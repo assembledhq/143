@@ -34,19 +34,19 @@ services:
       - "8080:8080"
 
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: ../Dockerfile
-      target: frontend-builder
-    command: npm run dev
+    image: node:22-alpine
+    working_dir: /app
+    command: sh -c "npm install && npm run dev"
     depends_on:
       - server
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8080
+      API_PROXY_TARGET: http://server:8080
     ports:
       - "3000:3000"
     volumes:
-      - ./frontend/src:/app/src
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
 
 volumes:
   pgdata:
+  frontend_node_modules:

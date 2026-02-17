@@ -13,9 +13,10 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import "./globals.css";
 import { useState } from "react";
+import { cn } from "@/lib/utils";
 
 const navItems = [
-  { label: "Dashboard", icon: LayoutDashboard, href: "/" },
+  { label: "Overview", icon: LayoutDashboard, href: "/" },
   { label: "Issues", icon: AlertCircle, href: "/issues" },
   { label: "Runs", icon: Play, href: "/runs" },
   { label: "Analytics", icon: BarChart3, href: "/analytics" },
@@ -36,32 +37,40 @@ export default function RootLayout({
       <body className="antialiased">
         <QueryClientProvider client={queryClient}>
           <div className="flex h-screen">
-            <aside className="w-64 bg-gray-900 text-white flex flex-col">
-              <div className="p-6">
-                <h1 className="text-xl font-bold">143.dev</h1>
+            <aside className="w-56 border-r border-border bg-sidebar flex flex-col">
+              <div className="px-5 py-5">
+                <Link href="/" className="text-sm font-semibold tracking-tight text-sidebar-foreground">
+                  143.dev
+                </Link>
               </div>
-              <nav className="flex-1 px-3 space-y-1">
+              <nav className="flex-1 px-3 space-y-0.5">
                 {navItems.map((item) => {
-                  const isActive = pathname === item.href;
+                  const isActive =
+                    item.href === "/"
+                      ? pathname === "/"
+                      : pathname.startsWith(item.href);
                   return (
                     <Link
                       key={item.href}
                       href={item.href}
-                      className={`flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+                      className={cn(
+                        "flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-[13px] font-medium transition-colors",
                         isActive
-                          ? "bg-gray-800 text-white"
-                          : "text-gray-300 hover:bg-gray-800 hover:text-white"
-                      }`}
+                          ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                          : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                      )}
                     >
-                      <item.icon className="h-5 w-5" />
+                      <item.icon className="h-4 w-4" />
                       {item.label}
                     </Link>
                   );
                 })}
               </nav>
             </aside>
-            <main className="flex-1 overflow-auto bg-white p-8">
-              {children}
+            <main className="flex-1 overflow-auto bg-background">
+              <div className="mx-auto max-w-4xl px-8 py-8">
+                {children}
+              </div>
             </main>
           </div>
         </QueryClientProvider>

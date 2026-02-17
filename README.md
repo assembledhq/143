@@ -2,7 +2,7 @@
 
 **from issue to PR, with zero human intervention**
 
-[Quickstart](#quickstart) · [Architecture](docs/design/overall.md) · [How it works](#how-it-works) · [Contributing](#contributing)
+[Local Development](#local-development) · [Architecture](docs/design/overall.md) · [How it works](#how-it-works)
 
 ---
 
@@ -10,23 +10,56 @@
 
 Every PR review makes the next run smarter. Learned conventions are extracted and fed back into future agent executions, creating a flywheel that compounds over time.
 
-## Quickstart
+## Local Development
+
+### Setup
+
+Requires Go 1.24+, Node.js 18+, and PostgreSQL 17. The setup script installs anything missing via Homebrew (macOS) or apt (Linux).
 
 ```bash
 git clone https://github.com/assembledhq/143.git && cd 143 && ./setup.sh
 ```
 
-Requires Go, Node.js, and PostgreSQL. The setup script will install anything missing via Homebrew (macOS) or apt (Linux).
+This creates the database, copies `.env.example` to `.env`, installs dependencies, and runs migrations.
+
+### Running
+
+**Option A — with Docker Compose**:
 
 ```bash
-# start the api server
-go run cmd/server/main.go
-
-# start the frontend
-cd frontend && npm run dev
+make dev              # starts Postgres, API server, and frontend
 ```
 
-API runs on `localhost:8080`, frontend on `localhost:3000`.
+**Option B — without Docker** (two terminals):
+
+```bash
+make server-dev       # Go API on localhost:8080
+make frontend-dev     # Next.js on localhost:3000
+```
+
+The frontend proxies `/api/*` to the Go server automatically.
+
+### Common commands
+
+```bash
+make test             # run all tests
+make test-race        # run tests with race detector
+make test-coverage    # generate coverage.html
+make migrate-up       # apply pending migrations
+make migrate-down     # roll back last migration
+make lint             # run golangci-lint
+```
+
+### Environment
+
+All config lives in `.env` (created by setup). The defaults work out of the box for local dev.
+
+To enable GitHub OAuth login and repo onboarding, set these in `.env`:
+
+- `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET` — [create an OAuth app](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app)
+- `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` / `GITHUB_WEBHOOK_SECRET` — [create a GitHub App](https://docs.github.com/en/apps/creating-github-apps)
+
+See `.env.example` for the full list of variables.
 
 ## How it works
 
@@ -39,38 +72,45 @@ issues in → prioritize → estimate complexity → run agents → validate →
 1. **Ingest** — pull issues from Sentry, Linear, support tickets via webhooks
 2. **Prioritize** — score by customer count, severity, revenue risk
 3. **Estimate** — LLM pre-analysis to classify complexity before burning compute
-4. **Execute** — run coding agents (Claude Code, Codex, etc.) in isolated Docker containers
-5. **Validate** — LLM-based direction/correctness/quality checks + CI + regression tests
+4. **Execute** — run coding agents in isolated Docker containers
+5. **Validate** — direction/correctness/quality checks + CI + regression tests
 6. **Ship** — open a GitHub PR with full context for human review
 7. **Observe** — measure post-deploy impact on error rates and support volume
-8. **Learn** — extract review feedback into conventions, feed production outcomes back into future runs
-
-## Stack
-
-| Layer | Tech |
-|-------|------|
-| Backend | Go, chi, pgx, zerolog |
-| Frontend | Next.js, React, shadcn/ui, TanStack Query |
-| Database | PostgreSQL |
-| Infra | Docker (sandboxes), Datadog (monitoring) |
+8. **Learn** — extract review feedback into conventions, feed back into future runs
 
 ## Project structure
 
 ```
-docs/design/    # numbered design docs (architecture, schema, each subsystem)
-setup.sh        # one-command local setup
-AGENTS.md       # coding conventions and patterns
+cmd/
+  server/         # API server entrypoint
+  migrate/        # database migration runner
+internal/
+  api/
+    handlers/     # HTTP handlers (auth, repos, webhooks, health, settings)
+    middleware/   # auth, CORS, logging, org context
+    router.go     # chi router + route registration
+  config/         # env-based configuration
+  db/             # data access layer (pgx, named args, store-per-domain)
+  models/         # domain types + API response envelopes
+  services/
+    github/       # GitHub App JWT + installation token management
+  worker/         # background job processor
+  cluster/        # node heartbeat + scheduler leader lock
+  logging/        # zerolog setup
+migrations/       # SQL migration files
+frontend/         # Next.js app (App Router, shadcn/ui, TanStack Query)
+docs/design/      # numbered design docs
 ```
 
 ## Why "143"
 
 In 1943, Lockheed's Skunk Works team designed and built the XP-80 Shooting Star — America's first operational jet fighter — in just 143 days. A small, autonomous team with full ownership, no bureaucracy, and a bias toward shipping.
 
-Most bugs don't need a sprint planning meeting. They need someone (or something) to isolate the issue, write the fix, validate it, and open the PR. 143 is that something — a small, autonomous system that takes ownership of the boring-but-important work so your team can focus on what actually moves the product forward.
+Most bugs don't need a sprint planning meeting. They need someone (or something) to isolate the issue, write the fix, validate it, and open the PR. 143 is that something.
 
 ## Contributing
 
-We welcome contributions. Read through the [design docs](docs/design/overall.md) to understand the architecture, then pick an issue and open a PR.
+Read through the [design docs](docs/design/overall.md) to understand the architecture, then pick an issue and open a PR.
 
 ## License
 

@@ -1,4 +1,4 @@
-.PHONY: dev setup test test-coverage migrate-up migrate-down build frontend-dev lint
+.PHONY: dev setup test test-coverage migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint
 
 dev:
 	docker compose up --build
@@ -28,6 +28,15 @@ build:
 
 frontend-dev:
 	cd frontend && npm run dev
+
+frontend-lint:
+	cd frontend && npm run lint
+
+frontend-typecheck:
+	cd frontend && npm run typecheck
+
+frontend-check:
+	cd frontend && npm run typecheck && npm run lint && npm run build
 
 server-dev:
 	go run cmd/server/main.go

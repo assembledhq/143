@@ -20,9 +20,22 @@ Use docs/design/overall.md as the overall design of the system, think of it as a
 
 **Key libraries**: `shadcn/ui` (copy-paste components on Radix UI + Tailwind, not an npm dependency), `@tanstack/react-query` (server state), `nuqs` (URL search params state for filters). See `docs/design/03-frontend.md` for full list.
 
+**shadcn/ui first**: Always use shadcn/ui components instead of writing custom CSS or inline Tailwind for common UI patterns. If a shadcn component exists for what you need (Button, Card, Badge, Input, Label, etc.), use it. Install new components with `npx shadcn@latest add <component>`. Never write custom button, input, or card styles — use the shadcn variants. When styling, use shadcn's semantic design tokens (`text-foreground`, `text-muted-foreground`, `bg-card`, `border-border`, etc.) instead of hardcoded hex colors. This keeps the UI consistent and theme-able.
+
+**Shared components**: Reusable app-level components live in `src/components/`. Current shared components:
+- `PageHeader` — consistent page title + description. Use on every page.
+- `EmptyState` — centered icon + title + description + optional action. Use for all empty/zero-data states.
+
 **Server state**: All API calls go through TanStack Query hooks (`useQuery`, `useMutation`). No raw fetch. TanStack Query handles caching, deduplication, and background refetching.
 
 **Filter state**: Use `nuqs` to store filter/search state in URL params so views are bookmarkable and shareable.
+
+**Verify after every frontend change**: After modifying any frontend code, always run these checks from the `frontend/` directory before considering the work done:
+1. `npm run typecheck` — TypeScript must pass with zero errors
+2. `npm run lint` — ESLint must pass with zero errors
+3. `npm run build` — the production build must succeed
+
+Do not skip any of these steps. A change that breaks types, lint, or the build is not complete.
 
 ## Test-First Development (Mandatory)
 
