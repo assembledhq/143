@@ -366,7 +366,7 @@ When active patterns exist for a repo, the system generates and maintains a mark
   (learned from fix #PR-298, which did not reduce error rate)
 ```
 
-**Note**: This file is written to by two sources. PR review patterns (this document) produce the category-grouped sections. Production learnings from [18-fix-quality-feedback.md](18-fix-quality-feedback.md) produce the "From Production Outcomes" section. Both share the same regeneration job.
+**Note**: This file is written to by two sources. PR review patterns (this document) produce the category-grouped sections. Production learnings from [18-fix-quality-feedback.md](18-fix-quality-feedback.md) produce the "From Production Outcomes" section. Both share the same regeneration job. When these sources conflict (e.g., a review pattern recommends an approach that production data shows is harmful), explicit precedence rules apply — see the "Conflict Resolution" section in [18-fix-quality-feedback.md](18-fix-quality-feedback.md). Production regressions always override review patterns; manually curated rules always win over automated learnings.
 
 ### How the Agent Reads It
 

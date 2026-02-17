@@ -266,7 +266,8 @@ POST /api/v1/issues/:id/run-agent    # now accepts optional overrides:
     "skip_complexity_check": true     # bypass aggressiveness filter
   }
 
-POST /api/v1/agent-runs/:id/approve  # approve a needs_human_guidance run to continue
+POST /api/v1/agent-runs/:id/guide    # approve, provide guidance, or dismiss a needs_human_guidance run
+GET  /api/v1/agent-runs/:id/resume-info  # get sandbox connection info for local resume
 ```
 
 ## Job Changes

@@ -240,7 +240,7 @@ Each attempt to fix an issue via a coding agent.
 | issue_id | uuid | FK -> issues |
 | org_id | uuid | FK -> organizations |
 | agent_type | text | `claude_code`, `codex`, `cursor`, etc. |
-| status | text | `pending`, `running`, `completed`, `failed`, `cancelled`, `skipped`, `needs_human_guidance` |
+| status | text | `pending`, `running`, `awaiting_input`, `needs_human_guidance`, `resumed_locally`, `completed`, `failed`, `cancelled`, `skipped` |
 | autonomy_level | text | `manual`, `auto_simple`, `auto_all` |
 | token_mode | text | `low`, `high` |
 | complexity_tier | int | snapshot of the complexity tier at run time |
@@ -262,6 +262,15 @@ Each attempt to fix an issue via a coding agent.
 | diff | text | the generated code diff |
 | created_at | timestamptz | |
 
+**Indexes:**
+- `(org_id, status, created_at DESC)` — Fix Queue queries (active, failed, shipped runs)
+- `(org_id, issue_id)` — all runs for an issue
+- `(org_id, created_at DESC)` — recent run history
+- `(parent_run_id)` where `parent_run_id IS NOT NULL` — revision run lookups
+
+**Constraints:**
+- `parent_run_id` is a self-referential FK: `FOREIGN KEY (parent_run_id) REFERENCES agent_runs(id)`. This prevents orphaned revision runs and enforces referential integrity for the revision chain.
+
 ### `agent_run_logs`
 
 Streaming logs from an agent run for real-time UI display.
@@ -271,12 +280,35 @@ Streaming logs from an agent run for real-time UI display.
 | id | bigserial | PK |
 | agent_run_id | uuid | FK -> agent_runs |
 | timestamp | timestamptz | |
-| level | text | `info`, `debug`, `error`, `tool_use`, `output` |
+| level | text | `info`, `debug`, `error`, `tool_use`, `output`, `question` |
 | message | text | |
 | metadata | jsonb | tool calls, file paths, etc. |
 
 **Indexes:**
 - `(agent_run_id, timestamp)` — log streaming
+
+### `agent_run_questions`
+
+Questions asked by the agent during execution. When the agent encounters ambiguity, it emits a question; the run pauses until answered.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | uuid | PK |
+| agent_run_id | uuid | FK -> agent_runs |
+| org_id | uuid | FK -> organizations |
+| question_text | text | The question in plain text |
+| options | text[] | Optional multiple-choice answers (null = free text) |
+| context | text | What the agent was doing when it asked |
+| blocks_phase | text | Which phase is blocked (`analysis`, `implementation`, `testing`) |
+| answer_text | text | The human's answer (null until answered) |
+| answered_by | uuid | FK -> users (null until answered) |
+| answered_at | timestamptz | Null until answered |
+| status | text | `pending`, `answered`, `timed_out`, `skipped` |
+| created_at | timestamptz | |
+
+**Indexes:**
+- `(agent_run_id, created_at)` — list questions for a run in order
+- `(org_id, status)` — find unanswered questions across all runs (for Fix Queue)
 
 ## Validation Tables
 
@@ -622,6 +654,81 @@ Learnings from production outcomes (post-deploy impact measurement). When a fix 
 - `(org_id, error_pattern)` where `status = 'active'` — pattern matching
 - `(org_id, issue_type, outcome_type)` — analytics
 
+## Notification Tables
+
+### `notification_preferences`
+
+Per-user notification delivery settings. Controls which events a user receives and through which channels.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | uuid | PK |
+| user_id | uuid | FK -> users |
+| org_id | uuid | FK -> organizations |
+| channel | text | `email`, `slack`, `in_app` |
+| event_category | text | `run_completed`, `run_failed`, `review_requested`, `deploy_detected`, `regression_detected`, `needs_guidance` |
+| enabled | boolean | default true |
+| quiet_hours_start | time | nullable, user's local time |
+| quiet_hours_end | time | nullable |
+| created_at | timestamptz | |
+| updated_at | timestamptz | |
+
+**Indexes:**
+- `(user_id, channel, event_category)` unique — one preference per user/channel/event
+- `(org_id, event_category)` — org-level preference lookups
+
+### `notifications`
+
+Individual notification delivery records. One row per notification per channel.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | uuid | PK |
+| org_id | uuid | FK -> organizations |
+| user_id | uuid | FK -> users |
+| channel | text | `email`, `slack`, `in_app` |
+| event_type | text | specific event (e.g., `agent_run.failed`, `pr.merged`, `experiment.regression`) |
+| event_category | text | category for preference matching |
+| title | text | notification title |
+| body | text | notification body (markdown) |
+| resource_type | text | e.g., `agent_run`, `pull_request`, `experiment` |
+| resource_id | uuid | FK to the relevant resource |
+| status | text | `pending`, `sent`, `delivered`, `failed`, `read` |
+| sent_at | timestamptz | |
+| read_at | timestamptz | |
+| error | text | delivery failure reason |
+| metadata | jsonb | channel-specific data (Slack ts, email message-id, etc.) |
+| created_at | timestamptz | |
+
+**Indexes:**
+- `(user_id, status, created_at DESC)` — user's notification inbox
+- `(org_id, event_type, created_at DESC)` — event-type analytics
+- `(status, created_at)` where `status = 'pending'` — delivery queue
+
+## Cost Tracking Tables
+
+### `org_token_usage`
+
+Rolling token and cost tracking per org. Updated after each agent run completes. Used for budget enforcement and cost visibility.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | uuid | PK |
+| org_id | uuid | FK -> organizations |
+| period | text | `daily`, `monthly` |
+| period_start | date | start of the tracking period |
+| input_tokens | bigint | total input tokens consumed |
+| output_tokens | bigint | total output tokens consumed |
+| estimated_cost_usd | numeric(10,4) | estimated cost based on model pricing |
+| run_count | int | number of agent runs in this period |
+| model_breakdown | jsonb | `{"claude-opus": {input: N, output: N, cost: X}, ...}` |
+| created_at | timestamptz | |
+| updated_at | timestamptz | |
+
+**Indexes:**
+- `(org_id, period, period_start)` unique — one row per org per period
+- `(org_id, period_start DESC)` — recent usage lookup
+
 ## Audit Trail
 
 ### `audit_log`
@@ -909,6 +1016,9 @@ organizations
   └── tuning_decisions
         └── tuning_config_versions.decision_id (nullable)
   └── jobs
+  └── notification_preferences
+  └── notifications
+  └── org_token_usage
 
 prompt_templates (global defaults)
   └── prompt_versions
@@ -926,6 +1036,6 @@ nodes (independent — not org-scoped)
 - **Candidates for insert-only versioning extraction**: The following tables contain settings that would benefit from insert-only versioning but cannot use it directly because they are FK targets for child tables: `organizations` (settings jsonb — consider extracting to a separate `org_settings` table), `prompt_templates` (default_content — consider referencing by `key` instead of `id`), `eval_datasets` (metadata — consider extracting mutable fields to a separate settings table). These tables retain `updated_at` for now.
 - **Tables that intentionally use `updated_at`**: Operational/lifecycle entities where in-place updates are the natural model: `issues` (status tracked via `issue_events`), `pull_requests` (synced from GitHub), `experiments` (lifecycle entity), `jobs` (transient work queue with locking), `repositories` (external entity sync), `prompt_versions` (already IS the version history), `repo_context_packages`/`repo_context_entries`/`repo_file_map` (computed/cached data rebuilt on context refresh).
 - **Row-Level Security (RLS)**: Enabled as defense-in-depth on sensitive tables (`integrations`, `agent_runs`, `issues`, `pull_requests`, `organizations`, `users`, `eval_datasets`, `eval_examples`, `eval_runs`, `eval_run_results`). The application sets `app.current_org_id` on each connection and RLS policies enforce org isolation. Primary access control remains in the Go application layer via `org_id` filtering. See [20-security-architecture.md](20-security-architecture.md).
-- **Data retention**: Raw payloads (`webhook_deliveries.payload`), agent run logs, and traces have configurable retention policies (defaults: 30 days for webhooks, 90 days for logs/traces). A daily cleanup job purges expired data while retaining metadata for analytics. See [20-security-architecture.md](20-security-architecture.md).
+- **Data retention**: Raw payloads (`webhook_deliveries.payload`), agent run logs, and traces have configurable retention policies (defaults: 30 days for webhooks, 90 days for logs/traces). A scheduled `data_retention_cleanup` job runs daily and purges expired data while retaining metadata for analytics. The job processes tables in order: `agent_run_logs` (older than 90 days), `webhook_deliveries` (payload nullified after 30 days, metadata rows kept for 1 year), `audit_log` (partitioned by month, archived after 1 year). See [20-security-architecture.md](20-security-architecture.md).
 - **Encryption**: The `integrations.config` column (containing API keys and credentials) is encrypted at rest using envelope encryption with `ENCRYPTION_MASTER_KEY`. See [20-security-architecture.md](20-security-architecture.md).
 - **Private eval data**: `eval_examples` encrypted payload fields (`input_encrypted`, `expected_output_encrypted`, `ground_truth_encrypted`) are application-layer encrypted before insert. Only metadata is queryable in plaintext. See [16-ai-agent-evals.md](16-ai-agent-evals.md).

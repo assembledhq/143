@@ -20,27 +20,24 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
 - Step 2: Prioritize and identify top issues based on business impact
     - The system determines how many customers were affected, regression severity, and optionally (if you integrate Salesforce or some other CRM) the revenue risk.
     - The admins can specify the product direction they want to move towards, to make sure that any issues that don’t jive with the product direction are filtered out.
-- Step 3: Estimate complexity and route to the right execution strategy
-    - Before running an agent, the system estimates issue complexity using the issue description, stack traces, codebase context, and historical outcomes.
-    - The system classifies the issue type (bug fix, error handling, performance, refactor, feature gap, security) to select the right agent prompt strategy and validation criteria.
-    - Admins set a **confidence threshold** that controls which issues the system will attempt. Issues below the threshold are automatically skipped (for auto-triggered runs) or flagged with a warning (for manual triggers).
-- Step 4: Execute a coding agent
-    - The admins define the level of autonomy (e.g. human kickoff only vs. automate kickoff for simple issues vs automatic kickoff for everything) and the spend they want (e.g. low token mode vs high token mode).
-    - Admins choose their preferred coding agent (Claude Code, Codex, Gemini CLI, etc.) and model. The system always uses the configured agent and model.
-    - The agent runs in a sandbox and produces a code diff.
-    - The agent outputs a **confidence score** with its fix. Low-confidence runs are paused for human guidance before proceeding to validation.
-- Step 5: Validate correctness
+- Step 3: Execute a coding agent
+    - Admins set a **confidence threshold** that controls which issues the system will auto-attempt. Issues below the threshold require manual triggering.
+    - The agent runs in a sandboxed container and produces a code diff.
+    - The agent outputs a **confidence score** with its fix. Low-confidence runs are paused for human review before proceeding to validation.
+    - If the agent asks a clarifying question during execution, the run pauses and the question surfaces in the Fix Queue. The user can answer in the UI, provide guidance, or **resume the session locally** via CLI (e.g., `143 resume <run-id>` or `claude --resume <session-id>`) to take over the sandbox interactively.
+    - When a run fails, the system generates a **human-readable failure explanation** with actionable next steps — see [17-failure-communication.md](17-failure-communication.md). Failures are classified by sub-type and feed back into the system to improve future runs.
+- Step 4: Validate correctness
     - The system checks the code and ensures that
         1. it works towards the right product direction
         2. the code is correct
         3. the code is high quality and a simple, minimal diff
         4. the fix includes a regression test that would have caught the original bug (required for Sentry errors and support tickets)
         5. the code passes all CI/CD checks and coverage is not reduced
-- Step 6: Open PR and ship
+- Step 5: Open PR and ship
     - The system opens a new PR on github, using whatever Github template already exists
     - It makes sure to attach the relevant Linear issue to the PR title, or references the original sentry issue / customer complaint
     - Sends the PR for human review (depending on the settings, could be a push notification or just puts it out for a group of reviewers).
-- Step 7: Observe impact and close the customer loop
+- Step 6: Observe impact and close the customer loop
     - After a fix is deployed, the system automatically evaluates whether it reduced real customer pain.
     - Each shipped PR captures baseline production metrics before deploy and an observation window after deploy. After a deploy, the system will do automated checks to attribute impact.
     - It will measure:
@@ -48,13 +45,189 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
         - support ticket volume changes
         - latency or reliability improvements
     - Finally the system classifies the outcomes as successful or not.
-- Step 8: PR review feedback → agent improvement loop
+- Step 7: PR review feedback → agent improvement loop
     - By default, review comments on 143-generated PRs are captured and run through a multi-stage filtering pipeline (structural pre-filter → merge-gate → adoption check → directive detection → classification → dedup). An org setting can expand this to all PRs.
     - When a reviewer requests changes on a 143-generated PR, the system offers to re-run the agent with that feedback incorporated (auto-apply), rather than making the human fix it manually.
     - Generalizable reviewer feedback is accumulated into a per-repo knowledge base and materialized as a `.143/learned-conventions.md` file in the repo — version-controlled, transparent, and editable by the team. The agent reads this file as part of its context for all future runs.
     - Reviewer trust tiers (maintainer, contributor, external) control how quickly patterns are promoted. Adoption evidence (was the suggestion reflected in the final merged code?) further weights pattern confidence.
     - Reviewer acceptance rates are tracked per issue type, so the system learns which categories of fixes the agent handles well vs. poorly.
     - This creates a flywheel: every human review makes every future agent run better.
+
+**The system tracks 7 steps, but the core demo is Steps 1-3-4-5: ingest a Sentry error → run an agent → validate → open a PR. Everything else is optimization on this loop.**
+
+# State Machines
+
+The following state machines define valid status transitions for the core entities. These are authoritative — no code should transition an entity to a status not shown here.
+
+## Issue Status
+
+```
+                          ┌───────────────┐
+                          │     open      │ ◄── created by ingestion
+                          └───────┬───────┘
+                                  │ prioritization scores computed
+                                  ▼
+                          ┌───────────────┐
+                     ┌──▶ │    triaged    │ ◄── eligible for agent run
+                     │    └───────┬───────┘
+                     │            │ agent run started
+                     │            ▼
+                     │    ┌───────────────┐
+                     │    │  in_progress  │ ◄── agent run active
+                     │    └───┬───────┬───┘
+                     │        │       │
+     validation fail │        │       │ PR merged + deploy detected
+     or run failed   │        │       ▼
+                     │        │  ┌───────────────┐
+                     └────────┘  │   observing   │ ◄── experiment running
+                                 └───────┬───────┘
+                                         │ experiment completed
+                                         ▼
+                                 ┌───────────────┐
+                                 │     fixed     │ ◄── outcome = success
+                                 └───────────────┘
+
+Other terminal statuses (reachable from open, triaged, or in_progress):
+  - wont_fix  — admin dismisses manually
+  - duplicate — dedup merges into another issue
+```
+
+Note: If a fix causes a regression (outcome = `regression`), the issue transitions back from `observing` → `triaged` so it can be re-attempted.
+
+## Agent Run Status
+
+```
+┌─────────┐   job claimed    ┌─────────┐   agent exits     ┌───────────┐
+│ pending │ ───────────────▶ │ running │ ──────────────▶   │ completed │
+└────┬────┘                  └────┬────┘                   └─────┬─────┘
+     │                            │                              │
+     │ admin cancels              │ sandbox crash/timeout        │ validation
+     ▼                            │ or agent error               │
+┌───────────┐                     ▼                              ▼
+│ cancelled │              ┌────────────┐               ┌──────────────┐
+└───────────┘              │   failed   │               │  validation  │
+                           └────────────┘               │   passed     │
+                                                        └──────┬───────┘
+                                                               │
+                                                    ┌──────────┴──────────┐
+                                                    │                     │
+                                              confidence             confidence
+                                              >= threshold           < threshold
+                                                    │                     │
+                                                    ▼                     ▼
+                                             ┌─────────────┐   ┌──────────────────────┐
+                                             │  pr_created  │   │ needs_human_guidance │
+                                             └─────────────┘   └──────────────────────┘
+                                                                         │
+                                                                   admin approves
+                                                                         │
+                                                                         ▼
+                                                                  ┌─────────────┐
+                                                                  │  pr_created  │
+                                                                  └─────────────┘
+```
+
+Note: `skipped` is also a valid status, set when the aggressiveness gate rejects an auto-triggered run before execution.
+
+## Experiment Status
+
+```
+┌──────────┐   baseline window      ┌───────────┐   observation window    ┌───────────┐
+│ baseline │ ─────────────────────▶ │ observing │ ──────────────────────▶ │ completed │
+└──────────┘   ends (= deploy time) └───────────┘   ends                  └───────────┘
+
+Outcome (set on completion): success | no_change | regression | inconclusive
+```
+
+If outcome is `regression`, the linked issue transitions back to `triaged`.
+
+## PR Status
+
+```
+┌────────┐   approved + merged    ┌────────┐
+│  open  │ ─────────────────────▶ │ merged │
+└───┬────┘                        └────────┘
+    │
+    │ author/admin closes
+    ▼
+┌────────┐
+│ closed │
+└────────┘
+```
+
+# Decision Matrix: Should We Attempt This Issue?
+
+Three controls interact to determine whether an issue gets an automatic agent run. They operate **sequentially** — each is a gate that must pass before the next is evaluated. See [24-design-resolutions.md](24-design-resolutions.md) Resolution 1 for the full flowchart.
+
+```
+Issue eligible (score > threshold, status = open/triaged, direction_alignment > -0.5)
+        │
+        ▼
+GATE 1: Autonomy Level (pre-run — "should we auto-trigger?")
+        │
+        ├── manual      → never auto-trigger; admin must click "Fix This"
+        ├── auto_simple  → auto-trigger only for medium/low severity, score < 60
+        └── auto_all     → auto-trigger for all eligible issues
+        │
+        ▼
+GATE 2: Aggressiveness (pre-run — "is this issue within our complexity tolerance?")
+        │
+        ├── issue.complexity_tier <= max_tier_for_aggressiveness_level? → proceed
+        └── above max tier? → skip (auto) or warn (manual trigger)
+        │
+        ▼
+AGENT EXECUTES IN SANDBOX
+        │
+        ▼
+GATE 3: Confidence Score (post-run — "do we trust this result?")
+        │
+        ├── score >= 0.8 (auto_proceed)     → proceed to validation
+        ├── score 0.5-0.79 (human_review)   → proceed, flag for review before merge
+        └── score < 0.5                      → pause, mark needs_human_guidance
+```
+
+**Key rule**: These gates never interact with each other. A high confidence score cannot bypass the aggressiveness gate (different lifecycle stages). A high priority score cannot bypass a low confidence result.
+
+# Failure Recovery
+
+Every failure type has a defined recovery path. This prevents ambiguity during implementation.
+
+## Agent Run Failures
+
+| Failure Type | What Happens | Retry? | Issue Status |
+|-------------|-------------|--------|-------------|
+| **Sandbox crash** (OOM, infrastructure) | Run marked `failed`, `failure_category = tooling`, `failure_sub_type = sandbox_crash` | Auto-retry once. If second attempt fails, stop and notify. | Stays `in_progress` during retry, returns to `triaged` after final failure |
+| **Timeout** | Run marked `failed`, `failure_category = tooling` | No auto-retry. User can retry manually with longer timeout. | Returns to `triaged` |
+| **Agent error** (non-zero exit, no diff) | Run marked `failed`, failure analyzed by LLM | No auto-retry. User sees explanation + next steps. | Returns to `triaged` |
+| **LLM API error** (rate limit, outage) | Run marked `failed`, `failure_category = tooling`, `failure_sub_type = api_error` | Auto-retry with exponential backoff (max 3 attempts). | Stays `in_progress` during retries, returns to `triaged` after exhaustion |
+| **Low confidence** (score < 0.5) | Run marked `needs_human_guidance` | Not a failure — admin reviews and approves/dismisses. | Stays `in_progress` |
+
+## Validation Failures
+
+| Failure Type | What Happens | Retry? | Issue Status |
+|-------------|-------------|--------|-------------|
+| **Tests fail** (`test_regression`) | Validation marked `failed`, run gets failure explanation | No auto-retry. User can retry or review diff. | Returns to `triaged` |
+| **Security violation** | Validation marked `failed` | Never auto-retry. Cannot be overridden. | Returns to `triaged` |
+| **Direction/quality/correctness fail** | Validation marked `failed` | No auto-retry. Admin can override (except security). | Returns to `triaged` |
+| **CI failure** | Validation marked `failed` | No auto-retry. May be flaky CI — user can retry. | Returns to `triaged` |
+
+## Pipeline Failures
+
+| Failure Type | What Happens | Retry? |
+|-------------|-------------|--------|
+| **Webhook processing fails** | `webhook_deliveries.status = failed`, attempts incremented | Up to 3 retries with exponential backoff (1s, 4s, 16s). After exhaustion: logged, polling worker catches it on next sync. |
+| **Polling sync fails** | `integration_sync_runs.status = failed` | Next scheduled sync (every 5 min). After 3 consecutive failures: integration status set to `error`, alert shown in UI. |
+| **PR creation fails** | Job retried | Up to 3 attempts. After exhaustion: run stays `completed` with no PR, admin notified. |
+| **Experiment evaluation fails** | Experiment stays in `observing` | Retried on next evaluation cycle. After 3 failures: outcome set to `inconclusive`. |
+
+## Post-Deploy Regression
+
+When an experiment outcome is `regression`:
+1. Issue transitions from `observing` → `triaged` (making it eligible for re-attempt)
+2. A `production_learnings` record is created with `severity = high`
+3. Admin is notified with the regression details
+4. The system does NOT automatically revert the PR — revert is a manual admin action
+5. The learning is injected into future agent runs on similar issues
 
 # Tech Stack
 
@@ -112,154 +285,131 @@ Single system of record. Bundled in Docker Compose for local dev, swappable to m
 | 14 | [Codebase Context Layer](14-codebase-context.md) | Context packages, file maps, conventions, quality scoring | Draft |
 | 15 | [Time to First Fix](15-time-to-first-fix.md) | Demo mode, quick-win scan, progress UX, onboarding optimization | Draft |
 | 16 | [AI Agent Evaluation System](16-ai-agent-evals.md) | Offline/online eval architecture, grader design, release gates, and automated eval flywheel | Draft |
-| 17 | [Failure Communication](17-failure-communication.md) | Human-readable failure explanations, fix rate transparency, next-step suggestions | Draft |
+| 17 | [Failure Communication](17-failure-communication.md) | Failure taxonomy, human-readable explanations, system learning from failures, trust progression, fix rate transparency | Draft |
 | 18 | [Fix Quality Feedback Loop](18-fix-quality-feedback.md) | Production outcome analysis, ineffective fix learning, anti-pattern detection | Draft |
 | 20 | [Security Architecture](20-security-architecture.md) | Threat model, sandbox hardening, prompt injection defense, secret management, RBAC | Draft |
 | 21 | [First-Run Experience](21-first-run-experience.md) | Onboarding flow, quick-start issue scan, time-to-value optimization | Draft |
 | 22 | [Notification System](22-notifications.md) | Event taxonomy, multi-channel delivery, user preferences, escalation | Draft |
+| 23 | [Auto-Closing Feedback Loops](23-auto-closing-feedback-loops.md) | Self-tuning loops for complexity calibration, agent defaults, context, conventions | Draft |
+| 24 | [Design Resolutions](24-design-resolutions.md) | Cross-document clarifications, conflict resolutions, decision flowcharts | Draft |
 
 # Build Order
 
-The system should be built in phases. Each phase produces a usable milestone.
-
-## Phase 0: AI Agent Evaluation System (doc: 16)
-
-Define evaluation infrastructure before scaling autonomous execution.
-
-1. **Eval taxonomy + schema** — define outcome, trace, policy, and impact eval dimensions with standard failure codes
-2. **Dataset pipeline** — build golden, shadow, and adversarial sets from curated and production-derived issues
-3. **Grader stack** — implement deterministic checks plus calibrated LLM-as-judge graders
-4. **Release gates + rollout** — enforce offline gates and staged canary rollout with auto-rollback
-5. **Continuous eval flywheel** — convert production failures into new eval cases automatically
-
-**Milestone**: Every agent configuration change is gated by reproducible evals and continuously monitored with automatic feedback into the eval suite.
+The system should be built in phases. Each phase produces a usable milestone. The ordering principle is: **get to "Sentry error → PR" as fast as possible.** That's the demo. That's the tweet. That's the moment a user decides this product is real.
 
 ## Phase 1: Foundation + Repo Onboarding (docs: 01, 02, 03, 10, 13)
 
 Build the skeleton that everything else plugs into, including GitHub authentication and repo connection.
 
-1. **Database schema + migrations** (01) — set up Postgres, create initial tables (including `repositories`, `repo_context_packages`, `repo_context_entries`, `repo_file_map`)
+1. **Database schema + migrations** (01) — set up Postgres, create initial tables (including `repositories`)
 2. **Go API server scaffold** (02) — chi router, middleware, health checks, basic CRUD for orgs/users
 3. **GitHub OAuth flow** (13) — "Sign in with GitHub" for user authentication
 4. **GitHub App setup** (13) — manifest-based app creation or manual setup, installation webhook handling
 5. **Repository management** (13) — connect repos, store in `repositories` table, manage installation tokens
-6. **Frontend scaffold** (03) — Next.js project, shadcn/ui setup, layout, empty pages, repo connection UI
+6. **Frontend scaffold** (03) — Next.js project, shadcn/ui setup, layout, Fix Queue (empty state), repo connection UI
 7. **Docker Compose + Makefile** (10) — `docker compose up` runs Postgres + server + frontend
+8. **Success metrics instrumentation** — define and instrument the core metrics from day one: fix rate, time-to-fix, reviewer acceptance rate, failure rate by category. Every run records these. This replaces a premature eval harness — measure first, gate later.
 
-**Milestone**: You can start the app, sign in with GitHub, connect repositories, and see connected repos in the dashboard.
+**Milestone**: You can start the app, sign in with GitHub, connect repositories, and see connected repos in the dashboard. Core metrics are being captured from the first run.
 
-## Phase 1.5: Codebase Context (doc: 14)
+## Phase 2: Sentry Ingestion (doc: 04)
 
-Build the context layer that makes agents effective. This runs in parallel with ingestion setup.
+Connect Sentry first. It's the highest-signal, most automated source — stack traces give agents exactly what they need.
 
-1. **Context discovery** — scan connected repos for CLAUDE.md, AGENTS.md, CODEOWNERS, linter/formatter configs, CI config
-2. **File map generation** — LLM-based classification of files into features and components, import graph analysis
-3. **Convention extraction** — infer coding conventions from code samples and configs
-4. **Test infrastructure discovery** — detect test frameworks, test commands, test patterns
-5. **Dependency map** — build import graph, detect service dependencies, analyze component boundaries
-6. **Quality scoring** — compute context quality score, generate improvement insights
-7. **Incremental updates** — push webhook handler updates context on code changes
-8. **Context UI** — view context quality, file map, conventions, and improvement suggestions
-
-**Milestone**: Each connected repo has an auto-generated context package with a quality score. Teams can see what's well-documented vs. gaps. Context is injected into agent runs.
-
-## Phase 2: Ingestion (doc: 04)
-
-Connect to external systems and start filling the database.
-
-1. **Webhook endpoints** — receive Sentry, Linear, GitHub webhooks
-2. **Source adapters** — Sentry and Linear first (most common)
-3. **Normalization + deduplication** — unified issue pipeline
-4. **Polling workers** — scheduled sync jobs
+1. **Sentry webhook endpoint** — receive Sentry issue/event webhooks
+2. **Sentry adapter** — parse, normalize, extract stack traces and affected customer counts
+3. **Normalization + deduplication** — unified issue pipeline with fingerprint-based dedup
+4. **Polling worker** — scheduled Sentry API sync as catch-all for missed webhooks
 5. **Issues UI** — data table with filters on the issues page
 
-**Milestone**: Issues from Sentry and Linear appear in the dashboard in real time.
+**Milestone**: Sentry errors appear in the dashboard in real time. (Linear and support tool ingestion are added later — Sentry alone is enough to demonstrate the core loop.)
 
-## Phase 3: Prioritization & Complexity Estimation (docs: 05, 12)
+## Phase 3: Agent Execution + Validation + PR (docs: 06, 07, 08, 17)
 
-Rank issues so the most impactful ones surface, and estimate complexity before agent execution.
+**This is the "aha moment."** Connect a repo, see a Sentry error, click "Fix This," get a PR. Ship these three together because none is useful alone.
 
-1. **Scoring algorithm** — compute priority scores
-2. **Complexity estimation** — LLM-based classification of issue difficulty (trivial → very complex) and issue type (bug fix, performance, security, etc.)
-3. **Settings UI** — weight configuration, product direction text, execution aggressiveness slider
-4. **Dashboard stats** — top issues, aggregate counts
-5. **Priority display** — scores, complexity tier, and explainability in the issues table
-
-**Milestone**: Issues are ranked by business impact and complexity. Admins can tune the ranking and set how aggressively the system attempts fixes.
-
-## Phase 4: Agent Execution (docs: 06, 12, 14)
-
-The core differentiator — run coding agents to fix issues, with confidence gating and deep codebase context.
-
-1. **Sandbox container management** — create, run, destroy Docker containers
-2. **Claude Code adapter** — first agent integration
-3. **Agent orchestrator** — run lifecycle, concurrency control, aggressiveness check
-4. **Context injection** (14) — assemble relevant context from the repo context package (architecture docs, conventions, file map, test infra) and inject into agent prompts
-5. **Agent & model selection** — admins choose their preferred agent (Claude Code, Codex, Gemini CLI) and model
-6. **Confidence scoring** — agent outputs confidence score, low-confidence runs paused for human guidance
+1. **Sandbox container management** — create, run, destroy Docker containers with gVisor
+2. **Claude Code adapter** — first (and initially only) agent integration
+3. **Agent orchestrator** — run lifecycle, concurrency control
+4. **Basic context injection** — read existing CLAUDE.md/AGENTS.md from the repo + relevant files from the Sentry stack trace. No LLM-generated file maps or convention extraction yet — start with what's already in the repo.
+5. **Confidence scoring** — agent outputs confidence score, low-confidence runs paused for human guidance. Single threshold: above = proceed, below = needs review.
+6. **Human-in-the-loop** — agent questions pause the run and surface in the Fix Queue; users can answer, provide guidance, or resume the sandbox session locally via CLI (`143 resume <run-id>` or `claude --resume <session-id>`). This is not an interactive chat — it's an escape hatch for when the agent needs help.
 7. **Log streaming** — SSE endpoint + live log viewer in the UI
-8. **Agent runs UI** — run list, detail page with logs, diff viewer, confidence indicator
-9. **Execution strategy settings** — aggressiveness slider, confidence thresholds
+8. **Basic validation** — three checks: (1) do tests pass? (2) any security issues? (3) is the diff minimal? Skip LLM-based direction/quality checks for now.
+9. **PR creation** — branch, commit, formatted PR body with issue context, labels
+10. **PR tracking** — webhook-based status updates (merge, close, review)
+11. **Failure communication** (17) — human-readable failure explanations with next steps, shipped alongside the first agent runs (not as a later addition). See [17-failure-communication.md](17-failure-communication.md).
+12. **Fix Queue UI** — the primary dashboard showing Active runs, items Needing Review (including agent questions), Failed runs with explanations, and Shipped fixes. Run list, run detail page with logs + diff + PR tabs.
 
-**Milestone**: Click "Fix this" on an issue and watch an AI agent generate a code fix in real time. The agent has deep context about the repo's architecture, conventions, and file structure. Issues beyond the admin's aggressiveness setting are skipped. Low-confidence fixes are flagged for human review.
+**Milestone**: Click "Fix This" on a Sentry error and watch an AI agent generate a code fix, validate it, and open a GitHub PR — all in one flow. Failures get human-readable explanations. The Fix Queue shows everything at a glance.
 
-## Phase 4.5: Time to First Fix (doc: 15)
+## Phase 4: Prioritization + Routing (docs: 05, 12)
 
-Optimize the path from sign-up to first successful fix.
+Now that fixes are flowing, rank issues so the most impactful ones surface first.
 
-1. **Demo mode** — sample repo with planted bugs, embedded demo walkthrough
-2. **Quick-win scan** — after first Sentry connection, surface 3-5 easy-to-fix issues
-3. **Progress UX** — phase-based progress view instead of raw log streaming
-4. **Failure communication** (17) — human-readable failure explanations with next steps
+1. **Scoring algorithm** — compute priority scores (customer impact, severity, recency)
+2. **Auto-trigger** — automatically attempt fixes for issues above a confidence threshold, with a simple on/off toggle (not a 4-position aggressiveness slider — start simple, add granularity when you have data on what the system succeeds at)
+3. **Settings UI** — priority weight configuration, product direction text, auto-fix toggle + confidence threshold
+4. **Priority display** — scores and explainability in the issues table and Fix Queue ordering
 
-**Milestone**: A new user sees a real, validated code fix within 15 minutes of signing up.
+**Milestone**: Issues are ranked by business impact. High-confidence issues can be auto-fixed without human initiation.
 
-## Phase 5: Validation + Regression Guardrails (doc: 07)
-
-Ensure generated code is correct before it becomes a PR.
-
-1. **LLM-based checks** — direction, correctness, quality
-2. **CI check with coverage** — run the test suite, collect coverage data, track coverage delta
-3. **Validation UI** — check results on the agent run detail page
-4. **Manual override** — admins can override failed checks
-
-**Milestone**: Agent-generated code is automatically reviewed before shipping, with regression-test and coverage guardrails enforced.
-
-## Phase 6: PR & Ship (doc: 08)
-
-Open real pull requests on GitHub.
-
-1. **GitHub App setup** — authentication, permissions
-2. **Branch + commit creation** — via GitHub API
-3. **PR creation** — formatted body, labels, cross-references
-4. **PR tracking** — webhook-based status updates
-5. **PRs UI** — PR list and detail pages
-
-**Milestone**: Validated fixes automatically become GitHub PRs ready for human review.
-
-## Phase 7: Observability (doc: 09)
+## Phase 5: Observability + Impact (docs: 09, 18)
 
 Close the loop — measure whether fixes actually helped.
 
-1. **Experiment creation** — triggered after deploy detection
-2. **Baseline + observation metric collection** — from Sentry, support tools
-3. **Evaluation + classification** — compare before/after
-4. **Observability UI** — PR-detail deploy impact section + analytics charts/outcome views
-5. **Impact dashboard** — aggregate success rate, total impact
-6. **Production outcome feedback loop** (18) — analyze ineffective/regression outcomes, generate learnings, inject into agent context
+1. **Deploy detection** — GitHub Deployments webhook + merge-based fallback
+2. **Baseline + observation metric collection** — from Sentry error rates (start with Sentry only, add Datadog/support later)
+3. **Outcome classification** — compare before/after, classify as success/no_change/regression/inconclusive
+4. **Impact display** — impact badges in the Fix Queue's "Shipped" section, detailed view on run detail page
+5. **Production outcome feedback loop** (18) — analyze ineffective/regression outcomes, generate learnings, inject into agent context
 
-**Milestone**: After a fix deploys, the system automatically reports whether it reduced customer pain. Ineffective fixes feed back into agent context to prevent repeated mistakes.
+**Milestone**: After a fix deploys, the system automatically reports whether it reduced customer pain. Impact data appears in the Fix Queue. Ineffective fixes feed back into agent context.
 
-## Phase 8: Review Feedback Loop (doc: 11)
+## Phase 6: Review Feedback Loop (doc: 11)
 
-Close the learning loop — turn human PR reviews into agent improvements.
+Turn human PR reviews into agent improvements.
 
-1. **Review comment capture + processing pipeline** — extend PR webhook handler, create `review_comments` table, implement structural pre-filter + single LLM pass
-2. **Auto-apply feedback** — revision runs, push-to-existing-PR, revision prompt injection for 143-generated PRs
-3. **Review patterns KB** — `review_patterns` table, text-match dedup logic, admin UI
-4. **Curated context document** — `.143/learned-conventions.md` generation, PR-based updates, manual edit preservation
+1. **Review comment capture + processing pipeline** — extend PR webhook handler, structural pre-filter + single LLM pass
+2. **Auto-apply feedback** — revision runs, push-to-existing-PR for 143-generated PRs
+3. **Review patterns KB** — accumulate generalizable patterns, text-match dedup
+4. **Curated context document** — `.143/learned-conventions.md` generation, version-controlled in the repo
 
-**Milestone**: Every human review automatically improves all future agent runs for that repo. Learned conventions are version-controlled in the repo and editable by the team. Acceptance rates trend upward over time.
+**Milestone**: Every human review automatically improves future agent runs. Learned conventions are version-controlled and editable by the team.
+
+## Phase 7: Codebase Context — Advanced (doc: 14)
+
+Deepen the context layer based on what you've learned from real agent runs about what context actually matters.
+
+1. **File map generation** — LLM-based classification of files into features and components
+2. **Convention extraction** — infer coding conventions from code samples, linter configs, and accumulated review patterns
+3. **Test infrastructure discovery** — detect test frameworks, test commands, test patterns
+4. **Quality scoring** — compute context quality score, correlate with agent success rates
+5. **Incremental updates** — push webhook handler updates context on code changes
+6. **Context UI** — view context quality, file map, conventions, and improvement suggestions
+
+**Milestone**: Each repo has an auto-generated context package with a quality score correlated to fix success rate. Teams see what to improve.
+
+## Phase 8: Evals + Quality Gates (doc: 16)
+
+Now that you have real production data and observed failure modes, build the evaluation system on solid ground.
+
+1. **Eval taxonomy + schema** — define eval dimensions based on observed failure categories, not theory
+2. **Dataset pipeline** — build golden sets from curated production successes/failures, shadow sets from recent runs
+3. **Grader stack** — deterministic checks + LLM-judge, calibrated against actual human review outcomes
+4. **Release gates + rollout** — enforce offline gates and staged canary rollout for prompt/model changes
+5. **Continuous eval flywheel** — convert production failures into new eval cases automatically
+
+**Milestone**: Every agent configuration change is gated by reproducible evals built from real production data. Auto-rollback on quality drops.
+
+## Future: Additional Ingestion Sources
+
+After the core loop is proven with Sentry:
+
+- **Linear ingestion** — webhook + polling adapter, issue type classification
+- **Support tool ingestion** — Zendesk/Intercom adapters, customer pain extraction
+- **Additional agent adapters** — Codex, Gemini CLI, custom agents
+- **Time to First Fix optimization** (doc 15) — demo mode, quick-win scan, progress UX
 
 # Architecture
 
@@ -312,7 +462,7 @@ The main 143.dev container includes:
 - web UI
 - background worker loop
 - job scheduler
-- Step-6 experiment evaluator
+- post-deploy experiment evaluator
 - Integration logic for:
     - Github: PR creation, status checks, deploy signals
     - Sentry: Issue webhooks as well as retrieval of issues via the API. Also linkage of issues to Github PRs in the PR body.

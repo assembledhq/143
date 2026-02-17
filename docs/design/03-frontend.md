@@ -12,7 +12,7 @@ These patterns apply across every page. They are not optional — they define th
 
 - **Cmd+K command palette** — Global fuzzy search across all entities (issues, runs, settings, actions). Single entry point for keyboard-driven navigation. Inspired by Linear's command palette — covers navigation, actions, and search without requiring menu interaction.
 - **Keyboard-first navigation** — J/K keys for list navigation on all table/list pages. Space bar for peek preview (opens a side panel with summary details without full navigation). Single-key shortcuts for common actions. The mouse is secondary for power users.
-- **Consistent `StatusDot` component** — A single status indicator component used on every surface: sidebar badges, run list rows, dashboard action queue items, browser tab favicon. Six states mapping to the run lifecycle (running / completed / pr_open / in_review / merged / failed) with unambiguous colors. Never invent different status representations for different pages.
+- **Consistent `StatusDot` component** — A single status indicator component used on every surface: sidebar badges, run list rows, Fix Queue items, browser tab favicon. Nine states mapping to the full run lifecycle (running / awaiting_input / needs_guidance / resumed_locally / completed / pr_open / in_review / merged / failed) with unambiguous colors. `awaiting_input` and `needs_guidance` use a pulsing amber dot to signal "needs you." `resumed_locally` uses a blue dot to signal "human is driving." Never invent different status representations for different pages.
 - **Confidence as English labels** — Never show raw confidence scores (0.73) to users. Map scores to clear labels: "High confidence — will auto-proceed" / "Medium — needs your review" / "Low — blocked for approval". The score can be available in a tooltip for power users, but the label is the primary display.
 - **Progressive disclosure via drawers** — Deep-dive information (traces, breadcrumbs, detailed metadata) opens in slide-out drawer panels from the right edge, preserving the parent page context. Prefer drawers over inline expand/collapse for complex content. Reserve inline expansion for simple one-level toggles.
 - **Stable layouts** — Page structure (tabs, columns, sections) should be consistent regardless of data state. Unavailable sections are grayed out or show placeholder text, never hidden. Users build muscle memory from predictable layouts.
@@ -109,6 +109,8 @@ frontend/
 │   │   │   ├── run-log-viewer.tsx    # real-time log streaming
 │   │   │   ├── run-status-badge.tsx  # full lifecycle badge, wraps shared status-dot.tsx
 │   │   │   ├── run-diff-viewer.tsx
+│   │   │   ├── run-question-card.tsx # agent question display with answer input (inline in overview)
+│   │   │   ├── run-guidance-panel.tsx # guidance options for paused runs (approve, guide, resume locally, dismiss)
 │   │   │   ├── run-failure-card.tsx  # failure classification display (inline in overview)
 │   │   │   ├── run-similarity-card.tsx # similar runs comparison block
 │   │   │   ├── run-trace-drawer.tsx  # slide-out drawer for structured trace (opens from Logs tab)
@@ -218,11 +220,12 @@ This section builds trust. Users see the system is doing work, not a black box.
 **2. Needs You — "What's blocked on me?"**
 
 Items requiring human input, sorted by **composite priority** (severity x wait time x item type). A security-critical PR waiting 2 hours ranks above a low-severity run waiting 2 days. Items:
-- PRs awaiting review (with confidence label + diff stats summary)
-- Runs paused at low confidence (waiting for approval)
-- Issues manually escalated for triage
+- **Agent questions** — the agent asked a clarifying question during execution. Shows the question text inline with an answer input. Answering resumes the run immediately.
+- **Runs paused at low confidence** — waiting for approval or guidance. Shows confidence reasoning. Actions: "Approve", "Retry with guidance", "Resume Locally", "Dismiss".
+- **PRs awaiting review** — with confidence label + diff stats summary.
+- **Issues manually escalated** for triage.
 
-Each row: `StatusDot`, title (linked), priority reason label (e.g., "Low confidence — needs approval" or "Security changes detected"), wait time, and a primary action button ("Review", "Approve", "Dismiss").
+Each row: `StatusDot`, title (linked), priority reason label (e.g., "Agent question: Which database migration strategy?" or "Low confidence — needs approval"), wait time, and a primary action button ("Answer", "Approve", "Review", "Dismiss").
 
 **Click-to-preview side panel** — Clicking a queue item opens a side panel (`queue-item-panel.tsx`) on the right with summary context (run status, diff summary, confidence label, PR status) without navigating away. The side panel provides enough context for simple decisions (approve, dismiss). For deeper review, a "View full detail" link navigates to the full run detail page.
 
@@ -277,8 +280,11 @@ This section closes the loop. Users see that fixes they approved actually worked
 Runs and Pull Requests are combined into a single page. A PR is a stage in a run's lifecycle, not a separate concept. The full status flow is:
 
 ```
-running → completed → pr_open → in_review → merged    (happy path)
-                   ↘ failed                             (at any point)
+running → completed → pr_open → in_review → merged              (happy path)
+       → awaiting_input → running → ...                          (agent asked a question)
+       → needs_human_guidance → running (approved/guided) → ...  (low confidence)
+                              → resumed_locally → completed → ... (user took over)
+                   ↘ failed                                       (at any point)
 ```
 
 #### Run list
@@ -288,11 +294,11 @@ One table with a status column covering the entire lifecycle:
 | Column | Description |
 |--------|-------------|
 | Title | Issue title (linked), e.g., "Fix login timeout (#142)" |
-| Status | Full lifecycle badge: running / completed / pr_open / in_review / merged / failed |
+| Status | Full lifecycle badge: running / awaiting_input / needs_guidance / resumed_locally / completed / pr_open / in_review / merged / failed |
 | PR | PR number (linked to GitHub), blank if no PR yet |
 | Age | How long since the run started |
 
-**Filters**: status (running / completed / pr_open / in_review / merged / failed), date range, agent type. A **"Needs Review"** quick-filter replaces the old standalone PR list page.
+**Filters**: status (running / awaiting_input / needs_guidance / resumed_locally / completed / pr_open / in_review / merged / failed), date range, agent type. A **"Needs Review"** quick-filter shows all runs requiring human input (awaiting_input, needs_guidance, in_review).
 
 **Bulk actions** — Checkboxes on run rows allow batch operations: bulk-approve (for PRs in review), bulk-retry (for failed runs), bulk-assign. When 5 PRs need review, users should be able to select and batch-approve rather than clicking into each one.
 
@@ -304,13 +310,20 @@ The detail page always shows **all four tabs**, regardless of run state. Tabs wi
 
 ```
 While running:         [Overview]  [Logs ←default]  [Diff ·disabled]  [PR & Validation ·disabled]
+Awaiting input:        [Overview ←default]  [Logs]  [Diff ·disabled]  [PR & Validation ·disabled]
+Needs guidance:        [Overview ←default]  [Logs]  [Diff]  [PR & Validation ·disabled]
+Resumed locally:       [Overview ←default]  [Logs]  [Diff ·disabled]  [PR & Validation ·disabled]
 Completed (no PR):     [Overview]  [Logs]  [Diff ←default]  [PR & Validation ·disabled]
 Failed:                [Overview ←default]  [Logs]  [Diff]  [PR & Validation ·disabled]
 PR exists:             [Overview]  [Logs]  [Diff ←default]  [PR & Validation]
 PR with experiment:    [Overview]  [Logs]  [Diff]  [PR & Validation ←default]
 ```
 
-- **Overview**: status and metadata (complexity tier, **confidence label** — "High / Medium / Low" with English description, raw score in tooltip), **risk factors** (tags/chips), actions (cancel, retry, approve). **For failed runs**, failure info is shown inline: failure category and code, LLM reasoning, actionable recommendations, similar runs comparison with side-by-side diff. The overview adapts to run state.
+- **Overview**: status and metadata (complexity tier, **confidence label** — "High / Medium / Low" with English description, raw score in tooltip), **risk factors** (tags/chips), actions (cancel, retry, approve). The overview adapts to run state:
+  - **For `awaiting_input` runs** — the agent's question is displayed prominently as a card with the question text, context of what the agent was doing, and an answer input (free text or multiple-choice buttons if the agent provided options). Answering resumes the run immediately.
+  - **For `needs_human_guidance` runs** — a guidance panel shows the agent's confidence reasoning and offers four actions: "Approve" (proceed as-is), "Approve with note" (attach guidance for reviewers), "Retry with guidance" (re-run with guidance injected into the prompt — text input expands), and "Dismiss." A **"Resume Locally"** button provides a copyable CLI command (e.g., `143 resume abc123`) for users who want to take over in their terminal.
+  - **For `resumed_locally` runs** — shows "Resumed locally by {user}" with a timestamp. The log stream is replaced by a message: "This run is being driven locally. Logs will appear when the session ends."
+  - **For failed runs** — failure info is shown inline: failure category and code, LLM reasoning, actionable recommendations, similar runs comparison with side-by-side diff.
 - **Logs**: streams logs via SSE, auto-scrolls, supports log level filtering. Includes a **"Show detailed trace" button** that opens a **slide-out drawer** (`run-trace-drawer.tsx`) from the right edge — structured timeline of agent decision events grouped by phase (context_gathering, analysis, implementation, testing, review), expandable details, context map, token usage breakdown per phase. The drawer preserves the log stream on the left so users can cross-reference. Default tab while running.
 - **Diff**: shows the generated code changes. Default tab for completed runs (it's what people actually want to see).
 - **PR & Validation**: **severity-tiered validation results** — checks are grouped by severity, not shown as a flat list:

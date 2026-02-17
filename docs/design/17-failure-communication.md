@@ -72,6 +72,87 @@ Each failure category maps to a default set of actionable suggestions:
 | `tooling` | 1. "Retry the run — this may be a transient issue" 2. "Increase the timeout in agent settings" 3. "Check that your repo builds cleanly in a fresh environment" |
 | `validation` | 1. "Review the agent's diff — it may be close to correct" 2. "Retry with additional context about the expected behavior" 3. "Check if the failing tests are testing the right behavior" |
 
+## Failure Taxonomy for System Learning
+
+The four user-facing categories above (`context`, `complexity`, `tooling`, `validation`) are designed for human consumption. Internally, the system tracks a more granular **failure taxonomy** that drives learning. Every failure is classified into both a user-facing category and a system-learning sub-type.
+
+### Why Two Layers
+
+Users need simple, actionable categories. The system needs precise failure types to learn what it's bad at and improve. "Context" tells a user to add docs. `wrong_root_cause` tells the system to invest more in root cause analysis before generating fixes.
+
+### System Failure Sub-Types
+
+| User Category | System Sub-Type | Description | System Action |
+|--------------|----------------|-------------|---------------|
+| `context` | `wrong_file` | Agent edited the wrong file(s) | Weight stack trace file references more heavily in context injection |
+| `context` | `wrong_root_cause` | Agent misidentified the root cause | Add to adversarial eval set; improve root cause analysis prompt |
+| `context` | `missing_context` | Agent lacked info about architecture, conventions, or dependencies | Flag as context quality gap; suggest specific docs to add |
+| `context` | `stale_reference` | Stack trace or issue references code that no longer exists | Detect stale references pre-run; skip or warn |
+| `complexity` | `multi_file_scope` | Fix requires coordinated changes across many files | Track max file count for successful fixes; adjust routing |
+| `complexity` | `cross_service` | Fix spans multiple services or repos | Log as out-of-scope; don't retry |
+| `complexity` | `architectural` | Fix requires design decisions, not just code changes | Log as out-of-scope; surface to human with explanation |
+| `complexity` | `partial_fix` | Agent fixed part of the problem but not all of it | Consider: can the partial fix be shipped? Flag for human review. |
+| `tooling` | `timeout` | Agent ran out of time | Track avg completion time by repo size; auto-adjust timeout |
+| `tooling` | `sandbox_crash` | Container OOM, crash, or infrastructure failure | Retry automatically (transient); alert on repeated failures |
+| `tooling` | `build_failure` | Repo doesn't build in the sandbox environment | Surface to user: "Your repo needs X to build in a clean environment" |
+| `tooling` | `api_error` | LLM API returned an error (rate limit, outage) | Retry with backoff; this is never the user's fault |
+| `validation` | `test_regression` | Fix broke existing tests | Track which test patterns the agent struggles with |
+| `validation` | `security_violation` | Fix introduced a security issue | Add to adversarial eval set; never auto-retry |
+| `validation` | `style_violation` | Fix doesn't match repo conventions | Feed into review patterns / learned conventions |
+| `validation` | `incomplete_fix` | Fix addresses symptom but not root cause | Improve root cause analysis; add to eval set |
+
+### Failure Tracking Schema
+
+```go
+type FailureRecord struct {
+    FailureSummary                          // user-facing (existing)
+    SubType          string                 // system sub-type from taxonomy above
+    IssueType        string                 // bug_fix, error_handling, performance, etc.
+    RepoID           uuid.UUID              // which repo
+    FilesAttempted   int                    // how many files the agent touched
+    TokensUsed       int                    // how many tokens before failure
+    AgentPhase       string                 // where in the process it failed (analysis, coding, testing)
+    PriorAttempts    int                    // how many times this issue has been attempted
+}
+```
+
+### How Failures Feed Back Into the System
+
+Failures are not just communicated — they are **used**. Each failure sub-type triggers a specific system action:
+
+1. **Routing improvements**: Track success/failure rates by issue characteristics (type, file count, repo, complexity). Over time, this builds a model of what the system is good at vs. bad at, which feeds back into whether the system should attempt an issue automatically. This is more valuable than a theoretical complexity estimator — it's based on observed outcomes.
+
+2. **Context gap detection**: `missing_context` and `wrong_file` failures are aggregated per-repo and surfaced as context improvement suggestions: "Your agent fails 3x more often in `pkg/legacy/` — consider adding an AGENTS.md for that directory."
+
+3. **Eval set expansion**: `wrong_root_cause`, `security_violation`, and `incomplete_fix` failures are candidates for the adversarial eval dataset (Phase 8). Real failures make better eval cases than synthetic ones.
+
+4. **Prompt refinement**: Aggregate failure patterns are injected into agent prompts. If `test_regression` failures are common in a repo, the agent prompt emphasizes "be conservative with test changes."
+
+5. **Anti-pattern detection**: When the same sub-type recurs for the same repo or issue type, the system flags it as a systemic issue rather than a one-off: "The agent has failed on 4 performance issues in this repo — performance issues may need human attention."
+
+## Trust-Building Through Failure
+
+### The Trust Progression
+
+Users don't trust autonomous systems by default. Trust is built through honest, consistent behavior — especially in failure. The system should follow a trust progression:
+
+1. **Watch mode** (default for new orgs): The system ingests issues and shows which ones it *would* attempt, with estimated confidence. No runs are triggered. Users see the system's judgment before it acts.
+
+2. **Draft mode**: The system generates fixes but doesn't create PRs. Users review diffs in the Fix Queue and can promote them to PRs with one click. This is "show your work" mode.
+
+3. **PR mode**: The system opens PRs automatically, but humans merge. This is the steady-state for most teams.
+
+4. **Auto mode**: Fixes above a confidence threshold are merged automatically (requires CI passing + no security flags). Only for teams with high trust and good test coverage.
+
+The system suggests promotions based on acceptance rate: "Your team has approved 15 of the last 17 fixes. Consider enabling PR mode to skip manual draft review."
+
+### How Failure Builds Trust (When Done Right)
+
+- **Honest failures build more trust than hidden ones.** Showing a user "The agent tried and failed because X" is better than silently not attempting. Users learn what the system can and can't do.
+- **Fix rate transparency** (see below) sets expectations. A user who knows the fix rate is 42% won't be demoralized by individual failures.
+- **Showing improvement over time** reinforces the flywheel. "Your repo's fix rate improved from 35% to 52% after you added CLAUDE.md" is a powerful signal.
+- **Never blame the user.** Failure explanations should describe what happened, not imply the user did something wrong. "The agent lacked context about this area" not "You didn't document this area."
+
 ## Failure Rate Transparency
 
 ### Setting Expectations
@@ -179,12 +260,13 @@ Add columns for failure communication:
 
 ## Build Order
 
-This is part of **Phase 4** (Agent Execution). Failure communication should ship alongside the first agent runs, not as a later addition:
+This is part of **Phase 3** (Agent Execution + Validation + PR). Failure communication ships alongside the first agent runs — not as a later addition. If the first thing a user sees is an opaque failure, you've lost them.
 
-1. **Failure analysis job** — LLM-based post-failure analysis, store on `agent_runs`
-2. **Failure UI** — explanation card on run detail page, retry/dismiss actions
-3. **Fix rate dashboard** — aggregate fix rates, per-type breakdown, per-repo stats
-4. **Notification integration** — include failure explanations in Slack/email notifications
+1. **Failure analysis job** — LLM-based post-failure analysis with both user-facing category and system sub-type, stored on `agent_runs`
+2. **Failure UI in Fix Queue** — explanation card in the "Failed" section of the Fix Queue, with retry/dismiss actions; detailed view on run detail page
+3. **Fix rate header** — aggregate fix rate displayed in the Fix Queue header from day one
+4. **Failure tracking** — system sub-type logging and per-repo failure aggregation (feeds into routing and context improvement in later phases)
+5. **Notification integration** — include failure explanations in Slack/email notifications
 
 ## Connection with Other Design Docs
 
@@ -192,6 +274,10 @@ This is part of **Phase 4** (Agent Execution). Failure communication should ship
 
 **Validation Pipeline (doc 07)**: Validation failures trigger the same analysis job. The validation details are included in the analysis prompt.
 
-**Notifications (doc 22)**: Failure explanations are included in notification payloads.
+**Fix Queue / Frontend (doc 03)**: The Fix Queue's "Failed" section displays failure explanations inline. The run detail page shows the full failure card.
 
-**Time to First Fix (doc 15)**: First-run failures need special handling — if the first quick-win candidate fails, automatically try the next one before showing a failure.
+**Observability (doc 09)**: Post-deploy regressions also trigger failure analysis — the system learns from fixes that passed validation but didn't help in production.
+
+**Evals (doc 16)**: `wrong_root_cause`, `security_violation`, and `incomplete_fix` failures are candidates for the adversarial eval dataset.
+
+**Notifications (doc 22)**: Failure explanations are included in notification payloads.

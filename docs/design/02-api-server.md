@@ -273,9 +273,12 @@ Using `chi` for the HTTP router. All API routes are under `/api/v1/`.
 │   ├── GET    /:id/failure         # get failure classification for a run
 │   ├── POST   /:id/classify-failure # trigger failure classification (usually automatic)
 │   ├── GET    /:id/similar         # find similar runs for comparison
+│   ├── GET    /:id/questions       # list pending questions from the agent
+│   ├── POST   /:id/answer         # answer an agent question (resumes the run)
+│   ├── POST   /:id/guide          # provide guidance on a paused run (approve, approve_with_guidance, retry_with_guidance, dismiss)
+│   ├── GET    /:id/resume-info    # get sandbox connection info for local resume (one-time token, session ID, CLI command)
 │   ├── POST   /:id/cancel         # cancel a running agent
-│   ├── POST   /:id/retry          # retry a failed run
-│   └── POST   /:id/approve        # approve a needs_human_guidance run to continue
+│   └── POST   /:id/retry          # retry a failed run
 │
 ├── /pull-requests
 │   ├── GET    /                    # list PRs
