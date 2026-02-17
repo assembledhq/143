@@ -21,22 +21,14 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
     - The system determines how many customers were affected, regression severity, and optionally (if you integrate Salesforce or some other CRM) the revenue risk.
     - The admins can specify the product direction they want to move towards, to make sure that any issues that don’t jive with the product direction are filtered out.
 - Step 3: Estimate complexity and route to the right execution strategy
-    - Before running an agent, the system estimates issue complexity (trivial → simple → moderate → complex → very complex) using the issue description, stack traces, codebase context, and historical outcomes.
+    - Before running an agent, the system estimates issue complexity using the issue description, stack traces, codebase context, and historical outcomes.
     - The system classifies the issue type (bug fix, error handling, performance, refactor, feature gap, security) to select the right agent prompt strategy and validation criteria.
-    - Admins set an **execution aggressiveness** level (conservative → moderate → aggressive → maximum) that controls which complexity tiers the system will attempt. Conservative = only simple fixes with high success likelihood. Maximum = attempt everything.
-    - Issues above the admin's aggressiveness threshold are automatically skipped (for auto-triggered runs) or flagged with a warning (for manual triggers).
+    - Admins set a **confidence threshold** that controls which issues the system will attempt. Issues below the threshold are automatically skipped (for auto-triggered runs) or flagged with a warning (for manual triggers).
 - Step 4: Execute a coding agent
     - The admins define the level of autonomy (e.g. human kickoff only vs. automate kickoff for simple issues vs automatic kickoff for everything) and the spend they want (e.g. low token mode vs high token mode).
-    - Admins choose their preferred coding agent (Claude Code, Codex, Gemini CLI, etc.) and model. The system always uses the configured agent and model — smart routing only controls which issues are attempted, not which model runs.
-    - A coding agent runs in a sandbox in one of four **execution modes**:
-        - **Batch** (default): Agent runs autonomously end-to-end. Best for simple, clear issues.
-        - **Guided**: Agent runs but can **pause mid-execution to ask clarifying questions** ("I found two possible root causes — which should I pursue?") via the UI or Slack. Catches uncertainty _during_ the run instead of after. Can be auto-escalated from batch when the agent detects ambiguity.
-        - **Investigate**: Engineer clicks "Investigate" and gets a **live session** where the agent explores the codebase while the human steers ("look at the database layer, not the API handler"). When root cause is found, transitions to a fix.
-        - **Pair**: Engineer and agent work on the **same branch simultaneously** — agent handles boilerplate and tests while the human makes architectural decisions. Coordination via Git with conflict detection.
+    - Admins choose their preferred coding agent (Claude Code, Codex, Gemini CLI, etc.) and model. The system always uses the configured agent and model.
+    - The agent runs in a sandbox and produces a code diff.
     - The agent outputs a **confidence score** with its fix. Low-confidence runs are paused for human guidance before proceeding to validation.
-- Step 4b: Proactive test generation (when needed)
-    - Before generating a fix, the system checks test coverage of the affected files. If coverage is below a configurable threshold (default 30%), the agent first generates tests for the existing behavior, then generates the fix with those tests as context.
-    - This ensures the agent can verify its fix against real tests, and the generated tests persist after the fix — improving future agent success in that area.
 - Step 5: Validate correctness
     - The system checks the code and ensures that
         1. it works towards the right product direction
@@ -118,11 +110,10 @@ Single system of record. Bundled in Docker Compose for local dev, swappable to m
 | 12 | [Smart Issue Routing](12-smart-routing.md) | Complexity estimation, execution aggressiveness, confidence scoring | Draft |
 | 13 | [Repository Onboarding](13-repository-onboarding.md) | GitHub OAuth + App auth, repo connection, cloning strategy | Draft |
 | 14 | [Codebase Context Layer](14-codebase-context.md) | Context packages, file maps, conventions, quality scoring | Draft |
-| 15 | [Run Debugging](15-run-debugging.md) | Structured traces, failure classification, agent config experiments, cross-run patterns | Draft |
+| 15 | [Time to First Fix](15-time-to-first-fix.md) | Demo mode, quick-win scan, progress UX, onboarding optimization | Draft |
 | 16 | [AI Agent Evaluation System](16-ai-agent-evals.md) | Offline/online eval architecture, grader design, release gates, and automated eval flywheel | Draft |
-| 17 | [Cost Intelligence](17-cost-intelligence.md) | Token tracking, cost budgets, forecasting, smart throttling | Draft |
-| 18 | [Interactive Agent Sessions](18-interactive-sessions.md) | Guided execution, human-driven investigation, pair programming with agents | Draft |
-| 19 | [Test Health & Generation](19-test-health.md) | Coverage scoring, proactive test gen, flaky/slow detection, regression test validation | Draft |
+| 17 | [Failure Communication](17-failure-communication.md) | Human-readable failure explanations, fix rate transparency, next-step suggestions | Draft |
+| 18 | [Fix Quality Feedback Loop](18-fix-quality-feedback.md) | Production outcome analysis, ineffective fix learning, anti-pattern detection | Draft |
 | 20 | [Security Architecture](20-security-architecture.md) | Threat model, sandbox hardening, prompt injection defense, secret management, RBAC | Draft |
 | 21 | [First-Run Experience](21-first-run-experience.md) | Onboarding flow, quick-start issue scan, time-to-value optimization | Draft |
 | 22 | [Notification System](22-notifications.md) | Event taxonomy, multi-channel delivery, user preferences, escalation | Draft |
@@ -196,9 +187,9 @@ Rank issues so the most impactful ones surface, and estimate complexity before a
 
 **Milestone**: Issues are ranked by business impact and complexity. Admins can tune the ranking and set how aggressively the system attempts fixes.
 
-## Phase 4: Agent Execution with Smart Routing (docs: 06, 12, 14)
+## Phase 4: Agent Execution (docs: 06, 12, 14)
 
-The core differentiator — run coding agents to fix issues, with complexity-aware routing, confidence gating, and deep codebase context.
+The core differentiator — run coding agents to fix issues, with confidence gating and deep codebase context.
 
 1. **Sandbox container management** — create, run, destroy Docker containers
 2. **Claude Code adapter** — first agent integration
@@ -212,28 +203,25 @@ The core differentiator — run coding agents to fix issues, with complexity-awa
 
 **Milestone**: Click "Fix this" on an issue and watch an AI agent generate a code fix in real time. The agent has deep context about the repo's architecture, conventions, and file structure. Issues beyond the admin's aggressiveness setting are skipped. Low-confidence fixes are flagged for human review.
 
-## Phase 4.5: Interactive Agent Sessions (doc: 18)
+## Phase 4.5: Time to First Fix (doc: 15)
 
-Add interactive execution modes so agents can collaborate with humans mid-run instead of only running in batch.
+Optimize the path from sign-up to first successful fix.
 
-1. **WebSocket infrastructure** — WebSocket upgrade handler, `SessionManager`, `interactive_sessions` and `session_messages` tables
-2. **Guided mode** — agent question/answer protocol, auto-escalation from batch when confidence is low, question timeout handling
-3. **Investigate mode** — live exploration sessions with human directives, investigation prompts, "Generate Fix" transition
-4. **Pair mode** — shared branch coordination, Git sync mechanism, task division protocol, conflict detection
-5. **Notification integration** — Slack DMs with inline question answering, UI real-time badges
-6. **Session UI** — session list page, live session view with chat, log streaming, and branch status
+1. **Demo mode** — sample repo with planted bugs, embedded demo walkthrough
+2. **Quick-win scan** — after first Sentry connection, surface 3-5 easy-to-fix issues
+3. **Progress UX** — phase-based progress view instead of raw log streaming
+4. **Failure communication** (17) — human-readable failure explanations with next steps
 
-**Milestone**: Engineers can interactively guide agents during complex investigations, answer agent questions mid-run via Slack or the UI, and pair-program with agents on shared branches. Batch runs auto-escalate to guided mode when the agent encounters ambiguity.
+**Milestone**: A new user sees a real, validated code fix within 15 minutes of signing up.
 
-## Phase 5: Validation + Regression Guardrails (docs: 07, 19)
+## Phase 5: Validation + Regression Guardrails (doc: 07)
 
 Ensure generated code is correct before it becomes a PR.
 
 1. **LLM-based checks** — direction, correctness, quality
-2. **Regression test check** (19) — require regression tests for bug fixes from Sentry/support sources, verify they reproduce the original issue
-3. **CI check with coverage** (19) — run the test suite, collect coverage data, track coverage delta
-4. **Validation UI** — check results on the agent run detail page
-5. **Manual override** — admins can override failed checks
+2. **CI check with coverage** — run the test suite, collect coverage data, track coverage delta
+3. **Validation UI** — check results on the agent run detail page
+4. **Manual override** — admins can override failed checks
 
 **Milestone**: Agent-generated code is automatically reviewed before shipping, with regression-test and coverage guardrails enforced.
 
@@ -249,7 +237,7 @@ Open real pull requests on GitHub.
 
 **Milestone**: Validated fixes automatically become GitHub PRs ready for human review.
 
-## Phase 7: Observability & Cost Intelligence (docs: 09, 17)
+## Phase 7: Observability (doc: 09)
 
 Close the loop — measure whether fixes actually helped.
 
@@ -258,10 +246,9 @@ Close the loop — measure whether fixes actually helped.
 3. **Evaluation + classification** — compare before/after
 4. **Observability UI** — PR-detail deploy impact section + analytics charts/outcome views
 5. **Impact dashboard** — aggregate success rate, total impact
-6. **Cost intelligence** (17) — per-fix token rollup, budget tracking, forecasting, smart throttling
-7. **Cost UI** (17) — cost dashboard page, budget gauge, efficiency charts
+6. **Production outcome feedback loop** (18) — analyze ineffective/regression outcomes, generate learnings, inject into agent context
 
-**Milestone**: After a fix deploys, the system automatically reports whether it reduced customer pain. Token usage and costs are tracked per fix, with budget forecasting and smart throttling to control spend.
+**Milestone**: After a fix deploys, the system automatically reports whether it reduced customer pain. Ineffective fixes feed back into agent context to prevent repeated mistakes.
 
 ## Phase 8: Review Feedback Loop (doc: 11)
 
@@ -275,32 +262,6 @@ Close the learning loop — turn human PR reviews into agent improvements.
 6. **All-PRs mode** — enable `comment_scope = 'all_prs'` configuration, verify filtering pipeline handles the volume
 
 **Milestone**: Every human review automatically improves all future agent runs for that repo. Learned conventions are version-controlled in the repo and editable by the team. Acceptance rates trend upward over time.
-
-## Phase 9: Run Debugging & Experimentation (doc: 15)
-
-Understand why runs fail and systematically improve agent outcomes.
-
-1. **Structured traces** — extend agent adapters to emit structured decision events (phase, action, reasoning), store in `agent_run_traces` table, build trace viewer UI
-2. **Failure classification** — automated LLM-based classification of failed runs into categories (context, reasoning, tooling, validation) with specific codes and recommendations
-3. **Failure analytics dashboard** — aggregate failure data by category, issue type, complexity tier, and time
-4. **Agent config experiments** — A/B testing framework for prompts, context strategies, and settings. Deterministic variant assignment, per-variant metric comparison, statistical significance testing
-5. **Cross-run pattern detection** — compare successful and failed runs on similar issues to detect systemic problems and surface actionable recommendations
-
-**Milestone**: Teams can replay any agent run step-by-step, understand why failures happen, run controlled experiments on agent configs, and get automated recommendations for improvement.
-
-## Phase 10: Full Test Health & Proactive Test Generation (doc: 19)
-
-Make test infrastructure a first-class concern — actively measure and improve test quality.
-
-1. **Test execution tracking** — store individual test results from every CI run in sandboxes
-2. **Flaky test detection** — analyze test result consistency across runs, surface flaky tests in the dashboard
-3. **Slow test detection** — identify duration outliers that slow down validation
-4. **Coverage integration with context** — enrich `repo_file_map` with per-file coverage data, include coverage info in agent prompts so agents know where gaps are
-5. **Proactive test generation** — two-phase agent prompt: generate tests for low-coverage areas before generating the fix, so the fix is validated against real tests
-6. **Test health dashboard** — coverage trends, flaky/slow test lists, test generation impact, coverage-by-fix tracking
-7. **Regression test compounding** — track which production issues are now covered by regression tests from previous fixes, measure the compounding effect over time
-
-**Milestone**: Beyond Phase 5 guardrails, 143.dev continuously improves suite health over time. Flaky and slow tests are surfaced automatically, and agents proactively generate tests for poorly-covered code before attempting fixes.
 
 # Architecture
 

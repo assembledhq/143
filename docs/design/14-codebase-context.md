@@ -390,7 +390,7 @@ The test config is stored as a `repo_context_entries` record with `entry_type = 
 
 ### Coverage Data Integration
 
-Per-file test coverage data from the test health system (see [19-test-health.md](19-test-health.md)) is stored on `repo_file_map.test_coverage_pct` and included in agent prompts. This lets agents know when they're working in a poorly-tested area. When coverage is below a configurable threshold, the system triggers proactive test generation before the fix (see doc 19, Section 2).
+Per-file test coverage data can be stored on `repo_file_map.test_coverage_pct` and included in agent prompts when available. This lets agents know when they're working in a poorly-tested area.
 
 ## Component 5: Dependency Map
 

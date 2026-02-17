@@ -251,15 +251,10 @@ Each attempt to fix an issue via a coding agent.
 | started_at | timestamptz | |
 | completed_at | timestamptz | |
 | token_usage | jsonb | `{input_tokens, output_tokens, total_cost}` |
-| failure_category | text | `context`, `reasoning`, `tooling`, `validation`, null if not failed |
-| failure_code | text | specific code (e.g., `insufficient_context`, `wrong_root_cause`) |
-| failure_reasoning | text | LLM explanation of why the run failed |
-| failure_recommendations | text[] | actionable suggestions |
-| experiment_id | uuid | FK -> agent_config_experiments, nullable |
-| experiment_variant | text | which variant this run was assigned to |
-| execution_mode | text | `batch` (default), `guided`, `investigate`, `pair`. See [18-interactive-sessions.md](18-interactive-sessions.md) |
-| session_id | uuid | FK -> interactive_sessions, nullable. Set for interactive runs |
-| test_gen_phase | text | `none`, `generating`, `completed`, `failed`. Tracks proactive test generation status. See [19-test-health.md](19-test-health.md) |
+| failure_explanation | text | Human-readable 1-3 sentence explanation. See [17-failure-communication.md](17-failure-communication.md) |
+| failure_category | text | `context`, `complexity`, `tooling`, `validation` (null if not failed). See [17-failure-communication.md](17-failure-communication.md) |
+| failure_next_steps | text[] | Actionable suggestions for the user |
+| failure_retry_advised | boolean | Whether retrying is likely to help |
 | parent_run_id | uuid | FK -> agent_runs, nullable. Set for revision runs triggered by review feedback |
 | revision_context | jsonb | review feedback that triggered this revision run (null for initial runs) |
 | error | text | failure reason if applicable |
@@ -282,120 +277,6 @@ Streaming logs from an agent run for real-time UI display.
 
 **Indexes:**
 - `(agent_run_id, timestamp)` — log streaming
-
-### `agent_run_traces`
-
-Structured trace events for each agent run step. Captures the agent's decision-making process alongside regular log entries. See [15-run-debugging.md](15-run-debugging.md).
-
-| Column | Type | Notes |
-|--------|------|-------|
-| id | bigserial | PK |
-| agent_run_id | uuid | FK -> agent_runs |
-| org_id | uuid | FK -> organizations |
-| sequence | int | ordering within the run |
-| timestamp | timestamptz | |
-| phase | text | `context_gathering`, `analysis`, `implementation`, `testing`, `review` |
-| action | text | `read_file`, `search`, `edit_file`, `run_command`, `think`, `plan` |
-| input | jsonb | what the agent received |
-| output_summary | jsonb | summarized result (not full file contents — those are in logs) |
-| decision | text | agent's reasoning for what to do next |
-| tokens_used | int | |
-| duration_ms | int | |
-
-**Indexes:**
-- `(agent_run_id, sequence)` — trace replay
-- `(org_id, phase)` — phase-level analytics
-
-### `agent_config_experiments`
-
-A/B experiments on agent configurations. Allows testing different prompts, context strategies, and settings against real outcomes. See [15-run-debugging.md](15-run-debugging.md).
-
-| Column | Type | Notes |
-|--------|------|-------|
-| id | uuid | PK |
-| org_id | uuid | FK -> organizations |
-| name | text | human-readable experiment name |
-| description | text | what this experiment tests |
-| status | text | `draft`, `running`, `completed`, `stopped` |
-| variants | jsonb | array of variant definitions (name, weight, config overrides) |
-| metrics | text[] | which metrics to track |
-| min_runs_per_variant | int | minimum sample size |
-| results | jsonb | per-variant metric results, updated as runs complete |
-| created_by_user_id | uuid | FK -> users |
-| started_at | timestamptz | |
-| completed_at | timestamptz | |
-| created_at | timestamptz | |
-| updated_at | timestamptz | |
-
-**Indexes:**
-- `(org_id, status)` — active experiments
-- `(org_id, created_at DESC)` — experiment history
-
-### `run_patterns`
-
-Detected patterns from cross-run analysis. Compares successful and failed runs on similar issues to identify systemic problems. See [15-run-debugging.md](15-run-debugging.md).
-
-| Column | Type | Notes |
-|--------|------|-------|
-| id | uuid | PK |
-| org_id | uuid | FK -> organizations |
-| pattern_type | text | `context_diff`, `approach_diff`, `complexity_mismatch` |
-| description | text | human-readable pattern description |
-| successful_run_id | uuid | FK -> agent_runs |
-| failed_run_id | uuid | FK -> agent_runs |
-| diff_summary | text | what was different |
-| recommendation | text | actionable suggestion |
-| repo | text | `owner/repo` |
-| issue_type | text | issue type this pattern applies to |
-| status | text | `detected`, `acknowledged`, `applied`, `dismissed` |
-| created_at | timestamptz | |
-
-**Indexes:**
-- `(org_id, repo, status)` — active patterns per repo
-- `(org_id, pattern_type)` — pattern type analytics
-
-## Interactive Session Tables
-
-### `interactive_sessions`
-
-Tracks interactive agent sessions (guided, investigate, pair modes). See [18-interactive-sessions.md](18-interactive-sessions.md).
-
-| Column | Type | Notes |
-|--------|------|-------|
-| id | uuid | PK |
-| agent_run_id | uuid | FK -> agent_runs |
-| org_id | uuid | FK -> organizations |
-| user_id | uuid | FK -> users. The human participant |
-| mode | text | `guided`, `investigate`, `pair` |
-| status | text | `active`, `waiting_for_human`, `waiting_for_agent`, `completed`, `abandoned`, `timed_out` |
-| started_at | timestamptz | |
-| last_activity | timestamptz | |
-| completed_at | timestamptz | |
-| idle_timeout | interval | default 30 minutes |
-| metadata | jsonb | mode-specific config (e.g., pair branch name) |
-| created_at | timestamptz | |
-
-**Indexes:**
-- `(agent_run_id)` — session for a run
-- `(user_id, status)` — user's active sessions
-- `(org_id, status)` where status IN ('active', 'waiting_for_human', 'waiting_for_agent') — active sessions
-
-### `session_messages`
-
-All messages exchanged during an interactive session — agent questions, human answers, directives, status updates.
-
-| Column | Type | Notes |
-|--------|------|-------|
-| id | uuid | PK |
-| session_id | uuid | FK -> interactive_sessions |
-| sender | text | `agent`, `human`, `system` |
-| message_type | text | `question`, `answer`, `directive`, `status`, `checkpoint` |
-| content | text | the message text |
-| metadata | jsonb | structured data (options for questions, file refs, etc.) |
-| created_at | timestamptz | |
-
-**Indexes:**
-- `(session_id, created_at)` — message history
 
 ## Validation Tables
 
@@ -511,148 +392,6 @@ Per-repo knowledge base of recurring reviewer preferences, extracted from review
 **Indexes:**
 - `(org_id, repo, status)` where `active = true` — active patterns per repo
 - `(org_id, repo, rule)` unique where `active = true` — deduplication
-
-### `reviewer_trust`
-
-Admin-assigned trust tiers for reviewers. Controls how quickly a reviewer's generalizable comment is promoted to an active pattern.
-
-| Column | Type | Notes |
-|--------|------|-------|
-| id | uuid | PK |
-| org_id | uuid | FK -> organizations |
-| repo | text | `owner/repo`, or `*` for org-wide |
-| reviewer | text | GitHub username |
-| trust_tier | text | `maintainer`, `contributor` (default), `external` |
-| set_by_user_id | uuid | FK -> users |
-| notes | text | |
-| active | boolean | NOT NULL DEFAULT true. Insert-only versioning flag |
-| created_at | timestamptz | |
-
-**Indexes:**
-- `(org_id, repo, reviewer)` unique where `active = true` — one trust tier per reviewer per repo
-
-### `review_outcomes`
-
-Tracks reviewer acceptance rates per PR for analytics.
-
-| Column | Type | Notes |
-|--------|------|-------|
-| id | uuid | PK |
-| pull_request_id | uuid | FK -> pull_requests |
-| org_id | uuid | FK -> organizations |
-| repo | text | `owner/repo` |
-| issue_source | text | sentry, linear, support |
-| issue_severity | text | critical, high, medium, low |
-| review_result | text | `approved`, `changes_requested`, `rejected` |
-| revision_count | int | default 0 |
-| reviewer | text | GitHub username |
-| reviewer_trust_tier | text | snapshot of trust tier at review time |
-| time_to_review | interval | time from PR open to first review |
-| comment_count | int | default 0 |
-| comment_categories | text[] | categories of comments received |
-| created_at | timestamptz | |
-
-**Indexes:**
-- `(org_id, repo)` — per-repo analytics
-- `(org_id, review_result)` — acceptance rate queries
-
-## Test Health Tables
-
-### `test_coverage_snapshots`
-
-Point-in-time coverage data collected from CI runs. Each snapshot captures per-file and aggregate coverage for a repository at a specific commit. See [19-test-health.md](19-test-health.md).
-
-| Column | Type | Notes |
-|--------|------|-------|
-| id | uuid | PK |
-| repository_id | uuid | FK -> repositories |
-| org_id | uuid | FK -> organizations |
-| agent_run_id | uuid | FK -> agent_runs, nullable. Null for baseline snapshots |
-| commit_sha | text | commit at which coverage was measured |
-| branch | text | branch name |
-| aggregate_line_pct | float | overall line coverage (0-100) |
-| aggregate_branch_pct | float | overall branch coverage (0-100) |
-| per_file | jsonb | `[{file, line_pct, branch_pct, lines_covered, lines_total}]` |
-| tool | text | `go_cover`, `jest`, `pytest_cov`, `jacoco`, etc. |
-| raw_report | text | path to stored raw coverage report (S3/local) |
-| created_at | timestamptz | |
-
-**Indexes:**
-- `(repository_id, created_at DESC)` — coverage trend queries
-- `(agent_run_id)` — coverage for a specific run
-- `(repository_id, branch, created_at DESC)` — per-branch trends
-
-### `test_executions`
-
-Individual test case results from CI runs. Used for flaky test detection and slow test identification.
-
-| Column | Type | Notes |
-|--------|------|-------|
-| id | uuid | PK |
-| coverage_snapshot_id | uuid | FK -> test_coverage_snapshots |
-| org_id | uuid | FK -> organizations |
-| test_name | text | fully qualified test name |
-| test_file | text | file containing the test |
-| suite | text | test suite or package |
-| status | text | `passed`, `failed`, `skipped`, `errored` |
-| duration_ms | int | execution time |
-| error_message | text | failure message if applicable |
-| retry_count | int | default 0. Number of retries in this run |
-| created_at | timestamptz | |
-
-**Indexes:**
-- `(coverage_snapshot_id)` — tests per snapshot
-- `(org_id, test_name, created_at DESC)` — per-test history for flaky detection
-- `(org_id, status, created_at DESC)` — failure queries
-- `(org_id, duration_ms DESC)` — slow test identification
-
-### `test_health_issues`
-
-Detected test suite health problems (flaky tests, slow tests, coverage gaps). Auto-detected by cross-run analysis.
-
-| Column | Type | Notes |
-|--------|------|-------|
-| id | uuid | PK |
-| repository_id | uuid | FK -> repositories |
-| org_id | uuid | FK -> organizations |
-| issue_type | text | `flaky`, `slow`, `coverage_gap`, `always_failing` |
-| test_name | text | fully qualified test name (null for coverage_gap) |
-| test_file | text | file containing the test (null for coverage_gap) |
-| target_file | text | file with coverage gap (for coverage_gap type) |
-| severity | text | `low`, `medium`, `high` |
-| details | jsonb | type-specific data (flaky: flip count/window; slow: p50/p99 duration; coverage_gap: current_pct/target_pct) |
-| status | text | `open`, `acknowledged`, `fixed`, `dismissed` |
-| first_detected_at | timestamptz | |
-| last_seen_at | timestamptz | |
-| resolved_at | timestamptz | |
-| created_at | timestamptz | |
-| updated_at | timestamptz | |
-
-**Indexes:**
-- `(repository_id, issue_type, status)` — dashboard queries
-- `(org_id, severity, status)` — org-level health view
-- `(repository_id, test_name)` where `test_name IS NOT NULL` — per-test issue lookup
-
-### `regression_test_coverage`
-
-Tracks whether agent-generated fixes include regression tests that reproduce the original bug. Linked to validation results.
-
-| Column | Type | Notes |
-|--------|------|-------|
-| id | uuid | PK |
-| agent_run_id | uuid | FK -> agent_runs |
-| org_id | uuid | FK -> organizations |
-| issue_source | text | `sentry`, `linear`, `support` |
-| regression_test_present | boolean | was a regression test included? |
-| test_name | text | name of the regression test (null if not present) |
-| test_file | text | file containing the regression test |
-| reproduces_bug | text | `yes`, `no`, `uncertain` — does the test reproduce the original issue? |
-| reasoning | text | LLM explanation |
-| created_at | timestamptz | |
-
-**Indexes:**
-- `(agent_run_id)` — regression test for a run
-- `(org_id, issue_source, regression_test_present)` — compliance tracking by source
 
 ## Prompt and Eval Configuration Tables
 
@@ -834,60 +573,6 @@ Threshold policies that must pass before promotion to active prompt versions.
 **Indexes:**
 - `(org_id, gate_name)` unique where `active = true` — one config per named gate
 
-## Cost Intelligence Tables
-
-### `cost_summaries`
-
-Materialized per-fix rollups for token usage and optional dollar costs.
-
-| Column | Type | Notes |
-|--------|------|-------|
-| id | uuid | PK |
-| org_id | uuid | FK -> organizations |
-| agent_run_id | uuid | FK -> agent_runs |
-| issue_id | uuid | FK -> issues |
-| total_tokens | bigint | total tokens across run + validation |
-| input_tokens | bigint | |
-| output_tokens | bigint | |
-| cached_tokens | bigint | default 0 |
-| llm_cost_usd | numeric | nullable for subscription billing |
-| compute_seconds | int | sandbox runtime |
-| compute_cost_usd | numeric | nullable |
-| review_seconds | int | nullable; human review time |
-| review_cost_usd | numeric | nullable |
-| total_cost_usd | numeric | nullable if any component is non-dollar-accounted |
-| experiment_outcome | text | denormalized from `experiments.outcome` |
-| impact_score | float | denormalized from priority/impact signals |
-| created_at | timestamptz | |
-
-**Indexes:**
-- `(org_id, created_at DESC)` — org rollups and trends
-- `(issue_id)` — cost by issue
-- `(agent_run_id)` — cost for a specific run
-
-### `budget_periods`
-
-Per-org budget windows with usage and forecast counters.
-
-| Column | Type | Notes |
-|--------|------|-------|
-| id | uuid | PK |
-| org_id | uuid | FK -> organizations |
-| period_start | date | period start |
-| period_end | date | period end |
-| token_budget | bigint | primary budget cap |
-| tokens_used | bigint | running total |
-| tokens_forecasted | bigint | forecast to period end |
-| dollar_budget_usd | numeric | nullable |
-| dollars_spent_usd | numeric | nullable |
-| dollars_forecasted_usd | numeric | nullable |
-| throttle_active | boolean | default false |
-| updated_at | timestamptz | |
-
-**Indexes:**
-- `(org_id, period_start)` unique — one row per org period
-- `(org_id, updated_at DESC)` — current budget status queries
-
 ## Observability Tables
 
 ### `experiments`
@@ -911,6 +596,36 @@ Each deployed fix is an experiment that measures impact.
 | outcome_details | jsonb | statistical details, confidence intervals |
 | created_at | timestamptz | |
 | updated_at | timestamptz | |
+
+## Production Learning Tables
+
+### `production_learnings`
+
+Learnings from production outcomes (post-deploy impact measurement). When a fix is deployed and the outcome is classified, the system generates learnings that are injected into future agent runs. See [18-fix-quality-feedback.md](18-fix-quality-feedback.md).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | uuid | PK |
+| org_id | uuid | FK -> organizations |
+| repo | text | `owner/repo` |
+| experiment_id | uuid | FK -> experiments |
+| agent_run_id | uuid | FK -> agent_runs |
+| issue_id | uuid | FK -> issues |
+| issue_type | text | |
+| outcome_type | text | `success`, `ineffective`, `regression` |
+| error_pattern | text | issue fingerprint for matching similar issues |
+| approach_summary | text | what the agent did |
+| learning | text | generalized learning (1 sentence directive) |
+| analysis_detail | text | full LLM analysis |
+| impact_metrics | jsonb | before/after metrics snapshot |
+| severity | text | `low`, `medium`, `high` (default `medium`) |
+| status | text | `active`, `superseded`, `dismissed` (default `active`) |
+| created_at | timestamptz | |
+
+**Indexes:**
+- `(org_id, repo, status)` — active learnings per repo
+- `(org_id, error_pattern)` where `status = 'active'` — pattern matching
+- `(org_id, issue_type, outcome_type)` — analytics
 
 ## Audit Trail
 

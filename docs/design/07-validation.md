@@ -101,7 +101,7 @@ Verdict: PASS or FAIL with specific issues found.
 
 ### 5. Regression Test Check
 
-**Purpose**: Ensure the fix includes a regression test that would have caught the original bug. See [19-test-health.md](19-test-health.md) for the full test health system.
+**Purpose**: Ensure the fix includes a regression test that would have caught the original bug.
 
 **Method**: LLM analysis with test coverage context:
 
@@ -178,7 +178,6 @@ func (v *Validator) RunCIWithCoverage(ctx context.Context, sandbox *Sandbox) (*C
     // ... more project types
     }
 
-    // Parse and store coverage data (see 19-test-health.md)
     coverage := parseCoverageReport(sandbox)
     v.db.CreateCoverageSnapshot(ctx, coverage)
 
@@ -192,7 +191,7 @@ Alternatively, if the repo has a `.143.ci` config or a Makefile target, use that
 make ci   # or: ./scripts/ci.sh
 ```
 
-**Output**: `pass` if all commands exit 0, `fail` with the failing command's output. Coverage data is stored as a side effect for the test health system (see [19-test-health.md](19-test-health.md)).
+**Output**: `pass` if all commands exit 0, `fail` with the failing command's output.
 
 ## Pipeline Execution
 

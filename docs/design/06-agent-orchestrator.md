@@ -311,19 +311,10 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error
         }
     }
 
-    // 4. Check for active agent config experiments and assign variant
-    //    See 15-run-debugging.md for full experiment design.
-    if experiment, _ := o.db.GetActiveExperiment(ctx, run.OrgID); experiment != nil {
-        variant := o.assignVariant(experiment, issue.ID)
-        run.ExperimentID = &experiment.ID
-        run.ExperimentVariant = variant.Name
-        o.db.UpdateAgentRunExperiment(ctx, run.ID, experiment.ID, variant.Name)
-    }
-
-    // 5. Get the adapter for the admin's configured agent type
+    // 4. Get the adapter for the admin's configured agent type
     adapter := o.adapters[run.AgentType]
 
-    // 6. Prepare the prompt (includes complexity context and experiment overrides)
+    // 5. Prepare the prompt (includes complexity context)
     input := &AgentInput{
         Issue: issue,
         ComplexityEstimate: estimate,
@@ -331,28 +322,29 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error
     }
     prompt, _ := adapter.PreparePrompt(ctx, input)
 
-    // 7. Create sandbox (via pluggable provider — Docker+gVisor, E2B, etc.)
+    // 6. Create sandbox (via pluggable provider — Docker+gVisor, E2B, etc.)
     sandbox, _ := o.provider.Create(ctx, o.sandboxConfig)
     defer o.provider.Destroy(ctx, sandbox)
 
-    // 8. Clone repo
+    // 7. Clone repo
     o.provider.CloneRepo(ctx, sandbox, run.RepoURL, run.RepoBranch, token)
 
-    // 9. Execute agent with log streaming
+    // 8. Execute agent with log streaming
     logCh := make(chan LogEntry, 100)
     go o.streamLogs(ctx, run.ID, logCh)
 
     result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
 
-    // 10. Store result (including confidence score)
+    // 9. Store result (including confidence score)
     if err != nil {
         o.db.UpdateAgentRun(ctx, run.ID, "failed", err.Error(), nil)
-        o.jobs.Enqueue(ctx, "classify_failure", map[string]interface{}{"agent_run_id": run.ID})
+        // Enqueue failure analysis job — see 18-fix-quality-feedback.md
+        o.jobs.Enqueue(ctx, "analyze_failure", map[string]interface{}{"agent_run_id": run.ID})
         return err
     }
     o.db.UpdateAgentRun(ctx, run.ID, "completed", "", result)
 
-    // 11. Check confidence score against thresholds
+    // 10. Check confidence score against thresholds
     thresholds := settings.ConfidenceThresholds
     if result.ConfidenceScore < thresholds.HumanReview {
         // Low confidence — pause for human guidance
@@ -361,7 +353,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error
         return nil
     }
 
-    // 12. Enqueue validation job
+    // 11. Enqueue validation job
     o.jobs.Enqueue(ctx, "validate", map[string]interface{}{"agent_run_id": run.ID})
     return nil
 }
@@ -401,20 +393,7 @@ After each run, the orchestrator checks the agent's confidence score:
 - **Below human-review threshold** (default 0.5): pause the run, mark as `needs_human_guidance`, notify admin
 - Admin can then approve (continue to validation), retry with different settings, or dismiss
 
-### Interactive Execution Modes
-
-In addition to the default batch mode, the orchestrator supports interactive sessions where the agent and a human collaborate in real time. See [18-interactive-sessions.md](18-interactive-sessions.md) for the full design.
-
-| Mode | Description | Sandbox Lifetime |
-|------|-------------|-----------------|
-| **Batch** | Agent runs autonomously end-to-end | Short (5-30 min) |
-| **Guided** | Agent can pause to ask clarifying questions mid-run | Medium (up to 2 hours) |
-| **Investigate** | Human steers agent exploration in real time | Long (up to 4 hours) |
-| **Pair** | Human and agent work on same branch simultaneously | Long (up to 8 hours) |
-
-When `auto_escalate_to_guided` is enabled in org settings, the orchestrator monitors batch runs for uncertainty signals. If the agent's mid-run confidence drops below the escalation threshold, the run is automatically upgraded to guided mode — a `SessionManager` is created, the human is notified via Slack/UI, and the agent can ask questions via a WebSocket channel.
-
-The `AgentAdapter` interface is extended with `InteractiveAgentAdapter` for agents that support mid-run questions and human directives. Agents that don't implement this interface fall back to batch-only execution.
+The orchestrator currently supports batch execution mode only.
 
 ## Token Usage Tracking
 

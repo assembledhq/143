@@ -236,7 +236,6 @@ This creates compounding reliability over time.
 - [11-review-feedback-loop.md](11-review-feedback-loop.md): review failures as eval inputs.
 - [12-smart-routing.md](12-smart-routing.md): slice metrics by complexity and issue type.
 - [14-codebase-context.md](14-codebase-context.md): context-quality failures and remediation.
-- [15-run-debugging.md](15-run-debugging.md): failure classification and experiment analysis.
 - [01-database-schema.md](01-database-schema.md): prompt/eval tables and encrypted example fields.
 - [02-api-server.md](02-api-server.md): prompt/eval endpoints, jobs, and scheduler hooks.
 - [03-frontend.md](03-frontend.md): Prompts/Evals/Rollouts settings UX.
