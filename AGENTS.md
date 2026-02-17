@@ -67,6 +67,5 @@ Do **NOT** use for operational/lifecycle entities, external entity mirrors, comp
 | Table | Logical identity |
 |-------|-----------------|
 | `review_patterns` | (org_id, repo, rule) |
-| `reviewer_trust` | (org_id, repo, reviewer) |
 | `prompt_overrides` | (org_id, template_id, scope_type, repository_id, issue_type, phase) |
 | `eval_release_gates` | (org_id, gate_name) |

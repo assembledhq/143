@@ -340,7 +340,7 @@ Tracks deploy events detected after PR merge.
 
 ### `review_comments`
 
-Individual review comments captured from GitHub PRs, processed through a multi-stage filtering pipeline and classified by an LLM. By default, only comments on 143-generated PRs are captured; an org setting enables capture from all PRs. See [11-review-feedback-loop.md](11-review-feedback-loop.md).
+Individual review comments captured from 143-generated GitHub PRs, processed through a structural pre-filter and single LLM classification pass. See [11-review-feedback-loop.md](11-review-feedback-loop.md).
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -352,11 +352,8 @@ Individual review comments captured from GitHub PRs, processed through a multi-s
 | body | text | raw comment text |
 | diff_path | text | file path the comment is on |
 | diff_position | int | line position in the diff |
-| source_pr_type | text | `143_generated` (default) or `human_authored` |
-| filter_status | text | `pending`, `filtered_structural`, `filtered_unmerged`, `filtered_not_directive`, `accepted` |
-| adoption_evidence | boolean | was the suggestion adopted in the final merged code? |
-| category | text | `style`, `logic_bug`, `edge_case`, `wrong_approach`, `missing_test`, `unnecessary_change`, `security`, `performance`, `nit` (null until classified) |
-| severity | text | `low`, `medium`, `high` |
+| filter_status | text | `pending`, `filtered_structural`, `filtered_not_actionable`, `accepted` |
+| category | text | `style`, `logic_bug`, `edge_case`, `wrong_approach`, `missing_test`, `security`, `performance`, `nit` (null until classified) |
 | actionable | boolean | default true |
 | generalizable | boolean | default false |
 | generalized_rule | text | repo-level rule extracted from this comment |
@@ -368,11 +365,10 @@ Individual review comments captured from GitHub PRs, processed through a multi-s
 - `(pull_request_id)` — comments per PR
 - `(org_id, category)` — category analytics
 - `(org_id, filter_status)` — pipeline monitoring
-- `(org_id)` where `generalizable = true AND generalized_rule IS NOT NULL` — pattern extraction
 
 ### `review_patterns`
 
-Per-repo knowledge base of recurring reviewer preferences, extracted from review comments. Active patterns are materialized into a `.143/learned-conventions.md` file in the repo.
+Per-repo knowledge base of recurring reviewer preferences, extracted from review comments. Active patterns are materialized into a `.143/learned-conventions.md` file in the repo. Promotion is simple: 2+ occurrences promotes a candidate to active.
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -383,7 +379,6 @@ Per-repo knowledge base of recurring reviewer preferences, extracted from review
 | category | text | same categories as review_comments |
 | source_comment_ids | uuid[] | review_comments that produced this rule |
 | occurrence_count | int | default 1 |
-| confidence | float | default 0.5 |
 | status | text | `candidate`, `active`, `dismissed` |
 | manually_curated | boolean | default false. True if admin edited the rule or it came from a manual file edit |
 | active | boolean | NOT NULL DEFAULT true. Insert-only versioning flag |
@@ -884,9 +879,6 @@ organizations
         └── webhook_deliveries
         └── integration_sync_runs
         └── repositories
-              └── test_coverage_snapshots
-                    └── test_executions
-              └── test_health_issues
               └── repo_context_packages
                     └── repo_context_entries
                     └── repo_file_map
@@ -898,21 +890,13 @@ organizations
         └── complexity_estimates
         └── agent_runs
               └── agent_run_logs
-              └── agent_run_traces
-              └── interactive_sessions
-                    └── session_messages
               └── validations
-              └── regression_test_coverage
               └── pull_requests
                     └── review_comments
-                    └── review_outcomes
                     └── deploys
                           └── experiments
-  └── agent_config_experiments
-        └── agent_runs.experiment_id (nullable)
-  └── run_patterns
+                                └── production_learnings
   └── review_patterns
-  └── reviewer_trust
   └── eval_datasets
         └── eval_examples
   └── prompt_versions
@@ -920,8 +904,6 @@ organizations
   └── eval_runs
         └── eval_run_results
   └── eval_release_gates
-  └── cost_summaries
-  └── budget_periods
   └── tuning_config_versions
         └── tuning_decisions.decision_id (nullable)
   └── tuning_decisions
@@ -940,10 +922,10 @@ nodes (independent — not org-scoped)
 - All tables use UUIDs for primary keys (except log tables which use bigserial for performance).
 - All timestamps are `timestamptz` (UTC).
 - `jsonb` columns are used for flexible, schema-evolving data (raw payloads, config, metrics). Frequently queried fields should be promoted to proper columns as patterns stabilize.
-- **Insert-only versioned settings**: Settings/config tables use an insert-only versioning pattern instead of `updated_at`. On update, the current row is deactivated (`active = false`) and a new row is inserted (`active = true`) with merged values. All historical versions are preserved. Tables using this pattern: `review_patterns`, `reviewer_trust`, `prompt_overrides`, `eval_release_gates`. Unique constraints on these tables are partial indexes filtered on `active = true`. See AGENTS.md for the full implementation pattern.
+- **Insert-only versioned settings**: Settings/config tables use an insert-only versioning pattern instead of `updated_at`. On update, the current row is deactivated (`active = false`) and a new row is inserted (`active = true`) with merged values. All historical versions are preserved. Tables using this pattern: `review_patterns`, `prompt_overrides`, `eval_release_gates`. Unique constraints on these tables are partial indexes filtered on `active = true`. See AGENTS.md for the full implementation pattern.
 - **Candidates for insert-only versioning extraction**: The following tables contain settings that would benefit from insert-only versioning but cannot use it directly because they are FK targets for child tables: `organizations` (settings jsonb — consider extracting to a separate `org_settings` table), `prompt_templates` (default_content — consider referencing by `key` instead of `id`), `eval_datasets` (metadata — consider extracting mutable fields to a separate settings table). These tables retain `updated_at` for now.
-- **Tables that intentionally use `updated_at`**: Operational/lifecycle entities where in-place updates are the natural model: `issues` (status tracked via `issue_events`), `pull_requests` (synced from GitHub), `agent_config_experiments` (lifecycle entity), `experiments` (lifecycle entity), `test_health_issues` (issue tracking lifecycle), `jobs` (transient work queue with locking), `repositories` (external entity sync), `prompt_versions` (already IS the version history), `repo_context_packages`/`repo_context_entries`/`repo_file_map` (computed/cached data rebuilt on context refresh), `budget_periods` (running counters with incremental updates).
-- **Row-Level Security (RLS)**: Enabled as defense-in-depth on sensitive tables (`integrations`, `agent_runs`, `issues`, `pull_requests`, `organizations`, `users`, `eval_datasets`, `eval_examples`, `eval_runs`, `eval_run_results`, `cost_summaries`, `budget_periods`). The application sets `app.current_org_id` on each connection and RLS policies enforce org isolation. Primary access control remains in the Go application layer via `org_id` filtering. See [20-security-architecture.md](20-security-architecture.md).
+- **Tables that intentionally use `updated_at`**: Operational/lifecycle entities where in-place updates are the natural model: `issues` (status tracked via `issue_events`), `pull_requests` (synced from GitHub), `experiments` (lifecycle entity), `jobs` (transient work queue with locking), `repositories` (external entity sync), `prompt_versions` (already IS the version history), `repo_context_packages`/`repo_context_entries`/`repo_file_map` (computed/cached data rebuilt on context refresh).
+- **Row-Level Security (RLS)**: Enabled as defense-in-depth on sensitive tables (`integrations`, `agent_runs`, `issues`, `pull_requests`, `organizations`, `users`, `eval_datasets`, `eval_examples`, `eval_runs`, `eval_run_results`). The application sets `app.current_org_id` on each connection and RLS policies enforce org isolation. Primary access control remains in the Go application layer via `org_id` filtering. See [20-security-architecture.md](20-security-architecture.md).
 - **Data retention**: Raw payloads (`webhook_deliveries.payload`), agent run logs, and traces have configurable retention policies (defaults: 30 days for webhooks, 90 days for logs/traces). A daily cleanup job purges expired data while retaining metadata for analytics. See [20-security-architecture.md](20-security-architecture.md).
 - **Encryption**: The `integrations.config` column (containing API keys and credentials) is encrypted at rest using envelope encryption with `ENCRYPTION_MASTER_KEY`. See [20-security-architecture.md](20-security-architecture.md).
 - **Private eval data**: `eval_examples` encrypted payload fields (`input_encrypted`, `expected_output_encrypted`, `ground_truth_encrypted`) are application-layer encrypted before insert. Only metadata is queryable in plaintext. See [16-ai-agent-evals.md](16-ai-agent-evals.md).
