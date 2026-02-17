@@ -78,11 +78,11 @@ Issue eligible for agent run
 
 > **Why different patterns**: `prompt_versions` uses a `state` column because it's a lifecycle entity — drafts are edited, candidates are tested, then promoted. `prompt_overrides` uses insert-only versioning because it's a pointer table mapping scopes to versions — every change to "which version is active" must be preserved in history. These tables work together: `prompt_versions` manages content lifecycle, `prompt_overrides` manages routing.
 
-### Relationship to `tuning_config_versions` (doc 21)
+### Relationship to `tuning_config_versions` (doc 23)
 
-Prompts are NOT managed by `tuning_config_versions`. The prompt system (doc 16) has its own versioning via `prompt_versions` + `prompt_overrides`. The tuning system (doc 21) manages agent configuration, complexity calibration, conventions, and context packages — but not prompts.
+Prompts are NOT managed by `tuning_config_versions`. The prompt system (doc 16) has its own versioning via `prompt_versions` + `prompt_overrides`. The tuning system (doc 23) manages agent configuration, complexity calibration, conventions, and context packages — but not prompts.
 
-**Add to doc 21**, after the `tuning_config_versions` table definition:
+**Add to doc 23**, after the `tuning_config_versions` table definition:
 
 > **Scope boundary**: Prompts are versioned separately via `prompt_versions` + `prompt_overrides` (doc 16). The `tuning_config_versions` table does NOT include a `prompts` scope. This is intentional — prompts have a promotion lifecycle (draft → candidate → active) with eval gates that doesn't fit the insert-only pattern. If an auto-closing loop (e.g., Loop A) wants to modify prompts, it must go through the prompt promotion workflow (create draft → run evals → promote).
 

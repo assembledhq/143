@@ -315,3 +315,53 @@ This is part of **Phase 7** (Observability). It extends the experiment evaluatio
 **Agent Orchestrator (doc 06)**: Production context is assembled alongside codebase context at run time.
 
 **Codebase Context (doc 14)**: Production learnings become part of the context package.
+
+## Conflict Resolution: Review Patterns vs. Production Learnings
+
+The `.143/learned-conventions.md` file receives input from two sources: PR review patterns (doc 11) and production learnings (this document). These can contradict each other. For example, reviewers might establish a pattern "always add retry logic for external calls" while production data shows that retries on a specific service caused cascading failures.
+
+### Precedence Rules
+
+When a conflict is detected during conventions doc regeneration, the following precedence applies:
+
+1. **Production regressions always win.** A learning with `outcome_type = regression` and `severity = high` overrides any review pattern on the same topic. Production data is higher-signal than code review opinions.
+
+2. **Manually curated rules always win.** If a team member manually edited a rule in `.143/learned-conventions.md` (detected by `manually_curated = true` on the review pattern), the manual edit is preserved regardless of conflicting automated learnings.
+
+3. **Production ineffective learnings are additive, not overriding.** A learning with `outcome_type = ineffective` adds a caveat to an existing review pattern rather than replacing it. Example: review pattern says "wrap errors with context" → production learning adds "but avoid wrapping errors in hot paths where the allocation cost matters."
+
+4. **When in doubt, surface both.** If the system cannot determine precedence (e.g., two automated learnings disagree), both are included in the conventions doc with a `[needs review]` tag and the admin is notified.
+
+### Conflict Detection
+
+The regeneration job detects conflicts using simple keyword overlap between review pattern rules and production learning text:
+
+```go
+func detectConflicts(patterns []ReviewPattern, learnings []ProductionLearning) []Conflict {
+    var conflicts []Conflict
+    for _, learning := range learnings {
+        if learning.OutcomeType == "success" {
+            continue // successes don't conflict
+        }
+        for _, pattern := range patterns {
+            if topicOverlap(pattern.Rule, learning.Learning) > 0.5 {
+                conflicts = append(conflicts, Conflict{
+                    Pattern:  pattern,
+                    Learning: learning,
+                })
+            }
+        }
+    }
+    return conflicts
+}
+```
+
+When a conflict is found, the conventions doc includes both with context:
+
+```markdown
+## Error Handling
+- Always wrap errors with fmt.Errorf("context: %w", err)
+  (4 occurrences · reviewers: @alice, @bob)
+  ⚠️ Production caveat: Avoid wrapping errors in hot paths where
+  allocation cost matters (learned from fix #PR-401, no_change outcome)
+```

@@ -278,7 +278,7 @@ During execution, the agent adapter sends log entries to a channel:
 ```go
 type LogEntry struct {
     Timestamp time.Time
-    Level     string // info, debug, error, tool_use, output
+    Level     string // info, debug, error, tool_use, output, question
     Message   string
     Metadata  map[string]interface{} // tool calls, file paths, etc.
 }
@@ -369,6 +369,111 @@ func (o *Orchestrator) isWithinAggressiveness(estimate *models.ComplexityEstimat
     maxTier := maxTierByLevel[settings.ExecutionAggressiveness]
     return estimate.Tier <= maxTier
 }
+```
+
+## Human-in-the-Loop: Questions, Guidance, and Local Resume
+
+Agent runs are primarily autonomous, but the system supports three forms of human intervention without requiring full interactive sessions:
+
+### 1. Agent-Initiated Questions
+
+During execution, agents (e.g., Claude Code) may encounter ambiguity and ask clarifying questions. The system handles this as a structured pause-and-resume cycle within the batch run:
+
+```go
+// LogEntry Level "question" indicates the agent needs input
+type AgentQuestion struct {
+    QuestionID  string   // unique ID for this question within the run
+    Text        string   // the question in plain text
+    Options     []string // optional multiple-choice answers (empty = free text)
+    Context     string   // what the agent was doing when it asked
+    BlocksPhase string   // which phase is blocked (analysis, implementation, testing)
+}
+```
+
+**Flow:**
+1. The agent emits a `question`-level log entry via the `logCh` channel
+2. The orchestrator detects it, writes the question to the `agent_run_questions` table, and updates the run status to `awaiting_input`
+3. The sandbox stays alive (but the agent process is blocked on stdin)
+4. The question appears in the Fix Queue's "Needs You" section and on the run detail page
+5. The user answers via REST API (`POST /agent-runs/:id/answer`)
+6. The orchestrator pipes the answer to the agent's stdin
+7. The agent continues; run status returns to `running`
+
+Questions have a **timeout** (default: 24 hours). If unanswered, the agent is told to proceed with its best judgment or the run is cancelled (configurable per org).
+
+### 2. Human Guidance on Paused Runs
+
+When a run is paused at low confidence (`needs_human_guidance`), the user can do more than just approve or reject — they can provide **guidance text** that is injected into the agent's context if the run is resumed:
+
+```go
+type GuidanceInput struct {
+    Action   string // "approve", "approve_with_guidance", "retry_with_guidance", "dismiss"
+    Guidance string // free-text guidance injected into the agent prompt on resume
+}
+```
+
+- **`approve`**: Continue to validation as-is (existing behavior)
+- **`approve_with_guidance`**: Continue to validation, but attach the guidance as context for the PR body so reviewers see it
+- **`retry_with_guidance`**: Create a new run with the guidance injected into the agent prompt alongside the original issue context. The guidance is prepended as "Human reviewer guidance: ..."
+- **`dismiss`**: Mark the run as dismissed, don't proceed
+
+### 3. Resume Locally
+
+For any paused run (`awaiting_input` or `needs_human_guidance`), the user can **take over the sandbox session locally** using their own CLI. This is the escape hatch for when the agent needs hands-on human guidance that's easier to provide interactively.
+
+**Flow:**
+1. User clicks "Resume Locally" on the run detail page or calls `GET /agent-runs/:id/resume-info`
+2. The system returns:
+   - A one-time resume token (expires in 10 minutes)
+   - The sandbox connection details (provider-specific)
+   - The agent session ID (for Claude Code: the `--resume` session ID; for Codex: the session reference)
+3. The user runs the appropriate CLI command locally:
+   ```bash
+   # Claude Code
+   143 resume <run-id>                           # wrapper that handles auth + connection
+   # or directly:
+   claude --resume <session-id> --sandbox-url <url> --token <token>
+   ```
+4. The run status changes to `resumed_locally`
+5. The system stops streaming logs from the server side (the user is driving now)
+6. The user works in their terminal — the sandbox is the same container with the same repo state
+7. When the local session ends:
+   - The system collects the final `git diff` from the sandbox
+   - The run status transitions to `completed`
+   - The normal pipeline continues (validation → PR → etc.)
+   - The local session transcript is uploaded and appended to the run logs
+
+**Sandbox keepalive:** When a run is paused or resumed locally, the sandbox timeout is extended. The sandbox is destroyed only when:
+- The run completes (diff collected)
+- The user explicitly dismisses the run
+- The extended timeout expires (default: 4 hours for paused, 8 hours for resumed locally)
+
+```go
+// SandboxProvider additions for resume support
+type SandboxProvider interface {
+    // ... existing methods ...
+
+    // ConnectionInfo returns provider-specific connection details for local resume.
+    // For Docker: container ID + exec endpoint. For E2B: sandbox URL + API key.
+    ConnectionInfo(ctx context.Context, sb *Sandbox) (*SandboxConnectionInfo, error)
+}
+
+type SandboxConnectionInfo struct {
+    Provider      string            // "docker" or "e2b"
+    SandboxID     string            // container/VM ID
+    ConnectURL    string            // URL for the 143 CLI to connect
+    AgentSession  string            // agent-specific session ID for --resume
+    Environment   map[string]string // env vars needed for the local CLI
+}
+```
+
+### Status Flow (Updated)
+
+```
+running → awaiting_input → running → completed → pr_open → in_review → merged
+       → needs_human_guidance → running (approved/guided)
+                              → resumed_locally → completed → ...
+                   ↘ failed                                  (at any point)
 ```
 
 ## Concurrency Control
