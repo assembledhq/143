@@ -928,7 +928,7 @@ Maps files to features, components, and ownership.
 
 ### `tuning_config_versions`
 
-Insert-only configuration versioning. Each row is an immutable snapshot of a configuration value. New configs are inserted; old ones are never mutated (except the `is_active` flag). Enables point-in-time rollback to any previous configuration.
+Insert-only configuration versioning. Each row is an immutable snapshot of a configuration value. New configs are inserted; old ones are never mutated (except the `active` flag). Enables point-in-time rollback to any previous configuration.
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -938,13 +938,13 @@ Insert-only configuration versioning. Each row is an immutable snapshot of a con
 | scope_key | text | scoping key within the scope (e.g. repo name, issue type, or `*` for org-wide) |
 | version | int | monotonically increasing per (org_id, config_scope, scope_key) |
 | config_snapshot | jsonb | full config value at this version (complete, not a delta) |
-| is_active | boolean | only one version per (org_id, config_scope, scope_key) is active at a time |
+| active | boolean | NOT NULL DEFAULT true. Insert-only versioning flag |
 | decision_id | uuid | FK -> tuning_decisions, nullable. Which tuning decision created this version |
 | created_by | text | `system`, `user:<user_id>`, or `rollback` |
 | created_at | timestamptz | immutable: rows are never updated, only new rows are inserted |
 
 **Indexes:**
-- `(org_id, config_scope, scope_key)` unique where `is_active = true` — one active version per scope
+- `(org_id, config_scope, scope_key)` unique where `active = true` — one active version per scope
 - `(org_id, config_scope, scope_key, created_at DESC)` — point-in-time queries
 - `(org_id, config_scope, scope_key, version)` unique — version sequence
 
@@ -962,10 +962,8 @@ Audit log of every automated tuning decision — whether applied, proposed, or r
 | decision | text | human-readable summary |
 | config_scope | text | which config scope this affects |
 | scope_key | text | which scope key this affects |
-| before_version | int | version number before this change (null for first version) |
-| after_version | int | version number after this change (null if not yet applied) |
-| before_snapshot | jsonb | config before |
-| after_snapshot | jsonb | config after |
+| before_version_id | uuid | FK -> tuning_config_versions, nullable. Config version before this change (null for first version) |
+| after_version_id | uuid | FK -> tuning_config_versions, nullable. Config version after this change (null if not yet applied) |
 | confidence | float | decision confidence (0-1) |
 | status | text | `pending`, `approved`, `applied`, `rejected`, `rolled_back`, `superseded` |
 | approved_by | uuid | FK -> users, nullable |
@@ -1015,6 +1013,8 @@ organizations
         └── tuning_decisions.decision_id (nullable)
   └── tuning_decisions
         └── tuning_config_versions.decision_id (nullable)
+        └── tuning_config_versions.before_version_id (nullable)
+        └── tuning_config_versions.after_version_id (nullable)
   └── jobs
   └── notification_preferences
   └── notifications
@@ -1032,8 +1032,8 @@ nodes (independent — not org-scoped)
 - All tables use UUIDs for primary keys (except log tables which use bigserial for performance).
 - All timestamps are `timestamptz` (UTC).
 - `jsonb` columns are used for flexible, schema-evolving data (raw payloads, config, metrics). Frequently queried fields should be promoted to proper columns as patterns stabilize.
-- **Insert-only versioned settings**: Settings/config tables use an insert-only versioning pattern instead of `updated_at`. On update, the current row is deactivated (`active = false`) and a new row is inserted (`active = true`) with merged values. All historical versions are preserved. Tables using this pattern: `review_patterns`, `prompt_overrides`, `eval_release_gates`. Unique constraints on these tables are partial indexes filtered on `active = true`. See AGENTS.md for the full implementation pattern.
-- **Candidates for insert-only versioning extraction**: The following tables contain settings that would benefit from insert-only versioning but cannot use it directly because they are FK targets for child tables: `organizations` (settings jsonb — consider extracting to a separate `org_settings` table), `prompt_templates` (default_content — consider referencing by `key` instead of `id`), `eval_datasets` (metadata — consider extracting mutable fields to a separate settings table). These tables retain `updated_at` for now.
+- **Insert-only versioned settings**: Settings/config tables use an insert-only versioning pattern instead of `updated_at`. On update, the current row is deactivated (`active = false`) and a new row is inserted (`active = true`) with merged values. All historical versions are preserved. Tables using this pattern: `review_patterns`, `prompt_overrides`, `eval_release_gates`, `tuning_config_versions`. Unique constraints on these tables are partial indexes filtered on `active = true`. See AGENTS.md for the full implementation pattern.
+- **Insert-only versioning vs audit log**: These two mechanisms are complementary, not competing. Use **insert-only versioning** when application code needs to read previous versions (rollback, canary traffic splitting, A/B testing). Use the **audit log** when you only need a compliance trail of "who did what when" — it's a write-and-forget append that is never queried for application logic. Tables like `organizations.settings`, `prompt_templates`, and `eval_datasets` change rarely and don't need rollback — the audit log is sufficient for their change history.
 - **Tables that intentionally use `updated_at`**: Operational/lifecycle entities where in-place updates are the natural model: `issues` (status tracked via `issue_events`), `pull_requests` (synced from GitHub), `experiments` (lifecycle entity), `jobs` (transient work queue with locking), `repositories` (external entity sync), `prompt_versions` (already IS the version history), `repo_context_packages`/`repo_context_entries`/`repo_file_map` (computed/cached data rebuilt on context refresh).
 - **Row-Level Security (RLS)**: Enabled as defense-in-depth on sensitive tables (`integrations`, `agent_runs`, `issues`, `pull_requests`, `organizations`, `users`, `eval_datasets`, `eval_examples`, `eval_runs`, `eval_run_results`). The application sets `app.current_org_id` on each connection and RLS policies enforce org isolation. Primary access control remains in the Go application layer via `org_id` filtering. See [20-security-architecture.md](20-security-architecture.md).
 - **Data retention**: Raw payloads (`webhook_deliveries.payload`), agent run logs, and traces have configurable retention policies (defaults: 30 days for webhooks, 90 days for logs/traces). A scheduled `data_retention_cleanup` job runs daily and purges expired data while retaining metadata for analytics. The job processes tables in order: `agent_run_logs` (older than 90 days), `webhook_deliveries` (payload nullified after 30 days, metadata rows kept for 1 year), `audit_log` (partitioned by month, archived after 1 year). See [20-security-architecture.md](20-security-architecture.md).
