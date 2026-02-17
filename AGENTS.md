@@ -69,3 +69,4 @@ Do **NOT** use for operational/lifecycle entities, external entity mirrors, comp
 | `review_patterns` | (org_id, repo, rule) |
 | `prompt_overrides` | (org_id, template_id, scope_type, repository_id, issue_type, phase) |
 | `eval_release_gates` | (org_id, gate_name) |
+| `tuning_config_versions` | (org_id, config_scope, scope_key) |
