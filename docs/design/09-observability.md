@@ -345,3 +345,9 @@ All experiment lifecycle events (baseline capture, observation start/end, outcom
 - Searching for all evaluation activity for a given issue or PR
 - Alerting on experiment failures (e.g., unable to fetch Datadog metrics)
 - Auditing experiment outcomes over time
+
+## Production Feedback Loop
+
+After outcome classification, the system triggers a production feedback analysis job. This job generates learnings from the production outcome that are injected into future agent runs for similar issues. See [18-fix-quality-feedback.md](18-fix-quality-feedback.md) for the full design.
+
+When an experiment is classified as `no_change` or `regression`, an LLM analyzes why the fix was ineffective and generates a generalized learning. These learnings are stored in the `production_learnings` table and surfaced in agent prompts and in the `.143/learned-conventions.md` file.

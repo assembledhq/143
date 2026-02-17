@@ -760,7 +760,6 @@ Monthly token budgets prevent runaway costs from compromised or looping agents:
 - Per-org monthly token budget (configurable in settings).
 - The orchestrator checks remaining budget before starting a run.
 - If budget is exceeded, auto-triggered runs are paused. Manual runs are allowed with a warning.
-- See [17-cost-intelligence.md](17-cost-intelligence.md) for full cost controls.
 
 ### Model Output Validation
 
