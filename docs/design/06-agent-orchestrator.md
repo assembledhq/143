@@ -393,8 +393,6 @@ After each run, the orchestrator checks the agent's confidence score:
 - **Below human-review threshold** (default 0.5): pause the run, mark as `needs_human_guidance`, notify admin
 - Admin can then approve (continue to validation), retry with different settings, or dismiss
 
-The orchestrator currently supports batch execution mode only.
-
 ## Token Usage Tracking
 
 Each agent run records token usage in `agent_runs.token_usage`:
