@@ -254,12 +254,10 @@ Close the loop — measure whether fixes actually helped.
 
 Close the learning loop — turn human PR reviews into agent improvements.
 
-1. **Review comment capture + filtering pipeline** — extend PR webhook handler, create `review_comments` table, implement the 6-stage filtering pipeline (143-only mode first)
+1. **Review comment capture + processing pipeline** — extend PR webhook handler, create `review_comments` table, implement structural pre-filter + single LLM pass
 2. **Auto-apply feedback** — revision runs, push-to-existing-PR, revision prompt injection for 143-generated PRs
-3. **Review patterns KB + reviewer trust** — `review_patterns` and `reviewer_trust` tables, dedup logic, pattern promotion with trust-weighted thresholds, admin UI
+3. **Review patterns KB** — `review_patterns` table, text-match dedup logic, admin UI
 4. **Curated context document** — `.143/learned-conventions.md` generation, PR-based updates, manual edit preservation
-5. **Acceptance tracking** — `review_outcomes` table, aggregation queries, filter pipeline health dashboard
-6. **All-PRs mode** — enable `comment_scope = 'all_prs'` configuration, verify filtering pipeline handles the volume
 
 **Milestone**: Every human review automatically improves all future agent runs for that repo. Learned conventions are version-controlled in the repo and editable by the team. Acceptance rates trend upward over time.
 

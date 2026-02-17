@@ -618,20 +618,18 @@ agent_runs (failure_category = 'context')
 
 ### Loop D — Self-Improving Conventions
 
-**Trigger**: A `review_pattern` (doc 11) reaches `active` status with confidence >=0.8 and at least one maintainer-tier reviewer in its provenance.
+**Trigger**: A `review_pattern` (doc 11) reaches `active` status (i.e., 2+ occurrences from independent review comments).
 
 **Decision logic**:
 
-1. The `promote_conventions` job runs hourly, scanning `review_patterns` with `status = 'active'`, `confidence >= 0.8`, and verified reviewer trust
-2. It checks reviewer provenance: at least one `source_comment_id` must trace back to a reviewer with `trust_tier = 'maintainer'` in `reviewer_trust`
-3. For each qualifying pattern, it builds an updated convention set by reading the current active `tuning_config_versions` row for `conventions/{repo}` and adding the new rule
-4. Calls `TuningService.ProposeChange` with `config_scope='conventions'` and `scope_key='{repo}'`
-5. When applied, triggers `regenerate_conventions_doc` (doc 11) to update `.143/learned-conventions.md` in the repo, using an `auto_merge` flag that creates and merges a PR automatically (vs. the normal flow that opens a PR for review)
+1. The `promote_conventions` job runs hourly, scanning `review_patterns` with `status = 'active'` that haven't yet been synced to `tuning_config_versions`
+2. For each qualifying pattern, it builds an updated convention set by reading the current active `tuning_config_versions` row for `conventions/{repo}` and adding the new rule
+3. Calls `TuningService.ProposeChange` with `config_scope='conventions'` and `scope_key='{repo}'`
+4. When applied, triggers `regenerate_conventions_doc` (doc 11) to update `.143/learned-conventions.md` in the repo, using an `auto_merge` flag that creates and merges a PR automatically (vs. the normal flow that opens a PR for review)
 
 **Data flow**:
 ```
-review_patterns (doc 11, status = 'active', confidence >= 0.8)
-  + reviewer_trust (doc 11, trust_tier = 'maintainer')
+review_patterns (doc 11, status = 'active', occurrence_count >= 2)
   → promote_conventions hourly job
   → TuningService.ProposeChange
   → tuning_decisions + tuning_config_versions
