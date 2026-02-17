@@ -55,7 +55,7 @@ Costs           — "Are we within budget and spending efficiently?"
 Settings        — "How is the system configured?"
 ```
 
-**Why 6, not 8:** Pull Requests and Sessions were removed as standalone pages. PRs are a stage in a run's lifecycle (not a separate concept), so they appear as a tab on the run detail page. Sessions appear in the Runs list with a "Session" badge and link to their own detail view (`/sessions/[id]`), but don't need top-level nav — they're infrequent compared to batch runs.
+**Why 6, not 8:** Pull Requests were removed as a standalone page. PRs are a stage in a run's lifecycle (not a separate concept), so they appear as a tab on the run detail page.
 
 Deploy-impact experiments are shown inline on the run detail page's PR & Validation tab (where they contextually belong). Agent config experiments live under Settings > Experiments (they're a configuration concern, not a standalone workflow).
 
@@ -79,9 +79,6 @@ frontend/
 │   │   │   ├── page.tsx              # run list (full lifecycle: running → PR → merged)
 │   │   │   └── [id]/
 │   │   │       └── page.tsx          # run detail (stable tabs, unavailable tabs grayed out)
-│   │   ├── sessions/
-│   │   │   └── [id]/
-│   │   │       └── page.tsx          # live session view (accessed from Runs list, no standalone list page)
 │   │   ├── analytics/
 │   │   │   └── page.tsx              # failure analytics dashboard
 │   │   ├── costs/
@@ -117,11 +114,14 @@ frontend/
 │   │   │   ├── run-trace-drawer.tsx  # slide-out drawer for structured trace (opens from Logs tab)
 │   │   │   ├── run-validation.tsx    # PR validation checks, severity-tiered (blocking/review/passing)
 │   │   │   └── run-pr-section.tsx    # PR & Validation tab: review status, deploy experiment, GitHub link
-│   │   ├── dashboard/
-│   │   │   ├── health-indicator.tsx  # single success-rate number + sparkline
-│   │   │   ├── action-queue.tsx      # items blocked on human input, composite priority sorted
-│   │   │   ├── queue-item-panel.tsx  # side panel preview for action queue items (click-to-preview)
-│   │   │   └── onboarding-empty.tsx  # empty state: guides first integration setup + test run
+│   │   ├── fix-queue/
+│   │   │   ├── active-section.tsx    # runs in progress with phase-based progress indicators
+│   │   │   ├── needs-you-section.tsx # items blocked on human input, composite priority sorted
+│   │   │   ├── failed-section.tsx    # recent failures with inline explanations
+│   │   │   ├── shipped-section.tsx   # recently deployed fixes with impact badges
+│   │   │   ├── queue-item-panel.tsx  # side panel preview for queue items (click-to-preview)
+│   │   │   ├── fix-rate-header.tsx   # fix success rate + sparkline in page header
+│   │   │   └── onboarding-empty.tsx  # empty state: guides first integration setup
 │   │   ├── experiments/
 │   │   │   ├── metrics-comparison.tsx
 │   │   │   ├── outcome-badge.tsx
@@ -134,11 +134,6 @@ frontend/
 │   │   │   ├── token-impact-chart.tsx     # tokens/cost vs impact visualization
 │   │   │   ├── budget-gauge.tsx           # budget utilization and threshold marker
 │   │   │   └── usage-forecast-chart.tsx   # historical usage + forecast line
-│   │   ├── sessions/
-│   │   │   ├── session-chat.tsx          # bidirectional message feed (right panel)
-│   │   │   ├── session-question.tsx      # agent question display with answer input
-│   │   │   ├── session-status-bar.tsx    # mode, duration, connection status, branch info (top bar in right panel)
-│   │   │   └── session-actions.tsx       # end, generate fix, sync buttons
 │   │   ├── settings/
 │   │   │   ├── prompt-editor.tsx         # prompt override editor with diff
 │   │   │   ├── prompt-version-timeline.tsx # version history + rollback actions
@@ -159,10 +154,8 @@ frontend/
 │   │   ├── use-sse.ts                # SSE hook for log streaming
 │   │   ├── use-experiments.ts
 │   │   ├── use-failure-analytics.ts  # TanStack Query hook for failure analytics
-│   │   ├── use-websocket.ts          # WebSocket hook for interactive sessions
 │   │   ├── use-prompts.ts            # prompt templates/versions hooks
 │   │   ├── use-evals.ts              # eval datasets/runs hooks
-│   │   ├── use-session.ts            # TanStack Query hooks for session data
 │   │   ├── use-release-gates.ts      # rollout threshold hooks
 │   │   ├── use-costs.ts              # cost summary/budget/forecast hooks
 │   │   └── use-command-palette.ts    # Cmd+K registration, fuzzy search, action dispatch
@@ -203,36 +196,68 @@ frontend/
 
 ## Pages & Features
 
-### Dashboard (`/`)
+### Fix Queue — Dashboard (`/`)
 
-The dashboard answers one question: **"Do I need to do anything?"** It is an action queue, not a reporting page.
+The dashboard is the **Fix Queue** — the single screen where 80% of users spend 80% of their time. It answers: **"What is the system doing, and what does it need from me?"**
 
-#### Layout
+This is not a reporting page. It's a real-time operations view.
 
-**Health indicator in the header** — The fix success rate (trailing 7 days, e.g., "87%") is displayed as a single line in the page header with a green/yellow/red `StatusDot`. It does not get its own section — if the number is good it's noise, and if it's bad, the action queue below already shows what to do about it.
+#### Layout: Four Sections
 
-**Action queue (the page)** — This is the entire dashboard. It fills the viewport. Shows items **blocked on human input**, sorted by **composite priority** (severity × wait time × item type), not by age alone. A security-critical PR waiting 2 hours ranks above a low-severity escalation waiting 2 days. Items:
-- Runs in review (PRs awaiting review)
+The page is divided into four sections, each answering a different question. Sections collapse to a single-line summary when empty.
+
+**1. Active — "What is the system working on right now?"**
+
+Shows runs currently in progress, sorted by start time. Each row:
+- `StatusDot` (running), issue title (linked), repo name, elapsed time, live progress indicator (phase: analyzing / coding / testing)
+- Phase-based progress replaces raw log streaming for the dashboard view. Users see "Testing fix..." not scrolling terminal output.
+- Clicking a row opens the full run detail page with live logs.
+
+This section builds trust. Users see the system is doing work, not a black box.
+
+**2. Needs You — "What's blocked on me?"**
+
+Items requiring human input, sorted by **composite priority** (severity x wait time x item type). A security-critical PR waiting 2 hours ranks above a low-severity run waiting 2 days. Items:
+- PRs awaiting review (with confidence label + diff stats summary)
 - Runs paused at low confidence (waiting for approval)
-- Sessions with unanswered agent questions
 - Issues manually escalated for triage
 
-Each item is a single row: `StatusDot` (type + lifecycle state), title (linked), priority reason label (e.g., "Low confidence (blocked)" or "Security changes detected"), how long it's been waiting, and a primary action button ("Review", "Approve", "Answer"). The priority reason is visible on the row — users should understand *why* something needs attention, not just *that* it needs attention.
+Each row: `StatusDot`, title (linked), priority reason label (e.g., "Low confidence — needs approval" or "Security changes detected"), wait time, and a primary action button ("Review", "Approve", "Dismiss").
 
-**Click-to-preview side panel** — Clicking a queue item opens a side panel (`queue-item-panel.tsx`) on the right with summary context (run status, diff summary, confidence label, PR status) without navigating away from the dashboard. This lets users process multiple queue items without back-button ping-pong. The side panel provides enough context for simple decisions (approve, answer). For deeper review, a "View full detail" link navigates to the full run/issue detail page.
+**Click-to-preview side panel** — Clicking a queue item opens a side panel (`queue-item-panel.tsx`) on the right with summary context (run status, diff summary, confidence label, PR status) without navigating away. The side panel provides enough context for simple decisions (approve, dismiss). For deeper review, a "View full detail" link navigates to the full run detail page.
 
-**Bulk actions** — Checkboxes on queue items allow batch operations: bulk-approve, bulk-assign, bulk-dismiss. Users with 10+ items in their queue shouldn't have to process them one at a time.
+**Bulk actions** — Checkboxes allow batch operations: bulk-approve, bulk-assign, bulk-dismiss. Users with 10+ items shouldn't process them one at a time.
 
-**Empty state** — When the queue is empty, don't just show a checkmark. This is an **onboarding moment**:
-- For new users (no integrations configured): guide them to connect Sentry/Linear/GitHub and trigger a test run
-- For active users (everything clear): show a clear "nothing needs your attention" state with a link to the Runs page for passive monitoring
+**3. Failed — "What went wrong?"**
 
-#### What the dashboard intentionally omits
+Recent failures (last 7 days), sorted by recency. Each row:
+- `StatusDot` (failed), issue title, failure category badge (`context` / `complexity` / `tooling` / `validation`)
+- One-sentence failure explanation inline (not hidden behind a click)
+- "Retry" button if `retry_advised` is true, "View Details" otherwise
 
-- **Recent activity feed** — The Runs page already shows this. A collapsed "comfort section" on the dashboard adds cognitive weight just by existing. If users want to see recent completions, they navigate to Runs.
-- **Impact-over-time charts** — useful for weekly reviews, not daily dashboards. Available on the Analytics page.
-- **Total issue counts, PRs-opened-this-week** — vanity metrics that don't drive action.
-- **Health indicator as a standalone section** — demoted to a single line in the header. One number doesn't need its own section.
+This section is critical for trust-building. See [17-failure-communication.md](17-failure-communication.md) for how failure explanations are generated.
+
+**4. Shipped — "What impact has the system had?"**
+
+Recently deployed fixes (last 7 days) with impact data when available. Each row:
+- `StatusDot` (merged), issue title, PR link, deploy date
+- Impact badge when observation window is complete: "Reduced errors by 73%" or "No measurable change" or "Measuring..." (observation in progress)
+
+This section closes the loop. Users see that fixes they approved actually worked. It also builds the case for increasing the system's autonomy.
+
+**Fix rate in the header** — The fix success rate (trailing 30 days, e.g., "42%") is displayed as a single line in the page header with a green/yellow/red `StatusDot` and breakdown by issue type available on hover. This sets expectations honestly — see [17-failure-communication.md](17-failure-communication.md).
+
+#### Empty States
+
+- **New user (no integrations)**: Guide to connect Sentry and GitHub. Show a "Connect Sentry to get started" CTA with estimated time ("takes ~2 minutes").
+- **New user (integrations connected, no runs)**: Show "Scanning for fixable issues..." with the quick-win scan progress.
+- **Active user (queue empty)**: "Nothing needs your attention. The system is working." with a link to the Runs page for passive monitoring.
+
+#### What the Fix Queue intentionally omits
+
+- **Activity feed** — The Runs page shows full history. Duplicating it here adds noise.
+- **Charts and trends** — Available on the Analytics page. The Fix Queue is for action, not reflection.
+- **Vanity metrics** — Total issue counts, PRs-opened-this-week. If it doesn't drive action, it doesn't belong here.
 
 ### Issues (`/issues`)
 
@@ -245,7 +270,7 @@ Each item is a single row: `StatusDot` (type + lifecycle state), title (linked),
 - **Bulk actions**: triage, trigger agent run
 - **Peek preview**: Space bar on a selected row opens the peek panel with issue summary (severity, source, affected customers, linked runs) without navigating to the detail page. J/K navigates between rows while the peek panel stays open.
 - **Detail page**: full issue context, event history, linked agent runs/PRs
-- **Two action buttons** on the detail page: **"Fix"** (primary, batch mode) and **"Investigate"** (secondary). "Fix with guidance" is available as a checkbox in a modal after clicking Fix ("I want to provide guidance before the agent starts"). "Pair on this" lives in a `...` overflow menu — it's a fundamentally different workflow, not a variant of Fix. Don't make users parse a dropdown for the most common action.
+- **One primary action button** on the detail page: **"Fix This"**. Optionally, "Fix with guidance" is available as a checkbox in a modal after clicking Fix ("I want to provide guidance before the agent starts"). Keep it simple — one action, one button.
 
 ### Runs (`/runs`) — Full Lifecycle
 
@@ -267,7 +292,7 @@ One table with a status column covering the entire lifecycle:
 | PR | PR number (linked to GitHub), blank if no PR yet |
 | Age | How long since the run started |
 
-**Filters**: status (running / completed / pr_open / in_review / merged / failed), date range, agent type. A **"Needs Review"** quick-filter replaces the old standalone PR list page. Interactive sessions appear in the list with a "Session" badge and link to `/sessions/[id]` instead of the standard run detail page.
+**Filters**: status (running / completed / pr_open / in_review / merged / failed), date range, agent type. A **"Needs Review"** quick-filter replaces the old standalone PR list page.
 
 **Bulk actions** — Checkboxes on run rows allow batch operations: bulk-approve (for PRs in review), bulk-retry (for failed runs), bulk-assign. When 5 PRs need review, users should be able to select and batch-approve rather than clicking into each one.
 
@@ -293,19 +318,6 @@ PR with experiment:    [Overview]  [Logs]  [Diff]  [PR & Validation ←default]
   - **Needs review** (orange) — direction/correctness/quality concerns. Human judgment required.
   - **Passing** (green) — all checks that passed.
   Users scan red items first, then orange. Green is there for completeness but doesn't demand attention. Also includes: review status, link to GitHub. If a deploy experiment exists, it's shown inline: before/after metrics comparison, outcome classification with explanation, timeline of baseline and observation windows.
-
-#### Interactive sessions (`/sessions/[id]`)
-
-Sessions appear in the Runs list with a "Session" badge but have their own detail view because the UI is fundamentally different (live chat vs. tabs). No standalone session list page — the Runs list with a "Sessions" filter serves this purpose.
-
-**Live session view** — 2 panels (not 3 — a third panel is cramped on laptop screens):
-- **Agent Activity** (left): streaming logs reusing the `run-log-viewer` component
-- **Chat / Directives** (right): bidirectional message feed with question/answer display
-  - Top status bar: mode, duration, connection status, branch info (pair mode: current branch, last push by agent/human)
-  - Agent questions show as cards with answer options (buttons for multiple choice, text input for free text)
-  - Human directives are typed into the chat input
-  - Status messages show session lifecycle events
-- **Session actions**: "End Session", "Generate Fix" (investigate mode), "Sync Branch" (pair mode)
 
 ### Analytics (`/analytics`)
 

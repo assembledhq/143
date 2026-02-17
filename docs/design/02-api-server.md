@@ -32,7 +32,6 @@ This document describes the Go backend architecture for 143.dev.
 │   │       ├── experiments.go   # deploy impact + agent config experiments
 │   │       ├── analytics.go     # failure analytics
 │   │       ├── patterns.go      # detected run patterns
-│   │       ├── sessions.go      # interactive sessions, WebSocket upgrade
 │   │       ├── prompts.go       # prompt templates, versions, promotion, rollback
 │   │       ├── evals.go         # datasets, eval runs, release gates
 │   │       └── costs.go         # cost summaries, budget, forecast, ROI
@@ -59,8 +58,6 @@ This document describes the Go backend architecture for 143.dev.
 │   │   │   │   └── e2b.go       # E2B cloud provider (optional)
 │   │   │   ├── adapters/        # per-agent-type adapters (claude_code, codex, etc.)
 │   │   │   └── tracing.go       # trace event capture and storage
-│   │   ├── sessions/
-│   │   │   └── manager.go       # interactive session lifecycle, WebSocket coordination
 │   │   ├── validation/
 │   │   │   └── service.go       # validation pipeline
 │   │   ├── github/
@@ -127,7 +124,6 @@ This document describes the Go backend architecture for 143.dev.
 | `docker/docker` | Docker SDK for container management (agent sandboxes) |
 | `DataDog/datadog-go` | Datadog StatsD client for custom metrics |
 | `DataDog/dd-trace-go` | Datadog APM tracing (auto-instruments chi, pgx) |
-| `gorilla/websocket` | WebSocket support for interactive agent sessions |
 
 ### Testing Dependencies
 
@@ -323,16 +319,6 @@ Using `chi` for the HTTP router. All API routes are under `/api/v1/`.
 ├── /settings
 │   ├── GET    /                    # get org settings (includes execution_aggressiveness, confidence_thresholds, issue_type_overrides)
 │   └── PATCH  /                    # update settings (accepts all routing/execution settings)
-│
-├── /sessions
-│   ├── POST   /                    # create interactive session (guided, investigate, pair)
-│   ├── GET    /                    # list active sessions
-│   ├── GET    /:id                 # get session details + message history
-│   ├── GET    /:id/ws              # WebSocket upgrade for bidirectional messaging
-│   ├── POST   /:id/messages        # send message (REST fallback for non-WebSocket clients)
-│   ├── POST   /:id/end             # end session gracefully
-│   ├── POST   /:id/generate-fix    # transition investigate session to fix (creates batch run)
-│   └── POST   /:id/sync            # trigger branch sync (pair mode)
 │
 ├── /analytics
 │   └── GET    /                    # aggregate failure analytics (category, code, trends)
