@@ -1,0 +1,10 @@
+DROP TRIGGER IF EXISTS audit_log_immutable ON audit_log;
+DROP FUNCTION IF EXISTS prevent_audit_log_modification();
+DROP TABLE IF EXISTS audit_log;
+DROP TABLE IF EXISTS nodes;
+DROP TABLE IF EXISTS jobs;
+DROP TABLE IF EXISTS repositories;
+DROP TABLE IF EXISTS integrations;
+DROP TABLE IF EXISTS sessions;
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS organizations;
