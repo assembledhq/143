@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 143.dev — one-command setup (no Docker required)
+# Usage: git clone https://github.com/assembledhq/143.git && cd 143 && ./setup.sh
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+info()  { echo -e "${GREEN}[143]${NC} $*"; }
+warn()  { echo -e "${YELLOW}[143]${NC} $*"; }
+fail()  { echo -e "${RED}[143]${NC} $*"; exit 1; }
+
+# ---------------------------------------------------------------------------
+# 1. Detect OS
+# ---------------------------------------------------------------------------
+OS="$(uname -s)"
+case "$OS" in
+  Darwin) PLATFORM="macos" ;;
+  Linux)  PLATFORM="linux" ;;
+  *)      fail "Unsupported OS: $OS. Only macOS and Linux are supported." ;;
+esac
+info "Detected platform: ${BOLD}$PLATFORM${NC}"
+
+# ---------------------------------------------------------------------------
+# 2. Check / install prerequisites
+# ---------------------------------------------------------------------------
+install_prereqs() {
+  local missing=()
+
+  command -v go   >/dev/null 2>&1 || missing+=(go)
+  command -v node >/dev/null 2>&1 || missing+=(node)
+  command -v psql >/dev/null 2>&1 || missing+=(postgresql)
+
+  if [ ${#missing[@]} -eq 0 ]; then
+    info "All prerequisites found (go, node, psql)."
+    return
+  fi
+
+  warn "Missing prerequisites: ${missing[*]}"
+
+  if [ "$PLATFORM" = "macos" ]; then
+    if ! command -v brew >/dev/null 2>&1; then
+      fail "Homebrew not found. Install it from https://brew.sh then re-run this script."
+    fi
+    for pkg in "${missing[@]}"; do
+      case "$pkg" in
+        go)         info "Installing Go...";         brew install go ;;
+        node)       info "Installing Node.js...";    brew install node ;;
+        postgresql) info "Installing PostgreSQL...";  brew install postgresql@17 && brew services start postgresql@17 ;;
+      esac
+    done
+  elif [ "$PLATFORM" = "linux" ]; then
+    if command -v apt-get >/dev/null 2>&1; then
+      sudo apt-get update -qq
+      for pkg in "${missing[@]}"; do
+        case "$pkg" in
+          go)         info "Installing Go...";         sudo apt-get install -y golang ;;
+          node)       info "Installing Node.js...";    sudo apt-get install -y nodejs npm ;;
+          postgresql) info "Installing PostgreSQL...";  sudo apt-get install -y postgresql postgresql-client && sudo systemctl start postgresql ;;
+        esac
+      done
+    else
+      fail "Unsupported package manager. Install these manually: ${missing[*]}"
+    fi
+  fi
+
+  # Verify everything landed
+  command -v go   >/dev/null 2>&1 || fail "Go installation failed."
+  command -v node >/dev/null 2>&1 || fail "Node.js installation failed."
+  command -v psql >/dev/null 2>&1 || fail "PostgreSQL installation failed."
+
+  info "All prerequisites installed."
+}
+
+install_prereqs
+
+# ---------------------------------------------------------------------------
+# 3. Print detected versions
+# ---------------------------------------------------------------------------
+info "Go:         $(go version | awk '{print $3}')"
+info "Node:       $(node --version)"
+info "PostgreSQL: $(psql --version | awk '{print $3}')"
+
+# ---------------------------------------------------------------------------
+# 4. Set up environment
+# ---------------------------------------------------------------------------
+DB_NAME="onefortythree"
+DB_USER="onefortythree"
+DB_PASSWORD="dev"
+DB_HOST="localhost"
+DB_PORT="5432"
+DATABASE_URL="postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=disable"
+
+if [ ! -f .env ]; then
+  if [ -f .env.example ]; then
+    cp .env.example .env
+    info "Created .env from .env.example"
+  else
+    cat > .env <<EOF
+DATABASE_URL=${DATABASE_URL}
+PORT=8080
+LOG_LEVEL=debug
+SESSION_SECRET=$(openssl rand -hex 32)
+SANDBOX_IMAGE=143-sandbox:latest
+EOF
+    info "Created .env with development defaults"
+  fi
+else
+  info ".env already exists, skipping."
+fi
+
+# Source .env so DATABASE_URL is available
+set -a
+source .env
+set +a
+
+# ---------------------------------------------------------------------------
+# 5. Set up PostgreSQL database
+# ---------------------------------------------------------------------------
+setup_database() {
+  info "Setting up PostgreSQL database..."
+
+  # Try to create the user (ignore error if it already exists)
+  if [ "$PLATFORM" = "macos" ]; then
+    psql postgres -tc "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" | grep -q 1 \
+      || psql postgres -c "CREATE USER ${DB_USER} WITH PASSWORD '${DB_PASSWORD}' CREATEDB;"
+  else
+    sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" | grep -q 1 \
+      || sudo -u postgres psql -c "CREATE USER ${DB_USER} WITH PASSWORD '${DB_PASSWORD}' CREATEDB;"
+  fi
+
+  # Create the database (ignore error if it already exists)
+  if [ "$PLATFORM" = "macos" ]; then
+    psql postgres -tc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1 \
+      || createdb -O "${DB_USER}" "${DB_NAME}"
+  else
+    sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1 \
+      || sudo -u postgres createdb -O "${DB_USER}" "${DB_NAME}"
+  fi
+
+  info "Database '${DB_NAME}' is ready."
+}
+
+setup_database
+
+# ---------------------------------------------------------------------------
+# 6. Install Go dependencies and run migrations
+# ---------------------------------------------------------------------------
+if [ -f go.mod ]; then
+  info "Installing Go dependencies..."
+  go mod download
+
+  if [ -d cmd/migrate ]; then
+    info "Running database migrations..."
+    go run cmd/migrate/main.go up
+  elif [ -d migrations ]; then
+    info "Migrations directory found — run migrations after the migrate tool is built."
+  fi
+else
+  warn "No go.mod found yet — skipping Go dependency install."
+fi
+
+# ---------------------------------------------------------------------------
+# 7. Install frontend dependencies
+# ---------------------------------------------------------------------------
+if [ -d frontend ]; then
+  info "Installing frontend dependencies..."
+  cd frontend
+  npm install
+  cd ..
+else
+  warn "No frontend/ directory yet — skipping frontend install."
+fi
+
+# ---------------------------------------------------------------------------
+# 8. Done
+# ---------------------------------------------------------------------------
+echo ""
+echo -e "${GREEN}${BOLD}============================================${NC}"
+echo -e "${GREEN}${BOLD}  143.dev is ready!${NC}"
+echo -e "${GREEN}${BOLD}============================================${NC}"
+echo ""
+echo -e "  ${BOLD}Start the Go server:${NC}"
+echo -e "    go run cmd/server/main.go"
+echo ""
+echo -e "  ${BOLD}Start the frontend:${NC}"
+echo -e "    cd frontend && npm run dev"
+echo ""
+echo -e "  ${BOLD}Or start both at once:${NC}"
+echo -e "    make dev"
+echo ""
+echo -e "  ${BOLD}Database:${NC}"
+echo -e "    postgresql://${DB_HOST}:${DB_PORT}/${DB_NAME}"
+echo ""
+echo -e "  ${BOLD}API:${NC}       http://localhost:8080"
+echo -e "  ${BOLD}Frontend:${NC}  http://localhost:3000"
+echo ""
