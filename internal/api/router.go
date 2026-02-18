@@ -54,6 +54,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) *c
 	healthHandler := handlers.NewHealthHandler(pool)
 	authHandler := handlers.NewAuthHandler(cfg, orgStore, userStore, sessionStore)
 	repoHandler := handlers.NewRepositoryHandler(repoStore)
+	integrationHandler := handlers.NewIntegrationHandler(integrationStore)
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, repoStore, integrationStore, prService)
 	settingsHandler := handlers.NewSettingsHandler(orgStore)
 	issueHandler := handlers.NewIssueHandler(issueStore)
@@ -114,6 +115,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) *c
 
 			r.Get("/api/v1/repositories", repoHandler.List)
 			r.Get("/api/v1/repositories/{id}", repoHandler.Get)
+			r.Get("/api/v1/integrations", integrationHandler.ListIntegrations)
 			r.Get("/api/v1/issues", issueHandler.List)
 			r.Get("/api/v1/issues/{id}", issueHandler.Get)
 			r.Get("/api/v1/runs", runHandler.List)

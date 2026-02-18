@@ -1,5 +1,6 @@
 "use client";
 
+import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -9,9 +10,15 @@ import { Label } from "@/components/ui/label";
 import { PageHeader } from "@/components/page-header";
 import { IntegrationsCard } from "@/components/integrations-card";
 import { INTEGRATIONS } from "@/lib/integrations";
+import type { Organization, SingleResponse } from "@/lib/types";
 
 export default function SettingsPage() {
   const [github, sentry, linear] = INTEGRATIONS;
+
+  const { data: settings } = useQuery<SingleResponse<Organization>>({
+    queryKey: ["settings"],
+    queryFn: () => api.settings.get(),
+  });
 
   return (
     <div className="space-y-8">
@@ -26,7 +33,12 @@ export default function SettingsPage() {
           <CardContent>
             <div className="space-y-2">
               <Label htmlFor="org-name">Organization Name</Label>
-              <Input id="org-name" placeholder="My Organization" />
+              <Input
+                id="org-name"
+                value={settings?.data?.name ?? ""}
+                disabled
+                className="bg-muted"
+              />
             </div>
           </CardContent>
         </Card>

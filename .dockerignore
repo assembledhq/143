@@ -1,0 +1,13 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+bin/
+coverage.html
+frontend/node_modules
+frontend/.next
+frontend/coverage
+docs/
+*.md
+!README.md
