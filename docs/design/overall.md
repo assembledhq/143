@@ -297,110 +297,122 @@ Single system of record. Bundled in Docker Compose for local dev, swappable to m
 
 The system should be built in phases. Each phase produces a usable milestone. The ordering principle is: **get to "Sentry error → PR" as fast as possible.** That's the demo. That's the tweet. That's the moment a user decides this product is real.
 
-## Phase 1: Foundation + Repo Onboarding (docs: 01, 02, 03, 10, 13)
+## Phase 1: Foundation + Repo Onboarding (docs: 01, 02, 03, 10, 13) — COMPLETE
 
 Build the skeleton that everything else plugs into, including GitHub authentication and repo connection.
 
-1. **Database schema + migrations** (01) — set up Postgres, create initial tables (including `repositories`)
-2. **Go API server scaffold** (02) — chi router, middleware, health checks, basic CRUD for orgs/users
-3. **GitHub OAuth flow** (13) — "Sign in with GitHub" for user authentication
-4. **GitHub App setup** (13) — manifest-based app creation or manual setup, installation webhook handling
-5. **Repository management** (13) — connect repos, store in `repositories` table, manage installation tokens
-6. **Frontend scaffold** (03) — Next.js project, shadcn/ui setup, layout, Fix Queue (empty state), repo connection UI
-7. **Docker Compose + Makefile** (10) — `docker compose up` runs Postgres + server + frontend
-8. **Success metrics instrumentation** — define and instrument the core metrics from day one: fix rate, time-to-fix, reviewer acceptance rate, failure rate by category. Every run records these. This replaces a premature eval harness — measure first, gate later.
+1. **Database schema + migrations** (01) — ✅ Two migration files: `000001_init` (orgs, users, sessions, repos, integrations, jobs, nodes, audit_log) and `000002_core_domain` (issues, agent_runs, validations, PRs, deploys)
+2. **Go API server scaffold** (02) — ✅ Chi v5 router with 8+ middleware (auth, CORS, logging, rate limiting, metrics, RBAC, body limits, webhook signature verification). Handlers for health, auth, repos, webhooks, issues, runs, settings.
+3. **GitHub OAuth flow** (13) — ✅ Login/callback/logout with state token CSRF protection, user upsert, 30-day sessions, HttpOnly cookies
+4. **GitHub App setup** (13) — ✅ Installation webhook handling (created/deleted). JWT token generation + caching. Manifest-based app creation endpoint not yet implemented (convenience feature, not blocking).
+5. **Repository management** (13) — ✅ Full CRUD store, UpsertFromGitHub for idempotent webhook sync, DisconnectByInstallationID for cleanup, installation token management
+6. **Frontend scaffold** (03) — ✅ Next.js 16 + App Router + shadcn/ui + TanStack Query. Pages: Overview, Issues, Runs, Settings, Analytics (placeholder), Costs (placeholder). Vitest test suite with MSW mocks.
+7. **Docker Compose + Makefile** (10) — ✅ Postgres 17 + Go server (air hot reload) + Next.js frontend. Makefile with dev, test, migrate, build, lint targets.
+8. **Success metrics instrumentation** — ✅ Prometheus metrics middleware (http_requests_total, http_request_duration_seconds, http_requests_in_flight). `/metrics` endpoint. CI/CD via GitHub Actions with coverage gates (70% backend, 80% frontend).
 
-**Milestone**: You can start the app, sign in with GitHub, connect repositories, and see connected repos in the dashboard. Core metrics are being captured from the first run.
+**Milestone**: ✅ You can start the app, sign in with GitHub, connect repositories, and see connected repos in the dashboard. Core metrics are being captured from the first run.
 
-## Phase 2: Sentry Ingestion (doc: 04)
+## Phase 2: Sentry Ingestion (doc: 04) — ~80% COMPLETE
 
 Connect Sentry first. It's the highest-signal, most automated source — stack traces give agents exactly what they need.
 
-1. **Sentry webhook endpoint** — receive Sentry issue/event webhooks
-2. **Sentry adapter** — parse, normalize, extract stack traces and affected customer counts
-3. **Normalization + deduplication** — unified issue pipeline with fingerprint-based dedup
-4. **Polling worker** — scheduled Sentry API sync as catch-all for missed webhooks
-5. **Issues UI** — data table with filters on the issues page
+1. **Sentry webhook endpoint** — ✅ `HandleSentry()` in ingestion_webhooks.go with signature verification, delivery tracking, supports created/regression events
+2. **Sentry adapter** — ✅ `SentryAdapter` parses webhooks, extracts stack traces, severity mapping, occurrence/customer counts, tags, timestamps. Full test coverage.
+3. **Normalization + deduplication** — ✅ `NormalizedIssue` struct with `sha256(source:externalID)` fingerprinting, `ON CONFLICT` upsert with smart merging (increment occurrences, max customer count, update severity)
+4. **Polling worker** — ❌ NOT STARTED. No Sentry API client, no polling job handler, `integration_sync_runs` table exists but unused. Needed as catch-all for missed webhooks.
+5. **Issues UI** — ⚠️ PARTIAL. Data table shows severity/status/source badges, occurrence count, customer count, relative timestamps. Backend supports status/source/severity filters + cursor pagination, but **filter UI controls not exposed in frontend**.
 
-**Milestone**: Sentry errors appear in the dashboard in real time. (Linear and support tool ingestion are added later — Sentry alone is enough to demonstrate the core loop.)
+**Milestone**: ⚠️ Sentry errors appear in the dashboard via webhooks, but polling sync (catch-all) and frontend filter controls are missing.
 
-## Phase 3: Agent Execution + Validation + PR (docs: 06, 07, 08, 17)
+## Phase 3: Agent Execution + Validation + PR (docs: 06, 07, 08, 17) — NOT STARTED (schema only)
 
 **This is the "aha moment."** Connect a repo, see a Sentry error, click "Fix This," get a PR. Ship these three together because none is useful alone.
 
-1. **Sandbox container management** — create, run, destroy Docker containers with gVisor
-2. **Claude Code adapter** — first (and initially only) agent integration
-3. **Agent orchestrator** — run lifecycle, concurrency control
-4. **Basic context injection** — read existing CLAUDE.md/AGENTS.md from the repo + relevant files from the Sentry stack trace. No LLM-generated file maps or convention extraction yet — start with what's already in the repo.
-5. **Confidence scoring** — agent outputs confidence score, low-confidence runs paused for human guidance. Single threshold: above = proceed, below = needs review.
-6. **Human-in-the-loop** — agent questions pause the run and surface in the Fix Queue; users can answer, provide guidance, or resume the sandbox session locally via CLI (`143 resume <run-id>` or `claude --resume <session-id>`). This is not an interactive chat — it's an escape hatch for when the agent needs help.
-7. **Log streaming** — SSE endpoint + live log viewer in the UI
-8. **Basic validation** — three checks: (1) do tests pass? (2) any security issues? (3) is the diff minimal? Skip LLM-based direction/quality checks for now.
-9. **PR creation** — branch, commit, formatted PR body with issue context, labels
-10. **PR tracking** — webhook-based status updates (merge, close, review)
-11. **Failure communication** (17) — human-readable failure explanations with next steps, shipped alongside the first agent runs (not as a later addition). See [17-failure-communication.md](17-failure-communication.md).
-12. **Fix Queue UI** — the primary dashboard showing Active runs, items Needing Review (including agent questions), Failed runs with explanations, and Shipped fixes. Run list, run detail page with logs + diff + PR tabs.
+DB schema for all Phase 3 entities exists (agent_runs, agent_run_logs, agent_run_questions, validations, pull_requests, deploys) and basic API handlers exist for listing/getting runs, but the entire execution pipeline is unimplemented:
 
-**Milestone**: Click "Fix This" on a Sentry error and watch an AI agent generate a code fix, validate it, and open a GitHub PR — all in one flow. Failures get human-readable explanations. The Fix Queue shows everything at a glance.
+1. **Sandbox container management** — ❌ No Docker/gVisor integration, no container lifecycle code
+2. **Claude Code adapter** — ❌ No agent adapter interface or Claude Code CLI integration
+3. **Agent orchestrator** — ❌ No run lifecycle management or concurrency control. Worker handlers are stubs.
+4. **Basic context injection** — ❌ No CLAUDE.md/AGENTS.md reading or stack trace file extraction
+5. **Confidence scoring** — ⚠️ DB field + frontend display exist, but no scoring logic or threshold gating
+6. **Human-in-the-loop** — ⚠️ `agent_run_questions` table exists, but no API endpoints, no orchestrator pause logic, no frontend UI
+7. **Log streaming** — ❌ No SSE endpoint, no log channel handling, no frontend EventSource client
+8. **Basic validation** — ❌ `validations` table exists but no validation service, no test/security/diff checks
+9. **PR creation** — ❌ GitHub service exists as stub but no branch/commit/PR creation logic
+10. **PR tracking** — ⚠️ `pull_requests` table exists, webhook handler scaffolded, but no PR store or status update logic
+11. **Failure communication** (17) — ⚠️ DB fields exist (failure_explanation, failure_category, failure_next_steps), frontend displays them, but no failure analysis service
+12. **Fix Queue UI** — ⚠️ Basic runs list page exists with status/confidence/failure display. Missing: run detail page with tabs (logs, diff, PR), live log viewer, agent questions UI.
 
-## Phase 4: Prioritization + Routing (docs: 05, 12)
+**Milestone**: ❌ Not yet achievable. This is the next major phase to build.
+
+## Phase 4: Prioritization + Routing (docs: 05, 12) — NOT STARTED (schema only)
 
 Now that fixes are flowing, rank issues so the most impactful ones surface first.
 
-1. **Scoring algorithm** — compute priority scores (customer impact, severity, recency)
-2. **Auto-trigger** — automatically attempt fixes for issues above a confidence threshold, with a simple on/off toggle (not a 4-position aggressiveness slider — start simple, add granularity when you have data on what the system succeeds at)
-3. **Settings UI** — priority weight configuration, product direction text, auto-fix toggle + confidence threshold
-4. **Priority display** — scores and explainability in the issues table and Fix Queue ordering
+DB tables exist for `priority_scores` and `complexity_estimates`, but no business logic is implemented:
 
-**Milestone**: Issues are ranked by business impact. High-confidence issues can be auto-fixed without human initiation.
+1. **Scoring algorithm** — ❌ `priority_scores` table ready, `prioritize` job handler is a stub. No scoring logic, no direction alignment LLM call.
+2. **Auto-trigger** — ❌ No auto-trigger logic, no autonomy level enforcement, no concurrency cap
+3. **Settings UI** — ❌ Settings page exists but only shows integration stubs. No priority weight, product direction, or auto-fix controls.
+4. **Priority display** — ❌ Issues table shows severity/status but not priority scores or explainability
 
-## Phase 5: Observability + Impact (docs: 09, 18)
+**Milestone**: ❌ Depends on Phase 3 completion first (fixes must be flowing before prioritization matters).
+
+## Phase 5: Observability + Impact (docs: 09, 18) — NOT STARTED
 
 Close the loop — measure whether fixes actually helped.
 
-1. **Deploy detection** — GitHub Deployments webhook + merge-based fallback
-2. **Baseline + observation metric collection** — from Sentry error rates (start with Sentry only, add Datadog/support later)
-3. **Outcome classification** — compare before/after, classify as success/no_change/regression/inconclusive
-4. **Impact display** — impact badges in the Fix Queue's "Shipped" section, detailed view on run detail page
-5. **Production outcome feedback loop** (18) — analyze ineffective/regression outcomes, generate learnings, inject into agent context
+`deploys` table exists in schema but experiments/metrics tables are missing. No implementation:
 
-**Milestone**: After a fix deploys, the system automatically reports whether it reduced customer pain. Impact data appears in the Fix Queue. Ineffective fixes feed back into agent context.
+1. **Deploy detection** — ❌ No webhook handler for deploy events
+2. **Baseline + observation metric collection** — ❌ No experiments table, no metric collection
+3. **Outcome classification** — ❌ No comparison or classification logic
+4. **Impact display** — ❌ No impact UI
+5. **Production outcome feedback loop** (18) — ❌ No outcome analysis or learning injection
 
-## Phase 6: Review Feedback Loop (doc: 11)
+**Milestone**: ❌ Depends on Phase 3 (PRs must be shipping before impact can be measured).
+
+## Phase 6: Review Feedback Loop (doc: 11) — NOT STARTED
 
 Turn human PR reviews into agent improvements.
 
-1. **Review comment capture + processing pipeline** — extend PR webhook handler, structural pre-filter + single LLM pass
-2. **Auto-apply feedback** — revision runs, push-to-existing-PR for 143-generated PRs
-3. **Review patterns KB** — accumulate generalizable patterns, text-match dedup
-4. **Curated context document** — `.143/learned-conventions.md` generation, version-controlled in the repo
+`agent_runs` has `parent_run_id` and `revision_context` columns ready for revision runs, but `review_comments` and `review_patterns` tables are not yet created:
 
-**Milestone**: Every human review automatically improves future agent runs. Learned conventions are version-controlled and editable by the team.
+1. **Review comment capture + processing pipeline** — ❌ No review comment table, no capture logic
+2. **Auto-apply feedback** — ❌ DB columns ready in agent_runs, but no revision run logic
+3. **Review patterns KB** — ❌ No review_patterns table or pattern extraction
+4. **Curated context document** — ❌ No `.143/learned-conventions.md` generation
 
-## Phase 7: Codebase Context — Advanced (doc: 14)
+**Milestone**: ❌ Depends on Phase 3 (PRs must exist to receive reviews).
+
+## Phase 7: Codebase Context — Advanced (doc: 14) — NOT STARTED
 
 Deepen the context layer based on what you've learned from real agent runs about what context actually matters.
 
-1. **File map generation** — LLM-based classification of files into features and components
-2. **Convention extraction** — infer coding conventions from code samples, linter configs, and accumulated review patterns
-3. **Test infrastructure discovery** — detect test frameworks, test commands, test patterns
-4. **Quality scoring** — compute context quality score, correlate with agent success rates
-5. **Incremental updates** — push webhook handler updates context on code changes
-6. **Context UI** — view context quality, file map, conventions, and improvement suggestions
+`repositories` table has a `context_quality` column ready, but context package tables (`repo_context_packages`, `repo_context_entries`, `repo_file_map`) are not created:
 
-**Milestone**: Each repo has an auto-generated context package with a quality score correlated to fix success rate. Teams see what to improve.
+1. **File map generation** — ❌ No tables, no LLM classification
+2. **Convention extraction** — ❌ No extraction logic
+3. **Test infrastructure discovery** — ❌ No discovery logic
+4. **Quality scoring** — ❌ DB column exists on repos, no scoring algorithm
+5. **Incremental updates** — ❌ No push webhook context updates
+6. **Context UI** — ❌ No context UI
 
-## Phase 8: Evals + Quality Gates (doc: 16)
+**Milestone**: ❌ Depends on Phase 3 having real agent runs to learn from.
+
+## Phase 8: Evals + Quality Gates (doc: 16) — NOT STARTED
 
 Now that you have real production data and observed failure modes, build the evaluation system on solid ground.
 
-1. **Eval taxonomy + schema** — define eval dimensions based on observed failure categories, not theory
-2. **Dataset pipeline** — build golden sets from curated production successes/failures, shadow sets from recent runs
-3. **Grader stack** — deterministic checks + LLM-judge, calibrated against actual human review outcomes
-4. **Release gates + rollout** — enforce offline gates and staged canary rollout for prompt/model changes
-5. **Continuous eval flywheel** — convert production failures into new eval cases automatically
+No eval infrastructure tables exist. Entirely future work:
 
-**Milestone**: Every agent configuration change is gated by reproducible evals built from real production data. Auto-rollback on quality drops.
+1. **Eval taxonomy + schema** — ❌ No eval tables
+2. **Dataset pipeline** — ❌ No dataset infrastructure
+3. **Grader stack** — ❌ No grader implementation
+4. **Release gates + rollout** — ❌ No release gate tables or logic
+5. **Continuous eval flywheel** — ❌ No flywheel
+
+**Milestone**: ❌ Depends on having real production data from Phases 3-5.
 
 ## Future: Additional Ingestion Sources
 
