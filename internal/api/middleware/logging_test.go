@@ -37,7 +37,7 @@ func TestLogging(t *testing.T) {
 		{
 			name: "defaults to 200 when WriteHeader is not called",
 			handler: func(w http.ResponseWriter, r *http.Request) {
-				w.Write([]byte("hello"))
+				_, _ = w.Write([]byte("hello"))
 			},
 			expectedCode: http.StatusOK,
 			expectedBody: "hello",

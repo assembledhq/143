@@ -366,53 +366,60 @@ func TestGitHubAPIFlow(t *testing.T) {
 	// GET /repos/:owner/:repo/git/ref/heads/main
 	mux.HandleFunc("GET /repos/testorg/testrepo/git/ref/heads/main", func(w http.ResponseWriter, r *http.Request) {
 		requestPaths = append(requestPaths, r.Method+" "+r.URL.Path)
-		json.NewEncoder(w).Encode(map[string]any{
+		err := json.NewEncoder(w).Encode(map[string]any{
 			"object": map[string]string{"sha": baseSHA},
 		})
+		require.NoError(t, err, "mock server should encode getRef response")
 	})
 
 	// POST /repos/:owner/:repo/git/refs (create branch)
 	mux.HandleFunc("POST /repos/testorg/testrepo/git/refs", func(w http.ResponseWriter, r *http.Request) {
 		requestPaths = append(requestPaths, r.Method+" "+r.URL.Path)
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]string{"ref": "refs/heads/143/fix/test"})
+		err := json.NewEncoder(w).Encode(map[string]string{"ref": "refs/heads/143/fix/test"})
+		require.NoError(t, err, "mock server should encode createRef response")
 	})
 
 	// POST /repos/:owner/:repo/git/blobs
 	mux.HandleFunc("POST /repos/testorg/testrepo/git/blobs", func(w http.ResponseWriter, r *http.Request) {
 		requestPaths = append(requestPaths, r.Method+" "+r.URL.Path)
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]string{"sha": blobSHA})
+		err := json.NewEncoder(w).Encode(map[string]string{"sha": blobSHA})
+		require.NoError(t, err, "mock server should encode createBlob response")
 	})
 
 	// POST /repos/:owner/:repo/git/trees
 	mux.HandleFunc("POST /repos/testorg/testrepo/git/trees", func(w http.ResponseWriter, r *http.Request) {
 		requestPaths = append(requestPaths, r.Method+" "+r.URL.Path)
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]string{"sha": treeSHA})
+		err := json.NewEncoder(w).Encode(map[string]string{"sha": treeSHA})
+		require.NoError(t, err, "mock server should encode createTree response")
 	})
 
 	// POST /repos/:owner/:repo/git/commits
 	mux.HandleFunc("POST /repos/testorg/testrepo/git/commits", func(w http.ResponseWriter, r *http.Request) {
 		requestPaths = append(requestPaths, r.Method+" "+r.URL.Path)
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]string{"sha": commitSHA})
+		err := json.NewEncoder(w).Encode(map[string]string{"sha": commitSHA})
+		require.NoError(t, err, "mock server should encode createCommit response")
 	})
 
 	// POST /repos/:owner/:repo/pulls
 	mux.HandleFunc("POST /repos/testorg/testrepo/pulls", func(w http.ResponseWriter, r *http.Request) {
 		requestPaths = append(requestPaths, r.Method+" "+r.URL.Path)
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]any{
+		err := json.NewEncoder(w).Encode(map[string]any{
 			"number":   42,
 			"html_url": "https://github.com/testorg/testrepo/pull/42",
 		})
+		require.NoError(t, err, "mock server should encode create pull request response")
 	})
 
 	// POST /repos/:owner/:repo/issues/:number/labels
 	mux.HandleFunc("POST /repos/testorg/testrepo/issues/42/labels", func(w http.ResponseWriter, r *http.Request) {
 		requestPaths = append(requestPaths, r.Method+" "+r.URL.Path)
-		json.NewEncoder(w).Encode([]map[string]string{{"name": "143-generated"}})
+		err := json.NewEncoder(w).Encode([]map[string]string{{"name": "143-generated"}})
+		require.NoError(t, err, "mock server should encode set labels response")
 	})
 
 	server := httptest.NewServer(mux)
