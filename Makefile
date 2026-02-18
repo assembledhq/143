@@ -1,6 +1,12 @@
 .PHONY: dev setup test test-coverage migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint
 
 dev:
+	@FRONTEND_PORT=$${FRONTEND_PORT:-3000}; \
+	if lsof -nP -iTCP:$$FRONTEND_PORT -sTCP:LISTEN >/dev/null 2>&1; then \
+		echo "Port $$FRONTEND_PORT is already in use."; \
+		echo "Stop the process on that port, or run: FRONTEND_PORT=3001 make dev"; \
+		exit 1; \
+	fi; \
 	docker compose up --build
 
 setup:
