@@ -36,11 +36,15 @@ func main() {
 		hostname, _ := os.Hostname()
 		w := worker.New(pool, logger, hostname)
 		stores := &worker.Stores{
-			Issues:    db.NewIssueStore(pool),
-			AgentRuns: db.NewAgentRunStore(pool),
-			Jobs:      db.NewJobStore(pool),
+			Issues:       db.NewIssueStore(pool),
+			AgentRuns:    db.NewAgentRunStore(pool),
+			Jobs:         db.NewJobStore(pool),
+			Integrations: db.NewIntegrationStore(pool),
+			Webhooks:     db.NewWebhookDeliveryStore(pool),
 		}
-		worker.RegisterHandlers(w, stores, logger)
+		// Services will be nil until Phase 3 runtime dependencies are configured.
+		// The existing handlers (ingest_webhook, prioritize, sync_sentry) don't need services.
+		worker.RegisterHandlers(w, stores, nil, logger)
 		go w.Start(ctx)
 		logger.Info().Msg("worker started with registered handlers")
 	}

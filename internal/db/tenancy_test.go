@@ -55,6 +55,8 @@ func TestMultiTenancyAudit(t *testing.T) {
 		{"sessions", "where user_id"},
 		{"repositories", "installation_id"},
 		{"integrations", "from integrations"},
+		{"agent_run_logs", "from agent_run_logs"},  // no org_id column; scoped via agent_run_id FK
+		{"agent_run_logs", "into agent_run_logs"},   // no org_id column; scoped via agent_run_id FK
 	}
 
 	// Scan all .go files in the db package (not test files)

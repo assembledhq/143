@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -24,146 +24,153 @@ func anyArgs(n int) []any {
 	return args
 }
 
-func TestIngestNormalized_Success(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
+func TestIngestNormalized(t *testing.T) {
+	t.Parallel()
 
-	issueStore := db.NewIssueStore(mock)
-	webhookStore := db.NewWebhookDeliveryStore(mock)
-	jobStore := db.NewJobStore(mock)
-	svc := NewService(issueStore, webhookStore, jobStore, zerolog.Nop())
+	tests := []struct {
+		name           string
+		ni             func(integrationID uuid.UUID, now time.Time) NormalizedIssue
+		setupMock      func(mock pgxmock.PgxPoolIface, issueID uuid.UUID, now time.Time)
+		expectErr      bool
+		errSubstr      string
+		checkResult    func(t *testing.T, issue *models.Issue, issueID uuid.UUID)
+	}{
+		{
+			name: "successful ingestion upserts issue and enqueues prioritize job",
+			ni: func(integrationID uuid.UUID, now time.Time) NormalizedIssue {
+				return NormalizedIssue{
+					ExternalID:            "EXT-123",
+					Source:                "sentry",
+					SourceIntegrationID:   integrationID,
+					Title:                 "Test Issue",
+					Description:           "A test issue description",
+					Severity:              "error",
+					OccurrenceCount:       5,
+					AffectedCustomerCount: 2,
+					Tags:                  []string{"backend", "api"},
+					FirstSeenAt:           now.Add(-1 * time.Hour),
+					LastSeenAt:            now,
+					RawData:               json.RawMessage(`{"key":"value"}`),
+				}
+			},
+			setupMock: func(mock pgxmock.PgxPoolIface, issueID uuid.UUID, now time.Time) {
+				upsertRows := pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
+					AddRow(issueID, now, now)
+				mock.ExpectQuery("INSERT INTO issues").
+					WithArgs(anyArgs(16)...).
+					WillReturnRows(upsertRows)
 
-	orgID := uuid.New()
-	issueID := uuid.New()
-	now := time.Now()
-	integrationID := uuid.New()
+				jobID := uuid.New()
+				enqueueRows := pgxmock.NewRows([]string{"id"}).
+					AddRow(jobID)
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(anyArgs(6)...).
+					WillReturnRows(enqueueRows)
+			},
+			expectErr: false,
+			checkResult: func(t *testing.T, issue *models.Issue, issueID uuid.UUID) {
+				t.Helper()
+				require.NotNil(t, issue, "ingested issue should not be nil")
+				require.Equal(t, issueID, issue.ID, "issue ID should match upserted value")
+				require.Equal(t, "sentry", issue.Source, "source should be sentry")
+				require.Equal(t, "EXT-123", issue.ExternalID, "external ID should match input")
+				require.Equal(t, "Test Issue", issue.Title, "title should match input")
+				require.Equal(t, "high", issue.Severity, "error severity should normalize to high")
+				require.Equal(t, "open", issue.Status, "status should default to open")
+				require.Equal(t, 5, issue.OccurrenceCount, "occurrence count should match input")
+			},
+		},
+		{
+			name: "upsert failure returns error",
+			ni: func(integrationID uuid.UUID, now time.Time) NormalizedIssue {
+				return NormalizedIssue{
+					ExternalID:          "EXT-456",
+					Source:              "pagerduty",
+					SourceIntegrationID: integrationID,
+					Title:               "Failing Issue",
+					Severity:            "critical",
+					FirstSeenAt:         now,
+					LastSeenAt:          now,
+				}
+			},
+			setupMock: func(mock pgxmock.PgxPoolIface, issueID uuid.UUID, now time.Time) {
+				mock.ExpectQuery("INSERT INTO issues").
+					WithArgs(anyArgs(16)...).
+					WillReturnError(fmt.Errorf("database connection lost"))
+			},
+			expectErr: true,
+			errSubstr: "upsert issue",
+			checkResult: func(t *testing.T, issue *models.Issue, issueID uuid.UUID) {
+				t.Helper()
+				require.Nil(t, issue, "result should be nil on upsert failure")
+			},
+		},
+		{
+			name: "enqueue failure is ignored and ingestion still succeeds",
+			ni: func(integrationID uuid.UUID, now time.Time) NormalizedIssue {
+				return NormalizedIssue{
+					ExternalID:          "EXT-789",
+					Source:              "github",
+					SourceIntegrationID: integrationID,
+					Title:               "Another Issue",
+					Severity:            "warning",
+					FirstSeenAt:         now,
+					LastSeenAt:          now,
+				}
+			},
+			setupMock: func(mock pgxmock.PgxPoolIface, issueID uuid.UUID, now time.Time) {
+				upsertRows := pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
+					AddRow(issueID, now, now)
+				mock.ExpectQuery("INSERT INTO issues").
+					WithArgs(anyArgs(16)...).
+					WillReturnRows(upsertRows)
 
-	ni := NormalizedIssue{
-		ExternalID:            "EXT-123",
-		Source:                "sentry",
-		SourceIntegrationID:   integrationID,
-		Title:                 "Test Issue",
-		Description:           "A test issue description",
-		Severity:              "error",
-		OccurrenceCount:       5,
-		AffectedCustomerCount: 2,
-		Tags:                  []string{"backend", "api"},
-		FirstSeenAt:           now.Add(-1 * time.Hour),
-		LastSeenAt:            now,
-		RawData:               json.RawMessage(`{"key":"value"}`),
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(anyArgs(6)...).
+					WillReturnError(fmt.Errorf("job queue full"))
+			},
+			expectErr: false,
+			checkResult: func(t *testing.T, issue *models.Issue, issueID uuid.UUID) {
+				t.Helper()
+				require.NotNil(t, issue, "ingested issue should not be nil even when enqueue fails")
+				require.Equal(t, issueID, issue.ID, "issue ID should match upserted value")
+				require.Equal(t, "medium", issue.Severity, "warning severity should normalize to medium")
+			},
+		},
 	}
 
-	// Upsert uses QueryRow with 16 named args
-	upsertRows := pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
-		AddRow(issueID, now, now)
-	mock.ExpectQuery("INSERT INTO issues").
-		WithArgs(anyArgs(16)...).
-		WillReturnRows(upsertRows)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	// Enqueue uses QueryRow with 6 named args
-	jobID := uuid.New()
-	enqueueRows := pgxmock.NewRows([]string{"id"}).
-		AddRow(jobID)
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(anyArgs(6)...).
-		WillReturnRows(enqueueRows)
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create pgxmock pool")
+			defer mock.Close()
 
-	issue, err := svc.IngestNormalized(context.Background(), orgID, ni)
+			issueStore := db.NewIssueStore(mock)
+			webhookStore := db.NewWebhookDeliveryStore(mock)
+			jobStore := db.NewJobStore(mock)
+			svc := NewService(issueStore, webhookStore, jobStore, zerolog.Nop())
 
-	require.NoError(t, err)
-	assert.NotNil(t, issue)
-	assert.Equal(t, issueID, issue.ID)
-	assert.Equal(t, orgID, issue.OrgID)
-	assert.Equal(t, "sentry", issue.Source)
-	assert.Equal(t, "EXT-123", issue.ExternalID)
-	assert.Equal(t, "Test Issue", issue.Title)
-	assert.Equal(t, "high", issue.Severity) // "error" normalizes to "high"
-	assert.Equal(t, "open", issue.Status)
-	assert.Equal(t, 5, issue.OccurrenceCount)
-	assert.NoError(t, mock.ExpectationsWereMet())
-}
+			orgID := uuid.New()
+			issueID := uuid.New()
+			integrationID := uuid.New()
+			now := time.Now()
 
-func TestIngestNormalized_UpsertFailure(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
+			ni := tt.ni(integrationID, now)
+			tt.setupMock(mock, issueID, now)
 
-	issueStore := db.NewIssueStore(mock)
-	webhookStore := db.NewWebhookDeliveryStore(mock)
-	jobStore := db.NewJobStore(mock)
-	svc := NewService(issueStore, webhookStore, jobStore, zerolog.Nop())
+			issue, err := svc.IngestNormalized(context.Background(), orgID, ni)
 
-	orgID := uuid.New()
-	integrationID := uuid.New()
-	now := time.Now()
+			if tt.expectErr {
+				require.Error(t, err, "IngestNormalized should return an error")
+				require.Contains(t, err.Error(), tt.errSubstr, "error should contain expected substring")
+			} else {
+				require.NoError(t, err, "IngestNormalized should not return an error")
+			}
 
-	ni := NormalizedIssue{
-		ExternalID:          "EXT-456",
-		Source:              "pagerduty",
-		SourceIntegrationID: integrationID,
-		Title:               "Failing Issue",
-		Severity:            "critical",
-		FirstSeenAt:         now,
-		LastSeenAt:          now,
+			tt.checkResult(t, issue, issueID)
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
 	}
-
-	// Upsert fails - 16 named args
-	mock.ExpectQuery("INSERT INTO issues").
-		WithArgs(anyArgs(16)...).
-		WillReturnError(fmt.Errorf("database connection lost"))
-
-	issue, err := svc.IngestNormalized(context.Background(), orgID, ni)
-
-	assert.Error(t, err)
-	assert.Nil(t, issue)
-	assert.Contains(t, err.Error(), "upsert issue")
-	assert.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestIngestNormalized_EnqueueIgnored(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	issueStore := db.NewIssueStore(mock)
-	webhookStore := db.NewWebhookDeliveryStore(mock)
-	jobStore := db.NewJobStore(mock)
-	svc := NewService(issueStore, webhookStore, jobStore, zerolog.Nop())
-
-	orgID := uuid.New()
-	issueID := uuid.New()
-	integrationID := uuid.New()
-	now := time.Now()
-
-	ni := NormalizedIssue{
-		ExternalID:          "EXT-789",
-		Source:              "github",
-		SourceIntegrationID: integrationID,
-		Title:               "Another Issue",
-		Severity:            "warning",
-		FirstSeenAt:         now,
-		LastSeenAt:          now,
-	}
-
-	// Upsert succeeds - 16 named args
-	upsertRows := pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
-		AddRow(issueID, now, now)
-	mock.ExpectQuery("INSERT INTO issues").
-		WithArgs(anyArgs(16)...).
-		WillReturnRows(upsertRows)
-
-	// Enqueue fails - 6 named args - but the error is ignored by the service (_, _ = ...)
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(anyArgs(6)...).
-		WillReturnError(fmt.Errorf("job queue full"))
-
-	issue, err := svc.IngestNormalized(context.Background(), orgID, ni)
-
-	// Should still succeed because enqueue errors are silently ignored
-	require.NoError(t, err)
-	assert.NotNil(t, issue)
-	assert.Equal(t, issueID, issue.ID)
-	assert.Equal(t, "medium", issue.Severity) // "warning" normalizes to "medium"
-	assert.NoError(t, mock.ExpectationsWereMet())
 }

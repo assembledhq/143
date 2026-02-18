@@ -14,153 +14,164 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestIssueHandler_List_Success(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
+func TestIssueHandler_List(t *testing.T) {
+	t.Parallel()
 
-	orgID := uuid.New()
-	issueID := uuid.New()
-	now := time.Now()
+	issueColumns := []string{
+		"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
+		"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
+		"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
+		"created_at", "updated_at",
+	}
 
-	store := db.NewIssueStore(mock)
-	handler := NewIssueHandler(store)
+	tests := []struct {
+		name         string
+		setupMock    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID)
+		expectedCode int
+		expectedLen  int
+	}{
+		{
+			name: "returns issues for org successfully",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				issueID := uuid.New()
+				mock.ExpectQuery("SELECT .+ FROM issues WHERE org_id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(issueColumns).AddRow(
+							issueID, orgID, "ext-1", "sentry", nil, nil,
+							"Test Issue", nil, json.RawMessage(`{}`), "open", now, now,
+							5, 2, "high", []string{"bug"}, "fp123",
+							now, now,
+						),
+					)
+			},
+			expectedCode: http.StatusOK,
+			expectedLen:  1,
+		},
+		{
+			name: "returns empty list when no issues exist",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				mock.ExpectQuery("SELECT .+ FROM issues WHERE org_id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(issueColumns))
+			},
+			expectedCode: http.StatusOK,
+			expectedLen:  0,
+		},
+	}
 
-	mock.ExpectQuery("SELECT .+ FROM issues WHERE org_id").
-		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows([]string{
-				"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
-				"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
-				"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
-				"created_at", "updated_at",
-			}).AddRow(
-				issueID, orgID, "ext-1", "sentry", nil, nil,
-				"Test Issue", nil, json.RawMessage(`{}`), "open", now, now,
-				5, 2, "high", []string{"bug"}, "fp123",
-				now, now,
-			),
-		)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/issues", nil)
-	ctx := middleware.WithOrgID(req.Context(), orgID)
-	req = req.WithContext(ctx)
-	w := httptest.NewRecorder()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create pgxmock pool without error")
+			defer mock.Close()
 
-	handler.List(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
+			orgID := uuid.New()
+			store := db.NewIssueStore(mock)
+			handler := NewIssueHandler(store)
 
-	var resp models.ListResponse[models.Issue]
-	err = json.Unmarshal(w.Body.Bytes(), &resp)
-	require.NoError(t, err)
-	assert.Len(t, resp.Data, 1)
-	assert.Equal(t, "Test Issue", resp.Data[0].Title)
-	assert.Equal(t, "high", resp.Data[0].Severity)
-	assert.NoError(t, mock.ExpectationsWereMet())
+			tt.setupMock(mock, orgID)
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/issues", nil)
+			ctx := middleware.WithOrgID(req.Context(), orgID)
+			req = req.WithContext(ctx)
+			w := httptest.NewRecorder()
+
+			handler.List(w, req)
+			require.Equal(t, tt.expectedCode, w.Code, "should return expected status code")
+
+			var resp models.ListResponse[models.Issue]
+			err = json.Unmarshal(w.Body.Bytes(), &resp)
+			require.NoError(t, err, "response body should be valid JSON")
+			require.Equal(t, tt.expectedLen, len(resp.Data), "should return expected number of issues")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }
 
-func TestIssueHandler_List_Empty(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
+func TestIssueHandler_Get(t *testing.T) {
+	t.Parallel()
 
-	orgID := uuid.New()
-	store := db.NewIssueStore(mock)
-	handler := NewIssueHandler(store)
+	issueColumns := []string{
+		"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
+		"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
+		"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
+		"created_at", "updated_at",
+	}
 
-	mock.ExpectQuery("SELECT .+ FROM issues WHERE org_id").
-		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows([]string{
-				"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
-				"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
-				"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
-				"created_at", "updated_at",
-			}),
-		)
+	tests := []struct {
+		name         string
+		idParam      string
+		setupMock    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID)
+		expectedCode int
+		expectedBody string
+	}{
+		{
+			name:    "returns issue by ID successfully",
+			idParam: "", // will be set to a valid UUID in the subtest
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				issueID := uuid.New()
+				mock.ExpectQuery("SELECT").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(issueColumns).AddRow(
+							issueID, orgID, "ext-1", "sentry", nil, nil,
+							"Found Issue", nil, json.RawMessage(`{}`), "open", now, now,
+							3, 1, "medium", []string{}, "fp456",
+							now, now,
+						),
+					)
+			},
+			expectedCode: http.StatusOK,
+			expectedBody: "Found Issue",
+		},
+		{
+			name:         "returns bad request for invalid UUID",
+			idParam:      "not-a-uuid",
+			setupMock:    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_ID",
+		},
+	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/issues", nil)
-	ctx := middleware.WithOrgID(req.Context(), orgID)
-	req = req.WithContext(ctx)
-	w := httptest.NewRecorder()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	handler.List(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create pgxmock pool without error")
+			defer mock.Close()
 
-	var resp models.ListResponse[models.Issue]
-	err = json.Unmarshal(w.Body.Bytes(), &resp)
-	require.NoError(t, err)
-	assert.Len(t, resp.Data, 0)
-	assert.NoError(t, mock.ExpectationsWereMet())
-}
+			orgID := uuid.New()
+			store := db.NewIssueStore(mock)
+			handler := NewIssueHandler(store)
 
-func TestIssueHandler_Get_Success(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
+			tt.setupMock(mock, orgID)
 
-	orgID := uuid.New()
-	issueID := uuid.New()
-	now := time.Now()
+			idParam := tt.idParam
+			if idParam == "" {
+				idParam = uuid.New().String()
+			}
 
-	store := db.NewIssueStore(mock)
-	handler := NewIssueHandler(store)
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/issues/"+idParam, nil)
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("id", idParam)
+			ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+			ctx = middleware.WithOrgID(ctx, orgID)
+			req = req.WithContext(ctx)
+			w := httptest.NewRecorder()
 
-	mock.ExpectQuery("SELECT").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows([]string{
-				"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
-				"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
-				"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
-				"created_at", "updated_at",
-			}).AddRow(
-				issueID, orgID, "ext-1", "sentry", nil, nil,
-				"Found Issue", nil, json.RawMessage(`{}`), "open", now, now,
-				3, 1, "medium", []string{}, "fp456",
-				now, now,
-			),
-		)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/issues/"+issueID.String(), nil)
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("id", issueID.String())
-	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
-	ctx = middleware.WithOrgID(ctx, orgID)
-	req = req.WithContext(ctx)
-	w := httptest.NewRecorder()
-
-	handler.Get(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
-
-	var resp models.SingleResponse[models.Issue]
-	err = json.Unmarshal(w.Body.Bytes(), &resp)
-	require.NoError(t, err)
-	assert.Equal(t, "Found Issue", resp.Data.Title)
-	assert.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestIssueHandler_Get_InvalidID(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	store := db.NewIssueStore(mock)
-	handler := NewIssueHandler(store)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/issues/not-a-uuid", nil)
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("id", "not-a-uuid")
-	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
-	ctx = middleware.WithOrgID(ctx, uuid.New())
-	req = req.WithContext(ctx)
-	w := httptest.NewRecorder()
-
-	handler.Get(w, req)
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "INVALID_ID")
+			handler.Get(w, req)
+			require.Equal(t, tt.expectedCode, w.Code, "should return expected status code")
+			require.Contains(t, w.Body.String(), tt.expectedBody, "response body should contain expected content")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }

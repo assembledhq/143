@@ -3,79 +3,173 @@ package ingestion
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func TestComputeFingerprint_Deterministic(t *testing.T) {
-	fp1 := computeFingerprint("sentry", "12345")
-	fp2 := computeFingerprint("sentry", "12345")
-	assert.Equal(t, fp1, fp2)
-	assert.Len(t, fp1, 32)
-}
+func TestComputeFingerprint(t *testing.T) {
+	t.Parallel()
 
-func TestComputeFingerprint_DifferentInputs(t *testing.T) {
-	fp1 := computeFingerprint("sentry", "12345")
-	fp2 := computeFingerprint("linear", "12345")
-	assert.NotEqual(t, fp1, fp2, "different sources should produce different fingerprints")
-
-	fp3 := computeFingerprint("sentry", "12345")
-	fp4 := computeFingerprint("sentry", "67890")
-	assert.NotEqual(t, fp3, fp4, "different IDs should produce different fingerprints")
-}
-
-func TestNormalizeSeverity(t *testing.T) {
 	tests := []struct {
-		input    string
-		expected string
+		name       string
+		source     string
+		externalID string
+		compare    func(t *testing.T, fp string)
 	}{
-		{"fatal", "critical"},
-		{"critical", "critical"},
-		{"urgent", "critical"},
-		{"0", "critical"},
-		{"error", "high"},
-		{"high", "high"},
-		{"1", "high"},
-		{"warning", "medium"},
-		{"medium", "medium"},
-		{"normal", "medium"},
-		{"2", "medium"},
-		{"info", "low"},
-		{"low", "low"},
-		{"3", "low"},
-		{"4", "low"},
-		{"unknown", "medium"},
-		{"", "medium"},
-		{"FATAL", "critical"}, // case insensitive
-		{"Error", "high"},
+		{
+			name:       "deterministic for same inputs",
+			source:     "sentry",
+			externalID: "12345",
+			compare: func(t *testing.T, fp string) {
+				t.Helper()
+				fp2 := computeFingerprint("sentry", "12345")
+				require.Equal(t, fp, fp2, "same inputs should produce identical fingerprints")
+				require.Len(t, fp, 32, "fingerprint should be 32 characters (hex-encoded MD5)")
+			},
+		},
+		{
+			name:       "different sources produce different fingerprints",
+			source:     "sentry",
+			externalID: "12345",
+			compare: func(t *testing.T, fp string) {
+				t.Helper()
+				fp2 := computeFingerprint("linear", "12345")
+				require.NotEqual(t, fp, fp2, "different sources should produce different fingerprints")
+			},
+		},
+		{
+			name:       "different IDs produce different fingerprints",
+			source:     "sentry",
+			externalID: "12345",
+			compare: func(t *testing.T, fp string) {
+				t.Helper()
+				fp2 := computeFingerprint("sentry", "67890")
+				require.NotEqual(t, fp, fp2, "different external IDs should produce different fingerprints")
+			},
+		},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			assert.Equal(t, tt.expected, normalizeSeverity(tt.input))
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			fp := computeFingerprint(tt.source, tt.externalID)
+			tt.compare(t, fp)
 		})
 	}
 }
 
-func TestCleanText_TruncatesLongText(t *testing.T) {
-	long := "a" + string(make([]byte, 600))
-	result := cleanText(long, 500)
-	assert.Len(t, result, 500)
+func TestNormalizeSeverity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{name: "fatal maps to critical", input: "fatal", expected: "critical"},
+		{name: "critical maps to critical", input: "critical", expected: "critical"},
+		{name: "urgent maps to critical", input: "urgent", expected: "critical"},
+		{name: "numeric 0 maps to critical", input: "0", expected: "critical"},
+		{name: "error maps to high", input: "error", expected: "high"},
+		{name: "high maps to high", input: "high", expected: "high"},
+		{name: "numeric 1 maps to high", input: "1", expected: "high"},
+		{name: "warning maps to medium", input: "warning", expected: "medium"},
+		{name: "medium maps to medium", input: "medium", expected: "medium"},
+		{name: "normal maps to medium", input: "normal", expected: "medium"},
+		{name: "numeric 2 maps to medium", input: "2", expected: "medium"},
+		{name: "info maps to low", input: "info", expected: "low"},
+		{name: "low maps to low", input: "low", expected: "low"},
+		{name: "numeric 3 maps to low", input: "3", expected: "low"},
+		{name: "numeric 4 maps to low", input: "4", expected: "low"},
+		{name: "unknown defaults to medium", input: "unknown", expected: "medium"},
+		{name: "empty string defaults to medium", input: "", expected: "medium"},
+		{name: "FATAL is case insensitive", input: "FATAL", expected: "critical"},
+		{name: "Error is case insensitive", input: "Error", expected: "high"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, normalizeSeverity(tt.input), "normalizeSeverity should return expected severity")
+		})
+	}
 }
 
-func TestCleanText_TrimsWhitespace(t *testing.T) {
-	assert.Equal(t, "hello", cleanText("  hello  ", 100))
+func TestCleanText(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    string
+		maxLen   int
+		expected string
+	}{
+		{
+			name:     "truncates text longer than max length",
+			input:    "a" + string(make([]byte, 600)),
+			maxLen:   500,
+			expected: "", // checked via length
+		},
+		{
+			name:     "trims whitespace",
+			input:    "  hello  ",
+			maxLen:   100,
+			expected: "hello",
+		},
+		{
+			name:     "short text is unchanged",
+			input:    "short",
+			maxLen:   500,
+			expected: "short",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := cleanText(tt.input, tt.maxLen)
+			if tt.name == "truncates text longer than max length" {
+				require.Len(t, result, tt.maxLen, "cleanText should truncate to max length")
+			} else {
+				require.Equal(t, tt.expected, result, "cleanText should return expected result")
+			}
+		})
+	}
 }
 
-func TestCleanText_ShortTextUnchanged(t *testing.T) {
-	assert.Equal(t, "short", cleanText("short", 500))
-}
+func TestStrPtr(t *testing.T) {
+	t.Parallel()
 
-func TestStrPtr_NonEmpty(t *testing.T) {
-	p := strPtr("hello")
-	assert.NotNil(t, p)
-	assert.Equal(t, "hello", *p)
-}
+	tests := []struct {
+		name     string
+		input    string
+		expected *string
+	}{
+		{
+			name:     "non-empty string returns pointer",
+			input:    "hello",
+			expected: func() *string { s := "hello"; return &s }(),
+		},
+		{
+			name:     "empty string returns nil",
+			input:    "",
+			expected: nil,
+		},
+	}
 
-func TestStrPtr_Empty(t *testing.T) {
-	assert.Nil(t, strPtr(""))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := strPtr(tt.input)
+			if tt.expected == nil {
+				require.Nil(t, result, "strPtr should return nil for empty string")
+			} else {
+				require.NotNil(t, result, "strPtr should return non-nil pointer for non-empty string")
+				require.Equal(t, *tt.expected, *result, "strPtr should return pointer to correct value")
+			}
+		})
+	}
 }

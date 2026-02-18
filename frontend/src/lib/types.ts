@@ -95,6 +95,69 @@ export interface AgentRun {
   created_at: string;
 }
 
+export interface Validation {
+  id: string;
+  agent_run_id: string;
+  org_id: string;
+  status: string;
+  direction_check: string | null;
+  direction_check_details: string | null;
+  correctness_check: string | null;
+  correctness_check_details: string | null;
+  quality_check: string | null;
+  quality_check_details: string | null;
+  security_scan: string | null;
+  security_scan_details: string | null;
+  regression_test_check: string | null;
+  regression_test_check_details: string | null;
+  ci_check: string | null;
+  ci_check_details: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentRunLog {
+  id: number;
+  agent_run_id: string;
+  level: string;
+  message: string;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface AgentRunQuestion {
+  id: string;
+  agent_run_id: string;
+  org_id: string;
+  question_text: string;
+  options: string[] | null;
+  context: string | null;
+  blocks_phase: string | null;
+  status: string;
+  answer_text: string | null;
+  answered_at: string | null;
+  answered_by: string | null;
+  created_at: string;
+}
+
+export interface PullRequest {
+  id: string;
+  agent_run_id: string;
+  org_id: string;
+  github_pr_number: number;
+  github_pr_url: string;
+  github_repo: string;
+  title: string;
+  body: string;
+  status: string;
+  branch_name: string;
+  review_status: string | null;
+  merged_at: string | null;
+  closed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ListResponse<T> {
   data: T[];
   meta: {

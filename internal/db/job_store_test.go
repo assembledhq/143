@@ -6,76 +6,96 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestJobStore_Enqueue_Success(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
+func TestJobStore_Enqueue(t *testing.T) {
+	t.Parallel()
 
-	store := NewJobStore(mock)
-	orgID := uuid.New()
-	generatedID := uuid.New()
+	tests := []struct {
+		name      string
+		queue     string
+		jobType   string
+		payload   any
+		priority  int
+		dedupeKey *string
+		setupMock func(mock pgxmock.PgxPoolIface, generatedID uuid.UUID)
+		expectErr bool
+	}{
+		{
+			name:      "enqueues job without dedupe key",
+			queue:     "default",
+			jobType:   "process_issue",
+			payload:   map[string]string{"issue_id": "abc-123"},
+			priority:  1,
+			dedupeKey: nil,
+			setupMock: func(mock pgxmock.PgxPoolIface, generatedID uuid.UUID) {
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"id"}).
+							AddRow(generatedID),
+					)
+			},
+		},
+		{
+			name:      "enqueues job with dedupe key",
+			queue:     "sync",
+			jobType:   "sync_repo",
+			payload:   map[string]string{"repo_id": "repo-456"},
+			priority:  5,
+			dedupeKey: jobDedupeKeyPtr("sync-repo-456"),
+			setupMock: func(mock pgxmock.PgxPoolIface, generatedID uuid.UUID) {
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"id"}).
+							AddRow(generatedID),
+					)
+			},
+		},
+		{
+			name:      "returns error when payload cannot be marshaled",
+			queue:     "default",
+			jobType:   "bad_job",
+			payload:   make(chan int),
+			priority:  1,
+			dedupeKey: nil,
+			setupMock: func(mock pgxmock.PgxPoolIface, generatedID uuid.UUID) {
+				// No DB interaction expected since marshaling fails first
+			},
+			expectErr: true,
+		},
+	}
 
-	payload := map[string]string{"issue_id": "abc-123"}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	// 6 named args: org_id, queue, job_type, payload, priority, dedupe_key
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows([]string{"id"}).
-				AddRow(generatedID),
-		)
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
 
-	id, err := store.Enqueue(context.Background(), orgID, "default", "process_issue", payload, 1, nil)
-	require.NoError(t, err)
-	assert.Equal(t, generatedID, id)
-	assert.NoError(t, mock.ExpectationsWereMet())
+			store := NewJobStore(mock)
+			orgID := uuid.New()
+			generatedID := uuid.New()
+			tt.setupMock(mock, generatedID)
+
+			id, err := store.Enqueue(context.Background(), orgID, tt.queue, tt.jobType, tt.payload, tt.priority, tt.dedupeKey)
+			if tt.expectErr {
+				require.Error(t, err, "Enqueue should return an error")
+				require.Equal(t, uuid.Nil, id, "should return nil UUID on error")
+				return
+			}
+			require.NoError(t, err, "Enqueue should not return an error")
+			require.Equal(t, generatedID, id, "should return the generated job ID")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }
 
-func TestJobStore_Enqueue_WithDedupeKey(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	store := NewJobStore(mock)
-	orgID := uuid.New()
-	generatedID := uuid.New()
-
-	payload := map[string]string{"repo_id": "repo-456"}
-	dedupeKey := "sync-repo-456"
-
-	// 6 named args: org_id, queue, job_type, payload, priority, dedupe_key
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows([]string{"id"}).
-				AddRow(generatedID),
-		)
-
-	id, err := store.Enqueue(context.Background(), orgID, "sync", "sync_repo", payload, 5, &dedupeKey)
-	require.NoError(t, err)
-	assert.Equal(t, generatedID, id)
-	assert.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestJobStore_Enqueue_MarshalError(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	store := NewJobStore(mock)
-	orgID := uuid.New()
-
-	// Pass a channel which cannot be marshaled to JSON
-	payload := make(chan int)
-
-	id, err := store.Enqueue(context.Background(), orgID, "default", "bad_job", payload, 1, nil)
-	assert.Error(t, err)
-	assert.Equal(t, uuid.Nil, id)
-	assert.NoError(t, mock.ExpectationsWereMet())
+func jobDedupeKeyPtr(s string) *string {
+	return &s
 }

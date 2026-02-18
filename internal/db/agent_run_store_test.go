@@ -9,7 +9,6 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -31,106 +30,138 @@ func newAgentRunRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 	}
 }
 
-func TestAgentRunStore_ListByOrg_Success(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
+func TestAgentRunStore_ListByOrg(t *testing.T) {
+	t.Parallel()
 
-	store := NewAgentRunStore(mock)
 	orgID := uuid.New()
 	runID1 := uuid.New()
 	runID2 := uuid.New()
 	issueID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery("SELECT .+ FROM agent_runs WHERE org_id").
-		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(agentRunColumns).
-				AddRow(newAgentRunRow(runID1, issueID, orgID, now)...).
-				AddRow(newAgentRunRow(runID2, issueID, orgID, now)...),
-		)
+	tests := []struct {
+		name      string
+		filters   AgentRunFilters
+		setupMock func(mock pgxmock.PgxPoolIface)
+		expected  int
+		expectErr bool
+	}{
+		{
+			name:    "returns agent runs for org",
+			filters: AgentRunFilters{},
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("SELECT .+ FROM agent_runs WHERE org_id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(agentRunColumns).
+							AddRow(newAgentRunRow(runID1, issueID, orgID, now)...).
+							AddRow(newAgentRunRow(runID2, issueID, orgID, now)...),
+					)
+			},
+			expected: 2,
+		},
+		{
+			name:    "returns filtered agent runs by status",
+			filters: AgentRunFilters{Status: "running"},
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("SELECT .+ FROM agent_runs WHERE org_id .+ AND status").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(agentRunColumns).
+							AddRow(newAgentRunRow(runID1, issueID, orgID, now)...),
+					)
+			},
+			expected: 1,
+		},
+	}
 
-	runs, err := store.ListByOrg(context.Background(), orgID, AgentRunFilters{})
-	require.NoError(t, err)
-	assert.Len(t, runs, 2)
-	assert.Equal(t, runID1, runs[0].ID)
-	assert.Equal(t, runID2, runs[1].ID)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewAgentRunStore(mock)
+			tt.setupMock(mock)
+
+			runs, err := store.ListByOrg(context.Background(), orgID, tt.filters)
+			if tt.expectErr {
+				require.Error(t, err, "ListByOrg should return an error")
+				return
+			}
+			require.NoError(t, err, "ListByOrg should not return an error")
+			require.Len(t, runs, tt.expected, "should return expected number of agent runs")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }
 
-func TestAgentRunStore_ListByOrg_WithStatusFilter(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
+func TestAgentRunStore_GetByID(t *testing.T) {
+	t.Parallel()
 
-	store := NewAgentRunStore(mock)
-	orgID := uuid.New()
-	runID := uuid.New()
-	issueID := uuid.New()
-	now := time.Now()
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface, orgID, runID, issueID uuid.UUID, now time.Time)
+		expectErr bool
+	}{
+		{
+			name: "returns agent run when found",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, runID, issueID uuid.UUID, now time.Time) {
+				mock.ExpectQuery("SELECT .+ FROM agent_runs WHERE id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(agentRunColumns).
+							AddRow(newAgentRunRow(runID, issueID, orgID, now)...),
+					)
+			},
+		},
+		{
+			name: "returns error when agent run not found",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, runID, issueID uuid.UUID, now time.Time) {
+				mock.ExpectQuery("SELECT .+ FROM agent_runs WHERE id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(agentRunColumns))
+			},
+			expectErr: true,
+		},
+	}
 
-	mock.ExpectQuery("SELECT .+ FROM agent_runs WHERE org_id .+ AND status").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(agentRunColumns).
-				AddRow(newAgentRunRow(runID, issueID, orgID, now)...),
-		)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	runs, err := store.ListByOrg(context.Background(), orgID, AgentRunFilters{Status: "running"})
-	require.NoError(t, err)
-	assert.Len(t, runs, 1)
-	assert.Equal(t, runID, runs[0].ID)
-	assert.NoError(t, mock.ExpectationsWereMet())
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewAgentRunStore(mock)
+			orgID := uuid.New()
+			runID := uuid.New()
+			issueID := uuid.New()
+			now := time.Now()
+			tt.setupMock(mock, orgID, runID, issueID, now)
+
+			run, err := store.GetByID(context.Background(), orgID, runID)
+			if tt.expectErr {
+				require.Error(t, err, "GetByID should return an error when agent run is not found")
+				return
+			}
+			require.NoError(t, err, "GetByID should not return an error")
+			require.Equal(t, runID, run.ID, "should return the correct agent run ID")
+			require.Equal(t, issueID, run.IssueID, "should return the correct issue ID")
+			require.Equal(t, "fixer", run.AgentType, "should return the correct agent type")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }
 
-func TestAgentRunStore_GetByID_Success(t *testing.T) {
+func TestAgentRunStore_Create(t *testing.T) {
+	t.Parallel()
+
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	store := NewAgentRunStore(mock)
-	orgID := uuid.New()
-	runID := uuid.New()
-	issueID := uuid.New()
-	now := time.Now()
-
-	mock.ExpectQuery("SELECT .+ FROM agent_runs WHERE id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(agentRunColumns).
-				AddRow(newAgentRunRow(runID, issueID, orgID, now)...),
-		)
-
-	run, err := store.GetByID(context.Background(), orgID, runID)
-	require.NoError(t, err)
-	assert.Equal(t, runID, run.ID)
-	assert.Equal(t, issueID, run.IssueID)
-	assert.Equal(t, "fixer", run.AgentType)
-	assert.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestAgentRunStore_GetByID_NotFound(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	store := NewAgentRunStore(mock)
-	orgID := uuid.New()
-	runID := uuid.New()
-
-	mock.ExpectQuery("SELECT .+ FROM agent_runs WHERE id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(agentRunColumns))
-
-	_, err = store.GetByID(context.Background(), orgID, runID)
-	assert.Error(t, err)
-	assert.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestAgentRunStore_Create_Success(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
 	store := NewAgentRunStore(mock)
@@ -156,51 +187,60 @@ func TestAgentRunStore_Create_Success(t *testing.T) {
 		)
 
 	err = store.Create(context.Background(), run)
-	require.NoError(t, err)
-	assert.Equal(t, generatedID, run.ID)
-	assert.Equal(t, now, run.CreatedAt)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "Create should not return an error")
+	require.Equal(t, generatedID, run.ID, "should set the generated ID on the agent run")
+	require.Equal(t, now, run.CreatedAt, "should set the created_at timestamp on the agent run")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestAgentRunStore_UpdateStatus_Running(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
+func TestAgentRunStore_UpdateStatus(t *testing.T) {
+	t.Parallel()
 
-	store := NewAgentRunStore(mock)
-	orgID := uuid.New()
-	runID := uuid.New()
+	tests := []struct {
+		name      string
+		status    string
+		queryRE   string
+	}{
+		{
+			name:    "sets started_at when transitioning to running",
+			status:  "running",
+			queryRE: "UPDATE agent_runs SET status .+ started_at",
+		},
+		{
+			name:    "sets completed_at when transitioning to completed",
+			status:  "completed",
+			queryRE: "UPDATE agent_runs SET status .+ completed_at",
+		},
+	}
 
-	mock.ExpectExec("UPDATE agent_runs SET status .+ started_at").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	err = store.UpdateStatus(context.Background(), orgID, runID, "running")
-	require.NoError(t, err)
-	assert.NoError(t, mock.ExpectationsWereMet())
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewAgentRunStore(mock)
+			orgID := uuid.New()
+			runID := uuid.New()
+
+			mock.ExpectExec(tt.queryRE).
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+			err = store.UpdateStatus(context.Background(), orgID, runID, tt.status)
+			require.NoError(t, err, "UpdateStatus should not return an error")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }
 
-func TestAgentRunStore_UpdateStatus_Completed(t *testing.T) {
+func TestAgentRunStore_ListByIssue(t *testing.T) {
+	t.Parallel()
+
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	store := NewAgentRunStore(mock)
-	orgID := uuid.New()
-	runID := uuid.New()
-
-	mock.ExpectExec("UPDATE agent_runs SET status .+ completed_at").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-	err = store.UpdateStatus(context.Background(), orgID, runID, "completed")
-	require.NoError(t, err)
-	assert.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestAgentRunStore_ListByIssue_Success(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
 	store := NewAgentRunStore(mock)
@@ -217,9 +257,9 @@ func TestAgentRunStore_ListByIssue_Success(t *testing.T) {
 		)
 
 	runs, err := store.ListByIssue(context.Background(), orgID, issueID)
-	require.NoError(t, err)
-	assert.Len(t, runs, 1)
-	assert.Equal(t, runID, runs[0].ID)
-	assert.Equal(t, issueID, runs[0].IssueID)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "ListByIssue should not return an error")
+	require.Len(t, runs, 1, "should return the agent run for the issue")
+	require.Equal(t, runID, runs[0].ID, "should return the correct agent run ID")
+	require.Equal(t, issueID, runs[0].IssueID, "should return the correct issue ID")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

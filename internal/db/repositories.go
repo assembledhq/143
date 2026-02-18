@@ -140,6 +140,19 @@ func (s *RepositoryStore) UpsertFromGitHub(ctx context.Context, repo *models.Rep
 	return row.Scan(&repo.ID, &repo.CreatedAt, &repo.UpdatedAt)
 }
 
+func (s *RepositoryStore) GetByFullName(ctx context.Context, fullName string) (models.Repository, error) {
+	query := `
+		SELECT id, org_id, integration_id, github_id, full_name, default_branch, private, language, description, clone_url, installation_id, status, last_synced_at, context_quality, settings, created_at, updated_at
+		FROM repositories
+		WHERE full_name = @full_name AND status = 'active'`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"full_name": fullName})
+	if err != nil {
+		return models.Repository{}, fmt.Errorf("query repository by full name: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Repository])
+}
+
 func (s *RepositoryStore) DisconnectByInstallationID(ctx context.Context, installationID int64) error {
 	query := `
 		UPDATE repositories

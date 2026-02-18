@@ -9,7 +9,6 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -17,9 +16,11 @@ var organizationColumns = []string{
 	"id", "name", "slug", "settings", "created_at", "updated_at",
 }
 
-func TestOrganizationStore_Create_Success(t *testing.T) {
+func TestOrganizationStore_Create(t *testing.T) {
+	t.Parallel()
+
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
 	store := NewOrganizationStore(mock)
@@ -32,7 +33,6 @@ func TestOrganizationStore_Create_Success(t *testing.T) {
 		Settings: json.RawMessage(`{"feature_flags":[]}`),
 	}
 
-	// 3 named args: name, slug, settings
 	mock.ExpectQuery("INSERT INTO organizations").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
@@ -41,101 +41,132 @@ func TestOrganizationStore_Create_Success(t *testing.T) {
 		)
 
 	err = store.Create(context.Background(), org)
-	require.NoError(t, err)
-	assert.Equal(t, generatedID, org.ID)
-	assert.Equal(t, now, org.CreatedAt)
-	assert.Equal(t, now, org.UpdatedAt)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "Create should not return an error")
+	require.Equal(t, generatedID, org.ID, "should set the generated ID on the organization")
+	require.Equal(t, now, org.CreatedAt, "should set the created_at timestamp on the organization")
+	require.Equal(t, now, org.UpdatedAt, "should set the updated_at timestamp on the organization")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestOrganizationStore_GetByID_Success(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
+func TestOrganizationStore_GetByID(t *testing.T) {
+	t.Parallel()
 
-	store := NewOrganizationStore(mock)
-	orgID := uuid.New()
-	now := time.Now()
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, now time.Time)
+		expectErr bool
+	}{
+		{
+			name: "returns organization when found",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, now time.Time) {
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(organizationColumns).
+							AddRow(orgID, "Test Org", "test-org", json.RawMessage(`{}`), now, now),
+					)
+			},
+		},
+		{
+			name: "returns error when organization not found",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, now time.Time) {
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(organizationColumns))
+			},
+			expectErr: true,
+		},
+	}
 
-	// 1 named arg: id
-	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
-		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(organizationColumns).
-				AddRow(orgID, "Test Org", "test-org", json.RawMessage(`{}`), now, now),
-		)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	org, err := store.GetByID(context.Background(), orgID)
-	require.NoError(t, err)
-	assert.Equal(t, orgID, org.ID)
-	assert.Equal(t, "Test Org", org.Name)
-	assert.Equal(t, "test-org", org.Slug)
-	assert.NoError(t, mock.ExpectationsWereMet())
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewOrganizationStore(mock)
+			orgID := uuid.New()
+			now := time.Now()
+			tt.setupMock(mock, orgID, now)
+
+			org, err := store.GetByID(context.Background(), orgID)
+			if tt.expectErr {
+				require.Error(t, err, "GetByID should return an error when organization is not found")
+				return
+			}
+			require.NoError(t, err, "GetByID should not return an error")
+			require.Equal(t, orgID, org.ID, "should return the correct organization ID")
+			require.Equal(t, "Test Org", org.Name, "should return the correct organization name")
+			require.Equal(t, "test-org", org.Slug, "should return the correct organization slug")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }
 
-func TestOrganizationStore_GetByID_NotFound(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
+func TestOrganizationStore_GetBySlug(t *testing.T) {
+	t.Parallel()
 
-	store := NewOrganizationStore(mock)
-	orgID := uuid.New()
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, now time.Time)
+		expectErr bool
+	}{
+		{
+			name: "returns organization when found by slug",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, now time.Time) {
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE slug").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(organizationColumns).
+							AddRow(orgID, "My Company", "my-company", json.RawMessage(`{}`), now, now),
+					)
+			},
+		},
+		{
+			name: "returns error when organization not found by slug",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, now time.Time) {
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE slug").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(organizationColumns))
+			},
+			expectErr: true,
+		},
+	}
 
-	// 1 named arg: id
-	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
-		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(organizationColumns))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	_, err = store.GetByID(context.Background(), orgID)
-	assert.Error(t, err)
-	assert.NoError(t, mock.ExpectationsWereMet())
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewOrganizationStore(mock)
+			orgID := uuid.New()
+			now := time.Now()
+			tt.setupMock(mock, orgID, now)
+
+			org, err := store.GetBySlug(context.Background(), "my-company")
+			if tt.expectErr {
+				require.Error(t, err, "GetBySlug should return an error when organization is not found")
+				return
+			}
+			require.NoError(t, err, "GetBySlug should not return an error")
+			require.Equal(t, orgID, org.ID, "should return the correct organization ID")
+			require.Equal(t, "My Company", org.Name, "should return the correct organization name")
+			require.Equal(t, "my-company", org.Slug, "should return the correct organization slug")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }
 
-func TestOrganizationStore_GetBySlug_Success(t *testing.T) {
+func TestOrganizationStore_Update(t *testing.T) {
+	t.Parallel()
+
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	store := NewOrganizationStore(mock)
-	orgID := uuid.New()
-	now := time.Now()
-
-	// 1 named arg: slug
-	mock.ExpectQuery("SELECT .+ FROM organizations WHERE slug").
-		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(organizationColumns).
-				AddRow(orgID, "My Company", "my-company", json.RawMessage(`{}`), now, now),
-		)
-
-	org, err := store.GetBySlug(context.Background(), "my-company")
-	require.NoError(t, err)
-	assert.Equal(t, orgID, org.ID)
-	assert.Equal(t, "My Company", org.Name)
-	assert.Equal(t, "my-company", org.Slug)
-	assert.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestOrganizationStore_GetBySlug_NotFound(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	store := NewOrganizationStore(mock)
-
-	// 1 named arg: slug
-	mock.ExpectQuery("SELECT .+ FROM organizations WHERE slug").
-		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(organizationColumns))
-
-	_, err = store.GetBySlug(context.Background(), "nonexistent")
-	assert.Error(t, err)
-	assert.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestOrganizationStore_Update_Success(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
 	store := NewOrganizationStore(mock)
@@ -148,7 +179,6 @@ func TestOrganizationStore_Update_Success(t *testing.T) {
 		Settings: json.RawMessage(`{"updated":true}`),
 	}
 
-	// 4 named args: id, name, slug, settings
 	mock.ExpectQuery("UPDATE organizations").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
@@ -157,7 +187,7 @@ func TestOrganizationStore_Update_Success(t *testing.T) {
 		)
 
 	err = store.Update(context.Background(), org)
-	require.NoError(t, err)
-	assert.Equal(t, now, org.UpdatedAt)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "Update should not return an error")
+	require.Equal(t, now, org.UpdatedAt, "should set the updated_at timestamp on the organization")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

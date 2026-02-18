@@ -15,7 +15,6 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -25,237 +24,232 @@ func computeTestSignature(secret string, payload []byte) string {
 	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
 }
 
-func setupWebhookHandler(t *testing.T, secret string) (pgxmock.PgxPoolIface, *WebhookHandler) {
+func setupWebhookHandler(t *testing.T, mock pgxmock.PgxPoolIface, secret string) *WebhookHandler {
 	t.Helper()
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-
 	cfg := &config.Config{
 		GitHubWebhookSecret: secret,
 	}
 	orgStore := db.NewOrganizationStore(mock)
 	repoStore := db.NewRepositoryStore(mock)
 	integrationStore := db.NewIntegrationStore(mock)
-	handler := NewWebhookHandler(cfg, orgStore, repoStore, integrationStore)
-	return mock, handler
+	return NewWebhookHandler(cfg, orgStore, repoStore, integrationStore, nil)
 }
 
-func TestWebhook_HandleGitHub_InstallationCreated(t *testing.T) {
-	secret := "test-secret"
-	mock, handler := setupWebhookHandler(t, secret)
-	defer mock.Close()
+func TestWebhook_HandleGitHub(t *testing.T) {
+	t.Parallel()
 
-	now := time.Now()
-	orgID := uuid.New()
-	integrationID := uuid.New()
+	tests := []struct {
+		name         string
+		secret       string
+		event        string
+		payload      string
+		signature    func(secret string, body []byte) string
+		setupMock    func(mock pgxmock.PgxPoolIface)
+		expectedCode int
+		expectedBody string
+	}{
+		{
+			name:   "installation created provisions org and repo",
+			secret: "test-secret",
+			event:  "installation",
+			payload: `{
+				"action": "created",
+				"installation": {
+					"id": 12345,
+					"account": {"id": 100, "login": "test-org"}
+				},
+				"repositories": [
+					{"id": 1001, "full_name": "test-org/repo1", "private": false}
+				]
+			}`,
+			signature: func(secret string, body []byte) string {
+				return computeTestSignature(secret, body)
+			},
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				now := time.Now()
+				orgID := uuid.New()
+				integrationID := uuid.New()
 
-	payload := `{
-		"action": "created",
-		"installation": {
-			"id": 12345,
-			"account": {"id": 100, "login": "test-org"}
+				// 1. GetBySlug -> empty rows (no existing org)
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE slug").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"id", "name", "slug", "settings", "created_at", "updated_at"}),
+					)
+
+				// 2. Create org (3 named args)
+				mock.ExpectQuery("INSERT INTO organizations").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
+							AddRow(orgID, now, now),
+					)
+
+				// 3. Create integration (4 named args)
+				mock.ExpectQuery("INSERT INTO integrations").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"id", "created_at"}).
+							AddRow(integrationID, now),
+					)
+
+				// 4. UpsertFromGitHub repo (12 named args)
+				mock.ExpectQuery("INSERT INTO repositories").
+					WithArgs(
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+					).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
+							AddRow(uuid.New(), now, now),
+					)
+			},
+			expectedCode: http.StatusOK,
+			expectedBody: "installation created",
 		},
-		"repositories": [
-			{"id": 1001, "full_name": "test-org/repo1", "private": false}
-		]
-	}`
-	body := []byte(payload)
-	sig := computeTestSignature(secret, body)
-
-	// 1. GetBySlug -> empty rows (no existing org) (1 named arg: slug)
-	mock.ExpectQuery("SELECT .+ FROM organizations WHERE slug").
-		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "name", "slug", "settings", "created_at", "updated_at"}),
-		)
-
-	// 2. Create org (3 named args: name, slug, settings)
-	mock.ExpectQuery("INSERT INTO organizations").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
-				AddRow(orgID, now, now),
-		)
-
-	// 3. Create integration (4 named args: org_id, provider, config, status)
-	mock.ExpectQuery("INSERT INTO integrations").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "created_at"}).
-				AddRow(integrationID, now),
-		)
-
-	// 4. UpsertFromGitHub repo (12 named args)
-	mock.ExpectQuery("INSERT INTO repositories").
-		WithArgs(
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-		).
-		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
-				AddRow(uuid.New(), now, now),
-		)
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", strings.NewReader(string(body)))
-	req.Header.Set("X-GitHub-Event", "installation")
-	req.Header.Set("X-Hub-Signature-256", sig)
-	w := httptest.NewRecorder()
-
-	handler.HandleGitHub(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), "installation created")
-	assert.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestWebhook_HandleGitHub_InstallationDeleted(t *testing.T) {
-	secret := "test-secret"
-	mock, handler := setupWebhookHandler(t, secret)
-	defer mock.Close()
-
-	payload := `{
-		"action": "deleted",
-		"installation": {
-			"id": 12345,
-			"account": {"id": 100, "login": "test-org"}
+		{
+			name:   "installation deleted disconnects repositories",
+			secret: "test-secret",
+			event:  "installation",
+			payload: `{
+				"action": "deleted",
+				"installation": {
+					"id": 12345,
+					"account": {"id": 100, "login": "test-org"}
+				},
+				"repositories": []
+			}`,
+			signature: func(secret string, body []byte) string {
+				return computeTestSignature(secret, body)
+			},
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectExec("UPDATE repositories").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 3))
+			},
+			expectedCode: http.StatusOK,
+			expectedBody: "installation deleted",
 		},
-		"repositories": []
-	}`
-	body := []byte(payload)
-	sig := computeTestSignature(secret, body)
-
-	// DisconnectByInstallationID (1 named arg: installation_id)
-	mock.ExpectExec("UPDATE repositories").
-		WithArgs(pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 3))
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", strings.NewReader(string(body)))
-	req.Header.Set("X-GitHub-Event", "installation")
-	req.Header.Set("X-Hub-Signature-256", sig)
-	w := httptest.NewRecorder()
-
-	handler.HandleGitHub(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), "installation deleted")
-	assert.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestWebhook_HandleGitHub_InvalidSignature(t *testing.T) {
-	secret := "test-secret"
-	_, handler := setupWebhookHandler(t, secret)
-
-	payload := `{"action":"created","installation":{"id":1,"account":{"id":1,"login":"x"}}}`
-	body := []byte(payload)
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", strings.NewReader(string(body)))
-	req.Header.Set("X-GitHub-Event", "installation")
-	req.Header.Set("X-Hub-Signature-256", "sha256=invalid")
-	w := httptest.NewRecorder()
-
-	handler.HandleGitHub(w, req)
-	assert.Equal(t, http.StatusUnauthorized, w.Code)
-	assert.Contains(t, w.Body.String(), "INVALID_SIGNATURE")
-}
-
-func TestWebhook_HandleGitHub_UnknownEvent(t *testing.T) {
-	secret := "test-secret"
-	_, handler := setupWebhookHandler(t, secret)
-
-	payload := `{}`
-	body := []byte(payload)
-	sig := computeTestSignature(secret, body)
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", strings.NewReader(string(body)))
-	req.Header.Set("X-GitHub-Event", "push")
-	req.Header.Set("X-Hub-Signature-256", sig)
-	w := httptest.NewRecorder()
-
-	handler.HandleGitHub(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), "ignored")
-}
-
-func TestWebhook_HandleGitHub_InvalidJSON(t *testing.T) {
-	secret := "test-secret"
-	_, handler := setupWebhookHandler(t, secret)
-
-	payload := `not valid json{`
-	body := []byte(payload)
-	sig := computeTestSignature(secret, body)
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", strings.NewReader(string(body)))
-	req.Header.Set("X-GitHub-Event", "installation")
-	req.Header.Set("X-Hub-Signature-256", sig)
-	w := httptest.NewRecorder()
-
-	handler.HandleGitHub(w, req)
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "INVALID_JSON")
-}
-
-func TestWebhook_HandleGitHub_InstallationRepos(t *testing.T) {
-	secret := "test-secret"
-	mock, handler := setupWebhookHandler(t, secret)
-	defer mock.Close()
-
-	now := time.Now()
-
-	payload := `{
-		"action": "added",
-		"installation": {
-			"id": 12345,
-			"account": {"id": 100, "login": "test-org"}
+		{
+			name:    "invalid signature returns unauthorized",
+			secret:  "test-secret",
+			event:   "installation",
+			payload: `{"action":"created","installation":{"id":1,"account":{"id":1,"login":"x"}}}`,
+			signature: func(secret string, body []byte) string {
+				return "sha256=invalid"
+			},
+			setupMock:    func(mock pgxmock.PgxPoolIface) {},
+			expectedCode: http.StatusUnauthorized,
+			expectedBody: "INVALID_SIGNATURE",
 		},
-		"repositories_added": [
-			{"id": 2001, "full_name": "test-org/new-repo", "private": true}
-		],
-		"repositories_removed": []
-	}`
-	body := []byte(payload)
-	sig := computeTestSignature(secret, body)
+		{
+			name:   "unknown event type is ignored",
+			secret: "test-secret",
+			event:  "push",
+			payload: `{}`,
+			signature: func(secret string, body []byte) string {
+				return computeTestSignature(secret, body)
+			},
+			setupMock:    func(mock pgxmock.PgxPoolIface) {},
+			expectedCode: http.StatusOK,
+			expectedBody: "ignored",
+		},
+		{
+			name:   "invalid JSON returns bad request",
+			secret: "test-secret",
+			event:  "installation",
+			payload: `not valid json{`,
+			signature: func(secret string, body []byte) string {
+				return computeTestSignature(secret, body)
+			},
+			setupMock:    func(mock pgxmock.PgxPoolIface) {},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_JSON",
+		},
+		{
+			name:   "installation_repositories event adds repos",
+			secret: "test-secret",
+			event:  "installation_repositories",
+			payload: `{
+				"action": "added",
+				"installation": {
+					"id": 12345,
+					"account": {"id": 100, "login": "test-org"}
+				},
+				"repositories_added": [
+					{"id": 2001, "full_name": "test-org/new-repo", "private": true}
+				],
+				"repositories_removed": []
+			}`,
+			signature: func(secret string, body []byte) string {
+				return computeTestSignature(secret, body)
+			},
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				now := time.Now()
+				mock.ExpectQuery("INSERT INTO repositories").
+					WithArgs(
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+					).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
+							AddRow(uuid.New(), now, now),
+					)
+			},
+			expectedCode: http.StatusOK,
+			expectedBody: "repositories updated",
+		},
+	}
 
-	// UpsertFromGitHub for added repo (12 named args)
-	mock.ExpectQuery("INSERT INTO repositories").
-		WithArgs(
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-		).
-		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
-				AddRow(uuid.New(), now, now),
-		)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", strings.NewReader(string(body)))
-	req.Header.Set("X-GitHub-Event", "installation_repositories")
-	req.Header.Set("X-Hub-Signature-256", sig)
-	w := httptest.NewRecorder()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create pgxmock pool without error")
+			defer mock.Close()
 
-	handler.HandleGitHub(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), "repositories updated")
-	assert.NoError(t, mock.ExpectationsWereMet())
+			handler := setupWebhookHandler(t, mock, tt.secret)
+			tt.setupMock(mock)
+
+			body := []byte(tt.payload)
+			sig := tt.signature(tt.secret, body)
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", strings.NewReader(string(body)))
+			req.Header.Set("X-GitHub-Event", tt.event)
+			req.Header.Set("X-Hub-Signature-256", sig)
+			w := httptest.NewRecorder()
+
+			handler.HandleGitHub(w, req)
+			require.Equal(t, tt.expectedCode, w.Code, "should return expected status code")
+			require.Contains(t, w.Body.String(), tt.expectedBody, "response body should contain expected content")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }
 
 func TestWebhook_VerifySignature_NoSecret(t *testing.T) {
-	// Empty secret allows any request through
-	mock, handler := setupWebhookHandler(t, "")
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
 	defer mock.Close()
 
-	payload := `{}`
-	body := []byte(payload)
+	handler := setupWebhookHandler(t, mock, "")
 
+	body := []byte(`{}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", strings.NewReader(string(body)))
 	req.Header.Set("X-GitHub-Event", "ping")
 	// No signature header
 	w := httptest.NewRecorder()
 
 	handler.HandleGitHub(w, req)
-	// Should pass through to the default case (unknown event) -> 200 "ignored"
-	assert.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, http.StatusOK, w.Code, "should allow request through when no secret is configured")
 
 	var resp map[string]string
-	err := json.Unmarshal(w.Body.Bytes(), &resp)
-	require.NoError(t, err)
-	assert.Equal(t, "ignored", resp["status"])
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err, "response body should be valid JSON")
+	require.Equal(t, "ignored", resp["status"], "should return ignored status for unknown ping event")
 }

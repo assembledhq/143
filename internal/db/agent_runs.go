@@ -120,6 +120,56 @@ func (s *AgentRunStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID
 	return err
 }
 
+func (s *AgentRunStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.AgentRunResult) error {
+	query := `
+		UPDATE agent_runs
+		SET status = @status, completed_at = now(),
+		    confidence_score = @confidence_score, confidence_reasoning = @confidence_reasoning,
+		    risk_factors = @risk_factors, token_usage = @token_usage,
+		    result_summary = @result_summary, diff = @diff, error = @error
+		WHERE id = @id AND org_id = @org_id`
+
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":                   runID,
+		"org_id":               orgID,
+		"status":               status,
+		"confidence_score":     result.ConfidenceScore,
+		"confidence_reasoning": result.ConfidenceReasoning,
+		"risk_factors":         result.RiskFactors,
+		"token_usage":          result.TokenUsage,
+		"result_summary":       result.ResultSummary,
+		"diff":                 result.Diff,
+		"error":                result.Error,
+	})
+	return err
+}
+
+func (s *AgentRunStore) UpdateFailure(ctx context.Context, orgID, runID uuid.UUID, explanation, category string, nextSteps []string, retryAdvised bool) error {
+	query := `
+		UPDATE agent_runs
+		SET failure_explanation = @failure_explanation,
+		    failure_category = @failure_category,
+		    failure_next_steps = @failure_next_steps,
+		    failure_retry_advised = @failure_retry_advised
+		WHERE id = @id AND org_id = @org_id`
+
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":                    runID,
+		"org_id":                orgID,
+		"failure_explanation":   explanation,
+		"failure_category":      category,
+		"failure_next_steps":    nextSteps,
+		"failure_retry_advised": retryAdvised,
+	})
+	return err
+}
+
+func (s *AgentRunStore) CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error) {
+	var count int
+	err := s.db.QueryRow(ctx, `SELECT count(*) FROM agent_runs WHERE org_id = @org_id AND status = 'running'`, pgx.NamedArgs{"org_id": orgID}).Scan(&count)
+	return count, err
+}
+
 func (s *AgentRunStore) ListByIssue(ctx context.Context, orgID, issueID uuid.UUID) ([]models.AgentRun, error) {
 	query := `
 		SELECT id, issue_id, org_id, agent_type, status, autonomy_level, token_mode,

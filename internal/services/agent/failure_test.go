@@ -1,0 +1,329 @@
+package agent
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/models"
+	"github.com/google/uuid"
+	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func newTestFailureService(t *testing.T) (*FailureService, pgxmock.PgxPoolIface) {
+	t.Helper()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	store := db.NewAgentRunStore(mock)
+	svc := NewFailureService(store, zerolog.Nop())
+	return svc, mock
+}
+
+func TestClassifyFailure(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		run              models.AgentRun
+		wantCategory     string
+		wantSubType      string
+		wantRetryAdvised bool
+	}{
+		{
+			name: "timeout error",
+			run: models.AgentRun{
+				Error: strPtr("operation timeout after 5m"),
+			},
+			wantCategory:     "tooling",
+			wantSubType:      "timeout",
+			wantRetryAdvised: true,
+		},
+		{
+			name: "deadline exceeded",
+			run: models.AgentRun{
+				Error: strPtr("context deadline exceeded"),
+			},
+			wantCategory:     "tooling",
+			wantSubType:      "timeout",
+			wantRetryAdvised: true,
+		},
+		{
+			name: "OOM crash",
+			run: models.AgentRun{
+				Error: strPtr("process killed: OOM"),
+			},
+			wantCategory:     "tooling",
+			wantSubType:      "sandbox_crash",
+			wantRetryAdvised: true,
+		},
+		{
+			name: "signal crash",
+			run: models.AgentRun{
+				Error: strPtr("process received signal: SIGKILL"),
+			},
+			wantCategory:     "tooling",
+			wantSubType:      "sandbox_crash",
+			wantRetryAdvised: true,
+		},
+		{
+			name: "out of memory",
+			run: models.AgentRun{
+				Error: strPtr("container out of memory"),
+			},
+			wantCategory:     "tooling",
+			wantSubType:      "sandbox_crash",
+			wantRetryAdvised: true,
+		},
+		{
+			name: "rate limit API error",
+			run: models.AgentRun{
+				Error: strPtr("API error: rate limit exceeded"),
+			},
+			wantCategory:     "tooling",
+			wantSubType:      "api_error",
+			wantRetryAdvised: true,
+		},
+		{
+			name: "429 status code",
+			run: models.AgentRun{
+				Error: strPtr("HTTP 429 Too Many Requests"),
+			},
+			wantCategory:     "tooling",
+			wantSubType:      "api_error",
+			wantRetryAdvised: true,
+		},
+		{
+			name: "503 service unavailable",
+			run: models.AgentRun{
+				Error: strPtr("upstream returned 503"),
+			},
+			wantCategory:     "tooling",
+			wantSubType:      "api_error",
+			wantRetryAdvised: true,
+		},
+		{
+			name: "build failure",
+			run: models.AgentRun{
+				Error: strPtr("build failed: exit code 1"),
+			},
+			wantCategory:     "tooling",
+			wantSubType:      "build_failure",
+			wantRetryAdvised: true,
+		},
+		{
+			name: "compilation error",
+			run: models.AgentRun{
+				Error: strPtr("compilation error in main.go:42"),
+			},
+			wantCategory:     "tooling",
+			wantSubType:      "build_failure",
+			wantRetryAdvised: true,
+		},
+		{
+			name: "syntax error",
+			run: models.AgentRun{
+				Error: strPtr("syntax error: unexpected token"),
+			},
+			wantCategory:     "tooling",
+			wantSubType:      "build_failure",
+			wantRetryAdvised: true,
+		},
+		{
+			name: "empty diff no error",
+			run: models.AgentRun{
+				// No error, no diff
+			},
+			wantCategory:     "context",
+			wantSubType:      "missing_context",
+			wantRetryAdvised: false,
+		},
+		{
+			name: "test regression in error",
+			run: models.AgentRun{
+				Error: strPtr("test failed: TestFoo"),
+				Diff:  strPtr("some diff content"),
+			},
+			wantCategory:     "validation",
+			wantSubType:      "test_regression",
+			wantRetryAdvised: true,
+		},
+		{
+			name: "test regression in result summary",
+			run: models.AgentRun{
+				ResultSummary: strPtr("Fix applied but tests failed"),
+				Diff:          strPtr("some diff content"),
+			},
+			wantCategory:     "validation",
+			wantSubType:      "test_regression",
+			wantRetryAdvised: true,
+		},
+		{
+			name: "security violation in error",
+			run: models.AgentRun{
+				Error: strPtr("security violation detected in generated code"),
+				Diff:  strPtr("some diff content"),
+			},
+			wantCategory:     "validation",
+			wantSubType:      "security_violation",
+			wantRetryAdvised: false,
+		},
+		{
+			name: "security violation in result summary",
+			run: models.AgentRun{
+				ResultSummary: strPtr("Security scan flagged vulnerability"),
+				Diff:          strPtr("some diff content"),
+			},
+			wantCategory:     "validation",
+			wantSubType:      "security_violation",
+			wantRetryAdvised: false,
+		},
+		{
+			name: "large diff over 500 lines",
+			run: models.AgentRun{
+				Diff: strPtr(strings.Repeat("line\n", 501)),
+			},
+			wantCategory:     "complexity",
+			wantSubType:      "multi_file_scope",
+			wantRetryAdvised: false,
+		},
+		{
+			name: "default classification with error and small diff",
+			run: models.AgentRun{
+				Error: strPtr("something unknown happened"),
+				Diff:  strPtr("a small change"),
+			},
+			wantCategory:     "context",
+			wantSubType:      "missing_context",
+			wantRetryAdvised: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc, mock := newTestFailureService(t)
+			defer mock.Close()
+
+			summary, err := svc.AnalyzeFailure(context.Background(), &tt.run)
+			require.NoError(t, err)
+			require.NotNil(t, summary)
+
+			assert.Equal(t, tt.wantCategory, summary.Category)
+			assert.Equal(t, tt.wantSubType, summary.SubType)
+			assert.Equal(t, tt.wantRetryAdvised, summary.RetryAdvised)
+			assert.NotEmpty(t, summary.Explanation, "explanation should not be empty")
+			assert.GreaterOrEqual(t, len(summary.NextSteps), 2, "should have at least 2 next steps")
+			assert.LessOrEqual(t, len(summary.NextSteps), 3, "should have at most 3 next steps")
+		})
+	}
+}
+
+func TestAnalyzeFailure_NilRun(t *testing.T) {
+	t.Parallel()
+
+	svc, mock := newTestFailureService(t)
+	defer mock.Close()
+
+	summary, err := svc.AnalyzeFailure(context.Background(), nil)
+	assert.Error(t, err)
+	assert.Nil(t, summary)
+	assert.Contains(t, err.Error(), "nil")
+}
+
+func TestUpdateRunWithFailure(t *testing.T) {
+	t.Parallel()
+
+	svc, mock := newTestFailureService(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	summary := &FailureSummary{
+		Explanation:  "The agent timed out.",
+		Category:     "tooling",
+		SubType:      "timeout",
+		NextSteps:    []string{"Retry", "Break into smaller tasks"},
+		RetryAdvised: true,
+	}
+
+	mock.ExpectExec("UPDATE agent_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err := svc.UpdateRunWithFailure(context.Background(), orgID, runID, summary)
+	require.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRetryAdvised_ToolingCategoriesAreRetryable(t *testing.T) {
+	t.Parallel()
+
+	toolingErrors := []string{
+		"timeout occurred",
+		"process killed by OOM",
+		"rate limit exceeded",
+		"build failed with errors",
+	}
+
+	svc, mock := newTestFailureService(t)
+	defer mock.Close()
+
+	for _, errMsg := range toolingErrors {
+		run := &models.AgentRun{Error: strPtr(errMsg)}
+		summary, err := svc.AnalyzeFailure(context.Background(), run)
+		require.NoError(t, err)
+		assert.Equal(t, "tooling", summary.Category, "error: %s", errMsg)
+		assert.True(t, summary.RetryAdvised, "tooling error should advise retry: %s", errMsg)
+	}
+}
+
+func TestRetryAdvised_SecurityNeverRetryable(t *testing.T) {
+	t.Parallel()
+
+	svc, mock := newTestFailureService(t)
+	defer mock.Close()
+
+	run := &models.AgentRun{
+		Error: strPtr("security violation: SQL injection detected"),
+		Diff:  strPtr("some changes"),
+	}
+
+	summary, err := svc.AnalyzeFailure(context.Background(), run)
+	require.NoError(t, err)
+	assert.Equal(t, "validation", summary.Category)
+	assert.Equal(t, "security_violation", summary.SubType)
+	assert.False(t, summary.RetryAdvised, "security violations should never advise retry")
+}
+
+func TestCountLines(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		input string
+		want  int
+	}{
+		{"", 0},
+		{"one line", 1},
+		{"line1\nline2", 2},
+		{"line1\nline2\nline3\n", 4},
+		{strings.Repeat("x\n", 500), 501},
+	}
+
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, countLines(tt.input))
+	}
+}
+
+func TestContainsAny(t *testing.T) {
+	t.Parallel()
+
+	assert.True(t, containsAny("hello world", "world"))
+	assert.True(t, containsAny("hello world", "foo", "world"))
+	assert.False(t, containsAny("hello world", "foo", "bar"))
+	assert.False(t, containsAny("", "foo"))
+}

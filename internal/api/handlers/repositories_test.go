@@ -15,7 +15,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -27,209 +26,232 @@ func repoColumns() []string {
 	}
 }
 
-func TestRepositoryHandler_List_Success(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
+func TestRepositoryHandler_List(t *testing.T) {
+	t.Parallel()
 
-	orgID := uuid.New()
-	repoID := uuid.New()
-	integrationID := uuid.New()
-	now := time.Now()
+	tests := []struct {
+		name         string
+		setupMock    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID)
+		expectedCode int
+		expectedLen  int
+	}{
+		{
+			name: "returns repositories for org successfully",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				repoID := uuid.New()
+				integrationID := uuid.New()
+				mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(repoColumns()).AddRow(
+							repoID, orgID, integrationID, int64(1001), "test-org/repo1", "main",
+							false, nil, nil, "https://github.com/test-org/repo1.git", int64(12345), "active",
+							nil, nil, json.RawMessage(`{}`), now, now,
+						),
+					)
+			},
+			expectedCode: http.StatusOK,
+			expectedLen:  1,
+		},
+		{
+			name: "returns empty list when no repositories exist",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(repoColumns()))
+			},
+			expectedCode: http.StatusOK,
+			expectedLen:  0,
+		},
+	}
 
-	store := db.NewRepositoryStore(mock)
-	handler := NewRepositoryHandler(store)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id").
-		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(repoColumns()).AddRow(
-				repoID, orgID, integrationID, int64(1001), "test-org/repo1", "main",
-				false, nil, nil, "https://github.com/test-org/repo1.git", int64(12345), "active",
-				nil, nil, json.RawMessage(`{}`), now, now,
-			),
-		)
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create pgxmock pool without error")
+			defer mock.Close()
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/repositories", nil)
-	ctx := middleware.WithOrgID(req.Context(), orgID)
-	req = req.WithContext(ctx)
-	w := httptest.NewRecorder()
+			orgID := uuid.New()
+			store := db.NewRepositoryStore(mock)
+			handler := NewRepositoryHandler(store)
 
-	handler.List(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
+			tt.setupMock(mock, orgID)
 
-	var resp models.ListResponse[models.Repository]
-	err = json.Unmarshal(w.Body.Bytes(), &resp)
-	require.NoError(t, err)
-	assert.Len(t, resp.Data, 1)
-	assert.Equal(t, "test-org/repo1", resp.Data[0].FullName)
-	assert.NoError(t, mock.ExpectationsWereMet())
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/repositories", nil)
+			ctx := middleware.WithOrgID(req.Context(), orgID)
+			req = req.WithContext(ctx)
+			w := httptest.NewRecorder()
+
+			handler.List(w, req)
+			require.Equal(t, tt.expectedCode, w.Code, "should return expected status code")
+
+			var resp models.ListResponse[models.Repository]
+			err = json.Unmarshal(w.Body.Bytes(), &resp)
+			require.NoError(t, err, "response body should be valid JSON")
+			require.Equal(t, tt.expectedLen, len(resp.Data), "should return expected number of repositories")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }
 
-func TestRepositoryHandler_List_Empty(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
+func TestRepositoryHandler_Get(t *testing.T) {
+	t.Parallel()
 
-	orgID := uuid.New()
-	store := db.NewRepositoryStore(mock)
-	handler := NewRepositoryHandler(store)
+	tests := []struct {
+		name         string
+		idParam      string
+		setupMock    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID)
+		expectedCode int
+		expectedBody string
+	}{
+		{
+			name:    "returns repository by ID successfully",
+			idParam: "", // will be set to a valid UUID in the subtest
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				repoID := uuid.New()
+				integrationID := uuid.New()
+				mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(repoColumns()).AddRow(
+							repoID, orgID, integrationID, int64(1001), "test-org/repo1", "main",
+							false, nil, nil, "https://github.com/test-org/repo1.git", int64(12345), "active",
+							nil, nil, json.RawMessage(`{}`), now, now,
+						),
+					)
+			},
+			expectedCode: http.StatusOK,
+			expectedBody: "test-org/repo1",
+		},
+		{
+			name:         "returns bad request for invalid UUID",
+			idParam:      "not-a-uuid",
+			setupMock:    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_ID",
+		},
+	}
 
-	mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id").
-		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(repoColumns()))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/repositories", nil)
-	ctx := middleware.WithOrgID(req.Context(), orgID)
-	req = req.WithContext(ctx)
-	w := httptest.NewRecorder()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create pgxmock pool without error")
+			defer mock.Close()
 
-	handler.List(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
+			orgID := uuid.New()
+			store := db.NewRepositoryStore(mock)
+			handler := NewRepositoryHandler(store)
 
-	var resp models.ListResponse[models.Repository]
-	err = json.Unmarshal(w.Body.Bytes(), &resp)
-	require.NoError(t, err)
-	assert.Len(t, resp.Data, 0)
-	assert.NoError(t, mock.ExpectationsWereMet())
+			tt.setupMock(mock, orgID)
+
+			idParam := tt.idParam
+			if idParam == "" {
+				idParam = uuid.New().String()
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/repositories/"+idParam, nil)
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("id", idParam)
+			ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+			ctx = middleware.WithOrgID(ctx, orgID)
+			req = req.WithContext(ctx)
+			w := httptest.NewRecorder()
+
+			handler.Get(w, req)
+			require.Equal(t, tt.expectedCode, w.Code, "should return expected status code")
+			require.Contains(t, w.Body.String(), tt.expectedBody, "response body should contain expected content")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }
 
-func TestRepositoryHandler_Get_Success(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
+func TestRepositoryHandler_Update(t *testing.T) {
+	t.Parallel()
 
-	orgID := uuid.New()
-	repoID := uuid.New()
-	integrationID := uuid.New()
-	now := time.Now()
+	tests := []struct {
+		name         string
+		body         string
+		setupMock    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, repoID uuid.UUID)
+		expectedCode int
+		expectedBody string
+	}{
+		{
+			name: "updates repository status successfully",
+			body: `{"status":"paused"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, repoID uuid.UUID) {
+				now := time.Now()
+				integrationID := uuid.New()
+				// GetByID
+				mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(repoColumns()).AddRow(
+							repoID, orgID, integrationID, int64(1001), "test-org/repo1", "main",
+							false, nil, nil, "https://github.com/test-org/repo1.git", int64(12345), "active",
+							nil, nil, json.RawMessage(`{}`), now, now,
+						),
+					)
+				// Update
+				mock.ExpectQuery("UPDATE repositories").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"updated_at"}).AddRow(now),
+					)
+			},
+			expectedCode: http.StatusOK,
+			expectedBody: "paused",
+		},
+		{
+			name:         "returns bad request for invalid JSON body",
+			body:         `not json`,
+			setupMock:    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, repoID uuid.UUID) {},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_JSON",
+		},
+	}
 
-	store := db.NewRepositoryStore(mock)
-	handler := NewRepositoryHandler(store)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(repoColumns()).AddRow(
-				repoID, orgID, integrationID, int64(1001), "test-org/repo1", "main",
-				false, nil, nil, "https://github.com/test-org/repo1.git", int64(12345), "active",
-				nil, nil, json.RawMessage(`{}`), now, now,
-			),
-		)
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create pgxmock pool without error")
+			defer mock.Close()
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/repositories/"+repoID.String(), nil)
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("id", repoID.String())
-	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
-	ctx = middleware.WithOrgID(ctx, orgID)
-	req = req.WithContext(ctx)
-	w := httptest.NewRecorder()
+			orgID := uuid.New()
+			repoID := uuid.New()
+			store := db.NewRepositoryStore(mock)
+			handler := NewRepositoryHandler(store)
 
-	handler.Get(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
+			tt.setupMock(mock, orgID, repoID)
 
-	var resp models.SingleResponse[models.Repository]
-	err = json.Unmarshal(w.Body.Bytes(), &resp)
-	require.NoError(t, err)
-	assert.Equal(t, "test-org/repo1", resp.Data.FullName)
-	assert.NoError(t, mock.ExpectationsWereMet())
-}
+			req := httptest.NewRequest(http.MethodPatch, "/api/v1/repositories/"+repoID.String(), strings.NewReader(tt.body))
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("id", repoID.String())
+			ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+			ctx = middleware.WithOrgID(ctx, orgID)
+			req = req.WithContext(ctx)
+			w := httptest.NewRecorder()
 
-func TestRepositoryHandler_Get_InvalidID(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	store := db.NewRepositoryStore(mock)
-	handler := NewRepositoryHandler(store)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/repositories/not-a-uuid", nil)
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("id", "not-a-uuid")
-	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
-	ctx = middleware.WithOrgID(ctx, uuid.New())
-	req = req.WithContext(ctx)
-	w := httptest.NewRecorder()
-
-	handler.Get(w, req)
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "INVALID_ID")
-}
-
-func TestRepositoryHandler_Update_Success(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	orgID := uuid.New()
-	repoID := uuid.New()
-	integrationID := uuid.New()
-	now := time.Now()
-
-	store := db.NewRepositoryStore(mock)
-	handler := NewRepositoryHandler(store)
-
-	// GetByID
-	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(repoColumns()).AddRow(
-				repoID, orgID, integrationID, int64(1001), "test-org/repo1", "main",
-				false, nil, nil, "https://github.com/test-org/repo1.git", int64(12345), "active",
-				nil, nil, json.RawMessage(`{}`), now, now,
-			),
-		)
-
-	// Update (uses QueryRow -> ExpectQuery, 4 named args: id, org_id, status, settings)
-	mock.ExpectQuery("UPDATE repositories").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows([]string{"updated_at"}).AddRow(now),
-		)
-
-	body := `{"status":"paused"}`
-	req := httptest.NewRequest(http.MethodPatch, "/api/v1/repositories/"+repoID.String(), strings.NewReader(body))
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("id", repoID.String())
-	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
-	ctx = middleware.WithOrgID(ctx, orgID)
-	req = req.WithContext(ctx)
-	w := httptest.NewRecorder()
-
-	handler.Update(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
-
-	var resp models.SingleResponse[models.Repository]
-	err = json.Unmarshal(w.Body.Bytes(), &resp)
-	require.NoError(t, err)
-	assert.Equal(t, "paused", resp.Data.Status)
-	assert.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestRepositoryHandler_Update_InvalidJSON(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	store := db.NewRepositoryStore(mock)
-	handler := NewRepositoryHandler(store)
-
-	req := httptest.NewRequest(http.MethodPatch, "/api/v1/repositories/"+uuid.New().String(), strings.NewReader(`not json`))
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("id", uuid.New().String())
-	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
-	ctx = middleware.WithOrgID(ctx, uuid.New())
-	req = req.WithContext(ctx)
-	w := httptest.NewRecorder()
-
-	handler.Update(w, req)
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "INVALID_JSON")
+			handler.Update(w, req)
+			require.Equal(t, tt.expectedCode, w.Code, "should return expected status code")
+			require.Contains(t, w.Body.String(), tt.expectedBody, "response body should contain expected content")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }
 
 func TestRepositoryHandler_Delete_Success(t *testing.T) {
+	t.Parallel()
+
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create pgxmock pool without error")
 	defer mock.Close()
 
 	orgID := uuid.New()
@@ -251,6 +273,6 @@ func TestRepositoryHandler_Delete_Success(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	handler.Delete(w, req)
-	assert.Equal(t, http.StatusNoContent, w.Code)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	require.Equal(t, http.StatusNoContent, w.Code, "should return 204 No Content on successful delete")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

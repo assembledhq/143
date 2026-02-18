@@ -5,45 +5,69 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func TestCORS_AllowsConfiguredOrigin(t *testing.T) {
-	handler := CORS([]string{"http://localhost:3000"})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
+func TestCORS(t *testing.T) {
+	t.Parallel()
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("Origin", "http://localhost:3000")
-	w := httptest.NewRecorder()
+	tests := []struct {
+		name                string
+		allowedOrigins      []string
+		requestOrigin       string
+		requestMethod       string
+		expectedCode        int
+		expectedAllowOrigin string
+		expectedCredentials string
+	}{
+		{
+			name:                "allows configured origin and sets CORS headers",
+			allowedOrigins:      []string{"http://localhost:3000"},
+			requestOrigin:       "http://localhost:3000",
+			requestMethod:       http.MethodGet,
+			expectedCode:        http.StatusOK,
+			expectedAllowOrigin: "http://localhost:3000",
+			expectedCredentials: "true",
+		},
+		{
+			name:                "rejects unknown origin by omitting CORS headers",
+			allowedOrigins:      []string{"http://localhost:3000"},
+			requestOrigin:       "http://evil.com",
+			requestMethod:       http.MethodGet,
+			expectedCode:        http.StatusOK,
+			expectedAllowOrigin: "",
+			expectedCredentials: "",
+		},
+		{
+			name:                "handles preflight OPTIONS request and returns 200",
+			allowedOrigins:      []string{"http://localhost:3000"},
+			requestOrigin:       "http://localhost:3000",
+			requestMethod:       http.MethodOptions,
+			expectedCode:        http.StatusOK,
+			expectedAllowOrigin: "http://localhost:3000",
+			expectedCredentials: "true",
+		},
+	}
 
-	handler.ServeHTTP(w, req)
-	assert.Equal(t, "http://localhost:3000", w.Header().Get("Access-Control-Allow-Origin"))
-	assert.Equal(t, "true", w.Header().Get("Access-Control-Allow-Credentials"))
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-func TestCORS_RejectsUnknownOrigin(t *testing.T) {
-	handler := CORS([]string{"http://localhost:3000"})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
+			handler := CORS(tt.allowedOrigins)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("Origin", "http://evil.com")
-	w := httptest.NewRecorder()
+			req := httptest.NewRequest(tt.requestMethod, "/", nil)
+			req.Header.Set("Origin", tt.requestOrigin)
+			w := httptest.NewRecorder()
 
-	handler.ServeHTTP(w, req)
-	assert.Empty(t, w.Header().Get("Access-Control-Allow-Origin"))
-}
+			handler.ServeHTTP(w, req)
 
-func TestCORS_HandlesPreflight(t *testing.T) {
-	handler := CORS([]string{"http://localhost:3000"})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusTeapot) // should not reach here
-	}))
-
-	req := httptest.NewRequest(http.MethodOptions, "/", nil)
-	req.Header.Set("Origin", "http://localhost:3000")
-	w := httptest.NewRecorder()
-
-	handler.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
+			require.Equal(t, tt.expectedCode, w.Code, "should return expected HTTP status code")
+			require.Equal(t, tt.expectedAllowOrigin, w.Header().Get("Access-Control-Allow-Origin"), "should set expected Access-Control-Allow-Origin header")
+			if tt.expectedCredentials != "" {
+				require.Equal(t, tt.expectedCredentials, w.Header().Get("Access-Control-Allow-Credentials"), "should set Access-Control-Allow-Credentials header")
+			}
+		})
+	}
 }

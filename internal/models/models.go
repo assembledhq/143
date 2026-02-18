@@ -119,6 +119,17 @@ type AgentRun struct {
 	CreatedAt            time.Time       `db:"created_at" json:"created_at"`
 }
 
+// AgentRunResult holds the result fields to update on an agent run.
+type AgentRunResult struct {
+	ConfidenceScore     *float64        `json:"confidence_score,omitempty"`
+	ConfidenceReasoning *string         `json:"confidence_reasoning,omitempty"`
+	RiskFactors         []string        `json:"risk_factors,omitempty"`
+	TokenUsage          json.RawMessage `json:"token_usage,omitempty"`
+	ResultSummary       *string         `json:"result_summary,omitempty"`
+	Diff                *string         `json:"diff,omitempty"`
+	Error               *string         `json:"error,omitempty"`
+}
+
 // Validation represents validation results for an agent run.
 type Validation struct {
 	ID                  uuid.UUID       `db:"id" json:"id"`
@@ -153,6 +164,43 @@ type PullRequest struct {
 	MergedAt       *time.Time `db:"merged_at" json:"merged_at,omitempty"`
 	CreatedAt      time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt      time.Time  `db:"updated_at" json:"updated_at"`
+}
+
+// AgentRunLog represents a log line emitted during an agent run.
+type AgentRunLog struct {
+	ID         int64           `db:"id" json:"id"`
+	AgentRunID uuid.UUID       `db:"agent_run_id" json:"agent_run_id"`
+	Timestamp  time.Time       `db:"timestamp" json:"timestamp"`
+	Level      string          `db:"level" json:"level"`
+	Message    string          `db:"message" json:"message"`
+	Metadata   json.RawMessage `db:"metadata" json:"metadata,omitempty"`
+}
+
+// AgentRunQuestion represents a question the agent asks a human during a run.
+type AgentRunQuestion struct {
+	ID           uuid.UUID  `db:"id" json:"id"`
+	AgentRunID   uuid.UUID  `db:"agent_run_id" json:"agent_run_id"`
+	OrgID        uuid.UUID  `db:"org_id" json:"org_id"`
+	QuestionText string     `db:"question_text" json:"question_text"`
+	Options      []string   `db:"options" json:"options,omitempty"`
+	Context      *string    `db:"context" json:"context,omitempty"`
+	BlocksPhase  *string    `db:"blocks_phase" json:"blocks_phase,omitempty"`
+	AnswerText   *string    `db:"answer_text" json:"answer_text,omitempty"`
+	AnsweredBy   *uuid.UUID `db:"answered_by" json:"answered_by,omitempty"`
+	AnsweredAt   *time.Time `db:"answered_at" json:"answered_at,omitempty"`
+	Status       string     `db:"status" json:"status"`
+	CreatedAt    time.Time  `db:"created_at" json:"created_at"`
+}
+
+// Deploy represents a deployment of a pull request.
+type Deploy struct {
+	ID            uuid.UUID `db:"id" json:"id"`
+	PullRequestID uuid.UUID `db:"pull_request_id" json:"pull_request_id"`
+	OrgID         uuid.UUID `db:"org_id" json:"org_id"`
+	Environment   string    `db:"environment" json:"environment"`
+	DeployedAt    time.Time `db:"deployed_at" json:"deployed_at"`
+	CommitSHA     *string   `db:"commit_sha" json:"commit_sha,omitempty"`
+	CreatedAt     time.Time `db:"created_at" json:"created_at"`
 }
 
 // WebhookDelivery represents an inbound webhook.

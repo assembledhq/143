@@ -9,7 +9,6 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -27,9 +26,11 @@ func newRepoRow(id, orgID, integrationID uuid.UUID, now time.Time) []interface{}
 	}
 }
 
-func TestRepositoryStore_ListByOrg_Success(t *testing.T) {
+func TestRepositoryStore_ListByOrg(t *testing.T) {
+	t.Parallel()
+
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
 	store := NewRepositoryStore(mock)
@@ -48,60 +49,77 @@ func TestRepositoryStore_ListByOrg_Success(t *testing.T) {
 		)
 
 	repos, err := store.ListByOrg(context.Background(), orgID)
-	require.NoError(t, err)
-	assert.Len(t, repos, 2)
-	assert.Equal(t, repoID1, repos[0].ID)
-	assert.Equal(t, repoID2, repos[1].ID)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "ListByOrg should not return an error")
+	require.Len(t, repos, 2, "should return both repositories for the org")
+	require.Equal(t, repoID1, repos[0].ID, "should return the first repository ID")
+	require.Equal(t, repoID2, repos[1].ID, "should return the second repository ID")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestRepositoryStore_GetByID_Success(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
+func TestRepositoryStore_GetByID(t *testing.T) {
+	t.Parallel()
 
-	store := NewRepositoryStore(mock)
-	orgID := uuid.New()
-	repoID := uuid.New()
-	integrationID := uuid.New()
-	now := time.Now()
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface, orgID, repoID, integrationID uuid.UUID, now time.Time)
+		expectErr bool
+	}{
+		{
+			name: "returns repository when found",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, repoID, integrationID uuid.UUID, now time.Time) {
+				mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(repoColumns).
+							AddRow(newRepoRow(repoID, orgID, integrationID, now)...),
+					)
+			},
+		},
+		{
+			name: "returns error when repository not found",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, repoID, integrationID uuid.UUID, now time.Time) {
+				mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(repoColumns))
+			},
+			expectErr: true,
+		},
+	}
 
-	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(repoColumns).
-				AddRow(newRepoRow(repoID, orgID, integrationID, now)...),
-		)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	repo, err := store.GetByID(context.Background(), orgID, repoID)
-	require.NoError(t, err)
-	assert.Equal(t, repoID, repo.ID)
-	assert.Equal(t, "org/repo", repo.FullName)
-	assert.Equal(t, "active", repo.Status)
-	assert.NoError(t, mock.ExpectationsWereMet())
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewRepositoryStore(mock)
+			orgID := uuid.New()
+			repoID := uuid.New()
+			integrationID := uuid.New()
+			now := time.Now()
+			tt.setupMock(mock, orgID, repoID, integrationID, now)
+
+			repo, err := store.GetByID(context.Background(), orgID, repoID)
+			if tt.expectErr {
+				require.Error(t, err, "GetByID should return an error when repository is not found")
+				return
+			}
+			require.NoError(t, err, "GetByID should not return an error")
+			require.Equal(t, repoID, repo.ID, "should return the correct repository ID")
+			require.Equal(t, "org/repo", repo.FullName, "should return the correct repository full name")
+			require.Equal(t, "active", repo.Status, "should return the correct repository status")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }
 
-func TestRepositoryStore_GetByID_NotFound(t *testing.T) {
+func TestRepositoryStore_Create(t *testing.T) {
+	t.Parallel()
+
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	store := NewRepositoryStore(mock)
-	orgID := uuid.New()
-	repoID := uuid.New()
-
-	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(repoColumns))
-
-	_, err = store.GetByID(context.Background(), orgID, repoID)
-	assert.Error(t, err)
-	assert.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestRepositoryStore_Create_Success(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
 	store := NewRepositoryStore(mock)
@@ -131,16 +149,18 @@ func TestRepositoryStore_Create_Success(t *testing.T) {
 		)
 
 	err = store.Create(context.Background(), repo)
-	require.NoError(t, err)
-	assert.Equal(t, generatedID, repo.ID)
-	assert.Equal(t, now, repo.CreatedAt)
-	assert.Equal(t, now, repo.UpdatedAt)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "Create should not return an error")
+	require.Equal(t, generatedID, repo.ID, "should set the generated ID on the repository")
+	require.Equal(t, now, repo.CreatedAt, "should set the created_at timestamp on the repository")
+	require.Equal(t, now, repo.UpdatedAt, "should set the updated_at timestamp on the repository")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestRepositoryStore_Update_Success(t *testing.T) {
+func TestRepositoryStore_Update(t *testing.T) {
+	t.Parallel()
+
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
 	store := NewRepositoryStore(mock)
@@ -161,14 +181,16 @@ func TestRepositoryStore_Update_Success(t *testing.T) {
 		)
 
 	err = store.Update(context.Background(), repo)
-	require.NoError(t, err)
-	assert.Equal(t, now, repo.UpdatedAt)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "Update should not return an error")
+	require.Equal(t, now, repo.UpdatedAt, "should set the updated_at timestamp on the repository")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestRepositoryStore_Delete_Success(t *testing.T) {
+func TestRepositoryStore_Delete(t *testing.T) {
+	t.Parallel()
+
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
 	store := NewRepositoryStore(mock)
@@ -180,13 +202,15 @@ func TestRepositoryStore_Delete_Success(t *testing.T) {
 		WillReturnResult(pgxmock.NewResult("DELETE", 1))
 
 	err = store.Delete(context.Background(), orgID, repoID)
-	require.NoError(t, err)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "Delete should not return an error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestRepositoryStore_UpsertFromGitHub_Success(t *testing.T) {
+func TestRepositoryStore_UpsertFromGitHub(t *testing.T) {
+	t.Parallel()
+
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
 	store := NewRepositoryStore(mock)
@@ -216,16 +240,18 @@ func TestRepositoryStore_UpsertFromGitHub_Success(t *testing.T) {
 		)
 
 	err = store.UpsertFromGitHub(context.Background(), repo)
-	require.NoError(t, err)
-	assert.Equal(t, generatedID, repo.ID)
-	assert.Equal(t, now, repo.CreatedAt)
-	assert.Equal(t, now, repo.UpdatedAt)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "UpsertFromGitHub should not return an error")
+	require.Equal(t, generatedID, repo.ID, "should set the generated ID on the repository")
+	require.Equal(t, now, repo.CreatedAt, "should set the created_at timestamp on the repository")
+	require.Equal(t, now, repo.UpdatedAt, "should set the updated_at timestamp on the repository")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestRepositoryStore_DisconnectByInstallationID_Success(t *testing.T) {
+func TestRepositoryStore_DisconnectByInstallationID(t *testing.T) {
+	t.Parallel()
+
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
 	store := NewRepositoryStore(mock)
@@ -235,6 +261,6 @@ func TestRepositoryStore_DisconnectByInstallationID_Success(t *testing.T) {
 		WillReturnResult(pgxmock.NewResult("UPDATE", 3))
 
 	err = store.DisconnectByInstallationID(context.Background(), int64(99))
-	require.NoError(t, err)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "DisconnectByInstallationID should not return an error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

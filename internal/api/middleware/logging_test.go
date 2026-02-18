@@ -6,60 +6,60 @@ import (
 	"testing"
 
 	"github.com/rs/zerolog"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func TestLogging_LogsRequest(t *testing.T) {
-	logger := zerolog.Nop()
+func TestLogging(t *testing.T) {
+	t.Parallel()
 
-	nextCalled := false
-	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		nextCalled = true
-		w.WriteHeader(http.StatusOK)
-	})
+	tests := []struct {
+		name         string
+		handler      http.HandlerFunc
+		expectedCode int
+		expectedBody string
+	}{
+		{
+			name: "logs request and calls next handler",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			},
+			expectedCode: http.StatusOK,
+			expectedBody: "",
+		},
+		{
+			name: "captures non-200 status code",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+			},
+			expectedCode: http.StatusNotFound,
+			expectedBody: "",
+		},
+		{
+			name: "defaults to 200 when WriteHeader is not called",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte("hello"))
+			},
+			expectedCode: http.StatusOK,
+			expectedBody: "hello",
+		},
+	}
 
-	handler := Logging(logger)(next)
-	req := httptest.NewRequest(http.MethodGet, "/test-path", nil)
-	w := httptest.NewRecorder()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	handler.ServeHTTP(w, req)
+			logger := zerolog.Nop()
+			handler := Logging(logger)(tt.handler)
 
-	assert.True(t, nextCalled)
-	assert.Equal(t, http.StatusOK, w.Code)
-}
+			req := httptest.NewRequest(http.MethodGet, "/test-path", nil)
+			w := httptest.NewRecorder()
 
-func TestLogging_CapturesStatusCode(t *testing.T) {
-	logger := zerolog.Nop()
+			handler.ServeHTTP(w, req)
 
-	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	})
-
-	handler := Logging(logger)(next)
-	req := httptest.NewRequest(http.MethodGet, "/missing", nil)
-	w := httptest.NewRecorder()
-
-	handler.ServeHTTP(w, req)
-
-	// The responseWriter wrapper should have captured the 404 status code.
-	// The httptest.ResponseRecorder also records the status.
-	assert.Equal(t, http.StatusNotFound, w.Code)
-}
-
-func TestLogging_DefaultStatus200(t *testing.T) {
-	logger := zerolog.Nop()
-
-	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Do not call WriteHeader; the default should be 200.
-		w.Write([]byte("hello"))
-	})
-
-	handler := Logging(logger)(next)
-	req := httptest.NewRequest(http.MethodGet, "/default", nil)
-	w := httptest.NewRecorder()
-
-	handler.ServeHTTP(w, req)
-
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Equal(t, "hello", w.Body.String())
+			require.Equal(t, tt.expectedCode, w.Code, "should return expected HTTP status code")
+			if tt.expectedBody != "" {
+				require.Equal(t, tt.expectedBody, w.Body.String(), "should return expected response body")
+			}
+		})
+	}
 }
