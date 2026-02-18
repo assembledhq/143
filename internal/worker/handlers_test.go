@@ -241,6 +241,28 @@ func TestValidateHandler_InvalidJSON(t *testing.T) {
 	require.Contains(t, err.Error(), "unmarshal validate payload", "error should indicate unmarshal failure")
 }
 
+func TestValidateHandler_UsesJobOrgIDWhenPayloadMissingOrgID(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	logger := zerolog.Nop()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	mock.ExpectQuery("SELECT .* FROM agent_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(context.Canceled)
+
+	handler := newValidateHandler(stores, nil, logger)
+	payload := json.RawMessage(`{"agent_run_id":"` + runID.String() + `"}`)
+	err := handler(withJobOrgID(context.Background(), orgID), "validate", payload)
+
+	require.Error(t, err, "validate handler should return an error when run fetch fails")
+	require.Contains(t, err.Error(), "fetch agent run", "validate handler should use org ID from job context before failing run fetch")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestOpenPRHandler_InvalidJSON(t *testing.T) {
 	t.Parallel()
 
@@ -254,6 +276,28 @@ func TestOpenPRHandler_InvalidJSON(t *testing.T) {
 
 	require.Error(t, err, "open_pr handler should return an error for invalid JSON")
 	require.Contains(t, err.Error(), "unmarshal open_pr payload", "error should indicate unmarshal failure")
+}
+
+func TestOpenPRHandler_UsesJobOrgIDWhenPayloadMissingOrgID(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	logger := zerolog.Nop()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	mock.ExpectQuery("SELECT .* FROM agent_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(context.Canceled)
+
+	handler := newOpenPRHandler(stores, nil, logger)
+	payload := json.RawMessage(`{"agent_run_id":"` + runID.String() + `"}`)
+	err := handler(withJobOrgID(context.Background(), orgID), "open_pr", payload)
+
+	require.Error(t, err, "open_pr handler should return an error when run fetch fails")
+	require.Contains(t, err.Error(), "fetch agent run", "open_pr handler should use org ID from job context before failing run fetch")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestAnalyzeFailureHandler_InvalidJSON(t *testing.T) {
@@ -271,6 +315,28 @@ func TestAnalyzeFailureHandler_InvalidJSON(t *testing.T) {
 	require.Contains(t, err.Error(), "unmarshal analyze_failure payload", "error should indicate unmarshal failure")
 }
 
+func TestAnalyzeFailureHandler_UsesJobOrgIDWhenPayloadMissingOrgID(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	logger := zerolog.Nop()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	mock.ExpectQuery("SELECT .* FROM agent_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(context.Canceled)
+
+	handler := newAnalyzeFailureHandler(stores, nil, logger)
+	payload := json.RawMessage(`{"agent_run_id":"` + runID.String() + `"}`)
+	err := handler(withJobOrgID(context.Background(), orgID), "analyze_failure", payload)
+
+	require.Error(t, err, "analyze_failure handler should return an error when run fetch fails")
+	require.Contains(t, err.Error(), "fetch agent run", "analyze_failure handler should use org ID from job context before failing run fetch")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestRegisterHandlers_AllRegistered(t *testing.T) {
 	t.Parallel()
 
@@ -285,14 +351,21 @@ func TestRegisterHandlers_AllRegistered(t *testing.T) {
 		"ingest_webhook",
 		"prioritize",
 		"sync_sentry",
+	}
+	for _, name := range expectedHandlers {
+		_, ok := w.handlers[name]
+		require.True(t, ok, "%s handler should be registered", name)
+	}
+
+	unexpectedHandlers := []string{
 		"run_agent",
 		"validate",
 		"open_pr",
 		"analyze_failure",
 	}
-	for _, name := range expectedHandlers {
+	for _, name := range unexpectedHandlers {
 		_, ok := w.handlers[name]
-		require.True(t, ok, "%s handler should be registered", name)
+		require.False(t, ok, "%s handler should not be registered without services", name)
 	}
 }
 

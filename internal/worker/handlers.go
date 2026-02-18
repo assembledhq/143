@@ -23,10 +23,23 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, logger zero
 	w.Register("ingest_webhook", newIngestWebhookHandler(stores, logger))
 	w.Register("prioritize", newPrioritizeHandler(stores, logger))
 	w.Register("sync_sentry", newSyncSentryHandler(stores, logger))
-	w.Register("run_agent", newRunAgentHandler(stores, services, logger))
-	w.Register("validate", newValidateHandler(stores, services, logger))
-	w.Register("open_pr", newOpenPRHandler(stores, services, logger))
-	w.Register("analyze_failure", newAnalyzeFailureHandler(stores, services, logger))
+	if hasServiceHandlersDependencies(services) {
+		w.Register("run_agent", newRunAgentHandler(stores, services, logger))
+		w.Register("validate", newValidateHandler(stores, services, logger))
+		w.Register("open_pr", newOpenPRHandler(stores, services, logger))
+		w.Register("analyze_failure", newAnalyzeFailureHandler(stores, services, logger))
+	}
+}
+
+func hasServiceHandlersDependencies(services *Services) bool {
+	if services == nil {
+		return false
+	}
+	return services.Orchestrator != nil &&
+		services.Validation != nil &&
+		services.PR != nil &&
+		services.Failure != nil &&
+		services.SandboxProvider != nil
 }
 
 // Stores holds all the database stores needed by job handlers.
@@ -40,11 +53,11 @@ type Stores struct {
 
 // Services holds the service dependencies needed by Phase 3 job handlers.
 type Services struct {
-	Orchestrator      *agent.Orchestrator
-	Validation        *validation.Service
-	PR                *ghservice.PRService
-	Failure           *agent.FailureService
-	SandboxProvider   agent.SandboxProvider
+	Orchestrator    *agent.Orchestrator
+	Validation      *validation.Service
+	PR              *ghservice.PRService
+	Failure         *agent.FailureService
+	SandboxProvider agent.SandboxProvider
 }
 
 // ingest_webhook handler processes a webhook delivery asynchronously.
@@ -219,7 +232,7 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			return fmt.Errorf("unmarshal run_agent payload: %w", err)
 		}
 
-		orgID, err := uuid.Parse(input.OrgID)
+		orgID, err := parseOrgID(input.OrgID, ctx)
 		if err != nil {
 			return fmt.Errorf("parse org ID: %w", err)
 		}
@@ -253,7 +266,7 @@ func newValidateHandler(stores *Stores, services *Services, logger zerolog.Logge
 			return fmt.Errorf("unmarshal validate payload: %w", err)
 		}
 
-		orgID, err := uuid.Parse(input.OrgID)
+		orgID, err := parseOrgID(input.OrgID, ctx)
 		if err != nil {
 			return fmt.Errorf("parse org ID: %w", err)
 		}
@@ -298,7 +311,7 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			return fmt.Errorf("unmarshal open_pr payload: %w", err)
 		}
 
-		orgID, err := uuid.Parse(input.OrgID)
+		orgID, err := parseOrgID(input.OrgID, ctx)
 		if err != nil {
 			return fmt.Errorf("parse org ID: %w", err)
 		}
@@ -333,7 +346,7 @@ func newAnalyzeFailureHandler(stores *Stores, services *Services, logger zerolog
 			return fmt.Errorf("unmarshal analyze_failure payload: %w", err)
 		}
 
-		orgID, err := uuid.Parse(input.OrgID)
+		orgID, err := parseOrgID(input.OrgID, ctx)
 		if err != nil {
 			return fmt.Errorf("parse org ID: %w", err)
 		}
@@ -359,4 +372,15 @@ func newAnalyzeFailureHandler(stores *Stores, services *Services, logger zerolog
 
 		return services.Failure.UpdateRunWithFailure(ctx, orgID, runID, summary)
 	}
+}
+
+func parseOrgID(orgIDFromPayload string, ctx context.Context) (uuid.UUID, error) {
+	if orgIDFromPayload != "" {
+		return uuid.Parse(orgIDFromPayload)
+	}
+	orgID, ok := jobOrgIDFromContext(ctx)
+	if !ok {
+		return uuid.Nil, fmt.Errorf("missing org ID")
+	}
+	return orgID, nil
 }

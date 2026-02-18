@@ -89,7 +89,7 @@ export const api = {
     getPR: (runId: string) => get<import('./types').SingleResponse<import('./types').PullRequest>>(`/api/v1/runs/${runId}/pr`),
     getQuestions: (runId: string) => get<import('./types').ListResponse<import('./types').AgentRunQuestion>>(`/api/v1/runs/${runId}/questions`),
     answerQuestion: (runId: string, questionId: string, answer: string) =>
-      post<import('./types').SingleResponse<import('./types').AgentRunQuestion>>(`/api/v1/runs/${runId}/questions/${questionId}/answer`, { answer_text: answer }),
+      post<import('./types').SingleResponse<import('./types').AgentRunQuestion>>(`/api/v1/runs/${runId}/questions/${questionId}/answer`, { answer }),
   },
   settings: {
     get: () => get<import('./types').SingleResponse<import('./types').Organization>>('/api/v1/settings'),

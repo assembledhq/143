@@ -105,10 +105,12 @@ func (m *mockIssueStore) UpdateStatus(ctx context.Context, orgID, issueID uuid.U
 
 type mockJobStore struct {
 	lastJobType string
+	lastPayload any
 }
 
 func (m *mockJobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
 	m.lastJobType = jobType
+	m.lastPayload = payload
 	return uuid.New(), nil
 }
 
@@ -489,6 +491,10 @@ func TestValidate_AllPass_EnqueuesPR(t *testing.T) {
 
 	assert.Equal(t, "passed", stores.validations.lastStatus)
 	assert.Equal(t, "open_pr", stores.jobs.lastJobType)
+	require.Equal(t, map[string]string{
+		"agent_run_id": agentRun.ID.String(),
+		"org_id":       agentRun.OrgID.String(),
+	}, stores.jobs.lastPayload, "validation should enqueue open_pr with agent_run_id and org_id")
 	assert.Empty(t, stores.issues.lastStatus)
 }
 

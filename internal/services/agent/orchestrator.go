@@ -222,6 +222,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error
 		o.failRun(ctx, run, err.Error())
 		o.enqueueJob(ctx, run.OrgID, "agent", "analyze_failure", map[string]interface{}{
 			"agent_run_id": run.ID.String(),
+			"org_id":       run.OrgID.String(),
 		})
 		return fmt.Errorf("execute agent: %w", err)
 	}
@@ -248,6 +249,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error
 	if result.ConfidenceScore >= lowConfidenceThreshold {
 		o.enqueueJob(ctx, run.OrgID, "agent", "validate", map[string]interface{}{
 			"agent_run_id": run.ID.String(),
+			"org_id":       run.OrgID.String(),
 		})
 	}
 

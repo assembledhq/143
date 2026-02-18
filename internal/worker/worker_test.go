@@ -150,6 +150,7 @@ func TestWorker_Poll(t *testing.T) {
 			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
 				t.Helper()
 				jobID := uuid.New()
+				orgID := uuid.New()
 				payload := json.RawMessage(`{"key":"value"}`)
 
 				w.Register("test_job", func(ctx context.Context, jobType string, p json.RawMessage) error {
@@ -159,8 +160,8 @@ func TestWorker_Poll(t *testing.T) {
 				})
 
 				mock.ExpectBegin()
-				rows := pgxmock.NewRows([]string{"id", "job_type", "payload", "attempts", "max_attempts"}).
-					AddRow(jobID, "test_job", payload, 0, 3)
+				rows := pgxmock.NewRows([]string{"id", "org_id", "job_type", "payload", "attempts", "max_attempts"}).
+					AddRow(jobID, orgID, "test_job", payload, 0, 3)
 				mock.ExpectQuery("SELECT .+ FROM jobs").
 					WillReturnRows(rows)
 				mock.ExpectExec("UPDATE jobs SET status = 'running'").
@@ -177,6 +178,7 @@ func TestWorker_Poll(t *testing.T) {
 			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
 				t.Helper()
 				jobID := uuid.New()
+				orgID := uuid.New()
 				payload := json.RawMessage(`{}`)
 				handlerErr := errors.New("temporary failure")
 
@@ -185,8 +187,8 @@ func TestWorker_Poll(t *testing.T) {
 				})
 
 				mock.ExpectBegin()
-				rows := pgxmock.NewRows([]string{"id", "job_type", "payload", "attempts", "max_attempts"}).
-					AddRow(jobID, "retry_job", payload, 0, 3)
+				rows := pgxmock.NewRows([]string{"id", "org_id", "job_type", "payload", "attempts", "max_attempts"}).
+					AddRow(jobID, orgID, "retry_job", payload, 0, 3)
 				mock.ExpectQuery("SELECT .+ FROM jobs").
 					WillReturnRows(rows)
 				mock.ExpectExec("UPDATE jobs SET status = 'running'").
@@ -204,6 +206,7 @@ func TestWorker_Poll(t *testing.T) {
 			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
 				t.Helper()
 				jobID := uuid.New()
+				orgID := uuid.New()
 				payload := json.RawMessage(`{}`)
 				handlerErr := errors.New("permanent failure")
 
@@ -212,8 +215,8 @@ func TestWorker_Poll(t *testing.T) {
 				})
 
 				mock.ExpectBegin()
-				rows := pgxmock.NewRows([]string{"id", "job_type", "payload", "attempts", "max_attempts"}).
-					AddRow(jobID, "dead_job", payload, 2, 3)
+				rows := pgxmock.NewRows([]string{"id", "org_id", "job_type", "payload", "attempts", "max_attempts"}).
+					AddRow(jobID, orgID, "dead_job", payload, 2, 3)
 				mock.ExpectQuery("SELECT .+ FROM jobs").
 					WillReturnRows(rows)
 				mock.ExpectExec("UPDATE jobs SET status = 'running'").
@@ -230,11 +233,12 @@ func TestWorker_Poll(t *testing.T) {
 			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
 				t.Helper()
 				jobID := uuid.New()
+				orgID := uuid.New()
 				payload := json.RawMessage(`{}`)
 
 				mock.ExpectBegin()
-				rows := pgxmock.NewRows([]string{"id", "job_type", "payload", "attempts", "max_attempts"}).
-					AddRow(jobID, "unknown_job", payload, 0, 3)
+				rows := pgxmock.NewRows([]string{"id", "org_id", "job_type", "payload", "attempts", "max_attempts"}).
+					AddRow(jobID, orgID, "unknown_job", payload, 0, 3)
 				mock.ExpectQuery("SELECT .+ FROM jobs").
 					WillReturnRows(rows)
 				mock.ExpectExec("UPDATE jobs SET status = 'running'").
@@ -261,11 +265,12 @@ func TestWorker_Poll(t *testing.T) {
 			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
 				t.Helper()
 				jobID := uuid.New()
+				orgID := uuid.New()
 				payload := json.RawMessage(`{}`)
 
 				mock.ExpectBegin()
-				rows := pgxmock.NewRows([]string{"id", "job_type", "payload", "attempts", "max_attempts"}).
-					AddRow(jobID, "some_job", payload, 0, 3)
+				rows := pgxmock.NewRows([]string{"id", "org_id", "job_type", "payload", "attempts", "max_attempts"}).
+					AddRow(jobID, orgID, "some_job", payload, 0, 3)
 				mock.ExpectQuery("SELECT .+ FROM jobs").
 					WillReturnRows(rows)
 				mock.ExpectExec("UPDATE jobs SET status = 'running'").
@@ -279,11 +284,12 @@ func TestWorker_Poll(t *testing.T) {
 			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
 				t.Helper()
 				jobID := uuid.New()
+				orgID := uuid.New()
 				payload := json.RawMessage(`{}`)
 
 				mock.ExpectBegin()
-				rows := pgxmock.NewRows([]string{"id", "job_type", "payload", "attempts", "max_attempts"}).
-					AddRow(jobID, "some_job", payload, 0, 3)
+				rows := pgxmock.NewRows([]string{"id", "org_id", "job_type", "payload", "attempts", "max_attempts"}).
+					AddRow(jobID, orgID, "some_job", payload, 0, 3)
 				mock.ExpectQuery("SELECT .+ FROM jobs").
 					WillReturnRows(rows)
 				mock.ExpectExec("UPDATE jobs SET status = 'running'").
@@ -298,6 +304,7 @@ func TestWorker_Poll(t *testing.T) {
 			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
 				t.Helper()
 				jobID := uuid.New()
+				orgID := uuid.New()
 				payload := json.RawMessage(`{}`)
 				handlerErr := errors.New("boundary failure")
 
@@ -306,8 +313,8 @@ func TestWorker_Poll(t *testing.T) {
 				})
 
 				mock.ExpectBegin()
-				rows := pgxmock.NewRows([]string{"id", "job_type", "payload", "attempts", "max_attempts"}).
-					AddRow(jobID, "boundary_job", payload, 1, 2)
+				rows := pgxmock.NewRows([]string{"id", "org_id", "job_type", "payload", "attempts", "max_attempts"}).
+					AddRow(jobID, orgID, "boundary_job", payload, 1, 2)
 				mock.ExpectQuery("SELECT .+ FROM jobs").
 					WillReturnRows(rows)
 				mock.ExpectExec("UPDATE jobs SET status = 'running'").
@@ -324,6 +331,7 @@ func TestWorker_Poll(t *testing.T) {
 			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
 				t.Helper()
 				jobID := uuid.New()
+				orgID := uuid.New()
 				payload := json.RawMessage(`{}`)
 				handlerErr := errors.New("retryable failure")
 
@@ -332,8 +340,8 @@ func TestWorker_Poll(t *testing.T) {
 				})
 
 				mock.ExpectBegin()
-				rows := pgxmock.NewRows([]string{"id", "job_type", "payload", "attempts", "max_attempts"}).
-					AddRow(jobID, "retry_boundary_job", payload, 0, 2)
+				rows := pgxmock.NewRows([]string{"id", "org_id", "job_type", "payload", "attempts", "max_attempts"}).
+					AddRow(jobID, orgID, "retry_boundary_job", payload, 0, 2)
 				mock.ExpectQuery("SELECT .+ FROM jobs").
 					WillReturnRows(rows)
 				mock.ExpectExec("UPDATE jobs SET status = 'running'").
