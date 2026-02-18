@@ -611,6 +611,103 @@ func TestShellEscape(t *testing.T) {
 	}
 }
 
+func TestDockerProvider_ShellInjection(t *testing.T) {
+	t.Parallel()
+
+	t.Run("CloneRepo escapes malicious branch name", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedCmd []string
+
+		mock := &mockDockerClient{}
+		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+			capturedCmd = config.Cmd
+			return container.ExecCreateResponse{ID: "exec-inject"}, nil
+		}
+		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+			return container.ExecInspect{ExitCode: 0}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+		sb := &agent.Sandbox{ID: "test-container", Provider: "docker", WorkDir: "/workspace"}
+
+		err := p.CloneRepo(context.Background(), sb, "https://github.com/org/repo.git", "main; echo pwned", "token")
+		require.NoError(t, err)
+
+		// The command passed to sh -c should have the branch single-quoted and escaped
+		shellCmd := capturedCmd[2] // sh -c "<cmd>"
+		require.Contains(t, shellCmd, "'main; echo pwned'", "branch with metacharacters should be single-quoted")
+		require.NotContains(t, shellCmd, "--branch main;", "bare semicolon should not appear outside quotes")
+	})
+
+	t.Run("CloneRepo escapes branch name with single quotes", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedCmd []string
+
+		mock := &mockDockerClient{}
+		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+			capturedCmd = config.Cmd
+			return container.ExecCreateResponse{ID: "exec-inject"}, nil
+		}
+		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+			return container.ExecInspect{ExitCode: 0}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+		sb := &agent.Sandbox{ID: "test-container", Provider: "docker", WorkDir: "/workspace"}
+
+		err := p.CloneRepo(context.Background(), sb, "https://github.com/org/repo.git", "main'$(whoami)", "")
+		require.NoError(t, err)
+
+		shellCmd := capturedCmd[2]
+		require.Contains(t, shellCmd, "'main'\\''$(whoami)'", "single quotes in branch should be escaped")
+	})
+
+	t.Run("ReadFile escapes malicious path", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedCmd []string
+
+		mock := &mockDockerClient{}
+		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+			capturedCmd = config.Cmd
+			return container.ExecCreateResponse{ID: "exec-inject"}, nil
+		}
+		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+			return container.ExecInspect{ExitCode: 0}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+		sb := &agent.Sandbox{ID: "test-container", Provider: "docker", WorkDir: "/workspace"}
+
+		_, _ = p.ReadFile(context.Background(), sb, "/workspace/foo; env")
+
+		shellCmd := capturedCmd[2]
+		require.Contains(t, shellCmd, "'/workspace/foo; env'", "path with metacharacters should be single-quoted")
+		require.NotContains(t, shellCmd, "cat /workspace/foo;", "bare semicolon should not appear outside quotes")
+	})
+
+	t.Run("WriteFile escapes malicious path", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedCmd []string
+
+		mock := &mockDockerClient{}
+		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+			capturedCmd = config.Cmd
+			return container.ExecCreateResponse{ID: "exec-inject"}, nil
+		}
+		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+			return container.ExecInspect{ExitCode: 0}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+		sb := &agent.Sandbox{ID: "test-container", Provider: "docker", WorkDir: "/workspace"}
+
+		_ = p.WriteFile(context.Background(), sb, "/workspace/$(rm -rf /)", []byte("data"))
+
+		shellCmd := capturedCmd[2]
+		require.Contains(t, shellCmd, "'/workspace/$(rm -rf /)'", "path with command substitution should be single-quoted")
+	})
+}
+
 func TestDockerProvider_CloneRepo(t *testing.T) {
 	t.Parallel()
 
@@ -634,7 +731,7 @@ func TestDockerProvider_CloneRepo(t *testing.T) {
 		require.NoError(t, err, "CloneRepo should not return an error")
 		require.Contains(t, capturedCmd, "git clone", "should run git clone command")
 		require.Contains(t, capturedCmd, "--depth 1", "should do shallow clone")
-		require.Contains(t, capturedCmd, "--branch main", "should clone the specified branch")
+		require.Contains(t, capturedCmd, "--branch 'main'", "should clone the specified branch")
 		require.Contains(t, capturedCmd, "x-access-token:ghp_test123@", "should include auth token in URL")
 	})
 
