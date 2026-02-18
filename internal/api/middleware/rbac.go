@@ -12,12 +12,12 @@ func RequireRole(roles ...string) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			user := UserFromContext(r.Context())
 			if user == nil {
-				http.Error(w, `{"error":{"code":"UNAUTHORIZED","message":"authentication required"}}`, http.StatusUnauthorized)
+				writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
 				return
 			}
 
 			if !slices.Contains(roles, user.Role) {
-				http.Error(w, `{"error":{"code":"FORBIDDEN","message":"insufficient permissions"}}`, http.StatusForbidden)
+				writeError(w, http.StatusForbidden, "FORBIDDEN", "insufficient permissions")
 				return
 			}
 

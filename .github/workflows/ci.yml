@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 env:
-  GO_VERSION: "1.24"
+  GO_VERSION: "1.26"
   NODE_VERSION: "22"
   BACKEND_COVERAGE_MIN: "70.0"
   BACKEND_COVERAGE_TARGET: "75.0"
@@ -181,9 +181,25 @@ jobs:
       - name: Build Docker image
         run: docker build -t 143-server .
 
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Run gosec
+        uses: securego/gosec@master
+        with:
+          args: ./...
+
   required-checks:
     name: All Checks Pass
-    needs: [backend-lint, backend-test, frontend-lint, frontend-test, migration-check, docker-build]
+    needs: [backend-lint, backend-test, frontend-lint, frontend-test, migration-check, docker-build, security]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -194,7 +210,8 @@ jobs:
              [[ "${{ needs.frontend-lint.result }}" != "success" ]] || \
              [[ "${{ needs.frontend-test.result }}" != "success" ]] || \
              [[ "${{ needs.migration-check.result }}" != "success" ]] || \
-             [[ "${{ needs.docker-build.result }}" != "success" ]]; then
+             [[ "${{ needs.docker-build.result }}" != "success" ]] || \
+             [[ "${{ needs.security.result }}" != "success" ]]; then
             echo "::error::One or more required checks failed"
             exit 1
           fi

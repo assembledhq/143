@@ -3,9 +3,22 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 
 	"github.com/assembledhq/143/internal/models"
 )
+
+func queryInt(r *http.Request, key string, defaultVal int) int {
+	v := r.URL.Query().Get(key)
+	if v == "" {
+		return defaultVal
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return defaultVal
+	}
+	return n
+}
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
