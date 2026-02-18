@@ -239,12 +239,17 @@ func (m *mockRepositoryStore) GetByID(ctx context.Context, orgID, repoID uuid.UU
 type mockJobStore struct {
 	mu       sync.Mutex
 	enqueued []string // job types
+	payloads map[string]any
 }
 
 func (m *mockJobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.payloads == nil {
+		m.payloads = make(map[string]any)
+	}
 	m.enqueued = append(m.enqueued, jobType)
+	m.payloads[jobType] = payload
 	return uuid.New(), nil
 }
 
@@ -254,6 +259,12 @@ func (m *mockJobStore) getEnqueued() []string {
 	out := make([]string, len(m.enqueued))
 	copy(out, m.enqueued)
 	return out
+}
+
+func (m *mockJobStore) getPayload(jobType string) any {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.payloads[jobType]
 }
 
 // --- Helpers ---
@@ -386,6 +397,10 @@ func TestRunAgent_SuccessfulRun(t *testing.T) {
 
 	// Validate job should be enqueued.
 	require.Contains(t, d.jobs.getEnqueued(), "validate")
+	validatePayload, ok := d.jobs.getPayload("validate").(map[string]interface{})
+	require.True(t, ok, "validate job payload should be a map")
+	require.Equal(t, run.ID.String(), validatePayload["agent_run_id"], "validate payload should include agent run ID")
+	require.Equal(t, run.OrgID.String(), validatePayload["org_id"], "validate payload should include org ID")
 
 	// Logs should be persisted.
 	require.GreaterOrEqual(t, d.logs.getCount(), 2)
@@ -426,6 +441,10 @@ func TestRunAgent_FailedExecution(t *testing.T) {
 
 	// analyze_failure job should be enqueued.
 	require.Contains(t, d.jobs.getEnqueued(), "analyze_failure")
+	analyzePayload, ok := d.jobs.getPayload("analyze_failure").(map[string]interface{})
+	require.True(t, ok, "analyze_failure payload should be a map")
+	require.Equal(t, run.ID.String(), analyzePayload["agent_run_id"], "analyze_failure payload should include agent run ID")
+	require.Equal(t, run.OrgID.String(), analyzePayload["org_id"], "analyze_failure payload should include org ID")
 
 	// Sandbox should be destroyed.
 	require.Equal(t, 1, d.provider.getDestroyCalls())

@@ -161,6 +161,20 @@ describe('api client', () => {
       expect(result.data.id).toBe('run-abc');
       expect(result.data.status).toBe('running');
     });
+
+    it('answers question with backend contract field', async () => {
+      let capturedBody: unknown;
+
+      server.use(
+        http.post('/api/v1/runs/:id/questions/:qid/answer', async ({ request }) => {
+          capturedBody = await request.json();
+          return HttpResponse.json({ data: { id: 'q-1' } });
+        }),
+      );
+
+      await api.runs.answerQuestion('run-1', 'q-1', 'Try option B');
+      expect(capturedBody).toEqual({ answer: 'Try option B' });
+    });
   });
 
   describe('repositories', () => {

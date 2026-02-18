@@ -136,7 +136,10 @@ func (s *Service) Validate(ctx context.Context, agentRun *models.AgentRun, sandb
 		if err := s.validations.UpdateStatus(ctx, v.OrgID, v.ID, "passed"); err != nil {
 			return fmt.Errorf("update validation status to passed: %w", err)
 		}
-		payload := map[string]string{"agent_run_id": agentRun.ID.String()}
+		payload := map[string]string{
+			"agent_run_id": agentRun.ID.String(),
+			"org_id":       agentRun.OrgID.String(),
+		}
 		dedupeKey := fmt.Sprintf("open_pr:%s", agentRun.ID.String())
 		if _, err := s.jobs.Enqueue(ctx, agentRun.OrgID, "default", "open_pr", payload, 5, &dedupeKey); err != nil {
 			return fmt.Errorf("enqueue open_pr job: %w", err)

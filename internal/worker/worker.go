@@ -14,6 +14,19 @@ import (
 
 type JobHandler func(ctx context.Context, jobType string, payload json.RawMessage) error
 
+type jobContextKey string
+
+const jobOrgIDContextKey jobContextKey = "job_org_id"
+
+func withJobOrgID(ctx context.Context, orgID uuid.UUID) context.Context {
+	return context.WithValue(ctx, jobOrgIDContextKey, orgID)
+}
+
+func jobOrgIDFromContext(ctx context.Context) (uuid.UUID, bool) {
+	orgID, ok := ctx.Value(jobOrgIDContextKey).(uuid.UUID)
+	return orgID, ok
+}
+
 // WorkerDB is the database interface required by the Worker.
 // Both *pgxpool.Pool and pgxmock.PgxPoolIface satisfy this interface.
 type WorkerDB interface {
@@ -68,18 +81,19 @@ func (w *Worker) poll(ctx context.Context) {
 	defer tx.Rollback(ctx)
 
 	var jobID uuid.UUID
+	var orgID uuid.UUID
 	var jobType string
 	var payload json.RawMessage
 	var attempts, maxAttempts int
 
 	err = tx.QueryRow(ctx, `
-		SELECT id, job_type, payload, attempts, max_attempts
+		SELECT id, org_id, job_type, payload, attempts, max_attempts
 		FROM jobs
 		WHERE status = 'pending' AND run_at <= now()
 		ORDER BY priority DESC, created_at ASC
 		FOR UPDATE SKIP LOCKED
 		LIMIT 1
-	`).Scan(&jobID, &jobType, &payload, &attempts, &maxAttempts)
+	`).Scan(&jobID, &orgID, &jobType, &payload, &attempts, &maxAttempts)
 
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -113,8 +127,9 @@ func (w *Worker) poll(ctx context.Context) {
 		return
 	}
 
+	handlerCtx := withJobOrgID(ctx, orgID)
 	w.logger.Info().Str("job_id", jobID.String()).Str("job_type", jobType).Msg("processing job")
-	if err := handler(ctx, jobType, payload); err != nil {
+	if err := handler(handlerCtx, jobType, payload); err != nil {
 		w.logger.Error().Err(err).Str("job_id", jobID.String()).Msg("job failed")
 		if attempts+1 >= maxAttempts {
 			w.deadLetterJob(ctx, jobID, err.Error())
