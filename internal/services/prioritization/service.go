@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
+	llmpkg "github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -43,11 +44,6 @@ type orgStore interface {
 // jobStore is the subset of db.JobStore used by the service.
 type jobStore interface {
 	Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
-}
-
-// LLMClient abstracts LLM completion calls so it can be mocked in tests.
-type LLMClient interface {
-	Complete(ctx context.Context, systemPrompt, userPrompt string) (string, error)
 }
 
 // OrgSettings holds the parsed org settings relevant to prioritization.
@@ -91,7 +87,7 @@ type Service struct {
 	agentRuns  agentRunStore
 	orgs       orgStore
 	jobs       jobStore
-	llm        LLMClient // can be nil
+	llm        llmpkg.Client // can be nil
 	logger     zerolog.Logger
 }
 
@@ -103,7 +99,7 @@ func NewService(
 	agentRuns agentRunStore,
 	orgs orgStore,
 	jobs jobStore,
-	llm LLMClient,
+	llmClient llmpkg.Client,
 	logger zerolog.Logger,
 ) *Service {
 	return &Service{
@@ -113,7 +109,7 @@ func NewService(
 		agentRuns:  agentRuns,
 		orgs:       orgs,
 		jobs:       jobs,
-		llm:        llm,
+		llm:        llmClient,
 		logger:     logger,
 	}
 }

@@ -24,8 +24,10 @@ profile.cov
 go.work
 go.work.sum
 
-# env file
+# env files (never commit secrets)
 .env
+.env.local
+.env.*.local
 
 # air live reload
 tmp/

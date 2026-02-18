@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
+	llmpkg "github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 )
@@ -37,18 +38,13 @@ type jobStore interface {
 	Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
 }
 
-// LLMClient abstracts LLM completion calls so it can be mocked in tests.
-type LLMClient interface {
-	Complete(ctx context.Context, systemPrompt, userPrompt string) (string, error)
-}
-
 // Service validates agent-produced diffs before PR creation.
 type Service struct {
 	validations validationStore
 	issues      issueStore
 	orgs        orgStore
 	jobs        jobStore
-	llm         LLMClient
+	llm         llmpkg.Client
 	provider    agent.SandboxProvider
 	logger      zerolog.Logger
 }
@@ -59,7 +55,7 @@ func NewService(
 	issues issueStore,
 	orgs orgStore,
 	jobs jobStore,
-	llm LLMClient,
+	llmClient llmpkg.Client,
 	provider agent.SandboxProvider,
 	logger zerolog.Logger,
 ) *Service {
@@ -68,7 +64,7 @@ func NewService(
 		issues:      issues,
 		orgs:        orgs,
 		jobs:        jobs,
-		llm:         llm,
+		llm:         llmClient,
 		provider:    provider,
 		logger:      logger,
 	}
