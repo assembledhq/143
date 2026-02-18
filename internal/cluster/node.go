@@ -4,18 +4,18 @@ import (
 	"context"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/assembledhq/143/internal/db"
 	"github.com/rs/zerolog"
 )
 
 type NodeManager struct {
-	pool   *pgxpool.Pool
+	pool   db.DBTX
 	logger zerolog.Logger
 	nodeID string
 	mode   string
 }
 
-func NewNodeManager(pool *pgxpool.Pool, logger zerolog.Logger, nodeID, mode string) *NodeManager {
+func NewNodeManager(pool db.DBTX, logger zerolog.Logger, nodeID, mode string) *NodeManager {
 	return &NodeManager{pool: pool, logger: logger, nodeID: nodeID, mode: mode}
 }
 

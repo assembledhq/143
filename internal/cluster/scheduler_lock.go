@@ -3,16 +3,16 @@ package cluster
 import (
 	"context"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/assembledhq/143/internal/db"
 )
 
 const schedulerLockID = 143143143
 
 type SchedulerLock struct {
-	pool *pgxpool.Pool
+	pool db.DBTX
 }
 
-func NewSchedulerLock(pool *pgxpool.Pool) *SchedulerLock {
+func NewSchedulerLock(pool db.DBTX) *SchedulerLock {
 	return &SchedulerLock{pool: pool}
 }
 
