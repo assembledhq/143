@@ -15,14 +15,17 @@ import (
 	"github.com/assembledhq/143/internal/services/agent"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
+	"github.com/assembledhq/143/internal/services/prioritization"
 	"github.com/assembledhq/143/internal/services/validation"
 )
 
 // RegisterHandlers registers all job handlers on the worker.
 func RegisterHandlers(w *Worker, stores *Stores, services *Services, logger zerolog.Logger) {
 	w.Register("ingest_webhook", newIngestWebhookHandler(stores, logger))
-	w.Register("prioritize", newPrioritizeHandler(stores, logger))
 	w.Register("sync_sentry", newSyncSentryHandler(stores, logger))
+	if services != nil && services.Prioritization != nil {
+		w.Register("prioritize", newPrioritizeHandler(stores, services, logger))
+	}
 	if hasServiceHandlersDependencies(services) {
 		w.Register("run_agent", newRunAgentHandler(stores, services, logger))
 		w.Register("validate", newValidateHandler(stores, services, logger))
@@ -44,11 +47,13 @@ func hasServiceHandlersDependencies(services *Services) bool {
 
 // Stores holds all the database stores needed by job handlers.
 type Stores struct {
-	Issues       *db.IssueStore
-	AgentRuns    *db.AgentRunStore
-	Jobs         *db.JobStore
-	Integrations *db.IntegrationStore
-	Webhooks     *db.WebhookDeliveryStore
+	Issues              *db.IssueStore
+	AgentRuns           *db.AgentRunStore
+	Jobs                *db.JobStore
+	Integrations        *db.IntegrationStore
+	Webhooks            *db.WebhookDeliveryStore
+	PriorityScores      *db.PriorityScoreStore
+	ComplexityEstimates *db.ComplexityEstimateStore
 }
 
 // Services holds the service dependencies needed by Phase 3 job handlers.
@@ -58,6 +63,7 @@ type Services struct {
 	PR              *ghservice.PRService
 	Failure         *agent.FailureService
 	SandboxProvider agent.SandboxProvider
+	Prioritization  *prioritization.Service
 }
 
 // ingest_webhook handler processes a webhook delivery asynchronously.
@@ -84,33 +90,45 @@ func newIngestWebhookHandler(stores *Stores, logger zerolog.Logger) JobHandler {
 }
 
 // prioritize handler recomputes priority scores for an issue.
-func newPrioritizeHandler(stores *Stores, logger zerolog.Logger) JobHandler {
+func newPrioritizeHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
 			IssueID string `json:"issue_id"`
+			OrgID   string `json:"org_id"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal prioritize payload: %w", err)
 		}
-
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
 		issueID, err := uuid.Parse(input.IssueID)
 		if err != nil {
 			return fmt.Errorf("parse issue ID: %w", err)
 		}
-
-		logger.Info().
-			Str("issue_id", issueID.String()).
-			Msg("computing priority score")
-
-		// In a full implementation, this would:
-		// 1. Fetch the issue
-		// 2. Compute customer_impact, severity, recency, revenue_risk sub-scores
-		// 3. Compute direction_alignment via LLM
-		// 4. Aggregate into composite score
-		// 5. Upsert into priority_scores table
-		// 6. Check eligibility and auto-trigger agent run if applicable
-
-		// For now, log that prioritization was requested.
+		// Compute priority score
+		score, err := services.Prioritization.ComputeScore(ctx, orgID, issueID)
+		if err != nil {
+			return fmt.Errorf("compute priority score: %w", err)
+		}
+		// Fetch issue for complexity estimation
+		issue, err := stores.Issues.GetByID(ctx, orgID, issueID)
+		if err != nil {
+			return fmt.Errorf("fetch issue: %w", err)
+		}
+		// Estimate complexity
+		estimate, err := services.Prioritization.EstimateComplexity(ctx, orgID, issueID, &issue)
+		if err != nil {
+			logger.Warn().Err(err).Str("issue_id", issueID.String()).Msg("complexity estimation failed, skipping auto-trigger")
+			return nil
+		}
+		// Check auto-trigger
+		if score.EligibleForAgent {
+			if err := services.Prioritization.CheckAutoTrigger(ctx, orgID, score, estimate, &issue); err != nil {
+				logger.Warn().Err(err).Str("issue_id", issueID.String()).Msg("auto-trigger check failed")
+			}
+		}
 		return nil
 	}
 }
@@ -296,7 +314,12 @@ func newValidateHandler(stores *Stores, services *Services, logger zerolog.Logge
 			}
 		}()
 
-		return services.Validation.Validate(ctx, &run, sandbox)
+		issue, err := stores.Issues.GetByID(ctx, orgID, run.IssueID)
+		if err != nil {
+			return fmt.Errorf("fetch issue for validation: %w", err)
+		}
+
+		return services.Validation.Validate(ctx, &run, &issue, sandbox)
 	}
 }
 

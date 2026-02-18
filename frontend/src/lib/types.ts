@@ -65,6 +65,10 @@ export interface Issue {
   severity: string;
   tags?: string[];
   fingerprint: string;
+  priority_score?: number;
+  priority_eligible?: boolean;
+  complexity_tier?: number;
+  complexity_label?: string;
   created_at: string;
   updated_at: string;
 }
@@ -158,6 +162,24 @@ export interface PullRequest {
   updated_at: string;
 }
 
+export interface OrgSettings {
+  autonomy_level?: 'manual' | 'auto_simple' | 'auto_all';
+  execution_aggressiveness?: number;
+  max_concurrent_runs?: number;
+  confidence_thresholds?: {
+    auto_proceed?: number;
+    human_review?: number;
+  };
+  priority_weights?: {
+    customer_impact?: number;
+    severity?: number;
+    recency?: number;
+    revenue_risk?: number;
+  };
+  min_priority_threshold?: number;
+  product_direction?: string;
+}
+
 export interface ListResponse<T> {
   data: T[];
   meta: {
@@ -175,4 +197,35 @@ export interface ErrorResponse {
     message: string;
     details?: unknown;
   };
+}
+
+export interface PriorityScore {
+  id: string;
+  issue_id: string;
+  org_id: string;
+  score: number;
+  customer_impact_score: number;
+  severity_score: number;
+  recency_score: number;
+  revenue_risk_score: number;
+  direction_alignment: number;
+  factors?: Record<string, unknown>;
+  eligible_for_agent: boolean;
+  computed_at: string;
+}
+
+export interface ComplexityEstimate {
+  id: string;
+  issue_id: string;
+  org_id: string;
+  tier: number;
+  label: string;
+  confidence: number;
+  issue_type?: string;
+  reasoning?: string;
+  estimated_files?: string[];
+  estimated_tokens?: number;
+  model_used?: string;
+  computed_at: string;
+  created_at: string;
 }

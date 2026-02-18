@@ -26,6 +26,7 @@ func (h *IssueHandler) List(w http.ResponseWriter, r *http.Request) {
 		Status:   r.URL.Query().Get("status"),
 		Source:   r.URL.Query().Get("source"),
 		Severity: r.URL.Query().Get("severity"),
+		Sort:     r.URL.Query().Get("sort"),
 		Limit:    limit,
 		Cursor:   r.URL.Query().Get("cursor"),
 	}
