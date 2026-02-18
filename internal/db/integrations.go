@@ -70,10 +70,11 @@ func (s *IntegrationStore) GetByID(ctx context.Context, id uuid.UUID) (models.In
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Integration])
 }
 
-func (s *IntegrationStore) UpdateStatus(ctx context.Context, id uuid.UUID, status string) error {
-	query := `UPDATE integrations SET status = @status WHERE id = @id`
+func (s *IntegrationStore) UpdateStatus(ctx context.Context, orgID, id uuid.UUID, status string) error {
+	query := `UPDATE integrations SET status = @status WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     id,
+		"org_id": orgID,
 		"status": status,
 	})
 	return err
