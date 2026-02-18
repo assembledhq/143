@@ -149,6 +149,7 @@ func TestAuth(t *testing.T) {
 		setupRequest func(req *http.Request) *http.Request
 		expectedCode int
 		checkContext func(t *testing.T, r *http.Request)
+		checkResponse func(t *testing.T, w *httptest.ResponseRecorder)
 	}{
 		{
 			name: "authenticates valid session cookie and sets user in context",
@@ -193,6 +194,7 @@ func TestAuth(t *testing.T) {
 				require.Equal(t, uuid.MustParse("aaaaaaaa-0000-0000-0000-000000000002"), user.ID, "should set correct user ID in context")
 				require.Equal(t, uuid.MustParse("aaaaaaaa-0000-0000-0000-000000000003"), user.OrgID, "should set correct org ID in context")
 			},
+			checkResponse: nil,
 		},
 		{
 			name: "authenticates valid bearer token and sets user in context",
@@ -236,6 +238,7 @@ func TestAuth(t *testing.T) {
 				require.NotNil(t, user, "should set user in request context")
 				require.Equal(t, uuid.MustParse("bbbbbbbb-0000-0000-0000-000000000002"), user.ID, "should set correct user ID in context")
 			},
+			checkResponse: nil,
 		},
 		{
 			name:      "returns 401 when no cookie and no authorization header present",
@@ -245,9 +248,10 @@ func TestAuth(t *testing.T) {
 			},
 			expectedCode: http.StatusUnauthorized,
 			checkContext: nil,
+			checkResponse: nil,
 		},
 		{
-			name: "returns 401 when session token is invalid",
+			name: "returns 401 and clears cookie when session cookie is invalid",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				sessionRows := pgxmock.NewRows([]string{"id", "user_id", "org_id", "token", "expires_at", "created_at"})
 				mock.ExpectQuery("SELECT .+ FROM sessions").
@@ -260,6 +264,21 @@ func TestAuth(t *testing.T) {
 			},
 			expectedCode: http.StatusUnauthorized,
 			checkContext: nil,
+			checkResponse: func(t *testing.T, w *httptest.ResponseRecorder) {
+				t.Helper()
+				resp := w.Result()
+				defer resp.Body.Close()
+				foundClearedCookie := false
+				for _, c := range resp.Cookies() {
+					if c.Name == "session_token" {
+						foundClearedCookie = true
+						require.Equal(t, "", c.Value, "session cookie should be cleared when token is invalid")
+						require.Equal(t, -1, c.MaxAge, "session cookie MaxAge should invalidate cookie immediately")
+						require.Equal(t, "/", c.Path, "session cookie should keep path when clearing")
+					}
+				}
+				require.True(t, foundClearedCookie, "response should clear session cookie when session is invalid")
+			},
 		},
 		{
 			name: "returns 401 when session is valid but user not found",
@@ -289,6 +308,7 @@ func TestAuth(t *testing.T) {
 			},
 			expectedCode: http.StatusUnauthorized,
 			checkContext: nil,
+			checkResponse: nil,
 		},
 	}
 
@@ -325,6 +345,9 @@ func TestAuth(t *testing.T) {
 				require.True(t, nextCalled, "should call next handler for successful auth")
 			} else {
 				require.False(t, nextCalled, "should not call next handler for failed auth")
+			}
+			if tt.checkResponse != nil {
+				tt.checkResponse(t, w)
 			}
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})

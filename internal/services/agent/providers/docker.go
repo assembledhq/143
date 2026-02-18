@@ -9,10 +9,10 @@ import (
 	"io"
 	"strings"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/stdcopy"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/rs/zerolog"
@@ -29,8 +29,8 @@ type DockerClient interface {
 	ContainerStart(ctx context.Context, containerID string, options container.StartOptions) error
 	ContainerStop(ctx context.Context, containerID string, options container.StopOptions) error
 	ContainerRemove(ctx context.Context, containerID string, options container.RemoveOptions) error
-	ContainerInspect(ctx context.Context, containerID string) (types.ContainerJSON, error)
-	ContainerExecCreate(ctx context.Context, containerID string, config container.ExecOptions) (types.IDResponse, error)
+	ContainerInspect(ctx context.Context, containerID string) (container.InspectResponse, error)
+	ContainerExecCreate(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error)
 	ContainerExecAttach(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error)
 	ContainerExecInspect(ctx context.Context, execID string) (container.ExecInspect, error)
 }
@@ -258,13 +258,13 @@ func (d *DockerProvider) Destroy(ctx context.Context, sb *agent.Sandbox) error {
 	// Stop the container with a short timeout
 	stopTimeout := 10 // seconds
 	err := d.client.ContainerStop(ctx, sb.ID, container.StopOptions{Timeout: &stopTimeout})
-	if err != nil && !errdefs.IsNotFound(err) {
+	if err != nil && !cerrdefs.IsNotFound(err) {
 		d.logger.Warn().Err(err).Str("container_id", sb.ID).Msg("failed to stop container, forcing removal")
 	}
 
 	// Remove the container
 	err = d.client.ContainerRemove(ctx, sb.ID, container.RemoveOptions{Force: true})
-	if err != nil && !errdefs.IsNotFound(err) {
+	if err != nil && !cerrdefs.IsNotFound(err) {
 		return fmt.Errorf("remove container %s: %w", sb.ID, err)
 	}
 

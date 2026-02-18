@@ -48,23 +48,29 @@ func Auth(sessionStore *db.SessionStore, userStore *db.UserStore) func(http.Hand
 					return
 				}
 				token := strings.TrimPrefix(auth, "Bearer ")
-				handleToken(w, r, next, sessionStore, userStore, token)
+				handleToken(w, r, next, sessionStore, userStore, token, false)
 				return
 			}
-			handleToken(w, r, next, sessionStore, userStore, cookie.Value)
+			handleToken(w, r, next, sessionStore, userStore, cookie.Value, true)
 		})
 	}
 }
 
-func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, sessionStore *db.SessionStore, userStore *db.UserStore, token string) {
+func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, sessionStore *db.SessionStore, userStore *db.UserStore, token string, clearCookieOnFailure bool) {
 	session, err := sessionStore.GetByToken(r.Context(), token)
 	if err != nil {
+		if clearCookieOnFailure {
+			clearSessionCookie(w)
+		}
 		http.Error(w, `{"error":{"code":"UNAUTHORIZED","message":"invalid session"}}`, http.StatusUnauthorized)
 		return
 	}
 
 	user, err := userStore.GetByID(r.Context(), session.OrgID, session.UserID)
 	if err != nil {
+		if clearCookieOnFailure {
+			clearSessionCookie(w)
+		}
 		http.Error(w, `{"error":{"code":"UNAUTHORIZED","message":"user not found"}}`, http.StatusUnauthorized)
 		return
 	}
@@ -72,4 +78,15 @@ func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, sess
 	ctx := WithUser(r.Context(), &user)
 	ctx = WithOrgID(ctx, user.OrgID)
 	next.ServeHTTP(w, r.WithContext(ctx))
+}
+
+func clearSessionCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session_token",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
 }

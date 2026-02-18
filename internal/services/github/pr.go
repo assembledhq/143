@@ -659,10 +659,6 @@ func parseDiff(diff string) []diffFile {
 			continue
 		}
 		if strings.HasPrefix(line, "--- ") {
-			// Check for deletion (new file is /dev/null).
-			if strings.HasPrefix(line, "--- a/") && currentPath == "" {
-				// Will be set by the +++ line.
-			}
 			continue
 		}
 		if strings.HasPrefix(line, "deleted file mode") {

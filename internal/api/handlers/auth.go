@@ -165,7 +165,10 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	cookie, err := r.Cookie("session_token")
 	if err == nil {
-		h.sessionStore.DeleteByToken(r.Context(), cookie.Value)
+		if deleteErr := h.sessionStore.DeleteByToken(r.Context(), cookie.Value); deleteErr != nil {
+			writeError(w, http.StatusInternalServerError, "SESSION_DELETE_FAILED", "failed to delete session")
+			return
+		}
 	}
 
 	http.SetCookie(w, &http.Cookie{

@@ -166,7 +166,10 @@ func (h *WebhookHandler) handleInstallation(w http.ResponseWriter, r *http.Reque
 				Status:         "active",
 				Settings:       json.RawMessage(`{}`),
 			}
-			h.repoStore.UpsertFromGitHub(ctx, repo)
+			if err := h.repoStore.UpsertFromGitHub(ctx, repo); err != nil {
+				writeError(w, http.StatusInternalServerError, "REPOSITORY_UPSERT_FAILED", "failed to upsert repository")
+				return
+			}
 		}
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "installation created"})
@@ -205,7 +208,10 @@ func (h *WebhookHandler) handleInstallationRepositories(w http.ResponseWriter, r
 			Status:         "active",
 			Settings:       json.RawMessage(`{}`),
 		}
-		h.repoStore.UpsertFromGitHub(ctx, repo)
+		if err := h.repoStore.UpsertFromGitHub(ctx, repo); err != nil {
+			writeError(w, http.StatusInternalServerError, "REPOSITORY_UPSERT_FAILED", "failed to upsert repository")
+			return
+		}
 	}
 
 	// For removed repos, mark as disconnected

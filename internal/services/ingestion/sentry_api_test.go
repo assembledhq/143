@@ -34,7 +34,7 @@ func TestSentryAPIClient_FetchIssues(t *testing.T) {
 				require.Equal(t, "date", r.URL.Query().Get("sort"), "should sort by date")
 
 				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode([]SentryIssue{
+				err := json.NewEncoder(w).Encode([]SentryIssue{
 					{
 						ID:        "100",
 						Title:     "TypeError in handler",
@@ -43,7 +43,7 @@ func TestSentryAPIClient_FetchIssues(t *testing.T) {
 						UserCount: 3,
 						FirstSeen: "2024-01-15T10:00:00Z",
 						LastSeen:  "2024-01-15T12:00:00Z",
-						Metadata:  struct {
+						Metadata: struct {
 							Type  string `json:"type"`
 							Value string `json:"value"`
 						}{Type: "TypeError", Value: "undefined is not a function"},
@@ -54,6 +54,7 @@ func TestSentryAPIClient_FetchIssues(t *testing.T) {
 						}{ID: "1", Name: "api", Slug: "api"},
 					},
 				})
+				require.NoError(t, err, "should encode single-page sentry issues response")
 			},
 			expected: []NormalizedIssue{
 				{
@@ -83,7 +84,7 @@ func TestSentryAPIClient_FetchIssues(t *testing.T) {
 						// First page - include Link header pointing to next page
 						nextURL := fmt.Sprintf("http://%s%s?cursor=page2", r.Host, r.URL.Path)
 						w.Header().Set("Link", fmt.Sprintf(`<%s>; rel="next"; results="true"; cursor="page2"`, nextURL))
-						json.NewEncoder(w).Encode([]SentryIssue{
+						err := json.NewEncoder(w).Encode([]SentryIssue{
 							{
 								ID: "200", Title: "Error 1", Level: "error",
 								Count: "1", UserCount: 1,
@@ -99,9 +100,10 @@ func TestSentryAPIClient_FetchIssues(t *testing.T) {
 								}{Slug: "app"},
 							},
 						})
+						require.NoError(t, err, "should encode first paginated sentry response")
 					} else {
 						// Second page - no next link
-						json.NewEncoder(w).Encode([]SentryIssue{
+						err := json.NewEncoder(w).Encode([]SentryIssue{
 							{
 								ID: "201", Title: "Error 2", Level: "warning",
 								Count: "2", UserCount: 0,
@@ -117,33 +119,34 @@ func TestSentryAPIClient_FetchIssues(t *testing.T) {
 								}{Slug: "app"},
 							},
 						})
+						require.NoError(t, err, "should encode second paginated sentry response")
 					}
 				}
 			}(),
 			expected: []NormalizedIssue{
 				{
-					ExternalID:      "200",
-					Source:           "sentry",
-					Title:           "Error 1",
-					Description:     "Error 1",
-					Severity:        "high",
-					OccurrenceCount: 1,
+					ExternalID:            "200",
+					Source:                "sentry",
+					Title:                 "Error 1",
+					Description:           "Error 1",
+					Severity:              "high",
+					OccurrenceCount:       1,
 					AffectedCustomerCount: 1,
-					Tags:            []string{"project:app"},
-					FirstSeenAt:     time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC),
-					LastSeenAt:      time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC),
+					Tags:                  []string{"project:app"},
+					FirstSeenAt:           time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC),
+					LastSeenAt:            time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC),
 				},
 				{
-					ExternalID:      "201",
-					Source:           "sentry",
-					Title:           "Error 2",
-					Description:     "Error 2",
-					Severity:        "medium",
-					OccurrenceCount: 2,
+					ExternalID:            "201",
+					Source:                "sentry",
+					Title:                 "Error 2",
+					Description:           "Error 2",
+					Severity:              "medium",
+					OccurrenceCount:       2,
 					AffectedCustomerCount: 0,
-					Tags:            []string{"project:app"},
-					FirstSeenAt:     time.Date(2024, 1, 15, 11, 0, 0, 0, time.UTC),
-					LastSeenAt:      time.Date(2024, 1, 15, 11, 0, 0, 0, time.UTC),
+					Tags:                  []string{"project:app"},
+					FirstSeenAt:           time.Date(2024, 1, 15, 11, 0, 0, 0, time.UTC),
+					LastSeenAt:            time.Date(2024, 1, 15, 11, 0, 0, 0, time.UTC),
 				},
 			},
 		},
@@ -152,7 +155,8 @@ func TestSentryAPIClient_FetchIssues(t *testing.T) {
 			since: time.Date(2024, 1, 15, 0, 0, 0, 0, time.UTC),
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode([]SentryIssue{})
+				err := json.NewEncoder(w).Encode([]SentryIssue{})
+				require.NoError(t, err, "should encode empty sentry issues response")
 			},
 			expected: []NormalizedIssue{},
 		},
@@ -161,7 +165,8 @@ func TestSentryAPIClient_FetchIssues(t *testing.T) {
 			since: time.Date(2024, 1, 15, 0, 0, 0, 0, time.UTC),
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusInternalServerError)
-				w.Write([]byte(`{"detail":"internal error"}`))
+				_, err := w.Write([]byte(`{"detail":"internal error"}`))
+				require.NoError(t, err, "should write sentry error response body")
 			},
 			expectErr:   true,
 			errContains: "unexpected status 500",
@@ -171,7 +176,8 @@ func TestSentryAPIClient_FetchIssues(t *testing.T) {
 			since: time.Date(2024, 1, 15, 0, 0, 0, 0, time.UTC),
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				w.Write([]byte(`not json`))
+				_, err := w.Write([]byte(`not json`))
+				require.NoError(t, err, "should write invalid JSON response body")
 			},
 			expectErr:   true,
 			errContains: "decode sentry issues",
@@ -189,7 +195,7 @@ func TestSentryAPIClient_FetchIssues(t *testing.T) {
 						return
 					}
 					w.Header().Set("Content-Type", "application/json")
-					json.NewEncoder(w).Encode([]SentryIssue{
+					err := json.NewEncoder(w).Encode([]SentryIssue{
 						{
 							ID: "300", Title: "After rate limit", Level: "error",
 							Count: "1", UserCount: 0,
@@ -205,20 +211,21 @@ func TestSentryAPIClient_FetchIssues(t *testing.T) {
 							}{Slug: "app"},
 						},
 					})
+					require.NoError(t, err, "should encode sentry issues after rate limit retry")
 				}
 			}(),
 			expected: []NormalizedIssue{
 				{
-					ExternalID:      "300",
-					Source:           "sentry",
-					Title:           "After rate limit",
-					Description:     "After rate limit",
-					Severity:        "high",
-					OccurrenceCount: 1,
+					ExternalID:            "300",
+					Source:                "sentry",
+					Title:                 "After rate limit",
+					Description:           "After rate limit",
+					Severity:              "high",
+					OccurrenceCount:       1,
 					AffectedCustomerCount: 0,
-					Tags:            []string{"project:app"},
-					FirstSeenAt:     time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC),
-					LastSeenAt:      time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC),
+					Tags:                  []string{"project:app"},
+					FirstSeenAt:           time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC),
+					LastSeenAt:            time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC),
 				},
 			},
 		},

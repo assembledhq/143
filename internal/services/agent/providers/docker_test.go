@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/errdefs"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -27,8 +27,8 @@ type mockDockerClient struct {
 	containerStartFn       func(ctx context.Context, containerID string, options container.StartOptions) error
 	containerStopFn        func(ctx context.Context, containerID string, options container.StopOptions) error
 	containerRemoveFn      func(ctx context.Context, containerID string, options container.RemoveOptions) error
-	containerInspectFn     func(ctx context.Context, containerID string) (types.ContainerJSON, error)
-	containerExecCreateFn  func(ctx context.Context, containerID string, config container.ExecOptions) (types.IDResponse, error)
+	containerInspectFn     func(ctx context.Context, containerID string) (container.InspectResponse, error)
+	containerExecCreateFn  func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error)
 	containerExecAttachFn  func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error)
 	containerExecInspectFn func(ctx context.Context, execID string) (container.ExecInspect, error)
 }
@@ -61,12 +61,12 @@ func (m *mockDockerClient) ContainerRemove(ctx context.Context, containerID stri
 	return nil
 }
 
-func (m *mockDockerClient) ContainerInspect(ctx context.Context, containerID string) (types.ContainerJSON, error) {
+func (m *mockDockerClient) ContainerInspect(ctx context.Context, containerID string) (container.InspectResponse, error) {
 	if m.containerInspectFn != nil {
 		return m.containerInspectFn(ctx, containerID)
 	}
-	return types.ContainerJSON{
-		ContainerJSONBase: &types.ContainerJSONBase{
+	return container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
 			HostConfig: &container.HostConfig{
 				NetworkMode: "143-sandbox",
 			},
@@ -74,11 +74,11 @@ func (m *mockDockerClient) ContainerInspect(ctx context.Context, containerID str
 	}, nil
 }
 
-func (m *mockDockerClient) ContainerExecCreate(ctx context.Context, containerID string, config container.ExecOptions) (types.IDResponse, error) {
+func (m *mockDockerClient) ContainerExecCreate(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
 	if m.containerExecCreateFn != nil {
 		return m.containerExecCreateFn(ctx, containerID, config)
 	}
-	return types.IDResponse{ID: "test-exec-id"}, nil
+	return container.ExecCreateResponse{ID: "test-exec-id"}, nil
 }
 
 func (m *mockDockerClient) ContainerExecAttach(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
@@ -254,10 +254,10 @@ func TestDockerProvider_Destroy(t *testing.T) {
 
 		mock := &mockDockerClient{}
 		mock.containerStopFn = func(ctx context.Context, containerID string, options container.StopOptions) error {
-			return errdefs.NotFound(fmt.Errorf("container not found"))
+			return fmt.Errorf("container not found: %w", cerrdefs.ErrNotFound)
 		}
 		mock.containerRemoveFn = func(ctx context.Context, containerID string, options container.RemoveOptions) error {
-			return errdefs.NotFound(fmt.Errorf("container not found"))
+			return fmt.Errorf("container not found: %w", cerrdefs.ErrNotFound)
 		}
 		p := NewDockerProvider(mock, newTestLogger())
 		sb := &agent.Sandbox{ID: "test-container", Provider: "docker", WorkDir: "/workspace"}
@@ -292,11 +292,11 @@ func TestDockerProvider_Exec(t *testing.T) {
 		var capturedAttachStdout, capturedAttachStderr bool
 
 		mock := &mockDockerClient{}
-		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (types.IDResponse, error) {
+		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
 			capturedCmd = config.Cmd
 			capturedAttachStdout = config.AttachStdout
 			capturedAttachStderr = config.AttachStderr
-			return types.IDResponse{ID: "exec-1"}, nil
+			return container.ExecCreateResponse{ID: "exec-1"}, nil
 		}
 		mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
 			return newMockHijackedResponse(""), nil
@@ -336,8 +336,8 @@ func TestDockerProvider_Exec(t *testing.T) {
 		t.Parallel()
 
 		mock := &mockDockerClient{}
-		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (types.IDResponse, error) {
-			return types.IDResponse{}, fmt.Errorf("container not running")
+		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+			return container.ExecCreateResponse{}, fmt.Errorf("container not running")
 		}
 		p := NewDockerProvider(mock, newTestLogger())
 		sb := &agent.Sandbox{ID: "test-container", Provider: "docker", WorkDir: "/workspace"}
@@ -378,9 +378,9 @@ func TestDockerProvider_ConnectionInfo(t *testing.T) {
 		{
 			name: "returns connection info",
 			setupMock: func(m *mockDockerClient) {
-				m.containerInspectFn = func(ctx context.Context, containerID string) (types.ContainerJSON, error) {
-					return types.ContainerJSON{
-						ContainerJSONBase: &types.ContainerJSONBase{
+				m.containerInspectFn = func(ctx context.Context, containerID string) (container.InspectResponse, error) {
+					return container.InspectResponse{
+						ContainerJSONBase: &container.ContainerJSONBase{
 							HostConfig: &container.HostConfig{
 								NetworkMode: "143-sandbox",
 							},
@@ -398,8 +398,8 @@ func TestDockerProvider_ConnectionInfo(t *testing.T) {
 		{
 			name: "returns error when inspect fails",
 			setupMock: func(m *mockDockerClient) {
-				m.containerInspectFn = func(ctx context.Context, containerID string) (types.ContainerJSON, error) {
-					return types.ContainerJSON{}, fmt.Errorf("container not found")
+				m.containerInspectFn = func(ctx context.Context, containerID string) (container.InspectResponse, error) {
+					return container.InspectResponse{}, fmt.Errorf("container not found")
 				}
 			},
 			expectErr:   true,
@@ -446,8 +446,8 @@ func TestDockerProvider_ReadFile(t *testing.T) {
 			name: "returns error when exec fails",
 			path: "/workspace/test.txt",
 			setupMock: func(m *mockDockerClient) {
-				m.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (types.IDResponse, error) {
-					return types.IDResponse{}, fmt.Errorf("container not running")
+				m.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+					return container.ExecCreateResponse{}, fmt.Errorf("container not running")
 				}
 			},
 			expectErr:   true,
@@ -504,8 +504,8 @@ func TestDockerProvider_WriteFile(t *testing.T) {
 			path: "/workspace/test.txt",
 			data: []byte("hello world"),
 			setupMock: func(m *mockDockerClient) {
-				m.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (types.IDResponse, error) {
-					return types.IDResponse{}, fmt.Errorf("container not running")
+				m.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+					return container.ExecCreateResponse{}, fmt.Errorf("container not running")
 				}
 			},
 			expectErr:   true,
@@ -620,9 +620,9 @@ func TestDockerProvider_CloneRepo(t *testing.T) {
 		var capturedCmd string
 
 		mock := &mockDockerClient{}
-		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (types.IDResponse, error) {
+		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
 			capturedCmd = strings.Join(config.Cmd, " ")
-			return types.IDResponse{ID: "exec-clone"}, nil
+			return container.ExecCreateResponse{ID: "exec-clone"}, nil
 		}
 		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
 			return container.ExecInspect{ExitCode: 0}, nil
@@ -644,9 +644,9 @@ func TestDockerProvider_CloneRepo(t *testing.T) {
 		var capturedCmd string
 
 		mock := &mockDockerClient{}
-		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (types.IDResponse, error) {
+		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
 			capturedCmd = strings.Join(config.Cmd, " ")
-			return types.IDResponse{ID: "exec-clone"}, nil
+			return container.ExecCreateResponse{ID: "exec-clone"}, nil
 		}
 		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
 			return container.ExecInspect{ExitCode: 0}, nil

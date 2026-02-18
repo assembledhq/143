@@ -72,11 +72,11 @@ func TestFormatBranchName(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		runID   uuid.UUID
-		title   string
-		expect  string
-		maxLen  bool // if true, verify length constraints
+		name   string
+		runID  uuid.UUID
+		title  string
+		expect string
+		maxLen bool // if true, verify length constraints
 	}{
 		{
 			name:   "basic branch name",
@@ -564,7 +564,8 @@ func TestDoGitHubRequest_ErrorResponse(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(`{"message":"Not Found"}`))
+		_, err := w.Write([]byte(`{"message":"Not Found"}`))
+		require.NoError(t, err, "test server should write not found response body")
 	}))
 	defer server.Close()
 
@@ -588,7 +589,8 @@ func TestDoGitHubRequest_SetsHeaders(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedAuth = r.Header.Get("Authorization")
 		capturedAccept = r.Header.Get("Accept")
-		w.Write([]byte(`{}`))
+		_, err := w.Write([]byte(`{}`))
+		require.NoError(t, err, "test server should write empty JSON response body")
 	}))
 	defer server.Close()
 

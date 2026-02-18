@@ -66,7 +66,9 @@ func main() {
 		cancel() // stop worker
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutdownCancel()
-		srv.Shutdown(shutdownCtx)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			logger.Error().Err(err).Msg("server shutdown failed")
+		}
 	}()
 
 	logger.Info().Int("port", cfg.Port).Str("mode", cfg.Mode).Msg("starting server")
