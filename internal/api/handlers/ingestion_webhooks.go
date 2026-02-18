@@ -102,7 +102,6 @@ func (h *IngestionWebhookHandler) handleProvider(w http.ResponseWriter, r *http.
 	if normalized == nil {
 		// Non-actionable event (e.g., resolved, comment)
 		_ = h.webhookStore.MarkProcessed(r.Context(), delivery, nil)
-		w.WriteHeader(http.StatusOK)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored"})
 		return
 	}
@@ -117,6 +116,5 @@ func (h *IngestionWebhookHandler) handleProvider(w http.ResponseWriter, r *http.
 	}
 
 	_ = h.webhookStore.MarkProcessed(r.Context(), delivery, nil)
-	w.WriteHeader(http.StatusOK)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
 }

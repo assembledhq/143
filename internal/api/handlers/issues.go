@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"net/http"
-	"strconv"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
@@ -22,7 +21,7 @@ func NewIssueHandler(issueStore *db.IssueStore) *IssueHandler {
 func (h *IssueHandler) List(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	limit := queryInt(r, "limit", 50)
 	filters := db.IssueFilters{
 		Status:   r.URL.Query().Get("status"),
 		Source:   r.URL.Query().Get("source"),

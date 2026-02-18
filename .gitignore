@@ -30,6 +30,10 @@ go.work.sum
 # air live reload
 tmp/
 
+# Build output
+bin/
+coverage.html
+
 # Editor/IDE
 # .idea/
 # .vscode/

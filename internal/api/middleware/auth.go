@@ -44,7 +44,7 @@ func Auth(sessionStore *db.SessionStore, userStore *db.UserStore) func(http.Hand
 				// Also check Authorization header for API access
 				auth := r.Header.Get("Authorization")
 				if auth == "" || !strings.HasPrefix(auth, "Bearer ") {
-					http.Error(w, `{"error":{"code":"UNAUTHORIZED","message":"missing session"}}`, http.StatusUnauthorized)
+					writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "missing session")
 					return
 				}
 				token := strings.TrimPrefix(auth, "Bearer ")
@@ -62,7 +62,7 @@ func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, sess
 		if clearCookieOnFailure {
 			clearSessionCookie(w)
 		}
-		http.Error(w, `{"error":{"code":"UNAUTHORIZED","message":"invalid session"}}`, http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid session")
 		return
 	}
 
@@ -71,7 +71,7 @@ func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, sess
 		if clearCookieOnFailure {
 			clearSessionCookie(w)
 		}
-		http.Error(w, `{"error":{"code":"UNAUTHORIZED","message":"user not found"}}`, http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "user not found")
 		return
 	}
 

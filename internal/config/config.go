@@ -33,8 +33,19 @@ type Config struct {
 }
 
 func Load() *Config {
-	port, _ := strconv.Atoi(getEnv("PORT", "8080"))
-	appID, _ := strconv.ParseInt(getEnv("GITHUB_APP_ID", "0"), 10, 64)
+	port := 8080
+	if v := os.Getenv("PORT"); v != "" {
+		if p, err := strconv.Atoi(v); err == nil {
+			port = p
+		}
+	}
+
+	var appID int64
+	if v := os.Getenv("GITHUB_APP_ID"); v != "" {
+		if id, err := strconv.ParseInt(v, 10, 64); err == nil {
+			appID = id
+		}
+	}
 
 	return &Config{
 		DatabaseURL:             getEnv("DATABASE_URL", "postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable"),

@@ -1,4 +1,8 @@
-.PHONY: dev setup test test-coverage migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint
+.PHONY: dev setup test test-coverage migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap
+
+GOLANGCI_LINT_VERSION ?= v1.64.8
+GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
+GO_TOOLCHAIN_VERSION := $(shell go env GOVERSION)
 
 dev:
 	@FRONTEND_PORT=$${FRONTEND_PORT:-3000}; \
@@ -48,4 +52,9 @@ server-dev:
 	go run cmd/server/main.go
 
 lint:
-	golangci-lint run ./...
+	@$(MAKE) lint-bootstrap
+	$(GOLANGCI_LINT_BIN) run ./...
+
+lint-bootstrap:
+	@mkdir -p $(CURDIR)/bin
+	GOTOOLCHAIN=$(GO_TOOLCHAIN_VERSION) GOBIN=$(CURDIR)/bin go install github.com/golangci/golangci-lint/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)

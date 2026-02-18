@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
@@ -47,7 +46,7 @@ func NewRunHandler(
 func (h *RunHandler) List(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	limit := queryInt(r, "limit", 50)
 	filters := db.AgentRunFilters{
 		Status: r.URL.Query().Get("status"),
 		Limit:  limit,

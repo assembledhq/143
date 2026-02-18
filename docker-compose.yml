@@ -14,6 +14,11 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
 
   server:
     image: golang:1.26
@@ -39,6 +44,11 @@ services:
       - .:/app
       - go_mod_cache:/go/pkg/mod
       - go_build_cache:/root/.cache/go-build
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "2.0"
 
   frontend:
     image: node:22-alpine

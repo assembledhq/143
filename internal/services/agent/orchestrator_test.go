@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"sync"
 	"testing"
 	"time"
@@ -15,66 +14,10 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
+	"github.com/assembledhq/143/internal/testutil"
 )
 
 // --- Mock implementations ---
-
-// mockSandboxProvider implements agent.SandboxProvider.
-type mockSandboxProvider struct {
-	createFn     func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error)
-	cloneRepoFn  func(ctx context.Context, sb *agent.Sandbox, repoURL, branch, token string) error
-	destroyFn    func(ctx context.Context, sb *agent.Sandbox) error
-	destroyCalls int
-	mu           sync.Mutex
-}
-
-func (m *mockSandboxProvider) Name() string { return "mock" }
-
-func (m *mockSandboxProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
-	if m.createFn != nil {
-		return m.createFn(ctx, cfg)
-	}
-	return &agent.Sandbox{ID: "sandbox-1", Provider: "mock", WorkDir: "/workspace"}, nil
-}
-
-func (m *mockSandboxProvider) CloneRepo(ctx context.Context, sb *agent.Sandbox, repoURL, branch, token string) error {
-	if m.cloneRepoFn != nil {
-		return m.cloneRepoFn(ctx, sb, repoURL, branch, token)
-	}
-	return nil
-}
-
-func (m *mockSandboxProvider) Exec(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-	return 0, nil
-}
-
-func (m *mockSandboxProvider) ReadFile(ctx context.Context, sb *agent.Sandbox, path string) ([]byte, error) {
-	return nil, nil
-}
-
-func (m *mockSandboxProvider) WriteFile(ctx context.Context, sb *agent.Sandbox, path string, data []byte) error {
-	return nil
-}
-
-func (m *mockSandboxProvider) Destroy(ctx context.Context, sb *agent.Sandbox) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.destroyCalls++
-	if m.destroyFn != nil {
-		return m.destroyFn(ctx, sb)
-	}
-	return nil
-}
-
-func (m *mockSandboxProvider) ConnectionInfo(ctx context.Context, sb *agent.Sandbox) (*agent.SandboxConnectionInfo, error) {
-	return &agent.SandboxConnectionInfo{}, nil
-}
-
-func (m *mockSandboxProvider) getDestroyCalls() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.destroyCalls
-}
 
 // mockAgentAdapter implements agent.AgentAdapter.
 type mockAgentAdapter struct {

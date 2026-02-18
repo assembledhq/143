@@ -16,66 +16,12 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
+	"github.com/assembledhq/143/internal/testutil"
 )
 
-// mockSandboxProvider implements agent.SandboxProvider for testing.
-type mockSandboxProvider struct {
-	name       string
-	execFunc   func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error)
-	writeFunc  func(ctx context.Context, sb *agent.Sandbox, path string, data []byte) error
-	readFunc   func(ctx context.Context, sb *agent.Sandbox, path string) ([]byte, error)
-	files      map[string][]byte
-}
-
-func newMockProvider() *mockSandboxProvider {
-	return &mockSandboxProvider{
-		name:  "mock",
-		files: make(map[string][]byte),
-	}
-}
-
-func (m *mockSandboxProvider) Name() string { return m.name }
-
-func (m *mockSandboxProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
-	return &agent.Sandbox{ID: "test-sandbox", Provider: m.name, WorkDir: "/workspace"}, nil
-}
-
-func (m *mockSandboxProvider) CloneRepo(ctx context.Context, sb *agent.Sandbox, repoURL, branch, token string) error {
-	return nil
-}
-
-func (m *mockSandboxProvider) Exec(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-	if m.execFunc != nil {
-		return m.execFunc(ctx, sb, cmd, stdout, stderr)
-	}
-	return 0, nil
-}
-
-func (m *mockSandboxProvider) ReadFile(ctx context.Context, sb *agent.Sandbox, path string) ([]byte, error) {
-	if m.readFunc != nil {
-		return m.readFunc(ctx, sb, path)
-	}
-	data, ok := m.files[path]
-	if !ok {
-		return nil, fmt.Errorf("file not found: %s", path)
-	}
-	return data, nil
-}
-
-func (m *mockSandboxProvider) WriteFile(ctx context.Context, sb *agent.Sandbox, path string, data []byte) error {
-	if m.writeFunc != nil {
-		return m.writeFunc(ctx, sb, path, data)
-	}
-	m.files[path] = data
-	return nil
-}
-
-func (m *mockSandboxProvider) Destroy(ctx context.Context, sb *agent.Sandbox) error {
-	return nil
-}
-
-func (m *mockSandboxProvider) ConnectionInfo(ctx context.Context, sb *agent.Sandbox) (*agent.SandboxConnectionInfo, error) {
-	return &agent.SandboxConnectionInfo{Provider: m.name, SandboxID: sb.ID}, nil
+// newMockProvider creates a shared MockSandboxProvider from testutil.
+func newMockProvider() *testutil.MockSandboxProvider {
+	return testutil.NewMockSandboxProvider()
 }
 
 func newTestIssue(source string, withDescription bool) *models.Issue {
@@ -450,7 +396,7 @@ Processing complete.
 
 			provider := newMockProvider()
 			callCount := 0
-			provider.execFunc = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+			provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 				callCount++
 				if strings.HasPrefix(cmd, "claude") {
 					_, _ = stdout.Write([]byte(tt.claudeOutput))
@@ -496,7 +442,7 @@ Processing complete.
 			tt.checkResult(t, result, logs)
 
 			// Verify prompt file was written.
-			promptData, exists := provider.files["/workspace/.143-prompt.md"]
+			promptData, exists := provider.Files["/workspace/.143-prompt.md"]
 			require.True(t, exists, "prompt file should have been written")
 			require.Contains(t, string(promptData), "Fix the bug.", "prompt file should contain system prompt")
 		})
@@ -827,7 +773,7 @@ func TestCollectDiff(t *testing.T) {
 			t.Parallel()
 
 			provider := newMockProvider()
-			provider.execFunc = tt.execFunc
+			provider.ExecFn = tt.execFunc
 			sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
 
 			diff, err := collectDiff(context.Background(), provider, sandbox)

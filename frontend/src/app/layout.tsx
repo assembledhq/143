@@ -15,6 +15,7 @@ import { usePathname } from "next/navigation";
 import "./globals.css";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
+import { ErrorBoundary } from "@/components/error-boundary";
 
 const navItems = [
   { label: "Overview", icon: LayoutDashboard, href: "/" },
@@ -38,6 +39,7 @@ export default function RootLayout({
       <body className="antialiased">
         <NuqsAdapter>
         <QueryClientProvider client={queryClient}>
+          <ErrorBoundary>
           <div className="flex h-screen">
             <aside className="w-56 border-r border-border bg-sidebar flex flex-col">
               <div className="px-5 py-5">
@@ -75,6 +77,7 @@ export default function RootLayout({
               </div>
             </main>
           </div>
+          </ErrorBoundary>
         </QueryClientProvider>
         </NuqsAdapter>
       </body>
