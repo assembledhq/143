@@ -162,7 +162,8 @@ func (d *DockerProvider) CloneRepo(ctx context.Context, sb *agent.Sandbox, repoU
 		authURL = strings.Replace(repoURL, "https://", fmt.Sprintf("https://x-access-token:%s@", token), 1)
 	}
 
-	cmd := fmt.Sprintf("git clone --depth 1 --branch %s %s %s", branch, authURL, sb.WorkDir)
+	cmd := fmt.Sprintf("git clone --depth 1 --branch '%s' '%s' '%s'",
+		shellEscape(branch), shellEscape(authURL), shellEscape(sb.WorkDir))
 	exitCode, err := d.Exec(ctx, sb, cmd, io.Discard, io.Discard)
 	if err != nil {
 		return fmt.Errorf("clone repo: %w", err)
@@ -222,7 +223,7 @@ func (d *DockerProvider) ReadFile(ctx context.Context, sb *agent.Sandbox, path s
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	exitCode, err := d.Exec(ctx, sb, fmt.Sprintf("cat %s", path), &stdout, &stderr)
+	exitCode, err := d.Exec(ctx, sb, fmt.Sprintf("cat '%s'", shellEscape(path)), &stdout, &stderr)
 	if err != nil {
 		return nil, fmt.Errorf("read file %s: %w", path, err)
 	}
@@ -237,7 +238,7 @@ func (d *DockerProvider) ReadFile(ctx context.Context, sb *agent.Sandbox, path s
 func (d *DockerProvider) WriteFile(ctx context.Context, sb *agent.Sandbox, path string, data []byte) error {
 	var stderr bytes.Buffer
 
-	cmd := fmt.Sprintf("printf '%%s' '%s' > %s", shellEscape(string(data)), path)
+	cmd := fmt.Sprintf("printf '%%s' '%s' > '%s'", shellEscape(string(data)), shellEscape(path))
 	exitCode, err := d.Exec(ctx, sb, cmd, io.Discard, &stderr)
 	if err != nil {
 		return fmt.Errorf("write file %s: %w", path, err)
