@@ -1,0 +1,181 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+env:
+  GO_VERSION: "1.24"
+  NODE_VERSION: "22"
+
+jobs:
+  backend-lint:
+    name: Backend Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+  backend-test:
+    name: Backend Test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: onefortythree
+          POSTGRES_PASSWORD: dev
+          POSTGRES_DB: onefortythree
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Run migrations
+        run: go run cmd/migrate/main.go up
+
+      - name: Run tests with coverage
+        run: |
+          go test ./... -coverprofile=coverage.out -covermode=atomic -race
+          go tool cover -func=coverage.out
+
+      - name: Check coverage threshold (70%)
+        run: |
+          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
+          echo "Total coverage: ${COVERAGE}%"
+          if (( $(echo "$COVERAGE < 70.0" | bc -l) )); then
+            echo "::error::Backend coverage ${COVERAGE}% is below the 70% minimum"
+            exit 1
+          fi
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: coverage.out
+
+  frontend-lint:
+    name: Frontend Lint & Typecheck
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+
+  frontend-test:
+    name: Frontend Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+
+      - name: Run tests with coverage
+        run: npx vitest run --coverage --coverage.reporter=text --coverage.reporter=json-summary
+
+      - name: Check coverage threshold (80%)
+        run: |
+          COVERAGE=$(cat coverage/coverage-summary.json | node -e "
+            const data = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+            console.log(data.total.lines.pct);
+          ")
+          echo "Total coverage: ${COVERAGE}%"
+          if (( $(echo "$COVERAGE < 80.0" | bc -l) )); then
+            echo "::error::Frontend coverage ${COVERAGE}% is below the 80% minimum"
+            exit 1
+          fi
+
+  migration-check:
+    name: Migration Safety
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: onefortythree
+          POSTGRES_PASSWORD: dev
+          POSTGRES_DB: onefortythree
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Migrate up
+        run: go run cmd/migrate/main.go up
+
+      - name: Migrate down
+        run: go run cmd/migrate/main.go down
+
+      - name: Migrate up again (idempotency check)
+        run: go run cmd/migrate/main.go up
+
+  docker-build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t 143-server .
+
+  required-checks:
+    name: All Checks Pass
+    needs: [backend-lint, backend-test, frontend-lint, frontend-test, migration-check, docker-build]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check all jobs passed
+        run: |
+          if [[ "${{ needs.backend-lint.result }}" != "success" ]] || \
+             [[ "${{ needs.backend-test.result }}" != "success" ]] || \
+             [[ "${{ needs.frontend-lint.result }}" != "success" ]] || \
+             [[ "${{ needs.frontend-test.result }}" != "success" ]] || \
+             [[ "${{ needs.migration-check.result }}" != "success" ]] || \
+             [[ "${{ needs.docker-build.result }}" != "success" ]]; then
+            echo "::error::One or more required checks failed"
+            exit 1
+          fi
+          echo "All checks passed"
