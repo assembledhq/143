@@ -7,8 +7,12 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PageHeader } from "@/components/page-header";
+import { IntegrationsCard } from "@/components/integrations-card";
+import { INTEGRATIONS } from "@/lib/integrations";
 
 export default function SettingsPage() {
+  const [github, sentry, linear] = INTEGRATIONS;
+
   return (
     <div className="space-y-8">
       <PageHeader
@@ -30,39 +34,32 @@ export default function SettingsPage() {
 
       <section className="space-y-3">
         <h2 className="text-[13px] font-medium text-foreground">Integrations</h2>
-        <Card className="gap-0 py-0">
-          <div className="flex items-center justify-between p-5">
-            <div>
-              <p className="text-sm font-medium text-foreground">GitHub</p>
-              <p className="mt-0.5 text-sm text-muted-foreground">
-                Connect your GitHub account to sync repositories and open PRs.
-              </p>
-            </div>
-            <Button size="sm" onClick={() => api.auth.login()}>
-              Connect
-            </Button>
-          </div>
-          <div className="border-t border-border" />
-          <div className="flex items-center justify-between p-5">
-            <div>
-              <p className="text-sm font-medium text-foreground">Sentry</p>
-              <p className="mt-0.5 text-sm text-muted-foreground">
-                Pull production errors and auto-generate fixes.
-              </p>
-            </div>
-            <Badge variant="secondary">Coming soon</Badge>
-          </div>
-          <div className="border-t border-border" />
-          <div className="flex items-center justify-between p-5">
-            <div>
-              <p className="text-sm font-medium text-foreground">Linear</p>
-              <p className="mt-0.5 text-sm text-muted-foreground">
-                Sync issues from Linear and auto-assign fixes.
-              </p>
-            </div>
-            <Badge variant="secondary">Coming soon</Badge>
-          </div>
-        </Card>
+        <IntegrationsCard
+          items={[
+            {
+              id: github.key,
+              title: github.name,
+              description: github.description,
+              action: (
+                <Button size="sm" onClick={() => api.auth.login()} aria-label="Connect GitHub">
+                  Connect
+                </Button>
+              ),
+            },
+            {
+              id: sentry.key,
+              title: sentry.name,
+              description: sentry.description,
+              action: <Badge variant="secondary">Coming soon</Badge>,
+            },
+            {
+              id: linear.key,
+              title: linear.name,
+              description: linear.description,
+              action: <Badge variant="secondary">Coming soon</Badge>,
+            },
+          ]}
+        />
       </section>
     </div>
   );
