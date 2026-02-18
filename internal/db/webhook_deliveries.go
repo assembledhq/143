@@ -47,10 +47,11 @@ func (s *WebhookDeliveryStore) MarkProcessed(ctx context.Context, d *models.Webh
 	query := `
 		UPDATE webhook_deliveries
 		SET status = @status, processed_at = now(), attempts = attempts + 1, error = @error
-		WHERE id = @id`
+		WHERE id = @id AND org_id = @org_id`
 
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     d.ID,
+		"org_id": d.OrgID,
 		"status": status,
 		"error":  errMsg,
 	})

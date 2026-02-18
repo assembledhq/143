@@ -24,6 +24,10 @@ type Config struct {
 	GitHubAppPrivateKey  string
 	GitHubWebhookSecret string
 
+	// Webhook secrets for ingestion providers
+	SentryWebhookSecret string
+	LinearWebhookSecret string
+
 	// Server mode
 	Mode string // "all", "api", "worker"
 }
@@ -45,6 +49,8 @@ func Load() *Config {
 		GitHubAppID:             appID,
 		GitHubAppPrivateKey:     getEnv("GITHUB_APP_PRIVATE_KEY", ""),
 		GitHubWebhookSecret:     getEnv("GITHUB_WEBHOOK_SECRET", ""),
+		SentryWebhookSecret:     getEnv("SENTRY_WEBHOOK_SECRET", ""),
+		LinearWebhookSecret:     getEnv("LINEAR_WEBHOOK_SECRET", ""),
 		Mode:                    getEnv("MODE", "all"),
 	}
 }

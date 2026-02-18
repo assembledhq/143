@@ -105,15 +105,16 @@ func (s *AgentRunStore) Create(ctx context.Context, run *models.AgentRun) error 
 	return row.Scan(&run.ID, &run.CreatedAt)
 }
 
-func (s *AgentRunStore) UpdateStatus(ctx context.Context, runID uuid.UUID, status string) error {
-	query := `UPDATE agent_runs SET status = @status WHERE id = @id`
+func (s *AgentRunStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string) error {
+	query := `UPDATE agent_runs SET status = @status WHERE id = @id AND org_id = @org_id`
 	if status == "running" {
-		query = `UPDATE agent_runs SET status = @status, started_at = now() WHERE id = @id`
+		query = `UPDATE agent_runs SET status = @status, started_at = now() WHERE id = @id AND org_id = @org_id`
 	} else if status == "completed" || status == "failed" || status == "cancelled" {
-		query = `UPDATE agent_runs SET status = @status, completed_at = now() WHERE id = @id`
+		query = `UPDATE agent_runs SET status = @status, completed_at = now() WHERE id = @id AND org_id = @org_id`
 	}
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     runID,
+		"org_id": orgID,
 		"status": status,
 	})
 	return err
