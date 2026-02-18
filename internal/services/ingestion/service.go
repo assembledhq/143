@@ -85,9 +85,10 @@ func (s *Service) IngestNormalized(ctx context.Context, orgID uuid.UUID, ni Norm
 
 	// Enqueue prioritize job
 	dedupeKey := fmt.Sprintf("prioritize:%s", issue.ID.String())
-	_, _ = s.jobStore.Enqueue(ctx, orgID, "prioritization", "prioritize", map[string]string{
+	_, _ = s.jobStore.Enqueue(ctx, orgID, "default", "prioritize", map[string]string{
 		"issue_id": issue.ID.String(),
-	}, 0, &dedupeKey)
+		"org_id":   orgID.String(),
+	}, 3, &dedupeKey)
 
 	s.logger.Info().
 		Str("issue_id", issue.ID.String()).

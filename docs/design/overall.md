@@ -324,11 +324,11 @@ Connect Sentry first. It's the highest-signal, most automated source — stack t
 
 **Milestone**: ✅ Sentry errors appear in the dashboard via both webhooks and polling sync. Issues can be filtered and browsed with full UI controls.
 
-## Phase 3: Agent Execution + Validation + PR (docs: 06, 07, 08, 17) — ~90% COMPLETE
+## Phase 3: Agent Execution + Validation + PR (docs: 06, 07, 08, 17) — COMPLETE
 
 **This is the "aha moment."** Connect a repo, see a Sentry error, click "Fix This," get a PR. Ship these three together because none is useful alone.
 
-The core execution pipeline is fully wired end-to-end. DB schema, stores, API handlers, services, and frontend are all implemented. The remaining gaps are LLM-based validation checks (3 of 6 checks stubbed).
+The core execution pipeline is fully wired end-to-end. DB schema, stores, API handlers, services, and frontend are all implemented. All 6 validation checks are now implemented.
 
 1. **Sandbox container management** — ✅ Docker SDK integration in `providers/docker.go` with full container lifecycle (Create/CloneRepo/Exec/ReadFile/WriteFile/Destroy). gVisor runtime support, security hardening (dropped capabilities, read-only rootfs, non-root user, PID limits, tmpfs with noexec). Configurable CPU/memory/timeout limits.
 2. **Claude Code adapter** — ✅ `adapters/claude_code.go` implements AgentAdapter interface. `PreparePrompt()` builds system+user prompts with stack trace extraction and file hints. `Execute()` runs Claude Code CLI in sandbox, parses streaming JSON output, collects git diff. Prompt injection defense included.
@@ -337,26 +337,29 @@ The core execution pipeline is fully wired end-to-end. DB schema, stores, API ha
 5. **Confidence scoring** — ✅ Claude Code adapter extracts confidence_score, confidence_reasoning, and risk_factors from agent JSON output. Orchestrator applies threshold gating: score < 0.5 → `needs_human_guidance`, score >= 0.5 → proceed to validation.
 6. **Human-in-the-loop** — ✅ Orchestrator detects "question" log entries, creates `AgentRunQuestion` records, sets run status to `awaiting_input`. API endpoints exist for listing questions (`GET /runs/{id}/questions`) and answering them (`POST /runs/{qid}/answer`).
 7. **Log streaming** — ✅ SSE endpoint (`GET /runs/{id}/logs`) in `runs.go` with HTTP Flusher for real-time streaming. Sends existing logs first, then polls every 1s for new entries. Frontend `LogViewer` component connects via EventSource with auto-reconnection.
-8. **Basic validation** — ⚠️ PARTIAL. `validation/service.go` implements 3 of 6 checks: security scan (regex-based secret/SQLi detection), CI check (detects project type and runs tests), diff size check (warn >200 lines, fail >500 lines). Three LLM-based checks are stubbed: direction_check, correctness_check, regression_test_check. Validation flow is complete: creates record → runs checks with fail-fast → marks passed/failed → enqueues `open_pr` or returns issue to `triaged`.
+8. **Full validation pipeline** — ✅ `validation/service.go` implements all 6 checks in fail-fast order: (1) **direction_check** — LLM verifies fix aligns with issue and product direction, (2) **correctness_check** — LLM verifies logical correctness, no introduced bugs, (3) **regression_test_check** — LLM verifies regression test is included, (4) **security_scan** — regex-based secret/SQLi detection, (5) **quality_check** — diff size limits (warn >200, fail >500 lines), (6) **ci_check** — detects project type and runs tests. LLM checks use an injectable `LLMClient` interface for testability. Diffs wrapped in `<code_diff>` tags for prompt injection defense. Graceful fallback to "skipped" when LLM is not configured. Validate method accepts issue context for LLM checks.
 9. **PR creation** — ✅ `github/pr.go` implements full GitHub API flow: get base branch SHA → create branch → parse diff → create blobs/tree/commit → update ref → create PR → add labels → store in DB → update run and issue status. PR body includes agent summary, issue metadata, and validation results.
 10. **PR tracking** — ✅ Full `PullRequestStore` with CRUD operations. Webhook handlers process `pull_request` events (merged/closed tracking, deploy record creation) and `pull_request_review` events (approval/changes_requested tracking).
 11. **Failure communication** (17) — ✅ Rule-based `FailureService` in `failure.go` classifies 9 failure types (timeout, sandbox crash, API error, build failure, empty diff, test regression, security violation, large diff, missing context). Each produces human-readable explanation, category, sub-type, next steps, and retry recommendation. Persisted to DB and displayed in frontend.
 12. **Fix Queue UI** — ✅ Runs list page with grouped tabs (All/Active/Needs Review/Failed/Completed), status badges, confidence scores, duration display. Run detail page with tabs: Overview (status/confidence/timestamps/result), Logs (live streaming LogViewer), Diff (DiffViewer component), Validation (results table for all 6 checks), PR (GitHub link/status/review status/branch/body). Failure details section shows explanation, category, next steps as bulleted list, and retry button.
 
-**Milestone**: ⚠️ The core "Sentry error → Fix This → agent run → validation → PR" pipeline is functionally complete. Remaining work: implement the 3 LLM-based validation checks (direction, correctness, regression test).
+**Milestone**: ✅ The core "Sentry error → Fix This → agent run → validation → PR" pipeline is fully complete including all 6 validation checks.
 
-## Phase 4: Prioritization + Routing (docs: 05, 12) — NOT STARTED (schema + stubs only)
+## Phase 4: Prioritization + Routing (docs: 05, 12) — COMPLETE
 
 Now that fixes are flowing, rank issues so the most impactful ones surface first.
 
-DB tables exist for `priority_scores` and `complexity_estimates`. A `prioritize` job handler is registered in the worker but is a stub (parses payload, logs, returns nil — no actual scoring logic):
+1. **Scoring algorithm** — ✅ `prioritization/service.go` implements full composite scoring with configurable weights (default: customer_impact=0.35, severity=0.25, recency=0.20, revenue_risk=0.20). Sub-scores: `computeCustomerImpact` (log2-scaled from affected_customer_count), `computeSeverity` (critical=100 → low=25), `computeRecency` (exponential decay with 168h half-life). Direction alignment via LLM call clamped to [-1,1], applied as `score * (1 + 0.3*alignment)`. Eligibility gating: direction > -0.5, status open/triaged, score > org threshold. Stores results via `PriorityScoreStore.Upsert` and `ComplexityEstimateStore.Upsert`. Auto-enqueued after issue ingestion via `ingestion/service.go`.
+2. **Complexity estimation** — ✅ `prioritization/service.go` `EstimateComplexity` uses LLM to classify issues into 5 tiers (trivial/simple/moderate/complex/very_complex) with confidence scores, issue type, reasoning, estimated files/tokens. Heuristic fallback based on severity when LLM unavailable.
+3. **Auto-trigger** — ✅ `CheckAutoTrigger` implements 4 sequential gates: (1) autonomy level must be "auto_all" or "auto_simple", (2) if auto_simple, complexity tier must be ≤2, (3) aggressiveness tier limit (`conservative=2, moderate=3, aggressive=4, maximum=5`) must not be exceeded, (4) concurrent running agent count must be below org's max_concurrent cap. On pass, enqueues a `run_agent` job.
+4. **DB stores** — ✅ `db/priority_scores.go` with Upsert (ON CONFLICT issue_id DO UPDATE), GetByIssueID, ListByOrg (with eligible_only filter, ORDER BY score DESC), DeleteByIssueID. `db/complexity_estimates.go` with Upsert, GetByIssueID, ListByOrg (with optional maxTier filter).
+5. **API endpoints** — ✅ `handlers/priority.go` exposes: GET `/api/v1/issues/{id}/priority` (viewer+), GET `/api/v1/issues/{id}/complexity` (viewer+), GET `/api/v1/priority-scores` with `eligible_only` filter (viewer+), POST `/api/v1/issues/{id}/reprioritize` (admin-only, enqueues prioritize job with dedup key).
+6. **Worker handler** — ✅ `worker/handlers.go` `prioritize` handler calls `ComputeScore` → `EstimateComplexity` → `CheckAutoTrigger` in sequence. Validate handler updated to fetch issue and pass to validation service for LLM context.
+7. **Settings UI** — ✅ Settings page rewritten with: Agent Execution controls (autonomy level select, aggressiveness select, max concurrent input), Confidence Thresholds (auto-proceed and human review sliders), Prioritization section (product direction textarea, priority weight grid with real-time sum validation, minimum score threshold). Save via PATCH with success/error feedback.
+8. **Priority display** — ✅ Issues page enhanced with: priority score badge (green ≥70, yellow ≥40, gray <40), complexity tier badge (green trivial/simple, yellow moderate, red complex/very_complex), eligibility indicator dot (green/gray), sort dropdown (Last seen / Priority). Priority sort uses LEFT JOIN with priority_scores, ORDER BY score DESC NULLS LAST.
+9. **Issues sort by priority** — ✅ `db/issues.go` IssueFilters extended with Sort field. When `Sort == "priority"`, query uses LEFT JOIN on priority_scores table. Frontend passes sort param via `useQueryState`.
 
-1. **Scoring algorithm** — ❌ `priority_scores` table ready, `prioritize` job handler is a stub (worker/handlers.go:86-114). No sub-score computation, no direction alignment LLM call, no composite scoring.
-2. **Auto-trigger** — ❌ No auto-trigger logic, no autonomy level enforcement, no concurrency cap
-3. **Settings UI** — ❌ Settings page exists but only shows integration status. No priority weight, product direction, or auto-fix controls.
-4. **Priority display** — ❌ Issues table shows severity/status but not priority scores or explainability
-
-**Milestone**: ❌ Depends on Phase 3 completion first (fixes must be flowing before prioritization matters).
+**Milestone**: ✅ Full prioritization pipeline: ingestion → auto-score → complexity estimate → auto-trigger gates → agent run. Settings UI gives orgs control over autonomy, aggressiveness, weights, and direction.
 
 ## Phase 5: Observability + Impact (docs: 09, 18) — NOT STARTED (partial deploy tracking exists)
 
@@ -370,7 +373,7 @@ Close the loop — measure whether fixes actually helped.
 4. **Impact display** — ❌ No impact UI
 5. **Production outcome feedback loop** (18) — ❌ No outcome analysis or learning injection
 
-**Milestone**: ❌ Depends on Phase 3 (PRs must be shipping before impact can be measured).
+**Milestone**: ❌ Unblocked — Phases 3 and 4 are complete. PRs are shipping and prioritization is live.
 
 ## Phase 6: Review Feedback Loop (doc: 11) — NOT STARTED
 
@@ -383,7 +386,7 @@ Turn human PR reviews into agent improvements.
 3. **Review patterns KB** — ❌ No review_patterns table or pattern extraction
 4. **Curated context document** — ❌ No `.143/learned-conventions.md` generation
 
-**Milestone**: ❌ Depends on Phase 3 (PRs must exist to receive reviews).
+**Milestone**: ❌ Unblocked — Phase 3 is complete. PRs exist to receive reviews.
 
 ## Phase 7: Codebase Context — Advanced (doc: 14) — NOT STARTED
 
@@ -398,7 +401,7 @@ Deepen the context layer based on what you've learned from real agent runs about
 5. **Incremental updates** — ❌ No push webhook context updates
 6. **Context UI** — ❌ No context UI
 
-**Milestone**: ❌ Depends on Phase 3 having real agent runs to learn from.
+**Milestone**: ❌ Unblocked — Phases 3-4 provide real agent runs and prioritization data to learn from.
 
 ## Phase 8: Evals + Quality Gates (doc: 16) — NOT STARTED
 
@@ -412,7 +415,7 @@ No eval infrastructure tables exist. Entirely future work:
 4. **Release gates + rollout** — ❌ No release gate tables or logic
 5. **Continuous eval flywheel** — ❌ No flywheel
 
-**Milestone**: ❌ Depends on having real production data from Phases 3-5.
+**Milestone**: ❌ Partially unblocked — Phases 3-4 are complete, Phase 5 still needed for full production data.
 
 ## Future: Additional Ingestion Sources
 

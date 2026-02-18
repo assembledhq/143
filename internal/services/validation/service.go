@@ -3,6 +3,7 @@ package validation
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -26,16 +27,28 @@ type issueStore interface {
 	UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status string) error
 }
 
+// orgStore is the subset of db.OrganizationStore used by the service.
+type orgStore interface {
+	GetByID(ctx context.Context, id uuid.UUID) (models.Organization, error)
+}
+
 // jobStore is the subset of db.JobStore used by the service.
 type jobStore interface {
 	Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
+}
+
+// LLMClient abstracts LLM completion calls so it can be mocked in tests.
+type LLMClient interface {
+	Complete(ctx context.Context, systemPrompt, userPrompt string) (string, error)
 }
 
 // Service validates agent-produced diffs before PR creation.
 type Service struct {
 	validations validationStore
 	issues      issueStore
+	orgs        orgStore
 	jobs        jobStore
+	llm         LLMClient
 	provider    agent.SandboxProvider
 	logger      zerolog.Logger
 }
@@ -44,14 +57,18 @@ type Service struct {
 func NewService(
 	validations validationStore,
 	issues issueStore,
+	orgs orgStore,
 	jobs jobStore,
+	llm LLMClient,
 	provider agent.SandboxProvider,
 	logger zerolog.Logger,
 ) *Service {
 	return &Service{
 		validations: validations,
 		issues:      issues,
+		orgs:        orgs,
 		jobs:        jobs,
+		llm:         llm,
 		provider:    provider,
 		logger:      logger,
 	}
@@ -60,7 +77,7 @@ func NewService(
 // Validate runs the validation pipeline for an agent run.
 // It creates a Validation record, runs checks sequentially (fail-fast),
 // and on success enqueues an "open_pr" job.
-func (s *Service) Validate(ctx context.Context, agentRun *models.AgentRun, sandbox *agent.Sandbox) error {
+func (s *Service) Validate(ctx context.Context, agentRun *models.AgentRun, issue *models.Issue, sandbox *agent.Sandbox) error {
 	diff := ""
 	if agentRun.Diff != nil {
 		diff = *agentRun.Diff
@@ -83,20 +100,34 @@ func (s *Service) Validate(ctx context.Context, agentRun *models.AgentRun, sandb
 		Str("agent_run_id", agentRun.ID.String()).
 		Msg("starting validation pipeline")
 
-	// Skipped checks (LLM-based, not yet implemented)
-	skippedChecks := []string{"direction_check", "correctness_check", "regression_test_check"}
-	for _, checkName := range skippedChecks {
-		if err := s.validations.UpdateCheck(ctx, v.OrgID, v.ID, checkName, "skipped", []byte(`"LLM-based check not yet implemented"`)); err != nil {
-			return fmt.Errorf("update skipped check %s: %w", checkName, err)
+	// Fetch org settings for direction check.
+	var org *models.Organization
+	if s.orgs != nil {
+		fetched, err := s.orgs.GetByID(ctx, agentRun.OrgID)
+		if err != nil {
+			s.logger.Warn().Err(err).Msg("failed to fetch org for direction check, will skip direction context")
+		} else {
+			org = &fetched
 		}
 	}
 
-	// Active checks run sequentially with fail-fast
+	// Active checks run sequentially with fail-fast.
+	// LLM-based checks run first (direction, correctness, regression test),
+	// followed by deterministic checks (security, quality, CI).
 	type check struct {
 		name string
 		fn   func(ctx context.Context, diff string, sandbox *agent.Sandbox) (string, string, error)
 	}
 	checks := []check{
+		{"direction_check", func(ctx context.Context, d string, _ *agent.Sandbox) (string, string, error) {
+			return s.checkDirection(ctx, d, issue, org)
+		}},
+		{"correctness_check", func(ctx context.Context, d string, _ *agent.Sandbox) (string, string, error) {
+			return s.checkCorrectness(ctx, d, issue)
+		}},
+		{"regression_test_check", func(ctx context.Context, d string, _ *agent.Sandbox) (string, string, error) {
+			return s.checkRegressionTest(ctx, d, issue)
+		}},
 		{"security_scan", func(ctx context.Context, d string, _ *agent.Sandbox) (string, string, error) {
 			return s.checkSecurity(d)
 		}},
@@ -160,6 +191,150 @@ func (s *Service) Validate(ctx context.Context, agentRun *models.AgentRun, sandb
 	}
 
 	return nil
+}
+
+// llmCheckResult is the expected JSON response from the LLM for validation checks.
+type llmCheckResult struct {
+	Result    string `json:"result"`
+	Reasoning string `json:"reasoning"`
+}
+
+// parseLLMCheckResult parses the LLM JSON response into a result and reasoning.
+// Returns ("fail", reasoning, nil) if parsing fails to be safe.
+func parseLLMCheckResult(raw string) (string, string, error) {
+	var res llmCheckResult
+	if err := json.Unmarshal([]byte(raw), &res); err != nil {
+		return "fail", fmt.Sprintf("failed to parse LLM response: %s", raw), nil
+	}
+	if res.Result != "pass" && res.Result != "fail" {
+		return "fail", fmt.Sprintf("unexpected LLM result %q: %s", res.Result, res.Reasoning), nil
+	}
+	return res.Result, res.Reasoning, nil
+}
+
+// wrapDiff wraps a diff in <code_diff> tags to defend against prompt injection.
+func wrapDiff(diff string) string {
+	return "<code_diff>\n" + diff + "\n</code_diff>"
+}
+
+// checkDirection uses the LLM to verify that the diff aligns with the issue
+// and the organization's product direction.
+func (s *Service) checkDirection(ctx context.Context, diff string, issue *models.Issue, org *models.Organization) (string, string, error) {
+	if s.llm == nil {
+		return "skipped", "LLM client not configured", nil
+	}
+
+	systemPrompt := `You are a code review validation agent. Your job is to check whether a code diff aligns with the reported issue and the organization's product direction.
+
+Respond with JSON only:
+{"result": "pass", "reasoning": "..."}
+or
+{"result": "fail", "reasoning": "..."}`
+
+	var issueContext string
+	if issue != nil {
+		issueContext = fmt.Sprintf("Issue Title: %s\n", issue.Title)
+		if issue.Description != nil {
+			issueContext += fmt.Sprintf("Issue Description: %s\n", *issue.Description)
+		}
+	} else {
+		issueContext = "No issue context available.\n"
+	}
+
+	var orgContext string
+	if org != nil && org.Settings != nil {
+		orgContext = fmt.Sprintf("Organization Settings: %s\n", string(org.Settings))
+	}
+
+	userPrompt := fmt.Sprintf(`Check if this code change aligns with the issue and product direction.
+
+%s%s
+Code diff:
+%s`, issueContext, orgContext, wrapDiff(diff))
+
+	response, err := s.llm.Complete(ctx, systemPrompt, userPrompt)
+	if err != nil {
+		return "fail", fmt.Sprintf("LLM direction check error: %s", err.Error()), nil
+	}
+
+	return parseLLMCheckResult(response)
+}
+
+// checkCorrectness uses the LLM to verify that the diff correctly addresses
+// the reported issue.
+func (s *Service) checkCorrectness(ctx context.Context, diff string, issue *models.Issue) (string, string, error) {
+	if s.llm == nil {
+		return "skipped", "LLM client not configured", nil
+	}
+
+	systemPrompt := `You are a code review validation agent. Your job is to check whether a code diff correctly fixes the reported issue. Look for logical errors, incomplete fixes, or changes that could introduce new bugs.
+
+Respond with JSON only:
+{"result": "pass", "reasoning": "..."}
+or
+{"result": "fail", "reasoning": "..."}`
+
+	var issueContext string
+	if issue != nil {
+		issueContext = fmt.Sprintf("Issue Title: %s\n", issue.Title)
+		if issue.Description != nil {
+			issueContext += fmt.Sprintf("Issue Description: %s\n", *issue.Description)
+		}
+		issueContext += fmt.Sprintf("Severity: %s\n", issue.Severity)
+	} else {
+		issueContext = "No issue context available.\n"
+	}
+
+	userPrompt := fmt.Sprintf(`Check if this code change correctly fixes the reported issue.
+
+%s
+Code diff:
+%s`, issueContext, wrapDiff(diff))
+
+	response, err := s.llm.Complete(ctx, systemPrompt, userPrompt)
+	if err != nil {
+		return "fail", fmt.Sprintf("LLM correctness check error: %s", err.Error()), nil
+	}
+
+	return parseLLMCheckResult(response)
+}
+
+// checkRegressionTest uses the LLM to verify that the diff includes
+// appropriate regression tests for the fix.
+func (s *Service) checkRegressionTest(ctx context.Context, diff string, issue *models.Issue) (string, string, error) {
+	if s.llm == nil {
+		return "skipped", "LLM client not configured", nil
+	}
+
+	systemPrompt := `You are a code review validation agent. Your job is to check whether a code diff includes appropriate regression tests for the fix. A good regression test should verify that the specific bug being fixed cannot recur.
+
+Respond with JSON only:
+{"result": "pass", "reasoning": "..."}
+or
+{"result": "fail", "reasoning": "..."}`
+
+	var issueContext string
+	if issue != nil {
+		issueContext = fmt.Sprintf("Issue Title: %s\n", issue.Title)
+		if issue.Description != nil {
+			issueContext += fmt.Sprintf("Issue Description: %s\n", *issue.Description)
+		}
+	} else {
+		issueContext = "No issue context available.\n"
+	}
+
+	userPrompt := fmt.Sprintf(`Check if this code change includes appropriate regression tests.
+
+%s
+Code diff:
+%s`, issueContext, wrapDiff(diff))
+
+	response, err := s.llm.Complete(ctx, systemPrompt, userPrompt)
+	if err != nil {
+		return "fail", fmt.Sprintf("LLM regression test check error: %s", err.Error()), nil
+	}
+
+	return parseLLMCheckResult(response)
 }
 
 // secretPatterns are regex patterns for detecting secrets in diffs.

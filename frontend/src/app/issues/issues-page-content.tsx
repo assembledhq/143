@@ -63,6 +63,32 @@ const severityOptions = [
   { value: "low", label: "Low" },
 ];
 
+const sortOptions = [
+  { value: "last_seen", label: "Last seen" },
+  { value: "priority", label: "Priority" },
+];
+
+function priorityScoreColor(score: number): string {
+  if (score >= 70) return "bg-green-100 text-green-800";
+  if (score >= 40) return "bg-yellow-100 text-yellow-800";
+  return "bg-gray-100 text-gray-700";
+}
+
+function complexityColor(label: string): string {
+  switch (label) {
+    case "trivial":
+    case "simple":
+      return "bg-green-100 text-green-800";
+    case "moderate":
+      return "bg-yellow-100 text-yellow-800";
+    case "complex":
+    case "very_complex":
+      return "bg-red-100 text-red-800";
+    default:
+      return "bg-gray-100 text-gray-700";
+  }
+}
+
 function formatTimeAgo(dateStr: string): string {
   const date = new Date(dateStr);
   const now = new Date();
@@ -113,24 +139,41 @@ function IssueRow({ issue }: { issue: Issue }) {
             <span>{issue.affected_customer_count.toLocaleString()} customers</span>
           )}
           <span>Last seen {formatTimeAgo(issue.last_seen_at)}</span>
+          {issue.priority_score != null && (
+            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${priorityScoreColor(issue.priority_score)}`}>
+              Priority: {issue.priority_score}
+            </span>
+          )}
+          {issue.complexity_label && (
+            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${complexityColor(issue.complexity_label)}`}>
+              {issue.complexity_label}
+            </span>
+          )}
         </div>
       </div>
-      {canFix && (
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => fixMutation.mutate()}
-          disabled={fixMutation.isPending}
-          className="ml-3 shrink-0"
-        >
-          {fixMutation.isPending ? (
-            <Loader2 className="mr-1.5 h-3 w-3 animate-spin" />
-          ) : (
-            <Wrench className="mr-1.5 h-3 w-3" />
-          )}
-          {fixMutation.isPending ? "Starting..." : "Fix This"}
-        </Button>
-      )}
+      <div className="flex items-center gap-2 ml-3 shrink-0">
+        {issue.priority_eligible != null && (
+          <span
+            className={`inline-block h-2.5 w-2.5 rounded-full ${issue.priority_eligible ? "bg-green-500" : "bg-gray-300"}`}
+            title={issue.priority_eligible ? "Eligible for agent" : "Not eligible"}
+          />
+        )}
+        {canFix && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => fixMutation.mutate()}
+            disabled={fixMutation.isPending}
+          >
+            {fixMutation.isPending ? (
+              <Loader2 className="mr-1.5 h-3 w-3 animate-spin" />
+            ) : (
+              <Wrench className="mr-1.5 h-3 w-3" />
+            )}
+            {fixMutation.isPending ? "Starting..." : "Fix This"}
+          </Button>
+        )}
+      </div>
     </div>
   );
 }
@@ -139,16 +182,18 @@ export function IssuesPageContent() {
   const [status, setStatus] = useQueryState("status", parseAsString);
   const [source, setSource] = useQueryState("source", parseAsString);
   const [severity, setSeverity] = useQueryState("severity", parseAsString);
+  const [sort, setSort] = useQueryState("sort", parseAsString);
 
-  const hasFilters = status !== null || source !== null || severity !== null;
+  const hasFilters = status !== null || source !== null || severity !== null || sort !== null;
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["issues", { status, source, severity }],
+    queryKey: ["issues", { status, source, severity, sort }],
     queryFn: () =>
       api.issues.list({
         status: status ?? undefined,
         source: source ?? undefined,
         severity: severity ?? undefined,
+        sort: sort ?? undefined,
         limit: 50,
       }),
   });
@@ -159,6 +204,7 @@ export function IssuesPageContent() {
     setStatus(null);
     setSource(null);
     setSeverity(null);
+    setSort(null);
   }
 
   return (
@@ -227,6 +273,27 @@ export function IssuesPageContent() {
             <SelectContent>
               <SelectItem value="all">All severities</SelectItem>
               {severityOptions.map((opt) => (
+                <SelectItem key={opt.value} value={opt.value}>
+                  {opt.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="flex flex-col gap-1.5">
+          <label htmlFor="sort-select" className="text-xs font-medium text-muted-foreground">
+            Sort by
+          </label>
+          <Select
+            value={sort ?? "last_seen"}
+            onValueChange={(v) => setSort(v === "last_seen" ? null : v)}
+          >
+            <SelectTrigger id="sort-select" className="w-[140px]" size="sm">
+              <SelectValue placeholder="Last seen" />
+            </SelectTrigger>
+            <SelectContent>
+              {sortOptions.map((opt) => (
                 <SelectItem key={opt.value} value={opt.value}>
                   {opt.label}
                 </SelectItem>

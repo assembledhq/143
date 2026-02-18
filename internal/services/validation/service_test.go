@@ -55,6 +55,33 @@ func (m *mockIssueStore) UpdateStatus(ctx context.Context, orgID, issueID uuid.U
 	return nil
 }
 
+type mockOrgStore struct {
+	org *models.Organization
+	err error
+}
+
+func (m *mockOrgStore) GetByID(ctx context.Context, id uuid.UUID) (models.Organization, error) {
+	if m.err != nil {
+		return models.Organization{}, m.err
+	}
+	if m.org != nil {
+		return *m.org, nil
+	}
+	return models.Organization{ID: id, Name: "Test Org"}, nil
+}
+
+type mockLLMClient struct {
+	response string
+	err      error
+}
+
+func (m *mockLLMClient) Complete(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
+	if m.err != nil {
+		return "", m.err
+	}
+	return m.response, nil
+}
+
 type mockJobStore struct {
 	lastJobType string
 	lastPayload any
@@ -69,6 +96,7 @@ func (m *mockJobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobT
 type mockStores struct {
 	validations *mockValidationStore
 	issues      *mockIssueStore
+	orgs        *mockOrgStore
 	jobs        *mockJobStore
 }
 
@@ -76,6 +104,7 @@ func newMockStores() *mockStores {
 	return &mockStores{
 		validations: &mockValidationStore{checkResults: make(map[string]string)},
 		issues:      &mockIssueStore{},
+		orgs:        &mockOrgStore{},
 		jobs:        &mockJobStore{},
 	}
 }
@@ -427,7 +456,7 @@ func TestValidate_AllPass_EnqueuesPR(t *testing.T) {
 	}
 
 	stores := newMockStores()
-	svc := NewService(stores.validations, stores.issues, stores.jobs, provider, zerolog.Nop())
+	svc := NewService(stores.validations, stores.issues, stores.orgs, stores.jobs, nil, provider, zerolog.Nop())
 
 	diff := generateDiff(5, 3)
 	agentRun := &models.AgentRun{
@@ -436,9 +465,10 @@ func TestValidate_AllPass_EnqueuesPR(t *testing.T) {
 		OrgID:   uuid.New(),
 		Diff:    &diff,
 	}
+	issue := &models.Issue{ID: agentRun.IssueID, OrgID: agentRun.OrgID, Title: "Test issue"}
 	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
 
-	err := svc.Validate(context.Background(), agentRun, sandbox)
+	err := svc.Validate(context.Background(), agentRun, issue, sandbox)
 	require.NoError(t, err, "Validate should not return an error when all checks pass")
 
 	require.Equal(t, "passed", stores.validations.lastStatus, "validation status should be passed when all checks pass")
@@ -457,7 +487,9 @@ func TestValidate_SecurityFails_FailFast(t *testing.T) {
 	provider.Files["go.mod"] = []byte("module test")
 
 	stores := newMockStores()
-	svc := NewService(stores.validations, stores.issues, stores.jobs, provider, zerolog.Nop())
+	// Use an LLM that passes so security check is the first failure
+	llm := &mockLLMClient{response: `{"result":"pass","reasoning":"looks good"}`}
+	svc := NewService(stores.validations, stores.issues, stores.orgs, stores.jobs, llm, provider, zerolog.Nop())
 
 	diff := `--- a/config.go
 +++ b/config.go
@@ -471,9 +503,10 @@ func TestValidate_SecurityFails_FailFast(t *testing.T) {
 		OrgID:   uuid.New(),
 		Diff:    &diff,
 	}
+	issue := &models.Issue{ID: agentRun.IssueID, OrgID: agentRun.OrgID, Title: "Test issue"}
 	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
 
-	err := svc.Validate(context.Background(), agentRun, sandbox)
+	err := svc.Validate(context.Background(), agentRun, issue, sandbox)
 	require.NoError(t, err, "Validate should not return an error even when security fails")
 
 	require.Equal(t, "failed", stores.validations.lastStatus, "validation status should be failed when security check fails")
@@ -493,7 +526,8 @@ func TestValidate_SkippedChecksRecorded(t *testing.T) {
 	}
 
 	stores := newMockStores()
-	svc := NewService(stores.validations, stores.issues, stores.jobs, provider, zerolog.Nop())
+	// nil LLM client means LLM checks are skipped
+	svc := NewService(stores.validations, stores.issues, stores.orgs, stores.jobs, nil, provider, zerolog.Nop())
 
 	diff := generateDiff(5, 3)
 	agentRun := &models.AgentRun{
@@ -502,15 +536,16 @@ func TestValidate_SkippedChecksRecorded(t *testing.T) {
 		OrgID:   uuid.New(),
 		Diff:    &diff,
 	}
+	issue := &models.Issue{ID: agentRun.IssueID, OrgID: agentRun.OrgID, Title: "Test issue"}
 	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
 
-	err := svc.Validate(context.Background(), agentRun, sandbox)
+	err := svc.Validate(context.Background(), agentRun, issue, sandbox)
 	require.NoError(t, err, "Validate should not return an error")
 
 	skipped := stores.validations.checkResults
-	require.Equal(t, "skipped", skipped["direction_check"], "direction_check should be recorded as skipped")
-	require.Equal(t, "skipped", skipped["correctness_check"], "correctness_check should be recorded as skipped")
-	require.Equal(t, "skipped", skipped["regression_test_check"], "regression_test_check should be recorded as skipped")
+	require.Equal(t, "skipped", skipped["direction_check"], "direction_check should be recorded as skipped when LLM client is nil")
+	require.Equal(t, "skipped", skipped["correctness_check"], "correctness_check should be recorded as skipped when LLM client is nil")
+	require.Equal(t, "skipped", skipped["regression_test_check"], "regression_test_check should be recorded as skipped when LLM client is nil")
 }
 
 func TestValidate_DiffTooLarge_Fails(t *testing.T) {
@@ -518,7 +553,8 @@ func TestValidate_DiffTooLarge_Fails(t *testing.T) {
 
 	provider := newMockProvider()
 	stores := newMockStores()
-	svc := NewService(stores.validations, stores.issues, stores.jobs, provider, zerolog.Nop())
+	// nil LLM so LLM checks pass as "skipped" (not fail), then quality check catches the large diff
+	svc := NewService(stores.validations, stores.issues, stores.orgs, stores.jobs, nil, provider, zerolog.Nop())
 
 	diff := generateDiff(400, 150)
 	agentRun := &models.AgentRun{
@@ -527,9 +563,10 @@ func TestValidate_DiffTooLarge_Fails(t *testing.T) {
 		OrgID:   uuid.New(),
 		Diff:    &diff,
 	}
+	issue := &models.Issue{ID: agentRun.IssueID, OrgID: agentRun.OrgID, Title: "Test issue"}
 	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
 
-	err := svc.Validate(context.Background(), agentRun, sandbox)
+	err := svc.Validate(context.Background(), agentRun, issue, sandbox)
 	require.NoError(t, err, "Validate should not return an error even when diff is too large")
 
 	require.Equal(t, "failed", stores.validations.lastStatus, "validation status should be failed when diff is too large")
@@ -546,7 +583,8 @@ func TestValidate_NilDiff_PassesSecurity(t *testing.T) {
 	}
 
 	stores := newMockStores()
-	svc := NewService(stores.validations, stores.issues, stores.jobs, provider, zerolog.Nop())
+	svc := NewService(stores.validations, stores.issues, stores.orgs, stores.jobs, nil, provider, zerolog.Nop())
+
 
 	agentRun := &models.AgentRun{
 		ID:      uuid.New(),
@@ -554,11 +592,207 @@ func TestValidate_NilDiff_PassesSecurity(t *testing.T) {
 		OrgID:   uuid.New(),
 		Diff:    nil,
 	}
+	issue := &models.Issue{ID: agentRun.IssueID, OrgID: agentRun.OrgID, Title: "Test issue"}
 	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
 
-	err := svc.Validate(context.Background(), agentRun, sandbox)
+	err := svc.Validate(context.Background(), agentRun, issue, sandbox)
 	require.NoError(t, err, "Validate should not return an error for nil diff")
 	require.Equal(t, "passed", stores.validations.lastStatus, "nil diff should pass validation")
+}
+
+// --- LLM Check Tests ---
+
+func TestCheckDirection_Pass(t *testing.T) {
+	t.Parallel()
+	llm := &mockLLMClient{response: `{"result":"pass","reasoning":"The diff aligns with the issue and product direction."}`}
+	s := &Service{llm: llm, logger: zerolog.Nop()}
+
+	issue := &models.Issue{Title: "Fix login bug", Severity: "high"}
+	org := &models.Organization{Name: "TestOrg"}
+
+	result, details, err := s.checkDirection(context.Background(), "+fix login", issue, org)
+	require.NoError(t, err)
+	require.Equal(t, "pass", result)
+	require.Contains(t, details, "aligns")
+}
+
+func TestCheckDirection_Fail(t *testing.T) {
+	t.Parallel()
+	llm := &mockLLMClient{response: `{"result":"fail","reasoning":"The diff does not address the reported issue."}`}
+	s := &Service{llm: llm, logger: zerolog.Nop()}
+
+	issue := &models.Issue{Title: "Fix login bug"}
+
+	result, details, err := s.checkDirection(context.Background(), "+unrelated change", issue, nil)
+	require.NoError(t, err)
+	require.Equal(t, "fail", result)
+	require.Contains(t, details, "does not address")
+}
+
+func TestCheckDirection_NilLLM(t *testing.T) {
+	t.Parallel()
+	s := &Service{llm: nil, logger: zerolog.Nop()}
+
+	result, details, err := s.checkDirection(context.Background(), "+change", nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, "skipped", result)
+	require.Contains(t, details, "LLM client not configured")
+}
+
+func TestCheckDirection_LLMError(t *testing.T) {
+	t.Parallel()
+	llm := &mockLLMClient{err: fmt.Errorf("connection timeout")}
+	s := &Service{llm: llm, logger: zerolog.Nop()}
+
+	result, details, err := s.checkDirection(context.Background(), "+change", nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, "fail", result)
+	require.Contains(t, details, "connection timeout")
+}
+
+func TestCheckCorrectness_Pass(t *testing.T) {
+	t.Parallel()
+	llm := &mockLLMClient{response: `{"result":"pass","reasoning":"The fix correctly addresses the null pointer issue."}`}
+	s := &Service{llm: llm, logger: zerolog.Nop()}
+
+	desc := "NullPointerException in UserService"
+	issue := &models.Issue{Title: "NPE in UserService", Description: &desc, Severity: "high"}
+
+	result, details, err := s.checkCorrectness(context.Background(), "+if user != nil {", issue)
+	require.NoError(t, err)
+	require.Equal(t, "pass", result)
+	require.Contains(t, details, "correctly addresses")
+}
+
+func TestCheckCorrectness_Fail(t *testing.T) {
+	t.Parallel()
+	llm := &mockLLMClient{response: `{"result":"fail","reasoning":"The fix only handles one code path, missing the other."}`}
+	s := &Service{llm: llm, logger: zerolog.Nop()}
+
+	issue := &models.Issue{Title: "NPE in UserService", Severity: "high"}
+
+	result, details, err := s.checkCorrectness(context.Background(), "+partial fix", issue)
+	require.NoError(t, err)
+	require.Equal(t, "fail", result)
+	require.Contains(t, details, "only handles one code path")
+}
+
+func TestCheckRegressionTest_Pass(t *testing.T) {
+	t.Parallel()
+	llm := &mockLLMClient{response: `{"result":"pass","reasoning":"The diff includes a test that reproduces the original bug."}`}
+	s := &Service{llm: llm, logger: zerolog.Nop()}
+
+	issue := &models.Issue{Title: "Fix timeout bug"}
+
+	result, details, err := s.checkRegressionTest(context.Background(), "+func TestTimeoutFix(t *testing.T) {", issue)
+	require.NoError(t, err)
+	require.Equal(t, "pass", result)
+	require.Contains(t, details, "reproduces the original bug")
+}
+
+func TestCheckRegressionTest_Fail(t *testing.T) {
+	t.Parallel()
+	llm := &mockLLMClient{response: `{"result":"fail","reasoning":"No regression test was included in the diff."}`}
+	s := &Service{llm: llm, logger: zerolog.Nop()}
+
+	issue := &models.Issue{Title: "Fix timeout bug"}
+
+	result, details, err := s.checkRegressionTest(context.Background(), "+fix only, no test", issue)
+	require.NoError(t, err)
+	require.Equal(t, "fail", result)
+	require.Contains(t, details, "No regression test")
+}
+
+func TestParseLLMCheckResult_InvalidJSON(t *testing.T) {
+	t.Parallel()
+
+	result, details, err := parseLLMCheckResult("not json")
+	require.NoError(t, err)
+	require.Equal(t, "fail", result)
+	require.Contains(t, details, "failed to parse LLM response")
+}
+
+func TestParseLLMCheckResult_UnexpectedResult(t *testing.T) {
+	t.Parallel()
+
+	result, details, err := parseLLMCheckResult(`{"result":"maybe","reasoning":"unsure"}`)
+	require.NoError(t, err)
+	require.Equal(t, "fail", result)
+	require.Contains(t, details, "unexpected LLM result")
+}
+
+func TestWrapDiff(t *testing.T) {
+	t.Parallel()
+
+	wrapped := wrapDiff("+hello")
+	require.Equal(t, "<code_diff>\n+hello\n</code_diff>", wrapped)
+}
+
+func TestValidate_LLMChecksRunBeforeDeterministic(t *testing.T) {
+	t.Parallel()
+
+	provider := newMockProvider()
+	provider.Files["go.mod"] = []byte("module test")
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		return 0, nil
+	}
+
+	stores := newMockStores()
+	// LLM that always passes
+	llm := &mockLLMClient{response: `{"result":"pass","reasoning":"looks good"}`}
+	svc := NewService(stores.validations, stores.issues, stores.orgs, stores.jobs, llm, provider, zerolog.Nop())
+
+	diff := generateDiff(5, 3)
+	agentRun := &models.AgentRun{
+		ID:      uuid.New(),
+		IssueID: uuid.New(),
+		OrgID:   uuid.New(),
+		Diff:    &diff,
+	}
+	issue := &models.Issue{ID: agentRun.IssueID, OrgID: agentRun.OrgID, Title: "Test issue"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
+
+	err := svc.Validate(context.Background(), agentRun, issue, sandbox)
+	require.NoError(t, err)
+
+	results := stores.validations.checkResults
+	require.Equal(t, "pass", results["direction_check"], "direction_check should pass with LLM")
+	require.Equal(t, "pass", results["correctness_check"], "correctness_check should pass with LLM")
+	require.Equal(t, "pass", results["regression_test_check"], "regression_test_check should pass with LLM")
+	require.Equal(t, "pass", results["security_scan"])
+	require.Equal(t, "pass", results["quality_check"])
+	require.Equal(t, "pass", results["ci_check"])
+	require.Equal(t, "passed", stores.validations.lastStatus)
+}
+
+func TestValidate_DirectionCheckFails_FailFast(t *testing.T) {
+	t.Parallel()
+
+	provider := newMockProvider()
+	stores := newMockStores()
+	llm := &mockLLMClient{response: `{"result":"fail","reasoning":"does not align with product direction"}`}
+	svc := NewService(stores.validations, stores.issues, stores.orgs, stores.jobs, llm, provider, zerolog.Nop())
+
+	diff := generateDiff(5, 3)
+	agentRun := &models.AgentRun{
+		ID:      uuid.New(),
+		IssueID: uuid.New(),
+		OrgID:   uuid.New(),
+		Diff:    &diff,
+	}
+	issue := &models.Issue{ID: agentRun.IssueID, OrgID: agentRun.OrgID, Title: "Test issue"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
+
+	err := svc.Validate(context.Background(), agentRun, issue, sandbox)
+	require.NoError(t, err)
+
+	results := stores.validations.checkResults
+	require.Equal(t, "fail", results["direction_check"])
+	// Subsequent checks should NOT have run due to fail-fast
+	require.Empty(t, results["correctness_check"])
+	require.Empty(t, results["security_scan"])
+	require.Equal(t, "failed", stores.validations.lastStatus)
+	require.Equal(t, "triaged", stores.issues.lastStatus)
 }
 
 // --- Helpers ---

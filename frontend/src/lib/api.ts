@@ -72,11 +72,12 @@ export const api = {
     delete: (id: string) => del(`/api/v1/repositories/${id}`),
   },
   issues: {
-    list: (params?: { status?: string; source?: string; severity?: string; cursor?: string; limit?: number }) => {
+    list: (params?: { status?: string; source?: string; severity?: string; sort?: string; cursor?: string; limit?: number }) => {
       const searchParams = new URLSearchParams();
       if (params?.status) searchParams.set('status', params.status);
       if (params?.source) searchParams.set('source', params.source);
       if (params?.severity) searchParams.set('severity', params.severity);
+      if (params?.sort) searchParams.set('sort', params.sort);
       if (params?.cursor) searchParams.set('cursor', params.cursor);
       if (params?.limit) searchParams.set('limit', String(params.limit));
       const qs = searchParams.toString();
@@ -107,5 +108,17 @@ export const api = {
   },
   integrations: {
     list: () => get<import('./types').ListResponse<import('./types').Integration>>('/api/v1/integrations'),
+  },
+  priority: {
+    getForIssue: (issueId: string) => get<import('./types').SingleResponse<import('./types').PriorityScore>>(`/api/v1/issues/${issueId}/priority`),
+    getComplexity: (issueId: string) => get<import('./types').SingleResponse<import('./types').ComplexityEstimate>>(`/api/v1/issues/${issueId}/complexity`),
+    list: (params?: { eligible_only?: boolean; limit?: number }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.eligible_only) searchParams.set('eligible_only', 'true');
+      if (params?.limit) searchParams.set('limit', String(params.limit));
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').PriorityScore>>(`/api/v1/priority-scores${qs ? `?${qs}` : ''}`);
+    },
+    reprioritize: (issueId: string) => post(`/api/v1/issues/${issueId}/reprioritize`),
   },
 };
