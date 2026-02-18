@@ -1,0 +1,12 @@
+DROP TABLE IF EXISTS deploys;
+DROP TABLE IF EXISTS pull_requests;
+DROP TABLE IF EXISTS validations;
+DROP TABLE IF EXISTS agent_run_questions;
+DROP TABLE IF EXISTS agent_run_logs;
+DROP TABLE IF EXISTS agent_runs;
+DROP TABLE IF EXISTS complexity_estimates;
+DROP TABLE IF EXISTS priority_scores;
+DROP TABLE IF EXISTS issue_events;
+DROP TABLE IF EXISTS issues;
+DROP TABLE IF EXISTS integration_sync_runs;
+DROP TABLE IF EXISTS webhook_deliveries;

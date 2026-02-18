@@ -10,6 +10,7 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/services/ingestion"
 )
 
 func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) *chi.Mux {
@@ -19,6 +20,13 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) *c
 	sessionStore := db.NewSessionStore(pool)
 	repoStore := db.NewRepositoryStore(pool)
 	integrationStore := db.NewIntegrationStore(pool)
+	issueStore := db.NewIssueStore(pool)
+	agentRunStore := db.NewAgentRunStore(pool)
+	webhookDeliveryStore := db.NewWebhookDeliveryStore(pool)
+	jobStore := db.NewJobStore(pool)
+
+	// Create services
+	ingestionSvc := ingestion.NewService(issueStore, webhookDeliveryStore, jobStore, logger)
 
 	// Create handlers
 	healthHandler := handlers.NewHealthHandler(pool)
@@ -26,6 +34,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) *c
 	repoHandler := handlers.NewRepositoryHandler(repoStore)
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, repoStore, integrationStore)
 	settingsHandler := handlers.NewSettingsHandler(orgStore)
+	issueHandler := handlers.NewIssueHandler(issueStore)
+	runHandler := handlers.NewRunHandler(agentRunStore)
+	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, ingestionSvc, logger)
 
 	r := chi.NewRouter()
 
@@ -39,8 +50,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) *c
 	r.Get("/healthz", healthHandler.Healthz)
 	r.Get("/readyz", healthHandler.Readyz)
 
-	// Webhook routes (no auth)
+	// Webhook routes (no auth — these are called by external services)
 	r.Post("/api/v1/webhooks/github", webhookHandler.HandleGitHub)
+	r.Post("/api/v1/webhooks/sentry", ingestionWebhookHandler.HandleSentry)
+	r.Post("/api/v1/webhooks/linear", ingestionWebhookHandler.HandleLinear)
 
 	// Auth routes (no auth)
 	r.Get("/api/v1/auth/github/login", authHandler.Login)
@@ -58,6 +71,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) *c
 		r.Get("/api/v1/repositories/{id}", repoHandler.Get)
 		r.Patch("/api/v1/repositories/{id}", repoHandler.Update)
 		r.Delete("/api/v1/repositories/{id}", repoHandler.Delete)
+
+		// Issues
+		r.Get("/api/v1/issues", issueHandler.List)
+		r.Get("/api/v1/issues/{id}", issueHandler.Get)
+
+		// Agent Runs
+		r.Get("/api/v1/runs", runHandler.List)
+		r.Get("/api/v1/runs/{id}", runHandler.Get)
 
 		// Settings
 		r.Get("/api/v1/settings", settingsHandler.Get)

@@ -13,6 +13,7 @@ import (
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/logging"
+	"github.com/assembledhq/143/internal/worker"
 )
 
 func main() {
@@ -30,6 +31,20 @@ func main() {
 
 	router := api.NewRouter(cfg, pool, logger)
 
+	// Start worker if mode includes worker capability
+	if cfg.Mode == "all" || cfg.Mode == "worker" {
+		hostname, _ := os.Hostname()
+		w := worker.New(pool, logger, hostname)
+		stores := &worker.Stores{
+			Issues:    db.NewIssueStore(pool),
+			AgentRuns: db.NewAgentRunStore(pool),
+			Jobs:      db.NewJobStore(pool),
+		}
+		worker.RegisterHandlers(w, stores, logger)
+		go w.Start(ctx)
+		logger.Info().Msg("worker started with registered handlers")
+	}
+
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),
 		Handler:      router,
@@ -44,6 +59,7 @@ func main() {
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
 		logger.Info().Msg("shutting down server...")
+		cancel() // stop worker
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutdownCancel()
 		srv.Shutdown(shutdownCtx)
