@@ -22,18 +22,31 @@ type IssueFilters struct {
 	Status   string
 	Source   string
 	Severity string
+	Sort     string
 	Limit    int
 	Cursor   string // issue ID for cursor-based pagination
 }
 
 func (s *IssueStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters IssueFilters) ([]models.Issue, error) {
-	query := `
+	var query string
+	if filters.Sort == "priority" {
+		query = `
+		SELECT i.id, i.org_id, i.external_id, i.source, i.source_integration_id, i.repository_id,
+		       i.title, i.description, i.raw_data, i.status, i.first_seen_at, i.last_seen_at,
+		       i.occurrence_count, i.affected_customer_count, i.severity, i.tags, i.fingerprint,
+		       i.created_at, i.updated_at
+		FROM issues i
+		LEFT JOIN priority_scores ps ON ps.issue_id = i.id
+		WHERE i.org_id = @org_id`
+	} else {
+		query = `
 		SELECT id, org_id, external_id, source, source_integration_id, repository_id,
 		       title, description, raw_data, status, first_seen_at, last_seen_at,
 		       occurrence_count, affected_customer_count, severity, tags, fingerprint,
 		       created_at, updated_at
 		FROM issues
 		WHERE org_id = @org_id`
+	}
 
 	args := pgx.NamedArgs{"org_id": orgID}
 
@@ -57,7 +70,11 @@ func (s *IssueStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters Iss
 		}
 	}
 
-	query += ` ORDER BY last_seen_at DESC`
+	if filters.Sort == "priority" {
+		query += ` ORDER BY ps.score DESC NULLS LAST`
+	} else {
+		query += ` ORDER BY last_seen_at DESC`
+	}
 
 	limit := filters.Limit
 	if limit <= 0 || limit > 100 {

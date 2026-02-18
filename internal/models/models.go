@@ -192,6 +192,39 @@ type AgentRunQuestion struct {
 	CreatedAt    time.Time  `db:"created_at" json:"created_at"`
 }
 
+// PriorityScore holds the computed priority score for an issue.
+type PriorityScore struct {
+	ID                  uuid.UUID       `db:"id" json:"id"`
+	IssueID             uuid.UUID       `db:"issue_id" json:"issue_id"`
+	OrgID               uuid.UUID       `db:"org_id" json:"org_id"`
+	Score               float64         `db:"score" json:"score"`
+	CustomerImpactScore float64         `db:"customer_impact_score" json:"customer_impact_score"`
+	SeverityScore       float64         `db:"severity_score" json:"severity_score"`
+	RecencyScore        float64         `db:"recency_score" json:"recency_score"`
+	RevenueRiskScore    float64         `db:"revenue_risk_score" json:"revenue_risk_score"`
+	DirectionAlignment  float64         `db:"direction_alignment" json:"direction_alignment"`
+	Factors             json.RawMessage `db:"factors" json:"factors,omitempty"`
+	EligibleForAgent    bool            `db:"eligible_for_agent" json:"eligible_for_agent"`
+	ComputedAt          time.Time       `db:"computed_at" json:"computed_at"`
+}
+
+// ComplexityEstimate holds the estimated complexity for an issue.
+type ComplexityEstimate struct {
+	ID              uuid.UUID `db:"id" json:"id"`
+	IssueID         uuid.UUID `db:"issue_id" json:"issue_id"`
+	OrgID           uuid.UUID `db:"org_id" json:"org_id"`
+	Tier            int       `db:"tier" json:"tier"`
+	Label           string    `db:"label" json:"label"`
+	Confidence      float64   `db:"confidence" json:"confidence"`
+	IssueType       *string   `db:"issue_type" json:"issue_type,omitempty"`
+	Reasoning       *string   `db:"reasoning" json:"reasoning,omitempty"`
+	EstimatedFiles  []string  `db:"estimated_files" json:"estimated_files,omitempty"`
+	EstimatedTokens *int      `db:"estimated_tokens" json:"estimated_tokens,omitempty"`
+	ModelUsed       *string   `db:"model_used" json:"model_used,omitempty"`
+	ComputedAt      time.Time `db:"computed_at" json:"computed_at"`
+	CreatedAt       time.Time `db:"created_at" json:"created_at"`
+}
+
 // Deploy represents a deployment of a pull request.
 type Deploy struct {
 	ID            uuid.UUID `db:"id" json:"id"`

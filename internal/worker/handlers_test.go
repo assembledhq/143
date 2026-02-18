@@ -72,8 +72,6 @@ func TestIngestWebhookHandler(t *testing.T) {
 func TestPrioritizeHandler(t *testing.T) {
 	t.Parallel()
 
-	validID := uuid.New()
-
 	tests := []struct {
 		name      string
 		payload   json.RawMessage
@@ -81,19 +79,20 @@ func TestPrioritizeHandler(t *testing.T) {
 		errSubstr string
 	}{
 		{
-			name:      "valid payload succeeds",
-			payload:   json.RawMessage(`{"issue_id":"` + validID.String() + `"}`),
-			expectErr: false,
-		},
-		{
 			name:      "invalid JSON returns unmarshal error",
 			payload:   json.RawMessage(`not json at all`),
 			expectErr: true,
 			errSubstr: "unmarshal",
 		},
 		{
-			name:      "invalid UUID returns parse error",
-			payload:   json.RawMessage(`{"issue_id":"not-a-valid-uuid"}`),
+			name:      "missing org ID returns parse error",
+			payload:   json.RawMessage(`{"issue_id":"` + uuid.New().String() + `"}`),
+			expectErr: true,
+			errSubstr: "parse org ID",
+		},
+		{
+			name:      "invalid issue UUID returns parse error",
+			payload:   json.RawMessage(`{"issue_id":"not-a-valid-uuid","org_id":"` + uuid.New().String() + `"}`),
 			expectErr: true,
 			errSubstr: "parse issue ID",
 		},
@@ -107,7 +106,8 @@ func TestPrioritizeHandler(t *testing.T) {
 			defer mock.Close()
 			logger := zerolog.Nop()
 
-			handler := newPrioritizeHandler(stores, logger)
+			services := &Services{}
+			handler := newPrioritizeHandler(stores, services, logger)
 			err := handler(context.Background(), "prioritize", tt.payload)
 
 			if tt.expectErr {
@@ -349,7 +349,6 @@ func TestRegisterHandlers_AllRegistered(t *testing.T) {
 
 	expectedHandlers := []string{
 		"ingest_webhook",
-		"prioritize",
 		"sync_sentry",
 	}
 	for _, name := range expectedHandlers {
@@ -358,6 +357,7 @@ func TestRegisterHandlers_AllRegistered(t *testing.T) {
 	}
 
 	unexpectedHandlers := []string{
+		"prioritize",
 		"run_agent",
 		"validate",
 		"open_pr",

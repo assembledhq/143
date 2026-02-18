@@ -31,6 +31,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) *c
 	webhookDeliveryStore := db.NewWebhookDeliveryStore(pool)
 	jobStore := db.NewJobStore(pool)
 
+	priorityScoreStore := db.NewPriorityScoreStore(pool)
+	complexityEstimateStore := db.NewComplexityEstimateStore(pool)
 	deployStore := db.NewDeployStore(pool)
 
 	// Create services
@@ -67,6 +69,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) *c
 		issueStore,
 		jobStore,
 	)
+	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, ingestionSvc, logger)
 
 	r := chi.NewRouter()
@@ -118,6 +121,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) *c
 			r.Get("/api/v1/integrations", integrationHandler.ListIntegrations)
 			r.Get("/api/v1/issues", issueHandler.List)
 			r.Get("/api/v1/issues/{id}", issueHandler.Get)
+			r.Get("/api/v1/issues/{id}/priority", priorityHandler.GetPriorityScore)
+			r.Get("/api/v1/issues/{id}/complexity", priorityHandler.GetComplexity)
+			r.Get("/api/v1/priority-scores", priorityHandler.ListPriorityScores)
 			r.Get("/api/v1/runs", runHandler.List)
 			r.Get("/api/v1/runs/{id}", runHandler.Get)
 			r.Get("/api/v1/runs/{id}/logs", runHandler.StreamLogs)
@@ -141,6 +147,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) *c
 			r.Use(middleware.RequireRole("admin"))
 
 			r.Delete("/api/v1/repositories/{id}", repoHandler.Delete)
+			r.Post("/api/v1/issues/{id}/reprioritize", priorityHandler.Reprioritize)
 			r.Patch("/api/v1/settings", settingsHandler.Update)
 		})
 	})
