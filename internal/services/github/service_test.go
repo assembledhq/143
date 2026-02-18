@@ -87,6 +87,37 @@ func TestService_GetInstallationToken_UsesCache(t *testing.T) {
 	require.Equal(t, "cached-token", token, "GetInstallationToken should return the cached token when it is not close to expiry")
 }
 
+func TestService_GetInstallationToken_FetchesAndCaches(t *testing.T) {
+	t.Parallel()
+
+	svc, err := NewService(143, testPrivateKeyPEM(t))
+	require.NoError(t, err, "NewService should create a valid GitHub service")
+
+	callCount := 0
+	svc.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			callCount++
+			require.True(t, strings.HasPrefix(req.Header.Get("Authorization"), "Bearer "), "GetInstallationToken should set bearer authorization when exchanging token")
+			return &http.Response{
+				StatusCode: http.StatusCreated,
+				Body: io.NopCloser(strings.NewReader(
+					`{"token":"ghs_cached","expires_at":"2030-01-01T00:00:00Z"}`,
+				)),
+				Header: make(http.Header),
+			}, nil
+		}),
+	}
+
+	first, err := svc.GetInstallationToken(context.Background(), 77)
+	require.NoError(t, err, "first GetInstallationToken call should not return an error")
+	require.Equal(t, "ghs_cached", first, "first GetInstallationToken call should return the exchanged token")
+
+	second, err := svc.GetInstallationToken(context.Background(), 77)
+	require.NoError(t, err, "second GetInstallationToken call should not return an error")
+	require.Equal(t, "ghs_cached", second, "second GetInstallationToken call should return the cached token")
+	require.Equal(t, 1, callCount, "GetInstallationToken should exchange only once and use cache on subsequent calls")
+}
+
 func TestService_GenerateJWT(t *testing.T) {
 	t.Parallel()
 

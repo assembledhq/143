@@ -42,4 +42,11 @@ describe('OverviewPage', () => {
     expect(sentryLoginMock).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('heading', { name: 'Integrations' })).not.toBeInTheDocument();
   });
+
+  it('shows Linear integration on the dashboard', () => {
+    renderWithProviders(<Overview />);
+
+    expect(screen.getByText('Connect Linear')).toBeInTheDocument();
+    expect(screen.getByText('Coming soon')).toBeInTheDocument();
+  });
 });
