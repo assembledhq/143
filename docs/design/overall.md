@@ -312,17 +312,17 @@ Build the skeleton that everything else plugs into, including GitHub authenticat
 
 **Milestone**: ✅ You can start the app, sign in with GitHub, connect repositories, and see connected repos in the dashboard. Core metrics are being captured from the first run.
 
-## Phase 2: Sentry Ingestion (doc: 04) — ~80% COMPLETE
+## Phase 2: Sentry Ingestion (doc: 04) — COMPLETE
 
 Connect Sentry first. It's the highest-signal, most automated source — stack traces give agents exactly what they need.
 
 1. **Sentry webhook endpoint** — ✅ `HandleSentry()` in ingestion_webhooks.go with signature verification, delivery tracking, supports created/regression events
 2. **Sentry adapter** — ✅ `SentryAdapter` parses webhooks, extracts stack traces, severity mapping, occurrence/customer counts, tags, timestamps. Full test coverage.
 3. **Normalization + deduplication** — ✅ `NormalizedIssue` struct with `sha256(source:externalID)` fingerprinting, `ON CONFLICT` upsert with smart merging (increment occurrences, max customer count, update severity)
-4. **Polling worker** — ❌ NOT STARTED. No Sentry API client, no polling job handler, `integration_sync_runs` table exists but unused. Needed as catch-all for missed webhooks.
-5. **Issues UI** — ⚠️ PARTIAL. Data table shows severity/status/source badges, occurrence count, customer count, relative timestamps. Backend supports status/source/severity filters + cursor pagination, but **filter UI controls not exposed in frontend**.
+4. **Polling worker** — ✅ `SentryAPIClient` in sentry_api.go with project issues polling, `sync_sentry` job handler in worker/handlers.go, uses `integration_sync_runs` for tracking sync state
+5. **Issues UI** — ✅ Data table with severity/status/source badges, occurrence count, customer count, relative timestamps. Filter dropdowns for status, source, and severity fully implemented in frontend. Backend supports cursor pagination.
 
-**Milestone**: ⚠️ Sentry errors appear in the dashboard via webhooks, but polling sync (catch-all) and frontend filter controls are missing.
+**Milestone**: ✅ Sentry errors appear in the dashboard via both webhooks and polling sync. Issues can be filtered and browsed with full UI controls.
 
 ## Phase 3: Agent Execution + Validation + PR (docs: 06, 07, 08, 17) — NOT STARTED (schema only)
 
