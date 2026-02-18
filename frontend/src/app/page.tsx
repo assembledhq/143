@@ -1,4 +1,4 @@
-import { GitBranch, AlertCircle, Zap } from "lucide-react";
+import { GitBranch, AlertCircle } from "lucide-react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -16,12 +16,6 @@ const steps = [
     title: "Connect an issue tracker",
     description: "Connect Sentry, Linear, or another source so 143 knows what to fix.",
     action: { label: "Set up", href: "/settings" },
-  },
-  {
-    icon: Zap,
-    title: "Watch fixes ship",
-    description: "Once connected, 143 picks up issues, generates fixes, and opens PRs automatically.",
-    action: null,
   },
 ];
 
@@ -44,15 +38,17 @@ export default function Overview() {
                 <p className="text-sm font-medium text-foreground">{step.title}</p>
                 <p className="mt-0.5 text-sm text-muted-foreground">{step.description}</p>
               </div>
-              {step.action && (
-                <Button variant="outline" size="sm" asChild>
-                  <Link href={step.action.href}>{step.action.label}</Link>
-                </Button>
-              )}
+              <Button variant="outline" size="sm" asChild>
+                <Link href={step.action.href}>{step.action.label}</Link>
+              </Button>
             </CardContent>
           </Card>
         ))}
       </div>
+
+      <p className="text-sm text-muted-foreground">
+        Once both are connected, 143 picks up issues, generates fixes, and opens PRs automatically.
+      </p>
     </div>
   );
 }

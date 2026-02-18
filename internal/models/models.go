@@ -67,6 +67,113 @@ type Repository struct {
 	UpdatedAt      time.Time       `db:"updated_at" json:"updated_at"`
 }
 
+// Issue is the unified, normalized issue from any source.
+type Issue struct {
+	ID                    uuid.UUID       `db:"id" json:"id"`
+	OrgID                 uuid.UUID       `db:"org_id" json:"org_id"`
+	ExternalID            string          `db:"external_id" json:"external_id"`
+	Source                string          `db:"source" json:"source"`
+	SourceIntegrationID   *uuid.UUID      `db:"source_integration_id" json:"source_integration_id,omitempty"`
+	RepositoryID          *uuid.UUID      `db:"repository_id" json:"repository_id,omitempty"`
+	Title                 string          `db:"title" json:"title"`
+	Description           *string         `db:"description" json:"description,omitempty"`
+	RawData               json.RawMessage `db:"raw_data" json:"-"`
+	Status                string          `db:"status" json:"status"`
+	FirstSeenAt           time.Time       `db:"first_seen_at" json:"first_seen_at"`
+	LastSeenAt            time.Time       `db:"last_seen_at" json:"last_seen_at"`
+	OccurrenceCount       int             `db:"occurrence_count" json:"occurrence_count"`
+	AffectedCustomerCount int             `db:"affected_customer_count" json:"affected_customer_count"`
+	Severity              string          `db:"severity" json:"severity"`
+	Tags                  []string        `db:"tags" json:"tags"`
+	Fingerprint           string          `db:"fingerprint" json:"fingerprint"`
+	CreatedAt             time.Time       `db:"created_at" json:"created_at"`
+	UpdatedAt             time.Time       `db:"updated_at" json:"updated_at"`
+}
+
+// AgentRun represents an attempt to fix an issue via a coding agent.
+type AgentRun struct {
+	ID                   uuid.UUID       `db:"id" json:"id"`
+	IssueID              uuid.UUID       `db:"issue_id" json:"issue_id"`
+	OrgID                uuid.UUID       `db:"org_id" json:"org_id"`
+	AgentType            string          `db:"agent_type" json:"agent_type"`
+	Status               string          `db:"status" json:"status"`
+	AutonomyLevel        string          `db:"autonomy_level" json:"autonomy_level"`
+	TokenMode            string          `db:"token_mode" json:"token_mode"`
+	ComplexityTier       *int            `db:"complexity_tier" json:"complexity_tier,omitempty"`
+	ConfidenceScore      *float64        `db:"confidence_score" json:"confidence_score,omitempty"`
+	ConfidenceReasoning  *string         `db:"confidence_reasoning" json:"confidence_reasoning,omitempty"`
+	RiskFactors          []string        `db:"risk_factors" json:"risk_factors,omitempty"`
+	ContainerID          *string         `db:"container_id" json:"container_id,omitempty"`
+	StartedAt            *time.Time      `db:"started_at" json:"started_at,omitempty"`
+	CompletedAt          *time.Time      `db:"completed_at" json:"completed_at,omitempty"`
+	TokenUsage           json.RawMessage `db:"token_usage" json:"token_usage,omitempty"`
+	FailureExplanation   *string         `db:"failure_explanation" json:"failure_explanation,omitempty"`
+	FailureCategory      *string         `db:"failure_category" json:"failure_category,omitempty"`
+	FailureNextSteps     []string        `db:"failure_next_steps" json:"failure_next_steps,omitempty"`
+	FailureRetryAdvised  *bool           `db:"failure_retry_advised" json:"failure_retry_advised,omitempty"`
+	ParentRunID          *uuid.UUID      `db:"parent_run_id" json:"parent_run_id,omitempty"`
+	RevisionContext      json.RawMessage `db:"revision_context" json:"revision_context,omitempty"`
+	Error                *string         `db:"error" json:"error,omitempty"`
+	ResultSummary        *string         `db:"result_summary" json:"result_summary,omitempty"`
+	Diff                 *string         `db:"diff" json:"diff,omitempty"`
+	CreatedAt            time.Time       `db:"created_at" json:"created_at"`
+}
+
+// Validation represents validation results for an agent run.
+type Validation struct {
+	ID                  uuid.UUID       `db:"id" json:"id"`
+	AgentRunID          uuid.UUID       `db:"agent_run_id" json:"agent_run_id"`
+	OrgID               uuid.UUID       `db:"org_id" json:"org_id"`
+	Status              string          `db:"status" json:"status"`
+	DirectionCheck      string          `db:"direction_check" json:"direction_check"`
+	CorrectnessCheck    string          `db:"correctness_check" json:"correctness_check"`
+	QualityCheck        string          `db:"quality_check" json:"quality_check"`
+	SecurityScan        string          `db:"security_scan" json:"security_scan"`
+	RegressionTestCheck string          `db:"regression_test_check" json:"regression_test_check"`
+	CoverageDelta       json.RawMessage `db:"coverage_delta" json:"coverage_delta,omitempty"`
+	CICheck             string          `db:"ci_check" json:"ci_check"`
+	Details             json.RawMessage `db:"details" json:"details,omitempty"`
+	StartedAt           *time.Time      `db:"started_at" json:"started_at,omitempty"`
+	CompletedAt         *time.Time      `db:"completed_at" json:"completed_at,omitempty"`
+	CreatedAt           time.Time       `db:"created_at" json:"created_at"`
+}
+
+// PullRequest represents a GitHub PR created by an agent run.
+type PullRequest struct {
+	ID             uuid.UUID  `db:"id" json:"id"`
+	AgentRunID     uuid.UUID  `db:"agent_run_id" json:"agent_run_id"`
+	OrgID          uuid.UUID  `db:"org_id" json:"org_id"`
+	GitHubPRNumber int        `db:"github_pr_number" json:"github_pr_number"`
+	GitHubPRURL    string     `db:"github_pr_url" json:"github_pr_url"`
+	GitHubRepo     string     `db:"github_repo" json:"github_repo"`
+	Title          string     `db:"title" json:"title"`
+	Body           *string    `db:"body" json:"body,omitempty"`
+	Status         string     `db:"status" json:"status"`
+	ReviewStatus   string     `db:"review_status" json:"review_status"`
+	MergedAt       *time.Time `db:"merged_at" json:"merged_at,omitempty"`
+	CreatedAt      time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt      time.Time  `db:"updated_at" json:"updated_at"`
+}
+
+// WebhookDelivery represents an inbound webhook.
+type WebhookDelivery struct {
+	ID             uuid.UUID       `db:"id" json:"id"`
+	OrgID          uuid.UUID       `db:"org_id" json:"org_id"`
+	IntegrationID  uuid.UUID       `db:"integration_id" json:"integration_id"`
+	Provider       string          `db:"provider" json:"provider"`
+	DeliveryID     *string         `db:"delivery_id" json:"delivery_id,omitempty"`
+	EventType      string          `db:"event_type" json:"event_type"`
+	SignatureValid *bool           `db:"signature_valid" json:"signature_valid,omitempty"`
+	ReceivedAt     time.Time       `db:"received_at" json:"received_at"`
+	ProcessedAt    *time.Time      `db:"processed_at" json:"processed_at,omitempty"`
+	Status         string          `db:"status" json:"status"`
+	Attempts       int             `db:"attempts" json:"attempts"`
+	Error          *string         `db:"error" json:"error,omitempty"`
+	Payload        json.RawMessage `db:"payload" json:"-"`
+	Headers        json.RawMessage `db:"headers" json:"-"`
+	CreatedAt      time.Time       `db:"created_at" json:"created_at"`
+}
+
 // Job represents an async work queue item.
 type Job struct {
 	ID             uuid.UUID       `db:"id" json:"id"`
