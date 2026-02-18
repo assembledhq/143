@@ -8,23 +8,30 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/rs/zerolog"
 )
 
 type JobHandler func(ctx context.Context, jobType string, payload json.RawMessage) error
 
+// WorkerDB is the database interface required by the Worker.
+// Both *pgxpool.Pool and pgxmock.PgxPoolIface satisfy this interface.
+type WorkerDB interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+}
+
 type Worker struct {
-	pool         *pgxpool.Pool
+	db           WorkerDB
 	logger       zerolog.Logger
 	nodeID       string
 	handlers     map[string]JobHandler
 	pollInterval time.Duration
 }
 
-func New(pool *pgxpool.Pool, logger zerolog.Logger, nodeID string) *Worker {
+func New(db WorkerDB, logger zerolog.Logger, nodeID string) *Worker {
 	return &Worker{
-		pool:         pool,
+		db:           db,
 		logger:       logger,
 		nodeID:       nodeID,
 		handlers:     make(map[string]JobHandler),
@@ -53,7 +60,7 @@ func (w *Worker) Start(ctx context.Context) {
 }
 
 func (w *Worker) poll(ctx context.Context) {
-	tx, err := w.pool.Begin(ctx)
+	tx, err := w.db.Begin(ctx)
 	if err != nil {
 		w.logger.Error().Err(err).Msg("failed to begin transaction")
 		return
@@ -121,14 +128,14 @@ func (w *Worker) poll(ctx context.Context) {
 }
 
 func (w *Worker) succeedJob(ctx context.Context, jobID uuid.UUID) {
-	_, _ = w.pool.Exec(ctx, `
+	_, _ = w.db.Exec(ctx, `
 		UPDATE jobs SET status = 'succeeded', completed_at = now(), locked_by_node_id = NULL, locked_at = NULL, updated_at = now()
 		WHERE id = $1
 	`, jobID)
 }
 
 func (w *Worker) failJob(ctx context.Context, jobID uuid.UUID, errMsg string) {
-	_, _ = w.pool.Exec(ctx, `
+	_, _ = w.db.Exec(ctx, `
 		UPDATE jobs SET status = 'failed', last_error = $1, locked_by_node_id = NULL, locked_at = NULL, updated_at = now()
 		WHERE id = $2
 	`, errMsg, jobID)
@@ -137,14 +144,14 @@ func (w *Worker) failJob(ctx context.Context, jobID uuid.UUID, errMsg string) {
 func (w *Worker) retryJob(ctx context.Context, jobID uuid.UUID, errMsg string, attempt int) {
 	// Exponential backoff: 2^attempt seconds
 	backoff := time.Duration(1<<uint(attempt)) * time.Second
-	_, _ = w.pool.Exec(ctx, `
+	_, _ = w.db.Exec(ctx, `
 		UPDATE jobs SET status = 'pending', last_error = $1, run_at = now() + $2::interval, locked_by_node_id = NULL, locked_at = NULL, updated_at = now()
 		WHERE id = $3
 	`, errMsg, fmt.Sprintf("%d seconds", int(backoff.Seconds())), jobID)
 }
 
 func (w *Worker) deadLetterJob(ctx context.Context, jobID uuid.UUID, errMsg string) {
-	_, _ = w.pool.Exec(ctx, `
+	_, _ = w.db.Exec(ctx, `
 		UPDATE jobs SET status = 'dead_letter', last_error = $1, completed_at = now(), locked_by_node_id = NULL, locked_at = NULL, updated_at = now()
 		WHERE id = $2
 	`, errMsg, jobID)
