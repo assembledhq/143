@@ -14,59 +14,12 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
+	"github.com/assembledhq/143/internal/testutil"
 )
 
-// --- Mock SandboxProvider ---
-
-type mockSandboxProvider struct {
-	files     map[string][]byte
-	execFn    func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error)
-	execCalls []string
-}
-
-func newMockProvider() *mockSandboxProvider {
-	return &mockSandboxProvider{
-		files: make(map[string][]byte),
-	}
-}
-
-func (m *mockSandboxProvider) Name() string { return "mock" }
-
-func (m *mockSandboxProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
-	return &agent.Sandbox{ID: "mock-sandbox", Provider: "mock", WorkDir: "/workspace"}, nil
-}
-
-func (m *mockSandboxProvider) CloneRepo(ctx context.Context, sb *agent.Sandbox, repoURL, branch, token string) error {
-	return nil
-}
-
-func (m *mockSandboxProvider) Exec(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-	m.execCalls = append(m.execCalls, cmd)
-	if m.execFn != nil {
-		return m.execFn(ctx, sb, cmd, stdout, stderr)
-	}
-	return 0, nil
-}
-
-func (m *mockSandboxProvider) ReadFile(ctx context.Context, sb *agent.Sandbox, path string) ([]byte, error) {
-	data, ok := m.files[path]
-	if !ok {
-		return nil, fmt.Errorf("file not found: %s", path)
-	}
-	return data, nil
-}
-
-func (m *mockSandboxProvider) WriteFile(ctx context.Context, sb *agent.Sandbox, path string, data []byte) error {
-	m.files[path] = data
-	return nil
-}
-
-func (m *mockSandboxProvider) Destroy(ctx context.Context, sb *agent.Sandbox) error {
-	return nil
-}
-
-func (m *mockSandboxProvider) ConnectionInfo(ctx context.Context, sb *agent.Sandbox) (*agent.SandboxConnectionInfo, error) {
-	return &agent.SandboxConnectionInfo{}, nil
+// newMockProvider creates a shared MockSandboxProvider from testutil.
+func newMockProvider() *testutil.MockSandboxProvider {
+	return testutil.NewMockSandboxProvider()
 }
 
 // --- Mock Stores ---
@@ -309,8 +262,8 @@ func TestCheckDiffSize_EmptyDiff(t *testing.T) {
 func TestCheckCI_GoTestsPass(t *testing.T) {
 	t.Parallel()
 	provider := newMockProvider()
-	provider.files["go.mod"] = []byte("module test")
-	provider.execFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+	provider.Files["go.mod"] = []byte("module test")
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 		fmt.Fprint(stdout, "ok  \ttest\t0.001s\n")
 		return 0, nil
 	}
@@ -327,8 +280,8 @@ func TestCheckCI_GoTestsPass(t *testing.T) {
 func TestCheckCI_GoTestsFail(t *testing.T) {
 	t.Parallel()
 	provider := newMockProvider()
-	provider.files["go.mod"] = []byte("module test")
-	provider.execFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+	provider.Files["go.mod"] = []byte("module test")
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 		fmt.Fprint(stderr, "FAIL\ttest\t0.001s\n--- FAIL: TestFoo (0.00s)\n    foo_test.go:10: expected 1, got 2\n")
 		return 1, nil
 	}
@@ -346,8 +299,8 @@ func TestCheckCI_GoTestsFail(t *testing.T) {
 func TestCheckCI_NpmTestsPass(t *testing.T) {
 	t.Parallel()
 	provider := newMockProvider()
-	provider.files["package.json"] = []byte("{}")
-	provider.execFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+	provider.Files["package.json"] = []byte("{}")
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 		fmt.Fprint(stdout, "Tests: 5 passed\n")
 		return 0, nil
 	}
@@ -387,8 +340,8 @@ func TestCheckCI_NilSandbox(t *testing.T) {
 func TestCheckCI_ExecError(t *testing.T) {
 	t.Parallel()
 	provider := newMockProvider()
-	provider.files["go.mod"] = []byte("module test")
-	provider.execFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+	provider.Files["go.mod"] = []byte("module test")
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 		return 0, fmt.Errorf("sandbox connection lost")
 	}
 
@@ -404,8 +357,8 @@ func TestCheckCI_ExecError(t *testing.T) {
 func TestCheckCI_LongOutputTruncated(t *testing.T) {
 	t.Parallel()
 	provider := newMockProvider()
-	provider.files["go.mod"] = []byte("module test")
-	provider.execFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+	provider.Files["go.mod"] = []byte("module test")
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 		longOutput := strings.Repeat("error line\n", 500)
 		fmt.Fprint(stderr, longOutput)
 		return 1, nil
@@ -467,8 +420,8 @@ func TestValidate_AllPass_EnqueuesPR(t *testing.T) {
 	t.Parallel()
 
 	provider := newMockProvider()
-	provider.files["go.mod"] = []byte("module test")
-	provider.execFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+	provider.Files["go.mod"] = []byte("module test")
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 		fmt.Fprint(stdout, "ok\n")
 		return 0, nil
 	}
@@ -501,7 +454,7 @@ func TestValidate_SecurityFails_FailFast(t *testing.T) {
 	t.Parallel()
 
 	provider := newMockProvider()
-	provider.files["go.mod"] = []byte("module test")
+	provider.Files["go.mod"] = []byte("module test")
 
 	stores := newMockStores()
 	svc := NewService(stores.validations, stores.issues, stores.jobs, provider, zerolog.Nop())
@@ -525,7 +478,7 @@ func TestValidate_SecurityFails_FailFast(t *testing.T) {
 
 	require.Equal(t, "failed", stores.validations.lastStatus, "validation status should be failed when security check fails")
 	// CI should NOT have been called (fail-fast)
-	require.Empty(t, provider.execCalls, "CI checks should not run after security failure due to fail-fast")
+	require.Empty(t, provider.ExecCalls, "CI checks should not run after security failure due to fail-fast")
 	require.Equal(t, "triaged", stores.issues.lastStatus, "issue status should be set to triaged on validation failure")
 	require.Empty(t, stores.jobs.lastJobType, "no job should be enqueued when validation fails")
 }
@@ -534,8 +487,8 @@ func TestValidate_SkippedChecksRecorded(t *testing.T) {
 	t.Parallel()
 
 	provider := newMockProvider()
-	provider.files["go.mod"] = []byte("module test")
-	provider.execFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+	provider.Files["go.mod"] = []byte("module test")
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 		return 0, nil
 	}
 
@@ -587,8 +540,8 @@ func TestValidate_NilDiff_PassesSecurity(t *testing.T) {
 	t.Parallel()
 
 	provider := newMockProvider()
-	provider.files["go.mod"] = []byte("module test")
-	provider.execFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+	provider.Files["go.mod"] = []byte("module test")
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 		return 0, nil
 	}
 

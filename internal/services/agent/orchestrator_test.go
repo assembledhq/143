@@ -259,7 +259,7 @@ func testRun(orgID, issueID uuid.UUID) *models.AgentRun {
 }
 
 type testDeps struct {
-	provider  *mockSandboxProvider
+	provider  *testutil.MockSandboxProvider
 	adapter   *mockAgentAdapter
 	agentRuns *mockAgentRunStore
 	issues    *mockIssueStore
@@ -273,7 +273,7 @@ type testDeps struct {
 func defaultDeps() testDeps {
 	orgID := testOrg()
 	return testDeps{
-		provider:  &mockSandboxProvider{},
+		provider:  testutil.NewMockSandboxProvider(),
 		adapter:   &mockAgentAdapter{name: "claude_code"},
 		agentRuns: &mockAgentRunStore{countRunning: 0},
 		issues:    &mockIssueStore{issue: testIssue(orgID)},
@@ -349,7 +349,7 @@ func TestRunAgent_SuccessfulRun(t *testing.T) {
 	require.GreaterOrEqual(t, d.logs.getCount(), 2)
 
 	// Sandbox should be destroyed.
-	require.Equal(t, 1, d.provider.getDestroyCalls())
+	require.Equal(t, 1, d.provider.GetDestroyCalls())
 }
 
 func TestRunAgent_FailedExecution(t *testing.T) {
@@ -390,7 +390,7 @@ func TestRunAgent_FailedExecution(t *testing.T) {
 	require.Equal(t, run.OrgID.String(), analyzePayload["org_id"], "analyze_failure payload should include org ID")
 
 	// Sandbox should be destroyed.
-	require.Equal(t, 1, d.provider.getDestroyCalls())
+	require.Equal(t, 1, d.provider.GetDestroyCalls())
 }
 
 func TestRunAgent_LowConfidence(t *testing.T) {
@@ -477,7 +477,7 @@ func TestRunAgent_ConcurrencyLimit(t *testing.T) {
 	}
 
 	// Sandbox should never have been created, so destroy shouldn't be called.
-	require.Equal(t, 0, d.provider.getDestroyCalls())
+	require.Equal(t, 0, d.provider.GetDestroyCalls())
 }
 
 func TestRunAgent_SandboxCleanupOnCreateFailure(t *testing.T) {
@@ -488,7 +488,7 @@ func TestRunAgent_SandboxCleanupOnCreateFailure(t *testing.T) {
 	run := testRun(orgID, issue.ID)
 
 	d := defaultDeps()
-	d.provider.createFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
 		return nil, errors.New("docker daemon not running")
 	}
 
@@ -498,7 +498,7 @@ func TestRunAgent_SandboxCleanupOnCreateFailure(t *testing.T) {
 	require.Contains(t, err.Error(), "create sandbox")
 
 	// Destroy should not be called since Create failed (no sandbox to destroy).
-	require.Equal(t, 0, d.provider.getDestroyCalls())
+	require.Equal(t, 0, d.provider.GetDestroyCalls())
 
 	// Run should be marked as failed.
 	results := d.agentRuns.getResultUpdates()
@@ -519,7 +519,7 @@ func TestRunAgent_SandboxCleanupOnCloneFailure(t *testing.T) {
 	run := testRun(orgID, issue.ID)
 
 	d := defaultDeps()
-	d.provider.cloneRepoFn = func(ctx context.Context, sb *agent.Sandbox, repoURL, branch, token string) error {
+	d.provider.CloneRepoFn = func(ctx context.Context, sb *agent.Sandbox, repoURL, branch, token string) error {
 		return errors.New("auth failed")
 	}
 
@@ -529,7 +529,7 @@ func TestRunAgent_SandboxCleanupOnCloneFailure(t *testing.T) {
 	require.Contains(t, err.Error(), "clone repo")
 
 	// Sandbox was created so Destroy must be called.
-	require.Equal(t, 1, d.provider.getDestroyCalls())
+	require.Equal(t, 1, d.provider.GetDestroyCalls())
 }
 
 func TestRunAgent_LogStreamingWithQuestion(t *testing.T) {
