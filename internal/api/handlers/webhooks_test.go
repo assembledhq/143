@@ -187,6 +187,18 @@ func TestWebhook_HandleGitHub(t *testing.T) {
 			},
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				now := time.Now()
+				orgID := uuid.New()
+				integrationID := uuid.New()
+
+				// 1. GetByGitHubInstallationID -> returns integration
+				mock.ExpectQuery("SELECT .+ FROM integrations WHERE provider").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+							AddRow(integrationID, orgID, "github", []byte(`{"installation_id":12345}`), "active", nil, now),
+					)
+
+				// 2. UpsertFromGitHub repo (12 named args)
 				mock.ExpectQuery("INSERT INTO repositories").
 					WithArgs(
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -197,6 +209,45 @@ func TestWebhook_HandleGitHub(t *testing.T) {
 						pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
 							AddRow(uuid.New(), now, now),
 					)
+			},
+			expectedCode: http.StatusOK,
+			expectedBody: "repositories updated",
+		},
+		{
+			name:   "installation_repositories event removes repos",
+			secret: "test-secret",
+			event:  "installation_repositories",
+			payload: `{
+				"action": "removed",
+				"installation": {
+					"id": 12345,
+					"account": {"id": 100, "login": "test-org"}
+				},
+				"repositories_added": [],
+				"repositories_removed": [
+					{"id": 2001, "full_name": "test-org/old-repo", "private": false}
+				]
+			}`,
+			signature: func(secret string, body []byte) string {
+				return computeTestSignature(secret, body)
+			},
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				now := time.Now()
+				orgID := uuid.New()
+				integrationID := uuid.New()
+
+				// 1. GetByGitHubInstallationID -> returns integration
+				mock.ExpectQuery("SELECT .+ FROM integrations WHERE provider").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+							AddRow(integrationID, orgID, "github", []byte(`{"installation_id":12345}`), "active", nil, now),
+					)
+
+				// 2. DisconnectByGitHubID
+				mock.ExpectExec("UPDATE repositories").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 			},
 			expectedCode: http.StatusOK,
 			expectedBody: "repositories updated",

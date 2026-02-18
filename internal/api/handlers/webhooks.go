@@ -196,9 +196,18 @@ func (h *WebhookHandler) handleInstallationRepositories(w http.ResponseWriter, r
 
 	ctx := r.Context()
 
-	// For added repos, upsert them
+	// Look up the integration by installation_id to get org_id and integration_id
+	integration, err := h.integrationStore.GetByGitHubInstallationID(ctx, event.Installation.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTEGRATION_LOOKUP_FAILED", "failed to find integration for installation")
+		return
+	}
+
+	// For added repos, upsert them with proper org/integration context
 	for _, whRepo := range event.RepositoriesAdded {
 		repo := &models.Repository{
+			OrgID:          integration.OrgID,
+			IntegrationID:  integration.ID,
 			GitHubID:       whRepo.ID,
 			FullName:       whRepo.FullName,
 			DefaultBranch:  "main",
@@ -215,8 +224,11 @@ func (h *WebhookHandler) handleInstallationRepositories(w http.ResponseWriter, r
 	}
 
 	// For removed repos, mark as disconnected
-	for range event.RepositoriesRemoved {
-		// TODO: look up by github_id and update status to disconnected
+	for _, whRepo := range event.RepositoriesRemoved {
+		if err := h.repoStore.DisconnectByGitHubID(ctx, event.Installation.ID, whRepo.ID); err != nil {
+			writeError(w, http.StatusInternalServerError, "REPOSITORY_DISCONNECT_FAILED", "failed to disconnect repository")
+			return
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "repositories updated"})

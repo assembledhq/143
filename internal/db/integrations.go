@@ -121,3 +121,18 @@ func (s *IntegrationStore) UpdateStatus(ctx context.Context, orgID, id uuid.UUID
 	})
 	return err
 }
+
+func (s *IntegrationStore) GetByGitHubInstallationID(ctx context.Context, installationID int64) (models.Integration, error) {
+	query := `
+		SELECT id, org_id, provider, config, status, last_synced_at, created_at
+		FROM integrations
+		WHERE provider = 'github'
+		  AND (config->>'installation_id')::bigint = @installation_id
+		  AND status = 'active'`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"installation_id": installationID})
+	if err != nil {
+		return models.Integration{}, fmt.Errorf("query integration by github installation id: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Integration])
+}
