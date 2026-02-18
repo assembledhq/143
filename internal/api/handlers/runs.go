@@ -106,6 +106,8 @@ func (h *RunHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// TODO: Allow callers to specify agent_type, autonomy_level, and token_mode
+	// via the request body instead of hardcoding defaults.
 	run := &models.AgentRun{
 		IssueID:       issueID,
 		OrgID:         orgID,
@@ -133,6 +135,9 @@ func (h *RunHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 }
 
 // StreamLogs streams agent run logs as Server-Sent Events.
+// Note: agent_run_logs are scoped by agent_run_id (which is itself org-scoped),
+// so this endpoint verifies org ownership via the run lookup rather than
+// requiring org_id directly on the logs table.
 func (h *RunHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	runID, err := uuid.Parse(chi.URLParam(r, "id"))

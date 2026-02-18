@@ -10,14 +10,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func newTestFailureService(t *testing.T) (*FailureService, pgxmock.PgxPoolIface) {
 	t.Helper()
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create pgxmock pool without error")
 	store := db.NewAgentRunStore(mock)
 	svc := NewFailureService(store, zerolog.Nop())
 	return svc, mock
@@ -210,15 +209,15 @@ func TestClassifyFailure(t *testing.T) {
 			defer mock.Close()
 
 			summary, err := svc.AnalyzeFailure(context.Background(), &tt.run)
-			require.NoError(t, err)
-			require.NotNil(t, summary)
+			require.NoError(t, err, "AnalyzeFailure should not return an error")
+			require.NotNil(t, summary, "AnalyzeFailure should return a non-nil summary")
 
-			assert.Equal(t, tt.wantCategory, summary.Category)
-			assert.Equal(t, tt.wantSubType, summary.SubType)
-			assert.Equal(t, tt.wantRetryAdvised, summary.RetryAdvised)
-			assert.NotEmpty(t, summary.Explanation, "explanation should not be empty")
-			assert.GreaterOrEqual(t, len(summary.NextSteps), 2, "should have at least 2 next steps")
-			assert.LessOrEqual(t, len(summary.NextSteps), 3, "should have at most 3 next steps")
+			require.Equal(t, tt.wantCategory, summary.Category, "failure category should match expected value")
+			require.Equal(t, tt.wantSubType, summary.SubType, "failure sub-type should match expected value")
+			require.Equal(t, tt.wantRetryAdvised, summary.RetryAdvised, "retry advised flag should match expected value")
+			require.NotEmpty(t, summary.Explanation, "explanation should not be empty")
+			require.GreaterOrEqual(t, len(summary.NextSteps), 2, "should have at least 2 next steps")
+			require.LessOrEqual(t, len(summary.NextSteps), 3, "should have at most 3 next steps")
 		})
 	}
 }
@@ -230,9 +229,9 @@ func TestAnalyzeFailure_NilRun(t *testing.T) {
 	defer mock.Close()
 
 	summary, err := svc.AnalyzeFailure(context.Background(), nil)
-	assert.Error(t, err)
-	assert.Nil(t, summary)
-	assert.Contains(t, err.Error(), "nil")
+	require.Error(t, err, "AnalyzeFailure should return an error for nil run")
+	require.Nil(t, summary, "summary should be nil when run is nil")
+	require.Contains(t, err.Error(), "nil", "error message should mention nil")
 }
 
 func TestUpdateRunWithFailure(t *testing.T) {
@@ -256,8 +255,8 @@ func TestUpdateRunWithFailure(t *testing.T) {
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	err := svc.UpdateRunWithFailure(context.Background(), orgID, runID, summary)
-	require.NoError(t, err)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "UpdateRunWithFailure should not return an error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestRetryAdvised_ToolingCategoriesAreRetryable(t *testing.T) {
@@ -276,9 +275,9 @@ func TestRetryAdvised_ToolingCategoriesAreRetryable(t *testing.T) {
 	for _, errMsg := range toolingErrors {
 		run := &models.AgentRun{Error: strPtr(errMsg)}
 		summary, err := svc.AnalyzeFailure(context.Background(), run)
-		require.NoError(t, err)
-		assert.Equal(t, "tooling", summary.Category, "error: %s", errMsg)
-		assert.True(t, summary.RetryAdvised, "tooling error should advise retry: %s", errMsg)
+		require.NoError(t, err, "AnalyzeFailure should not return an error for: %s", errMsg)
+		require.Equal(t, "tooling", summary.Category, "error: %s", errMsg)
+		require.True(t, summary.RetryAdvised, "tooling error should advise retry: %s", errMsg)
 	}
 }
 
@@ -294,10 +293,10 @@ func TestRetryAdvised_SecurityNeverRetryable(t *testing.T) {
 	}
 
 	summary, err := svc.AnalyzeFailure(context.Background(), run)
-	require.NoError(t, err)
-	assert.Equal(t, "validation", summary.Category)
-	assert.Equal(t, "security_violation", summary.SubType)
-	assert.False(t, summary.RetryAdvised, "security violations should never advise retry")
+	require.NoError(t, err, "AnalyzeFailure should not return an error")
+	require.Equal(t, "validation", summary.Category, "security violation should be classified as validation")
+	require.Equal(t, "security_violation", summary.SubType, "security violation should have correct sub-type")
+	require.False(t, summary.RetryAdvised, "security violations should never advise retry")
 }
 
 func TestCountLines(t *testing.T) {
@@ -315,15 +314,18 @@ func TestCountLines(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		assert.Equal(t, tt.want, countLines(tt.input))
+		t.Run(tt.input, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, countLines(tt.input), "countLines should return correct line count for input")
+		})
 	}
 }
 
 func TestContainsAny(t *testing.T) {
 	t.Parallel()
 
-	assert.True(t, containsAny("hello world", "world"))
-	assert.True(t, containsAny("hello world", "foo", "world"))
-	assert.False(t, containsAny("hello world", "foo", "bar"))
-	assert.False(t, containsAny("", "foo"))
+	require.True(t, containsAny("hello world", "world"), "containsAny should find 'world' in 'hello world'")
+	require.True(t, containsAny("hello world", "foo", "world"), "containsAny should find 'world' among multiple substrings")
+	require.False(t, containsAny("hello world", "foo", "bar"), "containsAny should return false when no substrings match")
+	require.False(t, containsAny("", "foo"), "containsAny should return false for empty string")
 }

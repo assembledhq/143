@@ -26,15 +26,24 @@ func NewSentryAPIClient(httpClient *http.Client, logger zerolog.Logger) *SentryA
 	}
 }
 
+const (
+	// sentryMaxPages is the maximum number of pages to fetch from the Sentry API
+	// during a single sync to prevent unbounded pagination.
+	sentryMaxPages = 50
+
+	// sentryMaxRetries is the maximum number of retry attempts for rate-limited
+	// Sentry API requests before giving up.
+	sentryMaxRetries = 3
+)
+
 // FetchIssues retrieves unresolved issues from a Sentry project since the given time.
 // It handles pagination and rate limiting automatically.
 func (c *SentryAPIClient) FetchIssues(ctx context.Context, integrationID uuid.UUID, baseURL, authToken, projectSlug string, since time.Time) ([]NormalizedIssue, error) {
 	var allIssues []NormalizedIssue
 
 	url := fmt.Sprintf("%s/api/0/projects/%s/issues/?query=is:unresolved&sort=date", baseURL, projectSlug)
-	maxPages := 50
 
-	for page := 0; url != "" && page < maxPages; page++ {
+	for page := 0; url != "" && page < sentryMaxPages; page++ {
 		issues, nextURL, err := c.fetchPage(ctx, url, authToken)
 		if err != nil {
 			return nil, err
@@ -62,9 +71,7 @@ func (c *SentryAPIClient) FetchIssues(ctx context.Context, integrationID uuid.UU
 }
 
 func (c *SentryAPIClient) fetchPage(ctx context.Context, url, authToken string) ([]SentryIssue, string, error) {
-	const maxRetries = 3
-
-	for attempt := 0; attempt <= maxRetries; attempt++ {
+	for attempt := 0; attempt <= sentryMaxRetries; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
 			return nil, "", fmt.Errorf("create request: %w", err)
@@ -106,7 +113,7 @@ func (c *SentryAPIClient) fetchPage(ctx context.Context, url, authToken string) 
 		return issues, nextURL, nil
 	}
 
-	return nil, "", fmt.Errorf("sentry API rate limited after %d retries", maxRetries)
+	return nil, "", fmt.Errorf("sentry API rate limited after %d retries", sentryMaxRetries)
 }
 
 func (c *SentryAPIClient) normalizeIssue(integrationID uuid.UUID, issue SentryIssue) NormalizedIssue {

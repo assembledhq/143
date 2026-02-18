@@ -8,7 +8,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
-	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -22,14 +21,19 @@ type FailureSummary struct {
 	RetryAdvised bool     // should the user try again?
 }
 
+// FailureRunUpdater defines the subset of agent run store operations needed by FailureService.
+type FailureRunUpdater interface {
+	UpdateFailure(ctx context.Context, orgID, runID uuid.UUID, explanation, category string, nextSteps []string, retryAdvised bool) error
+}
+
 // FailureService classifies agent run failures and generates user-facing explanations.
 type FailureService struct {
-	agentRuns *db.AgentRunStore
+	agentRuns FailureRunUpdater
 	logger    zerolog.Logger
 }
 
 // NewFailureService creates a new FailureService.
-func NewFailureService(agentRuns *db.AgentRunStore, logger zerolog.Logger) *FailureService {
+func NewFailureService(agentRuns FailureRunUpdater, logger zerolog.Logger) *FailureService {
 	return &FailureService{
 		agentRuns: agentRuns,
 		logger:    logger,

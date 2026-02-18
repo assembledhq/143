@@ -698,8 +698,8 @@ func parseDiff(diff string) []diffFile {
 		if path == "" {
 			continue
 		}
-		// Sanitize path: reject traversal attempts.
-		if strings.Contains(path, "..") {
+		// Sanitize path: reject traversal attempts and absolute paths.
+		if strings.Contains(path, "..") || strings.HasPrefix(path, "/") {
 			continue
 		}
 		f.Path = path

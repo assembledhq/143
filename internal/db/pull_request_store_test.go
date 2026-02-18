@@ -8,7 +8,6 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -27,7 +26,7 @@ func newPRRow(id, agentRunID, orgID uuid.UUID, now time.Time) []any {
 func TestPullRequestStore_Create_Success(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool without error")
 	defer mock.Close()
 
 	store := NewPullRequestStore(mock)
@@ -55,16 +54,16 @@ func TestPullRequestStore_Create_Success(t *testing.T) {
 		)
 
 	err = store.Create(context.Background(), pr)
-	require.NoError(t, err)
-	assert.Equal(t, generatedID, pr.ID)
-	assert.Equal(t, now, pr.CreatedAt)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "should create pull request without error")
+	require.Equal(t, generatedID, pr.ID, "should set the generated ID on the pull request")
+	require.Equal(t, now, pr.CreatedAt, "should set the created_at timestamp on the pull request")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestPullRequestStore_GetByID_Success(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool without error")
 	defer mock.Close()
 
 	store := NewPullRequestStore(mock)
@@ -81,17 +80,23 @@ func TestPullRequestStore_GetByID_Success(t *testing.T) {
 		)
 
 	pr, err := store.GetByID(context.Background(), orgID, id)
-	require.NoError(t, err)
-	assert.Equal(t, id, pr.ID)
-	assert.Equal(t, 42, pr.GitHubPRNumber)
-	assert.Equal(t, "open", pr.Status)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "should retrieve pull request by ID without error")
+	require.Equal(t, id, pr.ID, "should return the correct pull request ID")
+	require.Equal(t, agentRunID, pr.AgentRunID, "should return the correct agent run ID")
+	require.Equal(t, orgID, pr.OrgID, "should return the correct org ID")
+	require.Equal(t, 42, pr.GitHubPRNumber, "should return the correct GitHub PR number")
+	require.Equal(t, "https://github.com/org/repo/pull/42", pr.GitHubPRURL, "should return the correct GitHub PR URL")
+	require.Equal(t, "org/repo", pr.GitHubRepo, "should return the correct GitHub repo")
+	require.Equal(t, "Fix bug", pr.Title, "should return the correct title")
+	require.Equal(t, "open", pr.Status, "should return the correct status")
+	require.Equal(t, "pending", pr.ReviewStatus, "should return the correct review status")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestPullRequestStore_GetByID_NotFound(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool without error")
 	defer mock.Close()
 
 	store := NewPullRequestStore(mock)
@@ -101,14 +106,14 @@ func TestPullRequestStore_GetByID_NotFound(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(prColumns))
 
 	_, err = store.GetByID(context.Background(), uuid.New(), uuid.New())
-	assert.Error(t, err)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	require.Error(t, err, "should return an error when pull request is not found")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestPullRequestStore_GetByAgentRunID_Success(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool without error")
 	defer mock.Close()
 
 	store := NewPullRequestStore(mock)
@@ -125,16 +130,19 @@ func TestPullRequestStore_GetByAgentRunID_Success(t *testing.T) {
 		)
 
 	pr, err := store.GetByAgentRunID(context.Background(), orgID, agentRunID)
-	require.NoError(t, err)
-	assert.Equal(t, id, pr.ID)
-	assert.Equal(t, agentRunID, pr.AgentRunID)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "should retrieve pull request by agent run ID without error")
+	require.Equal(t, id, pr.ID, "should return the correct pull request ID")
+	require.Equal(t, agentRunID, pr.AgentRunID, "should return the correct agent run ID")
+	require.Equal(t, orgID, pr.OrgID, "should return the correct org ID")
+	require.Equal(t, 42, pr.GitHubPRNumber, "should return the correct GitHub PR number")
+	require.Equal(t, "open", pr.Status, "should return the correct status")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestPullRequestStore_UpdateStatus_Closed(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool without error")
 	defer mock.Close()
 
 	store := NewPullRequestStore(mock)
@@ -146,14 +154,14 @@ func TestPullRequestStore_UpdateStatus_Closed(t *testing.T) {
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	err = store.UpdateStatus(context.Background(), orgID, id, "closed")
-	require.NoError(t, err)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "should update pull request status to closed without error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestPullRequestStore_UpdateStatus_Merged(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool without error")
 	defer mock.Close()
 
 	store := NewPullRequestStore(mock)
@@ -165,14 +173,14 @@ func TestPullRequestStore_UpdateStatus_Merged(t *testing.T) {
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	err = store.UpdateStatus(context.Background(), orgID, id, "merged")
-	require.NoError(t, err)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "should update pull request status to merged without error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestPullRequestStore_ListByOrg_Success(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool without error")
 	defer mock.Close()
 
 	store := NewPullRequestStore(mock)
@@ -191,17 +199,21 @@ func TestPullRequestStore_ListByOrg_Success(t *testing.T) {
 		)
 
 	prs, err := store.ListByOrg(context.Background(), orgID, PullRequestFilters{})
-	require.NoError(t, err)
-	assert.Len(t, prs, 2)
-	assert.Equal(t, id1, prs[0].ID)
-	assert.Equal(t, id2, prs[1].ID)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "should list pull requests by org without error")
+	require.Len(t, prs, 2, "should return both pull requests for the org")
+	require.Equal(t, id1, prs[0].ID, "first pull request should have the correct ID")
+	require.Equal(t, id2, prs[1].ID, "second pull request should have the correct ID")
+	require.Equal(t, agentRunID, prs[0].AgentRunID, "first pull request should have the correct agent run ID")
+	require.Equal(t, orgID, prs[0].OrgID, "first pull request should have the correct org ID")
+	require.Equal(t, 42, prs[0].GitHubPRNumber, "first pull request should have the correct GitHub PR number")
+	require.Equal(t, "open", prs[0].Status, "first pull request should have the correct status")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestPullRequestStore_ListByOrg_WithStatusFilter(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool without error")
 	defer mock.Close()
 
 	store := NewPullRequestStore(mock)
@@ -218,7 +230,9 @@ func TestPullRequestStore_ListByOrg_WithStatusFilter(t *testing.T) {
 		)
 
 	prs, err := store.ListByOrg(context.Background(), orgID, PullRequestFilters{Status: "open"})
-	require.NoError(t, err)
-	assert.Len(t, prs, 1)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "should list pull requests filtered by status without error")
+	require.Len(t, prs, 1, "should return only the pull request matching the status filter")
+	require.Equal(t, id, prs[0].ID, "filtered pull request should have the correct ID")
+	require.Equal(t, "open", prs[0].Status, "filtered pull request should have the correct status")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

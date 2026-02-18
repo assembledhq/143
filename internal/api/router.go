@@ -11,6 +11,7 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/db"
+	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
 )
 
@@ -30,14 +31,30 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) *c
 	webhookDeliveryStore := db.NewWebhookDeliveryStore(pool)
 	jobStore := db.NewJobStore(pool)
 
+	deployStore := db.NewDeployStore(pool)
+
 	// Create services
 	ingestionSvc := ingestion.NewService(issueStore, webhookDeliveryStore, jobStore, logger)
+
+	// Create PRService if GitHub App credentials are configured.
+	var prService *ghservice.PRService
+	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
+		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
+		if err != nil {
+			logger.Warn().Err(err).Msg("failed to initialize GitHub App service, PR webhooks will be disabled")
+		} else {
+			prService = ghservice.NewPRService(
+				ghSvc, pullRequestStore, agentRunStore, issueStore,
+				deployStore, validationStore, repoStore, jobStore, logger,
+			)
+		}
+	}
 
 	// Create handlers
 	healthHandler := handlers.NewHealthHandler(pool)
 	authHandler := handlers.NewAuthHandler(cfg, orgStore, userStore, sessionStore)
 	repoHandler := handlers.NewRepositoryHandler(repoStore)
-	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, repoStore, integrationStore, nil)
+	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, repoStore, integrationStore, prService)
 	settingsHandler := handlers.NewSettingsHandler(orgStore)
 	issueHandler := handlers.NewIssueHandler(issueStore)
 	runHandler := handlers.NewRunHandler(
