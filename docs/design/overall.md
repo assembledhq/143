@@ -324,47 +324,47 @@ Connect Sentry first. It's the highest-signal, most automated source — stack t
 
 **Milestone**: ✅ Sentry errors appear in the dashboard via both webhooks and polling sync. Issues can be filtered and browsed with full UI controls.
 
-## Phase 3: Agent Execution + Validation + PR (docs: 06, 07, 08, 17) — NOT STARTED (schema only)
+## Phase 3: Agent Execution + Validation + PR (docs: 06, 07, 08, 17) — ~90% COMPLETE
 
 **This is the "aha moment."** Connect a repo, see a Sentry error, click "Fix This," get a PR. Ship these three together because none is useful alone.
 
-DB schema for all Phase 3 entities exists (agent_runs, agent_run_logs, agent_run_questions, validations, pull_requests, deploys) and basic API handlers exist for listing/getting runs, but the entire execution pipeline is unimplemented:
+The core execution pipeline is fully wired end-to-end. DB schema, stores, API handlers, services, and frontend are all implemented. The remaining gaps are LLM-based validation checks (3 of 6 checks stubbed).
 
-1. **Sandbox container management** — ❌ No Docker/gVisor integration, no container lifecycle code
-2. **Claude Code adapter** — ❌ No agent adapter interface or Claude Code CLI integration
-3. **Agent orchestrator** — ❌ No run lifecycle management or concurrency control. Worker handlers are stubs.
-4. **Basic context injection** — ❌ No CLAUDE.md/AGENTS.md reading or stack trace file extraction
-5. **Confidence scoring** — ⚠️ DB field + frontend display exist, but no scoring logic or threshold gating
-6. **Human-in-the-loop** — ⚠️ `agent_run_questions` table exists, but no API endpoints, no orchestrator pause logic, no frontend UI
-7. **Log streaming** — ❌ No SSE endpoint, no log channel handling, no frontend EventSource client
-8. **Basic validation** — ❌ `validations` table exists but no validation service, no test/security/diff checks
-9. **PR creation** — ❌ GitHub service exists as stub but no branch/commit/PR creation logic
-10. **PR tracking** — ⚠️ `pull_requests` table exists, webhook handler scaffolded, but no PR store or status update logic
-11. **Failure communication** (17) — ⚠️ DB fields exist (failure_explanation, failure_category, failure_next_steps), frontend displays them, but no failure analysis service
-12. **Fix Queue UI** — ⚠️ Basic runs list page exists with status/confidence/failure display. Missing: run detail page with tabs (logs, diff, PR), live log viewer, agent questions UI.
+1. **Sandbox container management** — ✅ Docker SDK integration in `providers/docker.go` with full container lifecycle (Create/CloneRepo/Exec/ReadFile/WriteFile/Destroy). gVisor runtime support, security hardening (dropped capabilities, read-only rootfs, non-root user, PID limits, tmpfs with noexec). Configurable CPU/memory/timeout limits.
+2. **Claude Code adapter** — ✅ `adapters/claude_code.go` implements AgentAdapter interface. `PreparePrompt()` builds system+user prompts with stack trace extraction and file hints. `Execute()` runs Claude Code CLI in sandbox, parses streaming JSON output, collects git diff. Prompt injection defense included.
+3. **Agent orchestrator** — ✅ `orchestrator.go` implements full run lifecycle: concurrency check per org → status update → fetch issue/repo → get adapter → prepare prompt → create sandbox → clone repo → execute agent with log streaming → confidence gating → enqueue follow-up jobs (validate or analyze_failure) → cleanup. Worker handlers (`run_agent`, `validate`, `open_pr`, `analyze_failure`) are wired to services.
+4. **Basic context injection** — ✅ `PreparePrompt()` injects repository conventions from ContextDocs. `extractFileHints()` pulls file paths from Sentry stack trace frames. `extractStackTrace()` produces human-readable stack traces from Sentry raw data.
+5. **Confidence scoring** — ✅ Claude Code adapter extracts confidence_score, confidence_reasoning, and risk_factors from agent JSON output. Orchestrator applies threshold gating: score < 0.5 → `needs_human_guidance`, score >= 0.5 → proceed to validation.
+6. **Human-in-the-loop** — ✅ Orchestrator detects "question" log entries, creates `AgentRunQuestion` records, sets run status to `awaiting_input`. API endpoints exist for listing questions (`GET /runs/{id}/questions`) and answering them (`POST /runs/{qid}/answer`).
+7. **Log streaming** — ✅ SSE endpoint (`GET /runs/{id}/logs`) in `runs.go` with HTTP Flusher for real-time streaming. Sends existing logs first, then polls every 1s for new entries. Frontend `LogViewer` component connects via EventSource with auto-reconnection.
+8. **Basic validation** — ⚠️ PARTIAL. `validation/service.go` implements 3 of 6 checks: security scan (regex-based secret/SQLi detection), CI check (detects project type and runs tests), diff size check (warn >200 lines, fail >500 lines). Three LLM-based checks are stubbed: direction_check, correctness_check, regression_test_check. Validation flow is complete: creates record → runs checks with fail-fast → marks passed/failed → enqueues `open_pr` or returns issue to `triaged`.
+9. **PR creation** — ✅ `github/pr.go` implements full GitHub API flow: get base branch SHA → create branch → parse diff → create blobs/tree/commit → update ref → create PR → add labels → store in DB → update run and issue status. PR body includes agent summary, issue metadata, and validation results.
+10. **PR tracking** — ✅ Full `PullRequestStore` with CRUD operations. Webhook handlers process `pull_request` events (merged/closed tracking, deploy record creation) and `pull_request_review` events (approval/changes_requested tracking).
+11. **Failure communication** (17) — ✅ Rule-based `FailureService` in `failure.go` classifies 9 failure types (timeout, sandbox crash, API error, build failure, empty diff, test regression, security violation, large diff, missing context). Each produces human-readable explanation, category, sub-type, next steps, and retry recommendation. Persisted to DB and displayed in frontend.
+12. **Fix Queue UI** — ✅ Runs list page with grouped tabs (All/Active/Needs Review/Failed/Completed), status badges, confidence scores, duration display. Run detail page with tabs: Overview (status/confidence/timestamps/result), Logs (live streaming LogViewer), Diff (DiffViewer component), Validation (results table for all 6 checks), PR (GitHub link/status/review status/branch/body). Failure details section shows explanation, category, next steps as bulleted list, and retry button.
 
-**Milestone**: ❌ Not yet achievable. This is the next major phase to build.
+**Milestone**: ⚠️ The core "Sentry error → Fix This → agent run → validation → PR" pipeline is functionally complete. Remaining work: implement the 3 LLM-based validation checks (direction, correctness, regression test).
 
-## Phase 4: Prioritization + Routing (docs: 05, 12) — NOT STARTED (schema only)
+## Phase 4: Prioritization + Routing (docs: 05, 12) — NOT STARTED (schema + stubs only)
 
 Now that fixes are flowing, rank issues so the most impactful ones surface first.
 
-DB tables exist for `priority_scores` and `complexity_estimates`, but no business logic is implemented:
+DB tables exist for `priority_scores` and `complexity_estimates`. A `prioritize` job handler is registered in the worker but is a stub (parses payload, logs, returns nil — no actual scoring logic):
 
-1. **Scoring algorithm** — ❌ `priority_scores` table ready, `prioritize` job handler is a stub. No scoring logic, no direction alignment LLM call.
+1. **Scoring algorithm** — ❌ `priority_scores` table ready, `prioritize` job handler is a stub (worker/handlers.go:86-114). No sub-score computation, no direction alignment LLM call, no composite scoring.
 2. **Auto-trigger** — ❌ No auto-trigger logic, no autonomy level enforcement, no concurrency cap
-3. **Settings UI** — ❌ Settings page exists but only shows integration stubs. No priority weight, product direction, or auto-fix controls.
+3. **Settings UI** — ❌ Settings page exists but only shows integration status. No priority weight, product direction, or auto-fix controls.
 4. **Priority display** — ❌ Issues table shows severity/status but not priority scores or explainability
 
 **Milestone**: ❌ Depends on Phase 3 completion first (fixes must be flowing before prioritization matters).
 
-## Phase 5: Observability + Impact (docs: 09, 18) — NOT STARTED
+## Phase 5: Observability + Impact (docs: 09, 18) — NOT STARTED (partial deploy tracking exists)
 
 Close the loop — measure whether fixes actually helped.
 
-`deploys` table exists in schema but experiments/metrics tables are missing. No implementation:
+`deploys` table exists and deploy records are already created automatically when PRs are merged (via `HandlePullRequestEvent` in `github/pr.go`). Experiments/metrics tables are missing. No experiment or outcome logic:
 
-1. **Deploy detection** — ❌ No webhook handler for deploy events
+1. **Deploy detection** — ⚠️ PARTIAL. Deploy records are created automatically on PR merge (github/pr.go:255-264) with commit SHA and environment. However, there is no external deploy webhook handler (e.g., from CI/CD systems) for non-PR deploys.
 2. **Baseline + observation metric collection** — ❌ No experiments table, no metric collection
 3. **Outcome classification** — ❌ No comparison or classification logic
 4. **Impact display** — ❌ No impact UI
