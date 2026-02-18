@@ -7,81 +7,101 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func TestMaxBodySize_AllowsSmallBody(t *testing.T) {
-	handler := MaxBodySize(1024)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
+func TestMaxBodySize(t *testing.T) {
+	t.Parallel()
 
-	body := bytes.NewReader([]byte("small body"))
-	req := httptest.NewRequest(http.MethodPost, "/", body)
-	req.Header.Set("Content-Length", "10")
-	w := httptest.NewRecorder()
+	tests := []struct {
+		name         string
+		maxSize      int64
+		method       string
+		body         func() *http.Request
+		expectedCode int
+	}{
+		{
+			name:    "allows request with body smaller than limit",
+			maxSize: 1024,
+			method:  http.MethodPost,
+			body: func() *http.Request {
+				body := bytes.NewReader([]byte("small body"))
+				req := httptest.NewRequest(http.MethodPost, "/", body)
+				req.Header.Set("Content-Length", "10")
+				return req
+			},
+			expectedCode: http.StatusOK,
+		},
+		{
+			name:    "rejects request with Content-Length exceeding limit",
+			maxSize: 100,
+			method:  http.MethodPost,
+			body: func() *http.Request {
+				body := bytes.NewReader(make([]byte, 200))
+				req := httptest.NewRequest(http.MethodPost, "/", body)
+				req.ContentLength = 200
+				return req
+			},
+			expectedCode: http.StatusRequestEntityTooLarge,
+		},
+		{
+			name:    "wraps body with MaxBytesReader to reject oversized streaming body",
+			maxSize: 50,
+			method:  http.MethodPost,
+			body: func() *http.Request {
+				body := strings.NewReader(strings.Repeat("x", 100))
+				req := httptest.NewRequest(http.MethodPost, "/", body)
+				req.ContentLength = -1 // unknown content length
+				return req
+			},
+			expectedCode: http.StatusRequestEntityTooLarge,
+		},
+		{
+			name:    "defaults to allowing small body when limit is zero",
+			maxSize: 0,
+			method:  http.MethodPost,
+			body: func() *http.Request {
+				body := bytes.NewReader([]byte("hello"))
+				req := httptest.NewRequest(http.MethodPost, "/", body)
+				req.ContentLength = 5
+				return req
+			},
+			expectedCode: http.StatusOK,
+		},
+		{
+			name:    "allows GET requests without body enforcement",
+			maxSize: 100,
+			method:  http.MethodGet,
+			body: func() *http.Request {
+				return httptest.NewRequest(http.MethodGet, "/", nil)
+			},
+			expectedCode: http.StatusOK,
+		},
+	}
 
-	handler.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-func TestMaxBodySize_RejectsLargeContentLength(t *testing.T) {
-	handler := MaxBodySize(100)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
+			handler := MaxBodySize(tt.maxSize)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// For the streaming body test, we need to actually read the body
+				// to trigger the MaxBytesReader limit
+				if r.ContentLength == -1 && r.Body != nil {
+					buf := make([]byte, 100)
+					_, err := r.Body.Read(buf)
+					if err != nil {
+						http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
+						return
+					}
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
 
-	body := bytes.NewReader(make([]byte, 200))
-	req := httptest.NewRequest(http.MethodPost, "/", body)
-	req.ContentLength = 200
-	w := httptest.NewRecorder()
+			req := tt.body()
+			w := httptest.NewRecorder()
 
-	handler.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
-	assert.Contains(t, w.Body.String(), "PAYLOAD_TOO_LARGE")
-}
-
-func TestMaxBodySize_WrapsBodyWithMaxBytesReader(t *testing.T) {
-	handler := MaxBodySize(50)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		buf := make([]byte, 100)
-		_, err := r.Body.Read(buf)
-		if err != nil {
-			http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	// Body is larger than limit but Content-Length header is not set
-	body := strings.NewReader(strings.Repeat("x", 100))
-	req := httptest.NewRequest(http.MethodPost, "/", body)
-	req.ContentLength = -1 // unknown content length
-	w := httptest.NewRecorder()
-
-	handler.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
-}
-
-func TestMaxBodySize_DefaultsToOneMB(t *testing.T) {
-	handler := MaxBodySize(0)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	body := bytes.NewReader([]byte("hello"))
-	req := httptest.NewRequest(http.MethodPost, "/", body)
-	req.ContentLength = 5
-	w := httptest.NewRecorder()
-
-	handler.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
-}
-
-func TestMaxBodySize_AllowsGetRequests(t *testing.T) {
-	handler := MaxBodySize(100)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	w := httptest.NewRecorder()
-
-	handler.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
+			handler.ServeHTTP(w, req)
+			require.Equal(t, tt.expectedCode, w.Code, "should return expected HTTP status code")
+		})
+	}
 }

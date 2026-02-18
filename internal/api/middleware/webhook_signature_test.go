@@ -10,7 +10,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func computeHMAC(body, secret string) string {
@@ -19,103 +19,107 @@ func computeHMAC(body, secret string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-func TestVerifyWebhookSignature_ValidSignature(t *testing.T) {
-	secret := "test-secret-key"
-	body := `{"action":"created","data":{"id":"123"}}`
-	sig := computeHMAC(body, secret)
+func TestVerifyWebhookSignature(t *testing.T) {
+	t.Parallel()
 
-	handler := VerifyWebhookSignature("X-Webhook-Signature", secret, "")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Verify body was restored
-		b, err := io.ReadAll(r.Body)
-		assert.NoError(t, err)
-		assert.Equal(t, body, string(b))
-		w.WriteHeader(http.StatusOK)
-	}))
+	tests := []struct {
+		name         string
+		headerName   string
+		secret       string
+		prefix       string
+		body         string
+		signature    string
+		expectedCode int
+		checkBody    bool
+	}{
+		{
+			name:         "allows request with valid HMAC signature and restores body",
+			headerName:   "X-Webhook-Signature",
+			secret:       "test-secret-key",
+			prefix:       "",
+			body:         `{"action":"created","data":{"id":"123"}}`,
+			signature:    computeHMAC(`{"action":"created","data":{"id":"123"}}`, "test-secret-key"),
+			expectedCode: http.StatusOK,
+			checkBody:    true,
+		},
+		{
+			name:         "rejects request with invalid signature",
+			headerName:   "X-Webhook-Signature",
+			secret:       "test-secret-key",
+			prefix:       "",
+			body:         `{"action":"created"}`,
+			signature:    "invalid-signature",
+			expectedCode: http.StatusUnauthorized,
+			checkBody:    false,
+		},
+		{
+			name:         "rejects request with missing signature header",
+			headerName:   "X-Webhook-Signature",
+			secret:       "secret",
+			prefix:       "",
+			body:         `{}`,
+			signature:    "",
+			expectedCode: http.StatusUnauthorized,
+			checkBody:    false,
+		},
+		{
+			name:         "skips verification when secret is empty",
+			headerName:   "X-Webhook-Signature",
+			secret:       "",
+			prefix:       "",
+			body:         `{}`,
+			signature:    "",
+			expectedCode: http.StatusOK,
+			checkBody:    false,
+		},
+		{
+			name:         "strips prefix from signature header before verification",
+			headerName:   "X-Hub-Signature-256",
+			secret:       "test-secret",
+			prefix:       "sha256=",
+			body:         `{"event":"issue.created"}`,
+			signature:    "sha256=" + computeHMAC(`{"event":"issue.created"}`, "test-secret"),
+			expectedCode: http.StatusOK,
+			checkBody:    false,
+		},
+		{
+			name:         "restores request body after successful verification",
+			headerName:   "X-Sig",
+			secret:       "restore-test",
+			prefix:       "",
+			body:         `{"key":"value"}`,
+			signature:    computeHMAC(`{"key":"value"}`, "restore-test"),
+			expectedCode: http.StatusOK,
+			checkBody:    true,
+		},
+	}
 
-	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewBufferString(body))
-	req.Header.Set("X-Webhook-Signature", sig)
-	w := httptest.NewRecorder()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	handler.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
-}
+			var bodyAfterMiddleware []byte
+			handler := VerifyWebhookSignature(tt.headerName, tt.secret, tt.prefix)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tt.checkBody {
+					b, err := io.ReadAll(r.Body)
+					require.NoError(t, err, "should read body without error after middleware")
+					bodyAfterMiddleware = b
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
 
-func TestVerifyWebhookSignature_InvalidSignature(t *testing.T) {
-	secret := "test-secret-key"
-	body := `{"action":"created"}`
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewBufferString(tt.body))
+			if tt.signature != "" {
+				req.Header.Set(tt.headerName, tt.signature)
+			}
+			w := httptest.NewRecorder()
 
-	handler := VerifyWebhookSignature("X-Webhook-Signature", secret, "")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
+			handler.ServeHTTP(w, req)
 
-	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewBufferString(body))
-	req.Header.Set("X-Webhook-Signature", "invalid-signature")
-	w := httptest.NewRecorder()
-
-	handler.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusUnauthorized, w.Code)
-	assert.Contains(t, w.Body.String(), "invalid webhook signature")
-}
-
-func TestVerifyWebhookSignature_MissingSignature(t *testing.T) {
-	handler := VerifyWebhookSignature("X-Webhook-Signature", "secret", "")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewBufferString(`{}`))
-	w := httptest.NewRecorder()
-
-	handler.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusUnauthorized, w.Code)
-	assert.Contains(t, w.Body.String(), "missing webhook signature")
-}
-
-func TestVerifyWebhookSignature_EmptySecret_SkipsVerification(t *testing.T) {
-	handler := VerifyWebhookSignature("X-Webhook-Signature", "", "")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewBufferString(`{}`))
-	w := httptest.NewRecorder()
-
-	handler.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
-}
-
-func TestVerifyWebhookSignature_StripPrefix(t *testing.T) {
-	secret := "test-secret"
-	body := `{"event":"issue.created"}`
-	sig := computeHMAC(body, secret)
-
-	handler := VerifyWebhookSignature("X-Hub-Signature-256", secret, "sha256=")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewBufferString(body))
-	req.Header.Set("X-Hub-Signature-256", "sha256="+sig)
-	w := httptest.NewRecorder()
-
-	handler.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
-}
-
-func TestVerifyWebhookSignature_BodyRestoredAfterVerification(t *testing.T) {
-	secret := "restore-test"
-	body := `{"key":"value"}`
-	sig := computeHMAC(body, secret)
-
-	var bodyAfterMiddleware []byte
-	handler := VerifyWebhookSignature("X-Sig", secret, "")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		bodyAfterMiddleware = b
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewBufferString(body))
-	req.Header.Set("X-Sig", sig)
-	w := httptest.NewRecorder()
-
-	handler.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Equal(t, body, string(bodyAfterMiddleware))
+			require.Equal(t, tt.expectedCode, w.Code, "should return expected HTTP status code")
+			if tt.checkBody && tt.expectedCode == http.StatusOK {
+				require.Equal(t, tt.body, string(bodyAfterMiddleware), "should restore request body after signature verification")
+			}
+		})
+	}
 }

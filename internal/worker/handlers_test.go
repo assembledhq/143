@@ -9,92 +9,296 @@ import (
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func newTestStores(t *testing.T) (*Stores, pgxmock.PgxPoolIface) {
 	t.Helper()
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create pgxmock pool")
 	stores := &Stores{
-		Issues:    db.NewIssueStore(mock),
-		AgentRuns: db.NewAgentRunStore(mock),
-		Jobs:      db.NewJobStore(mock),
+		Issues:       db.NewIssueStore(mock),
+		AgentRuns:    db.NewAgentRunStore(mock),
+		Jobs:         db.NewJobStore(mock),
+		Integrations: db.NewIntegrationStore(mock),
+		Webhooks:     db.NewWebhookDeliveryStore(mock),
 	}
 	return stores, mock
 }
 
-func TestIngestWebhookHandler_ValidPayload(t *testing.T) {
-	stores, mock := newTestStores(t)
-	defer mock.Close()
-	logger := zerolog.Nop()
+func TestIngestWebhookHandler(t *testing.T) {
+	t.Parallel()
 
-	handler := newIngestWebhookHandler(stores, logger)
+	tests := []struct {
+		name      string
+		payload   json.RawMessage
+		expectErr bool
+		errSubstr string
+	}{
+		{
+			name:      "valid payload succeeds",
+			payload:   json.RawMessage(`{"webhook_delivery_id":"abc-123","provider":"github"}`),
+			expectErr: false,
+		},
+		{
+			name:      "invalid JSON returns unmarshal error",
+			payload:   json.RawMessage(`{invalid json}`),
+			expectErr: true,
+			errSubstr: "unmarshal",
+		},
+	}
 
-	payload := json.RawMessage(`{"webhook_delivery_id":"abc-123","provider":"github"}`)
-	err := handler(context.Background(), "ingest_webhook", payload)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	assert.NoError(t, err)
+			stores, mock := newTestStores(t)
+			defer mock.Close()
+			logger := zerolog.Nop()
+
+			handler := newIngestWebhookHandler(stores, logger)
+			err := handler(context.Background(), "ingest_webhook", tt.payload)
+
+			if tt.expectErr {
+				require.Error(t, err, "ingest_webhook handler should return an error for invalid input")
+				require.Contains(t, err.Error(), tt.errSubstr, "error should contain expected substring")
+			} else {
+				require.NoError(t, err, "ingest_webhook handler should succeed for valid input")
+			}
+		})
+	}
 }
 
-func TestIngestWebhookHandler_InvalidJSON(t *testing.T) {
-	stores, mock := newTestStores(t)
-	defer mock.Close()
-	logger := zerolog.Nop()
+func TestPrioritizeHandler(t *testing.T) {
+	t.Parallel()
 
-	handler := newIngestWebhookHandler(stores, logger)
+	validID := uuid.New()
 
-	payload := json.RawMessage(`{invalid json}`)
-	err := handler(context.Background(), "ingest_webhook", payload)
+	tests := []struct {
+		name      string
+		payload   json.RawMessage
+		expectErr bool
+		errSubstr string
+	}{
+		{
+			name:      "valid payload succeeds",
+			payload:   json.RawMessage(`{"issue_id":"` + validID.String() + `"}`),
+			expectErr: false,
+		},
+		{
+			name:      "invalid JSON returns unmarshal error",
+			payload:   json.RawMessage(`not json at all`),
+			expectErr: true,
+			errSubstr: "unmarshal",
+		},
+		{
+			name:      "invalid UUID returns parse error",
+			payload:   json.RawMessage(`{"issue_id":"not-a-valid-uuid"}`),
+			expectErr: true,
+			errSubstr: "parse issue ID",
+		},
+	}
 
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "unmarshal")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			stores, mock := newTestStores(t)
+			defer mock.Close()
+			logger := zerolog.Nop()
+
+			handler := newPrioritizeHandler(stores, logger)
+			err := handler(context.Background(), "prioritize", tt.payload)
+
+			if tt.expectErr {
+				require.Error(t, err, "prioritize handler should return an error for invalid input")
+				require.Contains(t, err.Error(), tt.errSubstr, "error should contain expected substring")
+			} else {
+				require.NoError(t, err, "prioritize handler should succeed for valid input")
+			}
+		})
+	}
 }
 
-func TestPrioritizeHandler_ValidPayload(t *testing.T) {
-	stores, mock := newTestStores(t)
-	defer mock.Close()
-	logger := zerolog.Nop()
+func TestSyncSentryHandler(t *testing.T) {
+	t.Parallel()
 
-	handler := newPrioritizeHandler(stores, logger)
+	tests := []struct {
+		name      string
+		payload   json.RawMessage
+		setupMock func(mock pgxmock.PgxPoolIface)
+		expectErr bool
+		errSubstr string
+	}{
+		{
+			name:      "invalid JSON returns unmarshal error",
+			payload:   json.RawMessage(`{invalid json}`),
+			setupMock: func(mock pgxmock.PgxPoolIface) {},
+			expectErr: true,
+			errSubstr: "unmarshal sync_sentry payload",
+		},
+		{
+			name:      "invalid org ID returns parse error",
+			payload:   json.RawMessage(`{"org_id":"not-a-uuid"}`),
+			setupMock: func(mock pgxmock.PgxPoolIface) {},
+			expectErr: true,
+			errSubstr: "parse org ID",
+		},
+		{
+			name:    "no integrations returns nil",
+			payload: json.RawMessage(`{"org_id":"` + uuid.New().String() + `"}`),
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("SELECT .* FROM integrations").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}))
+			},
+			expectErr: false,
+		},
+	}
 
-	issueID := uuid.New()
-	payload := json.RawMessage(`{"issue_id":"` + issueID.String() + `"}`)
-	err := handler(context.Background(), "prioritize", payload)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	assert.NoError(t, err)
+			stores, mock := newTestStores(t)
+			defer mock.Close()
+			logger := zerolog.Nop()
+
+			tt.setupMock(mock)
+
+			handler := newSyncSentryHandler(stores, logger)
+			err := handler(context.Background(), "sync_sentry", tt.payload)
+
+			if tt.expectErr {
+				require.Error(t, err, "sync_sentry handler should return an error for invalid input")
+				require.Contains(t, err.Error(), tt.errSubstr, "error should contain expected substring")
+			} else {
+				require.NoError(t, err, "sync_sentry handler should succeed")
+				require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+			}
+		})
+	}
 }
 
-func TestPrioritizeHandler_InvalidJSON(t *testing.T) {
-	stores, mock := newTestStores(t)
-	defer mock.Close()
-	logger := zerolog.Nop()
+func TestRunAgentHandler(t *testing.T) {
+	t.Parallel()
 
-	handler := newPrioritizeHandler(stores, logger)
+	tests := []struct {
+		name      string
+		payload   json.RawMessage
+		expectErr bool
+		errSubstr string
+	}{
+		{
+			name:      "invalid JSON returns unmarshal error",
+			payload:   json.RawMessage(`{bad json}`),
+			expectErr: true,
+			errSubstr: "unmarshal run_agent payload",
+		},
+		{
+			name:      "invalid org ID returns parse error",
+			payload:   json.RawMessage(`{"agent_run_id":"` + uuid.New().String() + `","org_id":"not-a-uuid"}`),
+			expectErr: true,
+			errSubstr: "parse org ID",
+		},
+		{
+			name:      "invalid run ID returns parse error",
+			payload:   json.RawMessage(`{"agent_run_id":"not-a-uuid","org_id":"` + uuid.New().String() + `"}`),
+			expectErr: true,
+			errSubstr: "parse agent run ID",
+		},
+	}
 
-	payload := json.RawMessage(`not json at all`)
-	err := handler(context.Background(), "prioritize", payload)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "unmarshal")
+			stores, mock := newTestStores(t)
+			defer mock.Close()
+			logger := zerolog.Nop()
+
+			handler := newRunAgentHandler(stores, nil, logger)
+			err := handler(context.Background(), "run_agent", tt.payload)
+
+			require.Error(t, err, "run_agent handler should return an error for invalid input")
+			require.Contains(t, err.Error(), tt.errSubstr, "error should contain expected substring")
+		})
+	}
 }
 
-func TestPrioritizeHandler_InvalidUUID(t *testing.T) {
+func TestValidateHandler_InvalidJSON(t *testing.T) {
+	t.Parallel()
+
 	stores, mock := newTestStores(t)
 	defer mock.Close()
 	logger := zerolog.Nop()
 
-	handler := newPrioritizeHandler(stores, logger)
+	handler := newValidateHandler(stores, nil, logger)
+	payload := json.RawMessage(`{bad json}`)
+	err := handler(context.Background(), "validate", payload)
 
-	payload := json.RawMessage(`{"issue_id":"not-a-valid-uuid"}`)
-	err := handler(context.Background(), "prioritize", payload)
+	require.Error(t, err, "validate handler should return an error for invalid JSON")
+	require.Contains(t, err.Error(), "unmarshal validate payload", "error should indicate unmarshal failure")
+}
 
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "parse issue ID")
+func TestOpenPRHandler_InvalidJSON(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	logger := zerolog.Nop()
+
+	handler := newOpenPRHandler(stores, nil, logger)
+	payload := json.RawMessage(`{bad json}`)
+	err := handler(context.Background(), "open_pr", payload)
+
+	require.Error(t, err, "open_pr handler should return an error for invalid JSON")
+	require.Contains(t, err.Error(), "unmarshal open_pr payload", "error should indicate unmarshal failure")
+}
+
+func TestAnalyzeFailureHandler_InvalidJSON(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	logger := zerolog.Nop()
+
+	handler := newAnalyzeFailureHandler(stores, nil, logger)
+	payload := json.RawMessage(`{bad json}`)
+	err := handler(context.Background(), "analyze_failure", payload)
+
+	require.Error(t, err, "analyze_failure handler should return an error for invalid JSON")
+	require.Contains(t, err.Error(), "unmarshal analyze_failure payload", "error should indicate unmarshal failure")
+}
+
+func TestRegisterHandlers_AllRegistered(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	logger := zerolog.Nop()
+
+	w := New(nil, logger, "test-node")
+	RegisterHandlers(w, stores, nil, logger)
+
+	expectedHandlers := []string{
+		"ingest_webhook",
+		"prioritize",
+		"sync_sentry",
+		"run_agent",
+		"validate",
+		"open_pr",
+		"analyze_failure",
+	}
+	for _, name := range expectedHandlers {
+		_, ok := w.handlers[name]
+		require.True(t, ok, "%s handler should be registered", name)
+	}
 }
 
 func TestWorker_Register(t *testing.T) {
+	t.Parallel()
+
 	w := New(nil, zerolog.Nop(), "test-node")
 
 	called := false
@@ -105,13 +309,11 @@ func TestWorker_Register(t *testing.T) {
 
 	w.Register("test_job", handler)
 
-	// Verify the handler is stored
 	h, ok := w.handlers["test_job"]
-	assert.True(t, ok)
-	assert.NotNil(t, h)
+	require.True(t, ok, "handler should be stored in the handlers map")
+	require.NotNil(t, h, "handler function should not be nil")
 
-	// Verify we can invoke it
 	err := h(context.Background(), "test_job", nil)
-	assert.NoError(t, err)
-	assert.True(t, called)
+	require.NoError(t, err, "handler invocation should succeed")
+	require.True(t, called, "handler function should have been called")
 }

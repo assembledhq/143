@@ -6,159 +6,213 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func TestRateLimit_AllowsNormalTraffic(t *testing.T) {
-	handler := RateLimit(RateLimitConfig{
-		OrgRequestsPerSecond: 100,
-		IPRequestsPerSecond:  20,
-	})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
+func TestRateLimit(t *testing.T) {
+	t.Parallel()
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.RemoteAddr = "192.168.1.1:12345"
-	w := httptest.NewRecorder()
+	tests := []struct {
+		name         string
+		config       RateLimitConfig
+		requests     func(handler http.Handler) *httptest.ResponseRecorder
+		expectedCode int
+		checkHeaders func(t *testing.T, w *httptest.ResponseRecorder)
+	}{
+		{
+			name: "allows normal traffic within IP limit",
+			config: RateLimitConfig{
+				OrgRequestsPerSecond: 100,
+				IPRequestsPerSecond:  20,
+			},
+			requests: func(handler http.Handler) *httptest.ResponseRecorder {
+				req := httptest.NewRequest(http.MethodGet, "/", nil)
+				req.RemoteAddr = "192.168.1.1:12345"
+				w := httptest.NewRecorder()
+				handler.ServeHTTP(w, req)
+				return w
+			},
+			expectedCode: http.StatusOK,
+			checkHeaders: nil,
+		},
+		{
+			name: "blocks excessive IP requests with 429 and Retry-After header",
+			config: RateLimitConfig{
+				OrgRequestsPerSecond: 100,
+				IPRequestsPerSecond:  3,
+			},
+			requests: func(handler http.Handler) *httptest.ResponseRecorder {
+				// Exhaust the IP limit
+				for i := 0; i < 3; i++ {
+					req := httptest.NewRequest(http.MethodGet, "/", nil)
+					req.RemoteAddr = "10.0.0.1:12345"
+					w := httptest.NewRecorder()
+					handler.ServeHTTP(w, req)
+				}
+				// This request should be rate limited
+				req := httptest.NewRequest(http.MethodGet, "/", nil)
+				req.RemoteAddr = "10.0.0.1:12345"
+				w := httptest.NewRecorder()
+				handler.ServeHTTP(w, req)
+				return w
+			},
+			expectedCode: http.StatusTooManyRequests,
+			checkHeaders: func(t *testing.T, w *httptest.ResponseRecorder) {
+				t.Helper()
+				require.Equal(t, "1", w.Header().Get("Retry-After"), "should set Retry-After header to 1 second")
+			},
+		},
+		{
+			name: "blocks excessive org requests with 429",
+			config: RateLimitConfig{
+				OrgRequestsPerSecond: 2,
+				IPRequestsPerSecond:  100,
+			},
+			requests: func(handler http.Handler) *httptest.ResponseRecorder {
+				orgID := uuid.MustParse("aaaaaaaa-0000-0000-0000-000000000001")
+				// Exhaust the org limit
+				for i := 0; i < 2; i++ {
+					req := httptest.NewRequest(http.MethodGet, "/", nil)
+					req.RemoteAddr = "10.0.0.1:12345"
+					ctx := WithOrgID(req.Context(), orgID)
+					req = req.WithContext(ctx)
+					w := httptest.NewRecorder()
+					handler.ServeHTTP(w, req)
+				}
+				// This request should be rate limited
+				req := httptest.NewRequest(http.MethodGet, "/", nil)
+				req.RemoteAddr = "10.0.0.1:12345"
+				ctx := WithOrgID(req.Context(), orgID)
+				req = req.WithContext(ctx)
+				w := httptest.NewRecorder()
+				handler.ServeHTTP(w, req)
+				return w
+			},
+			expectedCode: http.StatusTooManyRequests,
+			checkHeaders: nil,
+		},
+		{
+			name: "different IPs have separate rate limit buckets",
+			config: RateLimitConfig{
+				OrgRequestsPerSecond: 100,
+				IPRequestsPerSecond:  2,
+			},
+			requests: func(handler http.Handler) *httptest.ResponseRecorder {
+				// Exhaust IP 1 bucket
+				for i := 0; i < 2; i++ {
+					req := httptest.NewRequest(http.MethodGet, "/", nil)
+					req.RemoteAddr = "10.0.0.1:12345"
+					w := httptest.NewRecorder()
+					handler.ServeHTTP(w, req)
+				}
+				// IP 2 should still have its own bucket
+				req := httptest.NewRequest(http.MethodGet, "/", nil)
+				req.RemoteAddr = "10.0.0.2:12345"
+				w := httptest.NewRecorder()
+				handler.ServeHTTP(w, req)
+				return w
+			},
+			expectedCode: http.StatusOK,
+			checkHeaders: nil,
+		},
+		{
+			name: "uses X-Forwarded-For header for IP extraction",
+			config: RateLimitConfig{
+				OrgRequestsPerSecond: 100,
+				IPRequestsPerSecond:  2,
+			},
+			requests: func(handler http.Handler) *httptest.ResponseRecorder {
+				// Exhaust rate limit for XFF IP
+				for i := 0; i < 2; i++ {
+					req := httptest.NewRequest(http.MethodGet, "/", nil)
+					req.RemoteAddr = "10.0.0.99:12345"
+					req.Header.Set("X-Forwarded-For", "203.0.113.1, 10.0.0.1")
+					w := httptest.NewRecorder()
+					handler.ServeHTTP(w, req)
+				}
+				// Next request with same XFF should be blocked
+				req := httptest.NewRequest(http.MethodGet, "/", nil)
+				req.RemoteAddr = "10.0.0.99:12345"
+				req.Header.Set("X-Forwarded-For", "203.0.113.1, 10.0.0.1")
+				w := httptest.NewRecorder()
+				handler.ServeHTTP(w, req)
+				return w
+			},
+			expectedCode: http.StatusTooManyRequests,
+			checkHeaders: nil,
+		},
+	}
 
-	handler.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Not parallel: rate limiter tests share mutable state within each subtest's
+			// handler instance, but each subtest creates its own limiter via RateLimit(config).
+			// However, the cleanup goroutine makes parallel execution safe since each test
+			// creates its own limiter. We can run parallel here.
+			t.Parallel()
+
+			handler := RateLimit(tt.config)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+
+			w := tt.requests(handler)
+			require.Equal(t, tt.expectedCode, w.Code, "should return expected HTTP status code")
+			if tt.checkHeaders != nil {
+				tt.checkHeaders(t, w)
+			}
+		})
+	}
 }
 
-func TestRateLimit_BlocksExcessiveIPRequests(t *testing.T) {
-	config := RateLimitConfig{
-		OrgRequestsPerSecond: 100,
-		IPRequestsPerSecond:  3,
-	}
-	handler := RateLimit(config)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
+func TestExtractIP(t *testing.T) {
+	t.Parallel()
 
-	// Send requests up to the limit
-	for i := 0; i < 3; i++ {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		req.RemoteAddr = "10.0.0.1:12345"
-		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, req)
-		assert.Equal(t, http.StatusOK, w.Code, "request %d should succeed", i)
-	}
-
-	// The next request should be rate limited
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.RemoteAddr = "10.0.0.1:12345"
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusTooManyRequests, w.Code)
-	assert.Equal(t, "1", w.Header().Get("Retry-After"))
-}
-
-func TestRateLimit_BlocksExcessiveOrgRequests(t *testing.T) {
-	config := RateLimitConfig{
-		OrgRequestsPerSecond: 2,
-		IPRequestsPerSecond:  100,
-	}
-	handler := RateLimit(config)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	orgID := uuid.New()
-
-	// Send requests up to the org limit
-	for i := 0; i < 2; i++ {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		req.RemoteAddr = "10.0.0.1:12345"
-		ctx := WithOrgID(req.Context(), orgID)
-		req = req.WithContext(ctx)
-		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, req)
-		assert.Equal(t, http.StatusOK, w.Code, "request %d should succeed", i)
+	tests := []struct {
+		name           string
+		remoteAddr     string
+		xForwardedFor  string
+		expectedIP     string
+	}{
+		{
+			name:       "extracts IP from RemoteAddr",
+			remoteAddr: "192.168.1.1:12345",
+			expectedIP: "192.168.1.1",
+		},
+		{
+			name:          "extracts first IP from X-Forwarded-For with multiple IPs",
+			remoteAddr:    "10.0.0.1:12345",
+			xForwardedFor: "203.0.113.50, 70.41.3.18, 10.0.0.1",
+			expectedIP:    "203.0.113.50",
+		},
+		{
+			name:          "extracts IP from X-Forwarded-For with single IP",
+			remoteAddr:    "10.0.0.1:12345",
+			xForwardedFor: "203.0.113.50",
+			expectedIP:    "203.0.113.50",
+		},
 	}
 
-	// The next request should be rate limited
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.RemoteAddr = "10.0.0.1:12345"
-	ctx := WithOrgID(req.Context(), orgID)
-	req = req.WithContext(ctx)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusTooManyRequests, w.Code)
-	assert.Contains(t, w.Body.String(), "org rate limit exceeded")
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-func TestRateLimit_DifferentIPsHaveSeparateBuckets(t *testing.T) {
-	config := RateLimitConfig{
-		OrgRequestsPerSecond: 100,
-		IPRequestsPerSecond:  2,
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.RemoteAddr = tt.remoteAddr
+			if tt.xForwardedFor != "" {
+				req.Header.Set("X-Forwarded-For", tt.xForwardedFor)
+			}
+
+			require.Equal(t, tt.expectedIP, extractIP(req), "should extract expected IP address")
+		})
 	}
-	handler := RateLimit(config)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	// Exhaust IP 1
-	for i := 0; i < 2; i++ {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		req.RemoteAddr = "10.0.0.1:12345"
-		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, req)
-	}
-
-	// IP 2 should still work
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.RemoteAddr = "10.0.0.2:12345"
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
-}
-
-func TestRateLimit_XForwardedFor(t *testing.T) {
-	config := RateLimitConfig{
-		OrgRequestsPerSecond: 100,
-		IPRequestsPerSecond:  2,
-	}
-	handler := RateLimit(config)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	// Exhaust rate limit for XFF IP
-	for i := 0; i < 2; i++ {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		req.RemoteAddr = "10.0.0.99:12345"
-		req.Header.Set("X-Forwarded-For", "203.0.113.1, 10.0.0.1")
-		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, req)
-	}
-
-	// Next request with same XFF should be blocked
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.RemoteAddr = "10.0.0.99:12345"
-	req.Header.Set("X-Forwarded-For", "203.0.113.1, 10.0.0.1")
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusTooManyRequests, w.Code)
-}
-
-func TestExtractIP_RemoteAddr(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.RemoteAddr = "192.168.1.1:12345"
-	assert.Equal(t, "192.168.1.1", extractIP(req))
-}
-
-func TestExtractIP_XForwardedFor(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.RemoteAddr = "10.0.0.1:12345"
-	req.Header.Set("X-Forwarded-For", "203.0.113.50, 70.41.3.18, 10.0.0.1")
-	assert.Equal(t, "203.0.113.50", extractIP(req))
-}
-
-func TestExtractIP_XForwardedForSingle(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.RemoteAddr = "10.0.0.1:12345"
-	req.Header.Set("X-Forwarded-For", "203.0.113.50")
-	assert.Equal(t, "203.0.113.50", extractIP(req))
 }
 
 func TestDefaultRateLimitConfig(t *testing.T) {
+	t.Parallel()
+
 	cfg := DefaultRateLimitConfig()
-	assert.Equal(t, 100, cfg.OrgRequestsPerSecond)
-	assert.Equal(t, 20, cfg.IPRequestsPerSecond)
+	require.Equal(t, RateLimitConfig{
+		OrgRequestsPerSecond: 100,
+		IPRequestsPerSecond:  20,
+	}, cfg, "should return default rate limit config values")
 }

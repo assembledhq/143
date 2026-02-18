@@ -1,6 +1,7 @@
 "use client";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { NuqsAdapter } from "nuqs/adapters/next/app";
 import {
   LayoutDashboard,
   AlertCircle,
@@ -35,6 +36,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="antialiased">
+        <NuqsAdapter>
         <QueryClientProvider client={queryClient}>
           <div className="flex h-screen">
             <aside className="w-56 border-r border-border bg-sidebar flex flex-col">
@@ -74,6 +76,7 @@ export default function RootLayout({
             </main>
           </div>
         </QueryClientProvider>
+        </NuqsAdapter>
       </body>
     </html>
   );

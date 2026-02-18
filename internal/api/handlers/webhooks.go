@@ -12,6 +12,7 @@ import (
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	ghservice "github.com/assembledhq/143/internal/services/github"
 )
 
 type WebhookHandler struct {
@@ -19,14 +20,16 @@ type WebhookHandler struct {
 	orgStore         *db.OrganizationStore
 	repoStore        *db.RepositoryStore
 	integrationStore *db.IntegrationStore
+	prService        *ghservice.PRService
 }
 
-func NewWebhookHandler(cfg *config.Config, orgStore *db.OrganizationStore, repoStore *db.RepositoryStore, integrationStore *db.IntegrationStore) *WebhookHandler {
+func NewWebhookHandler(cfg *config.Config, orgStore *db.OrganizationStore, repoStore *db.RepositoryStore, integrationStore *db.IntegrationStore, prService *ghservice.PRService) *WebhookHandler {
 	return &WebhookHandler{
 		cfg:              cfg,
 		orgStore:         orgStore,
 		repoStore:        repoStore,
 		integrationStore: integrationStore,
+		prService:        prService,
 	}
 }
 
@@ -50,6 +53,10 @@ func (h *WebhookHandler) HandleGitHub(w http.ResponseWriter, r *http.Request) {
 		h.handleInstallation(w, r, body)
 	case "installation_repositories":
 		h.handleInstallationRepositories(w, r, body)
+	case "pull_request":
+		h.handlePullRequest(w, r, body)
+	case "pull_request_review":
+		h.handlePullRequestReview(w, r, body)
 	default:
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "event": event})
 	}
@@ -207,4 +214,44 @@ func (h *WebhookHandler) handleInstallationRepositories(w http.ResponseWriter, r
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "repositories updated"})
+}
+
+func (h *WebhookHandler) handlePullRequest(w http.ResponseWriter, r *http.Request, body []byte) {
+	if h.prService == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "pr_service_not_configured"})
+		return
+	}
+
+	var event ghservice.PullRequestEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "failed to parse pull_request event")
+		return
+	}
+
+	if err := h.prService.HandlePullRequestEvent(r.Context(), event); err != nil {
+		writeError(w, http.StatusInternalServerError, "PR_EVENT_FAILED", "failed to process pull_request event")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
+}
+
+func (h *WebhookHandler) handlePullRequestReview(w http.ResponseWriter, r *http.Request, body []byte) {
+	if h.prService == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "pr_service_not_configured"})
+		return
+	}
+
+	var event ghservice.PullRequestReviewEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "failed to parse pull_request_review event")
+		return
+	}
+
+	if err := h.prService.HandlePullRequestReviewEvent(r.Context(), event); err != nil {
+		writeError(w, http.StatusInternalServerError, "REVIEW_EVENT_FAILED", "failed to process pull_request_review event")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
 }

@@ -23,6 +23,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) *c
 	integrationStore := db.NewIntegrationStore(pool)
 	issueStore := db.NewIssueStore(pool)
 	agentRunStore := db.NewAgentRunStore(pool)
+	agentRunLogStore := db.NewAgentRunLogStore(pool)
+	agentRunQuestionStore := db.NewAgentRunQuestionStore(pool)
+	validationStore := db.NewValidationStore(pool)
+	pullRequestStore := db.NewPullRequestStore(pool)
 	webhookDeliveryStore := db.NewWebhookDeliveryStore(pool)
 	jobStore := db.NewJobStore(pool)
 
@@ -33,10 +37,18 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) *c
 	healthHandler := handlers.NewHealthHandler(pool)
 	authHandler := handlers.NewAuthHandler(cfg, orgStore, userStore, sessionStore)
 	repoHandler := handlers.NewRepositoryHandler(repoStore)
-	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, repoStore, integrationStore)
+	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, repoStore, integrationStore, nil)
 	settingsHandler := handlers.NewSettingsHandler(orgStore)
 	issueHandler := handlers.NewIssueHandler(issueStore)
-	runHandler := handlers.NewRunHandler(agentRunStore)
+	runHandler := handlers.NewRunHandler(
+		agentRunStore,
+		agentRunLogStore,
+		agentRunQuestionStore,
+		validationStore,
+		pullRequestStore,
+		issueStore,
+		jobStore,
+	)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, ingestionSvc, logger)
 
 	r := chi.NewRouter()
@@ -89,6 +101,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) *c
 			r.Get("/api/v1/issues/{id}", issueHandler.Get)
 			r.Get("/api/v1/runs", runHandler.List)
 			r.Get("/api/v1/runs/{id}", runHandler.Get)
+			r.Get("/api/v1/runs/{id}/logs", runHandler.StreamLogs)
+			r.Get("/api/v1/runs/{id}/validation", runHandler.GetValidation)
+			r.Get("/api/v1/runs/{id}/pr", runHandler.GetPullRequest)
+			r.Get("/api/v1/runs/{id}/questions", runHandler.ListQuestions)
 			r.Get("/api/v1/settings", settingsHandler.Get)
 		})
 
@@ -97,6 +113,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) *c
 			r.Use(middleware.RequireRole("admin", "member"))
 
 			r.Patch("/api/v1/repositories/{id}", repoHandler.Update)
+			r.Post("/api/v1/issues/{id}/fix", runHandler.TriggerFix)
+			r.Post("/api/v1/runs/{id}/questions/{qid}/answer", runHandler.AnswerQuestion)
 		})
 
 		// Admin-only routes
