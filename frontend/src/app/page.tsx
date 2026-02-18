@@ -1,23 +1,10 @@
+"use client";
+
 import { GitBranch, AlertCircle } from "lucide-react";
-import Link from "next/link";
+import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { PageHeader } from "@/components/page-header";
-
-const steps = [
-  {
-    icon: GitBranch,
-    title: "Connect GitHub",
-    description: "Link your GitHub account so 143 can open pull requests on your repositories.",
-    action: { label: "Connect", href: "/settings" },
-  },
-  {
-    icon: AlertCircle,
-    title: "Connect an issue tracker",
-    description: "Connect Sentry, Linear, or another source so 143 knows what to fix.",
-    action: { label: "Set up", href: "/settings" },
-  },
-];
 
 export default function Overview() {
   return (
@@ -28,22 +15,38 @@ export default function Overview() {
       />
 
       <div className="space-y-3">
-        {steps.map((step, i) => (
-          <Card key={i} className="py-0">
-            <CardContent className="flex items-start gap-4 py-4">
-              <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted">
-                <step.icon className="h-4 w-4 text-muted-foreground" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-foreground">{step.title}</p>
-                <p className="mt-0.5 text-sm text-muted-foreground">{step.description}</p>
-              </div>
-              <Button variant="outline" size="sm" asChild>
-                <Link href={step.action.href}>{step.action.label}</Link>
-              </Button>
-            </CardContent>
-          </Card>
-        ))}
+        <Card className="py-0">
+          <CardContent className="flex items-start gap-4 py-4">
+            <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted">
+              <GitBranch className="h-4 w-4 text-muted-foreground" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-foreground">Connect GitHub</p>
+              <p className="mt-0.5 text-sm text-muted-foreground">
+                Link your GitHub account so 143 can open pull requests on your repositories.
+              </p>
+            </div>
+            <Button size="sm" onClick={() => api.auth.login()} aria-label="Connect GitHub">
+              Connect
+            </Button>
+          </CardContent>
+        </Card>
+        <Card className="py-0">
+          <CardContent className="flex items-start gap-4 py-4">
+            <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted">
+              <AlertCircle className="h-4 w-4 text-muted-foreground" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-foreground">Connect Sentry</p>
+              <p className="mt-0.5 text-sm text-muted-foreground">
+                Connect Sentry so 143 can pull production errors and auto-generate fixes.
+              </p>
+            </div>
+            <Button size="sm" onClick={() => api.auth.loginSentry()} aria-label="Connect Sentry">
+              Connect
+            </Button>
+          </CardContent>
+        </Card>
       </div>
 
       <p className="text-sm text-muted-foreground">

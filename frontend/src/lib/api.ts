@@ -1,4 +1,6 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
+const SENTRY_CLIENT_ID = process.env.NEXT_PUBLIC_SENTRY_CLIENT_ID || '';
+const SENTRY_REDIRECT_URI = process.env.NEXT_PUBLIC_SENTRY_REDIRECT_URI || '';
 
 class ApiError extends Error {
   constructor(public code: string, message: string, public details?: unknown) {
@@ -54,6 +56,14 @@ function del<T>(path: string): Promise<T> {
 export const api = {
   auth: {
     login: () => { window.location.href = `${API_BASE}/api/v1/auth/github/login`; },
+    loginSentry: () => {
+      const params = new URLSearchParams({
+        client_id: SENTRY_CLIENT_ID,
+        response_type: 'code',
+        redirect_uri: SENTRY_REDIRECT_URI,
+      });
+      window.location.href = `https://sentry.io/oauth/authorize/?${params.toString()}`;
+    },
     logout: () => post('/api/v1/auth/logout'),
   },
   repositories: {

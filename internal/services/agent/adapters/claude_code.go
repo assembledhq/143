@@ -221,7 +221,7 @@ func buildUserPrompt(input *agent.AgentInput) string {
 
 	// Complexity context.
 	if input.ComplexityEstimate != nil {
-		b.WriteString(fmt.Sprintf("### Complexity Assessment\n\n"))
+		b.WriteString("### Complexity Assessment\n\n")
 		b.WriteString(fmt.Sprintf("- Tier: %d\n", input.ComplexityEstimate.Tier))
 		b.WriteString(fmt.Sprintf("- Reasoning: %s\n\n", input.ComplexityEstimate.Reasoning))
 	}

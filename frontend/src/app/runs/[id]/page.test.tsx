@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
+import userEvent from '@testing-library/user-event';
 import { renderWithProviders, screen } from '@/test/test-utils';
 import { server } from '@/test/mocks/server';
 import { mockRuns } from '@/test/mocks/handlers';
@@ -92,5 +93,38 @@ describe('RunDetailPage', () => {
 
     renderWithProviders(<RunDetailContent id="run-98765432-abcd-ef01" />);
     expect(await screen.findByRole('heading', { name: 'Run run-9876' })).toBeInTheDocument();
+  });
+
+  it('renders validation details when validation tab is opened', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<RunDetailContent id="run-abcdef12-3456-7890" />);
+
+    await screen.findByRole('heading', { name: 'Fixed TypeError by adding null check' });
+    await user.click(screen.getByRole('tab', { name: 'Validation' }));
+
+    expect(await screen.findByText('Overall:')).toBeInTheDocument();
+    expect(screen.getByText('Direction Check')).toBeInTheDocument();
+    expect(screen.getByText('Regression Test Check')).toBeInTheDocument();
+  });
+
+  it('renders PR details when PR tab is opened', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<RunDetailContent id="run-abcdef12-3456-7890" />);
+
+    await screen.findByRole('heading', { name: 'Fixed TypeError by adding null check' });
+    await user.click(screen.getByRole('tab', { name: 'PR' }));
+
+    expect(await screen.findByText('Fix TypeError by adding null check')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'View on GitHub' })).toBeInTheDocument();
+  });
+
+  it('shows no diff message when run has no diff', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<RunDetailContent id="run-abcdef12-3456-7890" />);
+
+    await screen.findByRole('heading', { name: 'Fixed TypeError by adding null check' });
+    await user.click(screen.getByRole('tab', { name: 'Diff' }));
+
+    expect(await screen.findByText('No diff available for this run.')).toBeInTheDocument();
   });
 });

@@ -53,15 +53,15 @@ func TestStatusWriter(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name           string
-		action         func(sw *statusWriter)
-		expectedStatus int
+		name            string
+		action          func(sw *statusWriter)
+		expectedStatus  int
 		expectedWritten bool
 	}{
 		{
 			name: "defaults to 200 and marks written on Write call",
 			action: func(sw *statusWriter) {
-				sw.Write([]byte("hello"))
+				_, _ = sw.Write([]byte("hello"))
 			},
 			expectedStatus:  http.StatusOK,
 			expectedWritten: true,

@@ -78,7 +78,11 @@ func (w *Worker) poll(ctx context.Context) {
 		w.logger.Error().Err(err).Msg("failed to begin transaction")
 		return
 	}
-	defer tx.Rollback(ctx)
+	defer func() {
+		if rollbackErr := tx.Rollback(ctx); rollbackErr != nil && rollbackErr != pgx.ErrTxClosed {
+			w.logger.Error().Err(rollbackErr).Msg("failed to rollback transaction")
+		}
+	}()
 
 	var jobID uuid.UUID
 	var orgID uuid.UUID
@@ -97,7 +101,9 @@ func (w *Worker) poll(ctx context.Context) {
 
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			tx.Rollback(ctx)
+			if rollbackErr := tx.Rollback(ctx); rollbackErr != nil && rollbackErr != pgx.ErrTxClosed {
+				w.logger.Error().Err(rollbackErr).Msg("failed to rollback transaction after no rows")
+			}
 			return
 		}
 		w.logger.Error().Err(err).Msg("failed to claim job")

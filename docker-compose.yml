@@ -16,7 +16,7 @@ services:
       retries: 5
 
   server:
-    image: golang:1.24
+    image: golang:1.26
     working_dir: /app
     command: >
       sh -c "go install github.com/air-verse/air@latest &&
