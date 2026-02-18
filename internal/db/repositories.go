@@ -161,3 +161,15 @@ func (s *RepositoryStore) DisconnectByInstallationID(ctx context.Context, instal
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{"installation_id": installationID})
 	return err
 }
+
+func (s *RepositoryStore) DisconnectByGitHubID(ctx context.Context, installationID, githubID int64) error {
+	query := `
+		UPDATE repositories
+		SET status = 'disconnected', updated_at = now()
+		WHERE installation_id = @installation_id AND github_id = @github_id`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"installation_id": installationID,
+		"github_id":       githubID,
+	})
+	return err
+}
