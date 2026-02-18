@@ -9,13 +9,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestMultiTenancyAudit scans all store files for SQL queries and verifies
 // that every query on a multi-tenant table includes an org_id filter.
 // This is a critical safety test — a missing org_id filter is a P0 data isolation bug.
 func TestMultiTenancyAudit(t *testing.T) {
+	t.Parallel()
 	// Tables that require org_id filtering
 	multiTenantTables := []string{
 		"issues",
@@ -162,5 +163,5 @@ func TestMultiTenancyAudit(t *testing.T) {
 	}
 
 	// Also verify we scanned at least some files
-	assert.Greater(t, len(files), 0, "should have scanned at least one store file")
+	require.Greater(t, len(files), 0, "should have scanned at least one store file")
 }

@@ -8,7 +8,6 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -26,7 +25,7 @@ func newDeployRow(id, prID, orgID uuid.UUID, now time.Time) []any {
 func TestDeployStore_Create_Success(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool without error")
 	defer mock.Close()
 
 	store := NewDeployStore(mock)
@@ -49,17 +48,17 @@ func TestDeployStore_Create_Success(t *testing.T) {
 		)
 
 	err = store.Create(context.Background(), d)
-	require.NoError(t, err)
-	assert.Equal(t, generatedID, d.ID)
-	assert.Equal(t, now, d.DeployedAt)
-	assert.Equal(t, now, d.CreatedAt)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "should create deploy without error")
+	require.Equal(t, generatedID, d.ID, "should set the generated ID on the deploy")
+	require.Equal(t, now, d.DeployedAt, "should set the deployed_at timestamp on the deploy")
+	require.Equal(t, now, d.CreatedAt, "should set the created_at timestamp on the deploy")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestDeployStore_GetByPullRequestID_Success(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool without error")
 	defer mock.Close()
 
 	store := NewDeployStore(mock)
@@ -76,17 +75,20 @@ func TestDeployStore_GetByPullRequestID_Success(t *testing.T) {
 		)
 
 	d, err := store.GetByPullRequestID(context.Background(), orgID, prID)
-	require.NoError(t, err)
-	assert.Equal(t, id, d.ID)
-	assert.Equal(t, prID, d.PullRequestID)
-	assert.Equal(t, "production", d.Environment)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "should retrieve deploy by pull request ID without error")
+	require.Equal(t, id, d.ID, "should return the correct deploy ID")
+	require.Equal(t, prID, d.PullRequestID, "should return the correct pull request ID")
+	require.Equal(t, orgID, d.OrgID, "should return the correct org ID")
+	require.Equal(t, "production", d.Environment, "should return the correct environment")
+	require.NotNil(t, d.CommitSHA, "should return a non-nil commit SHA")
+	require.Equal(t, "abc123", *d.CommitSHA, "should return the correct commit SHA value")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestDeployStore_GetByPullRequestID_NotFound(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool without error")
 	defer mock.Close()
 
 	store := NewDeployStore(mock)
@@ -96,6 +98,6 @@ func TestDeployStore_GetByPullRequestID_NotFound(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(deployColumns))
 
 	_, err = store.GetByPullRequestID(context.Background(), uuid.New(), uuid.New())
-	assert.Error(t, err)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	require.Error(t, err, "should return an error when deploy is not found")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

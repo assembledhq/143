@@ -9,7 +9,6 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -26,7 +25,7 @@ func newLogRow(id int64, agentRunID uuid.UUID, now time.Time) []any {
 func TestAgentRunLogStore_Create_Success(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool without error")
 	defer mock.Close()
 
 	store := NewAgentRunLogStore(mock)
@@ -47,16 +46,16 @@ func TestAgentRunLogStore_Create_Success(t *testing.T) {
 		)
 
 	err = store.Create(context.Background(), log)
-	require.NoError(t, err)
-	assert.Equal(t, int64(1), log.ID)
-	assert.Equal(t, now, log.Timestamp)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "should create agent run log without error")
+	require.Equal(t, int64(1), log.ID, "should set the generated ID on the log")
+	require.Equal(t, now, log.Timestamp, "should set the timestamp on the log")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestAgentRunLogStore_ListByRunID_Success(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool without error")
 	defer mock.Close()
 
 	store := NewAgentRunLogStore(mock)
@@ -72,17 +71,21 @@ func TestAgentRunLogStore_ListByRunID_Success(t *testing.T) {
 		)
 
 	logs, err := store.ListByRunID(context.Background(), agentRunID)
-	require.NoError(t, err)
-	assert.Len(t, logs, 2)
-	assert.Equal(t, int64(1), logs[0].ID)
-	assert.Equal(t, int64(2), logs[1].ID)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "should list agent run logs without error")
+	require.Len(t, logs, 2, "should return both log entries for the agent run")
+	require.Equal(t, int64(1), logs[0].ID, "first log entry should have the correct ID")
+	require.Equal(t, agentRunID, logs[0].AgentRunID, "first log entry should have the correct agent run ID")
+	require.Equal(t, "info", logs[0].Level, "first log entry should have the correct level")
+	require.Equal(t, "doing something", logs[0].Message, "first log entry should have the correct message")
+	require.Equal(t, int64(2), logs[1].ID, "second log entry should have the correct ID")
+	require.Equal(t, agentRunID, logs[1].AgentRunID, "second log entry should have the correct agent run ID")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestAgentRunLogStore_ListByRunID_Empty(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool without error")
 	defer mock.Close()
 
 	store := NewAgentRunLogStore(mock)
@@ -92,15 +95,15 @@ func TestAgentRunLogStore_ListByRunID_Empty(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(logColumns))
 
 	logs, err := store.ListByRunID(context.Background(), uuid.New())
-	require.NoError(t, err)
-	assert.Empty(t, logs)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "should return no error for empty result set")
+	require.Empty(t, logs, "should return empty slice when no logs exist")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestAgentRunLogStore_ListByRunIDSince_Success(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool without error")
 	defer mock.Close()
 
 	store := NewAgentRunLogStore(mock)
@@ -115,8 +118,11 @@ func TestAgentRunLogStore_ListByRunIDSince_Success(t *testing.T) {
 		)
 
 	logs, err := store.ListByRunIDSince(context.Background(), agentRunID, 4)
-	require.NoError(t, err)
-	assert.Len(t, logs, 1)
-	assert.Equal(t, int64(5), logs[0].ID)
-	assert.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "should list agent run logs since given ID without error")
+	require.Len(t, logs, 1, "should return only log entries after the specified ID")
+	require.Equal(t, int64(5), logs[0].ID, "returned log entry should have the correct ID")
+	require.Equal(t, agentRunID, logs[0].AgentRunID, "returned log entry should have the correct agent run ID")
+	require.Equal(t, "info", logs[0].Level, "returned log entry should have the correct level")
+	require.Equal(t, "doing something", logs[0].Message, "returned log entry should have the correct message")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

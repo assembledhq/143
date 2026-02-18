@@ -10,7 +10,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/models"
@@ -142,9 +141,9 @@ func TestCheckSecurity_CleanDiff(t *testing.T) {
 +func hello() { fmt.Println("hello") }
 `
 	result, details, err := s.checkSecurity(diff)
-	require.NoError(t, err)
-	assert.Equal(t, "pass", result)
-	assert.Contains(t, details, "no security issues")
+	require.NoError(t, err, "checkSecurity should not return an error for clean diff")
+	require.Equal(t, "pass", result, "clean diff should pass security check")
+	require.Contains(t, details, "no security issues", "details should indicate no security issues found")
 }
 
 func TestCheckSecurity_AWSKeyDetected(t *testing.T) {
@@ -158,9 +157,9 @@ func TestCheckSecurity_AWSKeyDetected(t *testing.T) {
 +const awsKey = "AKIAIOSFODNN7EXAMPLE"
 `
 	result, details, err := s.checkSecurity(diff)
-	require.NoError(t, err)
-	assert.Equal(t, "fail", result)
-	assert.Contains(t, details, "potential secret detected")
+	require.NoError(t, err, "checkSecurity should not return an error")
+	require.Equal(t, "fail", result, "diff with AWS key should fail security check")
+	require.Contains(t, details, "potential secret detected", "details should indicate a potential secret was detected")
 }
 
 func TestCheckSecurity_GitHubTokenDetected(t *testing.T) {
@@ -174,9 +173,9 @@ func TestCheckSecurity_GitHubTokenDetected(t *testing.T) {
 +var token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
 `
 	result, details, err := s.checkSecurity(diff)
-	require.NoError(t, err)
-	assert.Equal(t, "fail", result)
-	assert.Contains(t, details, "potential secret detected")
+	require.NoError(t, err, "checkSecurity should not return an error")
+	require.Equal(t, "fail", result, "diff with GitHub token should fail security check")
+	require.Contains(t, details, "potential secret detected", "details should indicate a potential secret was detected")
 }
 
 func TestCheckSecurity_HardcodedPasswordDetected(t *testing.T) {
@@ -190,9 +189,9 @@ func TestCheckSecurity_HardcodedPasswordDetected(t *testing.T) {
 +var password = "supersecretpassword123"
 `
 	result, details, err := s.checkSecurity(diff)
-	require.NoError(t, err)
-	assert.Equal(t, "fail", result)
-	assert.Contains(t, details, "potential secret detected")
+	require.NoError(t, err, "checkSecurity should not return an error")
+	require.Equal(t, "fail", result, "diff with hardcoded password should fail security check")
+	require.Contains(t, details, "potential secret detected", "details should indicate a potential secret was detected")
 }
 
 func TestCheckSecurity_PrivateKeyDetected(t *testing.T) {
@@ -207,9 +206,9 @@ func TestCheckSecurity_PrivateKeyDetected(t *testing.T) {
 +MIIEpAIBAAKCAQEA...` + "`" + `
 `
 	result, details, err := s.checkSecurity(diff)
-	require.NoError(t, err)
-	assert.Equal(t, "fail", result)
-	assert.Contains(t, details, "potential secret detected")
+	require.NoError(t, err, "checkSecurity should not return an error")
+	require.Equal(t, "fail", result, "diff with private key should fail security check")
+	require.Contains(t, details, "potential secret detected", "details should indicate a potential secret was detected")
 }
 
 func TestCheckSecurity_SQLInjectionDetected(t *testing.T) {
@@ -223,9 +222,9 @@ func TestCheckSecurity_SQLInjectionDetected(t *testing.T) {
 +query := "SELECT * FROM users WHERE id = " + userID
 `
 	result, details, err := s.checkSecurity(diff)
-	require.NoError(t, err)
-	assert.Equal(t, "fail", result)
-	assert.Contains(t, details, "SQL injection")
+	require.NoError(t, err, "checkSecurity should not return an error")
+	require.Equal(t, "fail", result, "diff with SQL injection pattern should fail security check")
+	require.Contains(t, details, "SQL injection", "details should indicate SQL injection was detected")
 }
 
 func TestCheckSecurity_FmtSprintfSQLDetected(t *testing.T) {
@@ -239,9 +238,9 @@ func TestCheckSecurity_FmtSprintfSQLDetected(t *testing.T) {
 +q := fmt.Sprintf("SELECT * FROM users WHERE name = '%s'", name)
 `
 	result, details, err := s.checkSecurity(diff)
-	require.NoError(t, err)
-	assert.Equal(t, "fail", result)
-	assert.Contains(t, details, "SQL injection")
+	require.NoError(t, err, "checkSecurity should not return an error")
+	require.Equal(t, "fail", result, "diff with fmt.Sprintf SQL pattern should fail security check")
+	require.Contains(t, details, "SQL injection", "details should indicate SQL injection was detected")
 }
 
 func TestCheckSecurity_RemovedLinesIgnored(t *testing.T) {
@@ -256,8 +255,8 @@ func TestCheckSecurity_RemovedLinesIgnored(t *testing.T) {
 +// key removed for security
 `
 	result, _, err := s.checkSecurity(diff)
-	require.NoError(t, err)
-	assert.Equal(t, "pass", result)
+	require.NoError(t, err, "checkSecurity should not return an error")
+	require.Equal(t, "pass", result, "removed lines containing secrets should not trigger a failure")
 }
 
 // --- Diff Size Tests ---
@@ -268,9 +267,9 @@ func TestCheckDiffSize_Small(t *testing.T) {
 
 	diff := generateDiff(10, 5)
 	result, details, err := s.checkDiffSize(diff)
-	require.NoError(t, err)
-	assert.Equal(t, "pass", result)
-	assert.Contains(t, details, "15 lines changed")
+	require.NoError(t, err, "checkDiffSize should not return an error")
+	require.Equal(t, "pass", result, "small diff should pass size check")
+	require.Contains(t, details, "15 lines changed", "details should report the correct number of lines changed")
 }
 
 func TestCheckDiffSize_Warning(t *testing.T) {
@@ -279,9 +278,9 @@ func TestCheckDiffSize_Warning(t *testing.T) {
 
 	diff := generateDiff(150, 60)
 	result, details, err := s.checkDiffSize(diff)
-	require.NoError(t, err)
-	assert.Equal(t, "warn", result)
-	assert.Contains(t, details, "large diff")
+	require.NoError(t, err, "checkDiffSize should not return an error")
+	require.Equal(t, "warn", result, "medium diff should produce a warning")
+	require.Contains(t, details, "large diff", "details should indicate a large diff warning")
 }
 
 func TestCheckDiffSize_Fail(t *testing.T) {
@@ -290,9 +289,9 @@ func TestCheckDiffSize_Fail(t *testing.T) {
 
 	diff := generateDiff(400, 150)
 	result, details, err := s.checkDiffSize(diff)
-	require.NoError(t, err)
-	assert.Equal(t, "fail", result)
-	assert.Contains(t, details, "diff too large")
+	require.NoError(t, err, "checkDiffSize should not return an error")
+	require.Equal(t, "fail", result, "very large diff should fail size check")
+	require.Contains(t, details, "diff too large", "details should indicate diff is too large")
 }
 
 func TestCheckDiffSize_EmptyDiff(t *testing.T) {
@@ -300,9 +299,9 @@ func TestCheckDiffSize_EmptyDiff(t *testing.T) {
 	s := &Service{logger: zerolog.Nop()}
 
 	result, details, err := s.checkDiffSize("")
-	require.NoError(t, err)
-	assert.Equal(t, "pass", result)
-	assert.Contains(t, details, "0 lines changed")
+	require.NoError(t, err, "checkDiffSize should not return an error for empty diff")
+	require.Equal(t, "pass", result, "empty diff should pass size check")
+	require.Contains(t, details, "0 lines changed", "details should report zero lines changed")
 }
 
 // --- CI Check Tests ---
@@ -320,9 +319,9 @@ func TestCheckCI_GoTestsPass(t *testing.T) {
 	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
 
 	result, details, err := s.checkCI(context.Background(), sandbox)
-	require.NoError(t, err)
-	assert.Equal(t, "pass", result)
-	assert.Contains(t, details, "go test")
+	require.NoError(t, err, "checkCI should not return an error when Go tests pass")
+	require.Equal(t, "pass", result, "passing Go tests should produce a pass result")
+	require.Contains(t, details, "go test", "details should mention go test command")
 }
 
 func TestCheckCI_GoTestsFail(t *testing.T) {
@@ -338,10 +337,10 @@ func TestCheckCI_GoTestsFail(t *testing.T) {
 	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
 
 	result, details, err := s.checkCI(context.Background(), sandbox)
-	require.NoError(t, err)
-	assert.Equal(t, "fail", result)
-	assert.Contains(t, details, "tests failed")
-	assert.Contains(t, details, "exit code 1")
+	require.NoError(t, err, "checkCI should not return an error even when tests fail")
+	require.Equal(t, "fail", result, "failing Go tests should produce a fail result")
+	require.Contains(t, details, "tests failed", "details should indicate tests failed")
+	require.Contains(t, details, "exit code 1", "details should contain the exit code")
 }
 
 func TestCheckCI_NpmTestsPass(t *testing.T) {
@@ -357,9 +356,9 @@ func TestCheckCI_NpmTestsPass(t *testing.T) {
 	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
 
 	result, details, err := s.checkCI(context.Background(), sandbox)
-	require.NoError(t, err)
-	assert.Equal(t, "pass", result)
-	assert.Contains(t, details, "npm test")
+	require.NoError(t, err, "checkCI should not return an error when npm tests pass")
+	require.Equal(t, "pass", result, "passing npm tests should produce a pass result")
+	require.Contains(t, details, "npm test", "details should mention npm test command")
 }
 
 func TestCheckCI_NoProjectType(t *testing.T) {
@@ -370,9 +369,9 @@ func TestCheckCI_NoProjectType(t *testing.T) {
 	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
 
 	result, details, err := s.checkCI(context.Background(), sandbox)
-	require.NoError(t, err)
-	assert.Equal(t, "pass", result)
-	assert.Contains(t, details, "no recognized project type")
+	require.NoError(t, err, "checkCI should not return an error when no project type is detected")
+	require.Equal(t, "pass", result, "no recognized project type should default to pass")
+	require.Contains(t, details, "no recognized project type", "details should indicate no recognized project type")
 }
 
 func TestCheckCI_NilSandbox(t *testing.T) {
@@ -380,9 +379,9 @@ func TestCheckCI_NilSandbox(t *testing.T) {
 	s := &Service{logger: zerolog.Nop()}
 
 	result, details, err := s.checkCI(context.Background(), nil)
-	require.NoError(t, err)
-	assert.Equal(t, "fail", result)
-	assert.Contains(t, details, "no sandbox available")
+	require.NoError(t, err, "checkCI should not return an error for nil sandbox")
+	require.Equal(t, "fail", result, "nil sandbox should produce a fail result")
+	require.Contains(t, details, "no sandbox available", "details should indicate no sandbox is available")
 }
 
 func TestCheckCI_ExecError(t *testing.T) {
@@ -397,9 +396,9 @@ func TestCheckCI_ExecError(t *testing.T) {
 	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
 
 	result, details, err := s.checkCI(context.Background(), sandbox)
-	require.NoError(t, err)
-	assert.Equal(t, "fail", result)
-	assert.Contains(t, details, "sandbox connection lost")
+	require.NoError(t, err, "checkCI should not return an error for sandbox exec failure")
+	require.Equal(t, "fail", result, "sandbox exec failure should produce a fail result")
+	require.Contains(t, details, "sandbox connection lost", "details should contain the exec error message")
 }
 
 func TestCheckCI_LongOutputTruncated(t *testing.T) {
@@ -416,10 +415,10 @@ func TestCheckCI_LongOutputTruncated(t *testing.T) {
 	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
 
 	result, details, err := s.checkCI(context.Background(), sandbox)
-	require.NoError(t, err)
-	assert.Equal(t, "fail", result)
-	assert.Contains(t, details, "truncated")
-	assert.LessOrEqual(t, len(details), 2200)
+	require.NoError(t, err, "checkCI should not return an error even with long output")
+	require.Equal(t, "fail", result, "failing tests with long output should produce a fail result")
+	require.Contains(t, details, "truncated", "details should indicate output was truncated")
+	require.LessOrEqual(t, len(details), 2200, "details length should be within truncation limit")
 }
 
 // --- Helper function tests ---
@@ -437,10 +436,10 @@ func TestExtractAddedLines(t *testing.T) {
  context
 `
 	result := extractAddedLines(diff)
-	assert.Contains(t, result, "added line 1")
-	assert.Contains(t, result, "added line 2")
-	assert.NotContains(t, result, "removed line")
-	assert.NotContains(t, result, "b/file.go")
+	require.Contains(t, result, "added line 1", "extracted lines should contain first added line")
+	require.Contains(t, result, "added line 2", "extracted lines should contain second added line")
+	require.NotContains(t, result, "removed line", "extracted lines should not contain removed lines")
+	require.NotContains(t, result, "b/file.go", "extracted lines should not contain diff header paths")
 }
 
 func TestCountDiffLines(t *testing.T) {
@@ -458,8 +457,8 @@ func TestCountDiffLines(t *testing.T) {
  context
 `
 	added, removed := countDiffLines(diff)
-	assert.Equal(t, 3, added)
-	assert.Equal(t, 2, removed)
+	require.Equal(t, 3, added, "countDiffLines should count 3 added lines")
+	require.Equal(t, 2, removed, "countDiffLines should count 2 removed lines")
 }
 
 // --- Full Pipeline Tests ---
@@ -487,15 +486,15 @@ func TestValidate_AllPass_EnqueuesPR(t *testing.T) {
 	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
 
 	err := svc.Validate(context.Background(), agentRun, sandbox)
-	require.NoError(t, err)
+	require.NoError(t, err, "Validate should not return an error when all checks pass")
 
-	assert.Equal(t, "passed", stores.validations.lastStatus)
-	assert.Equal(t, "open_pr", stores.jobs.lastJobType)
+	require.Equal(t, "passed", stores.validations.lastStatus, "validation status should be passed when all checks pass")
+	require.Equal(t, "open_pr", stores.jobs.lastJobType, "a passing validation should enqueue an open_pr job")
 	require.Equal(t, map[string]string{
 		"agent_run_id": agentRun.ID.String(),
 		"org_id":       agentRun.OrgID.String(),
 	}, stores.jobs.lastPayload, "validation should enqueue open_pr with agent_run_id and org_id")
-	assert.Empty(t, stores.issues.lastStatus)
+	require.Empty(t, stores.issues.lastStatus, "issue status should not be updated when validation passes")
 }
 
 func TestValidate_SecurityFails_FailFast(t *testing.T) {
@@ -522,13 +521,13 @@ func TestValidate_SecurityFails_FailFast(t *testing.T) {
 	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
 
 	err := svc.Validate(context.Background(), agentRun, sandbox)
-	require.NoError(t, err)
+	require.NoError(t, err, "Validate should not return an error even when security fails")
 
-	assert.Equal(t, "failed", stores.validations.lastStatus)
+	require.Equal(t, "failed", stores.validations.lastStatus, "validation status should be failed when security check fails")
 	// CI should NOT have been called (fail-fast)
-	assert.Empty(t, provider.execCalls)
-	assert.Equal(t, "triaged", stores.issues.lastStatus)
-	assert.Empty(t, stores.jobs.lastJobType)
+	require.Empty(t, provider.execCalls, "CI checks should not run after security failure due to fail-fast")
+	require.Equal(t, "triaged", stores.issues.lastStatus, "issue status should be set to triaged on validation failure")
+	require.Empty(t, stores.jobs.lastJobType, "no job should be enqueued when validation fails")
 }
 
 func TestValidate_SkippedChecksRecorded(t *testing.T) {
@@ -553,12 +552,12 @@ func TestValidate_SkippedChecksRecorded(t *testing.T) {
 	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
 
 	err := svc.Validate(context.Background(), agentRun, sandbox)
-	require.NoError(t, err)
+	require.NoError(t, err, "Validate should not return an error")
 
 	skipped := stores.validations.checkResults
-	assert.Equal(t, "skipped", skipped["direction_check"])
-	assert.Equal(t, "skipped", skipped["correctness_check"])
-	assert.Equal(t, "skipped", skipped["regression_test_check"])
+	require.Equal(t, "skipped", skipped["direction_check"], "direction_check should be recorded as skipped")
+	require.Equal(t, "skipped", skipped["correctness_check"], "correctness_check should be recorded as skipped")
+	require.Equal(t, "skipped", skipped["regression_test_check"], "regression_test_check should be recorded as skipped")
 }
 
 func TestValidate_DiffTooLarge_Fails(t *testing.T) {
@@ -578,10 +577,10 @@ func TestValidate_DiffTooLarge_Fails(t *testing.T) {
 	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
 
 	err := svc.Validate(context.Background(), agentRun, sandbox)
-	require.NoError(t, err)
+	require.NoError(t, err, "Validate should not return an error even when diff is too large")
 
-	assert.Equal(t, "failed", stores.validations.lastStatus)
-	assert.Equal(t, "triaged", stores.issues.lastStatus)
+	require.Equal(t, "failed", stores.validations.lastStatus, "validation status should be failed when diff is too large")
+	require.Equal(t, "triaged", stores.issues.lastStatus, "issue status should be set to triaged when diff is too large")
 }
 
 func TestValidate_NilDiff_PassesSecurity(t *testing.T) {
@@ -605,8 +604,8 @@ func TestValidate_NilDiff_PassesSecurity(t *testing.T) {
 	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
 
 	err := svc.Validate(context.Background(), agentRun, sandbox)
-	require.NoError(t, err)
-	assert.Equal(t, "passed", stores.validations.lastStatus)
+	require.NoError(t, err, "Validate should not return an error for nil diff")
+	require.Equal(t, "passed", stores.validations.lastStatus, "nil diff should pass validation")
 }
 
 // --- Helpers ---

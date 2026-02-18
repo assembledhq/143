@@ -11,7 +11,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/models"
@@ -64,7 +63,7 @@ func TestFormatPRTitle(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			result := formatPRTitle(&tt.issue)
-			assert.Equal(t, tt.expect, result)
+			require.Equal(t, tt.expect, result, "PR title should match expected format")
 		})
 	}
 }
@@ -112,13 +111,13 @@ func TestFormatBranchName(t *testing.T) {
 			if tt.maxLen {
 				// The slug portion (after "143/fix/{8chars}/") shouldn't exceed maxBranchSlugLen
 				parts := strings.SplitN(result, "/", 4)
-				require.Len(t, parts, 4)
-				assert.LessOrEqual(t, len(parts[3]), maxBranchSlugLen)
+				require.Len(t, parts, 4, "branch name should have 4 path segments")
+				require.LessOrEqual(t, len(parts[3]), maxBranchSlugLen, "slug portion should not exceed max branch slug length")
 			} else {
-				assert.Equal(t, tt.expect, result)
+				require.Equal(t, tt.expect, result, "branch name should match expected format")
 			}
 			// Branch name should never contain spaces.
-			assert.NotContains(t, result, " ")
+			require.NotContains(t, result, " ", "branch name should not contain spaces")
 		})
 	}
 }
@@ -163,7 +162,7 @@ func TestFormatCommitMessage(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			result := formatCommitMessage(&tt.issue)
-			assert.Equal(t, tt.expect, result)
+			require.Equal(t, tt.expect, result, "commit message should match expected format")
 		})
 	}
 }
@@ -202,7 +201,7 @@ func TestBuildLabels(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			result := buildLabels(&tt.issue)
-			assert.Equal(t, tt.expect, result)
+			require.Equal(t, tt.expect, result, "labels should match expected set")
 		})
 	}
 }
@@ -229,14 +228,14 @@ func TestFormatPRBody(t *testing.T) {
 
 	body := svc.formatPRBody(context.Background(), run, issue)
 
-	assert.Contains(t, body, "## Summary")
-	assert.Contains(t, body, summary)
-	assert.Contains(t, body, "sentry")
-	assert.Contains(t, body, "high")
-	assert.Contains(t, body, "42")
-	assert.Contains(t, body, "100")
-	assert.Contains(t, body, "claude-code")
-	assert.Contains(t, body, "143.dev")
+	require.Contains(t, body, "## Summary", "PR body should contain Summary heading")
+	require.Contains(t, body, summary, "PR body should contain the result summary text")
+	require.Contains(t, body, "sentry", "PR body should contain the issue source")
+	require.Contains(t, body, "high", "PR body should contain the severity level")
+	require.Contains(t, body, "42", "PR body should contain the affected customer count")
+	require.Contains(t, body, "100", "PR body should contain the occurrence count")
+	require.Contains(t, body, "claude-code", "PR body should contain the agent type")
+	require.Contains(t, body, "143.dev", "PR body should contain the 143.dev branding")
 }
 
 func TestParseDiff(t *testing.T) {
@@ -288,6 +287,15 @@ diff --git a/b.go b/b.go
 +evil content`,
 			expect: nil,
 		},
+		{
+			name: "absolute path rejected",
+			diff: `diff --git a//etc/shadow b//etc/shadow
+--- a//etc/shadow
++++ b//etc/shadow
+@@ -0,0 +1 @@
++evil content`,
+			expect: nil,
+		},
 	}
 
 	for _, tt := range tests {
@@ -295,13 +303,13 @@ diff --git a/b.go b/b.go
 			t.Parallel()
 			result := parseDiff(tt.diff)
 			if tt.expect == nil {
-				assert.Empty(t, result)
+				require.Empty(t, result, "path traversal diffs should be rejected and produce empty result")
 			} else {
-				require.Len(t, result, len(tt.expect))
+				require.Len(t, result, len(tt.expect), "parsed diff should have expected number of files")
 				for i, f := range tt.expect {
-					assert.Equal(t, f.Path, result[i].Path)
-					assert.Equal(t, f.Content, result[i].Content)
-					assert.Equal(t, f.Deleted, result[i].Deleted)
+					require.Equal(t, f.Path, result[i].Path, "diff file path should match at index %d", i)
+					require.Equal(t, f.Content, result[i].Content, "diff file content should match at index %d", i)
+					require.Equal(t, f.Deleted, result[i].Deleted, "diff file deleted flag should match at index %d", i)
 				}
 			}
 		})
@@ -325,7 +333,7 @@ func TestSlugify(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.expect, slugify(tt.input))
+			require.Equal(t, tt.expect, slugify(tt.input), "slugify should produce expected slug")
 		})
 	}
 }
@@ -334,12 +342,12 @@ func TestSplitRepo(t *testing.T) {
 	t.Parallel()
 
 	owner, repo := splitRepo("myorg/myrepo")
-	assert.Equal(t, "myorg", owner)
-	assert.Equal(t, "myrepo", repo)
+	require.Equal(t, "myorg", owner, "owner should be parsed from org/repo format")
+	require.Equal(t, "myrepo", repo, "repo should be parsed from org/repo format")
 
 	owner, repo = splitRepo("noslash")
-	assert.Equal(t, "noslash", owner)
-	assert.Equal(t, "noslash", repo)
+	require.Equal(t, "noslash", owner, "owner should equal input when no slash present")
+	require.Equal(t, "noslash", repo, "repo should equal input when no slash present")
 }
 
 // TestGitHubAPIFlow tests the HTTP interactions with a mock GitHub API server.
@@ -420,42 +428,42 @@ func TestGitHubAPIFlow(t *testing.T) {
 
 	// Test getRef.
 	sha, err := svc.getRef(ctx, "test-token", "testorg", "testrepo", "refs/heads/main")
-	require.NoError(t, err)
-	assert.Equal(t, baseSHA, sha)
+	require.NoError(t, err, "getRef should not return an error")
+	require.Equal(t, baseSHA, sha, "getRef should return the base SHA from the mock server")
 
 	// Test createRef.
 	err = svc.createRef(ctx, "test-token", "testorg", "testrepo", "refs/heads/143/fix/test", baseSHA)
-	require.NoError(t, err)
+	require.NoError(t, err, "createRef should not return an error")
 
 	// Test createBlob.
 	blob, err := svc.createBlob(ctx, "test-token", "testorg", "testrepo", "package main\n")
-	require.NoError(t, err)
-	assert.Equal(t, blobSHA, blob)
+	require.NoError(t, err, "createBlob should not return an error")
+	require.Equal(t, blobSHA, blob, "createBlob should return the blob SHA from the mock server")
 
 	// Test createTree.
 	tree, err := svc.createTree(ctx, "test-token", "testorg", "testrepo", baseSHA, []treeEntry{
 		{Path: "main.go", Mode: "100644", Type: "blob", SHA: &blobSHA},
 	})
-	require.NoError(t, err)
-	assert.Equal(t, treeSHA, tree)
+	require.NoError(t, err, "createTree should not return an error")
+	require.Equal(t, treeSHA, tree, "createTree should return the tree SHA from the mock server")
 
 	// Test createCommit.
 	commit, err := svc.createCommit(ctx, "test-token", "testorg", "testrepo", "fix: test", treeSHA, baseSHA)
-	require.NoError(t, err)
-	assert.Equal(t, commitSHA, commit)
+	require.NoError(t, err, "createCommit should not return an error")
+	require.Equal(t, commitSHA, commit, "createCommit should return the commit SHA from the mock server")
 
 	// Test createPullRequest.
 	prNum, prURL, err := svc.createPullRequest(ctx, "test-token", "testorg", "testrepo", "fix: test PR", "body", "143/fix/test", "main")
-	require.NoError(t, err)
-	assert.Equal(t, 42, prNum)
-	assert.Equal(t, "https://github.com/testorg/testrepo/pull/42", prURL)
+	require.NoError(t, err, "createPullRequest should not return an error")
+	require.Equal(t, 42, prNum, "createPullRequest should return PR number 42")
+	require.Equal(t, "https://github.com/testorg/testrepo/pull/42", prURL, "createPullRequest should return the correct PR URL")
 
 	// Test addLabels.
 	err = svc.addLabels(ctx, "test-token", "testorg", "testrepo", 42, []string{"143-generated"})
-	require.NoError(t, err)
+	require.NoError(t, err, "addLabels should not return an error")
 
 	// Verify all expected API calls were made.
-	assert.Len(t, requestPaths, 7)
+	require.Len(t, requestPaths, 7, "should have made exactly 7 API calls")
 }
 
 func TestHandlePullRequestEvent_Merged(t *testing.T) {
@@ -471,15 +479,15 @@ func TestHandlePullRequestEvent_Merged(t *testing.T) {
 
 	// Verify event structure.
 	data, err := json.Marshal(event)
-	require.NoError(t, err)
+	require.NoError(t, err, "marshaling PullRequestEvent should not return an error")
 
 	var decoded PullRequestEvent
-	require.NoError(t, json.Unmarshal(data, &decoded))
-	assert.Equal(t, "closed", decoded.Action)
-	assert.True(t, decoded.PR.Merged)
-	assert.Equal(t, "abc123", decoded.PR.Head.SHA)
-	assert.Equal(t, "testorg/testrepo", decoded.Repository.FullName)
-	assert.Equal(t, 42, decoded.Number)
+	require.NoError(t, json.Unmarshal(data, &decoded), "unmarshaling PullRequestEvent should not return an error")
+	require.Equal(t, "closed", decoded.Action, "decoded action should be closed")
+	require.True(t, decoded.PR.Merged, "decoded PR should be marked as merged")
+	require.Equal(t, "abc123", decoded.PR.Head.SHA, "decoded PR head SHA should match")
+	require.Equal(t, "testorg/testrepo", decoded.Repository.FullName, "decoded repository full name should match")
+	require.Equal(t, 42, decoded.Number, "decoded PR number should be 42")
 }
 
 func TestHandlePullRequestEvent_ClosedWithoutMerge(t *testing.T) {
@@ -493,12 +501,12 @@ func TestHandlePullRequestEvent_ClosedWithoutMerge(t *testing.T) {
 	event.Repository.FullName = "testorg/testrepo"
 
 	data, err := json.Marshal(event)
-	require.NoError(t, err)
+	require.NoError(t, err, "marshaling PullRequestEvent should not return an error")
 
 	var decoded PullRequestEvent
-	require.NoError(t, json.Unmarshal(data, &decoded))
-	assert.Equal(t, "closed", decoded.Action)
-	assert.False(t, decoded.PR.Merged)
+	require.NoError(t, json.Unmarshal(data, &decoded), "unmarshaling PullRequestEvent should not return an error")
+	require.Equal(t, "closed", decoded.Action, "decoded action should be closed")
+	require.False(t, decoded.PR.Merged, "decoded PR should not be marked as merged when closed without merge")
 }
 
 func TestHandlePullRequestReviewEvent_Approved(t *testing.T) {
@@ -512,13 +520,13 @@ func TestHandlePullRequestReviewEvent_Approved(t *testing.T) {
 	event.Repository.FullName = "testorg/testrepo"
 
 	data, err := json.Marshal(event)
-	require.NoError(t, err)
+	require.NoError(t, err, "marshaling PullRequestReviewEvent should not return an error")
 
 	var decoded PullRequestReviewEvent
-	require.NoError(t, json.Unmarshal(data, &decoded))
-	assert.Equal(t, "submitted", decoded.Action)
-	assert.Equal(t, "approved", decoded.Review.State)
-	assert.Equal(t, 42, decoded.PullRequest.Number)
+	require.NoError(t, json.Unmarshal(data, &decoded), "unmarshaling PullRequestReviewEvent should not return an error")
+	require.Equal(t, "submitted", decoded.Action, "decoded action should be submitted")
+	require.Equal(t, "approved", decoded.Review.State, "decoded review state should be approved")
+	require.Equal(t, 42, decoded.PullRequest.Number, "decoded PR number should be 42")
 }
 
 func TestHandlePullRequestReviewEvent_ChangesRequested(t *testing.T) {
@@ -532,23 +540,23 @@ func TestHandlePullRequestReviewEvent_ChangesRequested(t *testing.T) {
 	event.Repository.FullName = "testorg/testrepo"
 
 	data, err := json.Marshal(event)
-	require.NoError(t, err)
+	require.NoError(t, err, "marshaling PullRequestReviewEvent should not return an error")
 
 	var decoded PullRequestReviewEvent
-	require.NoError(t, json.Unmarshal(data, &decoded))
-	assert.Equal(t, "changes_requested", decoded.Review.State)
+	require.NoError(t, json.Unmarshal(data, &decoded), "unmarshaling PullRequestReviewEvent should not return an error")
+	require.Equal(t, "changes_requested", decoded.Review.State, "decoded review state should be changes_requested")
 }
 
 func TestCheckEmoji(t *testing.T) {
 	t.Parallel()
 
-	assert.Equal(t, "pass", checkEmoji("pass"))
-	assert.Equal(t, "pass", checkEmoji("passed"))
-	assert.Equal(t, "fail", checkEmoji("fail"))
-	assert.Equal(t, "fail", checkEmoji("failed"))
-	assert.Equal(t, "skip", checkEmoji("skip"))
-	assert.Equal(t, "skip", checkEmoji("skipped"))
-	assert.Equal(t, "pending", checkEmoji("pending"))
+	require.Equal(t, "pass", checkEmoji("pass"), "checkEmoji should return pass for pass input")
+	require.Equal(t, "pass", checkEmoji("passed"), "checkEmoji should return pass for passed input")
+	require.Equal(t, "fail", checkEmoji("fail"), "checkEmoji should return fail for fail input")
+	require.Equal(t, "fail", checkEmoji("failed"), "checkEmoji should return fail for failed input")
+	require.Equal(t, "skip", checkEmoji("skip"), "checkEmoji should return skip for skip input")
+	require.Equal(t, "skip", checkEmoji("skipped"), "checkEmoji should return skip for skipped input")
+	require.Equal(t, "pending", checkEmoji("pending"), "checkEmoji should return pending for pending input")
 }
 
 func TestDoGitHubRequest_ErrorResponse(t *testing.T) {
@@ -567,9 +575,9 @@ func TestDoGitHubRequest_ErrorResponse(t *testing.T) {
 	}
 
 	_, err := svc.doGitHubRequest(context.Background(), "test-token", http.MethodGet, "/repos/test/test/git/ref/heads/main", nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "404")
-	assert.Contains(t, err.Error(), "Not Found")
+	require.Error(t, err, "doGitHubRequest should return an error for 404 response")
+	require.Contains(t, err.Error(), "404", "error should contain the HTTP status code")
+	require.Contains(t, err.Error(), "Not Found", "error should contain the response message")
 }
 
 func TestDoGitHubRequest_SetsHeaders(t *testing.T) {
@@ -591,9 +599,9 @@ func TestDoGitHubRequest_SetsHeaders(t *testing.T) {
 	}
 
 	_, err := svc.doGitHubRequest(context.Background(), "my-token", http.MethodGet, "/test", nil)
-	require.NoError(t, err)
-	assert.Equal(t, "token my-token", capturedAuth)
-	assert.Equal(t, "application/vnd.github+json", capturedAccept)
+	require.NoError(t, err, "doGitHubRequest should not return an error for valid request")
+	require.Equal(t, "token my-token", capturedAuth, "Authorization header should be set with token prefix")
+	require.Equal(t, "application/vnd.github+json", capturedAccept, "Accept header should be set to GitHub JSON media type")
 }
 
 func TestFormatPRBody_WithValidation(t *testing.T) {
@@ -622,12 +630,12 @@ func TestFormatPRBody_WithValidation(t *testing.T) {
 
 	body := svc.formatPRBody(context.Background(), run, issue)
 
-	assert.Contains(t, body, "## Summary")
-	assert.Contains(t, body, "Fixed the bug")
-	assert.Contains(t, body, "linear")
-	assert.Contains(t, body, "critical")
-	assert.Contains(t, body, "## Agent Details")
-	assert.Contains(t, body, "5m0s")
+	require.Contains(t, body, "## Summary", "PR body should contain Summary heading")
+	require.Contains(t, body, "Fixed the bug", "PR body should contain the result summary")
+	require.Contains(t, body, "linear", "PR body should contain the issue source")
+	require.Contains(t, body, "critical", "PR body should contain the severity")
+	require.Contains(t, body, "## Agent Details", "PR body should contain Agent Details section")
+	require.Contains(t, body, "5m0s", "PR body should contain the elapsed duration")
 }
 
 func TestFormatPRBody_NilSummary(t *testing.T) {
@@ -647,6 +655,5 @@ func TestFormatPRBody_NilSummary(t *testing.T) {
 	}
 
 	body := svc.formatPRBody(context.Background(), run, issue)
-	assert.Contains(t, body, "Automated fix generated by 143.dev")
+	require.Contains(t, body, "Automated fix generated by 143.dev", "PR body with nil summary should contain default branding text")
 }
-

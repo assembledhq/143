@@ -28,40 +28,66 @@ interface LogViewerProps {
   isActive: boolean;
 }
 
+const MAX_RECONNECT_ATTEMPTS = 5;
+const BASE_RECONNECT_DELAY_MS = 1000;
+
 export function LogViewer({ runId, isActive }: LogViewerProps) {
   const [logs, setLogs] = useState<AgentRunLog[]>([]);
   const [connected, setConnected] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
+  const reconnectAttempts = useRef(0);
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(null);
 
   useEffect(() => {
-    const eventSource = new EventSource(
-      `${apiBase}/api/v1/runs/${runId}/logs`,
-      { withCredentials: true }
-    );
+    let eventSource: EventSource | null = null;
 
-    eventSource.onopen = () => {
-      setConnected(true);
-    };
+    function connect() {
+      eventSource = new EventSource(
+        `${apiBase}/api/v1/runs/${runId}/logs`,
+        { withCredentials: true }
+      );
 
-    eventSource.onmessage = (event) => {
-      try {
-        const log: AgentRunLog = JSON.parse(event.data);
-        setLogs((prev) => [...prev, log]);
-      } catch {
-        // ignore unparseable messages
-      }
-    };
+      eventSource.onopen = () => {
+        setConnected(true);
+        reconnectAttempts.current = 0;
+      };
 
-    eventSource.onerror = () => {
-      setConnected(false);
-      eventSource.close();
-    };
+      eventSource.onmessage = (event) => {
+        try {
+          const log: AgentRunLog = JSON.parse(event.data);
+          setLogs((prev) => [...prev, log]);
+        } catch {
+          // ignore unparseable messages
+        }
+      };
+
+      eventSource.onerror = () => {
+        setConnected(false);
+        eventSource?.close();
+
+        if (
+          isActive &&
+          reconnectAttempts.current < MAX_RECONNECT_ATTEMPTS
+        ) {
+          const delay =
+            BASE_RECONNECT_DELAY_MS *
+            Math.pow(2, reconnectAttempts.current);
+          reconnectAttempts.current += 1;
+          reconnectTimer.current = setTimeout(connect, delay);
+        }
+      };
+    }
+
+    connect();
 
     return () => {
-      eventSource.close();
+      eventSource?.close();
+      if (reconnectTimer.current) {
+        clearTimeout(reconnectTimer.current);
+      }
     };
-  }, [runId, apiBase]);
+  }, [runId, apiBase, isActive]);
 
   useEffect(() => {
     if (scrollRef.current) {
