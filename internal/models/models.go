@@ -22,10 +22,12 @@ type User struct {
 	Email       string    `db:"email" json:"email"`
 	Name        string    `db:"name" json:"name"`
 	Role        string    `db:"role" json:"role"`
-	GitHubID    *int64    `db:"github_id" json:"github_id,omitempty"`
-	GitHubLogin *string   `db:"github_login" json:"github_login,omitempty"`
-	AvatarURL   *string   `db:"avatar_url" json:"avatar_url,omitempty"`
-	CreatedAt   time.Time `db:"created_at" json:"created_at"`
+	GitHubID     *int64    `db:"github_id" json:"github_id,omitempty"`
+	GitHubLogin  *string   `db:"github_login" json:"github_login,omitempty"`
+	AvatarURL    *string   `db:"avatar_url" json:"avatar_url,omitempty"`
+	PasswordHash *string   `db:"password_hash" json:"-"`
+	GoogleID     *string   `db:"google_id" json:"google_id,omitempty"`
+	CreatedAt    time.Time `db:"created_at" json:"created_at"`
 }
 
 type Session struct {

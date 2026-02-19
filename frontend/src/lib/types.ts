@@ -16,7 +16,14 @@ export interface User {
   github_id?: number;
   github_login?: string;
   avatar_url?: string;
+  google_id?: string;
   created_at: string;
+}
+
+export interface AuthProviders {
+  github: boolean;
+  google: boolean;
+  email: boolean;
 }
 
 export interface Repository {

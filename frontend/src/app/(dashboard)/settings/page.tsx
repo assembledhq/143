@@ -8,13 +8,8 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Slider } from "@/components/ui/slider";
 import { PageHeader } from "@/components/page-header";
 import { IntegrationsCard } from "@/components/integrations-card";
 import { INTEGRATIONS } from "@/lib/integrations";
@@ -179,34 +174,70 @@ export default function SettingsPage() {
         <h2 className="text-[13px] font-medium text-foreground">Agent Execution</h2>
         <Card>
           <CardContent>
-            <div className="space-y-4">
-              <div className="space-y-2">
-                <Label htmlFor="autonomy-level">Autonomy Level</Label>
-                <Select value={autonomyLevel} onValueChange={(v) => setAutonomyLevel(v as OrgSettings["autonomy_level"] & string)}>
-                  <SelectTrigger className="w-full" id="autonomy-level">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="manual">Manual (admin triggers)</SelectItem>
-                    <SelectItem value="auto_simple">Auto (simple issues)</SelectItem>
-                    <SelectItem value="auto_all">Auto (all eligible)</SelectItem>
-                  </SelectContent>
-                </Select>
+            <div className="space-y-6">
+              <div className="space-y-3">
+                <Label>Autonomy Level</Label>
+                <RadioGroup
+                  value={autonomyLevel}
+                  onValueChange={(v) => setAutonomyLevel(v as OrgSettings["autonomy_level"] & string)}
+                  className="grid grid-cols-3 gap-3"
+                >
+                  {[
+                    { value: "manual", label: "Manual", description: "Admin triggers all runs" },
+                    { value: "auto_simple", label: "Auto (simple)", description: "Auto-run simple issues" },
+                    { value: "auto_all", label: "Auto (all)", description: "Auto-run all eligible" },
+                  ].map((option) => (
+                    <label
+                      key={option.value}
+                      className={`relative flex cursor-pointer flex-col rounded-lg border p-3 transition-colors ${
+                        autonomyLevel === option.value
+                          ? "border-primary bg-primary/5"
+                          : "border-input hover:bg-muted/50"
+                      }`}
+                    >
+                      <div className="flex items-center gap-2">
+                        <RadioGroupItem value={option.value} />
+                        <span className="text-sm font-medium">{option.label}</span>
+                      </div>
+                      <span className="mt-1 pl-6 text-xs text-muted-foreground">
+                        {option.description}
+                      </span>
+                    </label>
+                  ))}
+                </RadioGroup>
               </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="aggressiveness">Execution Aggressiveness</Label>
-                <Select value={aggressiveness} onValueChange={setAggressiveness}>
-                  <SelectTrigger className="w-full" id="aggressiveness">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="1">1 - Conservative</SelectItem>
-                    <SelectItem value="2">2 - Moderate</SelectItem>
-                    <SelectItem value="3">3 - Aggressive</SelectItem>
-                    <SelectItem value="4">4 - Maximum</SelectItem>
-                  </SelectContent>
-                </Select>
+              <div className="space-y-3">
+                <Label>Execution Aggressiveness</Label>
+                <RadioGroup
+                  value={aggressiveness}
+                  onValueChange={setAggressiveness}
+                  className="grid grid-cols-4 gap-3"
+                >
+                  {[
+                    { value: "1", label: "Conservative", description: "Minimal changes" },
+                    { value: "2", label: "Moderate", description: "Balanced approach" },
+                    { value: "3", label: "Aggressive", description: "More changes" },
+                    { value: "4", label: "Maximum", description: "Full autonomy" },
+                  ].map((option) => (
+                    <label
+                      key={option.value}
+                      className={`relative flex cursor-pointer flex-col rounded-lg border p-3 transition-colors ${
+                        aggressiveness === option.value
+                          ? "border-primary bg-primary/5"
+                          : "border-input hover:bg-muted/50"
+                      }`}
+                    >
+                      <div className="flex items-center gap-2">
+                        <RadioGroupItem value={option.value} />
+                        <span className="text-sm font-medium">{option.label}</span>
+                      </div>
+                      <span className="mt-1 pl-6 text-xs text-muted-foreground">
+                        {option.description}
+                      </span>
+                    </label>
+                  ))}
+                </RadioGroup>
               </div>
 
               <div className="space-y-2">
@@ -229,33 +260,37 @@ export default function SettingsPage() {
         <h2 className="text-[13px] font-medium text-foreground">Confidence Thresholds</h2>
         <Card>
           <CardContent>
-            <div className="space-y-4">
-              <div className="space-y-2">
-                <Label htmlFor="auto-proceed">Auto-proceed Threshold</Label>
-                <Input
+            <div className="space-y-6">
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="auto-proceed">Auto-proceed Threshold</Label>
+                  <span className="text-sm font-medium tabular-nums">{autoProceed}</span>
+                </div>
+                <Slider
                   id="auto-proceed"
-                  type="number"
                   min={0}
-                  max={1}
-                  step={0.05}
-                  value={autoProceed}
-                  onChange={(e) => setAutoProceed(e.target.value)}
+                  max={100}
+                  step={5}
+                  value={[Math.round(parseFloat(autoProceed) * 100)]}
+                  onValueChange={([v]) => setAutoProceed((v / 100).toFixed(2))}
                 />
                 <p className="text-xs text-muted-foreground">
                   Minimum confidence score to proceed without human review.
                 </p>
               </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="human-review">Human Review Threshold</Label>
-                <Input
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="human-review">Human Review Threshold</Label>
+                  <span className="text-sm font-medium tabular-nums">{humanReview}</span>
+                </div>
+                <Slider
                   id="human-review"
-                  type="number"
                   min={0}
-                  max={1}
-                  step={0.05}
-                  value={humanReview}
-                  onChange={(e) => setHumanReview(e.target.value)}
+                  max={100}
+                  step={5}
+                  value={[Math.round(parseFloat(humanReview) * 100)]}
+                  onValueChange={([v]) => setHumanReview((v / 100).toFixed(2))}
                 />
                 <p className="text-xs text-muted-foreground">
                   Below this score, issues are flagged for human review.
@@ -283,74 +318,90 @@ export default function SettingsPage() {
                 />
               </div>
 
-              <div className="space-y-3">
-                <Label>Priority Weights</Label>
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <Label>Priority Weights</Label>
+                  <span className={`text-xs tabular-nums ${weightsValid ? "text-muted-foreground" : "text-destructive font-medium"}`}>
+                    Sum: {weightsSum.toFixed(2)} / 1.00
+                  </span>
+                </div>
                 {!weightsValid && (
                   <p className="text-xs text-destructive">
-                    Weights must sum to 1.0 (current: {weightsSum.toFixed(2)})
+                    Weights must sum to 1.0
                   </p>
                 )}
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="space-y-1">
-                    <Label htmlFor="w-customer" className="text-xs text-muted-foreground">Customer Impact</Label>
-                    <Input
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <Label htmlFor="w-customer" className="text-xs text-muted-foreground">Customer Impact</Label>
+                      <span className="text-xs font-medium tabular-nums">{customerImpact}</span>
+                    </div>
+                    <Slider
                       id="w-customer"
-                      type="number"
                       min={0}
-                      max={1}
-                      step={0.05}
-                      value={customerImpact}
-                      onChange={(e) => setCustomerImpact(e.target.value)}
+                      max={100}
+                      step={5}
+                      value={[Math.round(parseFloat(customerImpact) * 100)]}
+                      onValueChange={([v]) => setCustomerImpact((v / 100).toFixed(2))}
                     />
                   </div>
-                  <div className="space-y-1">
-                    <Label htmlFor="w-severity" className="text-xs text-muted-foreground">Severity</Label>
-                    <Input
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <Label htmlFor="w-severity" className="text-xs text-muted-foreground">Severity</Label>
+                      <span className="text-xs font-medium tabular-nums">{severity}</span>
+                    </div>
+                    <Slider
                       id="w-severity"
-                      type="number"
                       min={0}
-                      max={1}
-                      step={0.05}
-                      value={severity}
-                      onChange={(e) => setSeverity(e.target.value)}
+                      max={100}
+                      step={5}
+                      value={[Math.round(parseFloat(severity) * 100)]}
+                      onValueChange={([v]) => setSeverity((v / 100).toFixed(2))}
                     />
                   </div>
-                  <div className="space-y-1">
-                    <Label htmlFor="w-recency" className="text-xs text-muted-foreground">Recency</Label>
-                    <Input
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <Label htmlFor="w-recency" className="text-xs text-muted-foreground">Recency</Label>
+                      <span className="text-xs font-medium tabular-nums">{recency}</span>
+                    </div>
+                    <Slider
                       id="w-recency"
-                      type="number"
                       min={0}
-                      max={1}
-                      step={0.05}
-                      value={recency}
-                      onChange={(e) => setRecency(e.target.value)}
+                      max={100}
+                      step={5}
+                      value={[Math.round(parseFloat(recency) * 100)]}
+                      onValueChange={([v]) => setRecency((v / 100).toFixed(2))}
                     />
                   </div>
-                  <div className="space-y-1">
-                    <Label htmlFor="w-revenue" className="text-xs text-muted-foreground">Revenue Risk</Label>
-                    <Input
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <Label htmlFor="w-revenue" className="text-xs text-muted-foreground">Revenue Risk</Label>
+                      <span className="text-xs font-medium tabular-nums">{revenueRisk}</span>
+                    </div>
+                    <Slider
                       id="w-revenue"
-                      type="number"
                       min={0}
-                      max={1}
-                      step={0.05}
-                      value={revenueRisk}
-                      onChange={(e) => setRevenueRisk(e.target.value)}
+                      max={100}
+                      step={5}
+                      value={[Math.round(parseFloat(revenueRisk) * 100)]}
+                      onValueChange={([v]) => setRevenueRisk((v / 100).toFixed(2))}
                     />
                   </div>
                 </div>
               </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="min-threshold">Minimum Score Threshold</Label>
-                <Input
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="min-threshold">Minimum Score Threshold</Label>
+                  <span className="text-sm font-medium tabular-nums">{minThreshold}</span>
+                </div>
+                <Slider
                   id="min-threshold"
-                  type="number"
                   min={0}
                   max={100}
-                  value={minThreshold}
-                  onChange={(e) => setMinThreshold(e.target.value)}
+                  step={1}
+                  value={[parseInt(minThreshold, 10) || 0]}
+                  onValueChange={([v]) => setMinThreshold(String(v))}
                 />
                 <p className="text-xs text-muted-foreground">
                   Issues scoring below this threshold will not be auto-processed.
