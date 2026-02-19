@@ -10,12 +10,13 @@ import (
 	"github.com/assembledhq/143/internal/api/handlers"
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/config"
+	"github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/db"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
 )
 
-func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) *chi.Mux {
+func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) (*chi.Mux, error) {
 	// Create stores
 	orgStore := db.NewOrganizationStore(pool)
 	userStore := db.NewUserStore(pool)
@@ -34,6 +35,17 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) *c
 	priorityScoreStore := db.NewPriorityScoreStore(pool)
 	complexityEstimateStore := db.NewComplexityEstimateStore(pool)
 	deployStore := db.NewDeployStore(pool)
+
+	// Create credential store with optional encryption.
+	var cryptoSvc *crypto.Service
+	if cfg.EncryptionMasterKey != "" {
+		var err error
+		cryptoSvc, err = crypto.NewService(cfg.EncryptionMasterKey)
+		if err != nil {
+			return nil, err
+		}
+	}
+	credentialStore := db.NewOrgCredentialStore(pool, cryptoSvc)
 
 	// Create services
 	ingestionSvc := ingestion.NewService(issueStore, webhookDeliveryStore, jobStore, logger)
@@ -71,6 +83,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) *c
 	)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, ingestionSvc, logger)
+	credentialHandler := handlers.NewCredentialHandler(credentialStore)
 
 	r := chi.NewRouter()
 
@@ -149,8 +162,13 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) *c
 			r.Delete("/api/v1/repositories/{id}", repoHandler.Delete)
 			r.Post("/api/v1/issues/{id}/reprioritize", priorityHandler.Reprioritize)
 			r.Patch("/api/v1/settings", settingsHandler.Update)
+
+			// Credential management
+			r.Get("/api/v1/settings/credentials", credentialHandler.List)
+			r.Put("/api/v1/settings/credentials/{provider}", credentialHandler.Update)
+			r.Delete("/api/v1/settings/credentials/{provider}", credentialHandler.Delete)
 		})
 	})
 
-	return r
+	return r, nil
 }

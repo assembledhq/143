@@ -33,6 +33,9 @@ type Config struct {
 	SentryWebhookSecret string `env:"SENTRY_WEBHOOK_SECRET"`
 	LinearWebhookSecret string `env:"LINEAR_WEBHOOK_SECRET"`
 
+	// Encryption
+	EncryptionMasterKey string `env:"ENCRYPTION_MASTER_KEY"`
+
 	// LLM
 	LLMModel          string `env:"LLM_MODEL"`
 	AnthropicAPIKey   string `env:"ANTHROPIC_API_KEY"`
@@ -95,6 +98,7 @@ func (c *Config) LogStatus(logger zerolog.Logger) {
 		{"GitHub App", c.GitHubAppID != 0 && c.GitHubAppPrivateKey != "", "webhooks, PRs"},
 		{"Sentry webhooks", c.SentryWebhookSecret != "", "ingestion"},
 		{"Linear webhooks", c.LinearWebhookSecret != "", "ingestion"},
+		{"Credential encryption", c.EncryptionMasterKey != "", "encrypted credential storage"},
 	}
 
 	for _, f := range features {
