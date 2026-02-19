@@ -2,9 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Sun, Moon } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Slider } from "@/components/ui/slider";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -12,14 +10,18 @@ interface Plane {
   id: number;
   x: number;
   y: number;
-  vx: number;
-  vy: number;
   size: number;
+  speed: number;
+  baseHeading: number;
+  amplitude: number;
+  frequency: number;
+  phase: number;
+  baseY: number;
+  opacity: number;
   trail: Array<{ x: number; y: number }>;
   maxTrailLength: number;
+  layer: number;
   life: number;
-  maxLife: number;
-  opacity: number;
 }
 
 let nextPlaneId = 0;
@@ -34,12 +36,19 @@ interface BackgroundStar {
   layer: number;
 }
 
+interface CloudBlob {
+  ox: number;
+  oy: number;
+  radius: number;
+  opacity: number;
+}
+
 interface Cloud {
   x: number;
   y: number;
   vx: number;
   layer: number;
-  blobs: Array<{ ox: number; oy: number; rx: number; ry: number; opacity: number }>;
+  blobs: CloudBlob[];
 }
 
 interface Formation {
@@ -60,9 +69,8 @@ const DARK = {
   bg: "#08080f",
   planeFill: (a: number) => `rgba(210, 218, 230, ${a})`,
   planeStroke: (a: number) => `rgba(255, 255, 255, ${a * 0.3})`,
-  trail: (a: number) => `rgba(180, 190, 210, ${a})`,
-  exhaust: (a: number) => `rgba(200, 215, 240, ${a})`,
-  connection: (a: number) => `rgba(200, 200, 220, ${a})`,
+  trail: (a: number) => `rgba(180, 195, 220, ${a})`,
+  star: (a: number) => `rgba(255, 255, 255, ${a})`,
   orbs: [
     { color: "rgba(30, 40, 80, 0.15)" },
     { color: "rgba(50, 30, 70, 0.1)" },
@@ -71,36 +79,50 @@ const DARK = {
 
 const LIGHT = {
   bg: "#d4e6f5",
-  planeFill: (a: number) => `rgba(50, 55, 65, ${a})`,
-  planeStroke: (a: number) => `rgba(30, 30, 40, ${a * 0.3})`,
+  planeFill: (a: number) => `rgba(45, 55, 70, ${a})`,
+  planeStroke: (a: number) => `rgba(25, 30, 40, ${a * 0.25})`,
   trail: (a: number) => `rgba(255, 255, 255, ${a})`,
-  exhaust: (a: number) => `rgba(255, 255, 255, ${a})`,
-  connection: (a: number) => `rgba(80, 80, 100, ${a})`,
+  star: () => "transparent",
   orbs: [
     { color: "rgba(255, 255, 255, 0.3)" },
     { color: "rgba(200, 220, 255, 0.2)" },
   ],
 };
 
-// ── Responsive helpers ─────────────────────────────────────────────────────────
+// ── Responsive config ──────────────────────────────────────────────────────────
 
 function getResponsiveConfig(w: number) {
-  if (w < 640) {
-    return { maxPlanes: 5, starCount: 100, cloudCount: 6, planeSizeMin: 5, planeSizeRange: 4, spawnRate: 0.008 };
-  }
-  if (w < 1024) {
-    return { maxPlanes: 8, starCount: 160, cloudCount: 9, planeSizeMin: 6, planeSizeRange: 5, spawnRate: 0.01 };
-  }
-  return { maxPlanes: 12, starCount: 250, cloudCount: 12, planeSizeMin: 8, planeSizeRange: 6, spawnRate: 0.012 };
+  if (w < 640)
+    return {
+      maxPlanes: 3,
+      starCount: 80,
+      cloudCount: 4,
+      planeSizeMin: 14,
+      planeSizeRange: 6,
+    };
+  if (w < 1024)
+    return {
+      maxPlanes: 4,
+      starCount: 130,
+      cloudCount: 5,
+      planeSizeMin: 16,
+      planeSizeRange: 8,
+    };
+  return {
+    maxPlanes: 6,
+    starCount: 200,
+    cloudCount: 6,
+    planeSizeMin: 18,
+    planeSizeRange: 10,
+  };
 }
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
-const MOUSE_GRAVITY_STRENGTH = 500;
-const LOGO_REPEL_RADIUS = 180;
-const LOGO_REPEL_STRENGTH = 0.12;
-const FORMATION_DURATION = 5000;
-const BG_COLORS_DARK = "#08080f";
+const MOUSE_GRAVITY_STRENGTH = 200;
+const FORMATION_DURATION = 12000;
+const PARALLAX_STRENGTH = 40;
+
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -120,65 +142,85 @@ function createBackgroundStar(w: number, h: number): BackgroundStar {
 
 function createCloud(w: number, h: number): Cloud {
   const layer = Math.random() < 0.3 ? 0 : Math.random() < 0.5 ? 1 : 2;
-  const baseWidth = [120, 80, 50][layer];
-  const width = baseWidth + Math.random() * baseWidth * 0.6;
-  const blobCount = Math.floor(Math.random() * 4) + 4;
-  const blobs: Cloud["blobs"] = [];
 
+  // Dramatic layer differentiation
+  const baseRadius = [120, 70, 40][layer];
+  const blobCount = [6, 5, 4][layer];
+  const baseOpacity = [0.08, 0.15, 0.28][layer];
+  const speed = [0.03, 0.08, 0.15][layer];
+
+  const blobs: CloudBlob[] = [];
   for (let i = 0; i < blobCount; i++) {
+    const spread = baseRadius * 0.7;
     blobs.push({
-      ox: (Math.random() - 0.5) * width * 0.8,
-      oy: (Math.random() - 0.5) * width * 0.25,
-      rx: width * (0.2 + Math.random() * 0.25),
-      ry: width * (0.1 + Math.random() * 0.12),
-      opacity: [0.25, 0.35, 0.5][layer] + Math.random() * 0.1,
+      ox: (Math.random() - 0.5) * spread,
+      oy: (Math.random() - 0.5) * spread * 0.3,
+      radius: baseRadius * (0.5 + Math.random() * 0.5),
+      opacity: baseOpacity * (0.7 + Math.random() * 0.3),
     });
   }
 
+  // Avoid center zone where text is
+  const centerY = h / 2;
+  const exclusion = h * 0.22;
+  let y: number;
+  do {
+    y = Math.random() * h;
+  } while (Math.abs(y - centerY) < exclusion && Math.random() < 0.75);
+
   return {
     x: Math.random() * (w + 400) - 200,
-    y: Math.random() * h * 0.85 + h * 0.05,
-    vx: [0.08, 0.15, 0.25][layer] * (0.8 + Math.random() * 0.4),
+    y,
+    vx: speed * (0.8 + Math.random() * 0.4),
     layer,
     blobs,
   };
 }
 
-function spawnPlane(w: number, h: number, sizeMin: number, sizeRange: number): Plane {
-  const edge = Math.floor(Math.random() * 4);
-  let x: number, y: number;
-  switch (edge) {
-    case 0: x = Math.random() * w; y = -40; break;
-    case 1: x = w + 40; y = Math.random() * h; break;
-    case 2: x = Math.random() * w; y = h + 40; break;
-    default: x = -40; y = Math.random() * h; break;
-  }
-  const targetX = w / 2 + (Math.random() - 0.5) * w * 0.6;
-  const targetY = h / 2 + (Math.random() - 0.5) * h * 0.6;
-  const angle = Math.atan2(targetY - y, targetX - x);
-  const spd = Math.random() * 1.2 + 0.5;
+function spawnPlane(
+  w: number,
+  h: number,
+  sizeMin: number,
+  sizeRange: number,
+): Plane {
+  // Primarily left-to-right with occasional right-to-left
+  const goRight = Math.random() > 0.2;
+  const x = goRight ? -80 : w + 80;
+  const y = Math.random() * h * 0.7 + h * 0.1;
+  const heading = goRight
+    ? (Math.random() - 0.5) * 0.3
+    : Math.PI + (Math.random() - 0.5) * 0.3;
+
+  const layer = Math.random() < 0.3 ? 0 : Math.random() < 0.5 ? 1 : 2;
+  const sizeMultiplier = [0.7, 1.0, 1.3][layer];
+  const speedMultiplier = [0.4, 0.7, 1.1][layer];
+  const size = (Math.random() * sizeRange + sizeMin) * sizeMultiplier;
 
   return {
     id: nextPlaneId++,
-    x, y,
-    vx: Math.cos(angle) * spd,
-    vy: Math.sin(angle) * spd,
-    size: Math.random() * sizeRange + sizeMin,
+    x,
+    y,
+    size,
+    speed: (Math.random() * 0.3 + 0.5) * speedMultiplier,
+    baseHeading: heading,
+    amplitude: Math.random() * 25 + 8,
+    frequency: Math.random() * 0.0006 + 0.0002,
+    phase: Math.random() * Math.PI * 2,
+    baseY: y,
+    opacity: 0,
     trail: [],
-    maxTrailLength: Math.floor(Math.random() * 50 + 40),
+    maxTrailLength: Math.floor(Math.random() * 60 + 50),
+    layer,
     life: 0,
-    maxLife: Math.random() * 600 + 400,
-    opacity: 1,
   };
 }
 
 function getFormationOffsets(
-  heading: number, count: number,
+  heading: number,
+  count: number,
 ): Array<{ dx: number; dy: number }> {
-  const spacing = 45;
-  const offsets: Array<{ dx: number; dy: number }> = [];
-  offsets.push({ dx: 0, dy: 0 });
-
+  const spacing = 55;
+  const offsets: Array<{ dx: number; dy: number }> = [{ dx: 0, dy: 0 }];
   for (let i = 1; i < count; i++) {
     const row = Math.ceil(i / 2);
     const side = i % 2 === 0 ? 1 : -1;
@@ -196,8 +238,13 @@ function getFormationOffsets(
 
 function drawP80(
   ctx: CanvasRenderingContext2D,
-  x: number, y: number, angle: number, size: number, alpha: number,
-  fillFn: (a: number) => string, strokeFn: (a: number) => string,
+  x: number,
+  y: number,
+  angle: number,
+  size: number,
+  alpha: number,
+  fillFn: (a: number) => string,
+  strokeFn: (a: number) => string,
 ) {
   ctx.save();
   ctx.translate(x, y);
@@ -243,63 +290,31 @@ function drawP80(
   ctx.restore();
 }
 
-// ── Draw exhaust shimmer ───────────────────────────────────────────────────────
+// ── Draw cloud (soft radial gradients, no hard edges) ──────────────────────────
 
-function drawExhaustShimmer(
-  ctx: CanvasRenderingContext2D,
-  x: number, y: number, heading: number, size: number, alpha: number, time: number,
-  colorFn: (a: number) => string,
-) {
-  const cosH = Math.cos(heading);
-  const sinH = Math.sin(heading);
-  const tailX = x - cosH * size * 1.05;
-  const tailY = y - sinH * size * 1.05;
-
-  for (let j = 0; j < 4; j++) {
-    const wobbleX = Math.sin(time * 0.008 + j * 1.8) * 2.5;
-    const wobbleY = Math.cos(time * 0.01 + j * 2.3) * 2.5;
-    const dist = j * 5;
-    const sx = tailX - cosH * dist + sinH * wobbleX + wobbleY * 0.5;
-    const sy = tailY - sinH * dist - cosH * wobbleX + wobbleY * 0.5;
-    const r = 2.5 - j * 0.4;
-    const a = alpha * (0.18 - j * 0.04);
-
-    if (a > 0) {
-      const grad = ctx.createRadialGradient(sx, sy, 0, sx, sy, r * 2);
-      grad.addColorStop(0, colorFn(a));
-      grad.addColorStop(1, colorFn(0));
-      ctx.beginPath();
-      ctx.arc(sx, sy, r * 2, 0, Math.PI * 2);
-      ctx.fillStyle = grad;
-      ctx.fill();
-    }
-  }
-}
-
-// ── Draw cloud ─────────────────────────────────────────────────────────────────
-
-function drawCloud(ctx: CanvasRenderingContext2D, cloud: Cloud, offsetX: number, offsetY: number) {
+function drawCloudSoft(ctx: CanvasRenderingContext2D, cloud: Cloud) {
   for (const b of cloud.blobs) {
-    const bx = cloud.x + b.ox + offsetX;
-    const by = cloud.y + b.oy + offsetY;
+    const bx = cloud.x + b.ox;
+    const by = cloud.y + b.oy;
+    const r = b.radius;
 
-    // Subtle shadow
-    ctx.beginPath();
-    ctx.ellipse(bx, by + b.ry * 0.15, b.rx, b.ry, 0, 0, Math.PI * 2);
-    ctx.fillStyle = `rgba(160, 175, 200, ${b.opacity * 0.15})`;
-    ctx.fill();
-
-    // Cloud body
-    ctx.beginPath();
-    ctx.ellipse(bx, by, b.rx, b.ry, 0, 0, Math.PI * 2);
-    ctx.fillStyle = `rgba(255, 255, 255, ${b.opacity})`;
-    ctx.fill();
+    const grad = ctx.createRadialGradient(bx, by, 0, bx, by, r);
+    grad.addColorStop(0, `rgba(255, 255, 255, ${b.opacity})`);
+    grad.addColorStop(0.3, `rgba(255, 255, 255, ${b.opacity * 0.7})`);
+    grad.addColorStop(0.6, `rgba(255, 255, 255, ${b.opacity * 0.3})`);
+    grad.addColorStop(1, `rgba(255, 255, 255, 0)`);
+    ctx.fillStyle = grad;
+    ctx.fillRect(bx - r, by - r, r * 2, r * 2);
   }
 }
 
-// ── Draw light-mode sky gradient ───────────────────────────────────────────────
+// ── Draw sky gradient ──────────────────────────────────────────────────────────
 
-function drawSkyGradient(ctx: CanvasRenderingContext2D, w: number, h: number) {
+function drawSkyGradient(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+) {
   const grad = ctx.createLinearGradient(0, 0, 0, h);
   grad.addColorStop(0, "#87BBDF");
   grad.addColorStop(0.4, "#A8CEE4");
@@ -317,20 +332,30 @@ export default function LandingPage() {
   const cloudsRef = useRef<Cloud[]>([]);
   const planesRef = useRef<Plane[]>([]);
   const mouseRef = useRef({ x: -9999, y: -9999, active: false });
-  const speedRef = useRef(1);
   const dimsRef = useRef({ w: 0, h: 0 });
-  const configRef = useRef(getResponsiveConfig(typeof window !== "undefined" ? window.innerWidth : 1200));
-  const formationRef = useRef<Formation>({ active: false, startTime: 0, duration: FORMATION_DURATION, originX: 0, originY: 0, heading: 0, speed: 1.5, offsets: [], slotMap: new Map() });
+  const configRef = useRef(
+    getResponsiveConfig(
+      typeof window !== "undefined" ? window.innerWidth : 1200,
+    ),
+  );
+  const formationRef = useRef<Formation>({
+    active: false,
+    startTime: 0,
+    duration: FORMATION_DURATION,
+    originX: 0,
+    originY: 0,
+    heading: 0,
+    speed: 1.5,
+    offsets: [],
+    slotMap: new Map(),
+  });
   const isDarkRef = useRef(true);
   const [isDark, setIsDark] = useState(true);
-  const manualThemeRef = useRef<boolean | null>(null);
-  const [speed, setSpeed] = useState(12);
 
   // Detect system color scheme
   useEffect(() => {
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     const update = () => {
-      if (manualThemeRef.current !== null) return;
       const dark = mq.matches;
       isDarkRef.current = dark;
       setIsDark(dark);
@@ -339,17 +364,6 @@ export default function LandingPage() {
     mq.addEventListener("change", update);
     return () => mq.removeEventListener("change", update);
   }, []);
-
-  const toggleTheme = () => {
-    const next = !isDarkRef.current;
-    manualThemeRef.current = next;
-    isDarkRef.current = next;
-    setIsDark(next);
-  };
-
-  useEffect(() => {
-    speedRef.current = 0.1 + (speed / 100) * 4.9;
-  }, [speed]);
 
   // ── Canvas animation ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -373,43 +387,68 @@ export default function LandingPage() {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
       const cfg = configRef.current;
-      bgStarsRef.current = Array.from({ length: cfg.starCount }, () => createBackgroundStar(w, h));
-      cloudsRef.current = Array.from({ length: cfg.cloudCount }, () => createCloud(w, h));
+      bgStarsRef.current = Array.from({ length: cfg.starCount }, () =>
+        createBackgroundStar(w, h),
+      );
+      cloudsRef.current = Array.from({ length: cfg.cloudCount }, () =>
+        createCloud(w, h),
+      );
     };
 
     resize();
 
+    // Seed a few initial planes in the periphery (avoiding center text)
     const { w, h } = dimsRef.current;
     const cfg = configRef.current;
-    for (let i = 0; i < Math.min(4, cfg.maxPlanes); i++) {
-      planesRef.current.push(spawnPlane(w, h, cfg.planeSizeMin, cfg.planeSizeRange));
+    for (let i = 0; i < Math.min(3, cfg.maxPlanes); i++) {
+      const p = spawnPlane(w, h, cfg.planeSizeMin, cfg.planeSizeRange);
+      // Place in left or right third, outside the content zone
+      const side = Math.random() > 0.5;
+      p.x = side ? w * 0.05 + Math.random() * w * 0.2 : w * 0.75 + Math.random() * w * 0.2;
+      p.y = Math.random() * h * 0.3 + (Math.random() > 0.5 ? 0 : h * 0.65);
+      p.baseY = p.y;
+      p.opacity = 1;
+      p.life = 120;
+      planesRef.current.push(p);
     }
 
     // ── Render loop ──────────────────────────────────────────────────────────
 
     const frame = (time: number) => {
       const { w, h } = dimsRef.current;
-      const spd = speedRef.current;
       const mouse = mouseRef.current;
       const cfg = configRef.current;
       const formation = formationRef.current;
       const dark = isDarkRef.current;
       const theme = dark ? DARK : LIGHT;
 
-      const logoCx = w / 2;
-      const logoCy = h / 2 - h * 0.08;
 
-      if (formation.active && time - formation.startTime > formation.duration) {
+      if (
+        formation.active &&
+        time - formation.startTime > formation.duration
+      ) {
+        // Adopt formation heading so planes continue smoothly instead of snapping back
+        for (const p of planesRef.current) {
+          if (formation.slotMap.has(p.id)) {
+            p.baseHeading = formation.heading;
+            p.baseY = p.y;
+            p.speed = formation.speed;
+          }
+        }
         formation.active = false;
       }
 
       // ── Background ─────────────────────────────────────────────────────────
       if (dark) {
-        ctx.fillStyle = BG_COLORS_DARK;
+        ctx.fillStyle = DARK.bg;
         ctx.fillRect(0, 0, w, h);
 
-        // Ambient orbs
-        const drawOrb = (cx: number, cy: number, r: number, color: string) => {
+        const drawOrb = (
+          cx: number,
+          cy: number,
+          r: number,
+          color: string,
+        ) => {
           const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
           grad.addColorStop(0, color);
           grad.addColorStop(1, "transparent");
@@ -417,13 +456,30 @@ export default function LandingPage() {
           ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
         };
         const t = time * 0.0001;
-        drawOrb(w * 0.3 + Math.sin(t * 0.7) * w * 0.05, h * 0.4 + Math.cos(t * 0.5) * h * 0.05, w * 0.35, theme.orbs[0].color);
-        drawOrb(w * 0.7 + Math.cos(t * 0.6) * w * 0.04, h * 0.6 + Math.sin(t * 0.8) * h * 0.04, w * 0.3, theme.orbs[1].color);
+        drawOrb(
+          w * 0.3 + Math.sin(t * 0.7) * w * 0.05,
+          h * 0.4 + Math.cos(t * 0.5) * h * 0.05,
+          w * 0.35,
+          theme.orbs[0].color,
+        );
+        drawOrb(
+          w * 0.7 + Math.cos(t * 0.6) * w * 0.04,
+          h * 0.6 + Math.sin(t * 0.8) * h * 0.04,
+          w * 0.3,
+          theme.orbs[1].color,
+        );
       } else {
         drawSkyGradient(ctx, w, h);
 
-        // Subtle sun glow top-right
-        const grad = ctx.createRadialGradient(w * 0.8, h * 0.05, 0, w * 0.8, h * 0.05, w * 0.3);
+        // Subtle sun glow
+        const grad = ctx.createRadialGradient(
+          w * 0.8,
+          h * 0.05,
+          0,
+          w * 0.8,
+          h * 0.05,
+          w * 0.3,
+        );
         grad.addColorStop(0, "rgba(255, 248, 220, 0.4)");
         grad.addColorStop(0.5, "rgba(255, 248, 220, 0.1)");
         grad.addColorStop(1, "transparent");
@@ -431,141 +487,184 @@ export default function LandingPage() {
         ctx.fillRect(0, 0, w, h);
       }
 
-      // ── Stars (dark mode) or Clouds (light mode) ──────────────────────────
+      // ── Stars (dark) or Clouds (light) ──────────────────────────────────
       if (dark) {
+        const mx = mouse.active ? mouse.x : w / 2;
+        const my = mouse.active ? mouse.y : h / 2;
+        const pOffX = (mx - w / 2) / w;
+        const pOffY = (my - h / 2) / h;
+        const parallaxMults = [0.0, 0.35, 1.0];
+
         for (const s of bgStarsRef.current) {
-          const twinkle = Math.sin(time * s.twinkleSpeed * 0.001 + s.twinklePhase);
+          const twinkle = Math.sin(
+            time * s.twinkleSpeed * 0.001 + s.twinklePhase,
+          );
           const opacity = s.baseOpacity * (0.3 + 0.7 * twinkle);
+          const pm = parallaxMults[s.layer];
+          const drawX = s.x - pOffX * PARALLAX_STRENGTH * pm;
+          const drawY = s.y - pOffY * PARALLAX_STRENGTH * pm;
           ctx.beginPath();
-          ctx.arc(s.x, s.y, s.size, 0, Math.PI * 2);
-          ctx.fillStyle = `rgba(255, 255, 255, ${Math.max(0, opacity)})`;
+          ctx.arc(drawX, drawY, s.size, 0, Math.PI * 2);
+          ctx.fillStyle = DARK.star(Math.max(0, opacity));
           ctx.fill();
         }
       } else {
         for (const c of cloudsRef.current) {
-          c.x += c.vx * spd;
-          if (c.x - 150 > w) {
-            c.x = -200;
-            c.y = Math.random() * h * 0.85 + h * 0.05;
+          c.x += c.vx;
+          if (c.x - 250 > w) {
+            c.x = -300;
+            const centerY = h / 2;
+            const exclusion = h * 0.22;
+            let newY: number;
+            do {
+              newY = Math.random() * h;
+            } while (
+              Math.abs(newY - centerY) < exclusion &&
+              Math.random() < 0.75
+            );
+            c.y = newY;
           }
-          drawCloud(ctx, c, 0, 0);
+          drawCloudSoft(ctx, c);
         }
       }
 
       // ── Spawn new planes ───────────────────────────────────────────────────
-      if (planesRef.current.length < cfg.maxPlanes && Math.random() < cfg.spawnRate * spd) {
-        planesRef.current.push(spawnPlane(w, h, cfg.planeSizeMin, cfg.planeSizeRange));
+      if (
+        planesRef.current.length < cfg.maxPlanes &&
+        Math.random() < 0.003
+      ) {
+        planesRef.current.push(
+          spawnPlane(w, h, cfg.planeSizeMin, cfg.planeSizeRange),
+        );
       }
 
       // ── Update and draw planes ─────────────────────────────────────────────
       const alive: Plane[] = [];
 
-      for (let pi = 0; pi < planesRef.current.length; pi++) {
-        const p = planesRef.current[pi];
+      for (const p of planesRef.current) {
+        const slot = formation.active
+          ? formation.slotMap.get(p.id)
+          : undefined;
+        const inFormation = slot !== undefined;
 
-        const slot = formation.active ? formation.slotMap.get(p.id) : undefined;
-        if (slot !== undefined) {
+        if (inFormation) {
+          // Formation: spring-like easing toward slot
           const elapsed = (time - formation.startTime) / 1000;
-          const leaderX = formation.originX + Math.cos(formation.heading) * formation.speed * elapsed * 60;
-          const leaderY = formation.originY + Math.sin(formation.heading) * formation.speed * elapsed * 60;
+          const leaderX =
+            formation.originX +
+            Math.cos(formation.heading) *
+              formation.speed *
+              elapsed *
+              60;
+          const leaderY =
+            formation.originY +
+            Math.sin(formation.heading) *
+              formation.speed *
+              elapsed *
+              60;
           const offset = formation.offsets[slot];
           const targetX = leaderX + offset.dx;
           const targetY = leaderY + offset.dy;
-          const cruiseVx = Math.cos(formation.heading) * formation.speed;
-          const cruiseVy = Math.sin(formation.heading) * formation.speed;
 
-          const blend = 0.025;
-          p.x += (targetX - p.x) * blend;
-          p.y += (targetY - p.y) * blend;
-          p.vx += (cruiseVx - p.vx) * blend;
-          p.vy += (cruiseVy - p.vy) * blend;
+          const dx = targetX - p.x;
+          const dy = targetY - p.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          const ease = Math.min(0.04, 0.008 + dist * 0.00004);
+          p.x += dx * ease;
+          p.y += dy * ease;
         } else {
+          // Directional flight with gentle sine oscillation
+          p.x += Math.cos(p.baseHeading) * p.speed;
+
+          const oscillation =
+            Math.sin(time * p.frequency + p.phase) * p.amplitude;
+          const targetY = p.baseY + oscillation;
+          p.y += (targetY - p.y) * 0.015;
+
+          // Subtle mouse influence
           if (mouse.active) {
             const dx = mouse.x - p.x;
             const dy = mouse.y - p.y;
             const distSq = dx * dx + dy * dy;
             const dist = Math.sqrt(distSq);
-            if (dist > 40 && dist < 450) {
+            if (dist > 80 && dist < 400) {
               const force = MOUSE_GRAVITY_STRENGTH / distSq;
-              p.vx += (dx / dist) * force;
-              p.vy += (dy / dist) * force;
+              p.x += (dx / dist) * force * 0.2;
+              p.y += (dy / dist) * force * 0.2;
             }
           }
         }
 
-        // Logo repulsion
-        const ldx = p.x - logoCx;
-        const ldy = p.y - logoCy;
-        const logoDist = Math.sqrt(ldx * ldx + ldy * ldy);
-        if (logoDist < LOGO_REPEL_RADIUS && logoDist > 5) {
-          const repelForce = ((LOGO_REPEL_RADIUS - logoDist) / LOGO_REPEL_RADIUS) * LOGO_REPEL_STRENGTH;
-          p.vx += (ldx / logoDist) * repelForce;
-          p.vy += (ldy / logoDist) * repelForce;
-        }
 
-        p.vx *= 0.9985;
-        p.vy *= 0.9985;
+        p.life += 1;
 
-        const inFormation = slot !== undefined;
-        p.x += p.vx * spd;
-        p.y += p.vy * spd;
-        if (!inFormation) p.life += spd;
+        // Smooth fade in; fade at screen edges
+        const fadeIn = Math.min(p.life / 80, 1);
+        const edgePad = 120;
+        const edgeFade = inFormation
+          ? 1
+          : Math.min(
+              Math.min(
+                (p.x + edgePad) / edgePad,
+                (w + edgePad - p.x) / edgePad,
+              ),
+              1,
+            );
+        p.opacity = fadeIn * Math.max(0, Math.min(1, edgeFade));
 
-        const fadeIn = Math.min(p.life / 30, 1);
-        const fadeOut = inFormation ? 1 : Math.max(0, 1 - p.life / p.maxLife);
-        p.opacity = fadeIn * fadeOut;
-
+        // Record trail
         p.trail.push({ x: p.x, y: p.y });
         while (p.trail.length > p.maxTrailLength) p.trail.shift();
 
-        const pad = 200;
-        if (inFormation || (p.life < p.maxLife && p.x > -pad && p.x < w + pad && p.y > -pad && p.y < h + pad)) {
-          alive.push(p);
+        // Remove if off screen
+        const removePad = 160;
+        if (
+          !inFormation &&
+          (p.x < -removePad ||
+            p.x > w + removePad ||
+            p.y < -removePad ||
+            p.y > h + removePad)
+        ) {
+          continue;
         }
+        alive.push(p);
 
-        // Contrail
+        // ── Draw contrail ────────────────────────────────────────────────────
         if (p.trail.length > 2) {
           for (let i = 2; i < p.trail.length; i++) {
             const prev = p.trail[i - 1];
             const cur = p.trail[i];
             const progress = i / p.trail.length;
-            const trailAlpha = progress * p.opacity * 0.25;
+            // Contrail: thin at start, thicker near plane, fades out at tail
+            const trailAlpha = progress * p.opacity * 0.45;
+            const trailWidth = 0.5 + progress * 2;
+
             ctx.beginPath();
             ctx.moveTo(prev.x, prev.y);
             ctx.lineTo(cur.x, cur.y);
             ctx.strokeStyle = theme.trail(trailAlpha);
-            ctx.lineWidth = 1 + progress * 1.5;
+            ctx.lineWidth = trailWidth;
             ctx.lineCap = "round";
             ctx.stroke();
           }
         }
 
-        const heading = Math.atan2(p.vy, p.vx);
-        drawExhaustShimmer(ctx, p.x, p.y, heading, p.size, p.opacity, time, theme.exhaust);
-        drawP80(ctx, p.x, p.y, heading, p.size, p.opacity, theme.planeFill, theme.planeStroke);
+        // ── Draw plane ───────────────────────────────────────────────────────
+        // Use baseHeading for stable visual orientation (no jitter)
+        const heading = p.baseHeading;
+        drawP80(
+          ctx,
+          p.x,
+          p.y,
+          heading,
+          p.size,
+          p.opacity,
+          theme.planeFill,
+          theme.planeStroke,
+        );
       }
 
       planesRef.current = alive;
-
-      // Connection lines
-      for (let i = 0; i < alive.length; i++) {
-        for (let j = i + 1; j < alive.length; j++) {
-          const a = alive[i];
-          const b = alive[j];
-          const dx = a.x - b.x;
-          const dy = a.y - b.y;
-          const dist = Math.sqrt(dx * dx + dy * dy);
-          if (dist < 200) {
-            const opacity = (1 - dist / 200) * 0.06 * Math.min(a.opacity, b.opacity);
-            ctx.beginPath();
-            ctx.moveTo(a.x, a.y);
-            ctx.lineTo(b.x, b.y);
-            ctx.strokeStyle = theme.connection(opacity);
-            ctx.lineWidth = 0.5;
-            ctx.stroke();
-          }
-        }
-      }
 
       animId = requestAnimationFrame(frame);
     };
@@ -575,8 +674,12 @@ export default function LandingPage() {
     // ── Events ───────────────────────────────────────────────────────────────
 
     const onResize = () => resize();
-    const onMouseMove = (e: MouseEvent) => { mouseRef.current = { x: e.clientX, y: e.clientY, active: true }; };
-    const onMouseLeave = () => { mouseRef.current.active = false; };
+    const onMouseMove = (e: MouseEvent) => {
+      mouseRef.current = { x: e.clientX, y: e.clientY, active: true };
+    };
+    const onMouseLeave = () => {
+      mouseRef.current.active = false;
+    };
 
     const triggerFormation = (cx: number, cy: number) => {
       const planes = planesRef.current;
@@ -585,14 +688,42 @@ export default function LandingPage() {
       const heading = Math.atan2(cy - h / 2, cx - w / 2);
       const offsets = getFormationOffsets(heading, planes.length);
       const slotMap = new Map<number, number>();
-      planes.forEach((p, i) => { slotMap.set(p.id, i); });
-      formationRef.current = { active: true, startTime: performance.now(), duration: FORMATION_DURATION, originX: cx, originY: cy, heading, speed: 1.5, offsets, slotMap };
+      planes.forEach((p, i) => {
+        slotMap.set(p.id, i);
+        p.baseHeading = heading; // visually align with formation direction
+      });
+      formationRef.current = {
+        active: true,
+        startTime: performance.now(),
+        duration: FORMATION_DURATION,
+        originX: cx,
+        originY: cy,
+        heading,
+        speed: 1.5,
+        offsets,
+        slotMap,
+      };
     };
 
-    const onClick = (e: MouseEvent) => { triggerFormation(e.clientX, e.clientY); };
-    const onTouchStart = (e: TouchEvent) => { if (e.touches.length > 0) { const t = e.touches[0]; mouseRef.current = { x: t.clientX, y: t.clientY, active: true }; triggerFormation(t.clientX, t.clientY); } };
-    const onTouchMove = (e: TouchEvent) => { if (e.touches.length > 0) { const t = e.touches[0]; mouseRef.current = { x: t.clientX, y: t.clientY, active: true }; } };
-    const onTouchEnd = () => { mouseRef.current.active = false; };
+    const onClick = (e: MouseEvent) => {
+      triggerFormation(e.clientX, e.clientY);
+    };
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length > 0) {
+        const t = e.touches[0];
+        mouseRef.current = { x: t.clientX, y: t.clientY, active: true };
+        triggerFormation(t.clientX, t.clientY);
+      }
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      if (e.touches.length > 0) {
+        const t = e.touches[0];
+        mouseRef.current = { x: t.clientX, y: t.clientY, active: true };
+      }
+    };
+    const onTouchEnd = () => {
+      mouseRef.current.active = false;
+    };
 
     window.addEventListener("resize", onResize);
     canvas.addEventListener("mousemove", onMouseMove);
@@ -615,8 +746,11 @@ export default function LandingPage() {
   }, []);
 
   return (
-    <div className="relative min-h-screen overflow-hidden" style={{ background: isDark ? BG_COLORS_DARK : "#87BBDF" }}>
-      <canvas ref={canvasRef} className="fixed inset-0 z-0" style={{ cursor: "crosshair" }} />
+    <div
+      className="relative min-h-screen overflow-hidden"
+      style={{ background: isDark ? DARK.bg : "#87BBDF" }}
+    >
+      <canvas ref={canvasRef} className="fixed inset-0 z-0" />
 
       {/* ── Hero ──────────────────────────────────────────────────────────── */}
       <div className="relative z-10 flex min-h-screen flex-col items-center justify-center px-6 text-center select-none pointer-events-none">
@@ -626,22 +760,34 @@ export default function LandingPage() {
               className="bg-clip-text text-transparent"
               style={{
                 backgroundImage: isDark
-                  ? "linear-gradient(135deg, #ffffff 0%, #dde0e8 40%, #a8b0c0 100%)"
+                  ? "linear-gradient(135deg, #f0f0f5 0%, #c8ccd8 40%, #8891a5 100%)"
                   : "linear-gradient(135deg, #0f1f2e 0%, #1e3345 40%, #2d4a60 100%)",
               }}
             >
               143
             </span>
-            <span className={isDark ? "text-white/70" : "text-slate-800/70"}>.dev</span>
+            <span
+              className={isDark ? "text-white/50" : "text-slate-800/70"}
+            >
+              .dev
+            </span>
           </h1>
 
-          <p className={`text-base sm:text-lg md:text-xl font-light leading-relaxed ${isDark ? "text-white/70" : "text-slate-800"}`}>
-            Open source bug fixing for production systems.
+          <p
+            className={`text-base sm:text-lg md:text-xl font-light leading-relaxed ${isDark ? "text-white/50" : "text-slate-800"}`}
+          >
+            Open source AI that detects issues, generates fixes,
+            <br className="hidden sm:block" />
+            and opens pull requests while you sleep.
           </p>
 
-          <p className={`mx-auto max-w-lg text-xs sm:text-sm leading-relaxed ${isDark ? "text-white/40" : "text-slate-700"}`}>
-            The first US jet fighter, the P-80 Shooting Star, was built in just 143&nbsp;days.
-            Connect GitHub, Sentry, or Linear and ship fixes while you sleep.
+          <p
+            className={`mx-auto max-w-lg text-xs sm:text-sm leading-relaxed ${isDark ? "text-white/25" : "text-slate-700"}`}
+          >
+            The first US jet fighter, the P-80 Shooting Star, was built in
+            just 143&nbsp;days. We bring that same speed to fixing your code.
+            Fully open source, connect GitHub, Sentry, or Linear and let 143
+            handle the rest.
           </p>
 
           <div className="flex items-center justify-center gap-3 sm:gap-4 pt-2 pointer-events-auto">
@@ -660,7 +806,7 @@ export default function LandingPage() {
               variant="outline"
               className={`rounded-lg bg-transparent px-5 sm:px-7 py-2.5 text-sm font-medium shadow-none transition-all ${
                 isDark
-                  ? "border-white/25 text-white/70 hover:border-white/40 hover:bg-transparent hover:text-white/90"
+                  ? "border-white/15 text-white/50 hover:border-white/30 hover:bg-transparent hover:text-white/80"
                   : "border-slate-500 text-slate-700 hover:border-slate-600 hover:bg-transparent hover:text-slate-900"
               }`}
             >
@@ -668,43 +814,6 @@ export default function LandingPage() {
             </Button>
           </div>
         </div>
-
-        <p className={`absolute bottom-20 text-[11px] animate-pulse hidden sm:block ${isDark ? "text-white/20" : "text-slate-600/50"}`}>
-          move your mouse to attract planes &middot; click to call formation
-        </p>
-      </div>
-
-      {/* ── Controls panel ────────────────────────────────────────────────── */}
-      <div className={`fixed bottom-5 left-5 z-20 flex items-center gap-3 rounded-xl border px-4 py-3 backdrop-blur-md ${
-        isDark
-          ? "border-white/10 bg-white/[0.05]"
-          : "border-slate-400/30 bg-white/50"
-      }`}>
-        <span className={`text-[11px] font-medium tracking-wide uppercase ${isDark ? "text-white/40" : "text-slate-600"}`}>
-          Speed
-        </span>
-        <div className={`w-28 ${
-          isDark
-            ? "[&_[data-slot=slider-track]]:bg-white/15 [&_[data-slot=slider-range]]:bg-white/50 [&_[data-slot=slider-thumb]]:border-white/50 [&_[data-slot=slider-thumb]]:bg-white/90"
-            : "[&_[data-slot=slider-track]]:bg-slate-300/50 [&_[data-slot=slider-range]]:bg-slate-500/60 [&_[data-slot=slider-thumb]]:border-slate-400 [&_[data-slot=slider-thumb]]:bg-white"
-        }`}>
-          <Slider value={[speed]} onValueChange={(v) => setSpeed(v[0])} min={0} max={100} step={1} />
-        </div>
-        <span className={`w-8 text-right font-mono text-[11px] ${isDark ? "text-white/40" : "text-slate-600"}`}>
-          {(0.1 + (speed / 100) * 4.9).toFixed(1)}x
-        </span>
-        <div className={`ml-1 h-4 w-px ${isDark ? "bg-white/10" : "bg-slate-300/50"}`} />
-        <button
-          onClick={toggleTheme}
-          className={`flex items-center justify-center rounded-md p-1 transition-colors ${
-            isDark
-              ? "text-white/40 hover:text-white/70"
-              : "text-slate-600 hover:text-slate-800"
-          }`}
-          aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
-        >
-          {isDark ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
-        </button>
       </div>
     </div>
   );
