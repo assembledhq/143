@@ -55,7 +55,10 @@ function del<T>(path: string): Promise<T> {
 
 export const api = {
   auth: {
+    providers: () => get<import('./types').SingleResponse<import('./types').AuthProviders>>('/api/v1/auth/providers'),
+    me: () => get<import('./types').SingleResponse<import('./types').User>>('/api/v1/auth/me'),
     login: () => { window.location.href = `${API_BASE}/api/v1/auth/github/login`; },
+    loginGoogle: () => { window.location.href = `${API_BASE}/api/v1/auth/google/login`; },
     loginSentry: () => {
       const params = new URLSearchParams({
         client_id: SENTRY_CLIENT_ID,
@@ -64,6 +67,10 @@ export const api = {
       });
       window.location.href = `https://sentry.io/oauth/authorize/?${params.toString()}`;
     },
+    loginEmail: (email: string, password: string) =>
+      post<import('./types').SingleResponse<import('./types').User>>('/api/v1/auth/login', { email, password }),
+    register: (email: string, password: string, name: string) =>
+      post<import('./types').SingleResponse<import('./types').User>>('/api/v1/auth/register', { email, password, name }),
     logout: () => post('/api/v1/auth/logout'),
   },
   repositories: {

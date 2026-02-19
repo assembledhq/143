@@ -171,12 +171,12 @@ func TestAuth(t *testing.T) {
 				ghID := int64(12345)
 				ghLogin := "testuser"
 				avatarURL := "https://example.com/avatar.png"
-				userRows := pgxmock.NewRows([]string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "created_at"}).
+				userRows := pgxmock.NewRows([]string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}).
 					AddRow(
 						uuid.MustParse("aaaaaaaa-0000-0000-0000-000000000002"),
 						uuid.MustParse("aaaaaaaa-0000-0000-0000-000000000003"),
 						"test@example.com", "Test User", "member",
-						&ghID, &ghLogin, &avatarURL, now,
+						&ghID, &ghLogin, &avatarURL, nil, nil, now,
 					)
 				mock.ExpectQuery("SELECT .+ FROM users").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -216,12 +216,12 @@ func TestAuth(t *testing.T) {
 				ghID := int64(12345)
 				ghLogin := "testuser"
 				avatarURL := "https://example.com/avatar.png"
-				userRows := pgxmock.NewRows([]string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "created_at"}).
+				userRows := pgxmock.NewRows([]string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}).
 					AddRow(
 						uuid.MustParse("bbbbbbbb-0000-0000-0000-000000000002"),
 						uuid.MustParse("bbbbbbbb-0000-0000-0000-000000000003"),
 						"test@example.com", "Test User", "admin",
-						&ghID, &ghLogin, &avatarURL, now,
+						&ghID, &ghLogin, &avatarURL, nil, nil, now,
 					)
 				mock.ExpectQuery("SELECT .+ FROM users").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -297,7 +297,7 @@ func TestAuth(t *testing.T) {
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(sessionRows)
 
-				userRows := pgxmock.NewRows([]string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "created_at"})
+				userRows := pgxmock.NewRows([]string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"})
 				mock.ExpectQuery("SELECT .+ FROM users").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(userRows)

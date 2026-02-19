@@ -109,14 +109,20 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) (*
 	})
 
 	// Auth routes (no auth)
+	r.Get("/api/v1/auth/providers", authHandler.Providers)
 	r.Get("/api/v1/auth/github/login", authHandler.Login)
 	r.Get("/api/v1/auth/github/callback", authHandler.Callback)
+	r.Get("/api/v1/auth/google/login", authHandler.GoogleLogin)
+	r.Get("/api/v1/auth/google/callback", authHandler.GoogleCallback)
+	r.Post("/api/v1/auth/register", authHandler.Register)
+	r.Post("/api/v1/auth/login", authHandler.EmailLogin)
 
 	// Protected routes (authenticated)
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.Auth(sessionStore, userStore))
 		r.Use(middleware.OrgContext)
 
+		r.Get("/api/v1/auth/me", authHandler.Me)
 		r.Post("/api/v1/auth/logout", authHandler.Logout)
 
 		// Read-only routes (all roles: admin, member, viewer)

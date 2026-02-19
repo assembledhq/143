@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 )
 
@@ -173,9 +175,13 @@ func (h *IngestionWebhookHandler) verifyProviderSignature(
 
 	cred, err := h.credStore.Get(ctx, orgID, providerName)
 	if err != nil {
-		// No credential configured — skip verification (dev mode)
-		h.logger.Debug().Err(err).Str("provider", provider).Msg("no webhook credential configured, skipping signature verification")
-		return nil
+		if errors.Is(err, pgx.ErrNoRows) {
+			// No credential configured — skip verification (dev mode)
+			h.logger.Debug().Err(err).Str("provider", provider).Msg("no webhook credential configured, skipping signature verification")
+			return nil
+		}
+		h.logger.Error().Err(err).Str("provider", provider).Msg("failed to load webhook credential")
+		return fmt.Errorf("failed to load webhook credential")
 	}
 
 	// Extract webhook_secret from the typed config.

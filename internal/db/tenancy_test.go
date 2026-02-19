@@ -58,6 +58,9 @@ func TestMultiTenancyAudit(t *testing.T) {
 		{"integrations", "from integrations"},
 		{"agent_run_logs", "from agent_run_logs"},  // no org_id column; scoped via agent_run_id FK
 		{"agent_run_logs", "into agent_run_logs"},   // no org_id column; scoped via agent_run_id FK
+		{"users", "where github_id"},                // pre-auth lookup by GitHub ID
+		{"users", "where email"},                    // pre-auth lookup by email
+		{"users", "where google_id"},                // pre-auth lookup by Google ID
 	}
 
 	// Scan all .go files in the db package (not test files)
