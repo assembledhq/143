@@ -16,7 +16,7 @@ import (
 )
 
 func orgColumns() []string {
-	return []string{"id", "name", "slug", "settings", "created_at", "updated_at"}
+	return []string{"id", "name", "settings", "created_at", "updated_at"}
 }
 
 func TestSettingsHandler_Get(t *testing.T) {
@@ -36,7 +36,7 @@ func TestSettingsHandler_Get(t *testing.T) {
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(orgColumns()).AddRow(
-							orgID, "Test Org", "test-org", json.RawMessage(`{"theme":"dark"}`), now, now,
+							orgID, "Test Org", json.RawMessage(`{"theme":"dark"}`), now, now,
 						),
 					)
 			},
@@ -102,12 +102,12 @@ func TestSettingsHandler_Update(t *testing.T) {
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(orgColumns()).AddRow(
-							orgID, "Test Org", "test-org", json.RawMessage(`{}`), now, now,
+							orgID, "Test Org", json.RawMessage(`{}`), now, now,
 						),
 					)
 				// Update
 				mock.ExpectQuery("UPDATE organizations").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows([]string{"updated_at"}).AddRow(now),
 					)

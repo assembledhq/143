@@ -16,7 +16,6 @@ Multi-tenancy root. Each self-hosted instance has at least one org.
 |--------|------|-------|
 | id | uuid | PK |
 | name | text | |
-| slug | text | unique |
 | settings | jsonb | org-wide config (autonomy level, token budget, product direction, execution aggressiveness, confidence thresholds, issue type overrides, etc.) |
 | created_at | timestamptz | |
 | updated_at | timestamptz | |
