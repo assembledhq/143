@@ -2,7 +2,7 @@
 
 **from issue to PR, with zero human intervention**
 
-[Local Development](#local-development) · [Architecture](docs/design/overall.md) · [How it works](#how-it-works)
+[Local Development](docs/local-development.md) · [Architecture](docs/design/overall.md) · [How it works](#how-it-works)
 
 ---
 
@@ -56,10 +56,10 @@ All config lives in `.env` (created by setup). The defaults work out of the box 
 
 To enable GitHub OAuth login and repo onboarding, set these in `.env`:
 
-- `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET` — [create an OAuth app](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app)
-- `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` / `GITHUB_WEBHOOK_SECRET` — [create a GitHub App](https://docs.github.com/en/apps/creating-github-apps)
+- `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET` — create an OAuth app
+- `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` / `GITHUB_WEBHOOK_SECRET` — create a GitHub App
 
-See `.env.example` for the full list of variables.
+See the [local development guide](docs/local-development.md) for step-by-step setup including webhook tunneling, and `.env.example` for the full list of variables.
 
 ### Secrets & API Keys
 
