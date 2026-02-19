@@ -31,7 +31,7 @@ export default function LoginPage() {
 
   useEffect(() => {
     if (!authLoading && isAuthenticated) {
-      router.replace("/");
+      router.replace("/overview");
     }
   }, [authLoading, isAuthenticated, router]);
 
@@ -41,7 +41,7 @@ export default function LoginPage() {
     setLoading(true);
     try {
       await api.auth.loginEmail(signInEmail, signInPassword);
-      window.location.href = "/";
+      window.location.href = "/overview";
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Sign in failed";
       setError(message);
@@ -56,7 +56,7 @@ export default function LoginPage() {
     setLoading(true);
     try {
       await api.auth.register(signUpEmail, signUpPassword, signUpName);
-      window.location.href = "/";
+      window.location.href = "/overview";
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Sign up failed";
       setError(message);
