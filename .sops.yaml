@@ -1,0 +1,11 @@
+# SOPS configuration — tells sops which encryption keys to use.
+#
+# Add your age public key(s) below. Get yours with:
+#   make secrets-setup
+#
+# Multiple keys means multiple people can decrypt. Add a key per
+# team member or environment that needs access.
+creation_rules:
+  - path_regex: \.env\.enc$
+    age: >-
+      age1TODO_REPLACE_WITH_YOUR_PUBLIC_KEY

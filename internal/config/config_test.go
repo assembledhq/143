@@ -7,7 +7,9 @@ import (
 )
 
 func TestLoad_UsesDefaults(t *testing.T) {
-	// This test mutates process-wide env vars via t.Setenv, so it must not run in parallel.
+	// Unset all vars that have defaults so env.Parse falls back to envDefault tags.
+	// t.Setenv("FOO", "") sets the var to empty string. caarlos0/env treats empty
+	// string the same as unset when the field has an envDefault, so defaults apply.
 	t.Setenv("PORT", "")
 	t.Setenv("DATABASE_URL", "")
 	t.Setenv("LOG_LEVEL", "")
@@ -16,6 +18,8 @@ func TestLoad_UsesDefaults(t *testing.T) {
 	t.Setenv("CORS_ALLOWED_ORIGINS", "")
 	t.Setenv("MODE", "")
 	t.Setenv("GITHUB_APP_ID", "")
+	t.Setenv("OPENAI_API_TYPE", "")
+	t.Setenv("OPENROUTER_APP_NAME", "")
 
 	cfg := Load()
 
@@ -27,10 +31,11 @@ func TestLoad_UsesDefaults(t *testing.T) {
 	require.Equal(t, []string{"http://localhost:3000"}, cfg.CORSAllowedOrigins, "Load should default CORS origins")
 	require.Equal(t, int64(0), cfg.GitHubAppID, "Load should default GitHub app ID to zero")
 	require.Equal(t, "all", cfg.Mode, "Load should default mode to all")
+	require.Equal(t, "chat", cfg.OpenAIAPIType, "Load should default OpenAI API type to chat")
+	require.Equal(t, "143", cfg.OpenRouterAppName, "Load should default OpenRouter app name to 143")
 }
 
 func TestLoad_UsesEnvironmentOverrides(t *testing.T) {
-	// This test mutates process-wide env vars via t.Setenv, so it must not run in parallel.
 	t.Setenv("PORT", "9090")
 	t.Setenv("DATABASE_URL", "postgres://custom")
 	t.Setenv("LOG_LEVEL", "debug")
@@ -50,4 +55,18 @@ func TestLoad_UsesEnvironmentOverrides(t *testing.T) {
 	require.Equal(t, []string{"https://one.example.com", "https://two.example.com"}, cfg.CORSAllowedOrigins, "Load should split CORS origins from the environment")
 	require.Equal(t, int64(12345), cfg.GitHubAppID, "Load should parse GITHUB_APP_ID from the environment")
 	require.Equal(t, "worker", cfg.Mode, "Load should read MODE from the environment")
+}
+
+func TestLoad_LLMConfig(t *testing.T) {
+	t.Setenv("LLM_MODEL", "claude-sonnet-4-5")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+	t.Setenv("OPENROUTER_API_KEY", "sk-or-test")
+
+	cfg := Load()
+	llmCfg := cfg.LLMConfig()
+
+	require.Equal(t, "claude-sonnet-4-5", llmCfg.Model)
+	require.Equal(t, "sk-ant-test", llmCfg.AnthropicAPIKey)
+	require.Equal(t, "sk-or-test", llmCfg.OpenRouterAPIKey)
+	require.Equal(t, "chat", llmCfg.OpenAIAPIType, "OpenAI API type should default to chat")
 }
