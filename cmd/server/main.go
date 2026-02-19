@@ -30,7 +30,10 @@ func main() {
 	}
 	defer pool.Close()
 
-	router := api.NewRouter(cfg, pool, logger)
+	router, err := api.NewRouter(cfg, pool, logger)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to initialize API router")
+	}
 
 	// Start worker if mode includes worker capability
 	if cfg.Mode == "all" || cfg.Mode == "worker" {
