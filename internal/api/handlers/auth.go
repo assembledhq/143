@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -98,10 +97,12 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create org with unique slug
-	slug := strings.ToLower(strings.ReplaceAll(body.Name, " ", "-"))
-	org, err := h.createOrgWithUniqueSlug(r.Context(), body.Name+"'s Org", slug)
-	if err != nil {
+	// Create org
+	org := &models.Organization{
+		Name:     body.Name + "'s Org",
+		Settings: json.RawMessage(`{}`),
+	}
+	if err := h.orgStore.Create(r.Context(), org); err != nil {
 		writeError(w, http.StatusInternalServerError, "ORG_CREATE_FAILED", "Failed to create organization.")
 		return
 	}
@@ -250,9 +251,12 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// New user — create a default org with unique slug
-	org, createErr := h.createOrgWithUniqueSlug(r.Context(), ghUser.Login+"'s Org", ghUser.Login)
-	if createErr != nil {
+	// New user — create a default org
+	org := &models.Organization{
+		Name:     ghUser.Login + "'s Org",
+		Settings: json.RawMessage(`{}`),
+	}
+	if createErr := h.orgStore.Create(r.Context(), org); createErr != nil {
 		writeError(w, http.StatusInternalServerError, "ORG_CREATE_FAILED", "Failed to create organization.")
 		return
 	}
@@ -355,15 +359,17 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// New user — create a default org with unique slug
+	// New user — create a default org
 	name := gUser.Name
 	if name == "" {
 		name = gUser.Email
 	}
-	slug := strings.ToLower(strings.ReplaceAll(name, " ", "-"))
 
-	org, createErr := h.createOrgWithUniqueSlug(r.Context(), name+"'s Org", slug)
-	if createErr != nil {
+	org := &models.Organization{
+		Name:     name + "'s Org",
+		Settings: json.RawMessage(`{}`),
+	}
+	if createErr := h.orgStore.Create(r.Context(), org); createErr != nil {
 		writeError(w, http.StatusInternalServerError, "ORG_CREATE_FAILED", "Failed to create organization.")
 		return
 	}
@@ -410,30 +416,6 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- shared helpers ---
-
-// createOrgWithUniqueSlug attempts to create an org, appending a short random
-// suffix to the slug on conflict (unique constraint on slug).
-func (h *AuthHandler) createOrgWithUniqueSlug(ctx context.Context, name, baseSlug string) (*models.Organization, error) {
-	slug := baseSlug
-	for attempts := 0; attempts < 5; attempts++ {
-		org := &models.Organization{
-			Name:     name,
-			Slug:     slug,
-			Settings: json.RawMessage(`{}`),
-		}
-		if err := h.orgStore.Create(ctx, org); err != nil {
-			// Append a random suffix and retry
-			suffix, randErr := generateRandomString(3)
-			if randErr != nil {
-				return nil, randErr
-			}
-			slug = baseSlug + "-" + suffix[:6]
-			continue
-		}
-		return org, nil
-	}
-	return nil, fmt.Errorf("failed to create organization with unique slug after retries")
-}
 
 func (h *AuthHandler) createSessionAndRedirect(w http.ResponseWriter, r *http.Request, user *models.User) {
 	sessionToken, err := generateRandomString(32)
