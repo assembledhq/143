@@ -209,7 +209,7 @@ function spawnPlane(
     baseY: y,
     opacity: 0,
     trail: [],
-    maxTrailLength: Math.floor(Math.random() * 60 + 50),
+    maxTrailLength: Math.floor(Math.random() * 80 + 70),
     layer,
     life: 0,
   };
@@ -636,8 +636,8 @@ export default function LandingPage() {
             const cur = p.trail[i];
             const progress = i / p.trail.length;
             // Contrail: thin at start, thicker near plane, fades out at tail
-            const trailAlpha = progress * p.opacity * 0.45;
-            const trailWidth = 0.5 + progress * 2;
+            const trailAlpha = progress * p.opacity * 0.6;
+            const trailWidth = 0.8 + progress * 2.5;
 
             ctx.beginPath();
             ctx.moveTo(prev.x, prev.y);
@@ -728,8 +728,8 @@ export default function LandingPage() {
     window.addEventListener("resize", onResize);
     canvas.addEventListener("mousemove", onMouseMove);
     canvas.addEventListener("mouseleave", onMouseLeave);
-    canvas.addEventListener("click", onClick);
-    canvas.addEventListener("touchstart", onTouchStart, { passive: true });
+    window.addEventListener("click", onClick);
+    window.addEventListener("touchstart", onTouchStart, { passive: true });
     canvas.addEventListener("touchmove", onTouchMove, { passive: true });
     canvas.addEventListener("touchend", onTouchEnd);
 
@@ -738,8 +738,8 @@ export default function LandingPage() {
       window.removeEventListener("resize", onResize);
       canvas.removeEventListener("mousemove", onMouseMove);
       canvas.removeEventListener("mouseleave", onMouseLeave);
-      canvas.removeEventListener("click", onClick);
-      canvas.removeEventListener("touchstart", onTouchStart);
+      window.removeEventListener("click", onClick);
+      window.removeEventListener("touchstart", onTouchStart);
       canvas.removeEventListener("touchmove", onTouchMove);
       canvas.removeEventListener("touchend", onTouchEnd);
     };
@@ -752,64 +752,70 @@ export default function LandingPage() {
     >
       <canvas ref={canvasRef} className="fixed inset-0 z-0" />
 
-      {/* ── Hero ──────────────────────────────────────────────────────────── */}
-      <div className="relative z-10 flex min-h-screen flex-col items-center justify-center px-6 text-center select-none pointer-events-none">
-        <div className="max-w-2xl space-y-8">
-          <h1 className="text-[5rem] sm:text-[7rem] md:text-[9rem] font-extrabold leading-none tracking-tighter">
-            <span
-              className="bg-clip-text text-transparent"
-              style={{
-                backgroundImage: isDark
-                  ? "linear-gradient(135deg, #ffffff 0%, #dde0e8 40%, #a8b0c0 100%)"
-                  : "linear-gradient(135deg, #0f1f2e 0%, #1e3345 40%, #2d4a60 100%)",
-              }}
-            >
-              143
-            </span>
-            <span
-              className={isDark ? "text-white/70" : "text-slate-800/70"}
-            >
-              .dev
-            </span>
+      {/* ── Top nav ───────────────────────────────────────────────────────── */}
+      <div className="relative z-10 flex items-center justify-end px-6 sm:px-10 pt-6 sm:pt-8 pointer-events-auto">
+        <Button
+          asChild
+          variant="outline"
+          className={`rounded-full px-5 py-2 text-sm font-medium transition-all ${
+            isDark
+              ? "border-white/20 text-white/60 hover:text-white hover:border-white/40 bg-transparent"
+              : "border-slate-400/40 text-slate-600 hover:text-slate-900 hover:border-slate-500 bg-transparent"
+          }`}
+        >
+          <Link href="/login">Sign In</Link>
+        </Button>
+      </div>
+
+      {/* ── Bottom-left hero ───────────────────────────────────────────────── */}
+      <div className="relative z-10 flex min-h-[calc(100vh-80px)] flex-col justify-end px-6 sm:px-10 pb-12 sm:pb-16 select-none">
+        <div className="max-w-xl space-y-5">
+          <h1
+            className={`text-[2.75rem] sm:text-[3.5rem] md:text-6xl font-light leading-[1.1] tracking-tight ${
+              isDark ? "text-white" : "text-slate-900"
+            }`}
+          >
+            Open source
+            <br />
+            bug fixing for
+            <br />
+            production systems
           </h1>
 
           <p
-            className={`text-base sm:text-lg md:text-xl font-light leading-relaxed ${isDark ? "text-white/70" : "text-slate-800"}`}
+            className={`max-w-md text-sm sm:text-base leading-relaxed ${isDark ? "text-white/40" : "text-slate-600"}`}
           >
-            Open source bug fixing for production systems.
+            Connect your issue tracker and error monitoring. 143 spins
+            up an agent, validates the fix, and opens a PR, all before
+            you even wake up.
           </p>
 
-          <p
-            className={`mx-auto max-w-lg text-xs sm:text-sm leading-relaxed ${isDark ? "text-white/40" : "text-slate-700"}`}
-          >
-            The first US jet fighter, the P-80 Shooting Star, was built in
-            just 143&nbsp;days. Connect GitHub, Sentry, or Linear to bring that same speed to fixing your code.
-          </p>
-
-          <div className="flex items-center justify-center gap-3 sm:gap-4 pt-2 pointer-events-auto">
+          <div className="pt-2 pointer-events-auto">
             <Button
               asChild
-              className={`rounded-lg px-5 sm:px-7 py-2.5 text-sm font-semibold shadow-lg transition-all ${
+              className={`rounded-full px-6 py-2.5 text-sm font-medium transition-all ${
                 isDark
-                  ? "bg-white text-[#08080f] shadow-white/5 hover:bg-white/90 hover:shadow-white/15"
-                  : "bg-slate-900 text-white shadow-slate-900/10 hover:bg-slate-800"
+                  ? "bg-white text-[#08080f] hover:bg-white/90"
+                  : "bg-slate-900 text-white hover:bg-slate-800"
               }`}
             >
-              <Link href="/login?tab=signup">Get Started</Link>
-            </Button>
-            <Button
-              asChild
-              variant="outline"
-              className={`rounded-lg bg-transparent px-5 sm:px-7 py-2.5 text-sm font-medium shadow-none transition-all ${
-                isDark
-                  ? "border-white/25 text-white/70 hover:border-white/40 hover:bg-transparent hover:text-white/90"
-                  : "border-slate-500 text-slate-700 hover:border-slate-600 hover:bg-transparent hover:text-slate-900"
-              }`}
-            >
-              <Link href="/login">Sign In</Link>
+              <Link href="/login?tab=signup">
+                Get Started
+                <span className="ml-2">&rsaquo;</span>
+              </Link>
             </Button>
           </div>
         </div>
+      </div>
+
+      {/* ── Bottom-right: 143 origin story ─────────────────────────────────── */}
+      <div className={`absolute bottom-12 right-6 sm:right-10 z-10 hidden md:block max-w-[280px] text-right ${isDark ? "text-white/25" : "text-slate-500/80"}`}>
+        <p className="text-[11px] leading-relaxed tracking-wide">
+          The first US jet fighter, the P-80 Shooting Star,
+          was designed and built by Lockheed&apos;s Skunk Works
+          in just 143&nbsp;days. We named this project after
+          that same spirit of speed.
+        </p>
       </div>
     </div>
   );
