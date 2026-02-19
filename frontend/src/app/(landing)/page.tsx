@@ -69,6 +69,11 @@ const DARK = {
   bg: "#08080f",
   planeFill: (a: number) => `rgba(210, 218, 230, ${a})`,
   planeStroke: (a: number) => `rgba(255, 255, 255, ${a * 0.3})`,
+  planeHighlight: (a: number) => `rgba(255, 255, 255, ${a * 0.25})`,
+  planeShadow: (a: number) => `rgba(0, 0, 0, ${a * 0.3})`,
+  canopy: (a: number) => `rgba(140, 180, 255, ${a * 0.5})`,
+  canopyEdge: (a: number) => `rgba(200, 220, 255, ${a * 0.3})`,
+  panelLine: (a: number) => `rgba(255, 255, 255, ${a * 0.08})`,
   trail: (a: number) => `rgba(180, 195, 220, ${a})`,
   star: (a: number) => `rgba(255, 255, 255, ${a})`,
   orbs: [
@@ -81,6 +86,11 @@ const LIGHT = {
   bg: "#d4e6f5",
   planeFill: (a: number) => `rgba(45, 55, 70, ${a})`,
   planeStroke: (a: number) => `rgba(25, 30, 40, ${a * 0.25})`,
+  planeHighlight: (a: number) => `rgba(255, 255, 255, ${a * 0.2})`,
+  planeShadow: (a: number) => `rgba(15, 20, 35, ${a * 0.25})`,
+  canopy: (a: number) => `rgba(120, 170, 230, ${a * 0.6})`,
+  canopyEdge: (a: number) => `rgba(80, 130, 190, ${a * 0.35})`,
+  panelLine: (a: number) => `rgba(0, 0, 0, ${a * 0.06})`,
   trail: (a: number) => `rgba(255, 255, 255, ${a})`,
   star: () => "transparent",
   orbs: [
@@ -234,6 +244,10 @@ function getFormationOffsets(
   return offsets;
 }
 
+// ── Theme type for plane rendering ──────────────────────────────────────────────
+
+type PlaneTheme = typeof DARK;
+
 // ── Draw P-80 ──────────────────────────────────────────────────────────────────
 
 function drawP80(
@@ -245,6 +259,7 @@ function drawP80(
   alpha: number,
   fillFn: (a: number) => string,
   strokeFn: (a: number) => string,
+  theme?: PlaneTheme,
 ) {
   ctx.save();
   ctx.translate(x, y);
@@ -252,38 +267,195 @@ function drawP80(
   ctx.globalAlpha = alpha;
 
   const s = size;
+
+  // ── P-80 Shooting Star top-down view ────────────────────────────────────
+  // Compact cigar fuselage, nose intake, straight unswept mid-wings,
+  // large torpedo-shaped wingtip fuel tanks, bubble canopy set forward,
+  // conventional tail with horizontal stabilizers.
+
+  // ── 1. Fuselage (shorter, fatter cigar shape) ──────────────────────────
   ctx.beginPath();
-  ctx.moveTo(s * 1.3, 0);
-  ctx.lineTo(s * 0.4, -s * 0.1);
-  ctx.lineTo(s * 0.15, -s * 0.12);
-  ctx.lineTo(-s * 0.05, -s * 0.65);
-  ctx.lineTo(-s * 0.15, -s * 0.7);
-  ctx.lineTo(-s * 0.25, -s * 0.65);
-  ctx.lineTo(-s * 0.15, -s * 0.13);
-  ctx.lineTo(-s * 0.5, -s * 0.1);
-  ctx.lineTo(-s * 0.75, -s * 0.32);
-  ctx.lineTo(-s * 0.85, -s * 0.34);
-  ctx.lineTo(-s * 0.9, -s * 0.28);
-  ctx.lineTo(-s * 0.7, -s * 0.09);
-  ctx.lineTo(-s * 1.0, -s * 0.06);
-  ctx.lineTo(-s * 1.0, s * 0.06);
-  ctx.lineTo(-s * 0.7, s * 0.09);
-  ctx.lineTo(-s * 0.9, s * 0.28);
-  ctx.lineTo(-s * 0.85, s * 0.34);
-  ctx.lineTo(-s * 0.75, s * 0.32);
-  ctx.lineTo(-s * 0.5, s * 0.1);
-  ctx.lineTo(-s * 0.15, s * 0.13);
-  ctx.lineTo(-s * 0.25, s * 0.65);
-  ctx.lineTo(-s * 0.15, s * 0.7);
-  ctx.lineTo(-s * 0.05, s * 0.65);
-  ctx.lineTo(s * 0.15, s * 0.12);
-  ctx.lineTo(s * 0.4, s * 0.1);
+  // Nose — short rounded cone with intake
+  ctx.moveTo(s * 0.95, 0);
+  ctx.quadraticCurveTo(s * 0.88, -s * 0.07, s * 0.7, -s * 0.09);
+  // Forward fuselage widens to cockpit area
+  ctx.lineTo(s * 0.2, -s * 0.11);
+  // Mid fuselage (widest at wing root)
+  ctx.lineTo(-s * 0.1, -s * 0.11);
+  // Aft fuselage tapers
+  ctx.lineTo(-s * 0.55, -s * 0.08);
+  ctx.lineTo(-s * 0.85, -s * 0.05);
+  // Tail exhaust
+  ctx.lineTo(-s * 0.95, -s * 0.03);
+  ctx.lineTo(-s * 0.95, s * 0.03);
+  // Mirror bottom
+  ctx.lineTo(-s * 0.85, s * 0.05);
+  ctx.lineTo(-s * 0.55, s * 0.08);
+  ctx.lineTo(-s * 0.1, s * 0.11);
+  ctx.lineTo(s * 0.2, s * 0.11);
+  ctx.lineTo(s * 0.7, s * 0.09);
+  ctx.quadraticCurveTo(s * 0.88, s * 0.07, s * 0.95, 0);
   ctx.closePath();
 
-  ctx.fillStyle = fillFn(alpha);
+  // Very subtle body gradient
+  const bodyGrad = ctx.createLinearGradient(0, -s * 0.12, 0, s * 0.12);
+  if (theme) {
+    bodyGrad.addColorStop(0, theme.planeHighlight(alpha * 0.3));
+    bodyGrad.addColorStop(0.4, fillFn(alpha));
+    bodyGrad.addColorStop(1, theme.planeShadow(alpha * 0.12));
+  } else {
+    bodyGrad.addColorStop(0, fillFn(alpha));
+    bodyGrad.addColorStop(1, fillFn(alpha));
+  }
+  ctx.fillStyle = bodyGrad;
   ctx.fill();
   ctx.strokeStyle = strokeFn(alpha);
   ctx.lineWidth = 0.5;
+  ctx.stroke();
+
+  // ── 2. Main wings (straight, unswept, thick chord) ─────────────────────
+  // Top wing
+  ctx.beginPath();
+  ctx.moveTo(s * 0.15, -s * 0.11);    // leading edge at root
+  ctx.lineTo(s * 0.05, -s * 0.7);     // leading edge at tip
+  ctx.lineTo(-s * 0.05, -s * 0.73);   // blunt wingtip
+  ctx.lineTo(-s * 0.12, -s * 0.7);    // trailing edge at tip
+  ctx.lineTo(-s * 0.25, -s * 0.11);   // trailing edge at root
+  ctx.closePath();
+  ctx.fillStyle = fillFn(alpha);
+  ctx.fill();
+  ctx.strokeStyle = strokeFn(alpha);
+  ctx.lineWidth = 0.4;
+  ctx.stroke();
+
+  // Bottom wing
+  ctx.beginPath();
+  ctx.moveTo(s * 0.15, s * 0.11);
+  ctx.lineTo(s * 0.05, s * 0.7);
+  ctx.lineTo(-s * 0.05, s * 0.73);
+  ctx.lineTo(-s * 0.12, s * 0.7);
+  ctx.lineTo(-s * 0.25, s * 0.11);
+  ctx.closePath();
+  ctx.fillStyle = fillFn(alpha);
+  ctx.fill();
+  ctx.stroke();
+
+  // ── 3. Wingtip fuel tanks (large torpedo pods) ─────────────────────────
+  // These are a signature P-80 feature — big and visible
+  // Top tip tank
+  ctx.beginPath();
+  ctx.ellipse(-s * 0.02, -s * 0.76, s * 0.16, s * 0.04, 0, 0, Math.PI * 2);
+  ctx.fillStyle = fillFn(alpha);
+  ctx.fill();
+  ctx.strokeStyle = strokeFn(alpha);
+  ctx.lineWidth = 0.4;
+  ctx.stroke();
+
+  // Bottom tip tank
+  ctx.beginPath();
+  ctx.ellipse(-s * 0.02, s * 0.76, s * 0.16, s * 0.04, 0, 0, Math.PI * 2);
+  ctx.fillStyle = fillFn(alpha);
+  ctx.fill();
+  ctx.stroke();
+
+  // ── 4. Horizontal tail stabilizers ─────────────────────────────────────
+  // Top stabilizer
+  ctx.beginPath();
+  ctx.moveTo(-s * 0.6, -s * 0.06);
+  ctx.lineTo(-s * 0.68, -s * 0.28);
+  ctx.lineTo(-s * 0.76, -s * 0.3);
+  ctx.lineTo(-s * 0.88, -s * 0.24);
+  ctx.lineTo(-s * 0.9, -s * 0.06);
+  ctx.closePath();
+  ctx.fillStyle = fillFn(alpha);
+  ctx.fill();
+  ctx.strokeStyle = strokeFn(alpha);
+  ctx.lineWidth = 0.4;
+  ctx.stroke();
+
+  // Bottom stabilizer
+  ctx.beginPath();
+  ctx.moveTo(-s * 0.6, s * 0.06);
+  ctx.lineTo(-s * 0.68, s * 0.28);
+  ctx.lineTo(-s * 0.76, s * 0.3);
+  ctx.lineTo(-s * 0.88, s * 0.24);
+  ctx.lineTo(-s * 0.9, s * 0.06);
+  ctx.closePath();
+  ctx.fillStyle = fillFn(alpha);
+  ctx.fill();
+  ctx.stroke();
+
+  if (!theme) {
+    ctx.globalAlpha = 1;
+    ctx.restore();
+    return;
+  }
+
+  // ── 5. Bubble canopy (large, prominent, set forward) ───────────────────
+  const canopyX = s * 0.42;
+  const canopyRx = s * 0.2;
+  const canopyRy = s * 0.07;
+
+  // Canopy outline — teardrop shape (wider at back, narrow at front)
+  ctx.beginPath();
+  ctx.ellipse(canopyX, 0, canopyRx, canopyRy, 0, 0, Math.PI * 2);
+
+  // Bright canopy fill so it stands out
+  const canopyGrad = ctx.createLinearGradient(
+    canopyX, -canopyRy * 1.2, canopyX, canopyRy * 1.2,
+  );
+  canopyGrad.addColorStop(0, theme.canopy(alpha * 1.4));
+  canopyGrad.addColorStop(0.4, theme.canopy(alpha * 0.8));
+  canopyGrad.addColorStop(1, theme.canopy(alpha * 0.3));
+  ctx.fillStyle = canopyGrad;
+  ctx.fill();
+
+  // Canopy frame
+  ctx.strokeStyle = theme.canopyEdge(alpha * 1.2);
+  ctx.lineWidth = 0.5;
+  ctx.stroke();
+
+  // Bright glint on canopy glass
+  ctx.beginPath();
+  ctx.ellipse(
+    canopyX + canopyRx * 0.15, -canopyRy * 0.3,
+    canopyRx * 0.3, canopyRy * 0.25, -0.15, 0, Math.PI * 2,
+  );
+  ctx.fillStyle = theme.planeHighlight(alpha * 1.2);
+  ctx.fill();
+
+  // ── 6. Nose intake (visible dark oval) ─────────────────────────────────
+  ctx.beginPath();
+  ctx.ellipse(s * 0.9, 0, s * 0.02, s * 0.04, 0, 0, Math.PI * 2);
+  ctx.fillStyle = theme.planeShadow(alpha * 0.7);
+  ctx.fill();
+
+  // ── 7. Fuselage panel line ─────────────────────────────────────────────
+  ctx.beginPath();
+  ctx.moveTo(s * 0.75, 0);
+  ctx.lineTo(-s * 0.85, 0);
+  ctx.strokeStyle = theme.panelLine(alpha);
+  ctx.lineWidth = 0.4;
+  ctx.stroke();
+
+  // ── 8. Exhaust nozzle ──────────────────────────────────────────────────
+  ctx.beginPath();
+  ctx.ellipse(-s * 0.93, 0, s * 0.015, s * 0.025, 0, 0, Math.PI * 2);
+  ctx.fillStyle = theme.planeShadow(alpha * 0.5);
+  ctx.fill();
+
+  // ── 9. Tip tank detail lines ───────────────────────────────────────────
+  // Subtle seam on each tank
+  ctx.beginPath();
+  ctx.moveTo(-s * 0.16, -s * 0.76);
+  ctx.lineTo(s * 0.12, -s * 0.76);
+  ctx.strokeStyle = theme.panelLine(alpha);
+  ctx.lineWidth = 0.3;
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(-s * 0.16, s * 0.76);
+  ctx.lineTo(s * 0.12, s * 0.76);
   ctx.stroke();
 
   ctx.globalAlpha = 1;
@@ -661,6 +833,7 @@ export default function LandingPage() {
           p.opacity,
           theme.planeFill,
           theme.planeStroke,
+          theme,
         );
       }
 
@@ -809,7 +982,7 @@ export default function LandingPage() {
       </div>
 
       {/* ── Bottom-right: 143 origin story ─────────────────────────────────── */}
-      <div className={`absolute bottom-12 right-6 sm:right-10 z-10 hidden md:block max-w-[280px] text-right ${isDark ? "text-white/25" : "text-slate-500/80"}`}>
+      <div className={`absolute bottom-12 right-6 sm:right-10 z-10 hidden md:block max-w-[280px] text-right ${isDark ? "text-white/40" : "text-slate-600"}`}>
         <p className="text-[11px] leading-relaxed tracking-wide">
           The first US jet fighter, the P-80 Shooting Star,
           was designed and built by Lockheed&apos;s Skunk Works
