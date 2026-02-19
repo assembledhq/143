@@ -24,6 +24,10 @@ type Config struct {
 	GitHubOAuthClientID     string `env:"GITHUB_OAUTH_CLIENT_ID"`
 	GitHubOAuthClientSecret string `env:"GITHUB_OAUTH_CLIENT_SECRET"`
 
+	// Google OAuth
+	GoogleOAuthClientID     string `env:"GOOGLE_OAUTH_CLIENT_ID"`
+	GoogleOAuthClientSecret string `env:"GOOGLE_OAUTH_CLIENT_SECRET"`
+
 	// GitHub App
 	GitHubAppID         int64  `env:"GITHUB_APP_ID"`
 	GitHubAppPrivateKey  string `env:"GITHUB_APP_PRIVATE_KEY"`
@@ -91,6 +95,7 @@ func (c *Config) LogStatus(logger zerolog.Logger) {
 	}{
 		{"Database", c.DatabaseURL != "", ""},
 		{"GitHub OAuth", c.GitHubOAuthClientID != "" && c.GitHubOAuthClientSecret != "", "login"},
+		{"Google OAuth", c.GoogleOAuthClientID != "" && c.GoogleOAuthClientSecret != "", "login"},
 		{"GitHub App", c.GitHubAppID != 0 && c.GitHubAppPrivateKey != "", "webhooks, PRs"},
 		{"Credential encryption", c.EncryptionMasterKey != "", "encrypted credential storage"},
 	}

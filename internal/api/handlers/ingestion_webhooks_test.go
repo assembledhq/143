@@ -17,6 +17,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -494,7 +495,7 @@ func TestIngestionWebhook_SignatureVerification(t *testing.T) {
 
 		// Credential lookup returns error (not found)
 		credMock := &mockWebhookSecretLookup{
-			err: fmt.Errorf("get sentry credential: no rows in result set"),
+			err: fmt.Errorf("get sentry credential: %w", pgx.ErrNoRows),
 		}
 		handler := setupIngestionHandler(t, mock, credMock)
 		setupFullProcessingMock(mock)
@@ -507,6 +508,29 @@ func TestIngestionWebhook_SignatureVerification(t *testing.T) {
 		handler.HandleSentry(w, req)
 		require.Equal(t, http.StatusOK, w.Code, "should skip verification when no credential configured")
 		require.Contains(t, w.Body.String(), "processed")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("credential lookup operational error rejects request", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		credMock := &mockWebhookSecretLookup{
+			err: fmt.Errorf("get sentry credential: %w", context.DeadlineExceeded),
+		}
+		handler := setupIngestionHandler(t, mock, credMock)
+		setupIntegrationMock(mock)
+
+		url := "/api/v1/webhooks/sentry?integration_id=" + integrationID.String()
+		req := httptest.NewRequest(http.MethodPost, url, strings.NewReader(sentryBody))
+		w := httptest.NewRecorder()
+
+		handler.HandleSentry(w, req)
+		require.Equal(t, http.StatusUnauthorized, w.Code, "operational credential errors should reject webhook requests")
+		require.Contains(t, w.Body.String(), "UNAUTHORIZED")
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 }
