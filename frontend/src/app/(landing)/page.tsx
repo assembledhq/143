@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { Sun, Moon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 
@@ -30,7 +31,15 @@ interface BackgroundStar {
   baseOpacity: number;
   twinkleSpeed: number;
   twinklePhase: number;
-  layer: number; // 0 = far, 1 = mid, 2 = near
+  layer: number;
+}
+
+interface Cloud {
+  x: number;
+  y: number;
+  vx: number;
+  layer: number;
+  blobs: Array<{ ox: number; oy: number; rx: number; ry: number; opacity: number }>;
 }
 
 interface Formation {
@@ -41,20 +50,48 @@ interface Formation {
   originY: number;
   heading: number;
   speed: number;
-  offsets: Array<{ dx: number; dy: number }>; // relative to leader
-  slotMap: Map<number, number>; // planeId → slot index (locked at formation start)
+  offsets: Array<{ dx: number; dy: number }>;
+  slotMap: Map<number, number>;
 }
+
+// ── Theme colors ───────────────────────────────────────────────────────────────
+
+const DARK = {
+  bg: "#08080f",
+  planeFill: (a: number) => `rgba(210, 218, 230, ${a})`,
+  planeStroke: (a: number) => `rgba(255, 255, 255, ${a * 0.3})`,
+  trail: (a: number) => `rgba(180, 190, 210, ${a})`,
+  exhaust: (a: number) => `rgba(200, 215, 240, ${a})`,
+  connection: (a: number) => `rgba(200, 200, 220, ${a})`,
+  orbs: [
+    { color: "rgba(30, 40, 80, 0.15)" },
+    { color: "rgba(50, 30, 70, 0.1)" },
+  ],
+};
+
+const LIGHT = {
+  bg: "#d4e6f5",
+  planeFill: (a: number) => `rgba(50, 55, 65, ${a})`,
+  planeStroke: (a: number) => `rgba(30, 30, 40, ${a * 0.3})`,
+  trail: (a: number) => `rgba(255, 255, 255, ${a})`,
+  exhaust: (a: number) => `rgba(255, 255, 255, ${a})`,
+  connection: (a: number) => `rgba(80, 80, 100, ${a})`,
+  orbs: [
+    { color: "rgba(255, 255, 255, 0.3)" },
+    { color: "rgba(200, 220, 255, 0.2)" },
+  ],
+};
 
 // ── Responsive helpers ─────────────────────────────────────────────────────────
 
 function getResponsiveConfig(w: number) {
   if (w < 640) {
-    return { maxPlanes: 5, starCount: 100, planeSizeMin: 5, planeSizeRange: 4, spawnRate: 0.008 };
+    return { maxPlanes: 5, starCount: 100, cloudCount: 6, planeSizeMin: 5, planeSizeRange: 4, spawnRate: 0.008 };
   }
   if (w < 1024) {
-    return { maxPlanes: 8, starCount: 160, planeSizeMin: 6, planeSizeRange: 5, spawnRate: 0.01 };
+    return { maxPlanes: 8, starCount: 160, cloudCount: 9, planeSizeMin: 6, planeSizeRange: 5, spawnRate: 0.01 };
   }
-  return { maxPlanes: 12, starCount: 250, planeSizeMin: 8, planeSizeRange: 6, spawnRate: 0.012 };
+  return { maxPlanes: 12, starCount: 250, cloudCount: 12, planeSizeMin: 8, planeSizeRange: 6, spawnRate: 0.012 };
 }
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -62,10 +99,8 @@ function getResponsiveConfig(w: number) {
 const MOUSE_GRAVITY_STRENGTH = 500;
 const LOGO_REPEL_RADIUS = 180;
 const LOGO_REPEL_STRENGTH = 0.12;
-const PARALLAX_STRENGTH = 60;
-const FORMATION_DURATION = 5000; // ms
-const FORMATION_STEER = 0.04;
-const BG_COLOR = "#08080f";
+const FORMATION_DURATION = 5000;
+const BG_COLORS_DARK = "#08080f";
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -80,6 +115,32 @@ function createBackgroundStar(w: number, h: number): BackgroundStar {
     twinkleSpeed: Math.random() * 0.02 + 0.003,
     twinklePhase: Math.random() * Math.PI * 2,
     layer,
+  };
+}
+
+function createCloud(w: number, h: number): Cloud {
+  const layer = Math.random() < 0.3 ? 0 : Math.random() < 0.5 ? 1 : 2;
+  const baseWidth = [120, 80, 50][layer];
+  const width = baseWidth + Math.random() * baseWidth * 0.6;
+  const blobCount = Math.floor(Math.random() * 4) + 4;
+  const blobs: Cloud["blobs"] = [];
+
+  for (let i = 0; i < blobCount; i++) {
+    blobs.push({
+      ox: (Math.random() - 0.5) * width * 0.8,
+      oy: (Math.random() - 0.5) * width * 0.25,
+      rx: width * (0.2 + Math.random() * 0.25),
+      ry: width * (0.1 + Math.random() * 0.12),
+      opacity: [0.25, 0.35, 0.5][layer] + Math.random() * 0.1,
+    });
+  }
+
+  return {
+    x: Math.random() * (w + 400) - 200,
+    y: Math.random() * h * 0.85 + h * 0.05,
+    vx: [0.08, 0.15, 0.25][layer] * (0.8 + Math.random() * 0.4),
+    layer,
+    blobs,
   };
 }
 
@@ -116,7 +177,7 @@ function getFormationOffsets(
 ): Array<{ dx: number; dy: number }> {
   const spacing = 45;
   const offsets: Array<{ dx: number; dy: number }> = [];
-  offsets.push({ dx: 0, dy: 0 }); // leader
+  offsets.push({ dx: 0, dy: 0 });
 
   for (let i = 1; i < count; i++) {
     const row = Math.ceil(i / 2);
@@ -136,6 +197,7 @@ function getFormationOffsets(
 function drawP80(
   ctx: CanvasRenderingContext2D,
   x: number, y: number, angle: number, size: number, alpha: number,
+  fillFn: (a: number) => string, strokeFn: (a: number) => string,
 ) {
   ctx.save();
   ctx.translate(x, y);
@@ -143,7 +205,6 @@ function drawP80(
   ctx.globalAlpha = alpha;
 
   const s = size;
-
   ctx.beginPath();
   ctx.moveTo(s * 1.3, 0);
   ctx.lineTo(s * 0.4, -s * 0.1);
@@ -172,9 +233,9 @@ function drawP80(
   ctx.lineTo(s * 0.4, s * 0.1);
   ctx.closePath();
 
-  ctx.fillStyle = `rgba(210, 218, 230, ${alpha})`;
+  ctx.fillStyle = fillFn(alpha);
   ctx.fill();
-  ctx.strokeStyle = `rgba(255, 255, 255, ${alpha * 0.3})`;
+  ctx.strokeStyle = strokeFn(alpha);
   ctx.lineWidth = 0.5;
   ctx.stroke();
 
@@ -187,10 +248,10 @@ function drawP80(
 function drawExhaustShimmer(
   ctx: CanvasRenderingContext2D,
   x: number, y: number, heading: number, size: number, alpha: number, time: number,
+  colorFn: (a: number) => string,
 ) {
   const cosH = Math.cos(heading);
   const sinH = Math.sin(heading);
-  // Tail position
   const tailX = x - cosH * size * 1.05;
   const tailY = y - sinH * size * 1.05;
 
@@ -205,8 +266,8 @@ function drawExhaustShimmer(
 
     if (a > 0) {
       const grad = ctx.createRadialGradient(sx, sy, 0, sx, sy, r * 2);
-      grad.addColorStop(0, `rgba(200, 215, 240, ${a})`);
-      grad.addColorStop(1, `rgba(200, 215, 240, 0)`);
+      grad.addColorStop(0, colorFn(a));
+      grad.addColorStop(1, colorFn(0));
       ctx.beginPath();
       ctx.arc(sx, sy, r * 2, 0, Math.PI * 2);
       ctx.fillStyle = grad;
@@ -215,18 +276,76 @@ function drawExhaustShimmer(
   }
 }
 
+// ── Draw cloud ─────────────────────────────────────────────────────────────────
+
+function drawCloud(ctx: CanvasRenderingContext2D, cloud: Cloud, offsetX: number, offsetY: number) {
+  for (const b of cloud.blobs) {
+    const bx = cloud.x + b.ox + offsetX;
+    const by = cloud.y + b.oy + offsetY;
+
+    // Subtle shadow
+    ctx.beginPath();
+    ctx.ellipse(bx, by + b.ry * 0.15, b.rx, b.ry, 0, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(160, 175, 200, ${b.opacity * 0.15})`;
+    ctx.fill();
+
+    // Cloud body
+    ctx.beginPath();
+    ctx.ellipse(bx, by, b.rx, b.ry, 0, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255, 255, 255, ${b.opacity})`;
+    ctx.fill();
+  }
+}
+
+// ── Draw light-mode sky gradient ───────────────────────────────────────────────
+
+function drawSkyGradient(ctx: CanvasRenderingContext2D, w: number, h: number) {
+  const grad = ctx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, "#87BBDF");
+  grad.addColorStop(0.4, "#A8CEE4");
+  grad.addColorStop(0.8, "#C9DFF0");
+  grad.addColorStop(1, "#DAE8F2");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, w, h);
+}
+
 // ── Component ──────────────────────────────────────────────────────────────────
 
 export default function LandingPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const bgStarsRef = useRef<BackgroundStar[]>([]);
+  const cloudsRef = useRef<Cloud[]>([]);
   const planesRef = useRef<Plane[]>([]);
   const mouseRef = useRef({ x: -9999, y: -9999, active: false });
   const speedRef = useRef(1);
   const dimsRef = useRef({ w: 0, h: 0 });
   const configRef = useRef(getResponsiveConfig(typeof window !== "undefined" ? window.innerWidth : 1200));
   const formationRef = useRef<Formation>({ active: false, startTime: 0, duration: FORMATION_DURATION, originX: 0, originY: 0, heading: 0, speed: 1.5, offsets: [], slotMap: new Map() });
+  const isDarkRef = useRef(true);
+  const [isDark, setIsDark] = useState(true);
+  const manualThemeRef = useRef<boolean | null>(null);
   const [speed, setSpeed] = useState(12);
+
+  // Detect system color scheme
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const update = () => {
+      if (manualThemeRef.current !== null) return;
+      const dark = mq.matches;
+      isDarkRef.current = dark;
+      setIsDark(dark);
+    };
+    update();
+    mq.addEventListener("change", update);
+    return () => mq.removeEventListener("change", update);
+  }, []);
+
+  const toggleTheme = () => {
+    const next = !isDarkRef.current;
+    manualThemeRef.current = next;
+    isDarkRef.current = next;
+    setIsDark(next);
+  };
 
   useEffect(() => {
     speedRef.current = 0.1 + (speed / 100) * 4.9;
@@ -253,19 +372,16 @@ export default function LandingPage() {
       canvas.style.height = `${h}px`;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-      bgStarsRef.current = Array.from(
-        { length: configRef.current.starCount },
-        () => createBackgroundStar(w, h),
-      );
+      const cfg = configRef.current;
+      bgStarsRef.current = Array.from({ length: cfg.starCount }, () => createBackgroundStar(w, h));
+      cloudsRef.current = Array.from({ length: cfg.cloudCount }, () => createCloud(w, h));
     };
 
     resize();
 
-    // Seed initial planes
     const { w, h } = dimsRef.current;
     const cfg = configRef.current;
-    const seedCount = Math.min(4, cfg.maxPlanes);
-    for (let i = 0; i < seedCount; i++) {
+    for (let i = 0; i < Math.min(4, cfg.maxPlanes); i++) {
       planesRef.current.push(spawnPlane(w, h, cfg.planeSizeMin, cfg.planeSizeRange));
     }
 
@@ -277,60 +393,63 @@ export default function LandingPage() {
       const mouse = mouseRef.current;
       const cfg = configRef.current;
       const formation = formationRef.current;
+      const dark = isDarkRef.current;
+      const theme = dark ? DARK : LIGHT;
 
-      // Logo center (slightly above visual center to match the h1 position)
       const logoCx = w / 2;
       const logoCy = h / 2 - h * 0.08;
 
-      // Check formation expiry
       if (formation.active && time - formation.startTime > formation.duration) {
         formation.active = false;
       }
 
       // ── Background ─────────────────────────────────────────────────────────
-      ctx.fillStyle = BG_COLOR;
-      ctx.fillRect(0, 0, w, h);
+      if (dark) {
+        ctx.fillStyle = BG_COLORS_DARK;
+        ctx.fillRect(0, 0, w, h);
 
-      // Ambient gradient orbs
-      const drawOrb = (cx: number, cy: number, r: number, color: string) => {
-        const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
-        grad.addColorStop(0, color);
+        // Ambient orbs
+        const drawOrb = (cx: number, cy: number, r: number, color: string) => {
+          const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+          grad.addColorStop(0, color);
+          grad.addColorStop(1, "transparent");
+          ctx.fillStyle = grad;
+          ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+        };
+        const t = time * 0.0001;
+        drawOrb(w * 0.3 + Math.sin(t * 0.7) * w * 0.05, h * 0.4 + Math.cos(t * 0.5) * h * 0.05, w * 0.35, theme.orbs[0].color);
+        drawOrb(w * 0.7 + Math.cos(t * 0.6) * w * 0.04, h * 0.6 + Math.sin(t * 0.8) * h * 0.04, w * 0.3, theme.orbs[1].color);
+      } else {
+        drawSkyGradient(ctx, w, h);
+
+        // Subtle sun glow top-right
+        const grad = ctx.createRadialGradient(w * 0.8, h * 0.05, 0, w * 0.8, h * 0.05, w * 0.3);
+        grad.addColorStop(0, "rgba(255, 248, 220, 0.4)");
+        grad.addColorStop(0.5, "rgba(255, 248, 220, 0.1)");
         grad.addColorStop(1, "transparent");
         ctx.fillStyle = grad;
-        ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
-      };
+        ctx.fillRect(0, 0, w, h);
+      }
 
-      const t = time * 0.0001;
-      drawOrb(
-        w * 0.3 + Math.sin(t * 0.7) * w * 0.05,
-        h * 0.4 + Math.cos(t * 0.5) * h * 0.05,
-        w * 0.35,
-        "rgba(30, 40, 80, 0.15)",
-      );
-      drawOrb(
-        w * 0.7 + Math.cos(t * 0.6) * w * 0.04,
-        h * 0.6 + Math.sin(t * 0.8) * h * 0.04,
-        w * 0.3,
-        "rgba(50, 30, 70, 0.1)",
-      );
-
-      // ── Parallax background stars ──────────────────────────────────────────
-      const parallaxMults = [0.0, 0.35, 1.0];
-      const mx = mouse.active ? mouse.x : w / 2;
-      const my = mouse.active ? mouse.y : h / 2;
-      const pOffX = (mx - w / 2) / w;
-      const pOffY = (my - h / 2) / h;
-
-      for (const s of bgStarsRef.current) {
-        const twinkle = Math.sin(time * s.twinkleSpeed * 0.001 + s.twinklePhase);
-        const opacity = s.baseOpacity * (0.3 + 0.7 * twinkle);
-        const pm = parallaxMults[s.layer];
-        const drawX = s.x - pOffX * PARALLAX_STRENGTH * pm;
-        const drawY = s.y - pOffY * PARALLAX_STRENGTH * pm;
-        ctx.beginPath();
-        ctx.arc(drawX, drawY, s.size, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(255, 255, 255, ${Math.max(0, opacity)})`;
-        ctx.fill();
+      // ── Stars (dark mode) or Clouds (light mode) ──────────────────────────
+      if (dark) {
+        for (const s of bgStarsRef.current) {
+          const twinkle = Math.sin(time * s.twinkleSpeed * 0.001 + s.twinklePhase);
+          const opacity = s.baseOpacity * (0.3 + 0.7 * twinkle);
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, s.size, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(255, 255, 255, ${Math.max(0, opacity)})`;
+          ctx.fill();
+        }
+      } else {
+        for (const c of cloudsRef.current) {
+          c.x += c.vx * spd;
+          if (c.x - 150 > w) {
+            c.x = -200;
+            c.y = Math.random() * h * 0.85 + h * 0.05;
+          }
+          drawCloud(ctx, c, 0, 0);
+        }
       }
 
       // ── Spawn new planes ───────────────────────────────────────────────────
@@ -344,7 +463,6 @@ export default function LandingPage() {
       for (let pi = 0; pi < planesRef.current.length; pi++) {
         const p = planesRef.current[pi];
 
-        // Formation: smoothly lerp position + velocity toward slot (no oscillation)
         const slot = formation.active ? formation.slotMap.get(p.id) : undefined;
         if (slot !== undefined) {
           const elapsed = (time - formation.startTime) / 1000;
@@ -356,14 +474,12 @@ export default function LandingPage() {
           const cruiseVx = Math.cos(formation.heading) * formation.speed;
           const cruiseVy = Math.sin(formation.heading) * formation.speed;
 
-          // Direct interpolation toward target: can never overshoot
           const blend = 0.025;
           p.x += (targetX - p.x) * blend;
           p.y += (targetY - p.y) * blend;
           p.vx += (cruiseVx - p.vx) * blend;
           p.vy += (cruiseVy - p.vy) * blend;
         } else {
-          // Mouse gravity (only when not in formation)
           if (mouse.active) {
             const dx = mouse.x - p.x;
             const dy = mouse.y - p.y;
@@ -377,7 +493,7 @@ export default function LandingPage() {
           }
         }
 
-        // Magnetic logo repulsion
+        // Logo repulsion
         const ldx = p.x - logoCx;
         const ldy = p.y - logoCy;
         const logoDist = Math.sqrt(ldx * ldx + ldy * ldy);
@@ -387,69 +503,51 @@ export default function LandingPage() {
           p.vy += (ldy / logoDist) * repelForce;
         }
 
-        // Drag
         p.vx *= 0.9985;
         p.vy *= 0.9985;
 
-        // Integrate
         const inFormation = slot !== undefined;
         p.x += p.vx * spd;
         p.y += p.vy * spd;
-        if (!inFormation) {
-          p.life += spd;
-        }
+        if (!inFormation) p.life += spd;
 
-        // Fade in/out (planes in formation stay fully visible)
         const fadeIn = Math.min(p.life / 30, 1);
         const fadeOut = inFormation ? 1 : Math.max(0, 1 - p.life / p.maxLife);
         p.opacity = fadeIn * fadeOut;
 
-        // Record trail
         p.trail.push({ x: p.x, y: p.y });
-        while (p.trail.length > p.maxTrailLength) {
-          p.trail.shift();
-        }
+        while (p.trail.length > p.maxTrailLength) p.trail.shift();
 
-        // Bounds + lifespan (planes in formation are never removed)
         const pad = 200;
-        if (
-          inFormation ||
-          (p.life < p.maxLife &&
-           p.x > -pad && p.x < w + pad &&
-           p.y > -pad && p.y < h + pad)
-        ) {
+        if (inFormation || (p.life < p.maxLife && p.x > -pad && p.x < w + pad && p.y > -pad && p.y < h + pad)) {
           alive.push(p);
         }
 
-        // ── Draw contrail ────────────────────────────────────────────────────
+        // Contrail
         if (p.trail.length > 2) {
           for (let i = 2; i < p.trail.length; i++) {
             const prev = p.trail[i - 1];
             const cur = p.trail[i];
             const progress = i / p.trail.length;
             const trailAlpha = progress * p.opacity * 0.25;
-
             ctx.beginPath();
             ctx.moveTo(prev.x, prev.y);
             ctx.lineTo(cur.x, cur.y);
-            ctx.strokeStyle = `rgba(180, 190, 210, ${trailAlpha})`;
+            ctx.strokeStyle = theme.trail(trailAlpha);
             ctx.lineWidth = 1 + progress * 1.5;
             ctx.lineCap = "round";
             ctx.stroke();
           }
         }
 
-        // ── Draw exhaust shimmer ─────────────────────────────────────────────
         const heading = Math.atan2(p.vy, p.vx);
-        drawExhaustShimmer(ctx, p.x, p.y, heading, p.size, p.opacity, time);
-
-        // ── Draw plane ───────────────────────────────────────────────────────
-        drawP80(ctx, p.x, p.y, heading, p.size, p.opacity);
+        drawExhaustShimmer(ctx, p.x, p.y, heading, p.size, p.opacity, time, theme.exhaust);
+        drawP80(ctx, p.x, p.y, heading, p.size, p.opacity, theme.planeFill, theme.planeStroke);
       }
 
       planesRef.current = alive;
 
-      // ── Connection lines ───────────────────────────────────────────────────
+      // Connection lines
       for (let i = 0; i < alive.length; i++) {
         for (let j = i + 1; j < alive.length; j++) {
           const a = alive[i];
@@ -462,7 +560,7 @@ export default function LandingPage() {
             ctx.beginPath();
             ctx.moveTo(a.x, a.y);
             ctx.lineTo(b.x, b.y);
-            ctx.strokeStyle = `rgba(200, 200, 220, ${opacity})`;
+            ctx.strokeStyle = theme.connection(opacity);
             ctx.lineWidth = 0.5;
             ctx.stroke();
           }
@@ -477,58 +575,24 @@ export default function LandingPage() {
     // ── Events ───────────────────────────────────────────────────────────────
 
     const onResize = () => resize();
-
-    const onMouseMove = (e: MouseEvent) => {
-      mouseRef.current = { x: e.clientX, y: e.clientY, active: true };
-    };
+    const onMouseMove = (e: MouseEvent) => { mouseRef.current = { x: e.clientX, y: e.clientY, active: true }; };
     const onMouseLeave = () => { mouseRef.current.active = false; };
 
     const triggerFormation = (cx: number, cy: number) => {
       const planes = planesRef.current;
       if (planes.length === 0) return;
-
       const { w, h } = dimsRef.current;
       const heading = Math.atan2(cy - h / 2, cx - w / 2);
       const offsets = getFormationOffsets(heading, planes.length);
-
-      // Lock each plane to a slot by its ID so slots never shuffle
       const slotMap = new Map<number, number>();
       planes.forEach((p, i) => { slotMap.set(p.id, i); });
-
-      formationRef.current = {
-        active: true,
-        startTime: performance.now(),
-        duration: FORMATION_DURATION,
-        originX: cx,
-        originY: cy,
-        heading,
-        speed: 1.5,
-        offsets,
-        slotMap,
-      };
+      formationRef.current = { active: true, startTime: performance.now(), duration: FORMATION_DURATION, originX: cx, originY: cy, heading, speed: 1.5, offsets, slotMap };
     };
 
-    const onClick = (e: MouseEvent) => {
-      triggerFormation(e.clientX, e.clientY);
-    };
-
-    // Touch support for mobile
-    const onTouchStart = (e: TouchEvent) => {
-      if (e.touches.length > 0) {
-        const touch = e.touches[0];
-        mouseRef.current = { x: touch.clientX, y: touch.clientY, active: true };
-        triggerFormation(touch.clientX, touch.clientY);
-      }
-    };
-    const onTouchMove = (e: TouchEvent) => {
-      if (e.touches.length > 0) {
-        const touch = e.touches[0];
-        mouseRef.current = { x: touch.clientX, y: touch.clientY, active: true };
-      }
-    };
-    const onTouchEnd = () => {
-      mouseRef.current.active = false;
-    };
+    const onClick = (e: MouseEvent) => { triggerFormation(e.clientX, e.clientY); };
+    const onTouchStart = (e: TouchEvent) => { if (e.touches.length > 0) { const t = e.touches[0]; mouseRef.current = { x: t.clientX, y: t.clientY, active: true }; triggerFormation(t.clientX, t.clientY); } };
+    const onTouchMove = (e: TouchEvent) => { if (e.touches.length > 0) { const t = e.touches[0]; mouseRef.current = { x: t.clientX, y: t.clientY, active: true }; } };
+    const onTouchEnd = () => { mouseRef.current.active = false; };
 
     window.addEventListener("resize", onResize);
     canvas.addEventListener("mousemove", onMouseMove);
@@ -551,12 +615,8 @@ export default function LandingPage() {
   }, []);
 
   return (
-    <div className="relative min-h-screen overflow-hidden" style={{ background: BG_COLOR }}>
-      <canvas
-        ref={canvasRef}
-        className="fixed inset-0 z-0"
-        style={{ cursor: "crosshair" }}
-      />
+    <div className="relative min-h-screen overflow-hidden" style={{ background: isDark ? BG_COLORS_DARK : "#87BBDF" }}>
+      <canvas ref={canvasRef} className="fixed inset-0 z-0" style={{ cursor: "crosshair" }} />
 
       {/* ── Hero ──────────────────────────────────────────────────────────── */}
       <div className="relative z-10 flex min-h-screen flex-col items-center justify-center px-6 text-center select-none pointer-events-none">
@@ -565,59 +625,86 @@ export default function LandingPage() {
             <span
               className="bg-clip-text text-transparent"
               style={{
-                backgroundImage:
-                  "linear-gradient(135deg, #f0f0f5 0%, #c8ccd8 40%, #8891a5 100%)",
+                backgroundImage: isDark
+                  ? "linear-gradient(135deg, #ffffff 0%, #dde0e8 40%, #a8b0c0 100%)"
+                  : "linear-gradient(135deg, #0f1f2e 0%, #1e3345 40%, #2d4a60 100%)",
               }}
             >
               143
             </span>
-            <span className="text-white/50">.dev</span>
+            <span className={isDark ? "text-white/70" : "text-slate-800/70"}>.dev</span>
           </h1>
 
-          <p className="text-base sm:text-lg md:text-xl font-light text-white/50 leading-relaxed">
-            Detect issues, generate fixes,
-            <br className="hidden sm:block" />
-            and open pull requests while you sleep.
+          <p className={`text-base sm:text-lg md:text-xl font-light leading-relaxed ${isDark ? "text-white/70" : "text-slate-800"}`}>
+            Open source bug fixing for production systems.
           </p>
 
-          <p className="mx-auto max-w-lg text-xs sm:text-sm leading-relaxed text-white/25">
-            The first US jet fighter, the P-80 Shooting Star, was built in
-            just 143&nbsp;days. We bring that same speed to fixing your code.
-            Connect GitHub, Sentry, or Linear and let 143 handle the rest.
+          <p className={`mx-auto max-w-lg text-xs sm:text-sm leading-relaxed ${isDark ? "text-white/40" : "text-slate-700"}`}>
+            The first US jet fighter, the P-80 Shooting Star, was built in just 143&nbsp;days.
+            Connect GitHub, Sentry, or Linear and ship fixes while you sleep.
           </p>
 
           <div className="flex items-center justify-center gap-3 sm:gap-4 pt-2 pointer-events-auto">
-            <Button asChild className="rounded-lg bg-white px-5 sm:px-7 py-2.5 text-sm font-semibold text-[#08080f] shadow-lg shadow-white/5 transition-all hover:bg-white/90 hover:shadow-white/15">
+            <Button
+              asChild
+              className={`rounded-lg px-5 sm:px-7 py-2.5 text-sm font-semibold shadow-lg transition-all ${
+                isDark
+                  ? "bg-white text-[#08080f] shadow-white/5 hover:bg-white/90 hover:shadow-white/15"
+                  : "bg-slate-900 text-white shadow-slate-900/10 hover:bg-slate-800"
+              }`}
+            >
               <Link href="/login?tab=signup">Get Started</Link>
             </Button>
-            <Button asChild variant="outline" className="rounded-lg border border-white/15 bg-transparent px-5 sm:px-7 py-2.5 text-sm font-medium text-white/50 shadow-none transition-all hover:border-white/30 hover:bg-transparent hover:text-white/80">
+            <Button
+              asChild
+              variant="outline"
+              className={`rounded-lg bg-transparent px-5 sm:px-7 py-2.5 text-sm font-medium shadow-none transition-all ${
+                isDark
+                  ? "border-white/25 text-white/70 hover:border-white/40 hover:bg-transparent hover:text-white/90"
+                  : "border-slate-500 text-slate-700 hover:border-slate-600 hover:bg-transparent hover:text-slate-900"
+              }`}
+            >
               <Link href="/login">Sign In</Link>
             </Button>
           </div>
         </div>
 
-        <p className="absolute bottom-20 text-[11px] text-white/10 animate-pulse hidden sm:block">
+        <p className={`absolute bottom-20 text-[11px] animate-pulse hidden sm:block ${isDark ? "text-white/20" : "text-slate-600/50"}`}>
           move your mouse to attract planes &middot; click to call formation
         </p>
       </div>
 
-      {/* ── Speed slider ──────────────────────────────────────────────────── */}
-      <div className="fixed bottom-5 left-5 z-20 flex items-center gap-3 rounded-xl border border-white/[0.06] bg-white/[0.03] px-4 py-3 backdrop-blur-md">
-        <span className="text-[11px] font-medium tracking-wide text-white/25 uppercase">
+      {/* ── Controls panel ────────────────────────────────────────────────── */}
+      <div className={`fixed bottom-5 left-5 z-20 flex items-center gap-3 rounded-xl border px-4 py-3 backdrop-blur-md ${
+        isDark
+          ? "border-white/10 bg-white/[0.05]"
+          : "border-slate-400/30 bg-white/50"
+      }`}>
+        <span className={`text-[11px] font-medium tracking-wide uppercase ${isDark ? "text-white/40" : "text-slate-600"}`}>
           Speed
         </span>
-        <div className="w-28 [&_[data-slot=slider-track]]:bg-white/10 [&_[data-slot=slider-range]]:bg-white/40 [&_[data-slot=slider-thumb]]:border-white/40 [&_[data-slot=slider-thumb]]:bg-white/80">
-          <Slider
-            value={[speed]}
-            onValueChange={(v) => setSpeed(v[0])}
-            min={0}
-            max={100}
-            step={1}
-          />
+        <div className={`w-28 ${
+          isDark
+            ? "[&_[data-slot=slider-track]]:bg-white/15 [&_[data-slot=slider-range]]:bg-white/50 [&_[data-slot=slider-thumb]]:border-white/50 [&_[data-slot=slider-thumb]]:bg-white/90"
+            : "[&_[data-slot=slider-track]]:bg-slate-300/50 [&_[data-slot=slider-range]]:bg-slate-500/60 [&_[data-slot=slider-thumb]]:border-slate-400 [&_[data-slot=slider-thumb]]:bg-white"
+        }`}>
+          <Slider value={[speed]} onValueChange={(v) => setSpeed(v[0])} min={0} max={100} step={1} />
         </div>
-        <span className="w-8 text-right font-mono text-[11px] text-white/25">
+        <span className={`w-8 text-right font-mono text-[11px] ${isDark ? "text-white/40" : "text-slate-600"}`}>
           {(0.1 + (speed / 100) * 4.9).toFixed(1)}x
         </span>
+        <div className={`ml-1 h-4 w-px ${isDark ? "bg-white/10" : "bg-slate-300/50"}`} />
+        <button
+          onClick={toggleTheme}
+          className={`flex items-center justify-center rounded-md p-1 transition-colors ${
+            isDark
+              ? "text-white/40 hover:text-white/70"
+              : "text-slate-600 hover:text-slate-800"
+          }`}
+          aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
+        >
+          {isDark ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
+        </button>
       </div>
     </div>
   );
