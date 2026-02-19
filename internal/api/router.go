@@ -82,7 +82,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) (*
 		jobStore,
 	)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
-	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, ingestionSvc, logger)
+	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
 	credentialHandler := handlers.NewCredentialHandler(credentialStore)
 
 	r := chi.NewRouter()
@@ -104,14 +104,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) (*
 	// Webhook routes (no auth — called by external services, signature verified per-provider)
 	r.Route("/api/v1/webhooks", func(r chi.Router) {
 		r.Post("/github", webhookHandler.HandleGitHub)
-		r.Group(func(r chi.Router) {
-			r.Use(middleware.VerifyWebhookSignature("X-Sentry-Hook-Signature", cfg.SentryWebhookSecret, ""))
-			r.Post("/sentry", ingestionWebhookHandler.HandleSentry)
-		})
-		r.Group(func(r chi.Router) {
-			r.Use(middleware.VerifyWebhookSignature("X-Linear-Signature", cfg.LinearWebhookSecret, ""))
-			r.Post("/linear", ingestionWebhookHandler.HandleLinear)
-		})
+		r.Post("/sentry", ingestionWebhookHandler.HandleSentry)
+		r.Post("/linear", ingestionWebhookHandler.HandleLinear)
 	})
 
 	// Auth routes (no auth)

@@ -29,10 +29,6 @@ type Config struct {
 	GitHubAppPrivateKey  string `env:"GITHUB_APP_PRIVATE_KEY"`
 	GitHubWebhookSecret string `env:"GITHUB_WEBHOOK_SECRET"`
 
-	// Webhook secrets
-	SentryWebhookSecret string `env:"SENTRY_WEBHOOK_SECRET"`
-	LinearWebhookSecret string `env:"LINEAR_WEBHOOK_SECRET"`
-
 	// Encryption
 	EncryptionMasterKey string `env:"ENCRYPTION_MASTER_KEY"`
 
@@ -96,8 +92,6 @@ func (c *Config) LogStatus(logger zerolog.Logger) {
 		{"Database", c.DatabaseURL != "", ""},
 		{"GitHub OAuth", c.GitHubOAuthClientID != "" && c.GitHubOAuthClientSecret != "", "login"},
 		{"GitHub App", c.GitHubAppID != 0 && c.GitHubAppPrivateKey != "", "webhooks, PRs"},
-		{"Sentry webhooks", c.SentryWebhookSecret != "", "ingestion"},
-		{"Linear webhooks", c.LinearWebhookSecret != "", "ingestion"},
 		{"Credential encryption", c.EncryptionMasterKey != "", "encrypted credential storage"},
 	}
 

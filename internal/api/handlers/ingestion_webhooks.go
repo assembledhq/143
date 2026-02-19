@@ -1,7 +1,12 @@
 package handlers
 
 import (
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 
@@ -12,9 +17,16 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// webhookSecretLookup is the subset of OrgCredentialStore needed to look up
+// per-org webhook secrets at request time.
+type webhookSecretLookup interface {
+	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
+}
+
 type IngestionWebhookHandler struct {
 	webhookStore     *db.WebhookDeliveryStore
 	integrationStore *db.IntegrationStore
+	credStore        webhookSecretLookup
 	ingestionSvc     *ingestion.Service
 	logger           zerolog.Logger
 }
@@ -22,12 +34,14 @@ type IngestionWebhookHandler struct {
 func NewIngestionWebhookHandler(
 	webhookStore *db.WebhookDeliveryStore,
 	integrationStore *db.IntegrationStore,
+	credStore webhookSecretLookup,
 	ingestionSvc *ingestion.Service,
 	logger zerolog.Logger,
 ) *IngestionWebhookHandler {
 	return &IngestionWebhookHandler{
 		webhookStore:     webhookStore,
 		integrationStore: integrationStore,
+		credStore:        credStore,
 		ingestionSvc:     ingestionSvc,
 		logger:           logger,
 	}
@@ -39,6 +53,13 @@ func (h *IngestionWebhookHandler) HandleSentry(w http.ResponseWriter, r *http.Re
 
 func (h *IngestionWebhookHandler) HandleLinear(w http.ResponseWriter, r *http.Request) {
 	h.handleProvider(w, r, "linear")
+}
+
+// providerSignatureHeader maps provider name to the HTTP header carrying the
+// webhook signature.
+var providerSignatureHeader = map[string]string{
+	"sentry": "X-Sentry-Hook-Signature",
+	"linear": "X-Linear-Signature",
 }
 
 func (h *IngestionWebhookHandler) handleProvider(w http.ResponseWriter, r *http.Request, provider string) {
@@ -64,6 +85,12 @@ func (h *IngestionWebhookHandler) handleProvider(w http.ResponseWriter, r *http.
 	integration, err := h.integrationStore.GetByID(r.Context(), integrationID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "integration not found")
+		return
+	}
+
+	// Verify webhook signature using per-org credential from DB.
+	if err := h.verifyProviderSignature(r.Context(), integration.OrgID, provider, body, r.Header); err != nil {
+		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", err.Error())
 		return
 	}
 
@@ -117,4 +144,73 @@ func (h *IngestionWebhookHandler) handleProvider(w http.ResponseWriter, r *http.
 
 	_ = h.webhookStore.MarkProcessed(r.Context(), delivery, nil)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
+}
+
+// verifyProviderSignature looks up the per-org webhook secret from the DB and
+// verifies the HMAC-SHA256 signature. If no credential is configured, verification
+// is skipped (dev mode).
+func (h *IngestionWebhookHandler) verifyProviderSignature(
+	ctx context.Context,
+	orgID uuid.UUID,
+	provider string,
+	body []byte,
+	headers http.Header,
+) error {
+	if h.credStore == nil {
+		return nil // no credential store — skip verification
+	}
+
+	// Map provider string to models.ProviderName
+	var providerName models.ProviderName
+	switch provider {
+	case "sentry":
+		providerName = models.ProviderSentry
+	case "linear":
+		providerName = models.ProviderLinear
+	default:
+		return nil
+	}
+
+	cred, err := h.credStore.Get(ctx, orgID, providerName)
+	if err != nil {
+		// No credential configured — skip verification (dev mode)
+		h.logger.Debug().Err(err).Str("provider", provider).Msg("no webhook credential configured, skipping signature verification")
+		return nil
+	}
+
+	// Extract webhook_secret from the typed config.
+	var secret string
+	switch cfg := cred.Config.(type) {
+	case models.SentryConfig:
+		secret = cfg.WebhookSecret
+	case models.LinearConfig:
+		secret = cfg.WebhookSecret
+	default:
+		return nil
+	}
+
+	if secret == "" {
+		return nil // empty secret — skip verification
+	}
+
+	headerName := providerSignatureHeader[provider]
+	signature := headers.Get(headerName)
+	if signature == "" {
+		return fmt.Errorf("missing webhook signature")
+	}
+
+	if !verifyHMACSHA256(secret, body, signature) {
+		return fmt.Errorf("invalid webhook signature")
+	}
+
+	return nil
+}
+
+// verifyHMACSHA256 computes HMAC-SHA256 of body with the given key and compares
+// the hex-encoded result against the provided signature.
+func verifyHMACSHA256(secret string, body []byte, signature string) bool {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	expected := hex.EncodeToString(mac.Sum(nil))
+	return hmac.Equal([]byte(signature), []byte(expected))
 }
