@@ -13,7 +13,7 @@ import (
 )
 
 var organizationColumns = []string{
-	"id", "name", "slug", "settings", "created_at", "updated_at",
+	"id", "name", "settings", "created_at", "updated_at",
 }
 
 func TestOrganizationStore_Create(t *testing.T) {
@@ -29,12 +29,11 @@ func TestOrganizationStore_Create(t *testing.T) {
 
 	org := &models.Organization{
 		Name:     "Test Org",
-		Slug:     "test-org",
 		Settings: json.RawMessage(`{"feature_flags":[]}`),
 	}
 
 	mock.ExpectQuery("INSERT INTO organizations").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
 				AddRow(generatedID, now, now),
@@ -63,7 +62,7 @@ func TestOrganizationStore_GetByID(t *testing.T) {
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(organizationColumns).
-							AddRow(orgID, "Test Org", "test-org", json.RawMessage(`{}`), now, now),
+							AddRow(orgID, "Test Org", json.RawMessage(`{}`), now, now),
 					)
 			},
 		},
@@ -99,13 +98,12 @@ func TestOrganizationStore_GetByID(t *testing.T) {
 			require.NoError(t, err, "GetByID should not return an error")
 			require.Equal(t, orgID, org.ID, "should return the correct organization ID")
 			require.Equal(t, "Test Org", org.Name, "should return the correct organization name")
-			require.Equal(t, "test-org", org.Slug, "should return the correct organization slug")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
 }
 
-func TestOrganizationStore_GetBySlug(t *testing.T) {
+func TestOrganizationStore_GetByName(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -114,20 +112,20 @@ func TestOrganizationStore_GetBySlug(t *testing.T) {
 		expectErr bool
 	}{
 		{
-			name: "returns organization when found by slug",
+			name: "returns organization when found by name",
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, now time.Time) {
-				mock.ExpectQuery("SELECT .+ FROM organizations WHERE slug").
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE name").
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(organizationColumns).
-							AddRow(orgID, "My Company", "my-company", json.RawMessage(`{}`), now, now),
+							AddRow(orgID, "My Company", json.RawMessage(`{}`), now, now),
 					)
 			},
 		},
 		{
-			name: "returns error when organization not found by slug",
+			name: "returns error when organization not found by name",
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, now time.Time) {
-				mock.ExpectQuery("SELECT .+ FROM organizations WHERE slug").
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE name").
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(organizationColumns))
 			},
@@ -148,15 +146,14 @@ func TestOrganizationStore_GetBySlug(t *testing.T) {
 			now := time.Now()
 			tt.setupMock(mock, orgID, now)
 
-			org, err := store.GetBySlug(context.Background(), "my-company")
+			org, err := store.GetByName(context.Background(), "My Company")
 			if tt.expectErr {
-				require.Error(t, err, "GetBySlug should return an error when organization is not found")
+				require.Error(t, err, "GetByName should return an error when organization is not found")
 				return
 			}
-			require.NoError(t, err, "GetBySlug should not return an error")
+			require.NoError(t, err, "GetByName should not return an error")
 			require.Equal(t, orgID, org.ID, "should return the correct organization ID")
 			require.Equal(t, "My Company", org.Name, "should return the correct organization name")
-			require.Equal(t, "my-company", org.Slug, "should return the correct organization slug")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
@@ -175,12 +172,11 @@ func TestOrganizationStore_Update(t *testing.T) {
 	org := &models.Organization{
 		ID:       uuid.New(),
 		Name:     "Updated Org",
-		Slug:     "updated-org",
 		Settings: json.RawMessage(`{"updated":true}`),
 	}
 
 	mock.ExpectQuery("UPDATE organizations").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"updated_at"}).
 				AddRow(now),

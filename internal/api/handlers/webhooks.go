@@ -122,11 +122,10 @@ func (h *WebhookHandler) handleInstallation(w http.ResponseWriter, r *http.Reque
 		// Create a default org for the installation (or find existing)
 		org := &models.Organization{
 			Name:     event.Installation.Account.Login,
-			Slug:     event.Installation.Account.Login,
 			Settings: json.RawMessage(`{}`),
 		}
-		// Try to get existing org by slug first
-		existingOrg, err := h.orgStore.GetBySlug(ctx, org.Slug)
+		// Try to get existing org by name first
+		existingOrg, err := h.orgStore.GetByName(ctx, org.Name)
 		if err == nil {
 			org = &existingOrg
 		} else {

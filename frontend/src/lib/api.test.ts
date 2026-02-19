@@ -264,7 +264,6 @@ describe('api client', () => {
         data: {
           id: 'org-1',
           name: 'Test Org',
-          slug: 'test-org',
           settings: { theme: 'dark' },
           created_at: '2026-01-01T00:00:00Z',
           updated_at: '2026-01-01T00:00:00Z',
@@ -292,8 +291,7 @@ describe('api client', () => {
             data: {
               id: 'org-1',
               name: 'New Name',
-              slug: 'test-org',
-              settings: {},
+                  settings: {},
               created_at: '2026-01-01T00:00:00Z',
               updated_at: '2026-01-01T00:00:00Z',
             },

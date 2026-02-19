@@ -70,16 +70,16 @@ func TestWebhook_HandleGitHub(t *testing.T) {
 				orgID := uuid.New()
 				integrationID := uuid.New()
 
-				// 1. GetBySlug -> empty rows (no existing org)
-				mock.ExpectQuery("SELECT .+ FROM organizations WHERE slug").
+				// 1. GetByName -> empty rows (no existing org)
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE name").
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows([]string{"id", "name", "slug", "settings", "created_at", "updated_at"}),
+						pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}),
 					)
 
-				// 2. Create org (3 named args)
+				// 2. Create org (2 named args)
 				mock.ExpectQuery("INSERT INTO organizations").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
 							AddRow(orgID, now, now),

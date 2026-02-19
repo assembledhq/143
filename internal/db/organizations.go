@@ -20,13 +20,12 @@ func NewOrganizationStore(db DBTX) *OrganizationStore {
 
 func (s *OrganizationStore) Create(ctx context.Context, org *models.Organization) error {
 	query := `
-		INSERT INTO organizations (name, slug, settings)
-		VALUES (@name, @slug, @settings)
+		INSERT INTO organizations (name, settings)
+		VALUES (@name, @settings)
 		RETURNING id, created_at, updated_at`
 
 	args := pgx.NamedArgs{
 		"name":     org.Name,
-		"slug":     org.Slug,
 		"settings": org.Settings,
 	}
 
@@ -36,7 +35,7 @@ func (s *OrganizationStore) Create(ctx context.Context, org *models.Organization
 
 func (s *OrganizationStore) GetByID(ctx context.Context, id uuid.UUID) (models.Organization, error) {
 	query := `
-		SELECT id, name, slug, settings, created_at, updated_at
+		SELECT id, name, settings, created_at, updated_at
 		FROM organizations
 		WHERE id = @id`
 
@@ -47,15 +46,15 @@ func (s *OrganizationStore) GetByID(ctx context.Context, id uuid.UUID) (models.O
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Organization])
 }
 
-func (s *OrganizationStore) GetBySlug(ctx context.Context, slug string) (models.Organization, error) {
+func (s *OrganizationStore) GetByName(ctx context.Context, name string) (models.Organization, error) {
 	query := `
-		SELECT id, name, slug, settings, created_at, updated_at
+		SELECT id, name, settings, created_at, updated_at
 		FROM organizations
-		WHERE slug = @slug`
+		WHERE name = @name`
 
-	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"slug": slug})
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"name": name})
 	if err != nil {
-		return models.Organization{}, fmt.Errorf("query organization by slug: %w", err)
+		return models.Organization{}, fmt.Errorf("query organization by name: %w", err)
 	}
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Organization])
 }
@@ -63,14 +62,13 @@ func (s *OrganizationStore) GetBySlug(ctx context.Context, slug string) (models.
 func (s *OrganizationStore) Update(ctx context.Context, org *models.Organization) error {
 	query := `
 		UPDATE organizations
-		SET name = @name, slug = @slug, settings = @settings, updated_at = now()
+		SET name = @name, settings = @settings, updated_at = now()
 		WHERE id = @id
 		RETURNING updated_at`
 
 	args := pgx.NamedArgs{
 		"id":       org.ID,
 		"name":     org.Name,
-		"slug":     org.Slug,
 		"settings": org.Settings,
 	}
 
