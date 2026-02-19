@@ -61,6 +61,16 @@ To enable GitHub OAuth login and repo onboarding, set these in `.env`:
 
 See `.env.example` for the full list of variables.
 
+### Secrets & API Keys
+
+For local dev, just copy `.env.example` into `.env` and edit it directly — it's gitignored. For shared/deployed environments, we use [SOPS](https://github.com/getsecrets/sops) + [age](https://github.com/FiloSottile/age) to encrypt secrets into `.env.enc` (safe to commit). See the [secrets management guide](docs/secrets/README.md) for setup instructions.
+
+```bash
+make secrets-setup     # one-time: generate age keypair
+make secrets-encrypt   # encrypt .env → .env.enc
+make secrets-decrypt   # decrypt .env.enc → .env
+```
+
 ## How it works
 
 ```

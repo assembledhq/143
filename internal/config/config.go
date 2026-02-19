@@ -2,108 +2,68 @@ package config
 
 import (
 	"fmt"
-	"os"
-	"strconv"
-	"strings"
 
 	"github.com/assembledhq/143/internal/llm"
+	"github.com/caarlos0/env/v11"
 	"github.com/joho/godotenv"
 	"github.com/rs/zerolog"
 )
 
 type Config struct {
-	DatabaseURL        string
-	Port               int
-	LogLevel           string
-	SessionSecret      string
-	BaseURL            string
-	FrontendURL        string
-	CORSAllowedOrigins []string
+	// Core
+	DatabaseURL        string   `env:"DATABASE_URL"          envDefault:"postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable"`
+	Port               int      `env:"PORT"                  envDefault:"8080"`
+	LogLevel           string   `env:"LOG_LEVEL"             envDefault:"info"`
+	SessionSecret      string   `env:"SESSION_SECRET"`
+	BaseURL            string   `env:"BASE_URL"              envDefault:"http://localhost:8080"`
+	FrontendURL        string   `env:"FRONTEND_URL"          envDefault:"http://localhost:3000"`
+	CORSAllowedOrigins []string `env:"CORS_ALLOWED_ORIGINS"  envDefault:"http://localhost:3000" envSeparator:","`
+	Mode               string   `env:"MODE"                  envDefault:"all"`
 
 	// GitHub OAuth
-	GitHubOAuthClientID     string
-	GitHubOAuthClientSecret string
+	GitHubOAuthClientID     string `env:"GITHUB_OAUTH_CLIENT_ID"`
+	GitHubOAuthClientSecret string `env:"GITHUB_OAUTH_CLIENT_SECRET"`
 
 	// GitHub App
-	GitHubAppID         int64
-	GitHubAppPrivateKey  string
-	GitHubWebhookSecret string
+	GitHubAppID         int64  `env:"GITHUB_APP_ID"`
+	GitHubAppPrivateKey  string `env:"GITHUB_APP_PRIVATE_KEY"`
+	GitHubWebhookSecret string `env:"GITHUB_WEBHOOK_SECRET"`
 
-	// Webhook secrets for ingestion providers
-	SentryWebhookSecret string
-	LinearWebhookSecret string
+	// Webhook secrets
+	SentryWebhookSecret string `env:"SENTRY_WEBHOOK_SECRET"`
+	LinearWebhookSecret string `env:"LINEAR_WEBHOOK_SECRET"`
 
 	// LLM
-	LLMModel          string // e.g. "claude-sonnet-4-5", "gpt-4o"
-	AnthropicAPIKey   string
-	AnthropicBaseURL  string // optional, defaults to https://api.anthropic.com
-	OpenAIAPIKey      string
-	OpenAIBaseURL     string // optional, defaults to https://api.openai.com
-	OpenAIAPIType     string // "chat" or "responses", defaults to "chat"
-	OpenRouterAPIKey  string
-	OpenRouterBaseURL string // optional, defaults to https://openrouter.ai/api
-	OpenRouterAppName string // optional, sent as X-Title
-	OpenRouterSiteURL string // optional, sent as HTTP-Referer
-
-	// Server mode
-	Mode string // "all", "api", "worker"
+	LLMModel          string `env:"LLM_MODEL"`
+	AnthropicAPIKey   string `env:"ANTHROPIC_API_KEY"`
+	AnthropicBaseURL  string `env:"ANTHROPIC_BASE_URL"`
+	OpenAIAPIKey      string `env:"OPENAI_API_KEY"`
+	OpenAIBaseURL     string `env:"OPENAI_BASE_URL"`
+	OpenAIAPIType     string `env:"OPENAI_API_TYPE"       envDefault:"chat"`
+	OpenRouterAPIKey  string `env:"OPENROUTER_API_KEY"`
+	OpenRouterBaseURL string `env:"OPENROUTER_BASE_URL"`
+	OpenRouterAppName string `env:"OPENROUTER_APP_NAME"   envDefault:"143"`
+	OpenRouterSiteURL string `env:"OPENROUTER_SITE_URL"`
 }
 
+// Load reads configuration from env files and environment variables.
+//
+// Precedence (highest wins):
+//  1. Real env vars (CI, Docker, secret manager, SOPS decrypt)
+//  2. .env.local (personal overrides, gitignored)
+//  3. .env (shared defaults, gitignored)
 func Load() *Config {
-	// Load env files in precedence order (lowest to highest).
-	// godotenv does NOT overwrite already-set variables, so we load in
-	// reverse precedence: .env first, then .env.local (which won't
-	// overwrite .env values — but real env vars beat both).
-	//
-	// File loading order:
-	//   1. .env          — shared defaults, committed to repo as .env.example
-	//   2. .env.local    — personal overrides, never committed
-	//   3. Real env vars — always win (set by secret manager, CI, Docker, etc.)
-	//
-	// Errors are silently ignored (files are optional).
+	// godotenv does NOT overwrite already-set variables, so real env vars
+	// always win. .env.local is listed first so it takes precedence over .env.
 	_ = godotenv.Load(".env.local", ".env")
 
-	port := 8080
-	if v := os.Getenv("PORT"); v != "" {
-		if p, err := strconv.Atoi(v); err == nil {
-			port = p
-		}
+	cfg := &Config{}
+	if err := env.Parse(cfg); err != nil {
+		// Fall back to zero-value config rather than crashing — LogStatus
+		// will surface missing values at startup.
+		return cfg
 	}
-
-	var appID int64
-	if v := os.Getenv("GITHUB_APP_ID"); v != "" {
-		if id, err := strconv.ParseInt(v, 10, 64); err == nil {
-			appID = id
-		}
-	}
-
-	return &Config{
-		DatabaseURL:             getEnv("DATABASE_URL", "postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable"),
-		Port:                    port,
-		LogLevel:                getEnv("LOG_LEVEL", "info"),
-		SessionSecret:           getEnv("SESSION_SECRET", ""),
-		BaseURL:                 getEnv("BASE_URL", "http://localhost:8080"),
-		FrontendURL:             getEnv("FRONTEND_URL", "http://localhost:3000"),
-		CORSAllowedOrigins:      strings.Split(getEnv("CORS_ALLOWED_ORIGINS", "http://localhost:3000"), ","),
-		GitHubOAuthClientID:     getEnv("GITHUB_OAUTH_CLIENT_ID", ""),
-		GitHubOAuthClientSecret: getEnv("GITHUB_OAUTH_CLIENT_SECRET", ""),
-		GitHubAppID:             appID,
-		GitHubAppPrivateKey:     getEnv("GITHUB_APP_PRIVATE_KEY", ""),
-		GitHubWebhookSecret:     getEnv("GITHUB_WEBHOOK_SECRET", ""),
-		SentryWebhookSecret:     getEnv("SENTRY_WEBHOOK_SECRET", ""),
-		LinearWebhookSecret:     getEnv("LINEAR_WEBHOOK_SECRET", ""),
-		LLMModel:                getEnv("LLM_MODEL", ""),
-		AnthropicAPIKey:         getEnv("ANTHROPIC_API_KEY", ""),
-		AnthropicBaseURL:        getEnv("ANTHROPIC_BASE_URL", ""),
-		OpenAIAPIKey:            getEnv("OPENAI_API_KEY", ""),
-		OpenAIBaseURL:           getEnv("OPENAI_BASE_URL", ""),
-		OpenAIAPIType:           getEnv("OPENAI_API_TYPE", "chat"),
-		OpenRouterAPIKey:        getEnv("OPENROUTER_API_KEY", ""),
-		OpenRouterBaseURL:       getEnv("OPENROUTER_BASE_URL", ""),
-		OpenRouterAppName:       getEnv("OPENROUTER_APP_NAME", "143"),
-		OpenRouterSiteURL:       getEnv("OPENROUTER_SITE_URL", ""),
-		Mode:                    getEnv("MODE", "all"),
-	}
+	return cfg
 }
 
 // LLMConfig returns the llm.Config derived from this Config.
@@ -125,7 +85,6 @@ func (c *Config) LLMConfig() llm.Config {
 // LogStatus logs which features are configured and which are missing.
 // Call this at startup so contributors immediately see what's working.
 func (c *Config) LogStatus(logger zerolog.Logger) {
-	// Core services
 	features := []struct {
 		name       string
 		configured bool
@@ -150,7 +109,7 @@ func (c *Config) LogStatus(logger zerolog.Logger) {
 		e.Msg("feature status")
 	}
 
-	// LLM providers — special handling to show the fallback chain
+	// LLM providers
 	var providers []string
 	if c.AnthropicAPIKey != "" {
 		providers = append(providers, "anthropic")
@@ -177,15 +136,7 @@ func (c *Config) LogStatus(logger zerolog.Logger) {
 			Msg("LLM not configured (set LLM_MODEL + at least one provider API key) — LLM checks will be skipped")
 	}
 
-	// Security warnings
 	if c.SessionSecret == "" {
 		logger.Warn().Msg("SESSION_SECRET is empty — sessions will not survive restarts")
 	}
-}
-
-func getEnv(key, defaultVal string) string {
-	if val := os.Getenv(key); val != "" {
-		return val
-	}
-	return defaultVal
 }

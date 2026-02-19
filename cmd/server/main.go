@@ -19,6 +19,7 @@ import (
 func main() {
 	cfg := config.Load()
 	logger := logging.NewLogger(cfg.LogLevel)
+	cfg.LogStatus(logger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
