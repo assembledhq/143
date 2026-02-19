@@ -24,10 +24,11 @@ profile.cov
 go.work
 go.work.sum
 
-# env files (never commit secrets)
+# env files (never commit plaintext secrets)
 .env
 .env.local
 .env.*.local
+# .env.enc is the SOPS-encrypted version — safe to commit (intentionally NOT listed here)
 
 # air live reload
 tmp/
