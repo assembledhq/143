@@ -760,34 +760,30 @@ export default function LandingPage() {
               className="bg-clip-text text-transparent"
               style={{
                 backgroundImage: isDark
-                  ? "linear-gradient(135deg, #f0f0f5 0%, #c8ccd8 40%, #8891a5 100%)"
+                  ? "linear-gradient(135deg, #ffffff 0%, #dde0e8 40%, #a8b0c0 100%)"
                   : "linear-gradient(135deg, #0f1f2e 0%, #1e3345 40%, #2d4a60 100%)",
               }}
             >
               143
             </span>
             <span
-              className={isDark ? "text-white/50" : "text-slate-800/70"}
+              className={isDark ? "text-white/70" : "text-slate-800/70"}
             >
               .dev
             </span>
           </h1>
 
           <p
-            className={`text-base sm:text-lg md:text-xl font-light leading-relaxed ${isDark ? "text-white/50" : "text-slate-800"}`}
+            className={`text-base sm:text-lg md:text-xl font-light leading-relaxed ${isDark ? "text-white/70" : "text-slate-800"}`}
           >
-            Open source AI that detects issues, generates fixes,
-            <br className="hidden sm:block" />
-            and opens pull requests while you sleep.
+            Open source bug fixing for production systems.
           </p>
 
           <p
-            className={`mx-auto max-w-lg text-xs sm:text-sm leading-relaxed ${isDark ? "text-white/25" : "text-slate-700"}`}
+            className={`mx-auto max-w-lg text-xs sm:text-sm leading-relaxed ${isDark ? "text-white/40" : "text-slate-700"}`}
           >
             The first US jet fighter, the P-80 Shooting Star, was built in
-            just 143&nbsp;days. We bring that same speed to fixing your code.
-            Fully open source, connect GitHub, Sentry, or Linear and let 143
-            handle the rest.
+            just 143&nbsp;days. Connect GitHub, Sentry, or Linear to bring that same speed to fixing your code.
           </p>
 
           <div className="flex items-center justify-center gap-3 sm:gap-4 pt-2 pointer-events-auto">
@@ -806,7 +802,7 @@ export default function LandingPage() {
               variant="outline"
               className={`rounded-lg bg-transparent px-5 sm:px-7 py-2.5 text-sm font-medium shadow-none transition-all ${
                 isDark
-                  ? "border-white/15 text-white/50 hover:border-white/30 hover:bg-transparent hover:text-white/80"
+                  ? "border-white/25 text-white/70 hover:border-white/40 hover:bg-transparent hover:text-white/90"
                   : "border-slate-500 text-slate-700 hover:border-slate-600 hover:bg-transparent hover:text-slate-900"
               }`}
             >
