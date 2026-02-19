@@ -16,7 +16,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { useEffect } from "react";
 
 const navItems = [
-  { label: "Overview", icon: LayoutDashboard, href: "/" },
+  { label: "Overview", icon: LayoutDashboard, href: "/overview" },
   { label: "Issues", icon: AlertCircle, href: "/issues" },
   { label: "Runs", icon: Play, href: "/runs" },
   { label: "Analytics", icon: BarChart3, href: "/analytics" },
@@ -51,15 +51,15 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
     <div className="flex h-screen">
       <aside className="w-56 border-r border-border bg-sidebar flex flex-col">
         <div className="px-5 py-5">
-          <Link href="/" className="text-sm font-semibold tracking-tight text-sidebar-foreground">
+          <Link href="/overview" className="text-sm font-semibold tracking-tight text-sidebar-foreground">
             143.dev
           </Link>
         </div>
         <nav className="flex-1 px-3 space-y-0.5">
           {navItems.map((item) => {
             const isActive =
-              item.href === "/"
-                ? pathname === "/"
+              item.href === "/overview"
+                ? pathname === "/overview"
                 : pathname.startsWith(item.href);
             return (
               <Link
