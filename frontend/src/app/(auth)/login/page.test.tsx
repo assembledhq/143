@@ -31,6 +31,7 @@ const pushMock = vi.hoisted(() => vi.fn());
 const replaceMock = vi.hoisted(() => vi.fn());
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: pushMock, replace: replaceMock }),
+  useSearchParams: () => new URLSearchParams(),
 }));
 
 describe('LoginPage', () => {
