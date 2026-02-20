@@ -57,7 +57,7 @@ lint:
 
 lint-bootstrap:
 	@mkdir -p $(CURDIR)/bin
-	GOTOOLCHAIN=$(GO_TOOLCHAIN_VERSION) GOBIN=$(CURDIR)/bin go install github.com/golangci/golangci-lint/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	GOTOOLCHAIN=$(GO_TOOLCHAIN_VERSION) GOBIN=$(CURDIR)/bin go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 
 # ── Secrets management (SOPS + age) ─────────────────────────────────
 # Optional — only needed if you want encrypted secrets committed to git.

@@ -3,6 +3,7 @@ package config
 import (
 	"testing"
 
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -158,6 +159,58 @@ func TestSafeAgentEnv_MasksAPIKeys(t *testing.T) {
 
 	// Non-secret values should be unchanged
 	require.Equal(t, "opus", safe["claude_code"]["ANTHROPIC_MODEL"])
+}
+
+func TestLogStatus_AllConfigured(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://test")
+	t.Setenv("GITHUB_OAUTH_CLIENT_ID", "gh-id")
+	t.Setenv("GITHUB_OAUTH_CLIENT_SECRET", "gh-secret")
+	t.Setenv("GOOGLE_OAUTH_CLIENT_ID", "go-id")
+	t.Setenv("GOOGLE_OAUTH_CLIENT_SECRET", "go-secret")
+	t.Setenv("GITHUB_APP_ID", "123")
+	t.Setenv("GITHUB_APP_PRIVATE_KEY", "key")
+	t.Setenv("ENCRYPTION_MASTER_KEY", "master-key")
+	t.Setenv("LLM_MODEL", "claude-sonnet-4-5")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+	t.Setenv("SESSION_SECRET", "secret")
+
+	cfg := Load()
+	// LogStatus should not panic.
+	require.NotPanics(t, func() {
+		cfg.LogStatus(zerolog.Nop())
+	})
+}
+
+func TestLogStatus_NothingConfigured(t *testing.T) {
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("GITHUB_OAUTH_CLIENT_ID", "")
+	t.Setenv("GITHUB_OAUTH_CLIENT_SECRET", "")
+	t.Setenv("GOOGLE_OAUTH_CLIENT_ID", "")
+	t.Setenv("GOOGLE_OAUTH_CLIENT_SECRET", "")
+	t.Setenv("GITHUB_APP_ID", "0")
+	t.Setenv("GITHUB_APP_PRIVATE_KEY", "")
+	t.Setenv("ENCRYPTION_MASTER_KEY", "")
+	t.Setenv("LLM_MODEL", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("SESSION_SECRET", "")
+
+	cfg := Load()
+	require.NotPanics(t, func() {
+		cfg.LogStatus(zerolog.Nop())
+	})
+}
+
+func TestLogStatus_LLMModelWithoutProviders(t *testing.T) {
+	t.Setenv("LLM_MODEL", "claude-sonnet-4-5")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("OPENROUTER_API_KEY", "")
+	t.Setenv("SESSION_SECRET", "test-secret")
+
+	cfg := Load()
+	require.NotPanics(t, func() {
+		cfg.LogStatus(zerolog.Nop())
+	})
 }
 
 func TestAgentEnv_OnlyAnthropicKey(t *testing.T) {
