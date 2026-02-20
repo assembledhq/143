@@ -193,9 +193,9 @@ jobs:
           go-version: "1.26"
 
       - name: Run gosec
-        uses: securego/gosec@master
-        with:
-          args: ./...
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.22.4
+          gosec ./...
 
   required-checks:
     name: All Checks Pass
