@@ -34,14 +34,14 @@ func TestReviewPatternStore_Create_Success(t *testing.T) {
 	generatedID := uuid.New()
 
 	p := &models.ReviewPattern{
-		OrgID:           uuid.New(),
-		Repo:            "org/repo",
-		Rule:            "Always use structured logging",
-		Category:        "style",
+		OrgID:            uuid.New(),
+		Repo:             "org/repo",
+		Rule:             "Always use structured logging",
+		Category:         "style",
 		SourceCommentIDs: []uuid.UUID{uuid.New()},
-		OccurrenceCount: 1,
-		Status:          "candidate",
-		ManuallyCurated: false,
+		OccurrenceCount:  1,
+		Status:           "candidate",
+		ManuallyCurated:  false,
 	}
 
 	mock.ExpectQuery("INSERT INTO review_patterns").
@@ -227,6 +227,8 @@ func TestReviewPatternStore_UpdatePattern_InsertOnlyVersioning(t *testing.T) {
 	store := NewReviewPatternStore(mock)
 	orgID := uuid.New()
 	id := uuid.New()
+	newID := uuid.New()
+	now := time.Now()
 	sourceCommentIDs := []uuid.UUID{uuid.New()}
 
 	// Transaction: Begin
@@ -242,12 +244,17 @@ func TestReviewPatternStore_UpdatePattern_InsertOnlyVersioning(t *testing.T) {
 			}).AddRow(orgID, "org/repo", "Old rule text", "style", sourceCommentIDs, 1, "candidate", false),
 		)
 
-	// Step 2: Expect the insert of the new active row with updated values
+	// Step 2: Expect the insert of the new active row with updated values and returned row
 	newRule := "Updated rule text"
-	mock.ExpectExec("INSERT INTO review_patterns").
+	mock.ExpectQuery("INSERT INTO review_patterns").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "org_id", "repo", "rule", "category", "source_comment_ids",
+				"occurrence_count", "status", "manually_curated", "active", "created_at",
+			}).AddRow(newID, orgID, "org/repo", newRule, "style", sourceCommentIDs, 1, "candidate", true, true, now),
+		)
 
 	// Transaction: Commit
 	mock.ExpectCommit()
