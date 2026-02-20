@@ -208,7 +208,7 @@ func (h *RunHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 	var lastSeenID int64
 	for _, log := range logs {
 		data, _ := json.Marshal(log)
-		fmt.Fprintf(w, "data: %s\n\n", data)
+		fmt.Fprintf(w, "data: %s\n\n", data) // #nosec G705 -- SSE event stream, data is JSON-marshaled
 		lastSeenID = log.ID
 	}
 	flusher.Flush()
@@ -234,7 +234,7 @@ func (h *RunHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 			}
 			for _, log := range newLogs {
 				data, _ := json.Marshal(log)
-				fmt.Fprintf(w, "data: %s\n\n", data)
+				fmt.Fprintf(w, "data: %s\n\n", data) // #nosec G705 -- SSE event stream, data is JSON-marshaled
 				lastSeenID = log.ID
 			}
 			flusher.Flush()

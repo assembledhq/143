@@ -148,7 +148,7 @@ func (s *ReviewPatternStore) UpdatePatternAndGet(ctx context.Context, orgID, id 
 	if err != nil {
 		return models.ReviewPattern{}, fmt.Errorf("begin transaction: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	// 1. Inactivate the current row and get its values.
 	inactivateQuery := `
@@ -220,7 +220,7 @@ func (s *ReviewPatternStore) IncrementOccurrence(ctx context.Context, orgID, pat
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	inactivateQuery := `
 		UPDATE review_patterns SET active = false

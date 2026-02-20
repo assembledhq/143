@@ -85,6 +85,33 @@ func TestParseOrgSettings_PartialOverride(t *testing.T) {
 	require.Equal(t, DefaultMaxConcurrentRuns, s.MaxConcurrentRuns, "should default max_concurrent_runs when not provided")
 }
 
+func TestParseOrgSettings_AgentConfig(t *testing.T) {
+	t.Parallel()
+
+	raw := json.RawMessage(`{
+		"agent_config": {
+			"claude_code": {"ANTHROPIC_MODEL": "opus", "ANTHROPIC_API_KEY": "sk-ant-org"},
+			"gemini_cli": {"GEMINI_MODEL": "gemini-2.5-pro"}
+		}
+	}`)
+
+	s := ParseOrgSettings(raw)
+
+	require.NotNil(t, s.AgentConfig, "should parse agent_config")
+	require.Equal(t, "opus", s.AgentConfig["claude_code"]["ANTHROPIC_MODEL"])
+	require.Equal(t, "sk-ant-org", s.AgentConfig["claude_code"]["ANTHROPIC_API_KEY"])
+	require.Equal(t, "gemini-2.5-pro", s.AgentConfig["gemini_cli"]["GEMINI_MODEL"])
+	require.NotContains(t, s.AgentConfig, "codex", "codex should not be present when not configured")
+}
+
+func TestParseOrgSettings_AgentConfigEmpty(t *testing.T) {
+	t.Parallel()
+
+	s := ParseOrgSettings(json.RawMessage(`{}`))
+
+	require.Nil(t, s.AgentConfig, "agent_config should be nil for empty JSON")
+}
+
 func TestParseOrgSettings_InvalidJSON(t *testing.T) {
 	t.Parallel()
 

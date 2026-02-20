@@ -14,7 +14,7 @@ type Config struct {
 	DatabaseURL        string   `env:"DATABASE_URL"          envDefault:"postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable"`
 	Port               int      `env:"PORT"                  envDefault:"8080"`
 	LogLevel           string   `env:"LOG_LEVEL"             envDefault:"info"`
-	SessionSecret      string   `env:"SESSION_SECRET"`
+	SessionSecret      string   `env:"SESSION_SECRET"` // #nosec G117 -- env config field
 	BaseURL            string   `env:"BASE_URL"              envDefault:"http://localhost:8080"`
 	FrontendURL        string   `env:"FRONTEND_URL"          envDefault:"http://localhost:3000"`
 	CORSAllowedOrigins []string `env:"CORS_ALLOWED_ORIGINS"  envDefault:"http://localhost:3000" envSeparator:","`
@@ -40,9 +40,11 @@ type Config struct {
 	LLMModel          string `env:"LLM_MODEL"`
 	AnthropicAPIKey   string `env:"ANTHROPIC_API_KEY"`
 	AnthropicBaseURL  string `env:"ANTHROPIC_BASE_URL"`
+	AnthropicModel    string `env:"ANTHROPIC_MODEL"`
 	OpenAIAPIKey      string `env:"OPENAI_API_KEY"`
 	OpenAIBaseURL     string `env:"OPENAI_BASE_URL"`
 	OpenAIAPIType     string `env:"OPENAI_API_TYPE"       envDefault:"chat"`
+	OpenAIModel       string `env:"OPENAI_MODEL"`
 	OpenRouterAPIKey  string `env:"OPENROUTER_API_KEY"`
 	OpenRouterBaseURL string `env:"OPENROUTER_BASE_URL"`
 	OpenRouterAppName string `env:"OPENROUTER_APP_NAME"   envDefault:"143"`
@@ -50,6 +52,7 @@ type Config struct {
 
 	// Gemini CLI
 	GeminiAPIKey string `env:"GEMINI_API_KEY"`
+	GeminiModel  string `env:"GEMINI_MODEL"`
 }
 
 // Load reads configuration from env files and environment variables.
@@ -95,26 +98,40 @@ func (c *Config) AgentEnv() map[string]map[string]string {
 	result := make(map[string]map[string]string)
 
 	// Claude Code needs ANTHROPIC_API_KEY.
+	// ANTHROPIC_MODEL selects the model (e.g. "opus", "sonnet", "claude-opus-4-6").
 	if c.AnthropicAPIKey != "" {
 		env := map[string]string{"ANTHROPIC_API_KEY": c.AnthropicAPIKey}
 		if c.AnthropicBaseURL != "" {
 			env["ANTHROPIC_BASE_URL"] = c.AnthropicBaseURL
 		}
+		if c.AnthropicModel != "" {
+			env["ANTHROPIC_MODEL"] = c.AnthropicModel
+		}
 		result["claude_code"] = env
 	}
 
 	// Codex needs OPENAI_API_KEY.
+	// OPENAI_MODEL is not natively supported by Codex CLI (it uses config.toml),
+	// but we pass it so the adapter can use it in the --model flag.
 	if c.OpenAIAPIKey != "" {
 		env := map[string]string{"OPENAI_API_KEY": c.OpenAIAPIKey}
 		if c.OpenAIBaseURL != "" {
 			env["OPENAI_BASE_URL"] = c.OpenAIBaseURL
 		}
+		if c.OpenAIModel != "" {
+			env["OPENAI_MODEL"] = c.OpenAIModel
+		}
 		result["codex"] = env
 	}
 
 	// Gemini CLI needs GEMINI_API_KEY.
+	// GEMINI_MODEL selects the model (e.g. "gemini-2.5-pro", "gemini-2.5-flash").
 	if c.GeminiAPIKey != "" {
-		result["gemini_cli"] = map[string]string{"GEMINI_API_KEY": c.GeminiAPIKey}
+		env := map[string]string{"GEMINI_API_KEY": c.GeminiAPIKey}
+		if c.GeminiModel != "" {
+			env["GEMINI_MODEL"] = c.GeminiModel
+		}
+		result["gemini_cli"] = env
 	}
 
 	return result

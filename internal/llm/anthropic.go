@@ -70,7 +70,7 @@ func (p *AnthropicProvider) Complete(ctx context.Context, model, systemPrompt, u
 	req.Header.Set("x-api-key", p.apiKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 
-	resp, err := p.client.Do(req)
+	resp, err := p.client.Do(req) // #nosec G704 -- URL is from provider config
 	if err != nil {
 		// Connection errors are retryable.
 		return "", fmt.Errorf("%w: %s", ErrServerError, err.Error())

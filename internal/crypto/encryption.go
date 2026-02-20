@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 
 	"golang.org/x/crypto/hkdf"
 )
@@ -68,7 +69,10 @@ func (s *Service) Encrypt(plaintext []byte) ([]byte, error) {
 
 	// Encode: [4-byte len(wrappedDEK)][wrappedDEK][ciphertext]
 	buf := make([]byte, 4+len(wrappedDEK)+len(ciphertext))
-	binary.BigEndian.PutUint32(buf[:4], uint32(len(wrappedDEK)))
+	if len(wrappedDEK) > math.MaxUint32 {
+		return nil, fmt.Errorf("wrapped DEK too large: %d bytes", len(wrappedDEK))
+	}
+	binary.BigEndian.PutUint32(buf[:4], uint32(len(wrappedDEK))) // #nosec G115 -- bounds checked above
 	copy(buf[4:4+len(wrappedDEK)], wrappedDEK)
 	copy(buf[4+len(wrappedDEK):], ciphertext)
 

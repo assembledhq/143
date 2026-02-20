@@ -163,8 +163,12 @@ func (w *Worker) failJob(ctx context.Context, jobID uuid.UUID, errMsg string) {
 }
 
 func (w *Worker) retryJob(ctx context.Context, jobID uuid.UUID, errMsg string, attempt int) {
-	// Exponential backoff: 2^attempt seconds
-	backoff := time.Duration(1<<uint(attempt)) * time.Second
+	// Exponential backoff: 2^attempt seconds, capped at ~17 minutes.
+	exp := attempt
+	if exp > 10 {
+		exp = 10
+	}
+	backoff := time.Duration(1<<uint(exp)) * time.Second
 	_, _ = w.db.Exec(ctx, `
 		UPDATE jobs SET status = 'pending', last_error = $1, run_at = now() + $2::interval, locked_by_node_id = NULL, locked_at = NULL, updated_at = now()
 		WHERE id = $3

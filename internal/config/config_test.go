@@ -74,8 +74,10 @@ func TestLoad_LLMConfig(t *testing.T) {
 func TestAgentEnv_ClaudeCodeAndCodex(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-prod")
 	t.Setenv("ANTHROPIC_BASE_URL", "https://custom.anthropic.com")
+	t.Setenv("ANTHROPIC_MODEL", "opus")
 	t.Setenv("OPENAI_API_KEY", "sk-openai-prod")
 	t.Setenv("OPENAI_BASE_URL", "https://custom.openai.com")
+	t.Setenv("OPENAI_MODEL", "gpt-5.3-codex")
 
 	cfg := Load()
 	env := cfg.AgentEnv()
@@ -84,11 +86,13 @@ func TestAgentEnv_ClaudeCodeAndCodex(t *testing.T) {
 	require.Contains(t, env, "claude_code")
 	require.Equal(t, "sk-ant-prod", env["claude_code"]["ANTHROPIC_API_KEY"])
 	require.Equal(t, "https://custom.anthropic.com", env["claude_code"]["ANTHROPIC_BASE_URL"])
+	require.Equal(t, "opus", env["claude_code"]["ANTHROPIC_MODEL"])
 
 	// Codex
 	require.Contains(t, env, "codex")
 	require.Equal(t, "sk-openai-prod", env["codex"]["OPENAI_API_KEY"])
 	require.Equal(t, "https://custom.openai.com", env["codex"]["OPENAI_BASE_URL"])
+	require.Equal(t, "gpt-5.3-codex", env["codex"]["OPENAI_MODEL"])
 }
 
 func TestAgentEnv_NoKeysConfigured(t *testing.T) {
@@ -108,19 +112,38 @@ func TestAgentEnv_GeminiCLI(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("OPENAI_API_KEY", "")
 	t.Setenv("GEMINI_API_KEY", "gemini-test-key")
+	t.Setenv("GEMINI_MODEL", "gemini-2.5-pro")
 
 	cfg := Load()
 	env := cfg.AgentEnv()
 
 	require.Contains(t, env, "gemini_cli")
 	require.Equal(t, "gemini-test-key", env["gemini_cli"]["GEMINI_API_KEY"])
+	require.Equal(t, "gemini-2.5-pro", env["gemini_cli"]["GEMINI_MODEL"])
 	require.NotContains(t, env, "claude_code")
 	require.NotContains(t, env, "codex")
+}
+
+func TestAgentEnv_ModelOmittedWhenEmpty(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+	t.Setenv("ANTHROPIC_MODEL", "")
+	t.Setenv("OPENAI_API_KEY", "sk-openai-test")
+	t.Setenv("OPENAI_MODEL", "")
+	t.Setenv("GEMINI_API_KEY", "gemini-test")
+	t.Setenv("GEMINI_MODEL", "")
+
+	cfg := Load()
+	env := cfg.AgentEnv()
+
+	require.NotContains(t, env["claude_code"], "ANTHROPIC_MODEL", "model should be omitted when empty")
+	require.NotContains(t, env["codex"], "OPENAI_MODEL", "model should be omitted when empty")
+	require.NotContains(t, env["gemini_cli"], "GEMINI_MODEL", "model should be omitted when empty")
 }
 
 func TestAgentEnv_OnlyAnthropicKey(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-only")
 	t.Setenv("ANTHROPIC_BASE_URL", "")
+	t.Setenv("ANTHROPIC_MODEL", "")
 	t.Setenv("OPENAI_API_KEY", "")
 
 	cfg := Load()
@@ -129,5 +152,6 @@ func TestAgentEnv_OnlyAnthropicKey(t *testing.T) {
 	require.Contains(t, env, "claude_code")
 	require.Equal(t, "sk-ant-only", env["claude_code"]["ANTHROPIC_API_KEY"])
 	require.NotContains(t, env["claude_code"], "ANTHROPIC_BASE_URL", "base URL should be omitted when empty")
+	require.NotContains(t, env["claude_code"], "ANTHROPIC_MODEL", "model should be omitted when empty")
 	require.NotContains(t, env, "codex")
 }

@@ -1,11 +1,12 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { ChevronRight } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -14,6 +15,42 @@ import { PageHeader } from "@/components/page-header";
 import { IntegrationsCard } from "@/components/integrations-card";
 import { INTEGRATIONS } from "@/lib/integrations";
 import type { Organization, OrgSettings, SingleResponse } from "@/lib/types";
+
+interface AgentEnvVar {
+  name: string;
+  label: string;
+  sensitive?: boolean;
+  placeholder?: string;
+}
+
+const AGENT_TYPES: { key: string; label: string; envVars: AgentEnvVar[] }[] = [
+  {
+    key: "claude_code",
+    label: "Claude Code",
+    envVars: [
+      { name: "ANTHROPIC_API_KEY", label: "API Key", sensitive: true },
+      { name: "ANTHROPIC_MODEL", label: "Model", placeholder: "e.g. claude-sonnet-4-5, opus" },
+      { name: "ANTHROPIC_BASE_URL", label: "Base URL", placeholder: "Custom API endpoint (optional)" },
+    ],
+  },
+  {
+    key: "gemini_cli",
+    label: "Gemini CLI",
+    envVars: [
+      { name: "GEMINI_API_KEY", label: "API Key", sensitive: true },
+      { name: "GEMINI_MODEL", label: "Model", placeholder: "e.g. gemini-2.5-pro, gemini-2.5-flash" },
+    ],
+  },
+  {
+    key: "codex",
+    label: "Codex",
+    envVars: [
+      { name: "OPENAI_API_KEY", label: "API Key", sensitive: true },
+      { name: "OPENAI_MODEL", label: "Model", placeholder: "e.g. codex-mini, o3" },
+      { name: "OPENAI_BASE_URL", label: "Base URL", placeholder: "Custom API endpoint (optional)" },
+    ],
+  },
+];
 
 const DEFAULT_SETTINGS: Required<OrgSettings> = {
   autonomy_level: "manual",
@@ -31,6 +68,7 @@ const DEFAULT_SETTINGS: Required<OrgSettings> = {
   },
   min_priority_threshold: 20,
   product_direction: "",
+  agent_config: {},
 };
 
 export default function SettingsPage() {
@@ -55,10 +93,17 @@ export default function SettingsPage() {
   const [recency, setRecency] = useState(String(DEFAULT_SETTINGS.priority_weights.recency));
   const [revenueRisk, setRevenueRisk] = useState(String(DEFAULT_SETTINGS.priority_weights.revenue_risk));
   const [minThreshold, setMinThreshold] = useState(String(DEFAULT_SETTINGS.min_priority_threshold));
+  const [agentConfig, setAgentConfig] = useState<Record<string, Record<string, string>>>({});
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "success" | "error">("idle");
 
-  useEffect(() => {
-    if (!settings?.data?.settings) return;
+  // Sync server data into form state during render (React-recommended
+  // pattern for adjusting state when external data changes, avoids the
+  // extra render cycle caused by setState-in-useEffect).
+  const [prevSettingsRef, setPrevSettingsRef] = useState<unknown>(undefined);
+  const settingsData = settings?.data?.settings;
+  if (settingsData && settingsData !== prevSettingsRef) {
+    setPrevSettingsRef(settingsData);
     const s = orgSettings;
     setAutonomyLevel(s.autonomy_level ?? DEFAULT_SETTINGS.autonomy_level);
     setAggressiveness(String(s.execution_aggressiveness ?? DEFAULT_SETTINGS.execution_aggressiveness));
@@ -71,7 +116,10 @@ export default function SettingsPage() {
     setRecency(String(s.priority_weights?.recency ?? DEFAULT_SETTINGS.priority_weights.recency));
     setRevenueRisk(String(s.priority_weights?.revenue_risk ?? DEFAULT_SETTINGS.priority_weights.revenue_risk));
     setMinThreshold(String(s.min_priority_threshold ?? DEFAULT_SETTINGS.min_priority_threshold));
-  }, [settings?.data?.settings]); // eslint-disable-line react-hooks/exhaustive-deps
+    const loadedConfig = s.agent_config ?? {};
+    setAgentConfig(loadedConfig);
+    if (Object.keys(loadedConfig).length > 0) setShowAdvanced(true);
+  }
 
   const mutation = useMutation({
     mutationFn: (data: Record<string, unknown>) => api.settings.update(data),
@@ -94,6 +142,18 @@ export default function SettingsPage() {
   const weightsValid = Math.abs(weightsSum - 1.0) < 0.01;
 
   function handleSave() {
+    // Strip empty strings from agent_config so we don't persist blank overrides.
+    const cleanedAgentConfig: Record<string, Record<string, string>> = {};
+    for (const [agentKey, vars] of Object.entries(agentConfig)) {
+      const filtered: Record<string, string> = {};
+      for (const [k, v] of Object.entries(vars)) {
+        if (v) filtered[k] = v;
+      }
+      if (Object.keys(filtered).length > 0) {
+        cleanedAgentConfig[agentKey] = filtered;
+      }
+    }
+
     const payload: Record<string, unknown> = {
       settings: {
         autonomy_level: autonomyLevel,
@@ -111,6 +171,7 @@ export default function SettingsPage() {
         },
         min_priority_threshold: parseInt(minThreshold, 10),
         product_direction: productDirection,
+        ...(Object.keys(cleanedAgentConfig).length > 0 && { agent_config: cleanedAgentConfig }),
       },
     };
     mutation.mutate(payload);
@@ -254,6 +315,56 @@ export default function SettingsPage() {
             </div>
           </CardContent>
         </Card>
+      </section>
+
+      <section className="space-y-3">
+        <button
+          type="button"
+          className="flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground hover:text-foreground transition-colors"
+          onClick={() => setShowAdvanced((v) => !v)}
+        >
+          <ChevronRight className={`h-3.5 w-3.5 transition-transform ${showAdvanced ? "rotate-90" : ""}`} />
+          Advanced: Agent Configuration
+        </button>
+        {showAdvanced && (
+          <>
+            <p className="text-xs text-muted-foreground">
+              Override server-level agent credentials and model selection per agent.
+              Leave fields blank to use server defaults.
+            </p>
+            {AGENT_TYPES.map((agent) => (
+              <Card key={agent.key}>
+                <CardContent>
+                  <div className="space-y-4">
+                    <h3 className="text-sm font-medium">{agent.label}</h3>
+                    {agent.envVars.map((envVar) => (
+                      <div key={envVar.name} className="space-y-1">
+                        <Label htmlFor={`${agent.key}-${envVar.name}`} className="text-xs text-muted-foreground">
+                          {envVar.label}
+                        </Label>
+                        <Input
+                          id={`${agent.key}-${envVar.name}`}
+                          type={envVar.sensitive ? "password" : "text"}
+                          placeholder={envVar.sensitive ? "••••••••" : (envVar.placeholder ?? "")}
+                          value={agentConfig[agent.key]?.[envVar.name] ?? ""}
+                          onChange={(e) => {
+                            setAgentConfig((prev) => ({
+                              ...prev,
+                              [agent.key]: {
+                                ...prev[agent.key],
+                                [envVar.name]: e.target.value,
+                              },
+                            }));
+                          }}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+          </>
+        )}
       </section>
 
       <section className="space-y-3">

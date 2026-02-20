@@ -84,7 +84,7 @@ func (s *Service) exchangeForInstallationToken(ctx context.Context, jwtToken str
 	req.Header.Set("Authorization", "Bearer "+jwtToken)
 	req.Header.Set("Accept", "application/vnd.github+json")
 
-	resp, err := s.httpClient.Do(req)
+	resp, err := s.httpClient.Do(req) // #nosec G704 -- URL is GitHub API endpoint from config
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("request installation token: %w", err)
 	}
