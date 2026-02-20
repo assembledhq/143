@@ -3,9 +3,12 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/feedback"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
@@ -389,4 +392,102 @@ func TestWorker_Register(t *testing.T) {
 	err := h(context.Background(), "test_job", nil)
 	require.NoError(t, err, "handler invocation should succeed")
 	require.True(t, called, "handler function should have been called")
+}
+
+type testFeedbackCommentStore struct {
+	getByIDFn              func(ctx context.Context, orgID, id uuid.UUID) (models.ReviewComment, error)
+	updateClassificationFn func(ctx context.Context, orgID, id uuid.UUID, filterStatus string, category *string, actionable, generalizable bool, generalizedRule, summary *string) error
+}
+
+func (m *testFeedbackCommentStore) Create(ctx context.Context, c *models.ReviewComment) error {
+	return nil
+}
+
+func (m *testFeedbackCommentStore) GetByID(ctx context.Context, orgID, id uuid.UUID) (models.ReviewComment, error) {
+	if m.getByIDFn != nil {
+		return m.getByIDFn(ctx, orgID, id)
+	}
+	return models.ReviewComment{}, nil
+}
+
+func (m *testFeedbackCommentStore) UpdateClassification(ctx context.Context, orgID, id uuid.UUID, filterStatus string, category *string, actionable, generalizable bool, generalizedRule, summary *string) error {
+	if m.updateClassificationFn != nil {
+		return m.updateClassificationFn(ctx, orgID, id, filterStatus, category, actionable, generalizable, generalizedRule, summary)
+	}
+	return nil
+}
+
+func (m *testFeedbackCommentStore) MarkApplied(ctx context.Context, orgID, id uuid.UUID) error {
+	return nil
+}
+
+func (m *testFeedbackCommentStore) ListActionableByPullRequest(ctx context.Context, orgID, prID uuid.UUID) ([]models.ReviewComment, error) {
+	return nil, nil
+}
+
+type testFeedbackPatternStore struct {
+	createCalls int
+}
+
+func (m *testFeedbackPatternStore) Create(ctx context.Context, p *models.ReviewPattern) error {
+	m.createCalls++
+	return nil
+}
+
+func (m *testFeedbackPatternStore) GetByID(ctx context.Context, orgID, id uuid.UUID) (models.ReviewPattern, error) {
+	return models.ReviewPattern{}, nil
+}
+
+func (m *testFeedbackPatternStore) FindMatchingRule(ctx context.Context, orgID uuid.UUID, repo, normalizedRule string) (models.ReviewPattern, error) {
+	return models.ReviewPattern{}, errors.New("not found")
+}
+
+func (m *testFeedbackPatternStore) IncrementOccurrence(ctx context.Context, orgID, patternID, commentID uuid.UUID) error {
+	return nil
+}
+
+func (m *testFeedbackPatternStore) ListActiveByRepo(ctx context.Context, orgID uuid.UUID, repo string) ([]models.ReviewPattern, error) {
+	return nil, nil
+}
+
+func (m *testFeedbackPatternStore) UpdatePattern(ctx context.Context, orgID, id uuid.UUID, rule *string, status *string) error {
+	return nil
+}
+
+type testFeedbackJobStore struct{}
+
+func (m *testFeedbackJobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
+	return uuid.New(), nil
+}
+
+func TestProcessReviewCommentHandler_SkipsPatternUpdateWhenCommentAlreadyProcessed(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	commentID := uuid.New()
+	rule := "Always validate required input fields"
+	category := "nit"
+
+	commentStore := &testFeedbackCommentStore{
+		getByIDFn: func(ctx context.Context, gotOrgID, gotCommentID uuid.UUID) (models.ReviewComment, error) {
+			return models.ReviewComment{
+				ID:              gotCommentID,
+				OrgID:           gotOrgID,
+				FilterStatus:    "accepted",
+				Generalizable:   true,
+				GeneralizedRule: &rule,
+				Category:        &category,
+			}, nil
+		},
+	}
+	patternStore := &testFeedbackPatternStore{}
+	feedbackService := feedback.NewService(commentStore, patternStore, &testFeedbackJobStore{}, nil, zerolog.Nop())
+
+	services := &Services{Feedback: feedbackService}
+	handler := newProcessReviewCommentHandler(services, zerolog.Nop())
+	payload := json.RawMessage(`{"comment_id":"` + commentID.String() + `","org_id":"` + orgID.String() + `","repo":"org/repo"}`)
+
+	err := handler(context.Background(), "process_review_comment", payload)
+	require.NoError(t, err, "process_review_comment handler should succeed for already processed comments")
+	require.Equal(t, 0, patternStore.createCalls, "process_review_comment should not update patterns when comment was already processed")
 }

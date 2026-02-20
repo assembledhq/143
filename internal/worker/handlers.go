@@ -429,13 +429,24 @@ func newProcessReviewCommentHandler(services *Services, logger zerolog.Logger) J
 			Str("org_id", orgID.String()).
 			Msg("processing review comment")
 
+		shouldUpdatePatterns := false
+		if input.Repo != "" {
+			// Only update learned patterns when this job is processing a pending comment.
+			// This prevents duplicate occurrence increments on retries/redeliveries.
+			currentComment, err := services.Feedback.GetProcessedComment(ctx, commentID, orgID)
+			if err != nil {
+				return fmt.Errorf("get review comment before processing: %w", err)
+			}
+			shouldUpdatePatterns = currentComment.FilterStatus == "pending"
+		}
+
 		if err := services.Feedback.ProcessComment(ctx, commentID, orgID); err != nil {
 			return fmt.Errorf("process review comment: %w", err)
 		}
 
 		// After processing, check if the comment is generalizable and update patterns.
 		// The repo is passed from the webhook handler.
-		if input.Repo != "" {
+		if shouldUpdatePatterns {
 			comment, err := services.Feedback.GetProcessedComment(ctx, commentID, orgID)
 			if err == nil && comment.Generalizable && comment.GeneralizedRule != nil {
 				category := "nit"

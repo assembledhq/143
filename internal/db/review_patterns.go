@@ -138,9 +138,15 @@ func (s *ReviewPatternStore) FindMatchingRule(ctx context.Context, orgID uuid.UU
 // and inserts a new one with updated values. Wrapped in a transaction to ensure
 // the old row is never deactivated without a replacement being inserted.
 func (s *ReviewPatternStore) UpdatePattern(ctx context.Context, orgID, id uuid.UUID, rule *string, status *string) error {
+	_, err := s.UpdatePatternAndGet(ctx, orgID, id, rule, status)
+	return err
+}
+
+// UpdatePatternAndGet performs insert-only versioning and returns the newly inserted active row.
+func (s *ReviewPatternStore) UpdatePatternAndGet(ctx context.Context, orgID, id uuid.UUID, rule *string, status *string) (models.ReviewPattern, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin transaction: %w", err)
+		return models.ReviewPattern{}, fmt.Errorf("begin transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
@@ -160,7 +166,7 @@ func (s *ReviewPatternStore) UpdatePattern(ctx context.Context, orgID, id uuid.U
 		&existing.ManuallyCurated,
 	)
 	if err != nil {
-		return fmt.Errorf("inactivate review pattern: %w", err)
+		return models.ReviewPattern{}, fmt.Errorf("inactivate review pattern: %w", err)
 	}
 
 	// 2. Apply updates.
@@ -177,9 +183,10 @@ func (s *ReviewPatternStore) UpdatePattern(ctx context.Context, orgID, id uuid.U
 	// 3. Insert new active row.
 	insertQuery := `
 		INSERT INTO review_patterns (org_id, repo, rule, category, source_comment_ids, occurrence_count, status, manually_curated, active)
-		VALUES (@org_id, @repo, @rule, @category, @source_comment_ids, @occurrence_count, @status, @manually_curated, true)`
+		VALUES (@org_id, @repo, @rule, @category, @source_comment_ids, @occurrence_count, @status, @manually_curated, true)
+		RETURNING id, org_id, repo, rule, category, source_comment_ids, occurrence_count, status, manually_curated, active, created_at`
 
-	_, err = tx.Exec(ctx, insertQuery, pgx.NamedArgs{
+	rows, err := tx.Query(ctx, insertQuery, pgx.NamedArgs{
 		"org_id":             existing.OrgID,
 		"repo":               existing.Repo,
 		"rule":               newRule,
@@ -190,10 +197,19 @@ func (s *ReviewPatternStore) UpdatePattern(ctx context.Context, orgID, id uuid.U
 		"manually_curated":   existing.ManuallyCurated,
 	})
 	if err != nil {
-		return fmt.Errorf("insert new review pattern version: %w", err)
+		return models.ReviewPattern{}, fmt.Errorf("insert new review pattern version: %w", err)
 	}
 
-	return tx.Commit(ctx)
+	updated, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.ReviewPattern])
+	if err != nil {
+		return models.ReviewPattern{}, fmt.Errorf("scan new review pattern version: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return models.ReviewPattern{}, fmt.Errorf("commit transaction: %w", err)
+	}
+
+	return updated, nil
 }
 
 // IncrementOccurrence deactivates the current pattern and inserts a new active row
