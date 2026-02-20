@@ -85,6 +85,33 @@ func (c *Config) LLMConfig() llm.Config {
 	}
 }
 
+// AgentEnv returns a map from agent type to the environment variables that
+// should be injected into sandbox containers for that agent. Only includes
+// entries for agents whose required credentials are configured.
+func (c *Config) AgentEnv() map[string]map[string]string {
+	result := make(map[string]map[string]string)
+
+	// Claude Code needs ANTHROPIC_API_KEY.
+	if c.AnthropicAPIKey != "" {
+		env := map[string]string{"ANTHROPIC_API_KEY": c.AnthropicAPIKey}
+		if c.AnthropicBaseURL != "" {
+			env["ANTHROPIC_BASE_URL"] = c.AnthropicBaseURL
+		}
+		result["claude_code"] = env
+	}
+
+	// Codex needs OPENAI_API_KEY.
+	if c.OpenAIAPIKey != "" {
+		env := map[string]string{"OPENAI_API_KEY": c.OpenAIAPIKey}
+		if c.OpenAIBaseURL != "" {
+			env["OPENAI_BASE_URL"] = c.OpenAIBaseURL
+		}
+		result["codex"] = env
+	}
+
+	return result
+}
+
 // LogStatus logs which features are configured and which are missing.
 // Call this at startup so contributors immediately see what's working.
 func (c *Config) LogStatus(logger zerolog.Logger) {

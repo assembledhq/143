@@ -27,17 +27,18 @@ const (
 
 // PRService handles GitHub PR creation and webhook-based tracking.
 type PRService struct {
-	tokenProvider *Service
-	pullRequests  *db.PullRequestStore
-	agentRuns     *db.AgentRunStore
-	issues        *db.IssueStore
-	deploys       *db.DeployStore
-	validations   *db.ValidationStore
-	repos         *db.RepositoryStore
-	jobs          *db.JobStore
-	logger        zerolog.Logger
-	baseURL       string
-	httpClient    *http.Client
+	tokenProvider  *Service
+	pullRequests   *db.PullRequestStore
+	agentRuns      *db.AgentRunStore
+	issues         *db.IssueStore
+	deploys        *db.DeployStore
+	validations    *db.ValidationStore
+	repos          *db.RepositoryStore
+	jobs           *db.JobStore
+	reviewComments *db.ReviewCommentStore
+	logger         zerolog.Logger
+	baseURL        string
+	httpClient     *http.Client
 }
 
 func NewPRService(
@@ -64,6 +65,11 @@ func NewPRService(
 		baseURL:       defaultGitHubAPI,
 		httpClient:    &http.Client{Timeout: 30 * time.Second},
 	}
+}
+
+// SetReviewCommentStore sets the review comment store for the feedback loop.
+func (s *PRService) SetReviewCommentStore(store *db.ReviewCommentStore) {
+	s.reviewComments = store
 }
 
 // SetBaseURL overrides the GitHub API base URL (for testing).
@@ -286,7 +292,12 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 type PullRequestReviewEvent struct {
 	Action string `json:"action"`
 	Review struct {
+		ID    int64  `json:"id"`
 		State string `json:"state"`
+		Body  string `json:"body"`
+		User  struct {
+			Login string `json:"login"`
+		} `json:"user"`
 	} `json:"review"`
 	PullRequest struct {
 		Number int `json:"number"`
@@ -318,7 +329,227 @@ func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event Pull
 		return nil
 	}
 
-	return s.pullRequests.UpdateReviewStatus(ctx, pr.OrgID, pr.ID, reviewStatus)
+	if err := s.pullRequests.UpdateReviewStatus(ctx, pr.OrgID, pr.ID, reviewStatus); err != nil {
+		return fmt.Errorf("update review status: %w", err)
+	}
+
+	// If changes were requested and we have review comments from the review body,
+	// enqueue a processing job. Individual inline comments are captured by
+	// HandlePullRequestReviewCommentEvent.
+	if reviewStatus == "changes_requested" && event.Review.Body != "" {
+		if s.reviewComments != nil {
+			comment := &models.ReviewComment{
+				PullRequestID:   pr.ID,
+				OrgID:           pr.OrgID,
+				GitHubCommentID: event.Review.ID,
+				Reviewer:        event.Review.User.Login,
+				Body:            event.Review.Body,
+				FilterStatus:    "pending",
+			}
+			if err := s.reviewComments.Create(ctx, comment); err != nil {
+				s.logger.Warn().Err(err).Str("pr_id", pr.ID.String()).Msg("failed to create review comment record")
+			} else {
+				s.enqueueProcessReviewComment(ctx, pr.OrgID, comment.ID, pr.GitHubRepo)
+			}
+		}
+	}
+
+	return nil
+}
+
+// PullRequestReviewCommentEvent represents a GitHub pull_request_review_comment webhook event.
+type PullRequestReviewCommentEvent struct {
+	Action  string `json:"action"`
+	Comment struct {
+		ID       int64  `json:"id"`
+		Body     string `json:"body"`
+		Path     string `json:"path"`
+		Position *int   `json:"position"`
+		User     struct {
+			Login string `json:"login"`
+		} `json:"user"`
+	} `json:"comment"`
+	PullRequest struct {
+		Number int `json:"number"`
+	} `json:"pull_request"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+}
+
+// HandlePullRequestReviewCommentEvent processes pull_request_review_comment webhook events.
+// These are inline comments on specific diff lines.
+func (s *PRService) HandlePullRequestReviewCommentEvent(ctx context.Context, event PullRequestReviewCommentEvent) error {
+	if event.Action != "created" {
+		return nil
+	}
+
+	pr, err := s.pullRequests.GetByRepoAndNumber(ctx, event.Repository.FullName, event.PullRequest.Number)
+	if err != nil {
+		// Not a 143-generated PR — ignore.
+		return nil
+	}
+
+	if s.reviewComments == nil {
+		return nil
+	}
+
+	comment := &models.ReviewComment{
+		PullRequestID:   pr.ID,
+		OrgID:           pr.OrgID,
+		GitHubCommentID: event.Comment.ID,
+		Reviewer:        event.Comment.User.Login,
+		Body:            event.Comment.Body,
+		FilterStatus:    "pending",
+	}
+	if event.Comment.Path != "" {
+		comment.DiffPath = &event.Comment.Path
+	}
+	if event.Comment.Position != nil {
+		comment.DiffPosition = event.Comment.Position
+	}
+
+	if err := s.reviewComments.Create(ctx, comment); err != nil {
+		s.logger.Warn().Err(err).Str("pr_id", pr.ID.String()).Msg("failed to create review comment record")
+		return nil
+	}
+
+	s.enqueueProcessReviewComment(ctx, pr.OrgID, comment.ID, pr.GitHubRepo)
+	return nil
+}
+
+func (s *PRService) enqueueProcessReviewComment(ctx context.Context, orgID uuid.UUID, commentID uuid.UUID, repo string) {
+	dedupeKey := fmt.Sprintf("process_review_comment:%s", commentID)
+	if _, err := s.jobs.Enqueue(ctx, orgID, "feedback", "process_review_comment", map[string]string{
+		"comment_id": commentID.String(),
+		"org_id":     orgID.String(),
+		"repo":       repo,
+	}, 3, &dedupeKey); err != nil {
+		s.logger.Warn().Err(err).Str("comment_id", commentID.String()).Msg("failed to enqueue process_review_comment job")
+	}
+}
+
+// PushRevision pushes additional commits to an existing PR branch for a revision run.
+func (s *PRService) PushRevision(ctx context.Context, pr *models.PullRequest, run *models.AgentRun) error {
+	if run.Diff == nil || *run.Diff == "" {
+		return fmt.Errorf("revision run %s has no diff", run.ID)
+	}
+
+	// Look up the repo to get installation ID.
+	issue, err := s.issues.GetByID(ctx, run.OrgID, run.IssueID)
+	if err != nil {
+		return fmt.Errorf("get issue: %w", err)
+	}
+	if issue.RepositoryID == nil {
+		return fmt.Errorf("issue %s has no repository", issue.ID)
+	}
+	repo, err := s.repos.GetByID(ctx, run.OrgID, *issue.RepositoryID)
+	if err != nil {
+		return fmt.Errorf("get repository: %w", err)
+	}
+
+	token, err := s.tokenProvider.GetInstallationToken(ctx, repo.InstallationID)
+	if err != nil {
+		return fmt.Errorf("get installation token: %w", err)
+	}
+
+	owner, repoName := splitRepo(repo.FullName)
+
+	// 1. Get current HEAD of the PR branch.
+	branchRef := fmt.Sprintf("refs/heads/%s", extractBranch(pr.GitHubPRURL, pr.Title))
+	// We need to find the branch name. Since we don't store it, derive it from the original run.
+	// For now, use the GitHub API to get the PR's head branch.
+	headSHA, headBranch, err := s.getPRHead(ctx, token, owner, repoName, pr.GitHubPRNumber)
+	if err != nil {
+		return fmt.Errorf("get PR head: %w", err)
+	}
+	_ = branchRef // use headBranch instead
+
+	// 2. Parse diff and create blobs/tree/commit.
+	files := parseDiff(*run.Diff)
+	if len(files) == 0 {
+		return fmt.Errorf("revision diff produced no file changes")
+	}
+
+	treeEntries := make([]treeEntry, 0, len(files))
+	for _, f := range files {
+		if f.Deleted {
+			treeEntries = append(treeEntries, treeEntry{
+				Path: f.Path, Mode: "100644", Type: "blob", SHA: nil,
+			})
+			continue
+		}
+		blobSHA, err := s.createBlob(ctx, token, owner, repoName, f.Content)
+		if err != nil {
+			return fmt.Errorf("create blob for %s: %w", f.Path, err)
+		}
+		treeEntries = append(treeEntries, treeEntry{
+			Path: f.Path, Mode: "100644", Type: "blob", SHA: &blobSHA,
+		})
+	}
+
+	treeSHA, err := s.createTree(ctx, token, owner, repoName, headSHA, treeEntries)
+	if err != nil {
+		return fmt.Errorf("create tree: %w", err)
+	}
+
+	commitMsg := fmt.Sprintf("address review feedback\n\nRevision of agent run %s", run.ID)
+	if run.ParentRunID != nil {
+		commitMsg = fmt.Sprintf("address review feedback\n\nRevision of agent run %s (parent: %s)", run.ID, run.ParentRunID)
+	}
+
+	commitSHA, err := s.createCommit(ctx, token, owner, repoName, commitMsg, treeSHA, headSHA)
+	if err != nil {
+		return fmt.Errorf("create commit: %w", err)
+	}
+
+	// 3. Update branch ref.
+	if err := s.updateRef(ctx, token, owner, repoName, "refs/heads/"+headBranch, commitSHA); err != nil {
+		return fmt.Errorf("update branch ref: %w", err)
+	}
+
+	// 4. Post a comment summarizing the revision.
+	summaryBody := "## Revision Applied\n\nThis commit addresses reviewer feedback from the previous review.\n\n"
+	if run.ResultSummary != nil {
+		summaryBody += *run.ResultSummary
+	}
+	summaryBody += fmt.Sprintf("\n\n*Revision run: %s*", run.ID)
+
+	s.postComment(ctx, token, owner, repoName, pr.GitHubPRNumber, summaryBody)
+
+	return nil
+}
+
+func (s *PRService) getPRHead(ctx context.Context, token, owner, repo string, prNumber int) (sha, branch string, err error) {
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, prNumber)
+	body, err := s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
+	if err != nil {
+		return "", "", err
+	}
+	var result struct {
+		Head struct {
+			SHA string `json:"sha"`
+			Ref string `json:"ref"`
+		} `json:"head"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", "", err
+	}
+	return result.Head.SHA, result.Head.Ref, nil
+}
+
+func (s *PRService) postComment(ctx context.Context, token, owner, repo string, prNumber int, body string) {
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments", owner, repo, prNumber)
+	if _, err := s.doGitHubRequest(ctx, token, http.MethodPost, path, map[string]string{
+		"body": body,
+	}); err != nil {
+		s.logger.Warn().Err(err).Int("pr_number", prNumber).Msg("failed to post PR comment")
+	}
+}
+
+// extractBranch is a fallback for getting a branch name — not used if getPRHead works.
+func extractBranch(_, _ string) string {
+	return ""
 }
 
 // --- GitHub API helpers ---

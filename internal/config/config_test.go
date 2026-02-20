@@ -70,3 +70,48 @@ func TestLoad_LLMConfig(t *testing.T) {
 	require.Equal(t, "sk-or-test", llmCfg.OpenRouterAPIKey)
 	require.Equal(t, "chat", llmCfg.OpenAIAPIType, "OpenAI API type should default to chat")
 }
+
+func TestAgentEnv_ClaudeCodeAndCodex(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-prod")
+	t.Setenv("ANTHROPIC_BASE_URL", "https://custom.anthropic.com")
+	t.Setenv("OPENAI_API_KEY", "sk-openai-prod")
+	t.Setenv("OPENAI_BASE_URL", "https://custom.openai.com")
+
+	cfg := Load()
+	env := cfg.AgentEnv()
+
+	// Claude Code
+	require.Contains(t, env, "claude_code")
+	require.Equal(t, "sk-ant-prod", env["claude_code"]["ANTHROPIC_API_KEY"])
+	require.Equal(t, "https://custom.anthropic.com", env["claude_code"]["ANTHROPIC_BASE_URL"])
+
+	// Codex
+	require.Contains(t, env, "codex")
+	require.Equal(t, "sk-openai-prod", env["codex"]["OPENAI_API_KEY"])
+	require.Equal(t, "https://custom.openai.com", env["codex"]["OPENAI_BASE_URL"])
+}
+
+func TestAgentEnv_NoKeysConfigured(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+
+	cfg := Load()
+	env := cfg.AgentEnv()
+
+	require.NotContains(t, env, "claude_code", "claude_code should not be present without ANTHROPIC_API_KEY")
+	require.NotContains(t, env, "codex", "codex should not be present without OPENAI_API_KEY")
+}
+
+func TestAgentEnv_OnlyAnthropicKey(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-only")
+	t.Setenv("ANTHROPIC_BASE_URL", "")
+	t.Setenv("OPENAI_API_KEY", "")
+
+	cfg := Load()
+	env := cfg.AgentEnv()
+
+	require.Contains(t, env, "claude_code")
+	require.Equal(t, "sk-ant-only", env["claude_code"]["ANTHROPIC_API_KEY"])
+	require.NotContains(t, env["claude_code"], "ANTHROPIC_BASE_URL", "base URL should be omitted when empty")
+	require.NotContains(t, env, "codex")
+}

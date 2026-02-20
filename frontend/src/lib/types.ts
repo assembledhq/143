@@ -168,6 +168,39 @@ export interface PullRequest {
   updated_at: string;
 }
 
+export interface ReviewComment {
+  id: string;
+  pull_request_id: string;
+  org_id: string;
+  github_comment_id: number;
+  reviewer: string;
+  body: string;
+  diff_path?: string;
+  diff_position?: number;
+  filter_status: string;
+  category?: string;
+  actionable: boolean;
+  generalizable: boolean;
+  generalized_rule?: string;
+  summary?: string;
+  applied: boolean;
+  created_at: string;
+}
+
+export interface ReviewPattern {
+  id: string;
+  org_id: string;
+  repo: string;
+  rule: string;
+  category: string;
+  source_comment_ids: string[];
+  occurrence_count: number;
+  status: string;
+  manually_curated: boolean;
+  active: boolean;
+  created_at: string;
+}
+
 export interface OrgSettings {
   autonomy_level?: 'manual' | 'auto_simple' | 'auto_all';
   execution_aggressiveness?: number;

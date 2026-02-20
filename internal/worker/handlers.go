@@ -13,6 +13,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
+	"github.com/assembledhq/143/internal/services/feedback"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/prioritization"
@@ -31,6 +32,10 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, logger zero
 		w.Register("validate", newValidateHandler(stores, services, logger))
 		w.Register("open_pr", newOpenPRHandler(stores, services, logger))
 		w.Register("analyze_failure", newAnalyzeFailureHandler(stores, services, logger))
+	}
+	if services != nil && services.Feedback != nil {
+		w.Register("process_review_comment", newProcessReviewCommentHandler(services, logger))
+		w.Register("update_review_patterns", newUpdateReviewPatternsHandler(services, logger))
 	}
 }
 
@@ -56,7 +61,7 @@ type Stores struct {
 	ComplexityEstimates *db.ComplexityEstimateStore
 }
 
-// Services holds the service dependencies needed by Phase 3 job handlers.
+// Services holds the service dependencies needed by job handlers.
 type Services struct {
 	Orchestrator    *agent.Orchestrator
 	Validation      *validation.Service
@@ -64,6 +69,7 @@ type Services struct {
 	Failure         *agent.FailureService
 	SandboxProvider agent.SandboxProvider
 	Prioritization  *prioritization.Service
+	Feedback        *feedback.Service
 }
 
 // ingest_webhook handler processes a webhook delivery asynchronously.
@@ -394,6 +400,88 @@ func newAnalyzeFailureHandler(stores *Stores, services *Services, logger zerolog
 		}
 
 		return services.Failure.UpdateRunWithFailure(ctx, orgID, runID, summary)
+	}
+}
+
+// process_review_comment handler runs the feedback processing pipeline on a single comment.
+func newProcessReviewCommentHandler(services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			CommentID string `json:"comment_id"`
+			OrgID     string `json:"org_id"`
+			Repo      string `json:"repo"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal process_review_comment payload: %w", err)
+		}
+
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		commentID, err := uuid.Parse(input.CommentID)
+		if err != nil {
+			return fmt.Errorf("parse comment ID: %w", err)
+		}
+
+		logger.Info().
+			Str("comment_id", commentID.String()).
+			Str("org_id", orgID.String()).
+			Msg("processing review comment")
+
+		if err := services.Feedback.ProcessComment(ctx, commentID, orgID); err != nil {
+			return fmt.Errorf("process review comment: %w", err)
+		}
+
+		// After processing, check if the comment is generalizable and update patterns.
+		// The repo is passed from the webhook handler.
+		if input.Repo != "" {
+			comment, err := services.Feedback.GetProcessedComment(ctx, commentID, orgID)
+			if err == nil && comment.Generalizable && comment.GeneralizedRule != nil {
+				category := "nit"
+				if comment.Category != nil {
+					category = *comment.Category
+				}
+				if err := services.Feedback.UpdatePatterns(ctx, orgID, commentID, input.Repo, *comment.GeneralizedRule, category); err != nil {
+					logger.Warn().Err(err).Str("comment_id", commentID.String()).Msg("failed to update review patterns")
+				}
+			}
+		}
+
+		return nil
+	}
+}
+
+// update_review_patterns handler updates patterns for a classified comment.
+func newUpdateReviewPatternsHandler(services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			CommentID string `json:"comment_id"`
+			OrgID     string `json:"org_id"`
+			Repo      string `json:"repo"`
+			Rule      string `json:"rule"`
+			Category  string `json:"category"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal update_review_patterns payload: %w", err)
+		}
+
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		commentID, err := uuid.Parse(input.CommentID)
+		if err != nil {
+			return fmt.Errorf("parse comment ID: %w", err)
+		}
+
+		logger.Info().
+			Str("comment_id", commentID.String()).
+			Str("org_id", orgID.String()).
+			Str("repo", input.Repo).
+			Msg("updating review patterns")
+
+		return services.Feedback.UpdatePatterns(ctx, orgID, commentID, input.Repo, input.Rule, input.Category)
 	}
 }
 

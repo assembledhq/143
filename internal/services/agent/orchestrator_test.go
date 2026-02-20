@@ -640,6 +640,91 @@ func TestRunAgent_ExactConfidenceThreshold(t *testing.T) {
 	require.Contains(t, d.jobs.getEnqueued(), "validate")
 }
 
+func TestRunAgent_AgentEnvInjected(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+
+	// Track the SandboxConfig passed to Create.
+	var capturedCfg agent.SandboxConfig
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		capturedCfg = cfg
+		return &agent.Sandbox{ID: "env-sandbox", Provider: "mock", WorkDir: "/workspace"}, nil
+	}
+
+	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
+		Provider:          d.provider,
+		Adapters:          map[string]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		AgentRuns:         d.agentRuns,
+		AgentRunLogs:      d.logs,
+		AgentRunQuestions: d.questions,
+		Issues:            d.issues,
+		Repositories:      d.repos,
+		Jobs:              d.jobs,
+		GitHub:            d.github,
+		Logger:            zerolog.Nop(),
+		MaxConcurrent:     3,
+		AgentEnv: map[string]map[string]string{
+			"claude_code": {
+				"ANTHROPIC_API_KEY": "sk-ant-test-key",
+			},
+		},
+	})
+
+	err := orch.RunAgent(context.Background(), run)
+	require.NoError(t, err)
+
+	// Verify the sandbox was created with the correct env vars.
+	require.NotNil(t, capturedCfg.Env, "sandbox config should have env vars")
+	require.Equal(t, "sk-ant-test-key", capturedCfg.Env["ANTHROPIC_API_KEY"])
+}
+
+func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+
+	var capturedCfg agent.SandboxConfig
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		capturedCfg = cfg
+		return &agent.Sandbox{ID: "no-env-sandbox", Provider: "mock", WorkDir: "/workspace"}, nil
+	}
+
+	// AgentEnv only has "codex" configured, not "claude_code".
+	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
+		Provider:          d.provider,
+		Adapters:          map[string]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		AgentRuns:         d.agentRuns,
+		AgentRunLogs:      d.logs,
+		AgentRunQuestions: d.questions,
+		Issues:            d.issues,
+		Repositories:      d.repos,
+		Jobs:              d.jobs,
+		GitHub:            d.github,
+		Logger:            zerolog.Nop(),
+		MaxConcurrent:     3,
+		AgentEnv: map[string]map[string]string{
+			"codex": {
+				"OPENAI_API_KEY": "sk-openai-test",
+			},
+		},
+	})
+
+	err := orch.RunAgent(context.Background(), run)
+	require.NoError(t, err)
+
+	// Sandbox should have no env vars since "claude_code" isn't in AgentEnv.
+	require.Nil(t, capturedCfg.Env, "sandbox config should have no env vars for unconfigured agent type")
+}
+
 func TestRunAgent_IssueWithoutRepository(t *testing.T) {
 	t.Parallel()
 
