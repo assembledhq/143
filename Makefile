@@ -1,6 +1,6 @@
 .PHONY: dev setup test test-coverage migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap secrets-setup secrets-encrypt secrets-decrypt secrets-edit
 
-GOLANGCI_LINT_VERSION ?= v1.64.8
+GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
 GO_TOOLCHAIN_VERSION := $(shell go env GOVERSION)
 

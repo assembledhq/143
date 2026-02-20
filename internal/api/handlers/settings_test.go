@@ -82,6 +82,22 @@ func TestSettingsHandler_Get(t *testing.T) {
 	}
 }
 
+func TestSettingsHandler_GetAgentDefaults(t *testing.T) {
+	t.Parallel()
+
+	defaults := map[string]map[string]string{
+		"claude_code": {"ANTHROPIC_API_KEY": "sk-a••••test"},
+	}
+	handler := NewSettingsHandler(nil, defaults)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/agent-defaults", nil)
+	w := httptest.NewRecorder()
+
+	handler.GetAgentDefaults(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "should return 200 OK")
+	require.Contains(t, w.Body.String(), "claude_code", "response should contain agent type")
+}
+
 func TestSettingsHandler_Update(t *testing.T) {
 	t.Parallel()
 
