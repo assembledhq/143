@@ -92,7 +92,7 @@ func (p *OpenRouterProvider) Complete(ctx context.Context, model, systemPrompt, 
 		req.Header.Set("X-Title", p.appName)
 	}
 
-	resp, err := p.client.Do(req)
+	resp, err := p.client.Do(req) // #nosec G704 -- URL is from provider config
 	if err != nil {
 		return "", fmt.Errorf("%w: %s", ErrServerError, err.Error())
 	}

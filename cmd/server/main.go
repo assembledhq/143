@@ -177,6 +177,7 @@ func buildServices(
 		AgentRunQuestions: agentRunQuestionStore,
 		Issues:            issueStore,
 		Repositories:      repoStore,
+		Orgs:              orgStore,
 		Jobs:              jobStore,
 		GitHub:            ghSvc,
 		Logger:            logger,

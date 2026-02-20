@@ -12,7 +12,7 @@ import (
 func main() {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		dbURL = "postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable"
+		dbURL = "postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable" // #nosec G101 -- dev-only default, not a credential
 	}
 
 	if len(os.Args) < 2 {
@@ -41,7 +41,7 @@ func main() {
 		}
 		fmt.Println("Migrations rolled back successfully.")
 	default:
-		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1]) // #nosec G705 -- writing to stderr, not HTTP response
 		os.Exit(1)
 	}
 }

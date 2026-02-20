@@ -513,7 +513,7 @@ func TestReviewCommentStore_MultiTenancy(t *testing.T) {
 			tt.setupMock(mock)
 
 			orgID := uuid.New()
-			err = tt.execute(store, orgID)
+			_ = tt.execute(store, orgID)
 			// The key assertion: the mock expectation includes org_id in the query regex.
 			// If the store method does not filter by org_id, the expectation will not match
 			// and ExpectationsWereMet will fail.

@@ -42,6 +42,11 @@ type AgentRunQuestionStore interface {
 	Create(ctx context.Context, q *models.AgentRunQuestion) error
 }
 
+// OrgStore defines the organization read operations needed for org-level config.
+type OrgStore interface {
+	GetByID(ctx context.Context, orgID uuid.UUID) (models.Organization, error)
+}
+
 // IssueStore defines the issue read operations.
 type IssueStore interface {
 	GetByID(ctx context.Context, orgID, issueID uuid.UUID) (models.Issue, error)
@@ -67,6 +72,7 @@ type Orchestrator struct {
 	agentRunQuestions AgentRunQuestionStore
 	issues            IssueStore
 	repositories      RepositoryStore
+	orgs              OrgStore
 	jobs              JobStore
 	github            GitHubTokenProvider
 	logger            zerolog.Logger
@@ -83,15 +89,15 @@ type OrchestratorConfig struct {
 	AgentRunQuestions AgentRunQuestionStore
 	Issues            IssueStore
 	Repositories      RepositoryStore
+	Orgs              OrgStore
 	Jobs              JobStore
 	GitHub            GitHubTokenProvider
 	Logger            zerolog.Logger
 	MaxConcurrent     int
 
 	// AgentEnv maps agent type names to the environment variables that should
-	// be injected into their sandbox containers. For example:
-	//   "claude_code" -> {"ANTHROPIC_API_KEY": "sk-ant-..."}
-	//   "codex"       -> {"OPENAI_API_KEY": "sk-..."}
+	// be injected into their sandbox containers. These are server-level defaults
+	// that can be overridden by org-level agent_config in org settings.
 	AgentEnv map[string]map[string]string
 }
 
@@ -115,6 +121,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		agentRunQuestions: cfg.AgentRunQuestions,
 		issues:            cfg.Issues,
 		repositories:      cfg.Repositories,
+		orgs:              cfg.Orgs,
 		jobs:              cfg.Jobs,
 		github:            cfg.GitHub,
 		logger:            cfg.Logger,
@@ -198,10 +205,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error
 	}
 
 	// 7. Create sandbox with agent-specific env vars (API keys).
+	// Start with server-level defaults, then overlay org-level overrides.
 	sandboxCfg := DefaultSandboxConfig()
-	if envVars, ok := o.agentEnv[run.AgentType]; ok {
-		sandboxCfg.Env = envVars
-	}
+	sandboxCfg.Env = o.resolveAgentEnv(ctx, run.OrgID, run.AgentType)
 	sandbox, err := o.provider.Create(ctx, sandboxCfg)
 	if err != nil {
 		o.failRun(ctx, run, fmt.Sprintf("create sandbox: %s", err))
@@ -381,6 +387,39 @@ func (o *Orchestrator) enqueueJob(ctx context.Context, orgID uuid.UUID, queue, j
 			Str("job_type", jobType).
 			Msg("failed to enqueue follow-up job")
 	}
+}
+
+// resolveAgentEnv merges server-level and org-level env vars for the given agent type.
+// Org-level values override server-level defaults.
+func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, agentType string) map[string]string {
+	merged := make(map[string]string)
+
+	// Start with server-level defaults.
+	if base, ok := o.agentEnv[agentType]; ok {
+		for k, v := range base {
+			merged[k] = v
+		}
+	}
+
+	// Overlay org-level overrides from settings.
+	if o.orgs != nil {
+		org, err := o.orgs.GetByID(ctx, orgID)
+		if err == nil {
+			orgSettings := models.ParseOrgSettings(org.Settings)
+			if orgOverrides, ok := orgSettings.AgentConfig[agentType]; ok {
+				for k, v := range orgOverrides {
+					if v != "" {
+						merged[k] = v
+					}
+				}
+			}
+		}
+	}
+
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
 }
 
 func strPtr(s string) *string {

@@ -217,6 +217,7 @@ export interface OrgSettings {
   };
   min_priority_threshold?: number;
   product_direction?: string;
+  agent_config?: Record<string, Record<string, string>>;
 }
 
 export interface ListResponse<T> {
