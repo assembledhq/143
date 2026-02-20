@@ -192,7 +192,7 @@ func syncSentryIntegration(
 ) error {
 	var config struct {
 		BaseURL     string `json:"base_url"`
-		AuthToken   string `json:"auth_token"`
+		AuthToken   string `json:"auth_token"` // #nosec G117 -- JSON config field
 		ProjectSlug string `json:"project_slug"`
 	}
 	if err := json.Unmarshal(integ.Config, &config); err != nil {

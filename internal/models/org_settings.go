@@ -2,6 +2,11 @@ package models
 
 import "encoding/json"
 
+// AgentEnvConfig holds per-agent environment variable overrides.
+// Keys are agent type names (e.g. "claude_code", "gemini_cli", "codex"),
+// values are maps of env var name → value.
+type AgentEnvConfig map[string]map[string]string
+
 // OrgSettings is the strongly-typed representation of organizations.settings JSONB.
 type OrgSettings struct {
 	AutonomyLevel        string               `json:"autonomy_level"`
@@ -12,6 +17,7 @@ type OrgSettings struct {
 	MinPriorityThreshold float64              `json:"min_priority_threshold"`
 	ProductDirection     string               `json:"product_direction"`
 	LLMModel             string               `json:"llm_model"`
+	AgentConfig          AgentEnvConfig       `json:"agent_config,omitempty"`
 }
 
 // ConfidenceThresholds controls when to auto-proceed vs request human review.

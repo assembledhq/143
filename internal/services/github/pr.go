@@ -565,7 +565,7 @@ func (s *PRService) doGitHubRequest(ctx context.Context, token, method, path str
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := s.httpClient.Do(req)
+	resp, err := s.httpClient.Do(req) // #nosec G704 -- URL is GitHub API endpoint from config
 	if err != nil {
 		return nil, err
 	}

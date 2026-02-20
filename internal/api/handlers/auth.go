@@ -61,7 +61,7 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Email    string `json:"email"`
-		Password string `json:"password"`
+		Password string `json:"password"` // #nosec G117 -- request body field
 		Name     string `json:"name"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -127,7 +127,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) EmailLogin(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Email    string `json:"email"`
-		Password string `json:"password"`
+		Password string `json:"password"` // #nosec G117 -- request body field
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
@@ -478,7 +478,7 @@ func (h *AuthHandler) createSessionAndRespond(w http.ResponseWriter, r *http.Req
 // --- GitHub OAuth helpers ---
 
 type githubTokenResponse struct {
-	AccessToken string `json:"access_token"`
+	AccessToken string `json:"access_token"` // #nosec G117 -- OAuth response field
 	TokenType   string `json:"token_type"`
 	Scope       string `json:"scope"`
 }
@@ -505,7 +505,7 @@ func (h *AuthHandler) exchangeGitHubCode(code string) (*githubTokenResponse, err
 	req.URL.RawQuery = data.Encode()
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req) // #nosec G704 -- URL is GitHub OAuth endpoint
 	if err != nil {
 		return nil, fmt.Errorf("token exchange request: %w", err)
 	}
@@ -529,7 +529,7 @@ func (h *AuthHandler) fetchGitHubUser(accessToken string) (*githubUser, error) {
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/vnd.github+json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req) // #nosec G704 -- URL is GitHub API endpoint
 	if err != nil {
 		return nil, fmt.Errorf("github user request: %w", err)
 	}
@@ -550,7 +550,7 @@ func (h *AuthHandler) fetchGitHubUser(accessToken string) (*githubUser, error) {
 // --- Google OAuth helpers ---
 
 type googleTokenResponse struct {
-	AccessToken string `json:"access_token"`
+	AccessToken string `json:"access_token"` // #nosec G117 -- OAuth response field
 	TokenType   string `json:"token_type"`
 	ExpiresIn   int    `json:"expires_in"`
 	IDToken     string `json:"id_token"`
@@ -595,7 +595,7 @@ func (h *AuthHandler) fetchGoogleUser(accessToken string) (*googleUser, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req) // #nosec G704 -- URL is Google OAuth endpoint
 	if err != nil {
 		return nil, fmt.Errorf("google userinfo request: %w", err)
 	}

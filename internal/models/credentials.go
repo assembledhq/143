@@ -64,18 +64,18 @@ type ProviderConfig interface {
 // --- Per-provider config structs ---
 
 type AnthropicConfig struct {
-	APIKey  string `json:"api_key"`
+	APIKey  string `json:"api_key"` // #nosec G117 -- JSON config field
 	BaseURL string `json:"base_url,omitempty"`
 }
 
 type OpenAIConfig struct {
-	APIKey  string `json:"api_key"`
+	APIKey  string `json:"api_key"` // #nosec G117 -- JSON config field
 	BaseURL string `json:"base_url,omitempty"`
 	APIType string `json:"api_type"`
 }
 
 type OpenRouterConfig struct {
-	APIKey  string `json:"api_key"`
+	APIKey  string `json:"api_key"` // #nosec G117 -- JSON config field
 	BaseURL string `json:"base_url,omitempty"`
 	AppName string `json:"app_name,omitempty"`
 	SiteURL string `json:"site_url,omitempty"`
@@ -83,13 +83,13 @@ type OpenRouterConfig struct {
 
 type GitHubAppConfig struct {
 	AppID         int64  `json:"app_id"`
-	PrivateKey    string `json:"private_key"`
+	PrivateKey    string `json:"private_key"` // #nosec G117 -- JSON config field
 	WebhookSecret string `json:"webhook_secret"`
 }
 
 type GitHubOAuthConfig struct {
 	ClientID     string `json:"client_id"`
-	ClientSecret string `json:"client_secret"`
+	ClientSecret string `json:"client_secret"` // #nosec G117 -- JSON config field
 }
 
 type SentryConfig struct {

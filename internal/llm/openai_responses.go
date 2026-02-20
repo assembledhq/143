@@ -66,7 +66,7 @@ func (p *OpenAIResponsesProvider) Complete(ctx context.Context, model, systemPro
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+p.apiKey)
 
-	resp, err := p.client.Do(req)
+	resp, err := p.client.Do(req) // #nosec G704 -- URL is from provider config
 	if err != nil {
 		return "", fmt.Errorf("%w: %s", ErrServerError, err.Error())
 	}

@@ -78,7 +78,7 @@ func (c *SentryAPIClient) fetchPage(ctx context.Context, url, authToken string) 
 		}
 		req.Header.Set("Authorization", "Bearer "+authToken)
 
-		resp, err := c.httpClient.Do(req)
+		resp, err := c.httpClient.Do(req) // #nosec G704 -- URL is from internal Sentry config
 		if err != nil {
 			return nil, "", fmt.Errorf("fetch sentry issues: %w", err)
 		}
