@@ -81,17 +81,12 @@ func (h *ReviewPatternHandler) UpdateStatus(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if err := h.patternStore.UpdatePattern(r.Context(), orgID, patternID, nil, &req.Status); err != nil {
+	pattern, err := h.patternStore.UpdatePatternAndGet(r.Context(), orgID, patternID, nil, &req.Status)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update pattern status")
 		return
 	}
 
-	pattern, err := h.patternStore.GetByID(r.Context(), orgID, patternID)
-	if err != nil {
-		// The old ID was inactivated; fetch the new one by looking up the latest.
-		writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
-		return
-	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.ReviewPattern]{Data: pattern})
 }
 
@@ -117,12 +112,13 @@ func (h *ReviewPatternHandler) UpdateRule(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := h.patternStore.UpdatePattern(r.Context(), orgID, patternID, &req.Rule, nil); err != nil {
+	pattern, err := h.patternStore.UpdatePatternAndGet(r.Context(), orgID, patternID, &req.Rule, nil)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update pattern rule")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.ReviewPattern]{Data: pattern})
 }
 
 // ListComments returns review comments, optionally filtered by PR.
