@@ -187,24 +187,94 @@ func TestRunHandler_Get(t *testing.T) {
 	}
 }
 
+// triggerFixIssueMock sets up the common mock for a successful issue lookup,
+// agent run creation, and job enqueue for TriggerFix tests.
+func triggerFixIssueMock(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+	now := time.Now()
+	issueID := uuid.New()
+
+	// Mock issue lookup
+	mock.ExpectQuery("SELECT").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
+				"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
+				"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
+				"created_at", "updated_at",
+			}).AddRow(
+				issueID, orgID, "ISSUE-1", "sentry", nil, nil,
+				"Test issue", nil, nil, "open", now, now,
+				1, 0, "medium", nil, "fp-1",
+				now, now,
+			),
+		)
+
+	// Mock agent run create (9 named args)
+	runID := uuid.New()
+	mock.ExpectQuery("INSERT INTO agent_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
+
+	// Mock job enqueue (6 named args)
+	jobID := uuid.New()
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+}
+
 func TestRunHandler_TriggerFix(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name         string
 		idParam      string
+		body         string
 		setupMock    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID)
 		expectedCode int
 		expectedBody string
 	}{
 		{
-			name:    "triggers fix for valid issue successfully",
-			idParam: "", // will be set to a valid UUID in the subtest
+			name:         "triggers fix with default agent type",
+			idParam:      "",
+			body:         "",
+			setupMock:    triggerFixIssueMock,
+			expectedCode: http.StatusCreated,
+			expectedBody: "claude_code",
+		},
+		{
+			name:         "triggers fix with gemini_cli agent type",
+			idParam:      "",
+			body:         `{"agent_type":"gemini_cli"}`,
+			setupMock:    triggerFixIssueMock,
+			expectedCode: http.StatusCreated,
+			expectedBody: "gemini_cli",
+		},
+		{
+			name:         "triggers fix with codex agent type",
+			idParam:      "",
+			body:         `{"agent_type":"codex"}`,
+			setupMock:    triggerFixIssueMock,
+			expectedCode: http.StatusCreated,
+			expectedBody: "codex",
+		},
+		{
+			name:         "triggers fix with high token mode",
+			idParam:      "",
+			body:         `{"token_mode":"high"}`,
+			setupMock:    triggerFixIssueMock,
+			expectedCode: http.StatusCreated,
+			expectedBody: "high",
+		},
+		{
+			name:    "rejects invalid agent type",
+			idParam: "",
+			body:    `{"agent_type":"invalid_agent"}`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
 				now := time.Now()
 				issueID := uuid.New()
-
-				// Mock issue lookup
 				mock.ExpectQuery("SELECT").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
@@ -220,27 +290,40 @@ func TestRunHandler_TriggerFix(t *testing.T) {
 							now, now,
 						),
 					)
-
-				// Mock agent run create (9 named args)
-				runID := uuid.New()
-				mock.ExpectQuery("INSERT INTO agent_runs").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
-
-				// Mock job enqueue (6 named args)
-				jobID := uuid.New()
-				mock.ExpectQuery("INSERT INTO jobs").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
 			},
-			expectedCode: http.StatusCreated,
-			expectedBody: "pending",
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_AGENT_TYPE",
+		},
+		{
+			name:    "rejects invalid token mode",
+			idParam: "",
+			body:    `{"token_mode":"extreme"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				issueID := uuid.New()
+				mock.ExpectQuery("SELECT").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows([]string{
+							"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
+							"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
+							"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
+							"created_at", "updated_at",
+						}).AddRow(
+							issueID, orgID, "ISSUE-1", "sentry", nil, nil,
+							"Test issue", nil, nil, "open", now, now,
+							1, 0, "medium", nil, "fp-1",
+							now, now,
+						),
+					)
+			},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_TOKEN_MODE",
 		},
 		{
 			name:         "returns bad request for invalid issue ID",
 			idParam:      "bad-id",
+			body:         "",
 			setupMock:    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {},
 			expectedCode: http.StatusBadRequest,
 			expectedBody: "INVALID_ID",
@@ -265,7 +348,14 @@ func TestRunHandler_TriggerFix(t *testing.T) {
 				idParam = uuid.New().String()
 			}
 
-			req := httptest.NewRequest(http.MethodPost, "/api/v1/issues/"+idParam+"/fix", nil)
+			var bodyReader *strings.Reader
+			if tt.body != "" {
+				bodyReader = strings.NewReader(tt.body)
+			} else {
+				bodyReader = strings.NewReader("")
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/issues/"+idParam+"/fix", bodyReader)
 			rctx := chi.NewRouteContext()
 			rctx.URLParams.Add("id", idParam)
 			ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)

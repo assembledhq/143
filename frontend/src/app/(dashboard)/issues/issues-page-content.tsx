@@ -1,7 +1,8 @@
 "use client";
 
+import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, X, Wrench, Loader2 } from "lucide-react";
+import { AlertCircle, X, Wrench, Loader2, ChevronDown } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useQueryState, parseAsString } from "nuqs";
 import { PageHeader } from "@/components/page-header";
@@ -103,13 +104,21 @@ function formatTimeAgo(dateStr: string): string {
   return date.toLocaleDateString();
 }
 
+const agentTypeOptions = [
+  { value: "claude_code", label: "Claude Code" },
+  { value: "gemini_cli", label: "Gemini CLI" },
+  { value: "codex", label: "Codex" },
+];
+
 function IssueRow({ issue }: { issue: Issue }) {
   const router = useRouter();
   const queryClient = useQueryClient();
   const canFix = issue.status === "open" || issue.status === "triaged";
+  const [agentType, setAgentType] = useState("claude_code");
+  const [showAgentPicker, setShowAgentPicker] = useState(false);
 
   const fixMutation = useMutation({
-    mutationFn: () => api.issues.triggerFix(issue.id),
+    mutationFn: () => api.issues.triggerFix(issue.id, { agent_type: agentType }),
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["runs"] });
       router.push(`/runs/${result.data.id}`);
@@ -159,19 +168,46 @@ function IssueRow({ issue }: { issue: Issue }) {
           />
         )}
         {canFix && (
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => fixMutation.mutate()}
-            disabled={fixMutation.isPending}
-          >
-            {fixMutation.isPending ? (
-              <Loader2 className="mr-1.5 h-3 w-3 animate-spin" />
-            ) : (
-              <Wrench className="mr-1.5 h-3 w-3" />
+          <div className="flex items-center">
+            {showAgentPicker && (
+              <Select value={agentType} onValueChange={setAgentType}>
+                <SelectTrigger className="w-[130px] h-8 text-xs mr-1.5">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {agentTypeOptions.map((opt) => (
+                    <SelectItem key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             )}
-            {fixMutation.isPending ? "Starting..." : "Fix This"}
-          </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => fixMutation.mutate()}
+              disabled={fixMutation.isPending}
+            >
+              {fixMutation.isPending ? (
+                <Loader2 className="mr-1.5 h-3 w-3 animate-spin" />
+              ) : (
+                <Wrench className="mr-1.5 h-3 w-3" />
+              )}
+              {fixMutation.isPending ? "Starting..." : "Fix This"}
+            </Button>
+            {!fixMutation.isPending && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="px-1.5 ml-0.5"
+                onClick={() => setShowAgentPicker(!showAgentPicker)}
+                title="Choose agent"
+              >
+                <ChevronDown className="h-3 w-3" />
+              </Button>
+            )}
+          </div>
         )}
       </div>
     </div>
