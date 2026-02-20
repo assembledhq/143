@@ -321,6 +321,207 @@ describe('api client', () => {
     });
   });
 
+  describe('priority', () => {
+    it('fetches priority score for an issue', async () => {
+      const mockPriority = {
+        data: {
+          id: 'ps-1',
+          issue_id: 'issue-1',
+          org_id: 'org-1',
+          score: 85.5,
+          customer_impact_score: 90,
+          severity_score: 80,
+          recency_score: 75,
+          revenue_risk_score: 60,
+          direction_alignment: 0.9,
+          eligible_for_agent: true,
+          computed_at: '2026-02-17T08:00:00Z',
+        },
+      };
+
+      server.use(
+        http.get('/api/v1/issues/:issueId/priority', ({ params }) => {
+          expect(params.issueId).toBe('issue-1');
+          return HttpResponse.json(mockPriority);
+        }),
+      );
+
+      const result = await api.priority.getForIssue('issue-1');
+      expect(result.data.id).toBe('ps-1');
+      expect(result.data.score).toBe(85.5);
+      expect(result.data.eligible_for_agent).toBe(true);
+    });
+
+    it('fetches priority scores list', async () => {
+      const mockData = {
+        data: [
+          {
+            id: 'ps-1',
+            issue_id: 'issue-1',
+            org_id: 'org-1',
+            score: 85.5,
+            customer_impact_score: 90,
+            severity_score: 80,
+            recency_score: 75,
+            revenue_risk_score: 60,
+            direction_alignment: 0.9,
+            eligible_for_agent: true,
+            computed_at: '2026-02-17T08:00:00Z',
+          },
+        ],
+        meta: {},
+      };
+
+      server.use(
+        http.get('/api/v1/priority-scores', () => {
+          return HttpResponse.json(mockData);
+        }),
+      );
+
+      const result = await api.priority.list();
+      expect(result.data).toHaveLength(1);
+      expect(result.data[0].id).toBe('ps-1');
+      expect(result.data[0].score).toBe(85.5);
+    });
+
+    it('fetches priority scores with params', async () => {
+      let capturedUrl: string | undefined;
+
+      server.use(
+        http.get('/api/v1/priority-scores', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ data: [], meta: {} });
+        }),
+      );
+
+      await api.priority.list({ eligible_only: true, limit: 10 });
+
+      expect(capturedUrl).toBeDefined();
+      const url = new URL(capturedUrl!);
+      expect(url.searchParams.get('eligible_only')).toBe('true');
+      expect(url.searchParams.get('limit')).toBe('10');
+    });
+  });
+
+  describe('integrations', () => {
+    it('fetches integrations list', async () => {
+      const mockData = {
+        data: [
+          {
+            id: 'int-1',
+            org_id: 'org-1',
+            provider: 'github',
+            status: 'active',
+            last_synced_at: '2026-02-17T08:00:00Z',
+            created_at: '2026-01-01T00:00:00Z',
+          },
+          {
+            id: 'int-2',
+            org_id: 'org-1',
+            provider: 'sentry',
+            status: 'active',
+            created_at: '2026-01-15T00:00:00Z',
+          },
+        ],
+        meta: {},
+      };
+
+      server.use(
+        http.get('/api/v1/integrations', () => {
+          return HttpResponse.json(mockData);
+        }),
+      );
+
+      const result = await api.integrations.list();
+      expect(result.data).toHaveLength(2);
+      expect(result.data[0].id).toBe('int-1');
+      expect(result.data[0].provider).toBe('github');
+      expect(result.data[1].provider).toBe('sentry');
+    });
+  });
+
+  describe('reviewPatterns', () => {
+    it('fetches review patterns by repo', async () => {
+      const mockData = {
+        data: [
+          {
+            id: 'rp-1',
+            org_id: 'org-1',
+            repo: 'org/repo',
+            rule: 'Always use error boundaries',
+            category: 'error-handling',
+            source_comment_ids: ['comment-1', 'comment-2'],
+            occurrence_count: 5,
+            status: 'active',
+            manually_curated: false,
+            active: true,
+            created_at: '2026-02-01T00:00:00Z',
+          },
+        ],
+        meta: {},
+      };
+
+      server.use(
+        http.get('/api/v1/review-patterns/:owner/:repo', ({ params }) => {
+          expect(params.owner).toBe('org');
+          expect(params.repo).toBe('repo');
+          return HttpResponse.json(mockData);
+        }),
+      );
+
+      const result = await api.reviewPatterns.listByRepo('org/repo');
+      expect(result.data).toHaveLength(1);
+      expect(result.data[0].id).toBe('rp-1');
+      expect(result.data[0].rule).toBe('Always use error boundaries');
+    });
+
+    it('fetches review patterns with params', async () => {
+      let capturedUrl: string | undefined;
+
+      server.use(
+        http.get('/api/v1/review-patterns/:owner/:repo', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ data: [], meta: {} });
+        }),
+      );
+
+      await api.reviewPatterns.listByRepo('org/repo', { status: 'active', cursor: 'abc' });
+
+      expect(capturedUrl).toBeDefined();
+      const url = new URL(capturedUrl!);
+      expect(url.searchParams.get('status')).toBe('active');
+      expect(url.searchParams.get('cursor')).toBe('abc');
+    });
+  });
+
+  describe('settings - agent defaults', () => {
+    it('fetches agent defaults', async () => {
+      const mockDefaults = {
+        data: {
+          claude_code: {
+            autonomy_level: 'full',
+            token_mode: 'standard',
+          },
+          codex: {
+            autonomy_level: 'supervised',
+            token_mode: 'standard',
+          },
+        },
+      };
+
+      server.use(
+        http.get('/api/v1/settings/agent-defaults', () => {
+          return HttpResponse.json(mockDefaults);
+        }),
+      );
+
+      const result = await api.settings.getAgentDefaults();
+      expect(result.data).toBeDefined();
+      expect(result.data.claude_code.autonomy_level).toBe('full');
+      expect(result.data.codex.autonomy_level).toBe('supervised');
+    });
+  });
+
   describe('error handling', () => {
     it('throws ApiError on non-ok response', async () => {
       server.use(
