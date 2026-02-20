@@ -140,6 +140,26 @@ func TestAgentEnv_ModelOmittedWhenEmpty(t *testing.T) {
 	require.NotContains(t, env["gemini_cli"], "GEMINI_MODEL", "model should be omitted when empty")
 }
 
+func TestSafeAgentEnv_MasksAPIKeys(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-api3-abcdef1234567890")
+	t.Setenv("ANTHROPIC_MODEL", "opus")
+	t.Setenv("OPENAI_API_KEY", "sk-proj-abcdefgh1234")
+	t.Setenv("GEMINI_API_KEY", "short")
+
+	cfg := Load()
+	safe := cfg.SafeAgentEnv()
+
+	// Long keys: first 4 + •••• + last 4
+	require.Equal(t, "sk-a••••7890", safe["claude_code"]["ANTHROPIC_API_KEY"])
+	require.Equal(t, "sk-p••••1234", safe["codex"]["OPENAI_API_KEY"])
+
+	// Short keys (<= 8 chars): fully masked
+	require.Equal(t, "••••••••", safe["gemini_cli"]["GEMINI_API_KEY"])
+
+	// Non-secret values should be unchanged
+	require.Equal(t, "opus", safe["claude_code"]["ANTHROPIC_MODEL"])
+}
+
 func TestAgentEnv_OnlyAnthropicKey(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-only")
 	t.Setenv("ANTHROPIC_BASE_URL", "")
