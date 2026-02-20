@@ -113,6 +113,7 @@ export const api = {
   settings: {
     get: () => get<import('./types').SingleResponse<import('./types').Organization>>('/api/v1/settings'),
     update: (data: Record<string, unknown>) => patch<import('./types').SingleResponse<import('./types').Organization>>('/api/v1/settings', data),
+    getAgentDefaults: () => get<{ data: Record<string, Record<string, string>> }>('/api/v1/settings/agent-defaults'),
   },
   integrations: {
     list: () => get<import('./types').ListResponse<import('./types').Integration>>('/api/v1/integrations'),

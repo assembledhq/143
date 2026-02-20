@@ -137,6 +137,43 @@ func (c *Config) AgentEnv() map[string]map[string]string {
 	return result
 }
 
+// SafeAgentEnv returns the same structure as AgentEnv but with API key values
+// masked (e.g. "sk-ant-...prod"). Suitable for exposing to the frontend so
+// operators can see what server defaults are configured without leaking secrets.
+func (c *Config) SafeAgentEnv() map[string]map[string]string {
+	raw := c.AgentEnv()
+	safe := make(map[string]map[string]string, len(raw))
+	for agent, vars := range raw {
+		safeVars := make(map[string]string, len(vars))
+		for k, v := range vars {
+			if isSecretKey(k) {
+				safeVars[k] = maskSecret(v)
+			} else {
+				safeVars[k] = v
+			}
+		}
+		safe[agent] = safeVars
+	}
+	return safe
+}
+
+// isSecretKey returns true for env var names that contain secrets.
+func isSecretKey(key string) bool {
+	switch key {
+	case "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY":
+		return true
+	}
+	return false
+}
+
+// maskSecret masks a secret string, showing the first 4 and last 4 characters.
+func maskSecret(s string) string {
+	if len(s) <= 8 {
+		return "••••••••"
+	}
+	return s[:4] + "••••" + s[len(s)-4:]
+}
+
 // LogStatus logs which features are configured and which are missing.
 // Call this at startup so contributors immediately see what's working.
 func (c *Config) LogStatus(logger zerolog.Logger) {
