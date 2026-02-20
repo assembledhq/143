@@ -35,6 +35,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) (*
 	priorityScoreStore := db.NewPriorityScoreStore(pool)
 	complexityEstimateStore := db.NewComplexityEstimateStore(pool)
 	deployStore := db.NewDeployStore(pool)
+	reviewCommentStore := db.NewReviewCommentStore(pool)
+	reviewPatternStore := db.NewReviewPatternStore(pool)
 
 	// Create credential store with optional encryption.
 	var cryptoSvc *crypto.Service
@@ -61,6 +63,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) (*
 				ghSvc, pullRequestStore, agentRunStore, issueStore,
 				deployStore, validationStore, repoStore, jobStore, logger,
 			)
+			prService.SetReviewCommentStore(reviewCommentStore)
 		}
 	}
 
@@ -84,6 +87,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) (*
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
 	credentialHandler := handlers.NewCredentialHandler(credentialStore)
+	reviewPatternHandler := handlers.NewReviewPatternHandler(reviewPatternStore, reviewCommentStore)
 
 	r := chi.NewRouter()
 
@@ -137,6 +141,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) (*
 			r.Get("/api/v1/issues/{id}/priority", priorityHandler.GetPriorityScore)
 			r.Get("/api/v1/issues/{id}/complexity", priorityHandler.GetComplexity)
 			r.Get("/api/v1/priority-scores", priorityHandler.ListPriorityScores)
+			r.Get("/api/v1/review-patterns/*", reviewPatternHandler.ListByRepo)
+			r.Get("/api/v1/review-comments", reviewPatternHandler.ListComments)
 			r.Get("/api/v1/runs", runHandler.List)
 			r.Get("/api/v1/runs/{id}", runHandler.Get)
 			r.Get("/api/v1/runs/{id}/logs", runHandler.StreamLogs)
@@ -162,6 +168,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) (*
 			r.Delete("/api/v1/repositories/{id}", repoHandler.Delete)
 			r.Post("/api/v1/issues/{id}/reprioritize", priorityHandler.Reprioritize)
 			r.Patch("/api/v1/settings", settingsHandler.Update)
+			r.Patch("/api/v1/review-patterns/{id}", reviewPatternHandler.UpdateStatus)
+			r.Put("/api/v1/review-patterns/{id}", reviewPatternHandler.UpdateRule)
 
 			// Credential management
 			r.Get("/api/v1/settings/credentials", credentialHandler.List)

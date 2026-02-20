@@ -57,6 +57,8 @@ func (h *WebhookHandler) HandleGitHub(w http.ResponseWriter, r *http.Request) {
 		h.handlePullRequest(w, r, body)
 	case "pull_request_review":
 		h.handlePullRequestReview(w, r, body)
+	case "pull_request_review_comment":
+		h.handlePullRequestReviewComment(w, r, body)
 	default:
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "event": event})
 	}
@@ -267,6 +269,26 @@ func (h *WebhookHandler) handlePullRequestReview(w http.ResponseWriter, r *http.
 
 	if err := h.prService.HandlePullRequestReviewEvent(r.Context(), event); err != nil {
 		writeError(w, http.StatusInternalServerError, "REVIEW_EVENT_FAILED", "failed to process pull_request_review event")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
+}
+
+func (h *WebhookHandler) handlePullRequestReviewComment(w http.ResponseWriter, r *http.Request, body []byte) {
+	if h.prService == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "pr_service_not_configured"})
+		return
+	}
+
+	var event ghservice.PullRequestReviewCommentEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "failed to parse pull_request_review_comment event")
+		return
+	}
+
+	if err := h.prService.HandlePullRequestReviewCommentEvent(r.Context(), event); err != nil {
+		writeError(w, http.StatusInternalServerError, "REVIEW_COMMENT_EVENT_FAILED", "failed to process pull_request_review_comment event")
 		return
 	}
 

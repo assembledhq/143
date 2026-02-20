@@ -36,6 +36,14 @@ type AgentInput struct {
 	TokenMode          string // "low" or "high"
 	ComplexityEstimate *ComplexityEstimate
 	ContextDocs        []string // content of CLAUDE.md, AGENTS.md, etc.
+	RevisionContext    *RevisionContext
+}
+
+// RevisionContext holds feedback that triggered a revision run.
+type RevisionContext struct {
+	FormattedFeedback string `json:"formatted_feedback"`
+	PreviousDiff      string `json:"previous_diff"`
+	CommentSummary    string `json:"comment_summary"`
 }
 
 // ComplexityEstimate holds the triage system's assessment of issue complexity.
@@ -111,12 +119,13 @@ type SandboxProvider interface {
 
 // SandboxConfig holds the resource limits and settings for creating a sandbox.
 type SandboxConfig struct {
-	Image         string        // base image with agent CLI tools pre-installed
-	CPULimit      float64       // CPU cores (default: 2)
-	MemoryLimitMB int           // memory in MB (default: 4096)
-	Timeout       time.Duration // max execution time (default: 5 min)
-	NetworkPolicy string        // "restricted" — allow only LLM API endpoints
-	WorkDir       string        // /workspace
+	Image         string            // base image with agent CLI tools pre-installed
+	CPULimit      float64           // CPU cores (default: 2)
+	MemoryLimitMB int               // memory in MB (default: 4096)
+	Timeout       time.Duration     // max execution time (default: 5 min)
+	NetworkPolicy string            // "restricted" — allow only LLM API endpoints
+	WorkDir       string            // /workspace
+	Env           map[string]string // environment variables injected into the container (e.g. API keys)
 }
 
 // DefaultSandboxConfig returns a SandboxConfig populated with sensible defaults.

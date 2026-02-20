@@ -92,11 +92,18 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 
 	pidsLimit := int64(256)
 
+	// Convert env map to Docker's KEY=VALUE slice format.
+	var envSlice []string
+	for k, v := range cfg.Env {
+		envSlice = append(envSlice, k+"="+v)
+	}
+
 	containerCfg := &container.Config{
 		Image:      cfg.Image,
 		WorkingDir: cfg.WorkDir,
 		User:       "sandbox",
 		Tty:        false,
+		Env:        envSlice,
 		// Keep container running with a long sleep so we can exec into it
 		Cmd: []string{"sleep", "infinity"},
 	}

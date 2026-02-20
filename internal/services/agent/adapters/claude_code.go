@@ -181,6 +181,29 @@ func buildSystemPrompt(input *agent.AgentInput) string {
 		}
 	}
 
+	// Revision context: inject reviewer feedback for revision runs.
+	if input.RevisionContext != nil {
+		b.WriteString("## Revision Instructions\n\n")
+		b.WriteString("This is a REVISION run. A previous fix was submitted as a PR, and reviewers have ")
+		b.WriteString("requested changes. Apply the feedback below to improve the fix.\n\n")
+		if input.RevisionContext.FormattedFeedback != "" {
+			b.WriteString("### Reviewer Feedback\n\n")
+			b.WriteString(input.RevisionContext.FormattedFeedback)
+			b.WriteString("\n\n")
+		}
+		if input.RevisionContext.CommentSummary != "" {
+			b.WriteString("### Summary\n\n")
+			b.WriteString(input.RevisionContext.CommentSummary)
+			b.WriteString("\n\n")
+		}
+		if input.RevisionContext.PreviousDiff != "" {
+			b.WriteString("### Previous Diff\n\n")
+			b.WriteString("```diff\n")
+			b.WriteString(input.RevisionContext.PreviousDiff)
+			b.WriteString("\n```\n\n")
+		}
+	}
+
 	return b.String()
 }
 

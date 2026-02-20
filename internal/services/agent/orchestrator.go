@@ -71,6 +71,7 @@ type Orchestrator struct {
 	github            GitHubTokenProvider
 	logger            zerolog.Logger
 	maxConcurrent     int
+	agentEnv          map[string]map[string]string
 }
 
 // OrchestratorConfig holds the dependencies for creating an Orchestrator.
@@ -86,6 +87,12 @@ type OrchestratorConfig struct {
 	GitHub            GitHubTokenProvider
 	Logger            zerolog.Logger
 	MaxConcurrent     int
+
+	// AgentEnv maps agent type names to the environment variables that should
+	// be injected into their sandbox containers. For example:
+	//   "claude_code" -> {"ANTHROPIC_API_KEY": "sk-ant-..."}
+	//   "codex"       -> {"OPENAI_API_KEY": "sk-..."}
+	AgentEnv map[string]map[string]string
 }
 
 // NewOrchestrator creates an Orchestrator with the given dependencies.
@@ -93,6 +100,11 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 	maxConcurrent := cfg.MaxConcurrent
 	if maxConcurrent <= 0 {
 		maxConcurrent = defaultMaxConcurrent
+	}
+
+	agentEnv := cfg.AgentEnv
+	if agentEnv == nil {
+		agentEnv = make(map[string]map[string]string)
 	}
 
 	return &Orchestrator{
@@ -107,6 +119,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		github:            cfg.GitHub,
 		logger:            cfg.Logger,
 		maxConcurrent:     maxConcurrent,
+		agentEnv:          agentEnv,
 	}
 }
 
@@ -184,8 +197,12 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error
 		return fmt.Errorf("prepare prompt: %w", err)
 	}
 
-	// 7. Create sandbox.
-	sandbox, err := o.provider.Create(ctx, DefaultSandboxConfig())
+	// 7. Create sandbox with agent-specific env vars (API keys).
+	sandboxCfg := DefaultSandboxConfig()
+	if envVars, ok := o.agentEnv[run.AgentType]; ok {
+		sandboxCfg.Env = envVars
+	}
+	sandbox, err := o.provider.Create(ctx, sandboxCfg)
 	if err != nil {
 		o.failRun(ctx, run, fmt.Sprintf("create sandbox: %s", err))
 		return fmt.Errorf("create sandbox: %w", err)

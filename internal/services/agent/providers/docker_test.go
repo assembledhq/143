@@ -181,6 +181,52 @@ func TestDockerProvider_Create(t *testing.T) {
 		require.Equal(t, "runsc", sb.Metadata["runtime"], "sandbox metadata should include runtime")
 	})
 
+	t.Run("injects env vars into container", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedConfig *container.Config
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			capturedConfig = config
+			return container.CreateResponse{ID: "env-test"}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+
+		cfg := agent.DefaultSandboxConfig()
+		cfg.Env = map[string]string{
+			"ANTHROPIC_API_KEY": "sk-ant-test-key",
+			"OPENAI_API_KEY":    "sk-test-openai-key",
+		}
+		sb, err := p.Create(context.Background(), cfg)
+		require.NoError(t, err)
+		require.Equal(t, "env-test", sb.ID)
+
+		require.Len(t, capturedConfig.Env, 2, "container should have 2 env vars")
+		require.Contains(t, capturedConfig.Env, "ANTHROPIC_API_KEY=sk-ant-test-key")
+		require.Contains(t, capturedConfig.Env, "OPENAI_API_KEY=sk-test-openai-key")
+	})
+
+	t.Run("handles nil env map gracefully", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedConfig *container.Config
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			capturedConfig = config
+			return container.CreateResponse{ID: "no-env"}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+
+		cfg := agent.DefaultSandboxConfig()
+		// cfg.Env is nil by default
+		sb, err := p.Create(context.Background(), cfg)
+		require.NoError(t, err)
+		require.Equal(t, "no-env", sb.ID)
+		require.Empty(t, capturedConfig.Env, "container should have no env vars when Env is nil")
+	})
+
 	t.Run("returns error when container create fails", func(t *testing.T) {
 		t.Parallel()
 

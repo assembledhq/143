@@ -375,18 +375,16 @@ Close the loop — measure whether fixes actually helped.
 
 **Milestone**: ❌ Unblocked — Phases 3 and 4 are complete. PRs are shipping and prioritization is live.
 
-## Phase 6: Review Feedback Loop (doc: 11) — NOT STARTED
+## Phase 6: Review Feedback Loop (doc: 11) — COMPLETE
 
 Turn human PR reviews into agent improvements.
 
-`agent_runs` has `parent_run_id` and `revision_context` columns ready for revision runs, but `review_comments` and `review_patterns` tables are not yet created:
+1. **Review comment capture + processing pipeline** — ✅ `review_comments` table with migration, `ReviewCommentStore` (Create with ON CONFLICT dedup, GetByID, ListByOrg with filters, ListByPullRequest, ListActionableByPullRequest, UpdateClassification, MarkApplied, CountPendingByPR). Webhook handlers capture both `pull_request_review` (top-level review body) and `pull_request_review_comment` (inline diff comments). Multi-stage processing pipeline in `feedback/service.go`: structural pre-filter (bot accounts, short comments, emoji-only, CI patterns) → LLM classification (actionable, category, generalizable, generalized rule) → pattern dedup. Job queue integration via `process_review_comment` and `update_review_patterns` handlers.
+2. **Auto-apply feedback** — ✅ `RevisionContext` type added to `AgentInput`. Claude Code adapter injects revision instructions (formatted feedback, comment summary, previous diff) into system prompt for revision runs. `PRService.PushRevision` method pushes commits to existing PR branch via GitHub API (get head SHA → create blobs/tree/commit → update ref → post summary comment). `FormatRevisionFeedback` in feedback service formats actionable comments for prompt injection.
+3. **Review patterns KB** — ✅ `review_patterns` table with insert-only versioning pattern. `ReviewPatternStore` (Create, GetByID, ListByRepo with status filter, ListActiveByRepo, FindMatchingRule case-insensitive, UpdatePattern with insert-only versioning, IncrementOccurrence with auto-promotion candidate→active at 2+ occurrences). API endpoints: GET `/review-patterns/*` (viewer+), PATCH `/review-patterns/{id}` status update (admin), PUT `/review-patterns/{id}` rule edit (admin). Frontend API client wired.
+4. **Curated context document** — ✅ `GenerateConventionsDoc` in feedback service produces `.143/learned-conventions.md` content grouped by category (Style, Logic, Edge Cases, Architecture, Testing, Security, Performance, Nits) with occurrence counts. API endpoint for review comments listing: GET `/review-comments` with pull_request_id and filter_status filters.
 
-1. **Review comment capture + processing pipeline** — ❌ No review comment table, no capture logic
-2. **Auto-apply feedback** — ❌ DB columns ready in agent_runs, but no revision run logic
-3. **Review patterns KB** — ❌ No review_patterns table or pattern extraction
-4. **Curated context document** — ❌ No `.143/learned-conventions.md` generation
-
-**Milestone**: ❌ Unblocked — Phase 3 is complete. PRs exist to receive reviews.
+**Milestone**: ✅ Full review feedback loop: webhook capture → processing pipeline → pattern KB → conventions doc generation → revision context injection.
 
 ## Phase 7: Codebase Context — Advanced (doc: 14) — NOT STARTED
 

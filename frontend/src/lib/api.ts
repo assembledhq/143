@@ -128,4 +128,31 @@ export const api = {
     },
     reprioritize: (issueId: string) => post(`/api/v1/issues/${issueId}/reprioritize`),
   },
+  reviewPatterns: {
+    listByRepo: (repo: string, params?: { status?: string; cursor?: string }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.status) searchParams.set('status', params.status);
+      if (params?.cursor) searchParams.set('cursor', params.cursor);
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').ReviewPattern>>(`/api/v1/review-patterns/${repo}${qs ? `?${qs}` : ''}`);
+    },
+    updateStatus: (id: string, status: 'active' | 'dismissed') =>
+      patch<import('./types').SingleResponse<import('./types').ReviewPattern>>(`/api/v1/review-patterns/${id}`, { status }),
+    updateRule: (id: string, rule: string) => {
+      return request<import('./types').SingleResponse<import('./types').ReviewPattern>>(`/api/v1/review-patterns/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ rule }),
+      });
+    },
+  },
+  reviewComments: {
+    list: (params?: { pull_request_id?: string; filter_status?: string; cursor?: string }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.pull_request_id) searchParams.set('pull_request_id', params.pull_request_id);
+      if (params?.filter_status) searchParams.set('filter_status', params.filter_status);
+      if (params?.cursor) searchParams.set('cursor', params.cursor);
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').ReviewComment>>(`/api/v1/review-comments${qs ? `?${qs}` : ''}`);
+    },
+  },
 };
