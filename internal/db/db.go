@@ -16,6 +16,12 @@ type DBTX interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
+// TxStarter is the interface for starting transactions. Satisfied by pgxpool.Pool and pgxmock.
+type TxStarter interface {
+	DBTX
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
 func NewPool(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	config, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {

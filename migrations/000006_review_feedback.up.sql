@@ -22,6 +22,7 @@ CREATE TABLE review_comments (
 );
 
 CREATE INDEX idx_review_comments_pr ON review_comments (pull_request_id);
+CREATE INDEX idx_review_comments_org_created ON review_comments (org_id, created_at DESC);
 CREATE INDEX idx_review_comments_org_category ON review_comments (org_id, category);
 CREATE INDEX idx_review_comments_filter ON review_comments (org_id, filter_status);
 CREATE UNIQUE INDEX idx_review_comments_github ON review_comments (pull_request_id, github_comment_id);
