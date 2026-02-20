@@ -94,12 +94,28 @@ func TestAgentEnv_ClaudeCodeAndCodex(t *testing.T) {
 func TestAgentEnv_NoKeysConfigured(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("GEMINI_API_KEY", "")
 
 	cfg := Load()
 	env := cfg.AgentEnv()
 
 	require.NotContains(t, env, "claude_code", "claude_code should not be present without ANTHROPIC_API_KEY")
 	require.NotContains(t, env, "codex", "codex should not be present without OPENAI_API_KEY")
+	require.NotContains(t, env, "gemini_cli", "gemini_cli should not be present without GEMINI_API_KEY")
+}
+
+func TestAgentEnv_GeminiCLI(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("GEMINI_API_KEY", "gemini-test-key")
+
+	cfg := Load()
+	env := cfg.AgentEnv()
+
+	require.Contains(t, env, "gemini_cli")
+	require.Equal(t, "gemini-test-key", env["gemini_cli"]["GEMINI_API_KEY"])
+	require.NotContains(t, env, "claude_code")
+	require.NotContains(t, env, "codex")
 }
 
 func TestAgentEnv_OnlyAnthropicKey(t *testing.T) {

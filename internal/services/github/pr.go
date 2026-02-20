@@ -455,15 +455,11 @@ func (s *PRService) PushRevision(ctx context.Context, pr *models.PullRequest, ru
 
 	owner, repoName := splitRepo(repo.FullName)
 
-	// 1. Get current HEAD of the PR branch.
-	branchRef := fmt.Sprintf("refs/heads/%s", extractBranch(pr.GitHubPRURL, pr.Title))
-	// We need to find the branch name. Since we don't store it, derive it from the original run.
-	// For now, use the GitHub API to get the PR's head branch.
+	// 1. Get current HEAD of the PR branch via GitHub API.
 	headSHA, headBranch, err := s.getPRHead(ctx, token, owner, repoName, pr.GitHubPRNumber)
 	if err != nil {
 		return fmt.Errorf("get PR head: %w", err)
 	}
-	_ = branchRef // use headBranch instead
 
 	// 2. Parse diff and create blobs/tree/commit.
 	files := parseDiff(*run.Diff)
@@ -545,11 +541,6 @@ func (s *PRService) postComment(ctx context.Context, token, owner, repo string, 
 	}); err != nil {
 		s.logger.Warn().Err(err).Int("pr_number", prNumber).Msg("failed to post PR comment")
 	}
-}
-
-// extractBranch is a fallback for getting a branch name — not used if getPRHead works.
-func extractBranch(_, _ string) string {
-	return ""
 }
 
 // --- GitHub API helpers ---

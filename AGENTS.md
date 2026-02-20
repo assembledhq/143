@@ -280,9 +280,19 @@ For settings/config tables that need change history, use insert-only versioning 
 **Model requirements**: Use `models.Optional[T]` in update request types so unset fields can be distinguished from explicit values. Use `Optional.GetValueWithDefault(existing)` / `Optional.GetPtrWithDefault(existing)` when merging.
 
 **Implementation pattern**:
-1. `Update...Settings` (exported): wraps in `models.Transact()`, orchestrates inactivate + insert.
-2. `inactivate...Settings` (unexported): `UPDATE SET active = false ... RETURNING <columns>` via `Suffix(...)` + `QueryRowContext` to get previous values.
-3. `insert...Settings` (unexported): merge optionals with returned values, insert new active row.
+1. `Update...Settings` (exported): wraps in a **transaction** (`db.TxStarter.Begin()`), orchestrates inactivate + insert.
+2. `inactivate...Settings` (unexported): `UPDATE SET active = false ... RETURNING <columns>` via the transaction to get previous values.
+3. `insert...Settings` (unexported): merge optionals with returned values, insert new active row within the same transaction.
+
+**Always use a transaction.** The inactivate + insert must be atomic. If the process crashes between the UPDATE and INSERT without a transaction, the old row is deactivated with no replacement, leaving the data in an inconsistent state. Use `db.TxStarter` (which extends `DBTX` with `Begin()`) for stores that need insert-only versioning. Pattern:
+```go
+tx, err := s.db.Begin(ctx)
+if err != nil { return err }
+defer tx.Rollback(ctx)
+// ... UPDATE SET active = false using tx ...
+// ... INSERT new active row using tx ...
+return tx.Commit(ctx)
+```
 
 ### When to use
 
