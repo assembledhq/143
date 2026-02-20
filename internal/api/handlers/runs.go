@@ -105,15 +105,52 @@ func (h *RunHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: Allow callers to specify agent_type, autonomy_level, and token_mode
-	// via the request body instead of hardcoding defaults.
+	// Parse optional overrides from the request body.
+	var body struct {
+		AgentType     string `json:"agent_type"`
+		AutonomyLevel string `json:"autonomy_level"`
+		TokenMode     string `json:"token_mode"`
+	}
+	// Ignore decode errors — body is optional, fields default below.
+	_ = json.NewDecoder(r.Body).Decode(&body)
+
+	agentType := body.AgentType
+	if agentType == "" {
+		agentType = "claude_code"
+	}
+	validAgentTypes := map[string]bool{"claude_code": true, "gemini_cli": true, "codex": true}
+	if !validAgentTypes[agentType] {
+		writeError(w, http.StatusBadRequest, "INVALID_AGENT_TYPE", "agent_type must be one of: claude_code, gemini_cli, codex")
+		return
+	}
+
+	autonomyLevel := body.AutonomyLevel
+	if autonomyLevel == "" {
+		autonomyLevel = "semi"
+	}
+	validAutonomyLevels := map[string]bool{"full": true, "semi": true, "supervised": true}
+	if !validAutonomyLevels[autonomyLevel] {
+		writeError(w, http.StatusBadRequest, "INVALID_AUTONOMY_LEVEL", "autonomy_level must be one of: full, semi, supervised")
+		return
+	}
+
+	tokenMode := body.TokenMode
+	if tokenMode == "" {
+		tokenMode = "low"
+	}
+	validTokenModes := map[string]bool{"low": true, "high": true}
+	if !validTokenModes[tokenMode] {
+		writeError(w, http.StatusBadRequest, "INVALID_TOKEN_MODE", "token_mode must be one of: low, high")
+		return
+	}
+
 	run := &models.AgentRun{
 		IssueID:       issueID,
 		OrgID:         orgID,
-		AgentType:     "claude_code",
+		AgentType:     agentType,
 		Status:        "pending",
-		AutonomyLevel: "semi",
-		TokenMode:     "low",
+		AutonomyLevel: autonomyLevel,
+		TokenMode:     tokenMode,
 	}
 	if err := h.runStore.Create(r.Context(), run); err != nil {
 		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create agent run")
