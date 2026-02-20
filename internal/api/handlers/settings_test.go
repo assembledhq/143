@@ -65,7 +65,7 @@ func TestSettingsHandler_Get(t *testing.T) {
 
 			orgID := uuid.New()
 			store := db.NewOrganizationStore(mock)
-			handler := NewSettingsHandler(store)
+			handler := NewSettingsHandler(store, nil)
 
 			tt.setupMock(mock, orgID)
 
@@ -136,7 +136,7 @@ func TestSettingsHandler_Update(t *testing.T) {
 
 			orgID := uuid.New()
 			store := db.NewOrganizationStore(mock)
-			handler := NewSettingsHandler(store)
+			handler := NewSettingsHandler(store, nil)
 
 			tt.setupMock(mock, orgID)
 

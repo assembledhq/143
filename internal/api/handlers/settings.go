@@ -10,11 +10,12 @@ import (
 )
 
 type SettingsHandler struct {
-	orgStore *db.OrganizationStore
+	orgStore      *db.OrganizationStore
+	agentDefaults map[string]map[string]string
 }
 
-func NewSettingsHandler(orgStore *db.OrganizationStore) *SettingsHandler {
-	return &SettingsHandler{orgStore: orgStore}
+func NewSettingsHandler(orgStore *db.OrganizationStore, agentDefaults map[string]map[string]string) *SettingsHandler {
+	return &SettingsHandler{orgStore: orgStore, agentDefaults: agentDefaults}
 }
 
 func (h *SettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
@@ -25,6 +26,12 @@ func (h *SettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Organization]{Data: org})
+}
+
+// GetAgentDefaults returns the server-level agent environment variable defaults
+// with API keys masked. Allows the frontend to show what's configured.
+func (h *SettingsHandler) GetAgentDefaults(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"data": h.agentDefaults})
 }
 
 func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {

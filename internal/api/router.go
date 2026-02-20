@@ -73,7 +73,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) (*
 	repoHandler := handlers.NewRepositoryHandler(repoStore)
 	integrationHandler := handlers.NewIntegrationHandler(integrationStore)
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, repoStore, integrationStore, prService)
-	settingsHandler := handlers.NewSettingsHandler(orgStore)
+	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeAgentEnv())
 	issueHandler := handlers.NewIssueHandler(issueStore)
 	runHandler := handlers.NewRunHandler(
 		agentRunStore,
@@ -150,6 +150,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) (*
 			r.Get("/api/v1/runs/{id}/pr", runHandler.GetPullRequest)
 			r.Get("/api/v1/runs/{id}/questions", runHandler.ListQuestions)
 			r.Get("/api/v1/settings", settingsHandler.Get)
+			r.Get("/api/v1/settings/agent-defaults", settingsHandler.GetAgentDefaults)
 		})
 
 		// Write routes (admin and member only)

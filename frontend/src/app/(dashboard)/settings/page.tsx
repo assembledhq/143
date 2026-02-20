@@ -80,6 +80,12 @@ export default function SettingsPage() {
     queryFn: () => api.settings.get(),
   });
 
+  const { data: agentDefaultsResponse } = useQuery({
+    queryKey: ["agent-defaults"],
+    queryFn: () => api.settings.getAgentDefaults(),
+  });
+  const serverAgentDefaults = agentDefaultsResponse?.data ?? {};
+
   const orgSettings = (settings?.data?.settings ?? {}) as OrgSettings;
 
   const [autonomyLevel, setAutonomyLevel] = useState(DEFAULT_SETTINGS.autonomy_level);
@@ -142,12 +148,13 @@ export default function SettingsPage() {
   const weightsValid = Math.abs(weightsSum - 1.0) < 0.01;
 
   function handleSave() {
-    // Strip empty strings from agent_config so we don't persist blank overrides.
+    // Only persist values that differ from the server default.
     const cleanedAgentConfig: Record<string, Record<string, string>> = {};
     for (const [agentKey, vars] of Object.entries(agentConfig)) {
       const filtered: Record<string, string> = {};
+      const serverVars = serverAgentDefaults[agentKey] ?? {};
       for (const [k, v] of Object.entries(vars)) {
-        if (v) filtered[k] = v;
+        if (v && v !== serverVars[k]) filtered[k] = v;
       }
       if (Object.keys(filtered).length > 0) {
         cleanedAgentConfig[agentKey] = filtered;
@@ -330,39 +337,62 @@ export default function SettingsPage() {
           <>
             <p className="text-xs text-muted-foreground">
               Override server-level agent credentials and model selection per agent.
-              Leave fields blank to use server defaults.
+              Fields show the server default when no override is set.
             </p>
-            {AGENT_TYPES.map((agent) => (
-              <Card key={agent.key}>
-                <CardContent>
-                  <div className="space-y-4">
-                    <h3 className="text-sm font-medium">{agent.label}</h3>
-                    {agent.envVars.map((envVar) => (
-                      <div key={envVar.name} className="space-y-1">
-                        <Label htmlFor={`${agent.key}-${envVar.name}`} className="text-xs text-muted-foreground">
-                          {envVar.label}
-                        </Label>
-                        <Input
-                          id={`${agent.key}-${envVar.name}`}
-                          type={envVar.sensitive ? "password" : "text"}
-                          placeholder={envVar.sensitive ? "••••••••" : (envVar.placeholder ?? "")}
-                          value={agentConfig[agent.key]?.[envVar.name] ?? ""}
-                          onChange={(e) => {
-                            setAgentConfig((prev) => ({
-                              ...prev,
-                              [agent.key]: {
-                                ...prev[agent.key],
-                                [envVar.name]: e.target.value,
-                              },
-                            }));
-                          }}
-                        />
+            {AGENT_TYPES.map((agent) => {
+              const serverVars = serverAgentDefaults[agent.key] ?? {};
+              const hasServerConfig = Object.keys(serverVars).length > 0;
+              return (
+                <Card key={agent.key}>
+                  <CardContent>
+                    <div className="space-y-4">
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-sm font-medium">{agent.label}</h3>
+                        {hasServerConfig ? (
+                          <span className="text-xs text-green-600">Server configured</span>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">Not configured</span>
+                        )}
                       </div>
-                    ))}
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
+                      {agent.envVars.map((envVar) => {
+                        const serverDefault = serverVars[envVar.name] ?? "";
+                        const orgOverride = agentConfig[agent.key]?.[envVar.name] ?? "";
+                        const displayValue = orgOverride || serverDefault;
+                        const isServerDefault = !orgOverride && !!serverDefault;
+                        return (
+                          <div key={envVar.name} className="space-y-1">
+                            <div className="flex items-center justify-between">
+                              <Label htmlFor={`${agent.key}-${envVar.name}`} className="text-xs text-muted-foreground">
+                                {envVar.label}
+                              </Label>
+                              {isServerDefault && (
+                                <span className="text-[10px] text-muted-foreground">server default</span>
+                              )}
+                            </div>
+                            <Input
+                              id={`${agent.key}-${envVar.name}`}
+                              type={envVar.sensitive ? "password" : "text"}
+                              placeholder={envVar.placeholder ?? "Not set"}
+                              value={displayValue}
+                              className={isServerDefault ? "text-muted-foreground" : ""}
+                              onChange={(e) => {
+                                setAgentConfig((prev) => ({
+                                  ...prev,
+                                  [agent.key]: {
+                                    ...prev[agent.key],
+                                    [envVar.name]: e.target.value,
+                                  },
+                                }));
+                              }}
+                            />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </CardContent>
+                </Card>
+              );
+            })}
           </>
         )}
       </section>
