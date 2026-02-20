@@ -276,3 +276,38 @@ type Job struct {
 	UpdatedAt      time.Time       `db:"updated_at" json:"updated_at"`
 	CompletedAt    *time.Time      `db:"completed_at" json:"completed_at,omitempty"`
 }
+
+// ReviewComment represents a captured review comment on a 143-generated PR.
+type ReviewComment struct {
+	ID              uuid.UUID  `db:"id" json:"id"`
+	PullRequestID   uuid.UUID  `db:"pull_request_id" json:"pull_request_id"`
+	OrgID           uuid.UUID  `db:"org_id" json:"org_id"`
+	GitHubCommentID int64      `db:"github_comment_id" json:"github_comment_id"`
+	Reviewer        string     `db:"reviewer" json:"reviewer"`
+	Body            string     `db:"body" json:"body"`
+	DiffPath        *string    `db:"diff_path" json:"diff_path,omitempty"`
+	DiffPosition    *int       `db:"diff_position" json:"diff_position,omitempty"`
+	FilterStatus    string     `db:"filter_status" json:"filter_status"`
+	Category        *string    `db:"category" json:"category,omitempty"`
+	Actionable      bool       `db:"actionable" json:"actionable"`
+	Generalizable   bool       `db:"generalizable" json:"generalizable"`
+	GeneralizedRule *string    `db:"generalized_rule" json:"generalized_rule,omitempty"`
+	Summary         *string    `db:"summary" json:"summary,omitempty"`
+	Applied         bool       `db:"applied" json:"applied"`
+	CreatedAt       time.Time  `db:"created_at" json:"created_at"`
+}
+
+// ReviewPattern represents a learned review convention for a repo.
+type ReviewPattern struct {
+	ID               uuid.UUID   `db:"id" json:"id"`
+	OrgID            uuid.UUID   `db:"org_id" json:"org_id"`
+	Repo             string      `db:"repo" json:"repo"`
+	Rule             string      `db:"rule" json:"rule"`
+	Category         string      `db:"category" json:"category"`
+	SourceCommentIDs []uuid.UUID `db:"source_comment_ids" json:"source_comment_ids"`
+	OccurrenceCount  int         `db:"occurrence_count" json:"occurrence_count"`
+	Status           string      `db:"status" json:"status"`
+	ManuallyCurated  bool        `db:"manually_curated" json:"manually_curated"`
+	Active           bool        `db:"active" json:"active"`
+	CreatedAt        time.Time   `db:"created_at" json:"created_at"`
+}
