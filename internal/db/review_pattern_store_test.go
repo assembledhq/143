@@ -229,6 +229,9 @@ func TestReviewPatternStore_UpdatePattern_InsertOnlyVersioning(t *testing.T) {
 	id := uuid.New()
 	sourceCommentIDs := []uuid.UUID{uuid.New()}
 
+	// Transaction: Begin
+	mock.ExpectBegin()
+
 	// Step 1: Expect the inactivation query that returns the existing row values
 	mock.ExpectQuery("UPDATE review_patterns SET active = false WHERE id .+ AND org_id .+ AND active = true RETURNING").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -245,6 +248,9 @@ func TestReviewPatternStore_UpdatePattern_InsertOnlyVersioning(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+
+	// Transaction: Commit
+	mock.ExpectCommit()
 
 	err = store.UpdatePattern(context.Background(), orgID, id, &newRule, nil)
 	require.NoError(t, err, "should update review pattern using insert-only versioning without error")
@@ -263,6 +269,9 @@ func TestReviewPatternStore_IncrementOccurrence_PromotesAtTwo(t *testing.T) {
 	commentID := uuid.New()
 	existingCommentID := uuid.New()
 
+	// Transaction: Begin
+	mock.ExpectBegin()
+
 	// Step 1: Expect the inactivation query returning a candidate pattern with occurrence_count=1
 	mock.ExpectQuery("UPDATE review_patterns SET active = false WHERE id .+ AND org_id .+ AND active = true RETURNING").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -279,6 +288,9 @@ func TestReviewPatternStore_IncrementOccurrence_PromotesAtTwo(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+
+	// Transaction: Commit
+	mock.ExpectCommit()
 
 	err = store.IncrementOccurrence(context.Background(), orgID, patternID, commentID)
 	require.NoError(t, err, "should increment occurrence and promote pattern without error")

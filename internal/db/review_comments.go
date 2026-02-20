@@ -22,7 +22,7 @@ func (s *ReviewCommentStore) Create(ctx context.Context, c *models.ReviewComment
 	query := `
 		INSERT INTO review_comments (pull_request_id, org_id, github_comment_id, reviewer, body, diff_path, diff_position, filter_status)
 		VALUES (@pull_request_id, @org_id, @github_comment_id, @reviewer, @body, @diff_path, @diff_position, @filter_status)
-		ON CONFLICT (pull_request_id, github_comment_id) DO NOTHING
+		ON CONFLICT (pull_request_id, github_comment_id) DO UPDATE SET id = review_comments.id
 		RETURNING id, created_at`
 
 	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
@@ -35,7 +35,29 @@ func (s *ReviewCommentStore) Create(ctx context.Context, c *models.ReviewComment
 		"diff_position":     c.DiffPosition,
 		"filter_status":     c.FilterStatus,
 	})
-	return row.Scan(&c.ID, &c.CreatedAt)
+	if err := row.Scan(&c.ID, &c.CreatedAt); err != nil {
+		return err
+	}
+	return nil
+}
+
+// IsDuplicate returns true if the given comment already exists (based on its CreatedAt
+// being before the Create call's timestamp). Callers can use this to skip enqueueing
+// duplicate webhook deliveries.
+func (s *ReviewCommentStore) IsDuplicate(ctx context.Context, c *models.ReviewComment) bool {
+	// After an ON CONFLICT DO UPDATE SET id = id, the RETURNING clause returns the
+	// existing row's created_at. If a row was truly inserted, created_at will be ~now.
+	// For duplicates, created_at will be earlier. However, the simplest approach is
+	// to check if a record with this github_comment_id already has filter_status != pending.
+	var status string
+	err := s.db.QueryRow(ctx,
+		`SELECT filter_status FROM review_comments WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": c.ID, "org_id": c.OrgID},
+	).Scan(&status)
+	if err != nil {
+		return false
+	}
+	return status != "pending"
 }
 
 func (s *ReviewCommentStore) GetByID(ctx context.Context, orgID, id uuid.UUID) (models.ReviewComment, error) {

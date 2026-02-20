@@ -11,10 +11,10 @@ import (
 )
 
 type ReviewPatternStore struct {
-	db DBTX
+	db TxStarter
 }
 
-func NewReviewPatternStore(db DBTX) *ReviewPatternStore {
+func NewReviewPatternStore(db TxStarter) *ReviewPatternStore {
 	return &ReviewPatternStore{db: db}
 }
 
@@ -135,8 +135,15 @@ func (s *ReviewPatternStore) FindMatchingRule(ctx context.Context, orgID uuid.UU
 }
 
 // UpdatePattern implements insert-only versioning: deactivates the current row
-// and inserts a new one with updated values.
+// and inserts a new one with updated values. Wrapped in a transaction to ensure
+// the old row is never deactivated without a replacement being inserted.
 func (s *ReviewPatternStore) UpdatePattern(ctx context.Context, orgID, id uuid.UUID, rule *string, status *string) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
 	// 1. Inactivate the current row and get its values.
 	inactivateQuery := `
 		UPDATE review_patterns SET active = false
@@ -144,7 +151,7 @@ func (s *ReviewPatternStore) UpdatePattern(ctx context.Context, orgID, id uuid.U
 		RETURNING org_id, repo, rule, category, source_comment_ids, occurrence_count, status, manually_curated`
 
 	var existing models.ReviewPattern
-	err := s.db.QueryRow(ctx, inactivateQuery, pgx.NamedArgs{
+	err = tx.QueryRow(ctx, inactivateQuery, pgx.NamedArgs{
 		"id":     id,
 		"org_id": orgID,
 	}).Scan(
@@ -172,7 +179,7 @@ func (s *ReviewPatternStore) UpdatePattern(ctx context.Context, orgID, id uuid.U
 		INSERT INTO review_patterns (org_id, repo, rule, category, source_comment_ids, occurrence_count, status, manually_curated, active)
 		VALUES (@org_id, @repo, @rule, @category, @source_comment_ids, @occurrence_count, @status, @manually_curated, true)`
 
-	_, err = s.db.Exec(ctx, insertQuery, pgx.NamedArgs{
+	_, err = tx.Exec(ctx, insertQuery, pgx.NamedArgs{
 		"org_id":             existing.OrgID,
 		"repo":               existing.Repo,
 		"rule":               newRule,
@@ -182,19 +189,30 @@ func (s *ReviewPatternStore) UpdatePattern(ctx context.Context, orgID, id uuid.U
 		"status":             newStatus,
 		"manually_curated":   existing.ManuallyCurated,
 	})
-	return err
+	if err != nil {
+		return fmt.Errorf("insert new review pattern version: %w", err)
+	}
+
+	return tx.Commit(ctx)
 }
 
 // IncrementOccurrence deactivates the current pattern and inserts a new active row
-// with incremented occurrence_count and appended source comment ID.
+// with incremented occurrence_count and appended source comment ID. Wrapped in a
+// transaction to ensure atomicity of the insert-only versioning operation.
 func (s *ReviewPatternStore) IncrementOccurrence(ctx context.Context, orgID, patternID, commentID uuid.UUID) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
 	inactivateQuery := `
 		UPDATE review_patterns SET active = false
 		WHERE id = @id AND org_id = @org_id AND active = true
 		RETURNING org_id, repo, rule, category, source_comment_ids, occurrence_count, status, manually_curated`
 
 	var existing models.ReviewPattern
-	err := s.db.QueryRow(ctx, inactivateQuery, pgx.NamedArgs{
+	err = tx.QueryRow(ctx, inactivateQuery, pgx.NamedArgs{
 		"id":     patternID,
 		"org_id": orgID,
 	}).Scan(
@@ -219,7 +237,7 @@ func (s *ReviewPatternStore) IncrementOccurrence(ctx context.Context, orgID, pat
 		INSERT INTO review_patterns (org_id, repo, rule, category, source_comment_ids, occurrence_count, status, manually_curated, active)
 		VALUES (@org_id, @repo, @rule, @category, @source_comment_ids, @occurrence_count, @status, @manually_curated, true)`
 
-	_, err = s.db.Exec(ctx, insertQuery, pgx.NamedArgs{
+	_, err = tx.Exec(ctx, insertQuery, pgx.NamedArgs{
 		"org_id":             existing.OrgID,
 		"repo":               existing.Repo,
 		"rule":               existing.Rule,
@@ -229,5 +247,9 @@ func (s *ReviewPatternStore) IncrementOccurrence(ctx context.Context, orgID, pat
 		"status":             newStatus,
 		"manually_curated":   existing.ManuallyCurated,
 	})
-	return err
+	if err != nil {
+		return fmt.Errorf("insert incremented review pattern: %w", err)
+	}
+
+	return tx.Commit(ctx)
 }

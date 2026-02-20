@@ -47,6 +47,9 @@ type Config struct {
 	OpenRouterBaseURL string `env:"OPENROUTER_BASE_URL"`
 	OpenRouterAppName string `env:"OPENROUTER_APP_NAME"   envDefault:"143"`
 	OpenRouterSiteURL string `env:"OPENROUTER_SITE_URL"`
+
+	// Gemini CLI
+	GeminiAPIKey string `env:"GEMINI_API_KEY"`
 }
 
 // Load reads configuration from env files and environment variables.
@@ -107,6 +110,11 @@ func (c *Config) AgentEnv() map[string]map[string]string {
 			env["OPENAI_BASE_URL"] = c.OpenAIBaseURL
 		}
 		result["codex"] = env
+	}
+
+	// Gemini CLI needs GEMINI_API_KEY.
+	if c.GeminiAPIKey != "" {
+		result["gemini_cli"] = map[string]string{"GEMINI_API_KEY": c.GeminiAPIKey}
 	}
 
 	return result

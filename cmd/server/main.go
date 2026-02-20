@@ -59,6 +59,8 @@ func main() {
 		validationStore := db.NewValidationStore(pool)
 		pullRequestStore := db.NewPullRequestStore(pool)
 		deployStore := db.NewDeployStore(pool)
+		priorityScoreStore := db.NewPriorityScoreStore(pool)
+		complexityEstimateStore := db.NewComplexityEstimateStore(pool)
 
 		stores := &worker.Stores{
 			Issues:              issueStore,
@@ -66,15 +68,16 @@ func main() {
 			Jobs:                jobStore,
 			Integrations:        db.NewIntegrationStore(pool),
 			Webhooks:            db.NewWebhookDeliveryStore(pool),
-			PriorityScores:      db.NewPriorityScoreStore(pool),
-			ComplexityEstimates: db.NewComplexityEstimateStore(pool),
+			PriorityScores:      priorityScoreStore,
+			ComplexityEstimates: complexityEstimateStore,
 		}
 
 		// Build Phase 3+ services if runtime dependencies are available.
 		var services *worker.Services
 		if canBuildServices(cfg, logger) {
 			services = buildServices(cfg, pool, logger, issueStore, agentRunStore,
-				jobStore, orgStore, repoStore, validationStore, pullRequestStore, deployStore)
+				jobStore, orgStore, repoStore, validationStore, pullRequestStore,
+				deployStore, priorityScoreStore, complexityEstimateStore)
 		}
 		worker.RegisterHandlers(w, stores, services, logger)
 		go w.Start(ctx)
@@ -133,18 +136,20 @@ func buildServices(
 	validationStore *db.ValidationStore,
 	pullRequestStore *db.PullRequestStore,
 	deployStore *db.DeployStore,
+	priorityScoreStore *db.PriorityScoreStore,
+	complexityEstimateStore *db.ComplexityEstimateStore,
 ) *worker.Services {
 	// GitHub App service (for installation tokens, PR creation).
 	ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
 	if err != nil {
-		logger.Error().Err(err).Msg("failed to initialize GitHub App service")
+		logger.Error().Err(err).Msg("failed to initialize GitHub App service — all Phase 3+ services disabled")
 		return nil
 	}
 
 	// Docker sandbox provider.
 	dockerCli, err := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
 	if err != nil {
-		logger.Warn().Err(err).Msg("Docker not available — agent execution disabled")
+		logger.Error().Err(err).Msg("Docker not available — all Phase 3+ services disabled")
 		return nil
 	}
 	sandboxProvider := providers.NewDockerProvider(dockerCli, logger)
@@ -152,12 +157,13 @@ func buildServices(
 	// LLM client (optional — validation/prioritization degrade gracefully without it).
 	llmClient, err := llm.NewClient(cfg.LLMConfig(), logger)
 	if err != nil {
-		logger.Warn().Err(err).Msg("LLM client initialization failed — LLM checks will be skipped")
+		logger.Warn().Err(err).Msg("LLM client initialization failed — LLM-dependent checks will be skipped")
 	}
 
 	// Agent adapters.
 	agentAdapters := map[string]agent.AgentAdapter{
 		"claude_code": adapters.NewClaudeCodeAdapter(logger),
+		"gemini_cli":  adapters.NewGeminiCLIAdapter(logger),
 	}
 
 	// Orchestrator.
@@ -192,8 +198,6 @@ func buildServices(
 	failureSvc := agent.NewFailureService(agentRunStore, logger)
 
 	// Prioritization service.
-	priorityScoreStore := db.NewPriorityScoreStore(pool)
-	complexityEstimateStore := db.NewComplexityEstimateStore(pool)
 	prioritizationSvc := prioritization.NewService(
 		issueStore, priorityScoreStore, complexityEstimateStore,
 		agentRunStore, orgStore, jobStore, llmClient, logger,

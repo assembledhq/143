@@ -71,6 +71,8 @@ func TestReviewCommentStore_Create_DuplicateGitHubCommentID(t *testing.T) {
 	defer mock.Close()
 
 	store := NewReviewCommentStore(mock)
+	existingID := uuid.New()
+	existingTime := time.Now().Add(-1 * time.Hour)
 
 	c := &models.ReviewComment{
 		PullRequestID:   uuid.New(),
@@ -81,14 +83,19 @@ func TestReviewCommentStore_Create_DuplicateGitHubCommentID(t *testing.T) {
 		FilterStatus:    "pending",
 	}
 
-	// ON CONFLICT DO NOTHING means no rows are returned when the comment already exists.
+	// ON CONFLICT DO UPDATE SET id = review_comments.id returns the existing row on conflict.
 	mock.ExpectQuery("INSERT INTO review_comments").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}))
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "created_at"}).
+				AddRow(existingID, existingTime),
+		)
 
 	err = store.Create(context.Background(), c)
-	require.Error(t, err, "should return an error when duplicate github_comment_id causes no row returned")
+	require.NoError(t, err, "should return existing row on duplicate without error")
+	require.Equal(t, existingID, c.ID, "should populate the model with the existing row's ID")
+	require.Equal(t, existingTime, c.CreatedAt, "should populate the model with the existing row's created_at")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
