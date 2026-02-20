@@ -544,6 +544,215 @@ func TestRunHandler_AnswerQuestion(t *testing.T) {
 	}
 }
 
+func TestRunHandler_GetPullRequest_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	prID := uuid.New()
+	now := time.Now()
+
+	handler := newRunHandler(t, mock)
+
+	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "agent_run_id", "org_id", "github_pr_number", "github_pr_url",
+				"github_repo", "title", "body", "status", "review_status",
+				"merged_at", "created_at", "updated_at",
+			}).AddRow(
+				prID, runID, orgID, 42, "https://github.com/org/repo/pull/42",
+				"org/repo", "Fix bug", nil, "open", "pending",
+				nil, now, now,
+			),
+		)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+runID.String()+"/pull-request", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", runID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.GetPullRequest(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "should return 200 OK")
+
+	var resp models.SingleResponse[models.PullRequest]
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err, "response body should be valid JSON")
+	require.Equal(t, 42, resp.Data.GitHubPRNumber, "should return the PR number")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRunHandler_GetPullRequest_InvalidID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	handler := newRunHandler(t, mock)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs/bad-id/pull-request", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "bad-id")
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.GetPullRequest(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "should return 400 for invalid ID")
+	require.Contains(t, w.Body.String(), "INVALID_ID")
+}
+
+func TestRunHandler_GetValidation_InvalidID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	handler := newRunHandler(t, mock)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs/bad-id/validation", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "bad-id")
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.GetValidation(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "should return 400 for invalid ID")
+	require.Contains(t, w.Body.String(), "INVALID_ID")
+}
+
+func TestRunHandler_ListQuestions_InvalidID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	handler := newRunHandler(t, mock)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs/bad-id/questions", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "bad-id")
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.ListQuestions(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "should return 400 for invalid ID")
+	require.Contains(t, w.Body.String(), "INVALID_ID")
+}
+
+func TestRunHandler_AnswerQuestion_InvalidQID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	handler := newRunHandler(t, mock)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runs/"+runID.String()+"/questions/bad-id/answer", strings.NewReader(`{"answer":"yes"}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", runID.String())
+	rctx.URLParams.Add("qid", "bad-id")
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.AnswerQuestion(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "should return 400 for invalid question ID")
+	require.Contains(t, w.Body.String(), "INVALID_ID")
+}
+
+func TestRunHandler_AnswerQuestion_NoUser(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	qID := uuid.New()
+	handler := newRunHandler(t, mock)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runs/"+runID.String()+"/questions/"+qID.String()+"/answer", strings.NewReader(`{"answer":"yes"}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", runID.String())
+	rctx.URLParams.Add("qid", qID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	// No user set in context
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.AnswerQuestion(w, req)
+	require.Equal(t, http.StatusUnauthorized, w.Code, "should return 401 when no user in context")
+	require.Contains(t, w.Body.String(), "UNAUTHORIZED")
+}
+
+func TestRunHandler_TriggerFix_InvalidAutonomyLevel(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	issueID := uuid.New()
+	handler := newRunHandler(t, mock)
+
+	now := time.Now()
+	mock.ExpectQuery("SELECT").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
+				"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
+				"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
+				"created_at", "updated_at",
+			}).AddRow(
+				issueID, orgID, "ISSUE-1", "sentry", nil, nil,
+				"Test issue", nil, nil, "open", now, now,
+				1, 0, "medium", nil, "fp-1",
+				now, now,
+			),
+		)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/issues/"+issueID.String()+"/fix", strings.NewReader(`{"autonomy_level":"chaos"}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", issueID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.TriggerFix(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "should return 400 for invalid autonomy level")
+	require.Contains(t, w.Body.String(), "INVALID_AUTONOMY_LEVEL")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func stringPtr(s string) *string {
 	return &s
 }

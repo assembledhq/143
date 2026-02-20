@@ -375,6 +375,41 @@ func TestWorker_Poll(t *testing.T) {
 	}
 }
 
+func TestWorker_Start_StopsOnContextCancel(t *testing.T) {
+	t.Parallel()
+
+	w, mock := newTestWorker(t)
+	defer mock.Close()
+
+	// Set a very short poll interval so the test doesn't hang.
+	w.pollInterval = 10 * time.Millisecond
+
+	// The poll will try to begin a transaction. We'll let it run a few times,
+	// each returning no rows, then cancel.
+	mock.MatchExpectationsInOrder(false)
+	for range 5 {
+		mock.ExpectBegin()
+		mock.ExpectQuery("SELECT .+ FROM jobs").WillReturnError(pgx.ErrNoRows)
+		mock.ExpectRollback()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		w.Start(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Worker stopped as expected.
+	case <-time.After(2 * time.Second):
+		t.Fatal("Worker.Start did not stop after context cancellation")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Backoff verification (separate since it tests retryJob directly)
 // ---------------------------------------------------------------------------
