@@ -91,7 +91,8 @@ export const api = {
       return get<import('./types').ListResponse<import('./types').Issue>>(`/api/v1/issues${qs ? `?${qs}` : ''}`);
     },
     get: (id: string) => get<import('./types').SingleResponse<import('./types').Issue>>(`/api/v1/issues/${id}`),
-    triggerFix: (issueId: string) => post<import('./types').SingleResponse<import('./types').AgentRun>>(`/api/v1/issues/${issueId}/fix`),
+    triggerFix: (issueId: string, options?: { agent_type?: string; autonomy_level?: string; token_mode?: string }) =>
+      post<import('./types').SingleResponse<import('./types').AgentRun>>(`/api/v1/issues/${issueId}/fix`, options),
   },
   runs: {
     list: (params?: { status?: string; cursor?: string; limit?: number }) => {
