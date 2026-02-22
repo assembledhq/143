@@ -12,6 +12,7 @@ import {
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/use-auth";
 import { useEffect } from "react";
 
@@ -82,13 +83,14 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
           {user && (
             <div className="flex items-center gap-2 rounded-md px-2.5 py-1.5 text-[13px] text-muted-foreground">
               <span className="truncate flex-1">{user.name}</span>
-              <button
+              <Button
+                variant="ghost"
+                size="icon-xs"
                 onClick={logout}
-                className="hover:text-foreground transition-colors"
                 aria-label="Log out"
               >
                 <LogOut className="h-3.5 w-3.5" />
-              </button>
+              </Button>
             </div>
           )}
         </div>

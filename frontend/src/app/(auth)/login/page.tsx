@@ -74,7 +74,7 @@ function LoginPageContent() {
     }
   };
 
-  if (authLoading) {
+  if (authLoading || isAuthenticated) {
     return null;
   }
 
