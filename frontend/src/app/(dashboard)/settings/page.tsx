@@ -333,226 +333,229 @@ export default function SettingsPage() {
           onClick={() => setShowAdvanced((v) => !v)}
         >
           <ChevronRight className={`h-3.5 w-3.5 transition-transform ${showAdvanced ? "rotate-90" : ""}`} />
-          Advanced: Agent Configuration
+          Advanced Settings
         </Button>
         {showAdvanced && (
-          <>
-            <p className="text-xs text-muted-foreground">
-              Override server-level agent credentials and model selection per agent.
-              Fields show the server default when no override is set.
-            </p>
-            {AGENT_TYPES.map((agent) => {
-              const serverVars = serverAgentDefaults[agent.key] ?? {};
-              const hasServerConfig = Object.keys(serverVars).length > 0;
-              return (
-                <Card key={agent.key}>
-                  <CardContent>
+          <div className="space-y-6">
+            <div className="space-y-3">
+              <h3 className="text-[13px] font-medium text-foreground">Confidence Thresholds</h3>
+              <Card>
+                <CardContent>
+                  <div className="space-y-6">
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <Label htmlFor="auto-proceed">Auto-proceed Threshold</Label>
+                        <span className="text-sm font-medium tabular-nums">{autoProceed}</span>
+                      </div>
+                      <Slider
+                        id="auto-proceed"
+                        min={0}
+                        max={100}
+                        step={5}
+                        value={[Math.round(parseFloat(autoProceed) * 100)]}
+                        onValueChange={([v]) => setAutoProceed((v / 100).toFixed(2))}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Minimum confidence score to proceed without human review.
+                      </p>
+                    </div>
+
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <Label htmlFor="human-review">Human Review Threshold</Label>
+                        <span className="text-sm font-medium tabular-nums">{humanReview}</span>
+                      </div>
+                      <Slider
+                        id="human-review"
+                        min={0}
+                        max={100}
+                        step={5}
+                        value={[Math.round(parseFloat(humanReview) * 100)]}
+                        onValueChange={([v]) => setHumanReview((v / 100).toFixed(2))}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Below this score, issues are flagged for human review.
+                      </p>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+
+            <div className="space-y-3">
+              <h3 className="text-[13px] font-medium text-foreground">Prioritization</h3>
+              <Card>
+                <CardContent>
+                  <div className="space-y-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="product-direction">Product Direction</Label>
+                      <textarea
+                        id="product-direction"
+                        rows={3}
+                        value={productDirection}
+                        onChange={(e) => setProductDirection(e.target.value)}
+                        placeholder="Describe your product direction to guide issue prioritization..."
+                        className="border-input bg-transparent placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 flex w-full rounded-md border px-3 py-2 text-sm shadow-xs outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
+                      />
+                    </div>
+
                     <div className="space-y-4">
                       <div className="flex items-center justify-between">
-                        <h3 className="text-sm font-medium">{agent.label}</h3>
-                        {hasServerConfig ? (
-                          <span className="text-xs text-green-600">Server configured</span>
-                        ) : (
-                          <span className="text-xs text-muted-foreground">Not configured</span>
-                        )}
+                        <Label>Priority Weights</Label>
+                        <span className={`text-xs tabular-nums ${weightsValid ? "text-muted-foreground" : "text-destructive font-medium"}`}>
+                          Sum: {weightsSum.toFixed(2)} / 1.00
+                        </span>
                       </div>
-                      {agent.envVars.map((envVar) => {
-                        const serverDefault = serverVars[envVar.name] ?? "";
-                        const orgOverride = agentConfig[agent.key]?.[envVar.name] ?? "";
-                        const displayValue = orgOverride || serverDefault;
-                        const isServerDefault = !orgOverride && !!serverDefault;
-                        return (
-                          <div key={envVar.name} className="space-y-1">
-                            <div className="flex items-center justify-between">
-                              <Label htmlFor={`${agent.key}-${envVar.name}`} className="text-xs text-muted-foreground">
-                                {envVar.label}
-                              </Label>
-                              {isServerDefault && (
-                                <span className="text-[10px] text-muted-foreground">server default</span>
-                              )}
-                            </div>
-                            <Input
-                              id={`${agent.key}-${envVar.name}`}
-                              type={envVar.sensitive ? "password" : "text"}
-                              placeholder={envVar.placeholder ?? "Not set"}
-                              value={displayValue}
-                              className={isServerDefault ? "text-muted-foreground" : ""}
-                              onChange={(e) => {
-                                setAgentConfig((prev) => ({
-                                  ...prev,
-                                  [agent.key]: {
-                                    ...prev[agent.key],
-                                    [envVar.name]: e.target.value,
-                                  },
-                                }));
-                              }}
-                            />
+                      {!weightsValid && (
+                        <p className="text-xs text-destructive">
+                          Weights must sum to 1.0
+                        </p>
+                      )}
+                      <div className="space-y-4">
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <Label htmlFor="w-customer" className="text-xs text-muted-foreground">Customer Impact</Label>
+                            <span className="text-xs font-medium tabular-nums">{customerImpact}</span>
                           </div>
-                        );
-                      })}
+                          <Slider
+                            id="w-customer"
+                            min={0}
+                            max={100}
+                            step={5}
+                            value={[Math.round(parseFloat(customerImpact) * 100)]}
+                            onValueChange={([v]) => setCustomerImpact((v / 100).toFixed(2))}
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <Label htmlFor="w-severity" className="text-xs text-muted-foreground">Severity</Label>
+                            <span className="text-xs font-medium tabular-nums">{severity}</span>
+                          </div>
+                          <Slider
+                            id="w-severity"
+                            min={0}
+                            max={100}
+                            step={5}
+                            value={[Math.round(parseFloat(severity) * 100)]}
+                            onValueChange={([v]) => setSeverity((v / 100).toFixed(2))}
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <Label htmlFor="w-recency" className="text-xs text-muted-foreground">Recency</Label>
+                            <span className="text-xs font-medium tabular-nums">{recency}</span>
+                          </div>
+                          <Slider
+                            id="w-recency"
+                            min={0}
+                            max={100}
+                            step={5}
+                            value={[Math.round(parseFloat(recency) * 100)]}
+                            onValueChange={([v]) => setRecency((v / 100).toFixed(2))}
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <Label htmlFor="w-revenue" className="text-xs text-muted-foreground">Revenue Risk</Label>
+                            <span className="text-xs font-medium tabular-nums">{revenueRisk}</span>
+                          </div>
+                          <Slider
+                            id="w-revenue"
+                            min={0}
+                            max={100}
+                            step={5}
+                            value={[Math.round(parseFloat(revenueRisk) * 100)]}
+                            onValueChange={([v]) => setRevenueRisk((v / 100).toFixed(2))}
+                          />
+                        </div>
+                      </div>
                     </div>
-                  </CardContent>
-                </Card>
-              );
-            })}
-          </>
+
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <Label htmlFor="min-threshold">Minimum Score Threshold</Label>
+                        <span className="text-sm font-medium tabular-nums">{minThreshold}</span>
+                      </div>
+                      <Slider
+                        id="min-threshold"
+                        min={0}
+                        max={100}
+                        step={1}
+                        value={[parseInt(minThreshold, 10) || 0]}
+                        onValueChange={([v]) => setMinThreshold(String(v))}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Issues scoring below this threshold will not be auto-processed.
+                      </p>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+
+            <div className="space-y-3">
+              <h3 className="text-[13px] font-medium text-foreground">Agent Configuration</h3>
+              <p className="text-xs text-muted-foreground">
+                Override server-level agent credentials and model selection per agent.
+                Fields show the server default when no override is set.
+              </p>
+              {AGENT_TYPES.map((agent) => {
+                const serverVars = serverAgentDefaults[agent.key] ?? {};
+                const hasServerConfig = Object.keys(serverVars).length > 0;
+                return (
+                  <Card key={agent.key}>
+                    <CardContent>
+                      <div className="space-y-4">
+                        <div className="flex items-center justify-between">
+                          <h3 className="text-sm font-medium">{agent.label}</h3>
+                          {hasServerConfig ? (
+                            <span className="text-xs text-green-600">Server configured</span>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">Not configured</span>
+                          )}
+                        </div>
+                        {agent.envVars.map((envVar) => {
+                          const serverDefault = serverVars[envVar.name] ?? "";
+                          const orgOverride = agentConfig[agent.key]?.[envVar.name] ?? "";
+                          const displayValue = orgOverride || serverDefault;
+                          const isServerDefault = !orgOverride && !!serverDefault;
+                          return (
+                            <div key={envVar.name} className="space-y-1">
+                              <div className="flex items-center justify-between">
+                                <Label htmlFor={`${agent.key}-${envVar.name}`} className="text-xs text-muted-foreground">
+                                  {envVar.label}
+                                </Label>
+                                {isServerDefault && (
+                                  <span className="text-[10px] text-muted-foreground">server default</span>
+                                )}
+                              </div>
+                              <Input
+                                id={`${agent.key}-${envVar.name}`}
+                                type={envVar.sensitive ? "password" : "text"}
+                                placeholder={envVar.placeholder ?? "Not set"}
+                                value={displayValue}
+                                className={isServerDefault ? "text-muted-foreground" : ""}
+                                onChange={(e) => {
+                                  setAgentConfig((prev) => ({
+                                    ...prev,
+                                    [agent.key]: {
+                                      ...prev[agent.key],
+                                      [envVar.name]: e.target.value,
+                                    },
+                                  }));
+                                }}
+                              />
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </CardContent>
+                  </Card>
+                );
+              })}
+            </div>
+          </div>
         )}
-      </section>
-
-      <section className="space-y-3">
-        <h2 className="text-[13px] font-medium text-foreground">Confidence Thresholds</h2>
-        <Card>
-          <CardContent>
-            <div className="space-y-6">
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <Label htmlFor="auto-proceed">Auto-proceed Threshold</Label>
-                  <span className="text-sm font-medium tabular-nums">{autoProceed}</span>
-                </div>
-                <Slider
-                  id="auto-proceed"
-                  min={0}
-                  max={100}
-                  step={5}
-                  value={[Math.round(parseFloat(autoProceed) * 100)]}
-                  onValueChange={([v]) => setAutoProceed((v / 100).toFixed(2))}
-                />
-                <p className="text-xs text-muted-foreground">
-                  Minimum confidence score to proceed without human review.
-                </p>
-              </div>
-
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <Label htmlFor="human-review">Human Review Threshold</Label>
-                  <span className="text-sm font-medium tabular-nums">{humanReview}</span>
-                </div>
-                <Slider
-                  id="human-review"
-                  min={0}
-                  max={100}
-                  step={5}
-                  value={[Math.round(parseFloat(humanReview) * 100)]}
-                  onValueChange={([v]) => setHumanReview((v / 100).toFixed(2))}
-                />
-                <p className="text-xs text-muted-foreground">
-                  Below this score, issues are flagged for human review.
-                </p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      </section>
-
-      <section className="space-y-3">
-        <h2 className="text-[13px] font-medium text-foreground">Prioritization</h2>
-        <Card>
-          <CardContent>
-            <div className="space-y-4">
-              <div className="space-y-2">
-                <Label htmlFor="product-direction">Product Direction</Label>
-                <textarea
-                  id="product-direction"
-                  rows={3}
-                  value={productDirection}
-                  onChange={(e) => setProductDirection(e.target.value)}
-                  placeholder="Describe your product direction to guide issue prioritization..."
-                  className="border-input bg-transparent placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 flex w-full rounded-md border px-3 py-2 text-sm shadow-xs outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
-                />
-              </div>
-
-              <div className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <Label>Priority Weights</Label>
-                  <span className={`text-xs tabular-nums ${weightsValid ? "text-muted-foreground" : "text-destructive font-medium"}`}>
-                    Sum: {weightsSum.toFixed(2)} / 1.00
-                  </span>
-                </div>
-                {!weightsValid && (
-                  <p className="text-xs text-destructive">
-                    Weights must sum to 1.0
-                  </p>
-                )}
-                <div className="space-y-4">
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <Label htmlFor="w-customer" className="text-xs text-muted-foreground">Customer Impact</Label>
-                      <span className="text-xs font-medium tabular-nums">{customerImpact}</span>
-                    </div>
-                    <Slider
-                      id="w-customer"
-                      min={0}
-                      max={100}
-                      step={5}
-                      value={[Math.round(parseFloat(customerImpact) * 100)]}
-                      onValueChange={([v]) => setCustomerImpact((v / 100).toFixed(2))}
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <Label htmlFor="w-severity" className="text-xs text-muted-foreground">Severity</Label>
-                      <span className="text-xs font-medium tabular-nums">{severity}</span>
-                    </div>
-                    <Slider
-                      id="w-severity"
-                      min={0}
-                      max={100}
-                      step={5}
-                      value={[Math.round(parseFloat(severity) * 100)]}
-                      onValueChange={([v]) => setSeverity((v / 100).toFixed(2))}
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <Label htmlFor="w-recency" className="text-xs text-muted-foreground">Recency</Label>
-                      <span className="text-xs font-medium tabular-nums">{recency}</span>
-                    </div>
-                    <Slider
-                      id="w-recency"
-                      min={0}
-                      max={100}
-                      step={5}
-                      value={[Math.round(parseFloat(recency) * 100)]}
-                      onValueChange={([v]) => setRecency((v / 100).toFixed(2))}
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <Label htmlFor="w-revenue" className="text-xs text-muted-foreground">Revenue Risk</Label>
-                      <span className="text-xs font-medium tabular-nums">{revenueRisk}</span>
-                    </div>
-                    <Slider
-                      id="w-revenue"
-                      min={0}
-                      max={100}
-                      step={5}
-                      value={[Math.round(parseFloat(revenueRisk) * 100)]}
-                      onValueChange={([v]) => setRevenueRisk((v / 100).toFixed(2))}
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <Label htmlFor="min-threshold">Minimum Score Threshold</Label>
-                  <span className="text-sm font-medium tabular-nums">{minThreshold}</span>
-                </div>
-                <Slider
-                  id="min-threshold"
-                  min={0}
-                  max={100}
-                  step={1}
-                  value={[parseInt(minThreshold, 10) || 0]}
-                  onValueChange={([v]) => setMinThreshold(String(v))}
-                />
-                <p className="text-xs text-muted-foreground">
-                  Issues scoring below this threshold will not be auto-processed.
-                </p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
       </section>
 
       <div className="flex items-center gap-3">
