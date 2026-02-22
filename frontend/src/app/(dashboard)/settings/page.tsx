@@ -325,14 +325,16 @@ export default function SettingsPage() {
       </section>
 
       <section className="space-y-3">
-        <button
+        <Button
           type="button"
-          className="flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground hover:text-foreground transition-colors"
+          variant="ghost"
+          size="sm"
+          className="flex items-center gap-1.5 px-0 text-[13px] font-medium text-muted-foreground hover:text-foreground hover:bg-transparent"
           onClick={() => setShowAdvanced((v) => !v)}
         >
           <ChevronRight className={`h-3.5 w-3.5 transition-transform ${showAdvanced ? "rotate-90" : ""}`} />
           Advanced: Agent Configuration
-        </button>
+        </Button>
         {showAdvanced && (
           <>
             <p className="text-xs text-muted-foreground">

@@ -42,11 +42,7 @@ services:
       - key: MODE
         value: all
       - key: BASE_URL
-        sync: false # Set to your API URL after first deploy
-      - key: FRONTEND_URL
-        sync: false # Set to your frontend URL after first deploy
-      - key: CORS_ALLOWED_ORIGINS
-        sync: false # Set to your frontend URL after first deploy
+        sync: false # Set to your public URL (e.g. https://www.143.dev). FRONTEND_URL and CORS_ALLOWED_ORIGINS default to this.
       - key: SESSION_SECRET
         generateValue: true
       - key: ENCRYPTION_MASTER_KEY

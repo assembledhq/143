@@ -16,8 +16,8 @@ type Config struct {
 	LogLevel           string   `env:"LOG_LEVEL"             envDefault:"info"`
 	SessionSecret      string   `env:"SESSION_SECRET"` // #nosec G117 -- env config field
 	BaseURL            string   `env:"BASE_URL"              envDefault:"http://localhost:8080"`
-	FrontendURL        string   `env:"FRONTEND_URL"          envDefault:"http://localhost:3000"`
-	CORSAllowedOrigins []string `env:"CORS_ALLOWED_ORIGINS"  envDefault:"http://localhost:3000" envSeparator:","`
+	FrontendURL        string   `env:"FRONTEND_URL"`
+	CORSAllowedOrigins []string `env:"CORS_ALLOWED_ORIGINS"  envSeparator:","`
 	Mode               string   `env:"MODE"                  envDefault:"all"`
 
 	// GitHub OAuth
@@ -72,6 +72,17 @@ func Load() *Config {
 		// will surface missing values at startup.
 		return cfg
 	}
+
+	// Default FRONTEND_URL and CORS_ALLOWED_ORIGINS to BASE_URL when not
+	// explicitly set. In production the frontend proxies API calls so all
+	// three share the same origin.
+	if cfg.FrontendURL == "" {
+		cfg.FrontendURL = cfg.BaseURL
+	}
+	if len(cfg.CORSAllowedOrigins) == 0 {
+		cfg.CORSAllowedOrigins = []string{cfg.FrontendURL}
+	}
+
 	return cfg
 }
 
