@@ -40,17 +40,12 @@ export default function RootLayout({
       'color:#d2dae6;font-family:monospace;font-size:11px;line-height:1.5'
     );
     console.log(
-      '%c  XP-80 Shooting Star  %c  Built in 143 days  ',
-      'color:#d2dae6;background:#08080f;padding:3px 8px;font-family:monospace;font-weight:bold;letter-spacing:1px',
-      'color:#ffd700;background:#08080f;padding:3px 8px;font-family:monospace;letter-spacing:1px'
+      '%c  143 days  ',
+      'color:#ffd700;background:#08080f;padding:3px 8px;font-family:monospace;letter-spacing:2px'
     );
     console.log(
-      '%c  "Be quick, be quiet, be on time."  ',
-      'color:#ffd700;font-family:monospace;font-style:italic;font-size:13px;padding:4px 0;letter-spacing:0.5px'
-    );
-    console.log(
-      '%c  — Kelly Johnson, Skunk Works',
-      'color:#555555;font-family:monospace;font-size:11px;padding-bottom:4px'
+      '%cBe quick, be quiet, be on time.',
+      'color:#555555;font-family:monospace;font-style:italic;font-size:11px;letter-spacing:0.5px'
     );
   }, []);
 
