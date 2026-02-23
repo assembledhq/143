@@ -210,8 +210,8 @@ func (s *Service) PollForToken(ctx context.Context, orgID uuid.UUID) (*AuthStatu
 			}
 			// Restore pending auth from DB (survives server restart).
 			if err == nil && cred.Status == "pending_auth" {
-				cfg, ok := cred.Config.(models.OpenAIChatGPTConfig)
-				if ok && cfg.DeviceCode != "" && time.Now().Before(cfg.ExpiresAt) {
+				cfg, cfgOk := cred.Config.(models.OpenAIChatGPTConfig)
+				if cfgOk && cfg.DeviceCode != "" && time.Now().Before(cfg.ExpiresAt) {
 					restored := &PendingAuth{
 						DeviceCode:      cfg.DeviceCode,
 						UserCode:        cfg.UserCode,

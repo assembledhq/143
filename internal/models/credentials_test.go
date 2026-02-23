@@ -2,6 +2,7 @@ package models
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -216,6 +217,7 @@ func TestProviderConfig_Provider(t *testing.T) {
 		{"GitHubOAuthConfig", GitHubOAuthConfig{}, ProviderGitHubOAuth},
 		{"SentryConfig", SentryConfig{}, ProviderSentry},
 		{"LinearConfig", LinearConfig{}, ProviderLinear},
+		{"OpenAIChatGPTConfig", OpenAIChatGPTConfig{}, ProviderOpenAIChatGPT},
 	}
 
 	for _, tt := range tests {
@@ -250,6 +252,9 @@ func TestProviderConfig_Validate(t *testing.T) {
 		{"sentry empty", SentryConfig{WebhookSecret: ""}, true},
 		{"linear valid", LinearConfig{WebhookSecret: "secret"}, false},
 		{"linear empty", LinearConfig{WebhookSecret: ""}, true},
+		{"openai_chatgpt valid", OpenAIChatGPTConfig{AccessToken: "cha_tok", RefreshToken: "chr_tok"}, false},
+		{"openai_chatgpt missing access_token", OpenAIChatGPTConfig{AccessToken: "", RefreshToken: "chr_tok"}, true},
+		{"openai_chatgpt missing refresh_token", OpenAIChatGPTConfig{AccessToken: "cha_tok", RefreshToken: ""}, true},
 	}
 
 	for _, tt := range tests {
@@ -361,6 +366,81 @@ func TestMaskedSummary_Linear(t *testing.T) {
 	require.Equal(t, ProviderLinear, summary.Provider, "summary should have correct provider")
 	require.True(t, summary.Configured, "summary should be configured")
 	require.Empty(t, summary.MaskedKey, "linear summary should not include masked key")
+}
+
+func TestMaskedSummary_OpenAIChatGPT(t *testing.T) {
+	t.Parallel()
+
+	cfg := OpenAIChatGPTConfig{AccessToken: "cha_test_access_token_12345", AccountType: "plus"}
+	summary := cfg.MaskedSummary()
+
+	require.Equal(t, ProviderOpenAIChatGPT, summary.Provider, "summary should have correct provider")
+	require.True(t, summary.Configured, "summary should be configured")
+	require.Equal(t, "cha_te...2345", summary.MaskedKey, "summary should mask access token")
+	require.Equal(t, "plus", summary.AccountType, "summary should include account type")
+}
+
+func TestOpenAIChatGPTConfig_IsExpired(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		cfg      OpenAIChatGPTConfig
+		expected bool
+	}{
+		{"expired token", OpenAIChatGPTConfig{ExpiresAt: time.Now().Add(-1 * time.Hour)}, true},
+		{"valid token", OpenAIChatGPTConfig{ExpiresAt: time.Now().Add(1 * time.Hour)}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, tt.cfg.IsExpired())
+		})
+	}
+}
+
+func TestOpenAIChatGPTConfig_NeedsRefresh(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		cfg      OpenAIChatGPTConfig
+		window   time.Duration
+		expected bool
+	}{
+		{"expires within window", OpenAIChatGPTConfig{ExpiresAt: time.Now().Add(2 * time.Minute)}, 5 * time.Minute, true},
+		{"expires outside window", OpenAIChatGPTConfig{ExpiresAt: time.Now().Add(1 * time.Hour)}, 5 * time.Minute, false},
+		{"already expired", OpenAIChatGPTConfig{ExpiresAt: time.Now().Add(-1 * time.Minute)}, 5 * time.Minute, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, tt.cfg.NeedsRefresh(tt.window))
+		})
+	}
+}
+
+func TestParseProviderConfig_OpenAIChatGPT(t *testing.T) {
+	t.Parallel()
+
+	input := `{"access_token":"cha_tok","refresh_token":"chr_tok","account_type":"plus"}`
+	cfg, err := ParseProviderConfig(ProviderOpenAIChatGPT, []byte(input))
+	require.NoError(t, err)
+
+	chatCfg, ok := cfg.(OpenAIChatGPTConfig)
+	require.True(t, ok, "config should be OpenAIChatGPTConfig")
+	require.Equal(t, "cha_tok", chatCfg.AccessToken)
+	require.Equal(t, "chr_tok", chatCfg.RefreshToken)
+	require.Equal(t, "plus", chatCfg.AccountType)
+}
+
+func TestParseProviderConfig_OpenAIChatGPT_Invalid(t *testing.T) {
+	t.Parallel()
+
+	_, err := ParseProviderConfig(ProviderOpenAIChatGPT, []byte(`{bad json`))
+	require.Error(t, err)
 }
 
 func TestIsLLMProvider(t *testing.T) {
