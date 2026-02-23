@@ -8,11 +8,18 @@ import {
   DollarSign,
   Settings,
   LogOut,
+  ChevronsUpDown,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { useAuth } from "@/hooks/use-auth";
 import { useEffect } from "react";
 
@@ -22,7 +29,6 @@ const navItems = [
   { label: "Runs", icon: Play, href: "/runs" },
   { label: "Analytics", icon: BarChart3, href: "/analytics" },
   { label: "Costs", icon: DollarSign, href: "/costs" },
-  { label: "Settings", icon: Settings, href: "/settings" },
 ];
 
 export function AuthenticatedLayout({ children }: { children: React.ReactNode }) {
@@ -81,17 +87,43 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
         </nav>
         <div className="px-3 pb-4">
           {user && (
-            <div className="flex items-center gap-2 rounded-md px-2.5 py-1.5 text-[13px] text-muted-foreground">
-              <span className="truncate flex-1">{user.name}</span>
-              <Button
-                variant="ghost"
-                size="icon-xs"
-                onClick={logout}
-                aria-label="Log out"
-              >
-                <LogOut className="h-3.5 w-3.5" />
-              </Button>
-            </div>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  className={cn(
+                    "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-[13px] font-medium transition-colors",
+                    pathname.startsWith("/settings")
+                      ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                      : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                  )}
+                >
+                  {user.avatar_url ? (
+                    <img
+                      src={user.avatar_url}
+                      alt=""
+                      className="h-5 w-5 rounded-full"
+                    />
+                  ) : (
+                    <div className="flex h-5 w-5 items-center justify-center rounded-full bg-muted text-[10px] font-medium">
+                      {user.name?.[0]?.toUpperCase() ?? "?"}
+                    </div>
+                  )}
+                  <span className="truncate flex-1 text-left">{user.name}</span>
+                  <ChevronsUpDown className="h-3.5 w-3.5 shrink-0 opacity-50" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" side="top" className="w-48">
+                <DropdownMenuItem onClick={() => router.push("/settings")}>
+                  <Settings className="h-4 w-4" />
+                  Settings
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={logout}>
+                  <LogOut className="h-4 w-4" />
+                  Log out
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           )}
         </div>
       </aside>

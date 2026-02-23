@@ -11,7 +11,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Slider } from "@/components/ui/slider";
-import { PageHeader } from "@/components/page-header";
 import { IntegrationsCard } from "@/components/integrations-card";
 import { INTEGRATIONS } from "@/lib/integrations";
 import type { Organization, OrgSettings, SingleResponse, CodexDeviceAuth } from "@/lib/types";
@@ -360,11 +359,6 @@ export default function SettingsPage() {
 
   return (
     <div className="space-y-8">
-      <PageHeader
-        title="Settings"
-        description="Manage your organization and integrations."
-      />
-
       <section className="space-y-3">
         <h2 className="text-[13px] font-medium text-foreground">General</h2>
         <Card>
