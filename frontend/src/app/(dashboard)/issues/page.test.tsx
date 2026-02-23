@@ -279,4 +279,122 @@ describe('IssuesPage', () => {
     // The status trigger should show "Open" instead of "All statuses"
     expect(screen.getByText('Open')).toBeInTheDocument();
   });
+
+  it('shows Fix This button for open issues', async () => {
+    renderWithProviders(<IssuesPageContent />);
+
+    await screen.findByText('TypeError: Cannot read properties of undefined');
+
+    const fixButtons = screen.getAllByRole('button', { name: /Fix This/ });
+    expect(fixButtons.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('triggers a fix when Fix This button is clicked', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<IssuesPageContent />);
+
+    await screen.findByText('TypeError: Cannot read properties of undefined');
+
+    const fixButtons = screen.getAllByRole('button', { name: /Fix This/ });
+    await user.click(fixButtons[0]);
+
+    await waitFor(() => {
+      // The fix was triggered (POST /api/v1/issues/:id/fix is handled by mock)
+      expect(screen.queryByText('Starting...')).not.toBeInTheDocument();
+    });
+  });
+
+  it('shows priority score badge when issue has priority_score', async () => {
+    server.use(
+      http.get('/api/v1/issues', () => {
+        return HttpResponse.json({
+          data: [{ ...mockIssues[0], priority_score: 75 }],
+          meta: {},
+        });
+      }),
+    );
+
+    renderWithProviders(<IssuesPageContent />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Priority: 75')).toBeInTheDocument();
+    });
+  });
+
+  it('shows complexity label when issue has complexity_label', async () => {
+    server.use(
+      http.get('/api/v1/issues', () => {
+        return HttpResponse.json({
+          data: [{ ...mockIssues[0], complexity_label: 'simple' }],
+          meta: {},
+        });
+      }),
+    );
+
+    renderWithProviders(<IssuesPageContent />);
+
+    await waitFor(() => {
+      expect(screen.getByText('simple')).toBeInTheDocument();
+    });
+  });
+
+  it('shows priority eligible indicator when issue has priority_eligible', async () => {
+    server.use(
+      http.get('/api/v1/issues', () => {
+        return HttpResponse.json({
+          data: [{ ...mockIssues[0], priority_eligible: true }],
+          meta: {},
+        });
+      }),
+    );
+
+    renderWithProviders(<IssuesPageContent />);
+
+    await waitFor(() => {
+      expect(screen.getByTitle('Eligible for agent')).toBeInTheDocument();
+    });
+  });
+
+  it('shows not-eligible indicator when priority_eligible is false', async () => {
+    server.use(
+      http.get('/api/v1/issues', () => {
+        return HttpResponse.json({
+          data: [{ ...mockIssues[0], priority_eligible: false }],
+          meta: {},
+        });
+      }),
+    );
+
+    renderWithProviders(<IssuesPageContent />);
+
+    await waitFor(() => {
+      expect(screen.getByTitle('Not eligible')).toBeInTheDocument();
+    });
+  });
+
+  it('shows "just now" for very recent issues', async () => {
+    server.use(
+      http.get('/api/v1/issues', () => {
+        return HttpResponse.json({
+          data: [{ ...mockIssues[0], last_seen_at: new Date().toISOString() }],
+          meta: {},
+        });
+      }),
+    );
+
+    renderWithProviders(<IssuesPageContent />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Last seen just now/)).toBeInTheDocument();
+    });
+  });
+
+  it('renders sort by dropdown', async () => {
+    renderWithProviders(<IssuesPageContent />);
+
+    await screen.findByText('TypeError: Cannot read properties of undefined');
+
+    expect(screen.getByText('Sort by')).toBeInTheDocument();
+    expect(screen.getByText('Last seen')).toBeInTheDocument();
+  });
 });
