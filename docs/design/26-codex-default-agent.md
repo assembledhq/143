@@ -1,6 +1,6 @@
 # 26 — Codex as Default Agent with ChatGPT OAuth
 
-**Status**: proposed
+**Status**: implemented
 **Depends on**: 06-agent-orchestrator, 20-security-architecture, 21-first-run-experience, 25-dashboard-credentials
 
 ## Problem

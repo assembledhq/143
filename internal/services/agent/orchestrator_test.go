@@ -60,6 +60,19 @@ func (m *mockGitHubTokenProvider) GetInstallationToken(ctx context.Context, inst
 	return m.token, nil
 }
 
+// mockCodexAuthProvider implements agent.CodexAuthProvider.
+type mockCodexAuthProvider struct {
+	cfg *models.OpenAIChatGPTConfig
+	err error
+}
+
+func (m *mockCodexAuthProvider) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.cfg, nil
+}
+
 // mockAgentRunStore implements agent.AgentRunStore.
 type mockAgentRunStore struct {
 	mu              sync.Mutex
@@ -268,6 +281,7 @@ type testDeps struct {
 	questions *mockAgentRunQuestionStore
 	jobs      *mockJobStore
 	github    *mockGitHubTokenProvider
+	codexAuth *mockCodexAuthProvider
 }
 
 func defaultDeps() testDeps {
@@ -282,6 +296,7 @@ func defaultDeps() testDeps {
 		questions: &mockAgentRunQuestionStore{},
 		jobs:      &mockJobStore{},
 		github:    &mockGitHubTokenProvider{token: "ghp_test123"},
+		codexAuth: nil,
 	}
 }
 
@@ -296,6 +311,7 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		Repositories:      d.repos,
 		Jobs:              d.jobs,
 		GitHub:            d.github,
+		CodexAuth:         d.codexAuth,
 		Logger:            zerolog.Nop(),
 		MaxConcurrent:     3,
 	})
@@ -723,6 +739,45 @@ func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
 
 	// Sandbox should have no env vars since "claude_code" isn't in AgentEnv.
 	require.Nil(t, capturedCfg.Env, "sandbox config should have no env vars for unconfigured agent type")
+}
+
+func TestRunAgent_CodexAuthWritesToSandboxWorkdir(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.AgentType = "codex"
+
+	d := defaultDeps()
+	d.adapter.name = "codex"
+	d.codexAuth = &mockCodexAuthProvider{
+		cfg: &models.OpenAIChatGPTConfig{
+			AccessToken:  "test-access-token",
+			RefreshToken: "test-refresh-token",
+			ExpiresAt:    time.Date(2026, time.February, 23, 12, 0, 0, 0, time.UTC),
+		},
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.NoError(t, err, "run should succeed when codex auth token is present")
+
+	require.Contains(
+		t,
+		d.provider.ExecCalls,
+		"mkdir -p /workspace/.codex",
+		"codex auth setup should create the auth directory inside the writable sandbox workdir",
+	)
+
+	authData, ok := d.provider.Files["/workspace/.codex/auth.json"]
+	require.True(t, ok, "codex auth injection should write auth.json under /workspace/.codex")
+
+	var authJSON map[string]string
+	unmarshalErr := json.Unmarshal(authData, &authJSON)
+	require.NoError(t, unmarshalErr, "auth.json should contain valid JSON")
+	require.Equal(t, "test-access-token", authJSON["access_token"], "auth.json should include access token")
+	require.Equal(t, "test-refresh-token", authJSON["refresh_token"], "auth.json should include refresh token")
 }
 
 func TestRunAgent_IssueWithoutRepository(t *testing.T) {
