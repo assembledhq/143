@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { ZONES, getActiveZone, getZoneProgress } from "./zones";
+import { drawP80, drawP80Side } from "../draw-p80";
 
 interface AirfieldCanvasProps {
   progress: number;
@@ -392,177 +393,6 @@ function drawCRTGrain(ctx: CanvasRenderingContext2D, w: number, h: number, time:
   // Subtle green tint overlay
   ctx.fillStyle = `rgba(0, 30, 10, ${intensity * 2})`;
   ctx.fillRect(0, 0, w, h);
-}
-
-function drawP80TopDown(ctx: CanvasRenderingContext2D, x: number, y: number, size: number, rotation = 0) {
-  // P-80 Shooting Star top-down view. Default orientation: nose at +X (facing RIGHT).
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(rotation);
-
-  const s = size;
-
-  // Shadow beneath
-  ctx.fillStyle = "rgba(0,0,0,0.25)";
-  ctx.beginPath();
-  ctx.ellipse(3, 3, s * 1.0, s * 0.16, 0, 0, Math.PI * 2);
-  ctx.fill();
-
-  // ── Fuselage ──
-  const bodyGrad = ctx.createLinearGradient(0, -s * 0.14, 0, s * 0.14);
-  bodyGrad.addColorStop(0, "rgba(180, 190, 210, 0.85)");
-  bodyGrad.addColorStop(0.4, "rgba(58, 64, 80, 0.95)");
-  bodyGrad.addColorStop(1, "rgba(30, 35, 50, 0.7)");
-  ctx.fillStyle = bodyGrad;
-  ctx.beginPath();
-  ctx.moveTo(s * 0.95, 0);
-  ctx.quadraticCurveTo(s * 0.88, -s * 0.07, s * 0.7, -s * 0.10);
-  ctx.lineTo(-s * 0.55, -s * 0.09);
-  ctx.lineTo(-s * 0.85, -s * 0.05);
-  ctx.lineTo(-s * 0.92, 0);
-  ctx.lineTo(-s * 0.85, s * 0.05);
-  ctx.lineTo(-s * 0.55, s * 0.09);
-  ctx.lineTo(s * 0.7, s * 0.10);
-  ctx.quadraticCurveTo(s * 0.88, s * 0.07, s * 0.95, 0);
-  ctx.closePath();
-  ctx.fill();
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
-  ctx.lineWidth = 0.5;
-  ctx.stroke();
-
-  // ── Straight wings (P-80 signature) ──
-  const wingFill = "rgba(46, 54, 68, 0.9)";
-
-  // Top wing
-  ctx.fillStyle = wingFill;
-  ctx.beginPath();
-  ctx.moveTo(s * 0.12, -s * 0.10);
-  ctx.lineTo(s * 0.05, -s * 0.72);
-  ctx.lineTo(-s * 0.05, -s * 0.74);
-  ctx.lineTo(-s * 0.14, -s * 0.70);
-  ctx.lineTo(-s * 0.22, -s * 0.10);
-  ctx.closePath();
-  ctx.fill();
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
-  ctx.lineWidth = 0.4;
-  ctx.stroke();
-
-  // Bottom wing
-  ctx.fillStyle = wingFill;
-  ctx.beginPath();
-  ctx.moveTo(s * 0.12, s * 0.10);
-  ctx.lineTo(s * 0.05, s * 0.72);
-  ctx.lineTo(-s * 0.05, s * 0.74);
-  ctx.lineTo(-s * 0.14, s * 0.70);
-  ctx.lineTo(-s * 0.22, s * 0.10);
-  ctx.closePath();
-  ctx.fill();
-  ctx.stroke();
-
-  // ── Tip tanks (distinctive P-80 feature) ──
-  ctx.fillStyle = "rgba(50, 58, 72, 0.9)";
-  ctx.beginPath();
-  ctx.ellipse(-s * 0.03, -s * 0.76, s * 0.14, s * 0.035, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
-  ctx.lineWidth = 0.4;
-  ctx.stroke();
-
-  ctx.fillStyle = "rgba(50, 58, 72, 0.9)";
-  ctx.beginPath();
-  ctx.ellipse(-s * 0.03, s * 0.76, s * 0.14, s * 0.035, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.stroke();
-
-  // ── Horizontal stabilizers ──
-  ctx.fillStyle = wingFill;
-  ctx.beginPath();
-  ctx.moveTo(-s * 0.60, -s * 0.06);
-  ctx.lineTo(-s * 0.68, -s * 0.28);
-  ctx.lineTo(-s * 0.78, -s * 0.29);
-  ctx.lineTo(-s * 0.88, -s * 0.22);
-  ctx.lineTo(-s * 0.85, -s * 0.06);
-  ctx.closePath();
-  ctx.fill();
-
-  ctx.beginPath();
-  ctx.moveTo(-s * 0.60, s * 0.06);
-  ctx.lineTo(-s * 0.68, s * 0.28);
-  ctx.lineTo(-s * 0.78, s * 0.29);
-  ctx.lineTo(-s * 0.88, s * 0.22);
-  ctx.lineTo(-s * 0.85, s * 0.06);
-  ctx.closePath();
-  ctx.fill();
-
-  // ── Vertical stabilizer (from top, visible as thin ridge) ──
-  ctx.fillStyle = "rgba(70, 78, 92, 0.6)";
-  ctx.beginPath();
-  ctx.moveTo(-s * 0.55, 0);
-  ctx.lineTo(-s * 0.72, -s * 0.015);
-  ctx.lineTo(-s * 0.88, -s * 0.012);
-  ctx.lineTo(-s * 0.88, s * 0.012);
-  ctx.lineTo(-s * 0.72, s * 0.015);
-  ctx.closePath();
-  ctx.fill();
-
-  // ── Bubble canopy ──
-  const canopyGrad = ctx.createLinearGradient(0, -s * 0.06, 0, s * 0.06);
-  canopyGrad.addColorStop(0, "rgba(140, 180, 255, 0.5)");
-  canopyGrad.addColorStop(0.5, "rgba(100, 150, 230, 0.35)");
-  canopyGrad.addColorStop(1, "rgba(80, 120, 200, 0.2)");
-  ctx.fillStyle = canopyGrad;
-  ctx.beginPath();
-  ctx.ellipse(s * 0.42, 0, s * 0.18, s * 0.06, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = "rgba(180, 210, 255, 0.25)";
-  ctx.lineWidth = 0.5;
-  ctx.stroke();
-
-  // Canopy glint
-  ctx.fillStyle = "rgba(255, 255, 255, 0.2)";
-  ctx.beginPath();
-  ctx.ellipse(s * 0.45, -s * 0.02, s * 0.06, s * 0.02, -0.15, 0, Math.PI * 2);
-  ctx.fill();
-
-  // ── Nose intake ──
-  ctx.fillStyle = "rgba(10, 12, 20, 0.6)";
-  ctx.beginPath();
-  ctx.ellipse(s * 0.90, 0, s * 0.02, s * 0.04, 0, 0, Math.PI * 2);
-  ctx.fill();
-
-  // ── Panel line ──
-  ctx.beginPath();
-  ctx.moveTo(s * 0.75, 0);
-  ctx.lineTo(-s * 0.80, 0);
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.06)";
-  ctx.lineWidth = 0.4;
-  ctx.stroke();
-
-  // ── Exhaust ──
-  ctx.fillStyle = "rgba(10, 12, 20, 0.4)";
-  ctx.beginPath();
-  ctx.ellipse(-s * 0.91, 0, s * 0.015, s * 0.025, 0, 0, Math.PI * 2);
-  ctx.fill();
-
-  // ── Engine glow (from exhaust) ──
-  ctx.fillStyle = "rgba(255, 140, 40, 0.15)";
-  ctx.beginPath();
-  ctx.ellipse(-s * 0.95, 0, s * 0.04, s * 0.03, 0, 0, Math.PI * 2);
-  ctx.fill();
-
-  // ── Tip tank seams ──
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.05)";
-  ctx.lineWidth = 0.3;
-  ctx.beginPath();
-  ctx.moveTo(-s * 0.15, -s * 0.76);
-  ctx.lineTo(s * 0.10, -s * 0.76);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(-s * 0.15, s * 0.76);
-  ctx.lineTo(s * 0.10, s * 0.76);
-  ctx.stroke();
-
-  ctx.restore();
 }
 
 // ── Scene 1: Radar Room ──────────────────────────────────────
@@ -971,13 +801,13 @@ function drawScramble(
       jy = hy + hh * 0.5 + t * (rwyY + rwyH / 2 - hy - hh * 0.5);
       jetAngle = Math.PI / 2;
     } else {
-      // Phase 3: turn onto runway and roll to takeoff position
+      // Phase 3: already turned onto runway, roll to takeoff position
       const t = (jp - 0.5) / 0.5;
       jx = twyX + twyW / 2 + t * (rwyX0 + w * 0.15 - twyX - twyW / 2);
       jy = rwyY + rwyH / 2;
-      jetAngle = Math.PI / 2 - Math.min(1, t * 2.5) * (Math.PI / 2);
+      jetAngle = 0; // instant turn, now facing right down the runway
     }
-    drawP80TopDown(ctx, jx, jy, Math.min(w, h) * 0.035, jetAngle);
+    drawP80(ctx, jx, jy, Math.min(w, h) * 0.035, jetAngle, 0.25);
 
     // Engine glow trail
     if (jp > 0.2) {
@@ -1395,110 +1225,134 @@ function drawNeutralized(
 function drawReturnToBase(
   ctx: CanvasRenderingContext2D, w: number, h: number, p: number, time: number,
 ) {
+  // Deep night sky
   const skyGrad = ctx.createLinearGradient(0, 0, 0, h);
-  skyGrad.addColorStop(0, "#010308");
-  skyGrad.addColorStop(0.6, "#081018");
-  skyGrad.addColorStop(1, "#0e1820");
+  skyGrad.addColorStop(0, "#020408");
+  skyGrad.addColorStop(0.5, "#060c14");
+  skyGrad.addColorStop(1, "#0a1018");
   ctx.fillStyle = skyGrad;
   ctx.fillRect(0, 0, w, h);
 
-  // Stars
-  for (const star of STARS.slice(0, 60)) {
-    const twinkle = 0.10 + 0.08 * Math.sin(time * 0.001 + star.x * 50);
+  // Stars (drawn behind the moon)
+  for (const star of STARS.slice(0, 70)) {
+    const twinkle = 0.08 + 0.10 * Math.sin(time * 0.001 + star.x * 50);
     ctx.fillStyle = `rgba(255,255,255,${twinkle})`;
-    ctx.beginPath(); ctx.arc(star.x * w, star.y * h * 0.65, star.s * 0.5, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath();
+    ctx.arc(star.x * w, star.y * h, star.s * 0.6, 0, Math.PI * 2);
+    ctx.fill();
   }
 
-  // Terrain below
-  const groundY = h * 0.68;
-  const terrainGrad = ctx.createLinearGradient(0, groundY, 0, h);
-  terrainGrad.addColorStop(0, "rgba(6,14,10,0.7)");
-  terrainGrad.addColorStop(1, "rgba(4,10,6,0.9)");
-  ctx.fillStyle = terrainGrad;
-  ctx.fillRect(0, groundY, w, h - groundY);
+  // ── Moon ──
+  const moonR = Math.min(w, h) * 0.28;
+  const moonX = w * 0.52;
+  const moonY = h * 0.42;
 
-  // Terrain features (mountain ridges)
-  ctx.strokeStyle = "rgba(20, 40, 30, 0.3)";
-  ctx.lineWidth = 1;
+  // Moon glow (outer halo)
+  const outerGlow = ctx.createRadialGradient(moonX, moonY, moonR * 0.8, moonX, moonY, moonR * 2.2);
+  outerGlow.addColorStop(0, "rgba(180, 200, 230, 0.06)");
+  outerGlow.addColorStop(0.4, "rgba(140, 170, 210, 0.03)");
+  outerGlow.addColorStop(1, "rgba(100, 130, 180, 0)");
+  ctx.fillStyle = outerGlow;
   ctx.beginPath();
-  ctx.moveTo(0, groundY + h * 0.02);
-  for (let tx = 0; tx < w; tx += 20) {
-    ctx.lineTo(tx, groundY + h * 0.02 + Math.sin(tx * 0.008) * 8 + Math.sin(tx * 0.02) * 4);
-  }
-  ctx.stroke();
+  ctx.arc(moonX, moonY, moonR * 2.2, 0, Math.PI * 2);
+  ctx.fill();
 
-  // Airfield below — large and prominent
-  const rwyScale = 0.7 + p * 0.3;
-  const rwyW = w * 0.35 * rwyScale;
-  const rwyH = h * 0.012;
-  const rwyX = w * 0.5 - rwyW / 2;
-  const rwyBaseY = groundY + h * 0.06;
+  // Moon body
+  const moonGrad = ctx.createRadialGradient(
+    moonX - moonR * 0.15, moonY - moonR * 0.1, moonR * 0.05,
+    moonX, moonY, moonR,
+  );
+  moonGrad.addColorStop(0, "rgba(235, 235, 225, 0.95)");
+  moonGrad.addColorStop(0.4, "rgba(210, 210, 200, 0.90)");
+  moonGrad.addColorStop(0.75, "rgba(180, 185, 175, 0.85)");
+  moonGrad.addColorStop(1, "rgba(140, 150, 145, 0.75)");
+  ctx.fillStyle = moonGrad;
+  ctx.beginPath();
+  ctx.arc(moonX, moonY, moonR, 0, Math.PI * 2);
+  ctx.fill();
 
-  // Apron area
-  ctx.fillStyle = "rgba(20, 25, 30, 0.6)";
-  ctx.fillRect(rwyX - rwyW * 0.15, rwyBaseY + rwyH + 4, rwyW * 0.4, h * 0.03);
+  // Moon craters (dark maria)
+  const craters = [
+    { dx: -0.25, dy: -0.20, r: 0.18, a: 0.08 },
+    { dx: 0.10,  dy: -0.30, r: 0.12, a: 0.06 },
+    { dx: -0.35, dy: 0.10,  r: 0.14, a: 0.07 },
+    { dx: 0.20,  dy: 0.15,  r: 0.10, a: 0.05 },
+    { dx: -0.05, dy: 0.30,  r: 0.08, a: 0.04 },
+    { dx: 0.30,  dy: -0.05, r: 0.15, a: 0.06 },
+    { dx: -0.15, dy: -0.40, r: 0.06, a: 0.04 },
+    { dx: 0.35,  dy: 0.30,  r: 0.07, a: 0.03 },
+    { dx: -0.40, dy: -0.05, r: 0.09, a: 0.05 },
+    { dx: 0.05,  dy: 0.05,  r: 0.20, a: 0.05 },
+  ];
 
-  // Runway
-  ctx.fillStyle = "rgba(35,38,44,0.8)";
-  ctx.fillRect(rwyX, rwyBaseY, rwyW, rwyH);
+  ctx.save();
+  // Clip to moon circle so craters don't bleed
+  ctx.beginPath();
+  ctx.arc(moonX, moonY, moonR, 0, Math.PI * 2);
+  ctx.clip();
 
-  // Small buildings
-  for (let bi = 0; bi < 4; bi++) {
-    ctx.fillStyle = "rgba(25, 30, 35, 0.7)";
-    ctx.fillRect(rwyX - rwyW * 0.1 + bi * 12, rwyBaseY + rwyH + 6, 8, 5);
-  }
-
-  // Runway lights
-  for (let i = 0; i < 12; i++) {
-    const lx = rwyX + (i / 11) * rwyW;
-    ctx.fillStyle = "rgba(255,220,150,0.4)";
-    ctx.beginPath(); ctx.arc(lx, rwyBaseY, 1.8, 0, Math.PI * 2); ctx.fill();
-    ctx.beginPath(); ctx.arc(lx, rwyBaseY + rwyH, 1.8, 0, Math.PI * 2); ctx.fill();
-  }
-
-  // Approach lights (ALSF-style lead-in lights)
-  const approachLen = rwyW * 0.6;
-  const approachX = rwyX - approachLen;
-  for (let i = 0; i < 8; i++) {
-    const alx = approachX + (i / 7) * approachLen;
-    const blink = Math.sin(time * 0.008 - i * 0.4) > 0 ? 0.6 : 0.2;
-    ctx.fillStyle = `rgba(255, 255, 255, ${blink * (0.3 + i * 0.08)})`;
+  for (const c of craters) {
+    const cx = moonX + c.dx * moonR;
+    const cy = moonY + c.dy * moonR;
+    const cr = c.r * moonR;
+    const crGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, cr);
+    crGrad.addColorStop(0, `rgba(80, 85, 75, ${c.a})`);
+    crGrad.addColorStop(0.6, `rgba(100, 105, 95, ${c.a * 0.5})`);
+    crGrad.addColorStop(1, `rgba(120, 125, 115, 0)`);
+    ctx.fillStyle = crGrad;
     ctx.beginPath();
-    ctx.arc(alx, rwyBaseY + rwyH / 2, 2, 0, Math.PI * 2);
-    ctx.fill();
-    // Cross-bars on some
-    if (i % 2 === 0) {
-      ctx.fillRect(alx - 4, rwyBaseY + rwyH / 2 - 0.5, 8, 1);
-    }
-  }
-
-  // PAPI lights
-  for (let pi = 0; pi < 4; pi++) {
-    const px = rwyX - 8;
-    const py = rwyBaseY - 4 + pi * 3;
-    ctx.fillStyle = pi < 2 ? "rgba(255, 60, 30, 0.5)" : "rgba(255, 255, 255, 0.4)";
-    ctx.beginPath();
-    ctx.arc(px, py, 1.5, 0, Math.PI * 2);
+    ctx.arc(cx, cy, cr, 0, Math.PI * 2);
     ctx.fill();
   }
 
-  // Jet flying straight toward base — nose pointing LEFT, gentle descent
-  const jetX = w * (0.65 - p * 0.18);
-  const jetY = h * (0.25 + p * 0.22);
-  const jetSize = Math.min(w, h) * (0.045 + p * 0.02);
-  // Face left (Math.PI) with very slight nose-down for descent feel
-  const bankAngle = Math.PI + 0.05;
-  drawP80TopDown(ctx, jetX, jetY, jetSize, bankAngle);
-
-  // Engine trail
-  const trailLen = 5;
-  for (let i = 1; i <= trailLen; i++) {
-    const tAlpha = 0.04 * (1 - i / trailLen);
-    const tx = jetX + i * 12 * Math.cos(bankAngle + Math.PI);
-    const ty = jetY + i * 12 * Math.sin(bankAngle + Math.PI);
-    ctx.fillStyle = `rgba(255, 140, 40, ${tAlpha})`;
+  // Crater rims (subtle bright edges)
+  for (const c of craters.slice(0, 5)) {
+    const cx = moonX + c.dx * moonR;
+    const cy = moonY + c.dy * moonR;
+    const cr = c.r * moonR;
+    ctx.strokeStyle = `rgba(220, 220, 210, ${c.a * 0.4})`;
+    ctx.lineWidth = 0.5;
     ctx.beginPath();
-    ctx.arc(tx, ty, 4 + i * 2, 0, Math.PI * 2);
+    ctx.arc(cx, cy, cr * 0.85, -Math.PI * 0.8, Math.PI * 0.2);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+
+  // Moon limb darkening (edge shadow)
+  const limbGrad = ctx.createRadialGradient(moonX, moonY, moonR * 0.6, moonX, moonY, moonR);
+  limbGrad.addColorStop(0, "rgba(0, 0, 0, 0)");
+  limbGrad.addColorStop(0.85, "rgba(0, 0, 0, 0)");
+  limbGrad.addColorStop(1, "rgba(0, 0, 0, 0.25)");
+  ctx.fillStyle = limbGrad;
+  ctx.beginPath();
+  ctx.arc(moonX, moonY, moonR, 0, Math.PI * 2);
+  ctx.fill();
+
+  // ── Jet silhouette crossing the moon ──
+  // Flies from right to left across the moon face
+  const jetSize = Math.min(w, h) * 0.09;
+  // Path: enter from right of moon, cross through center, exit left
+  const pathStartX = moonX + moonR * 1.3;
+  const pathEndX = moonX - moonR * 1.3;
+  const jetX = pathStartX + (pathEndX - pathStartX) * p;
+  // Gentle arc through moon center
+  const arcAmount = -moonR * 0.15;
+  const jetY = moonY + arcAmount * Math.sin(p * Math.PI);
+  // Face left
+  drawP80Side(ctx, jetX, jetY, jetSize, Math.PI, 1, 0.02);
+
+  // Engine contrail (behind the jet)
+  for (let i = 1; i <= 8; i++) {
+    const tProgress = i / 8;
+    const tAlpha = 0.06 * (1 - tProgress);
+    // Trail goes to the right (behind the jet which faces left)
+    const tx = jetX + i * jetSize * 0.18;
+    const ty = jetY - arcAmount * Math.sin((p - i * 0.005) * Math.PI) * 0.02 * i;
+    const tSize = 3 + tProgress * 6;
+    ctx.fillStyle = `rgba(200, 210, 230, ${tAlpha})`;
+    ctx.beginPath();
+    ctx.arc(tx, ty, tSize, 0, Math.PI * 2);
     ctx.fill();
   }
 
@@ -1526,19 +1380,18 @@ function drawReturnToBase(
   ctx.textBaseline = "middle";
   ctx.fillText("CLEAR", mrx, mry + mrr + 12);
 
-  // Status text (bumped sizes)
+  // Status text
   if (p > 0.35) {
-    hudText(ctx, w * 0.5, h * 0.12, "PR MERGED", Math.min(1, (p - 0.35) / 0.2) * 0.8, 22, "center");
+    hudText(ctx, w * 0.5, h * 0.08, "PR MERGED", Math.min(1, (p - 0.35) / 0.2) * 0.8, 22, "center");
   }
   if (p > 0.6) {
-    hudText(ctx, w * 0.5, h * 0.20, "ISSUE RESOLVED", Math.min(1, (p - 0.6) / 0.2) * 0.6, 14, "center");
+    hudText(ctx, w * 0.5, h * 0.16, "ISSUE RESOLVED", Math.min(1, (p - 0.6) / 0.2) * 0.6, 14, "center");
   }
   if (p > 0.8) {
-    hudText(ctx, w * 0.5, h * 0.27, "AGENT LEARNING FROM REVIEW", Math.min(1, (p - 0.8) / 0.15) * 0.35, 11, "center");
+    hudText(ctx, w * 0.5, h * 0.88, "AGENT LEARNING FROM REVIEW", Math.min(1, (p - 0.8) / 0.15) * 0.35, 11, "center");
   }
 
-  drawHorizonHaze(ctx, w, h, groundY);
-  drawVignette(ctx, w, h, 0.35);
+  drawVignette(ctx, w, h, 0.4);
 
   hudText(ctx, 24, 22, "PR MERGED", 0.6, 14);
   hudText(ctx, 24, 40, "main \u2190 fix/null-ref-users", 0.25, 10);
