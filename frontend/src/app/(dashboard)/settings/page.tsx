@@ -187,8 +187,14 @@ function DeviceCodeModal({ onClose }: { onClose: () => void }) {
               </div>
             </div>
 
-            <div className="space-y-1">
+            <div className="space-y-2">
               <p className="text-sm text-muted-foreground">Waiting for authentication...</p>
+              <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-primary transition-all duration-1000"
+                  style={{ width: `${deviceAuth ? Math.max(0, (timeLeft / deviceAuth.expires_in) * 100) : 0}%` }}
+                />
+              </div>
               <p className="text-xs text-muted-foreground">
                 Expires in {minutes}:{seconds.toString().padStart(2, "0")}
               </p>
@@ -455,9 +461,7 @@ export default function SettingsPage() {
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
                           <span className="h-2 w-2 rounded-full bg-green-500" />
-                          <span className="text-sm text-green-600">
-                            Connected{codexAuthStatus.account_type ? ` (ChatGPT ${codexAuthStatus.account_type})` : ""}
-                          </span>
+                          <span className="text-sm text-green-600">Connected</span>
                         </div>
                         <Button
                           size="sm"
