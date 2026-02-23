@@ -129,7 +129,7 @@ describe('LoginPage', () => {
     await user.type(passwordInputs[passwordInputs.length - 1], 'newpass123');
     await user.click(screen.getByRole('button', { name: 'Create Account' }));
 
-    expect(registerMock).toHaveBeenCalledWith('new@example.com', 'newpass123', 'New User');
+    expect(registerMock).toHaveBeenCalledWith('new@example.com', 'newpass123', 'New User', undefined);
   });
 
   it('shows error on failed sign-in', async () => {
