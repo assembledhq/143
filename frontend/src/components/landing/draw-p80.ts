@@ -346,6 +346,7 @@ export function drawP80(
  * @param rotation  Heading in radians (nose direction)
  * @param alpha     Opacity (0–1). Default 1
  * @param noseDown  Pitch angle in radians (positive = nose down). Default 0
+ * @param opts      Optional: { noShadow, gearDown }
  */
 export function drawP80Side(
   ctx: CanvasRenderingContext2D,
@@ -355,6 +356,7 @@ export function drawP80Side(
   rotation: number,
   alpha = 1,
   noseDown = 0,
+  opts: { noShadow?: boolean; gearDown?: boolean } = {},
 ) {
   ctx.save();
   ctx.translate(x, y);
@@ -372,13 +374,15 @@ export function drawP80Side(
   const s = size;
 
   // ── Fuselage shadow (on ground / beneath) ──
-  ctx.save();
-  ctx.globalAlpha = alpha * 0.12;
-  ctx.fillStyle = "rgba(0, 0, 0, 1)";
-  ctx.beginPath();
-  ctx.ellipse(0, s * 0.22, s * 0.7, s * 0.025, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
+  if (!opts.noShadow) {
+    ctx.save();
+    ctx.globalAlpha = alpha * 0.12;
+    ctx.fillStyle = "rgba(0, 0, 0, 1)";
+    ctx.beginPath();
+    ctx.ellipse(0, s * 0.22, s * 0.7, s * 0.025, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
 
   // ── Horizontal stabilizer (behind fuselage) ──
   const stabGrad = ctx.createLinearGradient(-s * 0.58, -s * 0.04, -s * 0.58, s * 0.02);
@@ -961,23 +965,94 @@ export function drawP80Side(
   ctx.lineTo(-s * 0.50, -s * 0.10);
   ctx.stroke();
 
-  // ── Landing gear doors (closed, visible as panel lines) ──
-  ctx.strokeStyle = "rgba(0, 0, 0, 0.06)";
-  ctx.lineWidth = 0.4;
-  // Main gear door
-  ctx.beginPath();
-  ctx.moveTo(s * 0.05, s * 0.115);
-  ctx.lineTo(s * 0.05, s * 0.095);
-  ctx.lineTo(-s * 0.10, s * 0.095);
-  ctx.lineTo(-s * 0.10, s * 0.115);
-  ctx.stroke();
-  // Nose gear door
-  ctx.beginPath();
-  ctx.moveTo(s * 0.68, s * 0.05);
-  ctx.lineTo(s * 0.68, s * 0.08);
-  ctx.lineTo(s * 0.60, s * 0.08);
-  ctx.lineTo(s * 0.60, s * 0.05);
-  ctx.stroke();
+  // ── Landing gear ──
+  if (opts.gearDown) {
+    // Nose gear strut
+    const noseGearX = s * 0.64;
+    const noseGearTopY = s * 0.08;
+    const noseGearBottomY = s * 0.22;
+    ctx.strokeStyle = "rgba(120, 130, 150, 0.55)";
+    ctx.lineWidth = Math.max(1, s * 0.008);
+    ctx.beginPath();
+    ctx.moveTo(noseGearX, noseGearTopY);
+    ctx.lineTo(noseGearX, noseGearBottomY);
+    ctx.stroke();
+    // Nose wheel
+    ctx.fillStyle = "rgba(30, 32, 40, 0.8)";
+    ctx.beginPath();
+    ctx.ellipse(noseGearX, noseGearBottomY, s * 0.018, s * 0.012, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(80, 85, 100, 0.3)";
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
+    // Nose gear door (open, hanging)
+    ctx.fillStyle = "rgba(55, 62, 78, 0.5)";
+    ctx.beginPath();
+    ctx.moveTo(s * 0.60, s * 0.08);
+    ctx.lineTo(s * 0.60, s * 0.12);
+    ctx.lineTo(s * 0.62, s * 0.12);
+    ctx.lineTo(s * 0.62, s * 0.08);
+    ctx.closePath();
+    ctx.fill();
+
+    // Main gear strut
+    const mainGearX = -s * 0.02;
+    const mainGearTopY = s * 0.115;
+    const mainGearBottomY = s * 0.24;
+    ctx.strokeStyle = "rgba(120, 130, 150, 0.55)";
+    ctx.lineWidth = Math.max(1.2, s * 0.010);
+    ctx.beginPath();
+    ctx.moveTo(mainGearX, mainGearTopY);
+    ctx.lineTo(mainGearX, mainGearBottomY);
+    ctx.stroke();
+    // Oleo strut detail (thicker lower portion)
+    ctx.strokeStyle = "rgba(100, 110, 130, 0.4)";
+    ctx.lineWidth = Math.max(1.8, s * 0.014);
+    ctx.beginPath();
+    ctx.moveTo(mainGearX, mainGearBottomY - s * 0.04);
+    ctx.lineTo(mainGearX, mainGearBottomY);
+    ctx.stroke();
+    // Main wheel (larger)
+    ctx.fillStyle = "rgba(30, 32, 40, 0.85)";
+    ctx.beginPath();
+    ctx.ellipse(mainGearX, mainGearBottomY, s * 0.025, s * 0.016, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(80, 85, 100, 0.3)";
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
+    // Tire highlight
+    ctx.fillStyle = "rgba(60, 65, 80, 0.3)";
+    ctx.beginPath();
+    ctx.ellipse(mainGearX, mainGearBottomY - s * 0.004, s * 0.015, s * 0.006, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Main gear door (open, hanging)
+    ctx.fillStyle = "rgba(55, 62, 78, 0.5)";
+    ctx.beginPath();
+    ctx.moveTo(s * 0.05, s * 0.115);
+    ctx.lineTo(s * 0.05, s * 0.16);
+    ctx.lineTo(s * 0.03, s * 0.16);
+    ctx.lineTo(s * 0.03, s * 0.115);
+    ctx.closePath();
+    ctx.fill();
+  } else {
+    // Landing gear doors (closed, visible as panel lines)
+    ctx.strokeStyle = "rgba(0, 0, 0, 0.06)";
+    ctx.lineWidth = 0.4;
+    // Main gear door
+    ctx.beginPath();
+    ctx.moveTo(s * 0.05, s * 0.115);
+    ctx.lineTo(s * 0.05, s * 0.095);
+    ctx.lineTo(-s * 0.10, s * 0.095);
+    ctx.lineTo(-s * 0.10, s * 0.115);
+    ctx.stroke();
+    // Nose gear door
+    ctx.beginPath();
+    ctx.moveTo(s * 0.68, s * 0.05);
+    ctx.lineTo(s * 0.68, s * 0.08);
+    ctx.lineTo(s * 0.60, s * 0.08);
+    ctx.lineTo(s * 0.60, s * 0.05);
+    ctx.stroke();
+  }
 
   ctx.globalAlpha = 1;
   ctx.restore();
