@@ -233,6 +233,19 @@ export interface CodexDeviceAuth {
   expires_in: number;
 }
 
+export interface InvitationResponse {
+  id: string;
+  email: string;
+  role: string;
+  status: string;
+  invited_by: {
+    id: string;
+    name: string;
+  };
+  expires_at: string;
+  created_at: string;
+}
+
 export interface ListResponse<T> {
   data: T[];
   meta: {
