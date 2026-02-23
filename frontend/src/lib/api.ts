@@ -9,6 +9,19 @@ class ApiError extends Error {
   }
 }
 
+async function parseSuccessBody<T>(res: Response): Promise<T> {
+  if (res.status === 204 || res.status === 205) {
+    return undefined as T;
+  }
+
+  const text = await res.text();
+  if (text.length === 0) {
+    return undefined as T;
+  }
+
+  return JSON.parse(text) as T;
+}
+
 function getCSRFToken(): string {
   const match = document.cookie
     .split('; ')
@@ -43,7 +56,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     );
   }
 
-  return res.json();
+  return parseSuccessBody<T>(res);
 }
 
 function get<T>(path: string): Promise<T> {
@@ -72,8 +85,14 @@ export const api = {
   auth: {
     providers: () => get<import('./types').SingleResponse<import('./types').AuthProviders>>('/api/v1/auth/providers'),
     me: () => get<import('./types').SingleResponse<import('./types').User>>('/api/v1/auth/me'),
-    login: () => { window.location.href = `${API_BASE}/api/v1/auth/github/login`; },
-    loginGoogle: () => { window.location.href = `${API_BASE}/api/v1/auth/google/login`; },
+    login: (invitation?: string) => {
+      const params = invitation ? `?invitation=${encodeURIComponent(invitation)}` : '';
+      window.location.href = `${API_BASE}/api/v1/auth/github/login${params}`;
+    },
+    loginGoogle: (invitation?: string) => {
+      const params = invitation ? `?invitation=${encodeURIComponent(invitation)}` : '';
+      window.location.href = `${API_BASE}/api/v1/auth/google/login${params}`;
+    },
     loginSentry: () => {
       const params = new URLSearchParams({
         client_id: SENTRY_CLIENT_ID,
@@ -84,8 +103,8 @@ export const api = {
     },
     loginEmail: (email: string, password: string) =>
       post<import('./types').SingleResponse<import('./types').User>>('/api/v1/auth/login', { email, password }),
-    register: (email: string, password: string, name: string) =>
-      post<import('./types').SingleResponse<import('./types').User>>('/api/v1/auth/register', { email, password, name }),
+    register: (email: string, password: string, name: string, invitation?: string) =>
+      post<import('./types').SingleResponse<import('./types').User>>('/api/v1/auth/register', { email, password, name, ...(invitation && { invitation }) }),
     logout: () => post('/api/v1/auth/logout'),
   },
   repositories: {
@@ -161,6 +180,17 @@ export const api = {
         body: JSON.stringify({ rule }),
       });
     },
+  },
+  team: {
+    listMembers: () => get<import('./types').ListResponse<import('./types').User>>('/api/v1/team/members'),
+    changeRole: (id: string, role: string) =>
+      patch<import('./types').SingleResponse<import('./types').User>>(`/api/v1/team/members/${id}/role`, { role }),
+    removeMember: (id: string) => del<void>(`/api/v1/team/members/${id}`),
+    listInvitations: () =>
+      get<import('./types').ListResponse<import('./types').InvitationResponse>>('/api/v1/team/invitations'),
+    createInvitation: (email: string, role: string) =>
+      post<import('./types').SingleResponse<import('./types').InvitationResponse>>('/api/v1/team/invitations', { email, role }),
+    revokeInvitation: (id: string) => del<void>(`/api/v1/team/invitations/${id}`),
   },
   reviewComments: {
     list: (params?: { pull_request_id?: string; filter_status?: string; cursor?: string }) => {

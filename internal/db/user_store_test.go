@@ -2,11 +2,13 @@ package db
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
@@ -400,6 +402,70 @@ func TestUserStore_GetByGitHubID(t *testing.T) {
 			require.Equal(t, userID, user.ID, "should return the correct user ID")
 			require.Equal(t, "octocat@example.com", user.Email, "should return the correct user email")
 			require.Equal(t, "Octocat", user.Name, "should return the correct user name")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestUserStore_Delete(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		setupMock    func(mock pgxmock.PgxPoolIface)
+		expectErr    bool
+		expectNoRows bool
+	}{
+		{
+			name: "clears dependent references and deletes user",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("WITH cleared_agent_answers AS \\(").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"deleted"}).AddRow(true))
+			},
+		},
+		{
+			name: "returns no rows when user does not exist in org",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("WITH cleared_agent_answers AS \\(").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"deleted"}).AddRow(false))
+			},
+			expectErr:    true,
+			expectNoRows: true,
+		},
+		{
+			name: "returns error when delete query fails",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("WITH cleared_agent_answers AS \\(").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(errors.New("delete failed"))
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewUserStore(mock)
+			tt.setupMock(mock)
+
+			err = store.Delete(context.Background(), uuid.New(), uuid.New())
+			if tt.expectErr {
+				require.Error(t, err, "Delete should return an error for failing cases")
+				if tt.expectNoRows {
+					require.True(t, errors.Is(err, pgx.ErrNoRows), "Delete should return pgx.ErrNoRows when no user is deleted")
+				}
+			} else {
+				require.NoError(t, err, "Delete should remove the member without errors")
+			}
+
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}

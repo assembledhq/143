@@ -305,6 +305,38 @@ describe('api client', () => {
     });
   });
 
+  describe('team', () => {
+    it('removes member when backend returns 204 no content', async () => {
+      let deleteCalled = false;
+
+      server.use(
+        http.delete('/api/v1/team/members/:id', ({ params }) => {
+          deleteCalled = true;
+          expect(params.id).toBe('member-1');
+          return new HttpResponse(null, { status: 204 });
+        }),
+      );
+
+      await expect(api.team.removeMember('member-1')).resolves.toBeUndefined();
+      expect(deleteCalled).toBe(true);
+    });
+
+    it('revokes invitation when backend returns 204 no content', async () => {
+      let revokeCalled = false;
+
+      server.use(
+        http.delete('/api/v1/team/invitations/:id', ({ params }) => {
+          revokeCalled = true;
+          expect(params.id).toBe('inv-1');
+          return new HttpResponse(null, { status: 204 });
+        }),
+      );
+
+      await expect(api.team.revokeInvitation('inv-1')).resolves.toBeUndefined();
+      expect(revokeCalled).toBe(true);
+    });
+  });
+
   describe('auth', () => {
     it('logout calls POST', async () => {
       let logoutCalled = false;
