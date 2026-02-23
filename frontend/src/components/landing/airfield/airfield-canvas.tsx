@@ -591,252 +591,360 @@ function drawRadarRoom(
 function drawScramble(
   ctx: CanvasRenderingContext2D, w: number, h: number, p: number, time: number,
 ) {
-  // Night sky
-  const skyGrad = ctx.createLinearGradient(0, 0, 0, h);
-  skyGrad.addColorStop(0, "#030610");
-  skyGrad.addColorStop(0.4, "#081018");
-  skyGrad.addColorStop(1, "#0e141c");
+  // ── 1. Night sky — gradient top 38% ──
+  const horizonY = h * 0.38;
+  const skyGrad = ctx.createLinearGradient(0, 0, 0, horizonY);
+  skyGrad.addColorStop(0, "#020510");
+  skyGrad.addColorStop(0.4, "#060c18");
+  skyGrad.addColorStop(0.75, "#0a1220");
+  skyGrad.addColorStop(1, "#0e1628");
   ctx.fillStyle = skyGrad;
-  ctx.fillRect(0, 0, w, h);
+  ctx.fillRect(0, 0, w, horizonY);
 
-  // Stars
+  // Stars with twinkle
   for (const star of STARS.slice(0, 50)) {
-    if (star.y > 0.50) continue;
-    const twinkle = 0.08 + 0.1 * Math.sin(time * 0.001 + star.x * 50);
+    if (star.y >= 0.38) continue;
+    const twinkle = 0.06 + 0.12 * Math.sin(time * 0.0008 + star.x * 60 + star.y * 40);
     ctx.fillStyle = `rgba(255, 255, 255, ${twinkle})`;
-    ctx.beginPath(); ctx.arc(star.x * w, star.y * h, star.s * 0.7, 0, Math.PI * 2); ctx.fill();
-  }
-
-  // Ground
-  const groundY = h * 0.52;
-  const groundGrad = ctx.createLinearGradient(0, groundY, 0, h);
-  groundGrad.addColorStop(0, "#0c1410");
-  groundGrad.addColorStop(1, "#081008");
-  ctx.fillStyle = groundGrad;
-  ctx.fillRect(0, groundY, w, h - groundY);
-
-  // Ground texture — grass/dirt patches
-  for (let i = 0; i < 30; i++) {
-    const gx = pseudoRandom(i * 13 + 200) * w;
-    const gy = groundY + pseudoRandom(i * 13 + 201) * (h - groundY) * 0.8;
-    const gs = 8 + pseudoRandom(i * 13 + 202) * 20;
-    ctx.fillStyle = `rgba(${pseudoRandom(i * 13 + 203) > 0.5 ? "8,18,10" : "12,10,6"}, ${0.15 + pseudoRandom(i * 13 + 204) * 0.1})`;
     ctx.beginPath();
-    ctx.ellipse(gx, gy, gs, gs * 0.4, pseudoRandom(i * 13 + 205) * Math.PI, 0, Math.PI * 2);
+    ctx.arc(star.x * w, star.y * h, star.s * 0.6, 0, Math.PI * 2);
     ctx.fill();
   }
 
-  // Treeline silhouette along the horizon
-  ctx.fillStyle = "rgba(4, 12, 6, 0.7)";
+  // ── 2. Horizon silhouette — treeline + hangar roofline + control tower spike ──
+  ctx.fillStyle = "#060a10";
   ctx.beginPath();
-  ctx.moveTo(0, groundY + 2);
-  for (let tx = 0; tx <= w; tx += 6) {
-    const treeH = 4 + pseudoRandom(tx * 0.1 + 500) * 10 + Math.sin(tx * 0.03) * 3;
-    ctx.lineTo(tx, groundY - treeH);
+  ctx.moveTo(0, horizonY);
+
+  // Treeline from left edge to hangar area
+  for (let tx = 0; tx < w * 0.15; tx += 5) {
+    const treeH = 3 + pseudoRandom(tx * 0.13 + 600) * 8 + Math.sin(tx * 0.04) * 2;
+    ctx.lineTo(tx, horizonY - treeH);
   }
-  ctx.lineTo(w, groundY + 2);
+
+  // Hangar roofline (blocky shape rising above treeline)
+  ctx.lineTo(w * 0.15, horizonY - 12);
+  ctx.lineTo(w * 0.16, horizonY - 22);
+  ctx.lineTo(w * 0.20, horizonY - 24);
+  ctx.lineTo(w * 0.24, horizonY - 22);
+  ctx.lineTo(w * 0.25, horizonY - 12);
+
+  // Control tower spike
+  ctx.lineTo(w * 0.28, horizonY - 10);
+  ctx.lineTo(w * 0.29, horizonY - 35);
+  ctx.lineTo(w * 0.295, horizonY - 38);
+  ctx.lineTo(w * 0.30, horizonY - 35);
+  ctx.lineTo(w * 0.31, horizonY - 10);
+
+  // Continue treeline across the rest of the horizon
+  for (let tx = w * 0.32; tx <= w; tx += 5) {
+    const treeH = 3 + pseudoRandom(tx * 0.11 + 700) * 7 + Math.sin(tx * 0.035) * 2.5;
+    ctx.lineTo(tx, horizonY - treeH);
+  }
+
+  ctx.lineTo(w, horizonY);
   ctx.closePath();
   ctx.fill();
 
-  // Runway
-  const rwyY = h * 0.64, rwyH = h * 0.045;
-  const rwyX0 = w * 0.18, rwyX1 = w * 0.92;
-  ctx.fillStyle = "#1c1e22";
-  ctx.fillRect(rwyX0, rwyY, rwyX1 - rwyX0, rwyH);
-
-  // Runway shoulder
-  ctx.fillStyle = "#141618";
-  ctx.fillRect(rwyX0, rwyY - 2, rwyX1 - rwyX0, 2);
-  ctx.fillRect(rwyX0, rwyY + rwyH, rwyX1 - rwyX0, 2);
-
-  // Centerline dashes
-  ctx.setLineDash([14, 12]);
-  ctx.strokeStyle = "rgba(255,255,255,0.35)";
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  ctx.moveTo(rwyX0 + 30, rwyY + rwyH / 2);
-  ctx.lineTo(rwyX1 - 30, rwyY + rwyH / 2);
-  ctx.stroke();
-  ctx.setLineDash([]);
-
-  // Threshold bars
-  for (const tx of [rwyX0 + 8, rwyX1 - 8]) {
-    ctx.fillStyle = "rgba(255,255,255,0.4)";
-    const barH = rwyH * 0.06;
-    for (let i = 0; i < 6; i++) {
-      const by = rwyY + (rwyH - 6 * barH - 5 * barH) / 2 + i * barH * 2;
-      ctx.fillRect(tx - 8, by, 16, barH);
-    }
-  }
-
-  // Runway numbers
-  ctx.fillStyle = "rgba(255,255,255,0.3)";
-  ctx.font = `bold ${Math.max(10, rwyH * 0.45)}px monospace`;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText("09", rwyX0 + 40, rwyY + rwyH / 2);
-  ctx.fillText("27", rwyX1 - 40, rwyY + rwyH / 2);
-
-  // Runway edge lights
-  for (let lx = rwyX0; lx <= rwyX1; lx += w * 0.02) {
-    ctx.fillStyle = "rgba(255,230,180,0.5)";
-    ctx.beginPath(); ctx.arc(lx, rwyY - 1, 2, 0, Math.PI * 2); ctx.fill();
-    ctx.beginPath(); ctx.arc(lx, rwyY + rwyH + 1, 2, 0, Math.PI * 2); ctx.fill();
-  }
-
-  // Threshold lights
-  for (let ty = rwyY + 4; ty < rwyY + rwyH - 2; ty += 6) {
-    ctx.fillStyle = "rgba(0, 220, 80, 0.5)";
-    ctx.beginPath(); ctx.arc(rwyX0 - 3, ty, 2, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = "rgba(220, 50, 30, 0.5)";
-    ctx.beginPath(); ctx.arc(rwyX1 + 3, ty, 2, 0, Math.PI * 2); ctx.fill();
-  }
-
-  // Taxiway from hangar area to runway
-  const twyX = w * 0.16, twyW = w * 0.025;
-  ctx.fillStyle = "#181a1e";
-  ctx.fillRect(twyX, groundY + h * 0.02, twyW, rwyY - groundY - h * 0.02);
-  ctx.setLineDash([6, 5]);
-  ctx.strokeStyle = "rgba(220, 200, 50, 0.35)";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(twyX + twyW / 2, groundY + h * 0.04);
-  ctx.lineTo(twyX + twyW / 2, rwyY);
-  ctx.stroke();
-  ctx.setLineDash([]);
-  // Blue taxiway edge lights
-  for (let ty = groundY + h * 0.04; ty < rwyY; ty += 12) {
-    ctx.fillStyle = "rgba(50, 100, 255, 0.4)";
-    ctx.beginPath(); ctx.arc(twyX - 1, ty, 1.5, 0, Math.PI * 2); ctx.fill();
-    ctx.beginPath(); ctx.arc(twyX + twyW + 1, ty, 1.5, 0, Math.PI * 2); ctx.fill();
-  }
-
-  // ── Buildings on LEFT side ──
-
-  // Hangar (main, large)
-  const hx = w * 0.03, hy = groundY + h * 0.01, hw = w * 0.10, hh = h * 0.08;
-
-  // Building shadows (cast to the right)
-  ctx.fillStyle = "rgba(0, 0, 0, 0.15)";
-  ctx.beginPath();
-  ctx.moveTo(hx + hw, hy);
-  ctx.lineTo(hx + hw + hw * 0.3, hy + hh * 0.15);
-  ctx.lineTo(hx + hw + hw * 0.3, hy + hh + hh * 0.15);
-  ctx.lineTo(hx + hw, hy + hh);
-  ctx.closePath();
-  ctx.fill();
-
-  ctx.fillStyle = "#14181e";
-  ctx.fillRect(hx, hy, hw, hh);
-  // Roof ridge
-  ctx.strokeStyle = "rgba(80, 100, 120, 0.2)";
-  ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(hx, hy); ctx.lineTo(hx + hw / 2, hy - 4); ctx.lineTo(hx + hw, hy); ctx.stroke();
-
-  // Doors opening
-  const doorOpen = Math.min(1, Math.max(0, (p - 0.15) / 0.3));
-  if (doorOpen < 1) {
-    ctx.fillStyle = "#181c22";
-    const dw = hw * 0.48;
-    ctx.fillRect(hx, hy, dw * (1 - doorOpen), hh);
-    ctx.fillRect(hx + hw - dw * (1 - doorOpen), hy, dw * (1 - doorOpen), hh);
-  }
+  // ── 3. Sky glow behind hangar — warm interior light spilling upward ──
+  const hangarCenterX = w * 0.20;
+  const doorOpen = Math.min(1, Math.max(0, (p - 0.05) / 0.10));
   if (doorOpen > 0) {
-    ctx.fillStyle = `rgba(255,200,100,${doorOpen * 0.12})`;
-    ctx.fillRect(hx, hy, hw, hh);
+    const glowR = h * 0.15;
+    const skyGlowGrad = ctx.createRadialGradient(
+      hangarCenterX, horizonY, 0,
+      hangarCenterX, horizonY, glowR,
+    );
+    skyGlowGrad.addColorStop(0, `rgba(255, 190, 100, ${doorOpen * 0.08})`);
+    skyGlowGrad.addColorStop(0.4, `rgba(255, 160, 80, ${doorOpen * 0.04})`);
+    skyGlowGrad.addColorStop(1, "rgba(255, 140, 60, 0)");
+    ctx.fillStyle = skyGlowGrad;
+    ctx.beginPath();
+    ctx.arc(hangarCenterX, horizonY, glowR, 0, Math.PI * 2);
+    ctx.fill();
   }
-  ctx.strokeStyle = "rgba(80, 100, 120, 0.15)";
+
+  // ── 4. Tarmac surface — dark ground from horizon to bottom ──
+  const tarmacGrad = ctx.createLinearGradient(0, horizonY, 0, h);
+  tarmacGrad.addColorStop(0, "#0a0e14");
+  tarmacGrad.addColorStop(0.3, "#0c1018");
+  tarmacGrad.addColorStop(1, "#080c12");
+  ctx.fillStyle = tarmacGrad;
+  ctx.fillRect(0, horizonY, w, h - horizonY);
+
+  // Subtle concrete texture patches
+  for (let i = 0; i < 25; i++) {
+    const px = pseudoRandom(i * 17 + 300) * w;
+    const py = horizonY + pseudoRandom(i * 17 + 301) * (h - horizonY) * 0.85;
+    const ps = 6 + pseudoRandom(i * 17 + 302) * 18;
+    const shade = pseudoRandom(i * 17 + 303) > 0.5 ? "10,14,20" : "8,11,16";
+    const pa = 0.08 + pseudoRandom(i * 17 + 304) * 0.06;
+    ctx.fillStyle = `rgba(${shade}, ${pa})`;
+    ctx.beginPath();
+    ctx.ellipse(px, py, ps, ps * 0.35, pseudoRandom(i * 17 + 305) * Math.PI, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // ── 5. Runway perspective lights — two parallel rows converging to vanishing point ──
+  const vpX = w * 0.35;
+  const vpY = horizonY;
+  const numLights = 18;
+  for (let i = 0; i < numLights; i++) {
+    const t = i / (numLights - 1);
+    const t2 = t * t; // quadratic spacing for depth compression
+    const lx = vpX + (w * 0.90 - vpX) * t2;
+    const spreadY = (h * 0.48 - horizonY) * t2;
+    const ly = horizonY + spreadY;
+    const lightSize = 1.0 + t2 * 2.5;
+    const lightAlpha = 0.15 + t2 * 0.45;
+
+    // Left row
+    const leftOffY = ly - 4 * t2 - 2;
+    ctx.fillStyle = `rgba(255, 220, 150, ${lightAlpha})`;
+    ctx.beginPath();
+    ctx.arc(lx, leftOffY, lightSize, 0, Math.PI * 2);
+    ctx.fill();
+    // Light bloom
+    if (t2 > 0.1) {
+      const bloomGrad = ctx.createRadialGradient(lx, leftOffY, 0, lx, leftOffY, lightSize * 3);
+      bloomGrad.addColorStop(0, `rgba(255, 220, 150, ${lightAlpha * 0.15})`);
+      bloomGrad.addColorStop(1, "rgba(255, 220, 150, 0)");
+      ctx.fillStyle = bloomGrad;
+      ctx.beginPath();
+      ctx.arc(lx, leftOffY, lightSize * 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Right row
+    const rightOffY = ly + 4 * t2 + 2;
+    ctx.fillStyle = `rgba(255, 220, 150, ${lightAlpha})`;
+    ctx.beginPath();
+    ctx.arc(lx, rightOffY, lightSize, 0, Math.PI * 2);
+    ctx.fill();
+    if (t2 > 0.1) {
+      const bloomGrad2 = ctx.createRadialGradient(lx, rightOffY, 0, lx, rightOffY, lightSize * 3);
+      bloomGrad2.addColorStop(0, `rgba(255, 220, 150, ${lightAlpha * 0.15})`);
+      bloomGrad2.addColorStop(1, "rgba(255, 220, 150, 0)");
+      ctx.fillStyle = bloomGrad2;
+      ctx.beginPath();
+      ctx.arc(lx, rightOffY, lightSize * 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // ── 6. Taxiway blue lights — line from hangar area toward runway junction ──
+  const taxiStartX = w * 0.22;
+  const taxiStartY = horizonY + 6;
+  const taxiEndX = w * 0.38;
+  const taxiEndY = horizonY + (h * 0.48 - horizonY) * 0.12;
+  const numTaxiLights = 10;
+  for (let i = 0; i < numTaxiLights; i++) {
+    const t = i / (numTaxiLights - 1);
+    const tlx = taxiStartX + (taxiEndX - taxiStartX) * t;
+    const tly = taxiStartY + (taxiEndY - taxiStartY) * t;
+    const tSize = 1.0 + t * 1.0;
+    ctx.fillStyle = `rgba(50, 120, 255, ${0.25 + t * 0.2})`;
+    ctx.beginPath();
+    ctx.arc(tlx, tly, tSize, 0, Math.PI * 2);
+    ctx.fill();
+    // Blue bloom
+    const bGrad = ctx.createRadialGradient(tlx, tly, 0, tlx, tly, tSize * 4);
+    bGrad.addColorStop(0, `rgba(50, 120, 255, ${0.06 + t * 0.04})`);
+    bGrad.addColorStop(1, "rgba(50, 120, 255, 0)");
+    ctx.fillStyle = bGrad;
+    ctx.beginPath();
+    ctx.arc(tlx, tly, tSize * 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // ── 7. Hangar building — dark block above horizon on left side ──
+  const hx = w * 0.14;
+  const hw = w * 0.12;
+  const hTop = horizonY - 24;
+  const hBottom = horizonY + 8;
+  const hh = hBottom - hTop;
+
+  // Hangar body
+  ctx.fillStyle = "#0a0e16";
+  ctx.fillRect(hx, hTop, hw, hh);
+
+  // Roof ridge
+  ctx.strokeStyle = "rgba(60, 80, 100, 0.15)";
   ctx.lineWidth = 1;
-  ctx.strokeRect(hx, hy, hw, hh);
+  ctx.beginPath();
+  ctx.moveTo(hx, hTop);
+  ctx.lineTo(hx + hw * 0.5, hTop - 5);
+  ctx.lineTo(hx + hw, hTop);
+  ctx.stroke();
 
-  // Ops building
-  const obx = w * 0.04, oby = hy + hh + h * 0.015, obw = w * 0.05, obh = h * 0.04;
-  ctx.fillStyle = "#12161c";
-  ctx.fillRect(obx, oby, obw, obh);
-  ctx.strokeStyle = "rgba(80, 100, 120, 0.12)";
-  ctx.strokeRect(obx, oby, obw, obh);
-  for (let wx = obx + 4; wx < obx + obw - 4; wx += 8) {
-    ctx.fillStyle = `rgba(255, 220, 120, ${0.15 + 0.1 * Math.sin(time * 0.002 + wx)})`;
-    ctx.fillRect(wx, oby + 3, 4, 3);
+  // Hangar doors sliding open (p 0.05-0.15)
+  const doorW = hw * 0.45;
+  if (doorOpen < 1) {
+    ctx.fillStyle = "#0c1018";
+    const closedW = doorW * (1 - doorOpen);
+    ctx.fillRect(hx, hTop, closedW, hh);
+    ctx.fillRect(hx + hw - closedW, hTop, closedW, hh);
   }
 
-  // Control tower (small)
-  const twx = w * 0.11, twy = groundY - h * 0.02, tww = w * 0.012, twh = h * 0.06;
-  ctx.fillStyle = "#141820";
-  ctx.fillRect(twx, twy, tww, twh);
-  ctx.fillRect(twx - tww * 0.5, twy - h * 0.015, tww * 2, h * 0.015);
-  ctx.fillStyle = "rgba(0, 255, 100, 0.12)";
-  ctx.fillRect(twx - tww * 0.3, twy - h * 0.012, tww * 1.6, h * 0.006);
+  // Interior warm glow through open doors
+  if (doorOpen > 0) {
+    const interiorGrad = ctx.createRadialGradient(
+      hx + hw * 0.5, hTop + hh * 0.5, 0,
+      hx + hw * 0.5, hTop + hh * 0.5, hw * 0.6,
+    );
+    interiorGrad.addColorStop(0, `rgba(255, 200, 120, ${doorOpen * 0.18})`);
+    interiorGrad.addColorStop(0.5, `rgba(255, 170, 90, ${doorOpen * 0.08})`);
+    interiorGrad.addColorStop(1, "rgba(255, 150, 70, 0)");
+    ctx.fillStyle = interiorGrad;
+    ctx.fillRect(hx, hTop, hw, hh);
 
-  // Fuel depot
-  ctx.fillStyle = "#101418";
-  ctx.fillRect(w * 0.035, oby + obh + h * 0.01, w * 0.025, h * 0.025);
-  ctx.strokeStyle = "rgba(80, 100, 120, 0.1)";
-  ctx.strokeRect(w * 0.035, oby + obh + h * 0.01, w * 0.025, h * 0.025);
-
-  // Floodlight cones
-  for (const flx of [w * 0.08, w * 0.14]) {
-    const fly = groundY - h * 0.01;
-    const coneGrad = ctx.createRadialGradient(flx, fly, 0, flx, fly, h * 0.08);
-    coneGrad.addColorStop(0, `rgba(255, 240, 200, ${p > 0.1 ? 0.06 : 0.02})`);
-    coneGrad.addColorStop(1, "rgba(255, 240, 200, 0)");
-    ctx.fillStyle = coneGrad;
-    ctx.beginPath(); ctx.arc(flx, fly + h * 0.03, h * 0.08, 0, Math.PI * 2); ctx.fill();
+    // Light spill on ground in front of hangar
+    const spillGrad = ctx.createRadialGradient(
+      hx + hw * 0.5, hBottom, 0,
+      hx + hw * 0.5, hBottom, hw * 0.8,
+    );
+    spillGrad.addColorStop(0, `rgba(255, 200, 120, ${doorOpen * 0.06})`);
+    spillGrad.addColorStop(1, "rgba(255, 180, 100, 0)");
+    ctx.fillStyle = spillGrad;
+    ctx.beginPath();
+    ctx.arc(hx + hw * 0.5, hBottom, hw * 0.8, 0, Math.PI * 2);
+    ctx.fill();
   }
 
-  // Jet rolling from hangar to runway — facing RIGHT
-  if (p > 0.3) {
-    const jp = Math.min(1, (p - 0.3) / 0.6);
-    let jx: number, jy: number, jetAngle: number;
-    if (jp < 0.2) {
-      // Phase 1 (quick): taxi from hangar to taxiway
-      const t = jp / 0.2;
-      jx = hx + hw + t * (twyX + twyW / 2 - hx - hw);
-      jy = hy + hh * 0.5;
-      jetAngle = 0;
-    } else if (jp < 0.5) {
-      // Phase 2: down taxiway
-      const t = (jp - 0.2) / 0.3;
-      jx = twyX + twyW / 2;
-      jy = hy + hh * 0.5 + t * (rwyY + rwyH / 2 - hy - hh * 0.5);
-      jetAngle = Math.PI / 2;
+  // Hangar outline
+  ctx.strokeStyle = "rgba(60, 80, 100, 0.12)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(hx, hTop, hw, hh);
+
+  // ── 8. Floodlight pools — warm radial gradients on tarmac near hangar ──
+  for (const flPos of [
+    { x: hx + hw + w * 0.04, y: horizonY + 4 },
+    { x: hx - w * 0.02, y: horizonY + 6 },
+  ]) {
+    const poolR = h * 0.06 + Math.min(w, h) * 0.02;
+    const poolGrad = ctx.createRadialGradient(flPos.x, flPos.y, 0, flPos.x, flPos.y, poolR);
+    poolGrad.addColorStop(0, `rgba(255, 230, 180, ${p > 0.1 ? 0.05 : 0.02})`);
+    poolGrad.addColorStop(0.5, `rgba(255, 210, 160, ${p > 0.1 ? 0.02 : 0.008})`);
+    poolGrad.addColorStop(1, "rgba(255, 200, 140, 0)");
+    ctx.fillStyle = poolGrad;
+    ctx.beginPath();
+    ctx.arc(flPos.x, flPos.y, poolR, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // ── 9. Jet — emerges from hangar, taxis right toward camera ──
+  if (p > 0.15) {
+    const jp = Math.min(1, (p - 0.15) / 0.85); // 0..1 over p 0.15..1.0
+
+    let jetX: number;
+    let jetY: number;
+    let jetAlpha: number;
+    let jetSize: number;
+
+    if (jp < 0.29) {
+      // Phase: emerge from hangar, taxi right (p 0.15-0.40)
+      const t = jp / 0.29;
+      jetX = hx + hw * 0.5 + t * (w * 0.40 - hx - hw * 0.5);
+      jetY = horizonY + 4 + t * 8;
+      jetAlpha = Math.min(1, t * 3); // fade in quickly
+      jetSize = Math.min(w, h) * 0.08;
+    } else if (jp < 0.65) {
+      // Phase: continue toward runway (p 0.40-0.70)
+      const t = (jp - 0.29) / 0.36;
+      jetX = w * 0.40 + t * (w * 0.55 - w * 0.40);
+      jetY = horizonY + 12 + t * 12;
+      jetAlpha = 1;
+      jetSize = Math.min(w, h) * (0.08 + t * 0.01);
     } else {
-      // Phase 3: already turned onto runway, roll to takeoff position
-      const t = (jp - 0.5) / 0.5;
-      jx = twyX + twyW / 2 + t * (rwyX0 + w * 0.15 - twyX - twyW / 2);
-      jy = rwyY + rwyH / 2;
-      jetAngle = 0; // instant turn, now facing right down the runway
+      // Phase: turn onto runway, scale up closer to camera (p 0.70-1.0)
+      const t = (jp - 0.65) / 0.35;
+      jetX = w * 0.55 + t * (w * 0.72 - w * 0.55);
+      jetY = horizonY + 24 + t * (h * 0.15);
+      jetAlpha = 1;
+      jetSize = Math.min(w, h) * (0.09 + t * 0.02);
     }
-    drawP80(ctx, jx, jy, Math.min(w, h) * 0.035, jetAngle, 0.25);
 
-    // Engine glow trail
-    if (jp > 0.2) {
-      const glowGrad = ctx.createRadialGradient(jx, jy, 0, jx, jy, 20);
-      glowGrad.addColorStop(0, "rgba(255, 140, 40, 0.08)");
-      glowGrad.addColorStop(1, "rgba(255, 140, 40, 0)");
-      ctx.fillStyle = glowGrad;
-      ctx.beginPath(); ctx.arc(jx, jy, 20, 0, Math.PI * 2); ctx.fill();
+    drawP80Side(ctx, jetX, jetY, jetSize, 0, jetAlpha, 0, { gearDown: true });
+
+    // Taxi light (bright forward-pointing cone from nose)
+    if (jp > 0.05) {
+      const noseX = jetX + jetSize * 0.90;
+      const noseY = jetY + jetSize * 0.01;
+      const taxiLightGrad = ctx.createRadialGradient(noseX, noseY, 0, noseX + jetSize * 0.4, noseY, jetSize * 0.5);
+      taxiLightGrad.addColorStop(0, `rgba(255, 250, 230, ${jetAlpha * 0.12})`);
+      taxiLightGrad.addColorStop(0.5, `rgba(255, 240, 200, ${jetAlpha * 0.04})`);
+      taxiLightGrad.addColorStop(1, "rgba(255, 230, 180, 0)");
+      ctx.fillStyle = taxiLightGrad;
+      ctx.beginPath();
+      ctx.arc(noseX + jetSize * 0.2, noseY, jetSize * 0.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Wheel ground contact — subtle tarmac scuff/reflection under wheels
+    if (jp > 0.05) {
+      const mainWheelX = jetX - jetSize * 0.02;
+      const mainWheelY = jetY + jetSize * 0.24;
+      const noseWheelX = jetX + jetSize * 0.64;
+      const noseWheelY = jetY + jetSize * 0.22;
+      // Ground contact glow under main wheel
+      ctx.fillStyle = `rgba(255, 230, 180, ${jetAlpha * 0.03})`;
+      ctx.beginPath();
+      ctx.ellipse(mainWheelX, mainWheelY + jetSize * 0.01, jetSize * 0.04, jetSize * 0.008, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // Ground contact glow under nose wheel
+      ctx.fillStyle = `rgba(255, 230, 180, ${jetAlpha * 0.02})`;
+      ctx.beginPath();
+      ctx.ellipse(noseWheelX, noseWheelY + jetSize * 0.01, jetSize * 0.03, jetSize * 0.006, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // ── 10. Engine glow trail — orange radial at tail position ──
+    if (jp > 0.1) {
+      const trailAlpha = Math.min(0.2, (jp - 0.1) * 0.4);
+      const tailX = jetX - jetSize * 0.95;
+      const tailY = jetY + jetSize * 0.01;
+      const glowR = jetSize * 0.25;
+      const engineGlow = ctx.createRadialGradient(tailX, tailY, 0, tailX, tailY, glowR);
+      engineGlow.addColorStop(0, `rgba(255, 160, 50, ${trailAlpha})`);
+      engineGlow.addColorStop(0.4, `rgba(255, 120, 30, ${trailAlpha * 0.5})`);
+      engineGlow.addColorStop(1, "rgba(255, 100, 20, 0)");
+      ctx.fillStyle = engineGlow;
+      ctx.beginPath();
+      ctx.arc(tailX, tailY, glowR, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Extended exhaust plume
+      if (jp > 0.4) {
+        const plumeAlpha = Math.min(0.08, (jp - 0.4) * 0.15);
+        const plumeGrad = ctx.createLinearGradient(tailX, tailY, tailX - jetSize * 0.5, tailY);
+        plumeGrad.addColorStop(0, `rgba(255, 140, 50, ${plumeAlpha})`);
+        plumeGrad.addColorStop(0.5, `rgba(255, 100, 30, ${plumeAlpha * 0.4})`);
+        plumeGrad.addColorStop(1, "rgba(255, 80, 20, 0)");
+        ctx.fillStyle = plumeGrad;
+        ctx.beginPath();
+        ctx.moveTo(tailX, tailY - jetSize * 0.03);
+        ctx.lineTo(tailX - jetSize * 0.5, tailY);
+        ctx.lineTo(tailX, tailY + jetSize * 0.03);
+        ctx.closePath();
+        ctx.fill();
+      }
     }
   }
 
-  // Alarm flashers
-  if (p > 0.05) {
-    const fa = (Math.sin(time * 0.008) > 0 ? 0.7 : 0.15) * Math.min(1, p / 0.15);
-    for (const ax of [w * 0.25, w * 0.5, w * 0.75]) {
-      ctx.fillStyle = `rgba(255,40,20,${fa})`;
-      ctx.beginPath(); ctx.arc(ax, groundY + h * 0.015, 4, 0, Math.PI * 2); ctx.fill();
-      const alGlow = ctx.createRadialGradient(ax, groundY + h * 0.015, 0, ax, groundY + h * 0.015, 25);
-      alGlow.addColorStop(0, `rgba(255,40,20,${fa * 0.2})`);
-      alGlow.addColorStop(1, "rgba(255,40,20,0)");
-      ctx.fillStyle = alGlow;
-      ctx.beginPath(); ctx.arc(ax, groundY + h * 0.015, 25, 0, Math.PI * 2); ctx.fill();
-    }
-  }
+  // ── 11. Ground mist — semi-transparent horizontal band near horizon ──
+  const mistGrad = ctx.createLinearGradient(0, horizonY - 8, 0, horizonY + 30);
+  mistGrad.addColorStop(0, "rgba(12, 18, 28, 0)");
+  mistGrad.addColorStop(0.3, "rgba(14, 22, 34, 0.12)");
+  mistGrad.addColorStop(0.6, "rgba(16, 24, 36, 0.08)");
+  mistGrad.addColorStop(1, "rgba(12, 18, 28, 0)");
+  ctx.fillStyle = mistGrad;
+  ctx.fillRect(0, horizonY - 8, w, 38);
 
-  // Horizon haze and vignette
-  drawHorizonHaze(ctx, w, h, groundY);
+  // ── 12. Post-processing ──
+  drawHorizonHaze(ctx, w, h, horizonY);
   drawVignette(ctx, w, h, 0.35);
 
+  // ── 13. HUD text ──
   hudText(ctx, 24, 22, "AGENT ACTIVATED", 0.6, 14);
   hudText(ctx, 24, 40, p > 0.4 ? "CODEBASE LOADED" : "LOADING CONTEXT...", 0.25, 10);
   hudText(ctx, w - 24, 22, "STEP 2/6", 0.35, 11, "right");
@@ -966,115 +1074,428 @@ function drawCockpitLaunch(
 function drawLockOn(
   ctx: CanvasRenderingContext2D, w: number, h: number, p: number, time: number,
 ) {
+  // Fade-in factor for first 10% of animation
+  const fadeIn = Math.min(1, p / 0.1);
+
+  // ── 1. Background sky + clouds ──────────────────────────────
   const skyGrad = ctx.createLinearGradient(0, 0, 0, h);
   skyGrad.addColorStop(0, "#020510");
   skyGrad.addColorStop(1, "#081020");
   ctx.fillStyle = skyGrad;
   ctx.fillRect(0, 0, w, h);
 
-  // Drifting clouds
   for (const c of CLOUDS) {
     const drift = time * 0.00003;
     const ccx = ((c.x + drift) % 1.3 - 0.15) * w;
-    ctx.fillStyle = `rgba(15,22,40,${c.a})`;
+    ctx.fillStyle = `rgba(15,22,40,${c.a * 1.3})`;
     ctx.beginPath();
     ctx.ellipse(ccx, c.y * h, c.rx * w * 0.12, c.ry * h * 0.06, 0, 0, Math.PI * 2);
     ctx.fill();
   }
 
-  // Pitch ladder
-  drawHudPitchLadder(ctx, w, h, 0.6);
-
-  const rcx = w * 0.5, rcy = h * 0.42;
-  const rs = Math.min(w, h) * 0.13;
-
-  // Reticle circles
-  ctx.strokeStyle = "rgba(0,255,100,0.5)";
-  ctx.lineWidth = 1.5;
-  ctx.beginPath(); ctx.arc(rcx, rcy, rs, 0, Math.PI * 2); ctx.stroke();
-  ctx.beginPath(); ctx.arc(rcx, rcy, rs * 0.5, 0, Math.PI * 2); ctx.stroke();
-  ctx.beginPath(); ctx.arc(rcx, rcy, rs * 0.25, 0, Math.PI * 2); ctx.stroke();
-
-  // Crosshairs with gap
-  const gap = rs * 0.15;
-  ctx.beginPath();
-  ctx.moveTo(rcx - rs * 1.2, rcy); ctx.lineTo(rcx - gap, rcy);
-  ctx.moveTo(rcx + gap, rcy); ctx.lineTo(rcx + rs * 1.2, rcy);
-  ctx.moveTo(rcx, rcy - rs * 1.2); ctx.lineTo(rcx, rcy - gap);
-  ctx.moveTo(rcx, rcy + gap); ctx.lineTo(rcx, rcy + rs * 1.2);
-  ctx.stroke();
-
-  // Bogie diamond converging toward center
-  const bogieX = rcx + (1 - p) * w * 0.18;
-  const bogieY = rcy + (1 - p) * h * -0.07;
-  const ds = 10 + (1 - p) * 8;
-  const locked = p > 0.7;
-  ctx.strokeStyle = locked ? "rgba(255,60,40,0.9)" : "rgba(0,255,100,0.7)";
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(bogieX, bogieY - ds);
-  ctx.lineTo(bogieX + ds, bogieY);
-  ctx.lineTo(bogieX, bogieY + ds);
-  ctx.lineTo(bogieX - ds, bogieY);
-  ctx.closePath();
-  ctx.stroke();
-
-  // Target info box
-  if (p > 0.3) {
-    const tia = Math.min(1, (p - 0.3) / 0.2);
-    ctx.fillStyle = `rgba(0, 255, 100, ${tia * 0.5})`;
-    ctx.font = "11px monospace";
-    ctx.textAlign = "left";
-    ctx.textBaseline = "middle";
-    ctx.fillText("src/handlers/user.ts", bogieX + ds + 8, bogieY - 6);
-    ctx.fillText(`line ${Math.round(142 - p * 5)}`, bogieX + ds + 8, bogieY + 8);
+  // ── 2. Code rain ────────────────────────────────────────────
+  const codeChars = "{}()[];=>";
+  const colCount = Math.floor(w / 18);
+  ctx.font = "10px monospace";
+  ctx.textBaseline = "top";
+  for (let col = 0; col < colCount; col += 3) {
+    for (let row = 0; row < 5; row++) {
+      const seed = col * 7 + row * 13;
+      const ch = codeChars[Math.floor(pseudoRandom(seed) * codeChars.length)];
+      const cx = col * 18 + 4;
+      const cy = ((row * 28 + time * 0.02 * (1 + pseudoRandom(seed + 1))) % (h + 40)) - 20;
+      ctx.fillStyle = `rgba(0,255,100,0.04)`;
+      ctx.fillText(ch, cx, cy);
+    }
   }
 
-  // Diff counter (bumped)
-  const linesChanged = Math.round(12 + p * 35);
-  hudText(ctx, w * 0.86, h * 0.30, `DIFF +${linesChanged} -${Math.round(linesChanged * 0.3)}`, 0.7, 15, "right");
-  hudText(ctx, w * 0.86, h * 0.35, `${Math.round(3 + p * 4)} FILES`, 0.4, 11, "right");
+  // ── 3. Pitch ladder ─────────────────────────────────────────
+  drawHudPitchLadder(ctx, w, h, 0.6 * fadeIn);
 
-  // Lock indicator
+  // ── 4. Heading tape (top) ───────────────────────────────────
+  const htY = h * 0.06;
+  const htH = 22;
+  const htLeft = w * 0.3;
+  const htRight = w * 0.7;
+  const htWidth = htRight - htLeft;
+  ctx.fillStyle = `rgba(0,10,5,${0.35 * fadeIn})`;
+  ctx.fillRect(htLeft, htY - htH / 2, htWidth, htH);
+  ctx.strokeStyle = `rgba(0,255,100,${0.3 * fadeIn})`;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(htLeft, htY - htH / 2, htWidth, htH);
+
+  // Scrolling degree markings
+  const headingOffset = (time * 0.003) % 360;
+  const degPerPx = 0.15;
+  const centerDeg = headingOffset;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(htLeft, htY - htH / 2, htWidth, htH);
+  ctx.clip();
+  ctx.font = "9px monospace";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  for (let deg = -30; deg <= 30; deg++) {
+    const actualDeg = Math.round(centerDeg + deg);
+    const normalizedDeg = ((actualDeg % 360) + 360) % 360;
+    const px = w * 0.5 + (deg / degPerPx) * 0.08;
+    if (px < htLeft || px > htRight) continue;
+    if (normalizedDeg % 5 === 0) {
+      const isMajor = normalizedDeg % 10 === 0;
+      const tickH = isMajor ? 6 : 3;
+      ctx.strokeStyle = `rgba(0,255,100,${(isMajor ? 0.5 : 0.25) * fadeIn})`;
+      ctx.beginPath();
+      ctx.moveTo(px, htY + htH / 2 - tickH);
+      ctx.lineTo(px, htY + htH / 2);
+      ctx.stroke();
+      if (isMajor) {
+        const label = String(normalizedDeg).padStart(3, "0");
+        ctx.fillStyle = `rgba(0,255,100,${0.5 * fadeIn})`;
+        ctx.fillText(label, px, htY - 2);
+      }
+    }
+  }
+  ctx.restore();
+
+  // Center caret
+  ctx.fillStyle = `rgba(0,255,100,${0.6 * fadeIn})`;
+  ctx.beginPath();
+  ctx.moveTo(w * 0.5, htY - htH / 2);
+  ctx.lineTo(w * 0.5 - 5, htY - htH / 2 - 6);
+  ctx.lineTo(w * 0.5 + 5, htY - htH / 2 - 6);
+  ctx.closePath();
+  ctx.fill();
+
+  // ── 5. Airspeed tape (left) ─────────────────────────────────
+  const asX = w * 0.12;
+  const asW = 44;
+  const asTop = h * 0.2;
+  const asBot = h * 0.65;
+  const asH = asBot - asTop;
+  ctx.fillStyle = `rgba(0,10,5,${0.3 * fadeIn})`;
+  ctx.fillRect(asX - asW / 2, asTop, asW, asH);
+  ctx.strokeStyle = `rgba(0,255,100,${0.25 * fadeIn})`;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(asX - asW / 2, asTop, asW, asH);
+
+  const baseSpeed = 420;
+  const speedDrift = Math.sin(time * 0.0008) * 3;
+  const currentSpeed = baseSpeed + speedDrift;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(asX - asW / 2, asTop, asW, asH);
+  ctx.clip();
+  ctx.font = "9px monospace";
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  for (let spd = baseSpeed - 20; spd <= baseSpeed + 20; spd += 2) {
+    const frac = (spd - currentSpeed) / 40;
+    const yy = asTop + asH / 2 + frac * asH;
+    if (yy < asTop || yy > asBot) continue;
+    const isMajor = spd % 10 === 0;
+    if (isMajor) {
+      ctx.fillStyle = `rgba(0,255,100,${0.5 * fadeIn})`;
+      ctx.fillText(String(spd), asX + asW / 2 - 14, yy);
+      ctx.strokeStyle = `rgba(0,255,100,${0.4 * fadeIn})`;
+      ctx.beginPath();
+      ctx.moveTo(asX + asW / 2 - 10, yy);
+      ctx.lineTo(asX + asW / 2, yy);
+      ctx.stroke();
+    } else if (spd % 5 === 0) {
+      ctx.strokeStyle = `rgba(0,255,100,${0.2 * fadeIn})`;
+      ctx.beginPath();
+      ctx.moveTo(asX + asW / 2 - 5, yy);
+      ctx.lineTo(asX + asW / 2, yy);
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+
+  // Current speed box
+  const spdBoxY = asTop + asH / 2;
+  ctx.fillStyle = `rgba(0,20,10,${0.8 * fadeIn})`;
+  ctx.fillRect(asX - asW / 2, spdBoxY - 10, asW, 20);
+  ctx.strokeStyle = `rgba(0,255,100,${0.7 * fadeIn})`;
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(asX - asW / 2, spdBoxY - 10, asW, 20);
+  ctx.fillStyle = `rgba(0,255,100,${0.9 * fadeIn})`;
+  ctx.font = "bold 10px monospace";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(String(Math.round(currentSpeed)), asX, spdBoxY);
+
+  // ── 6. Altitude tape (right) ────────────────────────────────
+  const altX = w * 0.88;
+  const altW = 48;
+  const altTop = h * 0.2;
+  const altBot = h * 0.65;
+  const altH = altBot - altTop;
+  ctx.fillStyle = `rgba(0,10,5,${0.3 * fadeIn})`;
+  ctx.fillRect(altX - altW / 2, altTop, altW, altH);
+  ctx.strokeStyle = `rgba(0,255,100,${0.25 * fadeIn})`;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(altX - altW / 2, altTop, altW, altH);
+
+  const baseAlt = 250;
+  const altDrift = Math.sin(time * 0.0006) * 1.5;
+  const currentAlt = baseAlt + altDrift;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(altX - altW / 2, altTop, altW, altH);
+  ctx.clip();
+  ctx.font = "9px monospace";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  for (let alt = baseAlt - 4; alt <= baseAlt + 4; alt++) {
+    const frac = (alt - currentAlt) / 8;
+    const yy = altTop + altH / 2 + frac * altH;
+    if (yy < altTop || yy > altBot) continue;
+    const isMajor = alt % 2 === 0;
+    if (isMajor) {
+      ctx.fillStyle = `rgba(0,255,100,${0.5 * fadeIn})`;
+      ctx.fillText(String(alt * 100), altX - altW / 2 + 14, yy);
+    }
+    ctx.strokeStyle = `rgba(0,255,100,${(isMajor ? 0.4 : 0.2) * fadeIn})`;
+    ctx.beginPath();
+    ctx.moveTo(altX - altW / 2, yy);
+    ctx.lineTo(altX - altW / 2 + (isMajor ? 10 : 5), yy);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // Current altitude box
+  const altBoxY = altTop + altH / 2;
+  ctx.fillStyle = `rgba(0,20,10,${0.8 * fadeIn})`;
+  ctx.fillRect(altX - altW / 2, altBoxY - 10, altW, 20);
+  ctx.strokeStyle = `rgba(0,255,100,${0.7 * fadeIn})`;
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(altX - altW / 2, altBoxY - 10, altW, 20);
+  ctx.fillStyle = `rgba(0,255,100,${0.9 * fadeIn})`;
+  ctx.font = "bold 10px monospace";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(String(Math.round(currentAlt * 100)), altX, altBoxY);
+
+  // ── 7. Velocity vector (flight path marker) ─────────────────
+  const rcx = w * 0.5, rcy = h * 0.42;
+  const rs = Math.min(w, h) * 0.13;
+  const vvR = 5;
+  ctx.strokeStyle = `rgba(0,255,100,${0.7 * fadeIn})`;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(rcx, rcy - rs * 0.02, vvR, 0, Math.PI * 2);
+  ctx.stroke();
+  // Wing lines
+  ctx.beginPath();
+  ctx.moveTo(rcx - vvR, rcy - rs * 0.02);
+  ctx.lineTo(rcx - vvR - 12, rcy - rs * 0.02);
+  ctx.moveTo(rcx + vvR, rcy - rs * 0.02);
+  ctx.lineTo(rcx + vvR + 12, rcy - rs * 0.02);
+  ctx.stroke();
+  // Top tick
+  ctx.beginPath();
+  ctx.moveTo(rcx, rcy - rs * 0.02 - vvR);
+  ctx.lineTo(rcx, rcy - rs * 0.02 - vvR - 8);
+  ctx.stroke();
+
+  // ── 8. G-force + AOA readouts ───────────────────────────────
+  const gForce = (1.2 + Math.sin(time * 0.001) * 0.15).toFixed(1);
+  const aoa = (2.1 + Math.sin(time * 0.0007) * 0.4).toFixed(1);
+  hudText(ctx, w * 0.14, h * 0.72, `G ${gForce}`, 0.5 * fadeIn, 12);
+  hudText(ctx, w * 0.14, h * 0.76, `AOA ${aoa}\u00B0`, 0.5 * fadeIn, 12);
+
+  // ── 9. Enhanced reticle ─────────────────────────────────────
+  // Solid outer circle
+  ctx.strokeStyle = `rgba(0,255,100,${0.5 * fadeIn})`;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(rcx, rcy, rs, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Dashed inner circle
+  ctx.setLineDash([4, 4]);
+  ctx.strokeStyle = `rgba(0,255,100,${0.35 * fadeIn})`;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(rcx, rcy, rs * 0.6, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Cardinal tick marks on outer circle
+  const tickLen = 8;
+  ctx.strokeStyle = `rgba(0,255,100,${0.5 * fadeIn})`;
+  ctx.lineWidth = 1.5;
+  for (let i = 0; i < 4; i++) {
+    const angle = (i * Math.PI) / 2;
+    ctx.beginPath();
+    ctx.moveTo(rcx + Math.cos(angle) * rs, rcy + Math.sin(angle) * rs);
+    ctx.lineTo(rcx + Math.cos(angle) * (rs + tickLen), rcy + Math.sin(angle) * (rs + tickLen));
+    ctx.stroke();
+  }
+
+  // Crosshairs with gap
+  const gap = rs * 0.18;
+  ctx.strokeStyle = `rgba(0,255,100,${0.45 * fadeIn})`;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(rcx - rs * 0.95, rcy); ctx.lineTo(rcx - gap, rcy);
+  ctx.moveTo(rcx + gap, rcy); ctx.lineTo(rcx + rs * 0.95, rcy);
+  ctx.moveTo(rcx, rcy - rs * 0.95); ctx.lineTo(rcx, rcy - gap);
+  ctx.moveTo(rcx, rcy + gap); ctx.lineTo(rcx, rcy + rs * 0.95);
+  ctx.stroke();
+
+  // ── 10. Code fragments in reticle (clipped) ─────────────────
+  const codeLines: string[] = [
+    'const user = await db.findById(id);',
+    'if (!user) throw new Error("null ref");',
+    'const perms = user.roles.flatMap(r =>',
+    '  r.permissions.filter(p => p.active)',
+    ');',
+    'return { ...user, perms };',
+    'validateSession(req.headers.auth);',
+    'const result = handler(req, res);',
+  ];
+  const addLines: { idx: number; text: string }[] = [
+    { idx: 1, text: 'if (!user) return res.status(404);' },
+    { idx: 2, text: 'const perms = getPermissions(user);' },
+  ];
+  const removeIndices = [1, 2]; // lines that get red markers
+
+  const scrollOffset = time * 0.012;
+  const lineH = 13;
+  const codeStartY = rcy - (codeLines.length * lineH) / 2 + (scrollOffset % lineH);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(rcx, rcy, rs * 0.92, 0, Math.PI * 2);
+  ctx.clip();
+
+  ctx.font = "9px monospace";
+  ctx.textBaseline = "top";
+
+  for (let i = 0; i < codeLines.length; i++) {
+    const ly = codeStartY + i * lineH - scrollOffset * 0.3;
+    if (ly < rcy - rs || ly > rcy + rs) continue;
+
+    const isRemove = removeIndices.includes(i) && p > 0.3;
+    const isAdd = (i === 1 || i === 2) && p > 0.5;
+
+    if (isRemove && !isAdd) {
+      // Red removal marker
+      const removeAlpha = Math.min(1, (p - 0.3) / 0.1) * 0.6 * fadeIn;
+      ctx.fillStyle = `rgba(255,80,60,${removeAlpha})`;
+      ctx.fillText("- " + codeLines[i], rcx - rs * 0.8, ly);
+    } else if (isAdd) {
+      // Show red strikethrough of original
+      const removeAlpha = Math.min(1, (p - 0.3) / 0.1) * 0.35 * fadeIn;
+      ctx.fillStyle = `rgba(255,80,60,${removeAlpha})`;
+      ctx.fillText("- " + codeLines[i], rcx - rs * 0.8, ly - lineH * 0.6);
+
+      // Green addition
+      const addAlpha = Math.min(1, (p - 0.5) / 0.1) * 0.7 * fadeIn;
+      ctx.fillStyle = `rgba(80,255,120,${addAlpha})`;
+      ctx.fillText("+ " + addLines[i === 1 ? 0 : 1].text, rcx - rs * 0.8, ly);
+    } else {
+      // Normal code line
+      ctx.fillStyle = `rgba(0,255,100,${0.35 * fadeIn})`;
+      ctx.fillText("  " + codeLines[i], rcx - rs * 0.8, ly);
+    }
+  }
+
+  ctx.restore();
+
+  // ── 11. Target acquisition box (corner brackets) ────────────
+  const locked = p > 0.7;
+  const boxSizeMax = rs * 2.2;
+  const boxSizeMin = rs * 0.55;
+  const boxShrink = Math.min(1, p / 0.7);
+  const boxSize = boxSizeMax - (boxSizeMax - boxSizeMin) * boxShrink;
+  const bracketLen = boxSize * 0.25;
+  const bx = rcx - boxSize / 2;
+  const by = rcy - boxSize / 2;
+
+  const boxColor = locked
+    ? `rgba(255,60,40,${0.9 * fadeIn})`
+    : `rgba(0,255,100,${(0.5 + boxShrink * 0.3) * fadeIn})`;
+  ctx.strokeStyle = boxColor;
+  ctx.lineWidth = 2;
+
+  // Top-left corner
+  ctx.beginPath();
+  ctx.moveTo(bx, by + bracketLen); ctx.lineTo(bx, by); ctx.lineTo(bx + bracketLen, by);
+  ctx.stroke();
+  // Top-right corner
+  ctx.beginPath();
+  ctx.moveTo(bx + boxSize - bracketLen, by); ctx.lineTo(bx + boxSize, by); ctx.lineTo(bx + boxSize, by + bracketLen);
+  ctx.stroke();
+  // Bottom-left corner
+  ctx.beginPath();
+  ctx.moveTo(bx, by + boxSize - bracketLen); ctx.lineTo(bx, by + boxSize); ctx.lineTo(bx + bracketLen, by + boxSize);
+  ctx.stroke();
+  // Bottom-right corner
+  ctx.beginPath();
+  ctx.moveTo(bx + boxSize - bracketLen, by + boxSize); ctx.lineTo(bx + boxSize, by + boxSize); ctx.lineTo(bx + boxSize, by + boxSize - bracketLen);
+  ctx.stroke();
+
+  // ── 12. Range-to-target ─────────────────────────────────────
+  const range = Math.round(850 * (1 - p));
+  hudText(ctx, w * 0.86, h * 0.42, `RNG ${String(range).padStart(4, " ")}`, 0.6 * fadeIn, 11, "right");
+
+  // ── 13. Lock-on flash (p > 0.7) ─────────────────────────────
   if (locked) {
     const la = Math.min(1, (p - 0.7) / 0.15);
     const blink = Math.sin(time * 0.01) > 0 ? 1 : 0.5;
-    ctx.fillStyle = `rgba(255,60,40,${la * blink})`;
-    ctx.font = "bold 18px monospace";
+
+    // "PATCH READY" flashing text
+    ctx.fillStyle = `rgba(255,60,40,${la * blink * fadeIn})`;
+    ctx.font = "bold 16px monospace";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText("PATCH READY", rcx, rcy + rs + 28);
+    ctx.fillText("PATCH READY", rcx, rcy + rs + 30);
 
-    const bs = ds + 6;
-    ctx.strokeStyle = `rgba(255,60,40,${la})`;
-    ctx.lineWidth = 2;
-    ctx.strokeRect(bogieX - bs, bogieY - bs, bs * 2, bs * 2);
+    // Pulsing concentric lock rings
+    const pulse = Math.sin(time * 0.008);
+    for (let ring = 0; ring < 3; ring++) {
+      const ringR = rs * (1.15 + ring * 0.12) + pulse * 3;
+      const ringAlpha = la * (0.4 - ring * 0.12) * fadeIn;
+      ctx.strokeStyle = `rgba(255,60,40,${ringAlpha})`;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(rcx, rcy, ringR, 0, Math.PI * 2);
+      ctx.stroke();
+    }
   }
 
-  cockpitFrame(ctx, w, h);
-  hudText(ctx, w * 0.14, h * 0.30, "BUILDING FIX", 0.6, 15);
-  hudText(ctx, w * 0.14, h * 0.35, "SANDBOX ACTIVE", 0.3, 11);
-  hudText(ctx, w * 0.5, h * 0.12, "GENERATING PATCH", 0.5, 14, "center");
+  // ── 14. Animated counters ───────────────────────────────────
+  const linesAdded = Math.round(2 + p * 18);
+  const linesRemoved = Math.round(1 + p * 7);
+  const filesCount = Math.round(3 + p * 4);
+  hudText(ctx, w * 0.86, h * 0.30, `DIFF +${linesAdded} -${linesRemoved}`, 0.7 * fadeIn, 13, "right");
+  hudText(ctx, w * 0.86, h * 0.34, `${filesCount} FILES`, 0.4 * fadeIn, 11, "right");
 
-  // Blinking cursor
+  // Sandbox active (pulsing)
+  const sandboxPulse = 0.3 + Math.sin(time * 0.004) * 0.15;
+  hudText(ctx, w * 0.14, h * 0.35, "SANDBOX ACTIVE", sandboxPulse * fadeIn, 11);
+
+  // ── 15. Cockpit frame + post-processing ─────────────────────
+  cockpitFrame(ctx, w, h);
+
+  // Center status "GENERATING PATCH" with blinking cursor
+  hudText(ctx, w * 0.5, h * 0.12, "GENERATING PATCH", 0.5 * fadeIn, 14, "center");
   if (Math.sin(time * 0.005) > 0) {
     ctx.font = "bold 14px monospace";
     const tw = ctx.measureText("GENERATING PATCH").width;
-    hudText(ctx, w * 0.5 + tw / 2 + 6, h * 0.12, "\u2588", 0.4, 14, "left");
+    hudText(ctx, w * 0.5 + tw / 2 + 6, h * 0.12, "\u2588", 0.4 * fadeIn, 14, "left");
   }
-
-  // Heading tape
-  ctx.strokeStyle = "rgba(0, 255, 100, 0.2)";
-  ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(w * 0.3, h * 0.06); ctx.lineTo(w * 0.7, h * 0.06); ctx.stroke();
-  hudText(ctx, w * 0.5, h * 0.06, "\u25BD", 0.4, 12, "center");
 
   drawCRTGrain(ctx, w, h, time, 0.02);
   drawVignette(ctx, w, h, 0.3);
 
-  hudText(ctx, 24, 22, "FIX GENERATED", 0.6, 14);
-  hudText(ctx, 24, 40, "BUILDING PATCH", 0.25, 10);
-  hudText(ctx, w - 24, 22, "STEP 4/6", 0.35, 11, "right");
+  // ── 16. HUD text labels ─────────────────────────────────────
+  hudText(ctx, 24, 22, "FIX GENERATED", 0.6 * fadeIn, 14);
+  hudText(ctx, 24, 40, "BUILDING PATCH", 0.25 * fadeIn, 10);
+  hudText(ctx, w - 24, 22, "STEP 4/6", 0.35 * fadeIn, 11, "right");
+  hudText(ctx, w * 0.14, h * 0.30, "BUILDING FIX", 0.6 * fadeIn, 15);
 }
 
 // ── Scene 5: Neutralized ─────────────────────────────────────
@@ -1335,7 +1756,7 @@ function drawReturnToBase(
   const jetX = pathStartX + (pathEndX - pathStartX) * p;
   const arcAmount = -moonR * 0.12;
   const jetY = moonY + arcAmount * Math.sin(p * Math.PI);
-  drawP80Side(ctx, jetX, jetY, jetSize, Math.PI, 1, 0.02);
+  drawP80Side(ctx, jetX, jetY, jetSize, Math.PI, 1, 0.02, { noShadow: true });
 
   // Engine contrail
   for (let i = 1; i <= 12; i++) {
