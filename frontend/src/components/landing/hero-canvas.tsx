@@ -1,6 +1,9 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { drawP80, DARK, LIGHT, type PlaneTheme } from "./draw-p80";
+
+export { DARK, LIGHT, type PlaneTheme };
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -61,41 +64,6 @@ interface Formation {
   slotMap: Map<number, number>;
 }
 
-// ── Theme colors ───────────────────────────────────────────────────────────────
-
-export const DARK = {
-  bg: "#08080f",
-  planeFill: (a: number) => `rgba(210, 218, 230, ${a})`,
-  planeStroke: (a: number) => `rgba(255, 255, 255, ${a * 0.3})`,
-  planeHighlight: (a: number) => `rgba(255, 255, 255, ${a * 0.25})`,
-  planeShadow: (a: number) => `rgba(0, 0, 0, ${a * 0.3})`,
-  canopy: (a: number) => `rgba(140, 180, 255, ${a * 0.5})`,
-  canopyEdge: (a: number) => `rgba(200, 220, 255, ${a * 0.3})`,
-  panelLine: (a: number) => `rgba(255, 255, 255, ${a * 0.08})`,
-  trail: (a: number) => `rgba(180, 195, 220, ${a})`,
-  star: (a: number) => `rgba(255, 255, 255, ${a})`,
-  orbs: [
-    { color: "rgba(30, 40, 80, 0.15)" },
-    { color: "rgba(50, 30, 70, 0.1)" },
-  ],
-};
-
-export const LIGHT = {
-  bg: "#d4e6f5",
-  planeFill: (a: number) => `rgba(45, 55, 70, ${a})`,
-  planeStroke: (a: number) => `rgba(25, 30, 40, ${a * 0.25})`,
-  planeHighlight: (a: number) => `rgba(255, 255, 255, ${a * 0.2})`,
-  planeShadow: (a: number) => `rgba(15, 20, 35, ${a * 0.25})`,
-  canopy: (a: number) => `rgba(120, 170, 230, ${a * 0.6})`,
-  canopyEdge: (a: number) => `rgba(80, 130, 190, ${a * 0.35})`,
-  panelLine: (a: number) => `rgba(0, 0, 0, ${a * 0.06})`,
-  trail: (a: number) => `rgba(255, 255, 255, ${a})`,
-  star: () => "transparent",
-  orbs: [
-    { color: "rgba(255, 255, 255, 0.3)" },
-    { color: "rgba(200, 220, 255, 0.2)" },
-  ],
-};
 
 // ── Responsive config ──────────────────────────────────────────────────────────
 
@@ -235,202 +203,6 @@ function getFormationOffsets(
     });
   }
   return offsets;
-}
-
-type PlaneTheme = typeof DARK;
-
-// ── Draw P-80 ──────────────────────────────────────────────────────────────────
-
-function drawP80(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  angle: number,
-  size: number,
-  alpha: number,
-  fillFn: (a: number) => string,
-  strokeFn: (a: number) => string,
-  theme?: PlaneTheme,
-) {
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(angle);
-  ctx.globalAlpha = alpha;
-
-  const s = size;
-
-  // Fuselage
-  ctx.beginPath();
-  ctx.moveTo(s * 0.95, 0);
-  ctx.quadraticCurveTo(s * 0.88, -s * 0.07, s * 0.7, -s * 0.09);
-  ctx.lineTo(s * 0.2, -s * 0.11);
-  ctx.lineTo(-s * 0.1, -s * 0.11);
-  ctx.lineTo(-s * 0.55, -s * 0.08);
-  ctx.lineTo(-s * 0.85, -s * 0.05);
-  ctx.lineTo(-s * 0.95, -s * 0.03);
-  ctx.lineTo(-s * 0.95, s * 0.03);
-  ctx.lineTo(-s * 0.85, s * 0.05);
-  ctx.lineTo(-s * 0.55, s * 0.08);
-  ctx.lineTo(-s * 0.1, s * 0.11);
-  ctx.lineTo(s * 0.2, s * 0.11);
-  ctx.lineTo(s * 0.7, s * 0.09);
-  ctx.quadraticCurveTo(s * 0.88, s * 0.07, s * 0.95, 0);
-  ctx.closePath();
-
-  const bodyGrad = ctx.createLinearGradient(0, -s * 0.12, 0, s * 0.12);
-  if (theme) {
-    bodyGrad.addColorStop(0, theme.planeHighlight(alpha * 0.3));
-    bodyGrad.addColorStop(0.4, fillFn(alpha));
-    bodyGrad.addColorStop(1, theme.planeShadow(alpha * 0.12));
-  } else {
-    bodyGrad.addColorStop(0, fillFn(alpha));
-    bodyGrad.addColorStop(1, fillFn(alpha));
-  }
-  ctx.fillStyle = bodyGrad;
-  ctx.fill();
-  ctx.strokeStyle = strokeFn(alpha);
-  ctx.lineWidth = 0.5;
-  ctx.stroke();
-
-  // Top wing
-  ctx.beginPath();
-  ctx.moveTo(s * 0.15, -s * 0.11);
-  ctx.lineTo(s * 0.05, -s * 0.7);
-  ctx.lineTo(-s * 0.05, -s * 0.73);
-  ctx.lineTo(-s * 0.12, -s * 0.7);
-  ctx.lineTo(-s * 0.25, -s * 0.11);
-  ctx.closePath();
-  ctx.fillStyle = fillFn(alpha);
-  ctx.fill();
-  ctx.strokeStyle = strokeFn(alpha);
-  ctx.lineWidth = 0.4;
-  ctx.stroke();
-
-  // Bottom wing
-  ctx.beginPath();
-  ctx.moveTo(s * 0.15, s * 0.11);
-  ctx.lineTo(s * 0.05, s * 0.7);
-  ctx.lineTo(-s * 0.05, s * 0.73);
-  ctx.lineTo(-s * 0.12, s * 0.7);
-  ctx.lineTo(-s * 0.25, s * 0.11);
-  ctx.closePath();
-  ctx.fillStyle = fillFn(alpha);
-  ctx.fill();
-  ctx.stroke();
-
-  // Top tip tank
-  ctx.beginPath();
-  ctx.ellipse(-s * 0.02, -s * 0.76, s * 0.16, s * 0.04, 0, 0, Math.PI * 2);
-  ctx.fillStyle = fillFn(alpha);
-  ctx.fill();
-  ctx.strokeStyle = strokeFn(alpha);
-  ctx.lineWidth = 0.4;
-  ctx.stroke();
-
-  // Bottom tip tank
-  ctx.beginPath();
-  ctx.ellipse(-s * 0.02, s * 0.76, s * 0.16, s * 0.04, 0, 0, Math.PI * 2);
-  ctx.fillStyle = fillFn(alpha);
-  ctx.fill();
-  ctx.stroke();
-
-  // Top stabilizer
-  ctx.beginPath();
-  ctx.moveTo(-s * 0.6, -s * 0.06);
-  ctx.lineTo(-s * 0.68, -s * 0.28);
-  ctx.lineTo(-s * 0.76, -s * 0.3);
-  ctx.lineTo(-s * 0.88, -s * 0.24);
-  ctx.lineTo(-s * 0.9, -s * 0.06);
-  ctx.closePath();
-  ctx.fillStyle = fillFn(alpha);
-  ctx.fill();
-  ctx.strokeStyle = strokeFn(alpha);
-  ctx.lineWidth = 0.4;
-  ctx.stroke();
-
-  // Bottom stabilizer
-  ctx.beginPath();
-  ctx.moveTo(-s * 0.6, s * 0.06);
-  ctx.lineTo(-s * 0.68, s * 0.28);
-  ctx.lineTo(-s * 0.76, s * 0.3);
-  ctx.lineTo(-s * 0.88, s * 0.24);
-  ctx.lineTo(-s * 0.9, s * 0.06);
-  ctx.closePath();
-  ctx.fillStyle = fillFn(alpha);
-  ctx.fill();
-  ctx.stroke();
-
-  if (!theme) {
-    ctx.globalAlpha = 1;
-    ctx.restore();
-    return;
-  }
-
-  // Bubble canopy
-  const canopyX = s * 0.42;
-  const canopyRx = s * 0.2;
-  const canopyRy = s * 0.07;
-
-  ctx.beginPath();
-  ctx.ellipse(canopyX, 0, canopyRx, canopyRy, 0, 0, Math.PI * 2);
-
-  const canopyGrad = ctx.createLinearGradient(
-    canopyX, -canopyRy * 1.2, canopyX, canopyRy * 1.2,
-  );
-  canopyGrad.addColorStop(0, theme.canopy(alpha * 1.4));
-  canopyGrad.addColorStop(0.4, theme.canopy(alpha * 0.8));
-  canopyGrad.addColorStop(1, theme.canopy(alpha * 0.3));
-  ctx.fillStyle = canopyGrad;
-  ctx.fill();
-
-  ctx.strokeStyle = theme.canopyEdge(alpha * 1.2);
-  ctx.lineWidth = 0.5;
-  ctx.stroke();
-
-  // Canopy glint
-  ctx.beginPath();
-  ctx.ellipse(
-    canopyX + canopyRx * 0.15, -canopyRy * 0.3,
-    canopyRx * 0.3, canopyRy * 0.25, -0.15, 0, Math.PI * 2,
-  );
-  ctx.fillStyle = theme.planeHighlight(alpha * 1.2);
-  ctx.fill();
-
-  // Nose intake
-  ctx.beginPath();
-  ctx.ellipse(s * 0.9, 0, s * 0.02, s * 0.04, 0, 0, Math.PI * 2);
-  ctx.fillStyle = theme.planeShadow(alpha * 0.7);
-  ctx.fill();
-
-  // Panel line
-  ctx.beginPath();
-  ctx.moveTo(s * 0.75, 0);
-  ctx.lineTo(-s * 0.85, 0);
-  ctx.strokeStyle = theme.panelLine(alpha);
-  ctx.lineWidth = 0.4;
-  ctx.stroke();
-
-  // Exhaust
-  ctx.beginPath();
-  ctx.ellipse(-s * 0.93, 0, s * 0.015, s * 0.025, 0, 0, Math.PI * 2);
-  ctx.fillStyle = theme.planeShadow(alpha * 0.5);
-  ctx.fill();
-
-  // Tip tank seams
-  ctx.beginPath();
-  ctx.moveTo(-s * 0.16, -s * 0.76);
-  ctx.lineTo(s * 0.12, -s * 0.76);
-  ctx.strokeStyle = theme.panelLine(alpha);
-  ctx.lineWidth = 0.3;
-  ctx.stroke();
-
-  ctx.beginPath();
-  ctx.moveTo(-s * 0.16, s * 0.76);
-  ctx.lineTo(s * 0.12, s * 0.76);
-  ctx.stroke();
-
-  ctx.globalAlpha = 1;
-  ctx.restore();
 }
 
 // ── Draw cloud ──────────────────────────────────────────────────────────────────
@@ -772,17 +544,7 @@ export default function HeroCanvas({ isDark }: HeroCanvasProps) {
 
         // Draw plane
         const heading = p.baseHeading;
-        drawP80(
-          ctx,
-          p.x,
-          p.y,
-          heading,
-          p.size,
-          p.opacity,
-          theme.planeFill,
-          theme.planeStroke,
-          theme,
-        );
+        drawP80(ctx, p.x, p.y, p.size, heading, 0.5, p.opacity, theme);
       }
 
       planesRef.current = alive;
