@@ -47,6 +47,10 @@ type jobStore interface {
 }
 
 // OrgSettings holds the parsed org settings relevant to prioritization.
+// NOTE: This duplicates fields from models.OrgSettings. The two structs use
+// identical JSON tags and must be kept in sync when adding new fields. A full
+// unification is not done because the nested struct shapes differ slightly
+// (e.g. ConfidenceThresholds, PriorityWeights use inline structs here).
 type OrgSettings struct {
 	AutonomyLevel    string `json:"autonomy_level"`
 	Aggressiveness   int    `json:"execution_aggressiveness"`

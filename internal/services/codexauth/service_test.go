@@ -47,7 +47,7 @@ func (m *mockCredentialStore) Get(_ context.Context, orgID uuid.UUID, provider m
 	k := m.key(orgID, provider)
 	cred, ok := m.creds[k]
 	if !ok {
-		return nil, fmt.Errorf("not found")
+		return nil, ErrCredentialNotFound
 	}
 	return cred, nil
 }
@@ -363,5 +363,76 @@ func TestDisconnect(t *testing.T) {
 	_, err := store.Get(context.Background(), orgID, models.ProviderOpenAIChatGPT)
 	if err == nil {
 		t.Error("expected credential to be deleted")
+	}
+}
+
+func TestDisconnect_NilCredentials(t *testing.T) {
+	svc := NewService(nil, zerolog.Nop())
+	// Should not panic when credentials store is nil.
+	err := svc.Disconnect(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("expected nil error, got: %v", err)
+	}
+}
+
+// failingCredentialStore returns errors for all operations (simulates DB failure).
+type failingCredentialStore struct{}
+
+func (s *failingCredentialStore) Upsert(_ context.Context, _ uuid.UUID, _ models.ProviderConfig) error {
+	return fmt.Errorf("db connection refused")
+}
+func (s *failingCredentialStore) Get(_ context.Context, _ uuid.UUID, _ models.ProviderName) (*models.DecryptedCredential, error) {
+	return nil, fmt.Errorf("db connection refused")
+}
+func (s *failingCredentialStore) UpdateStatus(_ context.Context, _ uuid.UUID, _ models.ProviderName, _ string) error {
+	return fmt.Errorf("db connection refused")
+}
+func (s *failingCredentialStore) Disable(_ context.Context, _ uuid.UUID, _ models.ProviderName) error {
+	return fmt.Errorf("db connection refused")
+}
+
+func TestGetValidToken_DBError(t *testing.T) {
+	svc := NewService(&failingCredentialStore{}, zerolog.Nop())
+
+	_, err := svc.GetValidToken(context.Background(), uuid.New())
+	if err == nil {
+		t.Fatal("expected error for DB failure, got nil")
+	}
+}
+
+func TestPollForToken_RateLimited(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "authorization_pending",
+		})
+	}))
+	defer server.Close()
+
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+	svc.SetHTTPClient(server.Client())
+	svc.SetIssuer(server.URL)
+
+	orgID := uuid.New()
+	svc.pending.Store(orgID.String(), &PendingAuth{
+		DeviceCode: "dev_123",
+		ExpiresAt:  time.Now().Add(15 * time.Minute),
+		Interval:   5,
+		LastPollAt: time.Now(), // Just polled.
+	})
+
+	// Second poll should be rate-limited (no HTTP call).
+	status, err := svc.PollForToken(context.Background(), orgID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.Status != "pending" {
+		t.Errorf("expected pending status, got %s", status.Status)
+	}
+	if callCount != 0 {
+		t.Errorf("expected 0 HTTP calls (rate-limited), got %d", callCount)
 	}
 }

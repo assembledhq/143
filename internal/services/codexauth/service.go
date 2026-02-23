@@ -46,13 +46,17 @@ type CredentialStore interface {
 	Disable(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) error
 }
 
+// ErrCredentialNotFound is returned when no credential exists for the given org/provider.
+var ErrCredentialNotFound = fmt.Errorf("credential not found")
+
 // PendingAuth tracks an in-progress device code auth flow.
 type PendingAuth struct {
 	DeviceCode      string
 	UserCode        string
 	VerificationURI string
 	ExpiresAt       time.Time
-	Interval        int // poll interval in seconds
+	Interval        int       // poll interval in seconds
+	LastPollAt      time.Time // tracks when we last polled OpenAI
 }
 
 // DeviceAuthResponse is returned to the caller of InitiateDeviceAuth.
@@ -146,15 +150,33 @@ func (s *Service) InitiateDeviceAuth(ctx context.Context, orgID uuid.UUID) (*Dev
 		result.Interval = 5
 	}
 
-	// Store pending auth state.
+	expiresAt := time.Now().Add(time.Duration(result.ExpiresIn) * time.Second)
+
+	// Store pending auth state in memory.
 	pending := &PendingAuth{
 		DeviceCode:      result.DeviceCode,
 		UserCode:        result.UserCode,
 		VerificationURI: result.VerificationURI,
-		ExpiresAt:       time.Now().Add(time.Duration(result.ExpiresIn) * time.Second),
+		ExpiresAt:       expiresAt,
 		Interval:        result.Interval,
 	}
 	s.pending.Store(orgID.String(), pending)
+
+	// Persist to DB so the pending state survives server restarts.
+	if s.credentials != nil {
+		pendingCfg := models.OpenAIChatGPTConfig{
+			DeviceCode:      result.DeviceCode,
+			UserCode:        result.UserCode,
+			VerificationURI: result.VerificationURI,
+			ExpiresAt:       expiresAt,
+			PollInterval:    result.Interval,
+		}
+		if err := s.credentials.Upsert(ctx, orgID, pendingCfg); err != nil {
+			s.logger.Warn().Err(err).Msg("failed to persist pending device auth to DB")
+		} else {
+			_ = s.credentials.UpdateStatus(ctx, orgID, models.ProviderOpenAIChatGPT, "pending_auth")
+		}
+	}
 
 	s.logger.Info().
 		Str("org_id", orgID.String()).
@@ -173,7 +195,7 @@ func (s *Service) InitiateDeviceAuth(ctx context.Context, orgID uuid.UUID) (*Dev
 func (s *Service) PollForToken(ctx context.Context, orgID uuid.UUID) (*AuthStatus, error) {
 	val, ok := s.pending.Load(orgID.String())
 	if !ok {
-		// No pending auth — check if already connected.
+		// No in-memory state — check DB for persisted state.
 		if s.credentials != nil {
 			cred, err := s.credentials.Get(ctx, orgID, models.ProviderOpenAIChatGPT)
 			if err == nil && cred.Status == "active" {
@@ -186,8 +208,29 @@ func (s *Service) PollForToken(ctx context.Context, orgID uuid.UUID) (*AuthStatu
 					AccountType: cfg.AccountType,
 				}, nil
 			}
+			// Restore pending auth from DB (survives server restart).
+			if err == nil && cred.Status == "pending_auth" {
+				cfg, ok := cred.Config.(models.OpenAIChatGPTConfig)
+				if ok && cfg.DeviceCode != "" && time.Now().Before(cfg.ExpiresAt) {
+					restored := &PendingAuth{
+						DeviceCode:      cfg.DeviceCode,
+						UserCode:        cfg.UserCode,
+						VerificationURI: cfg.VerificationURI,
+						ExpiresAt:       cfg.ExpiresAt,
+						Interval:        cfg.PollInterval,
+					}
+					if restored.Interval <= 0 {
+						restored.Interval = 5
+					}
+					s.pending.Store(orgID.String(), restored)
+					val = restored
+					ok = true
+				}
+			}
 		}
-		return &AuthStatus{Status: "none", Message: "no pending auth flow"}, nil
+		if !ok {
+			return &AuthStatus{Status: "none", Message: "no pending auth flow"}, nil
+		}
 	}
 
 	pending := val.(*PendingAuth)
@@ -197,6 +240,13 @@ func (s *Service) PollForToken(ctx context.Context, orgID uuid.UUID) (*AuthStatu
 		s.pending.Delete(orgID.String())
 		return &AuthStatus{Status: "expired", Message: "device code expired, please try again"}, nil
 	}
+
+	// Rate-limit: skip the OpenAI call if we polled too recently.
+	minInterval := time.Duration(pending.Interval) * time.Second
+	if !pending.LastPollAt.IsZero() && time.Since(pending.LastPollAt) < minInterval {
+		return &AuthStatus{Status: "pending", Message: "waiting for user to enter code"}, nil
+	}
+	pending.LastPollAt = time.Now()
 
 	// Poll the token endpoint.
 	endpoint := s.issuer + "/api/accounts/deviceauth/token"
@@ -360,10 +410,17 @@ func (s *Service) RefreshToken(ctx context.Context, orgID uuid.UUID) (*models.Op
 // GetValidToken returns a valid access token, auto-refreshing if needed.
 // Returns nil, nil if no ChatGPT OAuth credential exists for this org.
 func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
+	if s.credentials == nil {
+		return nil, nil
+	}
+
 	cred, err := s.credentials.Get(ctx, orgID, models.ProviderOpenAIChatGPT)
 	if err != nil {
-		// No credential — not an error, just means OAuth not configured.
-		return nil, nil
+		// Distinguish "not found" from real errors (DB failures, decryption, etc.).
+		if isNotFoundError(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get credential: %w", err)
 	}
 
 	if cred.Status != "active" {
@@ -395,5 +452,18 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.O
 // Disconnect removes the ChatGPT OAuth credential for the given org.
 func (s *Service) Disconnect(ctx context.Context, orgID uuid.UUID) error {
 	s.pending.Delete(orgID.String())
+	if s.credentials == nil {
+		return nil
+	}
 	return s.credentials.Disable(ctx, orgID, models.ProviderOpenAIChatGPT)
+}
+
+// isNotFoundError checks if an error represents a "not found" condition.
+// This distinguishes missing credentials from real infrastructure errors.
+func isNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "not found") || strings.Contains(msg, "no rows")
 }

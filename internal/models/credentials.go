@@ -106,6 +106,13 @@ type OpenAIChatGPTConfig struct {
 	RefreshToken string    `json:"refresh_token"` // #nosec G117 -- JSON config field
 	ExpiresAt    time.Time `json:"expires_at"`
 	AccountType  string    `json:"account_type"` // "plus", "pro", "team", "enterprise"
+
+	// Pending device auth fields — only populated during the device code flow.
+	// Stored encrypted so the pending state survives server restarts.
+	DeviceCode      string `json:"device_code,omitempty"`
+	UserCode        string `json:"user_code,omitempty"`
+	VerificationURI string `json:"verification_uri,omitempty"`
+	PollInterval    int    `json:"poll_interval,omitempty"`
 }
 
 // IsExpired returns true if the access token has expired.

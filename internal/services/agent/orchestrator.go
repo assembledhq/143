@@ -218,6 +218,14 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error
 	// Start with server-level defaults, then overlay org-level overrides.
 	sandboxCfg := DefaultSandboxConfig()
 	sandboxCfg.Env = o.resolveAgentEnv(ctx, run.OrgID, run.AgentType)
+	// Ensure HOME points to the sandbox workdir so CLI tools (e.g. Codex
+	// resolving ~/.codex/auth.json) find files written to the workdir.
+	if sandboxCfg.Env == nil {
+		sandboxCfg.Env = make(map[string]string)
+	}
+	if _, ok := sandboxCfg.Env["HOME"]; !ok {
+		sandboxCfg.Env["HOME"] = sandboxCfg.WorkDir
+	}
 	sandbox, err := o.provider.Create(ctx, sandboxCfg)
 	if err != nil {
 		o.failRun(ctx, run, fmt.Sprintf("create sandbox: %s", err))
@@ -231,8 +239,15 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error
 
 	// 8. Inject Codex auth file if this is a codex agent run.
 	if run.AgentType == "codex" {
-		if err := o.injectCodexAuth(ctx, run.OrgID, sandbox); err != nil {
+		injected, err := o.injectCodexAuth(ctx, run.OrgID, sandbox)
+		if err != nil {
 			log.Warn().Err(err).Msg("codex auth injection failed, falling back to API key")
+		}
+		// Fail early if neither OAuth token nor API key is available.
+		hasAPIKey := sandboxCfg.Env["OPENAI_API_KEY"] != ""
+		if !hasAPIKey && !injected {
+			o.failRun(ctx, run, "no credentials configured for codex: connect ChatGPT or set an OPENAI_API_KEY in Settings")
+			return fmt.Errorf("no credentials for codex agent")
 		}
 	}
 
@@ -440,20 +455,21 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 }
 
 // injectCodexAuth writes a ~/.codex/auth.json file into the sandbox if
-// a ChatGPT OAuth token exists for this org. Returns nil if no OAuth token
-// is available (allowing fallback to OPENAI_API_KEY env var).
-func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox) error {
+// a ChatGPT OAuth token exists for this org. Returns (true, nil) if auth
+// was injected, (false, nil) if no OAuth token is available (allowing
+// fallback to OPENAI_API_KEY env var), or (false, err) on failure.
+func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox) (bool, error) {
 	if o.codexAuth == nil {
-		return nil
+		return false, nil
 	}
 
 	cfg, err := o.codexAuth.GetValidToken(ctx, orgID)
 	if err != nil {
-		return fmt.Errorf("get codex auth token: %w", err)
+		return false, fmt.Errorf("get codex auth token: %w", err)
 	}
 	if cfg == nil {
 		// No OAuth token — not an error, agent will use API key.
-		return nil
+		return false, nil
 	}
 
 	authJSON, err := json.Marshal(map[string]interface{}{
@@ -462,32 +478,30 @@ func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, san
 		"expires_at":    cfg.ExpiresAt.Format("2006-01-02T15:04:05Z"),
 	})
 	if err != nil {
-		return fmt.Errorf("marshal auth.json: %w", err)
+		return false, fmt.Errorf("marshal auth.json: %w", err)
 	}
 
-	// Create the directory and write the auth file inside the writable workdir.
-	authBaseDir := sandbox.WorkDir
-	if authBaseDir == "" {
-		authBaseDir = "/tmp"
-	}
-	authDir := path.Join(authBaseDir, ".codex")
+	// Write auth.json under the sandbox workdir/.codex. The sandbox env
+	// sets HOME to the workdir (see RunAgent step 7) so the Codex CLI
+	// resolves ~/.codex/auth.json to this path.
+	authDir := path.Join(sandbox.WorkDir, ".codex")
 	mkdirCmd := fmt.Sprintf("mkdir -p %s", authDir)
 
 	var mkdirOut, mkdirErr bytes.Buffer
 	if _, err := o.provider.Exec(ctx, sandbox, mkdirCmd, &mkdirOut, &mkdirErr); err != nil {
-		return fmt.Errorf("create .codex dir: %w", err)
+		return false, fmt.Errorf("create .codex dir: %w", err)
 	}
 
 	authPath := authDir + "/auth.json"
 	if err := o.provider.WriteFile(ctx, sandbox, authPath, authJSON); err != nil {
-		return fmt.Errorf("write auth.json: %w", err)
+		return false, fmt.Errorf("write auth.json: %w", err)
 	}
 
 	o.logger.Debug().
 		Str("org_id", orgID.String()).
 		Msg("injected codex auth.json into sandbox")
 
-	return nil
+	return true, nil
 }
 
 func strPtr(s string) *string {
