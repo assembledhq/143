@@ -407,6 +407,15 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true,
 	})
 
+	// Clear CSRF cookie on logout.
+	http.SetCookie(w, &http.Cookie{
+		Name:     middleware.CSRFCookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: false,
+	})
+
 	user := middleware.UserFromContext(r.Context())
 	if user != nil {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "logged out"})
@@ -443,6 +452,11 @@ func (h *AuthHandler) createSessionAndRedirect(w http.ResponseWriter, r *http.Re
 		SameSite: http.SameSiteLaxMode,
 	})
 
+	if err := middleware.SetCSRFCookie(w, r, []byte(h.cfg.CSRFSigningKey)); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate CSRF token")
+		return
+	}
+
 	http.Redirect(w, r, h.cfg.FrontendURL, http.StatusTemporaryRedirect)
 }
 
@@ -471,6 +485,11 @@ func (h *AuthHandler) createSessionAndRespond(w http.ResponseWriter, r *http.Req
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	})
+
+	if err := middleware.SetCSRFCookie(w, r, []byte(h.cfg.CSRFSigningKey)); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate CSRF token")
+		return
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"data": user})
 }
