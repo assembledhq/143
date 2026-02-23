@@ -33,6 +33,9 @@ type Config struct {
 	GitHubAppPrivateKey  string `env:"GITHUB_APP_PRIVATE_KEY"`
 	GitHubWebhookSecret string `env:"GITHUB_WEBHOOK_SECRET"`
 
+	// CSRF
+	CSRFSigningKey string `env:"CSRF_SIGNING_KEY"`
+
 	// Encryption
 	EncryptionMasterKey string `env:"ENCRYPTION_MASTER_KEY"`
 
@@ -81,6 +84,11 @@ func Load() *Config {
 	}
 	if len(cfg.CORSAllowedOrigins) == 0 {
 		cfg.CORSAllowedOrigins = []string{cfg.FrontendURL}
+	}
+
+	// Fall back to SessionSecret for CSRF signing if not explicitly set.
+	if cfg.CSRFSigningKey == "" {
+		cfg.CSRFSigningKey = cfg.SessionSecret
 	}
 
 	return cfg
@@ -241,5 +249,9 @@ func (c *Config) LogStatus(logger zerolog.Logger) {
 
 	if c.SessionSecret == "" {
 		logger.Warn().Msg("SESSION_SECRET is empty — sessions will not survive restarts")
+	}
+
+	if c.CSRFSigningKey == "" {
+		logger.Warn().Msg("CSRF_SIGNING_KEY is empty — CSRF protection will be ineffective")
 	}
 }
