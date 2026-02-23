@@ -436,3 +436,411 @@ func TestPollForToken_RateLimited(t *testing.T) {
 		t.Errorf("expected 0 HTTP calls (rate-limited), got %d", callCount)
 	}
 }
+
+func TestPollForToken_AccessDenied(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "access_denied",
+		})
+	}))
+	defer server.Close()
+
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+	svc.SetHTTPClient(server.Client())
+	svc.SetIssuer(server.URL)
+
+	orgID := uuid.New()
+	svc.pending.Store(orgID.String(), &PendingAuth{
+		DeviceCode: "dev_123",
+		ExpiresAt:  time.Now().Add(15 * time.Minute),
+		Interval:   5,
+	})
+
+	status, err := svc.PollForToken(context.Background(), orgID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.Status != "error" {
+		t.Errorf("expected error status, got %s", status.Status)
+	}
+	if status.Message != "authentication denied by user" {
+		t.Errorf("unexpected message: %s", status.Message)
+	}
+
+	// Verify pending state was cleaned up.
+	if _, ok := svc.pending.Load(orgID.String()); ok {
+		t.Error("expected pending auth to be deleted after access_denied")
+	}
+}
+
+func TestPollForToken_ExpiredToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "expired_token",
+		})
+	}))
+	defer server.Close()
+
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+	svc.SetHTTPClient(server.Client())
+	svc.SetIssuer(server.URL)
+
+	orgID := uuid.New()
+	svc.pending.Store(orgID.String(), &PendingAuth{
+		DeviceCode: "dev_123",
+		ExpiresAt:  time.Now().Add(15 * time.Minute),
+		Interval:   5,
+	})
+
+	status, err := svc.PollForToken(context.Background(), orgID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.Status != "expired" {
+		t.Errorf("expected expired status, got %s", status.Status)
+	}
+}
+
+func TestPollForToken_UnknownError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "some_unknown_error",
+		})
+	}))
+	defer server.Close()
+
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+	svc.SetHTTPClient(server.Client())
+	svc.SetIssuer(server.URL)
+
+	orgID := uuid.New()
+	svc.pending.Store(orgID.String(), &PendingAuth{
+		DeviceCode: "dev_123",
+		ExpiresAt:  time.Now().Add(15 * time.Minute),
+		Interval:   5,
+	})
+
+	status, err := svc.PollForToken(context.Background(), orgID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.Status != "error" {
+		t.Errorf("expected error status, got %s", status.Status)
+	}
+}
+
+func TestPollForToken_RestoreFromDB_Active(t *testing.T) {
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+
+	orgID := uuid.New()
+	// Pre-store an active credential in the DB.
+	store.Upsert(context.Background(), orgID, models.OpenAIChatGPTConfig{
+		AccessToken:  "cha_active_token",
+		RefreshToken: "chr_refresh",
+		ExpiresAt:    time.Now().Add(1 * time.Hour),
+		AccountType:  "plus",
+	})
+
+	// Poll with no in-memory state — should find it in DB.
+	status, err := svc.PollForToken(context.Background(), orgID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.Status != "completed" {
+		t.Errorf("expected completed status, got %s", status.Status)
+	}
+	if status.AccountType != "plus" {
+		t.Errorf("expected account type 'plus', got %s", status.AccountType)
+	}
+}
+
+func TestPollForToken_RestoreFromDB_PendingAuth(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "authorization_pending",
+		})
+	}))
+	defer server.Close()
+
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+	svc.SetHTTPClient(server.Client())
+	svc.SetIssuer(server.URL)
+
+	orgID := uuid.New()
+	// Pre-store a pending_auth credential in the DB.
+	k := store.key(orgID, models.ProviderOpenAIChatGPT)
+	store.creds[k] = &models.DecryptedCredential{
+		OrgID:    orgID,
+		Provider: models.ProviderOpenAIChatGPT,
+		Config: models.OpenAIChatGPTConfig{
+			DeviceCode:      "dev_restored",
+			UserCode:        "REST-CODE",
+			VerificationURI: "https://auth.openai.com/codex/device",
+			ExpiresAt:       time.Now().Add(10 * time.Minute),
+			PollInterval:    5,
+		},
+		Status: "pending_auth",
+	}
+
+	status, err := svc.PollForToken(context.Background(), orgID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.Status != "pending" {
+		t.Errorf("expected pending status from restored auth, got %s", status.Status)
+	}
+}
+
+func TestPollForToken_InvalidConfigType(t *testing.T) {
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+
+	orgID := uuid.New()
+	// Store an active credential with the wrong config type.
+	k := store.key(orgID, models.ProviderOpenAIChatGPT)
+	store.creds[k] = &models.DecryptedCredential{
+		OrgID:    orgID,
+		Provider: models.ProviderOpenAIChatGPT,
+		Config:   models.AnthropicConfig{APIKey: "wrong-type"},
+		Status:   "active",
+	}
+
+	status, err := svc.PollForToken(context.Background(), orgID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.Status != "error" {
+		t.Errorf("expected error status for invalid config, got %s", status.Status)
+	}
+}
+
+func TestGetValidToken_NilCredentials(t *testing.T) {
+	svc := NewService(nil, zerolog.Nop())
+
+	cfg, err := svc.GetValidToken(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("expected nil error, got: %v", err)
+	}
+	if cfg != nil {
+		t.Errorf("expected nil config, got %+v", cfg)
+	}
+}
+
+func TestGetValidToken_InactiveStatus(t *testing.T) {
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+
+	orgID := uuid.New()
+	store.Upsert(context.Background(), orgID, models.OpenAIChatGPTConfig{
+		AccessToken:  "cha_tok",
+		RefreshToken: "chr_tok",
+		ExpiresAt:    time.Now().Add(1 * time.Hour),
+	})
+	// Mark as inactive.
+	store.UpdateStatus(context.Background(), orgID, models.ProviderOpenAIChatGPT, "invalid")
+
+	cfg, err := svc.GetValidToken(context.Background(), orgID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg != nil {
+		t.Errorf("expected nil config for inactive credential, got %+v", cfg)
+	}
+}
+
+func TestGetValidToken_InvalidConfigType(t *testing.T) {
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+
+	orgID := uuid.New()
+	k := store.key(orgID, models.ProviderOpenAIChatGPT)
+	store.creds[k] = &models.DecryptedCredential{
+		OrgID:    orgID,
+		Provider: models.ProviderOpenAIChatGPT,
+		Config:   models.AnthropicConfig{APIKey: "wrong"},
+		Status:   "active",
+	}
+
+	_, err := svc.GetValidToken(context.Background(), orgID)
+	if err == nil {
+		t.Fatal("expected error for invalid config type")
+	}
+}
+
+func TestGetValidToken_RefreshFailsButTokenValid(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Refresh endpoint returns 500 error.
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error": "server_error"}`))
+	}))
+	defer server.Close()
+
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+	svc.SetHTTPClient(server.Client())
+	svc.SetIssuer(server.URL)
+
+	orgID := uuid.New()
+	// Token expiring within refresh window but not yet expired.
+	store.Upsert(context.Background(), orgID, models.OpenAIChatGPTConfig{
+		AccessToken:  "cha_still_valid",
+		RefreshToken: "chr_refresh",
+		ExpiresAt:    time.Now().Add(3 * time.Minute), // Within 5-min window but still valid.
+		AccountType:  "plus",
+	})
+
+	cfg, err := svc.GetValidToken(context.Background(), orgID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected non-nil config when token still valid despite refresh failure")
+	}
+	if cfg.AccessToken != "cha_still_valid" {
+		t.Errorf("expected original token, got %s", cfg.AccessToken)
+	}
+}
+
+func TestGetValidToken_RefreshFailsTokenExpired(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error": "server_error"}`))
+	}))
+	defer server.Close()
+
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+	svc.SetHTTPClient(server.Client())
+	svc.SetIssuer(server.URL)
+
+	orgID := uuid.New()
+	// Token already expired and refresh fails.
+	store.Upsert(context.Background(), orgID, models.OpenAIChatGPTConfig{
+		AccessToken:  "cha_expired",
+		RefreshToken: "chr_refresh",
+		ExpiresAt:    time.Now().Add(-1 * time.Minute), // Already expired.
+	})
+
+	_, err := svc.GetValidToken(context.Background(), orgID)
+	if err == nil {
+		t.Fatal("expected error when token expired and refresh fails")
+	}
+}
+
+func TestRefreshToken_NonAuthError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`internal server error`))
+	}))
+	defer server.Close()
+
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+	svc.SetHTTPClient(server.Client())
+	svc.SetIssuer(server.URL)
+
+	orgID := uuid.New()
+	store.Upsert(context.Background(), orgID, models.OpenAIChatGPTConfig{
+		AccessToken:  "cha_tok",
+		RefreshToken: "chr_tok",
+		ExpiresAt:    time.Now().Add(-1 * time.Hour),
+	})
+
+	_, err := svc.RefreshToken(context.Background(), orgID)
+	if err == nil {
+		t.Fatal("expected error for 500 response")
+	}
+}
+
+func TestRefreshToken_InvalidConfigType(t *testing.T) {
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+
+	orgID := uuid.New()
+	k := store.key(orgID, models.ProviderOpenAIChatGPT)
+	store.creds[k] = &models.DecryptedCredential{
+		OrgID:    orgID,
+		Provider: models.ProviderOpenAIChatGPT,
+		Config:   models.AnthropicConfig{APIKey: "wrong"},
+		Status:   "active",
+	}
+
+	_, err := svc.RefreshToken(context.Background(), orgID)
+	if err == nil {
+		t.Fatal("expected error for invalid config type")
+	}
+}
+
+func TestRefreshToken_NotFound(t *testing.T) {
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+
+	_, err := svc.RefreshToken(context.Background(), uuid.New())
+	if err == nil {
+		t.Fatal("expected error when credential not found")
+	}
+}
+
+func TestInitiateDeviceAuth_ServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`server error`))
+	}))
+	defer server.Close()
+
+	svc := NewService(nil, zerolog.Nop())
+	svc.SetHTTPClient(server.Client())
+	svc.SetIssuer(server.URL)
+
+	_, err := svc.InitiateDeviceAuth(context.Background(), uuid.New())
+	if err == nil {
+		t.Fatal("expected error for server error response")
+	}
+}
+
+func TestInitiateDeviceAuth_InvalidJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`not json`))
+	}))
+	defer server.Close()
+
+	svc := NewService(nil, zerolog.Nop())
+	svc.SetHTTPClient(server.Client())
+	svc.SetIssuer(server.URL)
+
+	_, err := svc.InitiateDeviceAuth(context.Background(), uuid.New())
+	if err == nil {
+		t.Fatal("expected error for invalid JSON response")
+	}
+}
+
+func TestIsNotFoundError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{"nil error", nil, false},
+		{"not found", fmt.Errorf("credential not found"), true},
+		{"no rows", fmt.Errorf("no rows in result set"), true},
+		{"other error", fmt.Errorf("db connection refused"), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isNotFoundError(tt.err); got != tt.expected {
+				t.Errorf("isNotFoundError(%v) = %v, want %v", tt.err, got, tt.expected)
+			}
+		})
+	}
+}

@@ -108,6 +108,44 @@ func TestCodexAuthHandler_Status_NoPending(t *testing.T) {
 	require.Equal(t, "none", resp.Data.Status, "status should report none when no auth flow exists")
 }
 
+func TestCodexAuthHandler_Initiate_Error(t *testing.T) {
+	t.Parallel()
+
+	// Use an unreachable server URL to force an error.
+	svc := codexauth.NewService(nil, codexTestLogger())
+	svc.SetIssuer("http://127.0.0.1:1") // unreachable port
+
+	handler := NewCodexAuthHandler(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/codex-auth/initiate", nil)
+	req = codexAddOrgContext(req)
+	w := httptest.NewRecorder()
+
+	handler.Initiate(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code, "initiate should return 500 on error")
+
+	var resp map[string]interface{}
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err, "error response should be valid JSON")
+}
+
+func TestCodexAuthHandler_Disconnect_Error(t *testing.T) {
+	t.Parallel()
+
+	store := &codexCredentialStoreStub{disableErr: errors.New("db error")}
+	svc := codexauth.NewService(store, codexTestLogger())
+	handler := NewCodexAuthHandler(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/codex-auth/disconnect", nil)
+	req = codexAddOrgContext(req)
+	w := httptest.NewRecorder()
+
+	handler.Disconnect(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code, "disconnect should return 500 when store fails")
+}
+
 func TestCodexAuthHandler_Disconnect_ReturnsJSON(t *testing.T) {
 	t.Parallel()
 

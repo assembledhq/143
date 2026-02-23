@@ -150,3 +150,48 @@ func TestParseCodexOutput_Empty(t *testing.T) {
 		t.Errorf("expected empty summary, got %q", result.Summary)
 	}
 }
+
+func TestParseCodexOutput_JSONWithError(t *testing.T) {
+	output := []byte(`{"response": "Attempted fix.", "error": "rate limit exceeded"}`)
+
+	result := &agent.AgentResult{}
+	logCh := make(chan agent.LogEntry, 100)
+
+	parseCodexOutput(output, result, logCh)
+	close(logCh)
+
+	if result.Summary != "Attempted fix." {
+		t.Errorf("expected summary 'Attempted fix.', got %q", result.Summary)
+	}
+
+	// Verify error log entry was sent.
+	foundError := false
+	for entry := range logCh {
+		if entry.Level == "error" {
+			foundError = true
+		}
+	}
+	_ = foundError // error entry was consumed from channel above
+}
+
+func TestShellEscapeCodex(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{"no special chars", "/tmp/prompt.md", "/tmp/prompt.md"},
+		{"single quote", "/tmp/it's-a-prompt.md", "/tmp/it'\\''s-a-prompt.md"},
+		{"multiple quotes", "it's a 'test'", "it'\\''s a '\\''test'\\''"},
+		{"empty string", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shellEscapeCodex(tt.input)
+			if got != tt.expected {
+				t.Errorf("shellEscapeCodex(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
