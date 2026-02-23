@@ -15,10 +15,10 @@ import (
 
 	"github.com/assembledhq/143/internal/api"
 	"github.com/assembledhq/143/internal/config"
+	"github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/logging"
-	"github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/agent/adapters"
 	"github.com/assembledhq/143/internal/services/agent/providers"

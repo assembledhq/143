@@ -188,7 +188,9 @@ func parseCodexOutput(output []byte, result *agent.AgentResult, logCh chan<- age
 	tryExtractConfidence(text, result)
 }
 
-// shellEscapeCodex escapes single quotes for safe shell usage.
+// shellEscapeCodex escapes single quotes in a path for use inside a
+// single-quoted shell string. It is only used on internally-generated
+// file paths (e.g. promptPath), never on user-supplied input.
 func shellEscapeCodex(s string) string {
 	return strings.ReplaceAll(s, "'", "'\\''")
 }
