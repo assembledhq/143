@@ -1,5 +1,7 @@
 # 27 — CSRF Protection
 
+**Status: Implemented**
+
 ## Background
 
 The application currently has **no explicit CSRF protection**. State-changing requests rely on:
@@ -32,6 +34,7 @@ We will use the **double-submit cookie** pattern. This is a stateless CSRF defen
 ### How It Works
 
 1. The server sets a random CSRF token in a **non-HttpOnly** cookie (`csrf_token`) on every response that sets or refreshes a session.
+   The cookie `Secure` attribute is request-aware: set for HTTPS requests (including `X-Forwarded-Proto: https`), unset for plain HTTP local development.
 2. The frontend reads this cookie and sends the same value back in a custom request header (`X-CSRF-Token`) on every state-changing request (POST, PUT, PATCH, DELETE).
 3. The server middleware compares the cookie value to the header value. If they match, the request is legitimate. If not, it's rejected with `403 Forbidden`.
 
