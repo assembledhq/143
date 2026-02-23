@@ -905,7 +905,18 @@ function drawScramble(
       jetRotation = runwayHeading({ x: jetX, y: jetY });
     }
 
+    // Apply 3D perspective skew: slight vertical compression + shear to simulate
+    // viewing the plane from a slightly elevated camera angle. The skew increases
+    // as the plane gets closer to the camera (more foreshortened when near).
+    const depthT = (jetY - horizonY) / (h * 0.5 - horizonY); // 0 at horizon, ~1 near camera
+    const ySquash = 0.55 + 0.15 * (1 - depthT); // more squashed when closer
+    const skewAmount = -0.12 * depthT; // slight lean, increases with proximity
+    ctx.save();
+    ctx.translate(jetX, jetY);
+    ctx.transform(1, skewAmount, 0, ySquash, 0, 0);
+    ctx.translate(-jetX, -jetY);
     drawP80Side(ctx, jetX, jetY, jetSize, jetRotation, jetAlpha, 0, { gearDown: true });
+    ctx.restore();
 
     // Taxi light (forward-pointing cone from nose, along heading)
     if (jp > 0.05) {
@@ -1797,10 +1808,10 @@ function drawReturnToBase(
 
   // ── Jet crossing the moon — bigger, the centrepiece ──
   const jetSize = Math.min(w, h) * 0.12;
-  const pathStartX = moonX + moonR * 1.4;
-  const pathEndX = moonX - moonR * 1.4;
+  const pathStartX = moonX + moonR * 2.2;
+  const pathEndX = moonX - moonR * 2.2;
   const jetX = pathStartX + (pathEndX - pathStartX) * p;
-  const arcAmount = -moonR * 0.12;
+  const arcAmount = -moonR * 0.18;
   const jetY = moonY + arcAmount * Math.sin(p * Math.PI);
   drawP80Side(ctx, jetX, jetY, jetSize, Math.PI, 1, 0.02, { noShadow: true });
 
