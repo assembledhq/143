@@ -130,6 +130,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) (*
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.Auth(sessionStore, userStore))
 		r.Use(middleware.OrgContext)
+		r.Use(middleware.CSRF(cfg.CSRFSigningKey))
 
 		r.Get("/api/v1/auth/me", authHandler.Me)
 		r.Post("/api/v1/auth/logout", authHandler.Logout)
