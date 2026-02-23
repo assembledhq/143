@@ -2,9 +2,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderWithProviders, screen, userEvent } from '@/test/test-utils';
 import Overview from './page';
 
-const { loginMock, sentryLoginMock } = vi.hoisted(() => ({
+const { loginMock, sentryLoginMock, codexStatusMock } = vi.hoisted(() => ({
   loginMock: vi.fn(),
   sentryLoginMock: vi.fn(),
+  codexStatusMock: vi.fn().mockResolvedValue({ data: { status: 'pending' } }),
 }));
 
 vi.mock('@/lib/api', () => ({
@@ -12,6 +13,9 @@ vi.mock('@/lib/api', () => ({
     auth: {
       login: loginMock,
       loginSentry: sentryLoginMock,
+    },
+    codexAuth: {
+      status: codexStatusMock,
     },
   },
 }));
