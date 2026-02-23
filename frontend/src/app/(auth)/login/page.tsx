@@ -25,6 +25,7 @@ function LoginPageContent() {
   const { isAuthenticated, isLoading: authLoading } = useAuth();
   const { providers } = useAuthProviders();
 
+  const invitation = searchParams.get("invitation") ?? undefined;
   const [tab, setTab] = useState(searchParams.get("tab") === "signup" ? "signup" : "signin");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -64,7 +65,7 @@ function LoginPageContent() {
     setError(null);
     setLoading(true);
     try {
-      await api.auth.register(signUpEmail, signUpPassword, signUpName);
+      await api.auth.register(signUpEmail, signUpPassword, signUpName, invitation);
       window.location.href = "/overview";
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Sign up failed";
@@ -91,7 +92,7 @@ function LoginPageContent() {
               <Button
                 variant="outline"
                 className="w-full"
-                onClick={() => api.auth.login()}
+                onClick={() => api.auth.login(invitation)}
                 aria-label="Continue with GitHub"
               >
                 Continue with GitHub
@@ -101,7 +102,7 @@ function LoginPageContent() {
               <Button
                 variant="outline"
                 className="w-full"
-                onClick={() => api.auth.loginGoogle()}
+                onClick={() => api.auth.loginGoogle(invitation)}
                 aria-label="Continue with Google"
               >
                 Continue with Google

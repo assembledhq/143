@@ -38,6 +38,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	deployStore := db.NewDeployStore(pool)
 	reviewCommentStore := db.NewReviewCommentStore(pool)
 	reviewPatternStore := db.NewReviewPatternStore(pool)
+	invitationStore := db.NewInvitationStore(pool)
 
 	// Create credential store with optional encryption.
 	var cryptoSvc *crypto.Service
@@ -70,7 +71,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 
 	// Create handlers
 	healthHandler := handlers.NewHealthHandler(pool)
-	authHandler := handlers.NewAuthHandler(cfg, orgStore, userStore, sessionStore)
+	authHandler := handlers.NewAuthHandler(cfg, orgStore, userStore, sessionStore, invitationStore)
 	repoHandler := handlers.NewRepositoryHandler(repoStore)
 	integrationHandler := handlers.NewIntegrationHandler(integrationStore)
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, repoStore, integrationStore, prService)
@@ -90,6 +91,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
 	credentialHandler := handlers.NewCredentialHandler(credentialStore)
 	reviewPatternHandler := handlers.NewReviewPatternHandler(reviewPatternStore, reviewCommentStore)
+	teamHandler := handlers.NewTeamHandler(userStore, sessionStore, invitationStore, orgStore, cfg.FrontendURL)
 
 	codexAuthHandler := handlers.NewCodexAuthHandler(codexAuthSvc)
 
@@ -116,6 +118,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		r.Post("/linear", ingestionWebhookHandler.HandleLinear)
 	})
 
+	// Public team routes (token-based, no auth)
+	r.Post("/api/v1/team/invitations/accept", teamHandler.AcceptInvitation)
+
 	// Auth routes (no auth)
 	r.Get("/api/v1/auth/providers", authHandler.Providers)
 	r.Get("/api/v1/auth/github/login", authHandler.Login)
@@ -129,6 +134,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.Auth(sessionStore, userStore))
 		r.Use(middleware.OrgContext)
+		r.Use(middleware.CSRF(cfg.CSRFSigningKey))
 
 		r.Get("/api/v1/auth/me", authHandler.Me)
 		r.Post("/api/v1/auth/logout", authHandler.Logout)
@@ -185,6 +191,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Post("/api/v1/settings/codex-auth/initiate", codexAuthHandler.Initiate)
 			r.Get("/api/v1/settings/codex-auth/status", codexAuthHandler.Status)
 			r.Post("/api/v1/settings/codex-auth/disconnect", codexAuthHandler.Disconnect)
+
+      // Team management
+			r.Get("/api/v1/team/members", teamHandler.ListMembers)
+			r.Patch("/api/v1/team/members/{id}/role", teamHandler.ChangeRole)
+			r.Delete("/api/v1/team/members/{id}", teamHandler.RemoveMember)
+			r.Get("/api/v1/team/invitations", teamHandler.ListInvitations)
+			r.Post("/api/v1/team/invitations", teamHandler.CreateInvitation)
+			r.Delete("/api/v1/team/invitations/{id}", teamHandler.RevokeInvitation)
 		})
 	})
 
