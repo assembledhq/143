@@ -9,14 +9,29 @@ class ApiError extends Error {
   }
 }
 
+function getCSRFToken(): string {
+  const match = document.cookie
+    .split('; ')
+    .find(row => row.startsWith('csrf_token='));
+  return match ? decodeURIComponent(match.substring('csrf_token='.length)) : '';
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(options?.headers as Record<string, string>),
+  };
+
+  // Attach CSRF token on state-changing requests.
+  const method = options?.method?.toUpperCase() || 'GET';
+  if (method !== 'GET' && method !== 'HEAD') {
+    headers['X-CSRF-Token'] = getCSRFToken();
+  }
+
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
     credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      ...options?.headers,
-    },
+    headers,
   });
 
   if (!res.ok) {
