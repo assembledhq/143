@@ -1233,7 +1233,7 @@ function drawReturnToBase(
   ctx.fillStyle = skyGrad;
   ctx.fillRect(0, 0, w, h);
 
-  // Stars (drawn behind the moon)
+  // Stars
   for (const star of STARS.slice(0, 70)) {
     const twinkle = 0.08 + 0.10 * Math.sin(time * 0.001 + star.x * 50);
     ctx.fillStyle = `rgba(255,255,255,${twinkle})`;
@@ -1242,30 +1242,31 @@ function drawReturnToBase(
     ctx.fill();
   }
 
-  // ── Moon ──
-  const moonR = Math.min(w, h) * 0.28;
-  const moonX = w * 0.52;
-  const moonY = h * 0.42;
+  // ── Moon — centered in viewport ──
+  const moonR = Math.min(w, h) * 0.22;
+  const moonX = w * 0.5;
+  const moonY = h * 0.5;
 
   // Moon glow (outer halo)
-  const outerGlow = ctx.createRadialGradient(moonX, moonY, moonR * 0.8, moonX, moonY, moonR * 2.2);
-  outerGlow.addColorStop(0, "rgba(180, 200, 230, 0.06)");
-  outerGlow.addColorStop(0.4, "rgba(140, 170, 210, 0.03)");
+  const outerGlow = ctx.createRadialGradient(moonX, moonY, moonR * 0.8, moonX, moonY, moonR * 2.0);
+  outerGlow.addColorStop(0, "rgba(180, 200, 230, 0.05)");
+  outerGlow.addColorStop(0.4, "rgba(140, 170, 210, 0.025)");
   outerGlow.addColorStop(1, "rgba(100, 130, 180, 0)");
   ctx.fillStyle = outerGlow;
   ctx.beginPath();
-  ctx.arc(moonX, moonY, moonR * 2.2, 0, Math.PI * 2);
+  ctx.arc(moonX, moonY, moonR * 2.0, 0, Math.PI * 2);
   ctx.fill();
 
   // Moon body
   const moonGrad = ctx.createRadialGradient(
-    moonX - moonR * 0.15, moonY - moonR * 0.1, moonR * 0.05,
-    moonX, moonY, moonR,
+    moonX - moonR * 0.2, moonY - moonR * 0.15, moonR * 0.05,
+    moonX + moonR * 0.1, moonY + moonR * 0.05, moonR,
   );
-  moonGrad.addColorStop(0, "rgba(235, 235, 225, 0.95)");
-  moonGrad.addColorStop(0.4, "rgba(210, 210, 200, 0.90)");
-  moonGrad.addColorStop(0.75, "rgba(180, 185, 175, 0.85)");
-  moonGrad.addColorStop(1, "rgba(140, 150, 145, 0.75)");
+  moonGrad.addColorStop(0, "rgba(240, 238, 228, 0.95)");
+  moonGrad.addColorStop(0.3, "rgba(220, 218, 208, 0.92)");
+  moonGrad.addColorStop(0.6, "rgba(195, 195, 185, 0.88)");
+  moonGrad.addColorStop(0.85, "rgba(165, 170, 160, 0.82)");
+  moonGrad.addColorStop(1, "rgba(130, 140, 135, 0.70)");
   ctx.fillStyle = moonGrad;
   ctx.beginPath();
   ctx.arc(moonX, moonY, moonR, 0, Math.PI * 2);
@@ -1286,7 +1287,6 @@ function drawReturnToBase(
   ];
 
   ctx.save();
-  // Clip to moon circle so craters don't bleed
   ctx.beginPath();
   ctx.arc(moonX, moonY, moonR, 0, Math.PI * 2);
   ctx.clip();
@@ -1305,7 +1305,6 @@ function drawReturnToBase(
     ctx.fill();
   }
 
-  // Crater rims (subtle bright edges)
   for (const c of craters.slice(0, 5)) {
     const cx = moonX + c.dx * moonR;
     const cy = moonY + c.dy * moonR;
@@ -1319,7 +1318,7 @@ function drawReturnToBase(
 
   ctx.restore();
 
-  // Moon limb darkening (edge shadow)
+  // Limb darkening
   const limbGrad = ctx.createRadialGradient(moonX, moonY, moonR * 0.6, moonX, moonY, moonR);
   limbGrad.addColorStop(0, "rgba(0, 0, 0, 0)");
   limbGrad.addColorStop(0.85, "rgba(0, 0, 0, 0)");
@@ -1329,73 +1328,41 @@ function drawReturnToBase(
   ctx.arc(moonX, moonY, moonR, 0, Math.PI * 2);
   ctx.fill();
 
-  // ── Jet silhouette crossing the moon ──
-  // Flies from right to left across the moon face
-  const jetSize = Math.min(w, h) * 0.09;
-  // Path: enter from right of moon, cross through center, exit left
-  const pathStartX = moonX + moonR * 1.3;
-  const pathEndX = moonX - moonR * 1.3;
+  // ── Jet crossing the moon — bigger, the centrepiece ──
+  const jetSize = Math.min(w, h) * 0.12;
+  const pathStartX = moonX + moonR * 1.4;
+  const pathEndX = moonX - moonR * 1.4;
   const jetX = pathStartX + (pathEndX - pathStartX) * p;
-  // Gentle arc through moon center
-  const arcAmount = -moonR * 0.15;
+  const arcAmount = -moonR * 0.12;
   const jetY = moonY + arcAmount * Math.sin(p * Math.PI);
-  // Face left
   drawP80Side(ctx, jetX, jetY, jetSize, Math.PI, 1, 0.02);
 
-  // Engine contrail (behind the jet)
-  for (let i = 1; i <= 8; i++) {
-    const tProgress = i / 8;
-    const tAlpha = 0.06 * (1 - tProgress);
-    // Trail goes to the right (behind the jet which faces left)
-    const tx = jetX + i * jetSize * 0.18;
-    const ty = jetY - arcAmount * Math.sin((p - i * 0.005) * Math.PI) * 0.02 * i;
-    const tSize = 3 + tProgress * 6;
+  // Engine contrail
+  for (let i = 1; i <= 12; i++) {
+    const tProgress = i / 12;
+    const tAlpha = 0.05 * (1 - tProgress);
+    const tx = jetX + i * jetSize * 0.15;
+    const ty = jetY + tProgress * 1.5;
+    const tSize = 2 + tProgress * 8;
     ctx.fillStyle = `rgba(200, 210, 230, ${tAlpha})`;
     ctx.beginPath();
     ctx.arc(tx, ty, tSize, 0, Math.PI * 2);
     ctx.fill();
   }
 
-  // Mini radar in corner — all clear
-  const mrx = w - 70, mry = 55, mrr = 34;
-  ctx.fillStyle = "rgba(4,12,4,0.85)";
-  ctx.beginPath(); ctx.arc(mrx, mry, mrr, 0, Math.PI * 2); ctx.fill();
-  ctx.strokeStyle = "rgba(0,180,60,0.12)";
-  ctx.lineWidth = 0.5;
-  for (let i = 1; i <= 3; i++) {
-    ctx.beginPath(); ctx.arc(mrx, mry, mrr * (i / 3), 0, Math.PI * 2); ctx.stroke();
-  }
-  const miniSweep = (time * 0.001) % (Math.PI * 2);
-  ctx.strokeStyle = "rgba(0,255,80,0.4)";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(mrx, mry);
-  ctx.lineTo(mrx + Math.cos(miniSweep) * mrr, mry + Math.sin(miniSweep) * mrr);
-  ctx.stroke();
-  ctx.strokeStyle = "rgba(0,180,60,0.2)";
-  ctx.beginPath(); ctx.arc(mrx, mry, mrr, 0, Math.PI * 2); ctx.stroke();
-  ctx.fillStyle = "rgba(0, 200, 60, 0.4)";
-  ctx.font = "9px monospace";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText("CLEAR", mrx, mry + mrr + 12);
-
-  // Status text
-  if (p > 0.35) {
-    hudText(ctx, w * 0.5, h * 0.08, "PR MERGED", Math.min(1, (p - 0.35) / 0.2) * 0.8, 22, "center");
-  }
-  if (p > 0.6) {
-    hudText(ctx, w * 0.5, h * 0.16, "ISSUE RESOLVED", Math.min(1, (p - 0.6) / 0.2) * 0.6, 14, "center");
-  }
-  if (p > 0.8) {
-    hudText(ctx, w * 0.5, h * 0.88, "AGENT LEARNING FROM REVIEW", Math.min(1, (p - 0.8) / 0.15) * 0.35, 11, "center");
-  }
-
   drawVignette(ctx, w, h, 0.4);
 
+  // ── HUD text — positioned well clear of moon ──
   hudText(ctx, 24, 22, "PR MERGED", 0.6, 14);
   hudText(ctx, 24, 40, "main \u2190 fix/null-ref-users", 0.25, 10);
   hudText(ctx, w - 24, 22, "STEP 6/6", 0.35, 11, "right");
+
+  if (p > 0.35) {
+    hudText(ctx, w * 0.5, h * 0.12, "PR MERGED", Math.min(1, (p - 0.35) / 0.2) * 0.8, 22, "center");
+  }
+  if (p > 0.6) {
+    hudText(ctx, w * 0.5, h * 0.18, "ISSUE RESOLVED", Math.min(1, (p - 0.6) / 0.2) * 0.5, 12, "center");
+  }
 }
 
 // ── Stable seeded data ───────────────────────────────────────
