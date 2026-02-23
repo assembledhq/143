@@ -833,9 +833,10 @@ function drawScramble(
   }
 
   // ── 9. Jet — emerges from hangar, taxis along runway toward camera ──
-  // KEY: The plane stays HORIZONTAL (rotation ≈ 0) because it's on flat ground.
-  // Depth is conveyed by size change and screen position, not by tilting the plane.
-  // The plane follows the runway centerline: x = vpX + (w*0.90-vpX)*t², y = horizonY + spread*t²
+  // The plane faces along the runway's perspective direction: nose points TOWARD
+  // the vanishing point (away from camera). The rotation is the angle from the
+  // jet's position back to the VP. Near the VP this is nearly horizontal; as the
+  // jet moves closer to the camera the angle tilts slightly up-left.
   if (p > 0.15) {
     const jp = Math.min(1, (p - 0.15) / 0.85); // 0..1 over p 0.15..1.0
 
@@ -853,6 +854,13 @@ function drawScramble(
       };
     }
 
+    // Compute heading angle: nose points AWAY from VP (direction of travel,
+    // toward camera). drawP80Side nose is +X, so we need the angle from
+    // VP to the jet's position (away from VP).
+    function runwayHeading(pos: { x: number; y: number }) {
+      return Math.atan2(pos.y - vpY, pos.x - vpX); // away from VP
+    }
+
     let jetX: number;
     let jetY: number;
     let jetAlpha: number;
@@ -860,21 +868,21 @@ function drawScramble(
     let jetRotation: number;
 
     if (jp < 0.25) {
-      // Phase 1: emerge from hangar, taxi rightward to runway threshold
-      // Moves from hangar door along the ground to a point near the runway start
+      // Phase 1: emerge from hangar, taxi to runway threshold
       const t = jp / 0.25;
-      const ease = t * t * (3 - 2 * t); // smoothstep
+      const ease = t * t * (3 - 2 * t);
       const startX = hx + hw * 0.7;
       const startY = horizonY + 2;
-      // End at an early point on the runway centerline (t=0.15 on the perspective line)
       const rwyStart = runwayPos(0.18);
       jetX = startX + (rwyStart.x - startX) * ease;
       jetY = startY + (rwyStart.y - startY) * ease;
       jetAlpha = Math.min(1, t * 4);
       jetSize = minSize + (maxSize - minSize) * 0.05 * ease;
-      jetRotation = 0; // flat on the ground, facing right
+      // Blend from facing right (hangar exit) to runway heading
+      const rwyAngle = runwayHeading(rwyStart);
+      jetRotation = ease * rwyAngle; // 0 → runway angle
     } else if (jp < 0.45) {
-      // Phase 2: on the runway, taxiing — moderate growth, still small and distant
+      // Phase 2: on the runway, taxiing — moderate growth
       const t = (jp - 0.25) / 0.20;
       const ease = t * t * (3 - 2 * t);
       const rwyA = runwayPos(0.18);
@@ -883,34 +891,39 @@ function drawScramble(
       jetY = rwyA.y + (rwyB.y - rwyA.y) * ease;
       jetAlpha = 1;
       jetSize = minSize + (maxSize - minSize) * (0.05 + 0.15 * ease);
-      jetRotation = 0;
+      jetRotation = runwayHeading({ x: jetX, y: jetY });
     } else {
       // Phase 3: approaching camera — accelerating size growth
       const t = (jp - 0.45) / 0.55;
-      const ease = t * t; // quadratic — accelerating approach
+      const ease = t * t;
       const rwyC = runwayPos(0.40);
       const rwyD = runwayPos(0.80);
       jetX = rwyC.x + (rwyD.x - rwyC.x) * ease;
       jetY = rwyC.y + (rwyD.y - rwyC.y) * ease;
       jetAlpha = 1;
       jetSize = minSize + (maxSize - minSize) * (0.20 + 0.80 * ease);
-      jetRotation = 0;
+      jetRotation = runwayHeading({ x: jetX, y: jetY });
     }
 
     drawP80Side(ctx, jetX, jetY, jetSize, jetRotation, jetAlpha, 0, { gearDown: true });
 
-    // Taxi light (forward-pointing cone from nose)
+    // Taxi light (forward-pointing cone from nose, along heading)
     if (jp > 0.05) {
-      const noseX = jetX + jetSize * 0.90;
-      const noseY = jetY;
+      const cosR = Math.cos(jetRotation);
+      const sinR = Math.sin(jetRotation);
+      const noseX = jetX + cosR * jetSize * 0.90;
+      const noseY = jetY + sinR * jetSize * 0.90;
       const lightReach = jetSize * 0.45;
-      const taxiLightGrad = ctx.createRadialGradient(noseX, noseY, 0, noseX + lightReach, noseY, lightReach);
+      const taxiLightGrad = ctx.createRadialGradient(
+        noseX, noseY, 0,
+        noseX + cosR * lightReach, noseY + sinR * lightReach, lightReach,
+      );
       taxiLightGrad.addColorStop(0, `rgba(255, 250, 230, ${jetAlpha * 0.10})`);
       taxiLightGrad.addColorStop(0.5, `rgba(255, 240, 200, ${jetAlpha * 0.03})`);
       taxiLightGrad.addColorStop(1, "rgba(255, 230, 180, 0)");
       ctx.fillStyle = taxiLightGrad;
       ctx.beginPath();
-      ctx.arc(noseX + lightReach * 0.4, noseY, lightReach, 0, Math.PI * 2);
+      ctx.arc(noseX + cosR * lightReach * 0.4, noseY + sinR * lightReach * 0.4, lightReach, 0, Math.PI * 2);
       ctx.fill();
     }
 
@@ -919,15 +932,18 @@ function drawScramble(
       const gcAlpha = jetAlpha * 0.03;
       ctx.fillStyle = `rgba(255, 230, 180, ${gcAlpha})`;
       ctx.beginPath();
-      ctx.ellipse(jetX, jetY + jetSize * 0.24, jetSize * 0.06, jetSize * 0.01, 0, 0, Math.PI * 2);
+      ctx.ellipse(jetX, jetY + jetSize * 0.24, jetSize * 0.06, jetSize * 0.01, jetRotation, 0, Math.PI * 2);
       ctx.fill();
     }
 
-    // ── 10. Engine glow trail — orange radial at tail position ──
+    // ── 10. Engine glow trail — at tail, along heading ──
     if (jp > 0.1) {
       const trailAlpha = Math.min(0.2, (jp - 0.1) * 0.4);
-      const tailX = jetX - jetSize * 0.95;
-      const tailY = jetY + jetSize * 0.012;
+      const cosR = Math.cos(jetRotation);
+      const sinR = Math.sin(jetRotation);
+      // Tail is opposite to nose direction
+      const tailX = jetX - cosR * jetSize * 0.95;
+      const tailY = jetY - sinR * jetSize * 0.95;
       const glowR = jetSize * 0.22;
       const engineGlow = ctx.createRadialGradient(tailX, tailY, 0, tailX, tailY, glowR);
       engineGlow.addColorStop(0, `rgba(255, 160, 50, ${trailAlpha})`);
@@ -938,18 +954,23 @@ function drawScramble(
       ctx.arc(tailX, tailY, glowR, 0, Math.PI * 2);
       ctx.fill();
 
-      // Exhaust plume (horizontal, pointing left from tail)
+      // Exhaust plume (away from nose, along tail direction)
       if (jp > 0.35) {
         const plumeAlpha = Math.min(0.08, (jp - 0.35) * 0.15);
-        const plumeGrad = ctx.createLinearGradient(tailX, tailY, tailX - jetSize * 0.5, tailY);
+        const plumeLen = jetSize * 0.5;
+        const plumeTipX = tailX - cosR * plumeLen;
+        const plumeTipY = tailY - sinR * plumeLen;
+        const perpX = -sinR * jetSize * 0.03;
+        const perpY = cosR * jetSize * 0.03;
+        const plumeGrad = ctx.createLinearGradient(tailX, tailY, plumeTipX, plumeTipY);
         plumeGrad.addColorStop(0, `rgba(255, 140, 50, ${plumeAlpha})`);
         plumeGrad.addColorStop(0.5, `rgba(255, 100, 30, ${plumeAlpha * 0.4})`);
         plumeGrad.addColorStop(1, "rgba(255, 80, 20, 0)");
         ctx.fillStyle = plumeGrad;
         ctx.beginPath();
-        ctx.moveTo(tailX, tailY - jetSize * 0.03);
-        ctx.lineTo(tailX - jetSize * 0.5, tailY);
-        ctx.lineTo(tailX, tailY + jetSize * 0.03);
+        ctx.moveTo(tailX + perpX, tailY + perpY);
+        ctx.lineTo(plumeTipX, plumeTipY);
+        ctx.lineTo(tailX - perpX, tailY - perpY);
         ctx.closePath();
         ctx.fill();
       }
