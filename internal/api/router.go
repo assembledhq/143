@@ -37,6 +37,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) (*
 	deployStore := db.NewDeployStore(pool)
 	reviewCommentStore := db.NewReviewCommentStore(pool)
 	reviewPatternStore := db.NewReviewPatternStore(pool)
+	invitationStore := db.NewInvitationStore(pool)
 
 	// Create credential store with optional encryption.
 	var cryptoSvc *crypto.Service
@@ -69,7 +70,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) (*
 
 	// Create handlers
 	healthHandler := handlers.NewHealthHandler(pool)
-	authHandler := handlers.NewAuthHandler(cfg, orgStore, userStore, sessionStore)
+	authHandler := handlers.NewAuthHandler(cfg, orgStore, userStore, sessionStore, invitationStore)
 	repoHandler := handlers.NewRepositoryHandler(repoStore)
 	integrationHandler := handlers.NewIntegrationHandler(integrationStore)
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, repoStore, integrationStore, prService)
@@ -88,6 +89,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) (*
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
 	credentialHandler := handlers.NewCredentialHandler(credentialStore)
 	reviewPatternHandler := handlers.NewReviewPatternHandler(reviewPatternStore, reviewCommentStore)
+	teamHandler := handlers.NewTeamHandler(userStore, sessionStore, invitationStore, orgStore, cfg.FrontendURL)
 
 	r := chi.NewRouter()
 
@@ -111,6 +113,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) (*
 		r.Post("/sentry", ingestionWebhookHandler.HandleSentry)
 		r.Post("/linear", ingestionWebhookHandler.HandleLinear)
 	})
+
+	// Public team routes (token-based, no auth)
+	r.Post("/api/v1/team/invitations/accept", teamHandler.AcceptInvitation)
 
 	// Auth routes (no auth)
 	r.Get("/api/v1/auth/providers", authHandler.Providers)
@@ -176,6 +181,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) (*
 			r.Get("/api/v1/settings/credentials", credentialHandler.List)
 			r.Put("/api/v1/settings/credentials/{provider}", credentialHandler.Update)
 			r.Delete("/api/v1/settings/credentials/{provider}", credentialHandler.Delete)
+
+			// Team management
+			r.Get("/api/v1/team/members", teamHandler.ListMembers)
+			r.Patch("/api/v1/team/members/{id}/role", teamHandler.ChangeRole)
+			r.Delete("/api/v1/team/members/{id}", teamHandler.RemoveMember)
+			r.Get("/api/v1/team/invitations", teamHandler.ListInvitations)
+			r.Post("/api/v1/team/invitations", teamHandler.CreateInvitation)
+			r.Delete("/api/v1/team/invitations/{id}", teamHandler.RevokeInvitation)
 		})
 	})
 

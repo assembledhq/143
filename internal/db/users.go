@@ -164,6 +164,80 @@ func (s *UserStore) LinkGitHubAccount(ctx context.Context, userID, orgID uuid.UU
 	return err
 }
 
+// ListByOrg returns all users in the given organization, ordered by creation time.
+func (s *UserStore) ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.User, error) {
+	query := fmt.Sprintf(`
+		SELECT %s
+		FROM users
+		WHERE org_id = @org_id
+		ORDER BY created_at ASC`, userSelectColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID})
+	if err != nil {
+		return nil, fmt.Errorf("query users: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.User])
+}
+
+// UpdateRole changes a user's role within their org.
+func (s *UserStore) UpdateRole(ctx context.Context, orgID, userID uuid.UUID, role string) error {
+	query := `UPDATE users SET role = @role WHERE id = @id AND org_id = @org_id`
+	ct, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"role":   role,
+		"id":     userID,
+		"org_id": orgID,
+	})
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+// Delete removes a user from their org.
+func (s *UserStore) Delete(ctx context.Context, orgID, userID uuid.UUID) error {
+	// Clear known user references before deletion to avoid FK failures for active users.
+	query := `
+		WITH cleared_agent_answers AS (
+			UPDATE agent_run_questions
+			SET answered_by = NULL
+			WHERE org_id = @org_id AND answered_by = @id
+		),
+		deleted_invitations AS (
+			DELETE FROM invitations
+			WHERE org_id = @org_id AND invited_by = @id
+		),
+		deleted_user AS (
+			DELETE FROM users
+			WHERE id = @id AND org_id = @org_id
+			RETURNING id
+		)
+		SELECT EXISTS (SELECT 1 FROM deleted_user)`
+
+	var deleted bool
+	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"id":     userID,
+		"org_id": orgID,
+	}).Scan(&deleted)
+	if err != nil {
+		return err
+	}
+	if !deleted {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+// CountAdmins returns the number of admin users in the given org.
+func (s *UserStore) CountAdmins(ctx context.Context, orgID uuid.UUID) (int, error) {
+	query := `SELECT COUNT(*) FROM users WHERE org_id = @org_id AND role = 'admin'`
+	var count int
+	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{"org_id": orgID}).Scan(&count)
+	return count, err
+}
+
 // LinkGoogleAccount attaches a Google identity to an existing user.
 func (s *UserStore) LinkGoogleAccount(ctx context.Context, userID, orgID uuid.UUID, googleID string, avatarURL string) error {
 	query := `
@@ -172,9 +246,9 @@ func (s *UserStore) LinkGoogleAccount(ctx context.Context, userID, orgID uuid.UU
 		WHERE id = @id AND org_id = @org_id`
 
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
-		"id":        userID,
-		"org_id":    orgID,
-		"google_id": googleID,
+		"id":         userID,
+		"org_id":     orgID,
+		"google_id":  googleID,
 		"avatar_url": avatarURL,
 	})
 	return err

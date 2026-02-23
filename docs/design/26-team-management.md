@@ -367,10 +367,11 @@ func NewInvitationStore(db DBTX) *InvitationStore {
 
 const invitationSelectColumns = `id, org_id, email, role, invited_by, token, status, expires_at, created_at, accepted_at`
 
-func (s *InvitationStore) Create(ctx context.Context, inv models.Invitation) error {
+func (s *InvitationStore) Create(ctx context.Context, inv *models.Invitation) error {
     query := `INSERT INTO invitations (org_id, email, role, invited_by, token, expires_at)
-              VALUES (@org_id, @email, @role, @invited_by, @token, @expires_at)`
-    _, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+              VALUES (@org_id, @email, @role, @invited_by, @token, @expires_at)
+              RETURNING id, status, created_at`
+    row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
         "org_id":     inv.OrgID,
         "email":      inv.Email,
         "role":       inv.Role,
@@ -378,11 +379,14 @@ func (s *InvitationStore) Create(ctx context.Context, inv models.Invitation) err
         "token":      inv.Token,
         "expires_at": inv.ExpiresAt,
     })
-    return err
+    return row.Scan(&inv.ID, &inv.Status, &inv.CreatedAt)
 }
 
+// GetByToken looks up an invitation by token regardless of status.
+// The handler inspects the Status field to return the correct error code
+// (INVITE_EXPIRED, INVITE_ALREADY_USED, INVITE_REVOKED, vs INVITE_NOT_FOUND).
 func (s *InvitationStore) GetByToken(ctx context.Context, token string) (models.Invitation, error) {
-    query := fmt.Sprintf(`SELECT %s FROM invitations WHERE token = @token AND status = 'pending'`, invitationSelectColumns)
+    query := fmt.Sprintf(`SELECT %s FROM invitations WHERE token = @token`, invitationSelectColumns)
     rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"token": token})
     if err != nil {
         return models.Invitation{}, fmt.Errorf("query invitation: %w", err)
@@ -407,8 +411,14 @@ func (s *InvitationStore) Accept(ctx context.Context, id uuid.UUID) error {
 
 func (s *InvitationStore) Revoke(ctx context.Context, orgID, id uuid.UUID) error {
     query := `UPDATE invitations SET status = 'revoked' WHERE id = @id AND org_id = @org_id AND status = 'pending'`
-    _, err := s.db.Exec(ctx, query, pgx.NamedArgs{"id": id, "org_id": orgID})
-    return err
+    ct, err := s.db.Exec(ctx, query, pgx.NamedArgs{"id": id, "org_id": orgID})
+    if err != nil {
+        return err
+    }
+    if ct.RowsAffected() == 0 {
+        return pgx.ErrNoRows
+    }
+    return nil
 }
 ```
 
@@ -498,7 +508,9 @@ Notes:
 
 ## Invitation Email
 
-When an admin creates an invitation, an email is sent to the invitee. Email delivery uses the same SMTP infrastructure from doc 22 (Notifications).
+When an admin creates an invitation, the invitation link must be delivered to the invitee. **Currently, no SMTP infrastructure exists** — email delivery is future work (see doc 22). For now, the invitation link is logged to the server console using zerolog. The API response includes the invitation metadata (but not the token) so the admin can manually share the link if needed.
+
+When SMTP is eventually configured, the email format will be:
 
 **Subject:** `You've been invited to join {org_name} on 143.dev`
 
@@ -516,11 +528,11 @@ This invitation expires in 7 days.
 If you weren't expecting this email, you can ignore it.
 ```
 
-When SMTP is not configured (local dev), the invitation link is logged to the server console instead.
+**Token generation** reuses the existing `generateRandomString(32)` helper from `internal/api/handlers/auth.go` (crypto/rand, hex-encoded).
 
 ## Frontend UI
 
-Team management is a new tab within the existing Settings page at `/settings`.
+The frontend lives at `frontend/src/` and uses Next.js (App Router), React, TanStack Query, and shadcn/ui. Team management is a new section within the existing Settings page at `frontend/src/app/(dashboard)/settings/page.tsx`. The current settings page is a single-page layout with sections — we add a "Team" section using the same component patterns (Card, Button, Input, Label, Badge, etc.).
 
 ### Settings → Team tab
 
@@ -692,3 +704,26 @@ DROP TABLE IF EXISTS invitations;
 
 **Dashboard Credentials (doc 25):**
 - Credential management is admin-only — team management makes it possible to promote/demote users who can access credentials
+
+## Implementation Notes
+
+- **Handler uses interfaces** for store dependencies (matching the `credentialStore` pattern in `credentials.go`), enabling mock-based unit tests.
+- **Accept flow uses transactions** via `TxStarter` / `pgx.BeginFunc` to atomically validate token + update invitation status + update user org/role.
+- **Auth handler modifications**: `Register` and OAuth callbacks are updated to check for an `invitation` query parameter/body field, placing the user in the invited org with the invited role instead of creating a new org.
+
+## Implementation Progress
+
+- [x] Phase 1a: Add `ListByOrg`, `UpdateRole`, `Delete`, `CountAdmins` to UserStore
+- [x] Phase 1b: Create `TeamHandler` with `ListMembers`, `ChangeRole`, `RemoveMember`
+- [x] Phase 1c: Wire team routes in `router.go`
+- [x] Phase 2a: Create `invitations` table migration (000007)
+- [x] Phase 2b: Create `Invitation` model
+- [x] Phase 2c: Create `InvitationStore`
+- [x] Phase 2d: Add invitation endpoints to `TeamHandler`
+- [x] Phase 2e: Update auth handler for invitation-aware registration
+- [x] Phase 2f: Add unit tests for TeamHandler (25 tests covering all endpoints)
+- [x] Phase 3a: Add frontend types (`InvitationResponse`) and API client methods (`api.team.*`)
+- [x] Phase 3b: Add Team page with members list, role management, invite form, pending invitations
+- [x] Phase 3c: Session invalidation on member removal (implemented in `RemoveMember`)
+
+**Status: COMPLETE**
