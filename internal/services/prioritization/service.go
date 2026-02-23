@@ -63,6 +63,7 @@ type OrgSettings struct {
 	} `json:"priority_weights"`
 	MinPriorityThreshold float64 `json:"min_priority_threshold"`
 	ProductDirection     string  `json:"product_direction"`
+	DefaultAgentType     string  `json:"default_agent_type"`
 }
 
 // Default weight values.
@@ -314,10 +315,14 @@ func (s *Service) CheckAutoTrigger(ctx context.Context, orgID uuid.UUID, score *
 	}
 
 	// All gates passed — create agent run and enqueue job.
+	agentType := settings.DefaultAgentType
+	if agentType == "" {
+		agentType = "codex"
+	}
 	run := &models.AgentRun{
 		IssueID:       issue.ID,
 		OrgID:         orgID,
-		AgentType:     "claude_code",
+		AgentType:     agentType,
 		Status:        "pending",
 		AutonomyLevel: settings.AutonomyLevel,
 		TokenMode:     "low",

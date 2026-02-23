@@ -218,6 +218,19 @@ export interface OrgSettings {
   min_priority_threshold?: number;
   product_direction?: string;
   agent_config?: Record<string, Record<string, string>>;
+  default_agent_type?: 'codex' | 'claude_code' | 'gemini_cli';
+}
+
+export interface CodexAuthStatus {
+  status: 'pending' | 'completed' | 'expired' | 'error' | 'none';
+  account_type?: string;
+  message?: string;
+}
+
+export interface CodexDeviceAuth {
+  user_code: string;
+  verification_uri: string;
+  expires_in: number;
 }
 
 export interface ListResponse<T> {
