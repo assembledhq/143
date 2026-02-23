@@ -13,18 +13,19 @@ import (
 type ProviderName string
 
 const (
-	ProviderAnthropic   ProviderName = "anthropic"
-	ProviderOpenAI      ProviderName = "openai"
-	ProviderOpenRouter  ProviderName = "openrouter"
-	ProviderGitHubApp   ProviderName = "github_app"
-	ProviderGitHubOAuth ProviderName = "github_oauth"
-	ProviderSentry      ProviderName = "sentry"
-	ProviderLinear      ProviderName = "linear"
+	ProviderAnthropic      ProviderName = "anthropic"
+	ProviderOpenAI         ProviderName = "openai"
+	ProviderOpenAIChatGPT  ProviderName = "openai_chatgpt"
+	ProviderOpenRouter     ProviderName = "openrouter"
+	ProviderGitHubApp      ProviderName = "github_app"
+	ProviderGitHubOAuth    ProviderName = "github_oauth"
+	ProviderSentry         ProviderName = "sentry"
+	ProviderLinear         ProviderName = "linear"
 )
 
 // AllProviders is the canonical list of credential providers.
 var AllProviders = []ProviderName{
-	ProviderAnthropic, ProviderOpenAI, ProviderOpenRouter,
+	ProviderAnthropic, ProviderOpenAI, ProviderOpenAIChatGPT, ProviderOpenRouter,
 	ProviderGitHubApp, ProviderGitHubOAuth,
 	ProviderSentry, ProviderLinear,
 }
@@ -100,6 +101,23 @@ type LinearConfig struct {
 	WebhookSecret string `json:"webhook_secret"`
 }
 
+type OpenAIChatGPTConfig struct {
+	AccessToken  string    `json:"access_token"`  // #nosec G117 -- JSON config field
+	RefreshToken string    `json:"refresh_token"` // #nosec G117 -- JSON config field
+	ExpiresAt    time.Time `json:"expires_at"`
+	AccountType  string    `json:"account_type"` // "plus", "pro", "team", "enterprise"
+}
+
+// IsExpired returns true if the access token has expired.
+func (c OpenAIChatGPTConfig) IsExpired() bool {
+	return time.Now().After(c.ExpiresAt)
+}
+
+// NeedsRefresh returns true if the access token will expire within the given window.
+func (c OpenAIChatGPTConfig) NeedsRefresh(window time.Duration) bool {
+	return time.Now().Add(window).After(c.ExpiresAt)
+}
+
 // --- Provider() implementations ---
 
 func (c AnthropicConfig) Provider() ProviderName   { return ProviderAnthropic }
@@ -108,7 +126,8 @@ func (c OpenRouterConfig) Provider() ProviderName   { return ProviderOpenRouter 
 func (c GitHubAppConfig) Provider() ProviderName    { return ProviderGitHubApp }
 func (c GitHubOAuthConfig) Provider() ProviderName  { return ProviderGitHubOAuth }
 func (c SentryConfig) Provider() ProviderName       { return ProviderSentry }
-func (c LinearConfig) Provider() ProviderName       { return ProviderLinear }
+func (c LinearConfig) Provider() ProviderName         { return ProviderLinear }
+func (c OpenAIChatGPTConfig) Provider() ProviderName  { return ProviderOpenAIChatGPT }
 
 // --- Validate() implementations ---
 
@@ -163,6 +182,16 @@ func (c SentryConfig) Validate() error {
 func (c LinearConfig) Validate() error {
 	if c.WebhookSecret == "" {
 		return errors.New("webhook_secret is required")
+	}
+	return nil
+}
+
+func (c OpenAIChatGPTConfig) Validate() error {
+	if c.AccessToken == "" {
+		return errors.New("access_token is required")
+	}
+	if c.RefreshToken == "" {
+		return errors.New("refresh_token is required")
 	}
 	return nil
 }
@@ -225,6 +254,15 @@ func (c LinearConfig) MaskedSummary() CredentialSummary {
 	}
 }
 
+func (c OpenAIChatGPTConfig) MaskedSummary() CredentialSummary {
+	return CredentialSummary{
+		Provider:    ProviderOpenAIChatGPT,
+		Configured:  true,
+		MaskedKey:   MaskKey(c.AccessToken),
+		AccountType: c.AccountType,
+	}
+}
+
 // --- ParseProviderConfig ---
 
 // ParseProviderConfig deserializes JSON into the correct strongly-typed config
@@ -276,6 +314,12 @@ func ParseProviderConfig(provider ProviderName, data []byte) (ProviderConfig, er
 			return nil, fmt.Errorf("invalid linear config: %w", err)
 		}
 		return cfg, nil
+	case ProviderOpenAIChatGPT:
+		var cfg OpenAIChatGPTConfig
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("invalid openai_chatgpt config: %w", err)
+		}
+		return cfg, nil
 	default:
 		return nil, fmt.Errorf("unknown provider: %s", provider)
 	}
@@ -317,9 +361,10 @@ type CredentialSummary struct {
 	LastVerifiedAt *time.Time   `json:"last_verified_at,omitempty"`
 
 	// Provider-specific non-secret fields.
-	APIType string `json:"api_type,omitempty"`
-	AppName string `json:"app_name,omitempty"`
-	AppID   int64  `json:"app_id,omitempty"`
+	APIType     string `json:"api_type,omitempty"`
+	AppName     string `json:"app_name,omitempty"`
+	AppID       int64  `json:"app_id,omitempty"`
+	AccountType string `json:"account_type,omitempty"` // OpenAI ChatGPT account tier
 }
 
 // MaskKey preserves the first 6 and last 4 characters of a key.
