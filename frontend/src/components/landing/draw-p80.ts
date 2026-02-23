@@ -329,7 +329,7 @@ export function drawP80(
   ctx.restore();
 }
 
-// ── Draw P-80 side profile ──────────────────────────────────────────────────
+// ── Draw P-80 side profile (hyper-realistic) ────────────────────────────────
 //
 // For scenes where the camera is external (watching the plane fly past).
 // Nose points in the +X direction; use rotation to face any heading.
@@ -337,7 +337,7 @@ export function drawP80(
 //
 
 /**
- * Draw a P-80 Shooting Star from the side.
+ * Draw a hyper-realistic P-80 Shooting Star from the side.
  *
  * @param ctx       Canvas context
  * @param x         Center X
@@ -359,9 +359,6 @@ export function drawP80Side(
   ctx.save();
   ctx.translate(x, y);
 
-  // When the plane faces left (rotation ≈ π), ctx.rotate(π) flips the Y axis
-  // so the tail fin / canopy end up pointing down. Fix: rotate then un-flip Y,
-  // and negate noseDown since the Y sense reversed.
   const facingLeft = Math.cos(rotation) < 0;
   if (facingLeft) {
     ctx.rotate(rotation);
@@ -374,249 +371,612 @@ export function drawP80Side(
 
   const s = size;
 
-  // ── Fuselage ──
-  // Torpedo shape: pointed nose, widest at mid-body, tapers at tail
+  // ── Fuselage shadow (on ground / beneath) ──
+  ctx.save();
+  ctx.globalAlpha = alpha * 0.12;
+  ctx.fillStyle = "rgba(0, 0, 0, 1)";
+  ctx.beginPath();
+  ctx.ellipse(0, s * 0.22, s * 0.7, s * 0.025, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // ── Horizontal stabilizer (behind fuselage) ──
+  const stabGrad = ctx.createLinearGradient(-s * 0.58, -s * 0.04, -s * 0.58, s * 0.02);
+  stabGrad.addColorStop(0, "rgba(75, 82, 98, 0.85)");
+  stabGrad.addColorStop(0.4, "rgba(55, 62, 78, 0.82)");
+  stabGrad.addColorStop(1, "rgba(40, 48, 62, 0.75)");
+  ctx.fillStyle = stabGrad;
+  ctx.beginPath();
+  ctx.moveTo(-s * 0.52, -s * 0.01);
+  ctx.quadraticCurveTo(-s * 0.62, -s * 0.05, -s * 0.72, -s * 0.048);
+  ctx.quadraticCurveTo(-s * 0.82, -s * 0.045, -s * 0.90, -s * 0.03);
+  ctx.lineTo(-s * 0.92, -s * 0.02);
+  ctx.lineTo(-s * 0.92, s * 0.005);
+  ctx.quadraticCurveTo(-s * 0.82, s * 0.015, -s * 0.72, s * 0.015);
+  ctx.quadraticCurveTo(-s * 0.62, s * 0.012, -s * 0.52, s * 0.015);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.06)";
+  ctx.lineWidth = 0.4;
+  ctx.stroke();
+
+  // Elevator hinge line
+  ctx.strokeStyle = "rgba(0, 0, 0, 0.08)";
+  ctx.lineWidth = 0.5;
+  ctx.beginPath();
+  ctx.moveTo(-s * 0.80, -s * 0.038);
+  ctx.quadraticCurveTo(-s * 0.85, -s * 0.028, -s * 0.90, -s * 0.025);
+  ctx.stroke();
+
+  // ── Vertical tail fin ──
+  const finGrad = ctx.createLinearGradient(-s * 0.52, -s * 0.10, -s * 0.78, -s * 0.42);
+  finGrad.addColorStop(0, "rgba(72, 80, 95, 0.94)");
+  finGrad.addColorStop(0.25, "rgba(62, 70, 86, 0.92)");
+  finGrad.addColorStop(0.5, "rgba(52, 60, 76, 0.90)");
+  finGrad.addColorStop(0.8, "rgba(42, 50, 66, 0.86)");
+  finGrad.addColorStop(1, "rgba(35, 43, 58, 0.82)");
+  ctx.fillStyle = finGrad;
+  ctx.beginPath();
+  ctx.moveTo(-s * 0.46, -s * 0.095);
+  ctx.bezierCurveTo(-s * 0.50, -s * 0.18, -s * 0.54, -s * 0.28, -s * 0.58, -s * 0.34);
+  ctx.bezierCurveTo(-s * 0.61, -s * 0.39, -s * 0.66, -s * 0.42, -s * 0.72, -s * 0.42);
+  ctx.lineTo(-s * 0.76, -s * 0.41);
+  ctx.bezierCurveTo(-s * 0.82, -s * 0.38, -s * 0.86, -s * 0.32, -s * 0.88, -s * 0.24);
+  ctx.bezierCurveTo(-s * 0.90, -s * 0.16, -s * 0.90, -s * 0.08, -s * 0.88, -s * 0.04);
+  ctx.closePath();
+  ctx.fill();
+
+  // Fin outline
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
+  ctx.lineWidth = 0.5;
+  ctx.stroke();
+
+  // Fin leading-edge highlight (sun catch)
+  ctx.strokeStyle = "rgba(200, 210, 225, 0.22)";
+  ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  ctx.moveTo(-s * 0.46, -s * 0.095);
+  ctx.bezierCurveTo(-s * 0.50, -s * 0.18, -s * 0.54, -s * 0.28, -s * 0.58, -s * 0.34);
+  ctx.bezierCurveTo(-s * 0.61, -s * 0.39, -s * 0.66, -s * 0.42, -s * 0.72, -s * 0.42);
+  ctx.stroke();
+
+  // Rudder hinge line
+  ctx.strokeStyle = "rgba(0, 0, 0, 0.10)";
+  ctx.lineWidth = 0.6;
+  ctx.beginPath();
+  ctx.moveTo(-s * 0.76, -s * 0.40);
+  ctx.bezierCurveTo(-s * 0.82, -s * 0.34, -s * 0.86, -s * 0.22, -s * 0.88, -s * 0.10);
+  ctx.stroke();
+
+  // Rudder trim tab
+  ctx.strokeStyle = "rgba(0, 0, 0, 0.06)";
+  ctx.lineWidth = 0.4;
+  ctx.beginPath();
+  ctx.moveTo(-s * 0.84, -s * 0.28);
+  ctx.lineTo(-s * 0.87, -s * 0.20);
+  ctx.stroke();
+
+  // Fin tip fairing
+  ctx.fillStyle = "rgba(55, 62, 78, 0.7)";
+  ctx.beginPath();
+  ctx.ellipse(-s * 0.72, -s * 0.42, s * 0.015, s * 0.005, -0.3, 0, Math.PI * 2);
+  ctx.fill();
+
+  // ── Main fuselage body ──
   const bodyGrad = ctx.createLinearGradient(0, -s * 0.18, 0, s * 0.18);
-  bodyGrad.addColorStop(0, "rgba(180, 190, 210, 0.85)");
-  bodyGrad.addColorStop(0.3, "rgba(90, 100, 115, 0.95)");
-  bodyGrad.addColorStop(0.55, "rgba(60, 68, 82, 0.92)");
-  bodyGrad.addColorStop(0.8, "rgba(45, 52, 65, 0.88)");
-  bodyGrad.addColorStop(1, "rgba(30, 38, 50, 0.7)");
+  bodyGrad.addColorStop(0, "rgba(195, 202, 218, 0.88)");
+  bodyGrad.addColorStop(0.15, "rgba(155, 165, 182, 0.92)");
+  bodyGrad.addColorStop(0.3, "rgba(105, 115, 132, 0.95)");
+  bodyGrad.addColorStop(0.45, "rgba(78, 88, 105, 0.94)");
+  bodyGrad.addColorStop(0.6, "rgba(60, 68, 82, 0.92)");
+  bodyGrad.addColorStop(0.75, "rgba(50, 58, 72, 0.90)");
+  bodyGrad.addColorStop(0.9, "rgba(40, 48, 62, 0.85)");
+  bodyGrad.addColorStop(1, "rgba(30, 38, 50, 0.72)");
   ctx.fillStyle = bodyGrad;
 
   ctx.beginPath();
-  ctx.moveTo(s * 0.95, 0);
-  ctx.quadraticCurveTo(s * 0.88, -s * 0.06, s * 0.72, -s * 0.095);
-  ctx.quadraticCurveTo(s * 0.55, -s * 0.11, s * 0.3, -s * 0.115);
-  ctx.lineTo(s * 0.1, -s * 0.12);
-  ctx.lineTo(-s * 0.15, -s * 0.115);
-  ctx.quadraticCurveTo(-s * 0.45, -s * 0.105, -s * 0.65, -s * 0.07);
-  ctx.lineTo(-s * 0.85, -s * 0.04);
-  ctx.lineTo(-s * 0.92, -s * 0.02);
-  ctx.lineTo(-s * 0.92, s * 0.04);
-  ctx.lineTo(-s * 0.85, s * 0.06);
-  ctx.quadraticCurveTo(-s * 0.65, s * 0.09, -s * 0.4, s * 0.10);
-  ctx.lineTo(-s * 0.1, s * 0.115);
-  ctx.lineTo(s * 0.1, s * 0.12);
-  ctx.quadraticCurveTo(s * 0.4, s * 0.115, s * 0.6, s * 0.10);
-  ctx.quadraticCurveTo(s * 0.85, s * 0.07, s * 0.95, 0);
+  // Nose — smooth ogive
+  ctx.moveTo(s * 0.96, 0);
+  ctx.bezierCurveTo(s * 0.94, -s * 0.025, s * 0.92, -s * 0.05, s * 0.88, -s * 0.068);
+  ctx.bezierCurveTo(s * 0.82, -s * 0.085, s * 0.74, -s * 0.098, s * 0.64, -s * 0.105);
+  // Upper fuselage contour
+  ctx.bezierCurveTo(s * 0.50, -s * 0.112, s * 0.35, -s * 0.118, s * 0.20, -s * 0.12);
+  ctx.bezierCurveTo(s * 0.05, -s * 0.122, -s * 0.10, -s * 0.12, -s * 0.22, -s * 0.115);
+  ctx.bezierCurveTo(-s * 0.38, -s * 0.108, -s * 0.52, -s * 0.095, -s * 0.62, -s * 0.075);
+  ctx.bezierCurveTo(-s * 0.72, -s * 0.058, -s * 0.80, -s * 0.045, -s * 0.86, -s * 0.035);
+  // Tail
+  ctx.lineTo(-s * 0.92, -s * 0.022);
+  ctx.lineTo(-s * 0.93, -s * 0.012);
+  ctx.lineTo(-s * 0.93, s * 0.032);
+  ctx.lineTo(-s * 0.92, s * 0.042);
+  // Lower fuselage contour
+  ctx.bezierCurveTo(-s * 0.86, s * 0.058, -s * 0.72, s * 0.082, -s * 0.58, s * 0.095);
+  ctx.bezierCurveTo(-s * 0.42, s * 0.105, -s * 0.25, s * 0.115, -s * 0.08, s * 0.12);
+  ctx.bezierCurveTo(s * 0.10, s * 0.122, s * 0.30, s * 0.118, s * 0.48, s * 0.108);
+  ctx.bezierCurveTo(s * 0.62, s * 0.098, s * 0.76, s * 0.080, s * 0.86, s * 0.058);
+  ctx.bezierCurveTo(s * 0.92, s * 0.040, s * 0.94, s * 0.022, s * 0.96, 0);
   ctx.closePath();
   ctx.fill();
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
+
+  // Fuselage outline
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.10)";
   ctx.lineWidth = 0.5;
   ctx.stroke();
 
-  // ── Fuselage panel lines ──
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.05)";
+  // ── Dorsal spine highlight (sun reflection along top) ──
+  ctx.strokeStyle = "rgba(220, 228, 240, 0.18)";
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.moveTo(s * 0.80, -s * 0.082);
+  ctx.bezierCurveTo(s * 0.60, -s * 0.102, s * 0.30, -s * 0.115, 0, -s * 0.118);
+  ctx.bezierCurveTo(-s * 0.25, -s * 0.114, -s * 0.45, -s * 0.098, -s * 0.60, -s * 0.078);
+  ctx.stroke();
+
+  // ── Fuselage panel lines (many, for realism) ──
+  ctx.strokeStyle = "rgba(0, 0, 0, 0.06)";
   ctx.lineWidth = 0.4;
-  // Center panel line
+
+  // Horizontal center-line seam
   ctx.beginPath();
-  ctx.moveTo(s * 0.80, s * 0.005);
-  ctx.lineTo(-s * 0.85, s * 0.005);
-  ctx.stroke();
-  // Upper panel line
-  ctx.beginPath();
-  ctx.moveTo(s * 0.65, -s * 0.07);
-  ctx.quadraticCurveTo(s * 0.2, -s * 0.09, -s * 0.4, -s * 0.08);
-  ctx.lineTo(-s * 0.70, -s * 0.05);
-  ctx.stroke();
-  // Wing root fairing line
-  ctx.beginPath();
-  ctx.moveTo(s * 0.15, s * 0.10);
-  ctx.lineTo(-s * 0.25, s * 0.10);
+  ctx.moveTo(s * 0.82, s * 0.005);
+  ctx.lineTo(-s * 0.88, s * 0.005);
   ctx.stroke();
 
-  // ── Fuselage belly highlight (reflected ground light) ──
-  ctx.strokeStyle = "rgba(100, 110, 130, 0.08)";
-  ctx.lineWidth = 1.5;
+  // Upper fuselage panel line
   ctx.beginPath();
-  ctx.moveTo(s * 0.5, s * 0.11);
-  ctx.quadraticCurveTo(s * 0.1, s * 0.125, -s * 0.3, s * 0.10);
+  ctx.moveTo(s * 0.70, -s * 0.065);
+  ctx.bezierCurveTo(s * 0.40, -s * 0.088, s * 0.10, -s * 0.095, -s * 0.20, -s * 0.09);
+  ctx.bezierCurveTo(-s * 0.42, -s * 0.082, -s * 0.58, -s * 0.068, -s * 0.72, -s * 0.048);
   ctx.stroke();
 
-  // ── Vertical tail fin (prominent in side view) ──
-  const finGrad = ctx.createLinearGradient(-s * 0.50, -s * 0.10, -s * 0.80, -s * 0.38);
-  finGrad.addColorStop(0, "rgba(65, 73, 88, 0.92)");
-  finGrad.addColorStop(0.5, "rgba(55, 63, 78, 0.90)");
-  finGrad.addColorStop(1, "rgba(45, 53, 68, 0.85)");
-  ctx.fillStyle = finGrad;
+  // Lower fuselage panel line
   ctx.beginPath();
-  ctx.moveTo(-s * 0.48, -s * 0.10);
-  ctx.quadraticCurveTo(-s * 0.55, -s * 0.28, -s * 0.62, -s * 0.36);
-  ctx.quadraticCurveTo(-s * 0.68, -s * 0.40, -s * 0.74, -s * 0.40);
-  ctx.lineTo(-s * 0.86, -s * 0.32);
-  ctx.quadraticCurveTo(-s * 0.90, -s * 0.22, -s * 0.88, -s * 0.04);
-  ctx.closePath();
-  ctx.fill();
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
-  ctx.lineWidth = 0.4;
+  ctx.moveTo(s * 0.70, s * 0.065);
+  ctx.bezierCurveTo(s * 0.40, s * 0.088, s * 0.10, s * 0.095, -s * 0.20, s * 0.09);
+  ctx.bezierCurveTo(-s * 0.42, s * 0.082, -s * 0.58, s * 0.068, -s * 0.72, s * 0.048);
   ctx.stroke();
 
-  // Fin leading edge highlight
-  ctx.strokeStyle = "rgba(180, 190, 210, 0.18)";
-  ctx.lineWidth = 0.7;
+  // Vertical panel seams (maintenance access panels)
+  for (const px of [0.55, 0.38, 0.20, 0.02, -0.18, -0.35, -0.52, -0.68]) {
+    ctx.beginPath();
+    ctx.moveTo(s * px, -s * 0.10);
+    ctx.lineTo(s * px, s * 0.10);
+    ctx.stroke();
+  }
+
+  // Wing root fairing panel line
+  ctx.strokeStyle = "rgba(0, 0, 0, 0.05)";
+  ctx.lineWidth = 0.5;
   ctx.beginPath();
-  ctx.moveTo(-s * 0.48, -s * 0.10);
-  ctx.quadraticCurveTo(-s * 0.55, -s * 0.28, -s * 0.62, -s * 0.36);
+  ctx.moveTo(s * 0.16, s * 0.105);
+  ctx.bezierCurveTo(s * 0.05, s * 0.11, -s * 0.10, s * 0.11, -s * 0.22, s * 0.105);
   ctx.stroke();
 
-  // Fin panel line / hinge line
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.04)";
-  ctx.lineWidth = 0.4;
-  ctx.beginPath();
-  ctx.moveTo(-s * 0.78, -s * 0.38);
-  ctx.lineTo(-s * 0.88, -s * 0.10);
-  ctx.stroke();
-
-  // ── Horizontal stabilizer (seen edge-on, thin wedge) ──
-  ctx.fillStyle = "rgba(50, 58, 72, 0.8)";
-  ctx.beginPath();
-  ctx.moveTo(-s * 0.58, -s * 0.02);
-  ctx.lineTo(-s * 0.68, -s * 0.045);
-  ctx.lineTo(-s * 0.88, -s * 0.025);
-  ctx.lineTo(-s * 0.88, s * 0.01);
-  ctx.lineTo(-s * 0.58, s * 0.02);
-  ctx.closePath();
-  ctx.fill();
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.05)";
+  // ── Access panels (rectangular hatches) ──
+  ctx.strokeStyle = "rgba(0, 0, 0, 0.05)";
   ctx.lineWidth = 0.3;
+
+  // Forward equipment bay
+  ctx.beginPath();
+  ctx.roundRect(s * 0.58, -s * 0.06, s * 0.08, s * 0.04, 1);
+  ctx.stroke();
+  // Ammo bay
+  ctx.beginPath();
+  ctx.roundRect(s * 0.62, s * 0.025, s * 0.06, s * 0.035, 1);
+  ctx.stroke();
+  // Mid-fuselage avionics bay
+  ctx.beginPath();
+  ctx.roundRect(s * 0.02, -s * 0.075, s * 0.10, s * 0.04, 1);
+  ctx.stroke();
+  // Engine access panel
+  ctx.beginPath();
+  ctx.roundRect(-s * 0.40, -s * 0.065, s * 0.14, s * 0.05, 1);
   ctx.stroke();
 
-  // ── Wing (seen edge-on: airfoil cross-section visible) ──
-  ctx.fillStyle = "rgba(46, 54, 68, 0.9)";
+  // ── Rivet lines (subtle dot rows) ──
+  ctx.fillStyle = "rgba(0, 0, 0, 0.04)";
+  // Upper rivet row
+  for (let rx = -s * 0.65; rx < s * 0.75; rx += s * 0.028) {
+    ctx.beginPath();
+    ctx.arc(rx, -s * 0.078, 0.4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // Lower rivet row
+  for (let rx = -s * 0.65; rx < s * 0.75; rx += s * 0.028) {
+    ctx.beginPath();
+    ctx.arc(rx, s * 0.078, 0.4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // Center rivet row
+  for (let rx = -s * 0.80; rx < s * 0.82; rx += s * 0.035) {
+    ctx.beginPath();
+    ctx.arc(rx, s * 0.008, 0.35, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // ── Belly highlight (reflected light from ground/atmosphere) ──
+  ctx.strokeStyle = "rgba(120, 130, 150, 0.08)";
+  ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(s * 0.14, s * 0.10);
-  ctx.quadraticCurveTo(s * 0.10, s * 0.13, s * 0.04, s * 0.14);
-  ctx.lineTo(-s * 0.18, s * 0.14);
-  ctx.quadraticCurveTo(-s * 0.22, s * 0.13, -s * 0.24, s * 0.10);
+  ctx.moveTo(s * 0.55, s * 0.105);
+  ctx.bezierCurveTo(s * 0.25, s * 0.12, -s * 0.10, s * 0.12, -s * 0.40, s * 0.095);
+  ctx.stroke();
+
+  // ── Exhaust staining (dark streak behind nozzle) ──
+  const stainGrad = ctx.createLinearGradient(-s * 0.93, 0, -s * 0.70, 0);
+  stainGrad.addColorStop(0, "rgba(20, 22, 28, 0.12)");
+  stainGrad.addColorStop(0.4, "rgba(25, 28, 35, 0.06)");
+  stainGrad.addColorStop(1, "rgba(30, 32, 40, 0)");
+  ctx.fillStyle = stainGrad;
+  ctx.beginPath();
+  ctx.moveTo(-s * 0.93, -s * 0.015);
+  ctx.lineTo(-s * 0.70, -s * 0.025);
+  ctx.lineTo(-s * 0.70, s * 0.04);
+  ctx.lineTo(-s * 0.93, s * 0.035);
   ctx.closePath();
   ctx.fill();
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.06)";
-  ctx.lineWidth = 0.3;
+
+  // ── Wing (airfoil cross-section, edge-on view) ──
+  const wingGrad = ctx.createLinearGradient(0, s * 0.10, 0, s * 0.155);
+  wingGrad.addColorStop(0, "rgba(70, 78, 94, 0.92)");
+  wingGrad.addColorStop(0.3, "rgba(52, 60, 76, 0.90)");
+  wingGrad.addColorStop(0.7, "rgba(42, 50, 66, 0.88)");
+  wingGrad.addColorStop(1, "rgba(35, 42, 58, 0.82)");
+  ctx.fillStyle = wingGrad;
+  ctx.beginPath();
+  ctx.moveTo(s * 0.16, s * 0.105);
+  ctx.bezierCurveTo(s * 0.14, s * 0.12, s * 0.10, s * 0.14, s * 0.04, s * 0.148);
+  ctx.bezierCurveTo(-s * 0.02, s * 0.152, -s * 0.10, s * 0.152, -s * 0.16, s * 0.148);
+  ctx.bezierCurveTo(-s * 0.20, s * 0.14, -s * 0.23, s * 0.128, -s * 0.26, s * 0.105);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.07)";
+  ctx.lineWidth = 0.4;
   ctx.stroke();
 
   // Wing leading-edge highlight
-  ctx.strokeStyle = "rgba(180, 190, 210, 0.10)";
-  ctx.lineWidth = 0.5;
+  ctx.strokeStyle = "rgba(200, 210, 225, 0.14)";
+  ctx.lineWidth = 0.7;
   ctx.beginPath();
-  ctx.moveTo(s * 0.14, s * 0.10);
-  ctx.quadraticCurveTo(s * 0.10, s * 0.13, s * 0.04, s * 0.14);
+  ctx.moveTo(s * 0.16, s * 0.105);
+  ctx.bezierCurveTo(s * 0.14, s * 0.12, s * 0.10, s * 0.14, s * 0.04, s * 0.148);
   ctx.stroke();
 
-  // ── Tip tank (visible hanging under wing) ──
-  ctx.fillStyle = "rgba(50, 58, 72, 0.85)";
+  // Wing trailing-edge (thin, dark)
+  ctx.strokeStyle = "rgba(0, 0, 0, 0.08)";
+  ctx.lineWidth = 0.3;
   ctx.beginPath();
-  ctx.ellipse(-s * 0.05, s * 0.17, s * 0.12, s * 0.025, 0, 0, Math.PI * 2);
+  ctx.moveTo(-s * 0.16, s * 0.148);
+  ctx.bezierCurveTo(-s * 0.20, s * 0.14, -s * 0.23, s * 0.128, -s * 0.26, s * 0.105);
+  ctx.stroke();
+
+  // Flap/aileron hinge line
+  ctx.strokeStyle = "rgba(0, 0, 0, 0.06)";
+  ctx.lineWidth = 0.4;
+  ctx.beginPath();
+  ctx.moveTo(-s * 0.12, s * 0.148);
+  ctx.lineTo(-s * 0.24, s * 0.108);
+  ctx.stroke();
+
+  // Flap track fairing (small bump)
+  ctx.fillStyle = "rgba(50, 58, 72, 0.6)";
+  ctx.beginPath();
+  ctx.ellipse(-s * 0.15, s * 0.135, s * 0.012, s * 0.005, 0.1, 0, Math.PI * 2);
+  ctx.fill();
+
+  // ── Tip tank ──
+  const tankGrad = ctx.createLinearGradient(-s * 0.05, s * 0.155, -s * 0.05, s * 0.195);
+  tankGrad.addColorStop(0, "rgba(72, 80, 96, 0.88)");
+  tankGrad.addColorStop(0.4, "rgba(55, 62, 78, 0.85)");
+  tankGrad.addColorStop(1, "rgba(40, 48, 62, 0.78)");
+  ctx.fillStyle = tankGrad;
+  ctx.beginPath();
+  ctx.ellipse(-s * 0.04, s * 0.175, s * 0.13, s * 0.028, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.strokeStyle = "rgba(255, 255, 255, 0.06)";
   ctx.lineWidth = 0.3;
   ctx.stroke();
-  // Tip tank pylon
-  ctx.strokeStyle = "rgba(50, 58, 72, 0.6)";
-  ctx.lineWidth = 1;
+
+  // Tip tank center seam
+  ctx.strokeStyle = "rgba(0, 0, 0, 0.05)";
+  ctx.lineWidth = 0.3;
   ctx.beginPath();
-  ctx.moveTo(-s * 0.05, s * 0.14);
-  ctx.lineTo(-s * 0.05, s * 0.145);
+  ctx.moveTo(-s * 0.17, s * 0.175);
+  ctx.lineTo(s * 0.09, s * 0.175);
   ctx.stroke();
 
-  // ── Bubble canopy ──
-  const canopyGrad = ctx.createLinearGradient(s * 0.30, -s * 0.24, s * 0.30, -s * 0.10);
-  canopyGrad.addColorStop(0, "rgba(150, 195, 255, 0.55)");
-  canopyGrad.addColorStop(0.35, "rgba(110, 160, 240, 0.4)");
-  canopyGrad.addColorStop(0.7, "rgba(90, 140, 220, 0.25)");
-  canopyGrad.addColorStop(1, "rgba(70, 110, 200, 0.10)");
-  ctx.fillStyle = canopyGrad;
+  // Tip tank nose highlight
+  ctx.fillStyle = "rgba(180, 190, 210, 0.10)";
   ctx.beginPath();
-  ctx.moveTo(s * 0.54, -s * 0.10);
-  ctx.quadraticCurveTo(s * 0.48, -s * 0.18, s * 0.40, -s * 0.22);
-  ctx.quadraticCurveTo(s * 0.32, -s * 0.24, s * 0.24, -s * 0.23);
-  ctx.quadraticCurveTo(s * 0.16, -s * 0.215, s * 0.10, -s * 0.12);
-  ctx.lineTo(s * 0.54, -s * 0.10);
+  ctx.ellipse(s * 0.07, s * 0.172, s * 0.02, s * 0.012, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Tip tank pylon
+  ctx.fillStyle = "rgba(50, 58, 72, 0.7)";
+  ctx.fillRect(-s * 0.055, s * 0.148, s * 0.018, s * 0.028);
+
+  // ── Bubble canopy (highly detailed) ──
+  // Canopy base (darker tint)
+  const canopyBaseGrad = ctx.createLinearGradient(s * 0.32, -s * 0.26, s * 0.32, -s * 0.095);
+  canopyBaseGrad.addColorStop(0, "rgba(120, 165, 235, 0.5)");
+  canopyBaseGrad.addColorStop(0.2, "rgba(100, 150, 225, 0.42)");
+  canopyBaseGrad.addColorStop(0.5, "rgba(80, 130, 210, 0.30)");
+  canopyBaseGrad.addColorStop(0.75, "rgba(65, 110, 195, 0.18)");
+  canopyBaseGrad.addColorStop(1, "rgba(50, 90, 180, 0.08)");
+  ctx.fillStyle = canopyBaseGrad;
+  ctx.beginPath();
+  // Windscreen front starts at fuselage
+  ctx.moveTo(s * 0.56, -s * 0.098);
+  ctx.bezierCurveTo(s * 0.52, -s * 0.14, s * 0.48, -s * 0.18, s * 0.44, -s * 0.21);
+  // Top of canopy bubble
+  ctx.bezierCurveTo(s * 0.40, -s * 0.235, s * 0.35, -s * 0.25, s * 0.30, -s * 0.255);
+  ctx.bezierCurveTo(s * 0.25, -s * 0.252, s * 0.20, -s * 0.245, s * 0.16, -s * 0.23);
+  // Rear of canopy (fairing back into fuselage)
+  ctx.bezierCurveTo(s * 0.12, -s * 0.21, s * 0.09, -s * 0.17, s * 0.07, -s * 0.12);
+  ctx.lineTo(s * 0.56, -s * 0.098);
   ctx.closePath();
   ctx.fill();
-  ctx.strokeStyle = "rgba(180, 210, 255, 0.3)";
-  ctx.lineWidth = 0.5;
+
+  // Canopy outline
+  ctx.strokeStyle = "rgba(180, 210, 255, 0.32)";
+  ctx.lineWidth = 0.6;
   ctx.stroke();
 
-  // Canopy frame lines
-  ctx.strokeStyle = "rgba(120, 150, 200, 0.12)";
-  ctx.lineWidth = 0.4;
-  // Front frame
+  // Windscreen (front section — flat armored glass)
+  ctx.strokeStyle = "rgba(140, 175, 230, 0.20)";
+  ctx.lineWidth = 0.7;
   ctx.beginPath();
-  ctx.moveTo(s * 0.46, -s * 0.105);
-  ctx.quadraticCurveTo(s * 0.44, -s * 0.17, s * 0.38, -s * 0.20);
+  ctx.moveTo(s * 0.50, -s * 0.098);
+  ctx.bezierCurveTo(s * 0.48, -s * 0.15, s * 0.45, -s * 0.19, s * 0.42, -s * 0.215);
+  ctx.stroke();
+
+  // Canopy frame lines (structural bow frames)
+  ctx.strokeStyle = "rgba(100, 130, 180, 0.14)";
+  ctx.lineWidth = 0.5;
+  // Front frame (windscreen to bubble joint)
+  ctx.beginPath();
+  ctx.moveTo(s * 0.44, -s * 0.098);
+  ctx.bezierCurveTo(s * 0.43, -s * 0.16, s * 0.41, -s * 0.20, s * 0.39, -s * 0.225);
+  ctx.stroke();
+  // Mid frame
+  ctx.beginPath();
+  ctx.moveTo(s * 0.32, -s * 0.098);
+  ctx.bezierCurveTo(s * 0.31, -s * 0.17, s * 0.30, -s * 0.22, s * 0.28, -s * 0.248);
   ctx.stroke();
   // Rear frame
   ctx.beginPath();
-  ctx.moveTo(s * 0.22, -s * 0.115);
-  ctx.quadraticCurveTo(s * 0.20, -s * 0.19, s * 0.19, -s * 0.215);
+  ctx.moveTo(s * 0.20, -s * 0.098);
+  ctx.bezierCurveTo(s * 0.19, -s * 0.16, s * 0.17, -s * 0.21, s * 0.16, -s * 0.235);
+  ctx.stroke();
+  // Aft frame
+  ctx.beginPath();
+  ctx.moveTo(s * 0.12, -s * 0.098);
+  ctx.bezierCurveTo(s * 0.11, -s * 0.14, s * 0.10, -s * 0.17, s * 0.09, -s * 0.19);
   ctx.stroke();
 
-  // Canopy glint (specular highlight)
-  ctx.fillStyle = "rgba(255, 255, 255, 0.22)";
+  // Canopy primary glint (broad specular)
+  ctx.fillStyle = "rgba(255, 255, 255, 0.20)";
   ctx.beginPath();
-  ctx.ellipse(s * 0.40, -s * 0.20, s * 0.045, s * 0.012, -0.25, 0, Math.PI * 2);
+  ctx.ellipse(s * 0.38, -s * 0.22, s * 0.055, s * 0.014, -0.2, 0, Math.PI * 2);
   ctx.fill();
-  // Secondary glint
+
+  // Secondary glint (smaller, offset)
+  ctx.fillStyle = "rgba(255, 255, 255, 0.10)";
+  ctx.beginPath();
+  ctx.ellipse(s * 0.24, -s * 0.24, s * 0.035, s * 0.008, -0.15, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Sky reflection on lower canopy
+  ctx.fillStyle = "rgba(80, 120, 200, 0.06)";
+  ctx.beginPath();
+  ctx.ellipse(s * 0.30, -s * 0.12, s * 0.10, s * 0.015, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // ── Canopy rear fairing (turtledeck) ──
+  const deckGrad = ctx.createLinearGradient(s * 0.07, -s * 0.14, s * 0.07, -s * 0.10);
+  deckGrad.addColorStop(0, "rgba(85, 92, 110, 0.6)");
+  deckGrad.addColorStop(1, "rgba(65, 72, 88, 0.4)");
+  ctx.fillStyle = deckGrad;
+  ctx.beginPath();
+  ctx.moveTo(s * 0.09, -s * 0.12);
+  ctx.bezierCurveTo(s * 0.04, -s * 0.13, -s * 0.02, -s * 0.12, -s * 0.06, -s * 0.115);
+  ctx.lineTo(-s * 0.06, -s * 0.10);
+  ctx.lineTo(s * 0.09, -s * 0.10);
+  ctx.closePath();
+  ctx.fill();
+
+  // ── Nose intake (split-lip centrifugal type, detailed) ──
+  // Intake barrel (dark interior)
+  ctx.fillStyle = "rgba(6, 8, 14, 0.75)";
+  ctx.beginPath();
+  ctx.ellipse(s * 0.94, s * 0.002, s * 0.018, s * 0.042, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Intake lip (bright metal edge)
+  ctx.strokeStyle = "rgba(170, 178, 195, 0.22)";
+  ctx.lineWidth = 0.6;
+  ctx.beginPath();
+  ctx.arc(s * 0.94, s * 0.002, s * 0.042, -Math.PI * 0.55, Math.PI * 0.55);
+  ctx.stroke();
+
+  // Intake splitter plate (internal divider)
+  ctx.fillStyle = "rgba(40, 45, 55, 0.5)";
+  ctx.fillRect(s * 0.90, -s * 0.002, s * 0.04, s * 0.004);
+
+  // Intake inner highlight (reflecting sky)
+  ctx.fillStyle = "rgba(60, 80, 120, 0.08)";
+  ctx.beginPath();
+  ctx.ellipse(s * 0.92, -s * 0.01, s * 0.012, s * 0.02, 0, -Math.PI * 0.5, Math.PI * 0.2);
+  ctx.fill();
+
+  // ── Pitot tube (extending from nose) ──
+  ctx.strokeStyle = "rgba(140, 148, 165, 0.35)";
+  ctx.lineWidth = 0.6;
+  ctx.beginPath();
+  ctx.moveTo(s * 0.96, -s * 0.068);
+  ctx.lineTo(s * 1.04, -s * 0.068);
+  ctx.stroke();
+  // Pitot tube tip
+  ctx.fillStyle = "rgba(160, 168, 185, 0.3)";
+  ctx.beginPath();
+  ctx.arc(s * 1.04, -s * 0.068, s * 0.004, 0, Math.PI * 2);
+  ctx.fill();
+
+  // ── Gun ports (6x .50 cal, P-80 nose) ──
+  ctx.fillStyle = "rgba(10, 12, 20, 0.25)";
+  for (let i = 0; i < 3; i++) {
+    const gy = s * 0.02 + i * s * 0.018;
+    ctx.beginPath();
+    ctx.arc(s * 0.90, gy, s * 0.004, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  for (let i = 0; i < 3; i++) {
+    const gy = -s * 0.05 + i * s * 0.018;
+    ctx.beginPath();
+    ctx.arc(s * 0.88, gy, s * 0.004, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // ── USAF star-and-bars marking (fuselage side) ──
+  const markX = s * 0.05, markY = 0;
+  const markR = s * 0.04;
+
+  // White circle
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
+  ctx.lineWidth = 0.6;
+  ctx.beginPath();
+  ctx.arc(markX, markY, markR, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Star (5-pointed)
   ctx.fillStyle = "rgba(255, 255, 255, 0.08)";
   ctx.beginPath();
-  ctx.ellipse(s * 0.28, -s * 0.21, s * 0.03, s * 0.008, -0.15, 0, Math.PI * 2);
+  for (let i = 0; i < 5; i++) {
+    const a = -Math.PI / 2 + (i * 2 * Math.PI) / 5;
+    const px = markX + Math.cos(a) * markR * 0.65;
+    const py = markY + Math.sin(a) * markR * 0.65;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+    const ia = a + Math.PI / 5;
+    const ipx = markX + Math.cos(ia) * markR * 0.25;
+    const ipy = markY + Math.sin(ia) * markR * 0.25;
+    ctx.lineTo(ipx, ipy);
+  }
+  ctx.closePath();
   ctx.fill();
 
-  // ── Nose intake (split-lip style) ──
-  ctx.fillStyle = "rgba(8, 10, 18, 0.7)";
+  // Bars
+  ctx.fillStyle = "rgba(255, 255, 255, 0.08)";
+  ctx.fillRect(markX - markR * 2.0, markY - markR * 0.28, markR * 1.0, markR * 0.56);
+  ctx.fillRect(markX + markR * 1.0, markY - markR * 0.28, markR * 1.0, markR * 0.56);
+
+  // ── Serial number (tail) ──
+  ctx.fillStyle = "rgba(255, 255, 255, 0.06)";
+  ctx.font = `${Math.max(4, s * 0.028)}px monospace`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("FT-675", -s * 0.60, s * 0.005);
+
+  // ── Exhaust nozzle (detailed) ──
+  // Outer ring
+  ctx.strokeStyle = "rgba(80, 85, 100, 0.25)";
+  ctx.lineWidth = 0.8;
   ctx.beginPath();
-  ctx.ellipse(s * 0.93, 0, s * 0.015, s * 0.038, 0, 0, Math.PI * 2);
-  ctx.fill();
-  // Intake lip highlight
-  ctx.strokeStyle = "rgba(150, 160, 180, 0.12)";
-  ctx.lineWidth = 0.4;
-  ctx.beginPath();
-  ctx.arc(s * 0.93, 0, s * 0.038, -Math.PI * 0.5, Math.PI * 0.5);
+  ctx.ellipse(-s * 0.925, s * 0.012, s * 0.016, s * 0.028, 0, 0, Math.PI * 2);
   ctx.stroke();
-
-  // ── Exhaust nozzle ──
-  ctx.fillStyle = "rgba(8, 10, 18, 0.6)";
+  // Inner dark
+  ctx.fillStyle = "rgba(5, 6, 12, 0.65)";
   ctx.beginPath();
-  ctx.ellipse(-s * 0.91, s * 0.01, s * 0.014, s * 0.022, 0, 0, Math.PI * 2);
+  ctx.ellipse(-s * 0.925, s * 0.012, s * 0.012, s * 0.022, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Hot core glow
+  ctx.fillStyle = "rgba(255, 120, 40, 0.15)";
+  ctx.beginPath();
+  ctx.ellipse(-s * 0.925, s * 0.012, s * 0.006, s * 0.010, 0, 0, Math.PI * 2);
   ctx.fill();
 
-  // ── Engine glow ──
+  // ── Engine exhaust glow + heat shimmer ──
   const glowGrad = ctx.createRadialGradient(
-    -s * 0.96, s * 0.01, 0,
-    -s * 0.96, s * 0.01, s * 0.06,
+    -s * 0.98, s * 0.012, 0,
+    -s * 0.98, s * 0.012, s * 0.08,
   );
-  glowGrad.addColorStop(0, "rgba(255, 160, 60, 0.25)");
-  glowGrad.addColorStop(0.4, "rgba(255, 100, 30, 0.10)");
-  glowGrad.addColorStop(1, "rgba(255, 80, 20, 0)");
+  glowGrad.addColorStop(0, "rgba(255, 170, 70, 0.28)");
+  glowGrad.addColorStop(0.25, "rgba(255, 120, 40, 0.15)");
+  glowGrad.addColorStop(0.5, "rgba(255, 80, 20, 0.06)");
+  glowGrad.addColorStop(1, "rgba(255, 60, 10, 0)");
   ctx.fillStyle = glowGrad;
   ctx.beginPath();
-  ctx.arc(-s * 0.96, s * 0.01, s * 0.06, 0, Math.PI * 2);
+  ctx.arc(-s * 0.98, s * 0.012, s * 0.08, 0, Math.PI * 2);
   ctx.fill();
 
-  // ── Navigation light (red on port / left side when facing right) ──
-  ctx.fillStyle = "rgba(255, 30, 20, 0.6)";
+  // Exhaust plume (longer cone)
+  const plumeGrad = ctx.createLinearGradient(-s * 0.93, 0, -s * 1.15, 0);
+  plumeGrad.addColorStop(0, "rgba(255, 140, 50, 0.12)");
+  plumeGrad.addColorStop(0.3, "rgba(255, 100, 30, 0.05)");
+  plumeGrad.addColorStop(1, "rgba(255, 80, 20, 0)");
+  ctx.fillStyle = plumeGrad;
   ctx.beginPath();
-  ctx.arc(-s * 0.18, s * 0.14, s * 0.008, 0, Math.PI * 2);
+  ctx.moveTo(-s * 0.93, -s * 0.005);
+  ctx.lineTo(-s * 1.15, s * 0.012);
+  ctx.lineTo(-s * 0.93, s * 0.030);
+  ctx.closePath();
   ctx.fill();
-  // Nav light glow
-  const navGlow = ctx.createRadialGradient(
-    -s * 0.18, s * 0.14, 0,
-    -s * 0.18, s * 0.14, s * 0.025,
+
+  // ── Navigation lights ──
+  // Red (port/left wingtip)
+  ctx.fillStyle = "rgba(255, 25, 15, 0.65)";
+  ctx.beginPath();
+  ctx.arc(-s * 0.20, s * 0.148, s * 0.008, 0, Math.PI * 2);
+  ctx.fill();
+  // Red glow
+  const navRedGlow = ctx.createRadialGradient(
+    -s * 0.20, s * 0.148, 0,
+    -s * 0.20, s * 0.148, s * 0.03,
   );
-  navGlow.addColorStop(0, "rgba(255, 30, 20, 0.15)");
-  navGlow.addColorStop(1, "rgba(255, 30, 20, 0)");
-  ctx.fillStyle = navGlow;
+  navRedGlow.addColorStop(0, "rgba(255, 25, 15, 0.18)");
+  navRedGlow.addColorStop(1, "rgba(255, 25, 15, 0)");
+  ctx.fillStyle = navRedGlow;
   ctx.beginPath();
-  ctx.arc(-s * 0.18, s * 0.14, s * 0.025, 0, Math.PI * 2);
+  ctx.arc(-s * 0.20, s * 0.148, s * 0.03, 0, Math.PI * 2);
   ctx.fill();
 
-  // ── Antenna mast (small, on fuselage spine) ──
-  ctx.strokeStyle = "rgba(100, 110, 130, 0.25)";
-  ctx.lineWidth = 0.5;
+  // Tail anti-collision (white strobe)
+  ctx.fillStyle = "rgba(255, 255, 255, 0.3)";
   ctx.beginPath();
-  ctx.moveTo(-s * 0.05, -s * 0.115);
-  ctx.lineTo(-s * 0.06, -s * 0.15);
+  ctx.arc(-s * 0.92, -s * 0.005, s * 0.005, 0, Math.PI * 2);
+  ctx.fill();
+
+  // ── Antenna mast (dorsal spine) ──
+  ctx.strokeStyle = "rgba(120, 128, 145, 0.28)";
+  ctx.lineWidth = 0.6;
+  ctx.beginPath();
+  ctx.moveTo(-s * 0.04, -s * 0.12);
+  ctx.lineTo(-s * 0.05, -s * 0.16);
+  ctx.stroke();
+  // Antenna wire (thin, to tail)
+  ctx.strokeStyle = "rgba(120, 128, 145, 0.10)";
+  ctx.lineWidth = 0.3;
+  ctx.beginPath();
+  ctx.moveTo(-s * 0.05, -s * 0.16);
+  ctx.lineTo(-s * 0.50, -s * 0.10);
+  ctx.stroke();
+
+  // ── Landing gear doors (closed, visible as panel lines) ──
+  ctx.strokeStyle = "rgba(0, 0, 0, 0.06)";
+  ctx.lineWidth = 0.4;
+  // Main gear door
+  ctx.beginPath();
+  ctx.moveTo(s * 0.05, s * 0.115);
+  ctx.lineTo(s * 0.05, s * 0.095);
+  ctx.lineTo(-s * 0.10, s * 0.095);
+  ctx.lineTo(-s * 0.10, s * 0.115);
+  ctx.stroke();
+  // Nose gear door
+  ctx.beginPath();
+  ctx.moveTo(s * 0.68, s * 0.05);
+  ctx.lineTo(s * 0.68, s * 0.08);
+  ctx.lineTo(s * 0.60, s * 0.08);
+  ctx.lineTo(s * 0.60, s * 0.05);
   ctx.stroke();
 
   ctx.globalAlpha = 1;
