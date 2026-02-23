@@ -12,64 +12,70 @@ export interface Zone {
 
 export const ZONES: Zone[] = [
   {
-    id: "comms-tower",
+    id: "alert-received",
     number: "01",
-    name: "Comms Tower",
-    description: "Issue ingestion — Sentry, Linear, alerts arrive",
-    visual: "antenna",
+    name: "Alert Received",
+    description:
+      "Sentry errors, Linear tickets, and PagerDuty alerts are ingested automatically",
+    visual: "radar",
     progressStart: 0,
     progressEnd: 1 / 6,
-    position: { x: 0.15, y: 0.2 },
+    position: { x: 0.03, y: 0.65 },
   },
   {
-    id: "briefing-room",
+    id: "agent-activated",
     number: "02",
-    name: "Briefing Room",
-    description: "Agent analysis — reads codebase, understands the bug",
-    visual: "screens",
+    name: "Agent Activated",
+    description:
+      "Agent spins up, loads the codebase, and pulls in issue context",
+    visual: "airfield",
     progressStart: 1 / 6,
     progressEnd: 2 / 6,
-    position: { x: 0.35, y: 0.35 },
+    position: { x: 0.03, y: 0.65 },
   },
   {
-    id: "hangar",
+    id: "root-cause-analysis",
     number: "03",
-    name: "Hangar",
-    description: "Fix generation — sandboxed environment builds the patch",
-    visual: "hangar",
+    name: "Root Cause Analysis",
+    description:
+      "Agent navigates the code, tracing the bug to its source",
+    visual: "cockpit-launch",
     progressStart: 2 / 6,
     progressEnd: 3 / 6,
-    position: { x: 0.55, y: 0.55 },
+    position: { x: 0.03, y: 0.55 },
   },
   {
-    id: "test-strip",
+    id: "fix-generated",
     number: "04",
-    name: "Test Strip",
-    description: "Validation — automated tests confirm the fix",
-    visual: "checkmarks",
+    name: "Fix Generated",
+    description:
+      "Root cause identified, patch built in a sandboxed environment",
+    visual: "cockpit-hud",
     progressStart: 3 / 6,
     progressEnd: 4 / 6,
-    position: { x: 0.72, y: 0.42 },
+    position: { x: 0.03, y: 0.55 },
   },
   {
-    id: "launch-pad",
+    id: "tests-passing",
     number: "05",
-    name: "Launch Pad",
-    description: "PR submission — fix shipped to your repo",
-    visual: "runway",
+    name: "Tests Passing",
+    description:
+      "Your existing test suite runs against the fix and confirms it works",
+    visual: "cockpit-kill",
     progressStart: 4 / 6,
     progressEnd: 5 / 6,
-    position: { x: 0.85, y: 0.25 },
+    position: { x: 0.03, y: 0.55 },
   },
   {
-    id: "control-tower",
+    id: "pr-merged",
     number: "06",
-    name: "Control Tower",
-    description: "Feedback loop — learns from code reviews",
-    visual: "tower",
+    name: "PR Merged",
+    description:
+      "Fix shipped to your repo. Agent learns from code review feedback",
+    visual: "aerial-return",
     progressStart: 5 / 6,
     progressEnd: 1,
-    position: { x: 0.75, y: 0.75 },
+    position: { x: 0.03, y: 0.65 },
   },
 ];
 
@@ -80,7 +86,6 @@ export function getActiveZone(progress: number): number {
       return i;
     }
   }
-  // At exactly 1.0, last zone is active
   if (progress >= 1) return ZONES.length - 1;
   return -1;
 }
