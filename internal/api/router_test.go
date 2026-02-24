@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/assembledhq/143/internal/config"
+	"github.com/assembledhq/143/internal/services/codexauth"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
@@ -34,7 +35,8 @@ func TestNewRouter_EncryptionKeyValidation(t *testing.T) {
 			t.Parallel()
 
 			cfg := &config.Config{EncryptionMasterKey: tt.masterKey}
-			router, err := NewRouter(cfg, nil, zerolog.Nop())
+			codexSvc := codexauth.NewService(nil, zerolog.Nop())
+			router, err := NewRouter(cfg, nil, zerolog.Nop(), codexSvc)
 			if tt.expectErr {
 				require.Error(t, err, "NewRouter should return an error when encryption key is invalid")
 				require.Nil(t, router, "NewRouter should not construct a router with an invalid encryption key")

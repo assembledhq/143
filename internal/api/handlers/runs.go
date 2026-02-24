@@ -14,13 +14,14 @@ import (
 )
 
 type RunHandler struct {
-	runStore      *db.AgentRunStore
-	logStore      *db.AgentRunLogStore
-	questionStore *db.AgentRunQuestionStore
-	validationStore *db.ValidationStore
+	runStore         *db.AgentRunStore
+	logStore         *db.AgentRunLogStore
+	questionStore    *db.AgentRunQuestionStore
+	validationStore  *db.ValidationStore
 	pullRequestStore *db.PullRequestStore
-	issueStore    *db.IssueStore
-	jobStore      *db.JobStore
+	issueStore       *db.IssueStore
+	orgStore         *db.OrganizationStore
+	jobStore         *db.JobStore
 }
 
 func NewRunHandler(
@@ -30,6 +31,7 @@ func NewRunHandler(
 	validationStore *db.ValidationStore,
 	pullRequestStore *db.PullRequestStore,
 	issueStore *db.IssueStore,
+	orgStore *db.OrganizationStore,
 	jobStore *db.JobStore,
 ) *RunHandler {
 	return &RunHandler{
@@ -39,6 +41,7 @@ func NewRunHandler(
 		validationStore:  validationStore,
 		pullRequestStore: pullRequestStore,
 		issueStore:       issueStore,
+		orgStore:         orgStore,
 		jobStore:         jobStore,
 	}
 }
@@ -116,7 +119,15 @@ func (h *RunHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 
 	agentType := body.AgentType
 	if agentType == "" {
-		agentType = "claude_code"
+		org, err := h.orgStore.GetByID(r.Context(), orgID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "DEFAULT_AGENT_LOOKUP_FAILED", "failed to load organization settings")
+			return
+		}
+		agentType = models.ParseOrgSettings(org.Settings).DefaultAgentType
+		if agentType == "" {
+			agentType = models.DefaultDefaultAgentType
+		}
 	}
 	validAgentTypes := map[string]bool{"claude_code": true, "gemini_cli": true, "codex": true}
 	if !validAgentTypes[agentType] {
