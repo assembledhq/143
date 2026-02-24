@@ -905,18 +905,12 @@ function drawScramble(
       jetRotation = runwayHeading({ x: jetX, y: jetY });
     }
 
-    // Apply 3D perspective skew: slight vertical compression + shear to simulate
-    // viewing the plane from a slightly elevated camera angle. The skew increases
-    // as the plane gets closer to the camera (more foreshortened when near).
-    const depthT = (jetY - horizonY) / (h * 0.5 - horizonY); // 0 at horizon, ~1 near camera
-    const ySquash = 0.55 + 0.15 * (1 - depthT); // more squashed when closer
-    const skewAmount = -0.12 * depthT; // slight lean, increases with proximity
-    ctx.save();
-    ctx.translate(jetX, jetY);
-    ctx.transform(1, skewAmount, 0, ySquash, 0, 0);
-    ctx.translate(-jetX, -jetY);
-    drawP80Side(ctx, jetX, jetY, jetSize, jetRotation, jetAlpha, 0, { gearDown: true });
-    ctx.restore();
+    // High-detail side profile with landing gear and rear-quarter perspective.
+    // The perspective option draws far-side elements (wing, stabilizer, tip tank)
+    // and a top fuselage surface strip to create actual 3D depth cues.
+    const depthT = Math.min(1, (jetY - horizonY) / (h * 0.45 - horizonY));
+    const perspAmt = 0.25 + depthT * 0.15;
+    drawP80Side(ctx, jetX, jetY, jetSize, jetRotation, jetAlpha, 0, { gearDown: true, perspective: perspAmt });
 
     // Taxi light (forward-pointing cone from nose, along heading)
     if (jp > 0.05) {

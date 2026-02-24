@@ -356,7 +356,7 @@ export function drawP80Side(
   rotation: number,
   alpha = 1,
   noseDown = 0,
-  opts: { noShadow?: boolean; gearDown?: boolean } = {},
+  opts: { noShadow?: boolean; gearDown?: boolean; perspective?: number } = {},
 ) {
   ctx.save();
   ctx.translate(x, y);
@@ -382,6 +382,53 @@ export function drawP80Side(
     ctx.ellipse(0, s * 0.22, s * 0.7, s * 0.025, 0, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
+  }
+
+  // ── Far-side perspective elements (rear-quarter elevated view) ──
+  const persp = opts.perspective ?? 0;
+  if (persp > 0) {
+    const farDim = alpha * persp;
+    const farOff = s * persp * 0.06;
+
+    // Far horizontal stabilizer
+    ctx.fillStyle = `rgba(45, 52, 68, ${farDim * 0.5})`;
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.52, -s * 0.01 - farOff);
+    ctx.quadraticCurveTo(-s * 0.65, -s * 0.06 - farOff, -s * 0.80, -s * 0.05 - farOff);
+    ctx.lineTo(-s * 0.92, -s * 0.03 - farOff);
+    ctx.lineTo(-s * 0.92, -s * 0.01 - farOff);
+    ctx.quadraticCurveTo(-s * 0.80, -s * 0.005 - farOff, -s * 0.52, s * 0.01 - farOff);
+    ctx.closePath();
+    ctx.fill();
+
+    // Far wing (planform visible above fuselage from elevated angle)
+    const fwTopY = -s * 0.12 - s * persp * 0.055;
+    const fwBotY = -s * 0.115;
+    const fwGrad = ctx.createLinearGradient(0, fwTopY, 0, fwBotY);
+    fwGrad.addColorStop(0, `rgba(38, 45, 60, ${farDim * 0.55})`);
+    fwGrad.addColorStop(1, `rgba(55, 62, 78, ${farDim * 0.45})`);
+    ctx.fillStyle = fwGrad;
+    ctx.beginPath();
+    ctx.moveTo(s * 0.14, fwBotY);
+    ctx.lineTo(s * 0.06, fwTopY);
+    ctx.lineTo(-s * 0.08, fwTopY);
+    ctx.lineTo(-s * 0.18, fwTopY + (fwBotY - fwTopY) * 0.3);
+    ctx.lineTo(-s * 0.26, fwBotY);
+    ctx.closePath();
+    ctx.fill();
+    // Far wing leading edge highlight
+    ctx.strokeStyle = `rgba(160, 170, 190, ${farDim * 0.2})`;
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    ctx.moveTo(s * 0.14, fwBotY);
+    ctx.lineTo(s * 0.06, fwTopY);
+    ctx.stroke();
+
+    // Far tip tank
+    ctx.fillStyle = `rgba(48, 55, 70, ${farDim * 0.5})`;
+    ctx.beginPath();
+    ctx.ellipse(-s * 0.04, fwTopY - s * 0.008, s * 0.09, s * 0.015 * persp, 0, 0, Math.PI * 2);
+    ctx.fill();
   }
 
   // ── Horizontal stabilizer (behind fuselage) ──
@@ -515,6 +562,24 @@ export function drawP80Side(
   ctx.bezierCurveTo(s * 0.60, -s * 0.102, s * 0.30, -s * 0.115, 0, -s * 0.118);
   ctx.bezierCurveTo(-s * 0.25, -s * 0.114, -s * 0.45, -s * 0.098, -s * 0.60, -s * 0.078);
   ctx.stroke();
+
+  // ── Top fuselage surface (elevated perspective) ──
+  if (persp > 0) {
+    const topA = alpha * persp * 0.25;
+    const topGrad = ctx.createLinearGradient(s * 0.6, -s * 0.13, -s * 0.5, -s * 0.10);
+    topGrad.addColorStop(0, `rgba(170, 180, 200, ${topA})`);
+    topGrad.addColorStop(0.5, `rgba(130, 140, 160, ${topA * 0.6})`);
+    topGrad.addColorStop(1, `rgba(90, 100, 120, ${topA * 0.3})`);
+    ctx.fillStyle = topGrad;
+    ctx.beginPath();
+    ctx.moveTo(s * 0.78, -s * 0.088);
+    ctx.bezierCurveTo(s * 0.55, -s * 0.108, s * 0.25, -s * 0.12, -s * 0.05, -s * 0.122);
+    ctx.bezierCurveTo(-s * 0.30, -s * 0.116, -s * 0.48, -s * 0.098, -s * 0.60, -s * 0.080);
+    ctx.bezierCurveTo(-s * 0.48, -s * 0.093, -s * 0.30, -s * 0.108, -s * 0.05, -s * 0.115);
+    ctx.bezierCurveTo(s * 0.25, -s * 0.112, s * 0.55, -s * 0.100, s * 0.78, -s * 0.080);
+    ctx.closePath();
+    ctx.fill();
+  }
 
   // ── Fuselage panel lines (many, for realism) ──
   ctx.strokeStyle = "rgba(0, 0, 0, 0.06)";
