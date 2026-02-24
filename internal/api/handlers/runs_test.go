@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -27,6 +28,7 @@ func newRunHandler(t *testing.T, mock pgxmock.PgxPoolIface) *RunHandler {
 		db.NewValidationStore(mock),
 		db.NewPullRequestStore(mock),
 		db.NewIssueStore(mock),
+		db.NewOrganizationStore(mock),
 		db.NewJobStore(mock),
 	)
 }
@@ -225,6 +227,51 @@ func triggerFixIssueMock(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
 }
 
+func triggerFixIssueAndOrgDefaultMock(mock pgxmock.PgxPoolIface, orgID uuid.UUID, defaultAgentType string) {
+	issueID := uuid.New()
+	now := time.Now()
+	settings := fmt.Sprintf(`{"default_agent_type":"%s"}`, defaultAgentType)
+
+	// Mock issue lookup
+	mock.ExpectQuery("SELECT").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
+				"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
+				"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
+				"created_at", "updated_at",
+			}).AddRow(
+				issueID, orgID, "ISSUE-1", "sentry", nil, nil,
+				"Test issue", nil, nil, "open", now, now,
+				1, 0, "medium", nil, "fp-1",
+				now, now,
+			),
+		)
+
+	// Mock org lookup for default agent type.
+	mock.ExpectQuery("SELECT .+ FROM organizations").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+				AddRow(orgID, "Acme", []byte(settings), now, now),
+		)
+
+	// Mock agent run create (9 named args)
+	runID := uuid.New()
+	mock.ExpectQuery("INSERT INTO agent_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
+
+	// Mock job enqueue (6 named args)
+	jobID := uuid.New()
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+}
+
 func TestRunHandler_TriggerFix(t *testing.T) {
 	t.Parallel()
 
@@ -237,12 +284,24 @@ func TestRunHandler_TriggerFix(t *testing.T) {
 		expectedBody string
 	}{
 		{
-			name:         "triggers fix with default agent type",
-			idParam:      "",
-			body:         "",
-			setupMock:    triggerFixIssueMock,
+			name:    "triggers fix with org default agent type when request omits agent_type",
+			idParam: "",
+			body:    "",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				triggerFixIssueAndOrgDefaultMock(mock, orgID, "gemini_cli")
+			},
 			expectedCode: http.StatusCreated,
-			expectedBody: "claude_code",
+			expectedBody: "gemini_cli",
+		},
+		{
+			name:    "falls back to codex when org default agent type is missing",
+			idParam: "",
+			body:    "",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				triggerFixIssueAndOrgDefaultMock(mock, orgID, "")
+			},
+			expectedCode: http.StatusCreated,
+			expectedBody: "codex",
 		},
 		{
 			name:         "triggers fix with gemini_cli agent type",
@@ -263,7 +322,7 @@ func TestRunHandler_TriggerFix(t *testing.T) {
 		{
 			name:         "triggers fix with high token mode",
 			idParam:      "",
-			body:         `{"token_mode":"high"}`,
+			body:         `{"agent_type":"codex","token_mode":"high"}`,
 			setupMock:    triggerFixIssueMock,
 			expectedCode: http.StatusCreated,
 			expectedBody: "high",
@@ -297,7 +356,7 @@ func TestRunHandler_TriggerFix(t *testing.T) {
 		{
 			name:    "rejects invalid token mode",
 			idParam: "",
-			body:    `{"token_mode":"extreme"}`,
+			body:    `{"agent_type":"codex","token_mode":"extreme"}`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
 				now := time.Now()
 				issueID := uuid.New()
@@ -739,7 +798,7 @@ func TestRunHandler_TriggerFix_InvalidAutonomyLevel(t *testing.T) {
 			),
 		)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/issues/"+issueID.String()+"/fix", strings.NewReader(`{"autonomy_level":"chaos"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/issues/"+issueID.String()+"/fix", strings.NewReader(`{"agent_type":"codex","autonomy_level":"chaos"}`))
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", issueID.String())
 	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)

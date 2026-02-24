@@ -18,6 +18,7 @@ type OrgSettings struct {
 	ProductDirection     string               `json:"product_direction"`
 	LLMModel             string               `json:"llm_model"`
 	AgentConfig          AgentEnvConfig       `json:"agent_config,omitempty"`
+	DefaultAgentType     string               `json:"default_agent_type,omitempty"`
 }
 
 // ConfidenceThresholds controls when to auto-proceed vs request human review.
@@ -40,6 +41,7 @@ const (
 	DefaultAggressiveness       = 5
 	DefaultMaxConcurrentRuns    = 3
 	DefaultMinPriorityThreshold = 30.0
+	DefaultDefaultAgentType     = "codex"
 
 	DefaultWeightCustomerImpact = 0.35
 	DefaultWeightSeverity       = 0.25
@@ -83,6 +85,9 @@ func ParseOrgSettings(raw json.RawMessage) OrgSettings {
 			AutoProceed: DefaultConfidenceAutoProceed,
 			HumanReview: DefaultConfidenceHumanReview,
 		}
+	}
+	if s.DefaultAgentType == "" {
+		s.DefaultAgentType = DefaultDefaultAgentType
 	}
 	return s
 }

@@ -1,9 +1,11 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"path"
 	"sync"
 
 	"github.com/google/uuid"
@@ -23,6 +25,11 @@ const (
 // GitHubTokenProvider abstracts retrieving a GitHub App installation token.
 type GitHubTokenProvider interface {
 	GetInstallationToken(ctx context.Context, installationID int64) (string, error)
+}
+
+// CodexAuthProvider abstracts retrieving valid ChatGPT OAuth tokens for Codex.
+type CodexAuthProvider interface {
+	GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAIChatGPTConfig, error)
 }
 
 // AgentRunStore defines the agent run DB operations needed by the orchestrator.
@@ -75,6 +82,7 @@ type Orchestrator struct {
 	orgs              OrgStore
 	jobs              JobStore
 	github            GitHubTokenProvider
+	codexAuth         CodexAuthProvider // can be nil
 	logger            zerolog.Logger
 	maxConcurrent     int
 	agentEnv          map[string]map[string]string
@@ -92,6 +100,7 @@ type OrchestratorConfig struct {
 	Orgs              OrgStore
 	Jobs              JobStore
 	GitHub            GitHubTokenProvider
+	CodexAuth         CodexAuthProvider // optional — enables ChatGPT OAuth for Codex agent
 	Logger            zerolog.Logger
 	MaxConcurrent     int
 
@@ -124,6 +133,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		orgs:              cfg.Orgs,
 		jobs:              cfg.Jobs,
 		github:            cfg.GitHub,
+		codexAuth:         cfg.CodexAuth,
 		logger:            cfg.Logger,
 		maxConcurrent:     maxConcurrent,
 		agentEnv:          agentEnv,
@@ -208,6 +218,14 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error
 	// Start with server-level defaults, then overlay org-level overrides.
 	sandboxCfg := DefaultSandboxConfig()
 	sandboxCfg.Env = o.resolveAgentEnv(ctx, run.OrgID, run.AgentType)
+	// Ensure HOME points to the sandbox workdir so CLI tools (e.g. Codex
+	// resolving ~/.codex/auth.json) find files written to the workdir.
+	if sandboxCfg.Env == nil {
+		sandboxCfg.Env = make(map[string]string)
+	}
+	if _, ok := sandboxCfg.Env["HOME"]; !ok {
+		sandboxCfg.Env["HOME"] = sandboxCfg.WorkDir
+	}
 	sandbox, err := o.provider.Create(ctx, sandboxCfg)
 	if err != nil {
 		o.failRun(ctx, run, fmt.Sprintf("create sandbox: %s", err))
@@ -219,7 +237,21 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error
 		}
 	}()
 
-	// 8. Clone repo into sandbox.
+	// 8. Inject Codex auth file if this is a codex agent run.
+	if run.AgentType == "codex" {
+		injected, err := o.injectCodexAuth(ctx, run.OrgID, sandbox)
+		if err != nil {
+			log.Warn().Err(err).Msg("codex auth injection failed, falling back to API key")
+		}
+		// Fail early if neither OAuth token nor API key is available.
+		hasAPIKey := sandboxCfg.Env["OPENAI_API_KEY"] != ""
+		if !hasAPIKey && !injected {
+			o.failRun(ctx, run, "no credentials configured for codex: connect ChatGPT or set an OPENAI_API_KEY in Settings")
+			return fmt.Errorf("no credentials for codex agent")
+		}
+	}
+
+	// 9. Clone repo into sandbox.
 	if repoURL != "" {
 		if err := o.provider.CloneRepo(ctx, sandbox, repoURL, branch, token); err != nil {
 			o.failRun(ctx, run, fmt.Sprintf("clone repo: %s", err))
@@ -227,7 +259,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error
 		}
 	}
 
-	// 9. Execute agent with log streaming.
+	// 10. Execute agent with log streaming.
 	logCh := make(chan LogEntry, 100)
 	var logWg sync.WaitGroup
 	logWg.Add(1)
@@ -240,7 +272,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error
 	close(logCh)
 	logWg.Wait()
 
-	// 10. Handle result.
+	// 11. Handle result.
 	if err != nil {
 		o.failRun(ctx, run, err.Error())
 		o.enqueueJob(ctx, run.OrgID, "agent", "analyze_failure", map[string]interface{}{
@@ -420,6 +452,56 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 		return nil
 	}
 	return merged
+}
+
+// injectCodexAuth writes a ~/.codex/auth.json file into the sandbox if
+// a ChatGPT OAuth token exists for this org. Returns (true, nil) if auth
+// was injected, (false, nil) if no OAuth token is available (allowing
+// fallback to OPENAI_API_KEY env var), or (false, err) on failure.
+func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox) (bool, error) {
+	if o.codexAuth == nil {
+		return false, nil
+	}
+
+	cfg, err := o.codexAuth.GetValidToken(ctx, orgID)
+	if err != nil {
+		return false, fmt.Errorf("get codex auth token: %w", err)
+	}
+	if cfg == nil {
+		// No OAuth token — not an error, agent will use API key.
+		return false, nil
+	}
+
+	authJSON, err := json.Marshal(map[string]interface{}{
+		"access_token":  cfg.AccessToken,
+		"refresh_token": cfg.RefreshToken,
+		"expires_at":    cfg.ExpiresAt.Format("2006-01-02T15:04:05Z"),
+	})
+	if err != nil {
+		return false, fmt.Errorf("marshal auth.json: %w", err)
+	}
+
+	// Write auth.json under the sandbox workdir/.codex. The sandbox env
+	// sets HOME to the workdir (see RunAgent step 7) so the Codex CLI
+	// resolves ~/.codex/auth.json to this path.
+	authDir := path.Join(sandbox.WorkDir, ".codex")
+	mkdirCmd := fmt.Sprintf("mkdir -p %s", authDir)
+
+	var mkdirOut, mkdirErr bytes.Buffer
+	if _, err := o.provider.Exec(ctx, sandbox, mkdirCmd, &mkdirOut, &mkdirErr); err != nil {
+		return false, fmt.Errorf("create .codex dir: %w", err)
+	}
+
+	authPath := authDir + "/auth.json"
+	if err := o.provider.WriteFile(ctx, sandbox, authPath, authJSON); err != nil {
+		return false, fmt.Errorf("write auth.json: %w", err)
+	}
+
+	o.logger.Debug().
+		Str("org_id", orgID.String()).
+		Msg("injected codex auth.json into sandbox")
+
+	return true, nil
 }
 
 func strPtr(s string) *string {
