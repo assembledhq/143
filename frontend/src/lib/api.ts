@@ -152,6 +152,11 @@ export const api = {
   integrations: {
     list: () => get<import('./types').ListResponse<import('./types').Integration>>('/api/v1/integrations'),
   },
+  codexAuth: {
+    initiate: () => post<import('./types').SingleResponse<import('./types').CodexDeviceAuth>>('/api/v1/settings/codex-auth/initiate'),
+    status: () => get<import('./types').SingleResponse<import('./types').CodexAuthStatus>>('/api/v1/settings/codex-auth/status'),
+    disconnect: () => post('/api/v1/settings/codex-auth/disconnect'),
+  },
   priority: {
     getForIssue: (issueId: string) => get<import('./types').SingleResponse<import('./types').PriorityScore>>(`/api/v1/issues/${issueId}/priority`),
     getComplexity: (issueId: string) => get<import('./types').SingleResponse<import('./types').ComplexityEstimate>>(`/api/v1/issues/${issueId}/complexity`),

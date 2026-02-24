@@ -12,11 +12,12 @@ import (
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/services/codexauth"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
 )
 
-func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) (*chi.Mux, error) {
+func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, codexAuthSvc *codexauth.Service) (*chi.Mux, error) {
 	// Create stores
 	orgStore := db.NewOrganizationStore(pool)
 	userStore := db.NewUserStore(pool)
@@ -83,6 +84,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) (*
 		validationStore,
 		pullRequestStore,
 		issueStore,
+		orgStore,
 		jobStore,
 	)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
@@ -90,6 +92,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) (*
 	credentialHandler := handlers.NewCredentialHandler(credentialStore)
 	reviewPatternHandler := handlers.NewReviewPatternHandler(reviewPatternStore, reviewCommentStore)
 	teamHandler := handlers.NewTeamHandler(userStore, sessionStore, invitationStore, orgStore, cfg.FrontendURL)
+
+	codexAuthHandler := handlers.NewCodexAuthHandler(codexAuthSvc)
 
 	r := chi.NewRouter()
 
@@ -183,7 +187,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger) (*
 			r.Put("/api/v1/settings/credentials/{provider}", credentialHandler.Update)
 			r.Delete("/api/v1/settings/credentials/{provider}", credentialHandler.Delete)
 
-			// Team management
+			// Codex (ChatGPT) OAuth device code auth
+			r.Post("/api/v1/settings/codex-auth/initiate", codexAuthHandler.Initiate)
+			r.Get("/api/v1/settings/codex-auth/status", codexAuthHandler.Status)
+			r.Post("/api/v1/settings/codex-auth/disconnect", codexAuthHandler.Disconnect)
+
+      // Team management
 			r.Get("/api/v1/team/members", teamHandler.ListMembers)
 			r.Patch("/api/v1/team/members/{id}/role", teamHandler.ChangeRole)
 			r.Delete("/api/v1/team/members/{id}", teamHandler.RemoveMember)

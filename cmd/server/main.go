@@ -15,12 +15,14 @@ import (
 
 	"github.com/assembledhq/143/internal/api"
 	"github.com/assembledhq/143/internal/config"
+	"github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/logging"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/agent/adapters"
 	"github.com/assembledhq/143/internal/services/agent/providers"
+	"github.com/assembledhq/143/internal/services/codexauth"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/prioritization"
 	"github.com/assembledhq/143/internal/services/validation"
@@ -41,7 +43,18 @@ func main() {
 	}
 	defer pool.Close()
 
-	router, err := api.NewRouter(cfg, pool, logger)
+	// Create codex auth service (shared between router and orchestrator).
+	var cryptoSvc *crypto.Service
+	if cfg.EncryptionMasterKey != "" {
+		cryptoSvc, err = crypto.NewService(cfg.EncryptionMasterKey)
+		if err != nil {
+			logger.Fatal().Err(err).Msg("failed to initialize crypto service")
+		}
+	}
+	credentialStore := db.NewOrgCredentialStore(pool, cryptoSvc)
+	codexAuthSvc := codexauth.NewService(credentialStore, logger)
+
+	router, err := api.NewRouter(cfg, pool, logger, codexAuthSvc)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}
@@ -75,7 +88,7 @@ func main() {
 		// Build Phase 3+ services if runtime dependencies are available.
 		var services *worker.Services
 		if canBuildServices(cfg, logger) {
-			services = buildServices(cfg, pool, logger, issueStore, agentRunStore,
+			services = buildServices(cfg, pool, logger, codexAuthSvc, issueStore, agentRunStore,
 				jobStore, orgStore, repoStore, validationStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore)
 		}
@@ -128,6 +141,7 @@ func buildServices(
 	cfg *config.Config,
 	pool *pgxpool.Pool,
 	logger zerolog.Logger,
+	codexAuthSvc *codexauth.Service,
 	issueStore *db.IssueStore,
 	agentRunStore *db.AgentRunStore,
 	jobStore *db.JobStore,
@@ -164,6 +178,7 @@ func buildServices(
 	agentAdapters := map[string]agent.AgentAdapter{
 		"claude_code": adapters.NewClaudeCodeAdapter(logger),
 		"gemini_cli":  adapters.NewGeminiCLIAdapter(logger),
+		"codex":       adapters.NewCodexAdapter(logger),
 	}
 
 	// Orchestrator.
@@ -180,6 +195,7 @@ func buildServices(
 		Orgs:              orgStore,
 		Jobs:              jobStore,
 		GitHub:            ghSvc,
+		CodexAuth:         codexAuthSvc,
 		Logger:            logger,
 		AgentEnv:          cfg.AgentEnv(),
 	})

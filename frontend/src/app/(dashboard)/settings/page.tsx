@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -13,7 +13,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Slider } from "@/components/ui/slider";
 import { IntegrationsCard } from "@/components/integrations-card";
 import { INTEGRATIONS } from "@/lib/integrations";
-import type { Organization, OrgSettings, SingleResponse } from "@/lib/types";
+import type { Organization, OrgSettings, SingleResponse, CodexDeviceAuth } from "@/lib/types";
 
 interface AgentEnvVar {
   name: string;
@@ -23,6 +23,15 @@ interface AgentEnvVar {
 }
 
 const AGENT_TYPES: { key: string; label: string; envVars: AgentEnvVar[] }[] = [
+  {
+    key: "codex",
+    label: "Codex",
+    envVars: [
+      { name: "OPENAI_API_KEY", label: "API Key", sensitive: true },
+      { name: "OPENAI_MODEL", label: "Model", placeholder: "e.g. codex-mini, o3" },
+      { name: "OPENAI_BASE_URL", label: "Base URL", placeholder: "Custom API endpoint (optional)" },
+    ],
+  },
   {
     key: "claude_code",
     label: "Claude Code",
@@ -38,15 +47,6 @@ const AGENT_TYPES: { key: string; label: string; envVars: AgentEnvVar[] }[] = [
     envVars: [
       { name: "GEMINI_API_KEY", label: "API Key", sensitive: true },
       { name: "GEMINI_MODEL", label: "Model", placeholder: "e.g. gemini-2.5-pro, gemini-2.5-flash" },
-    ],
-  },
-  {
-    key: "codex",
-    label: "Codex",
-    envVars: [
-      { name: "OPENAI_API_KEY", label: "API Key", sensitive: true },
-      { name: "OPENAI_MODEL", label: "Model", placeholder: "e.g. codex-mini, o3" },
-      { name: "OPENAI_BASE_URL", label: "Base URL", placeholder: "Custom API endpoint (optional)" },
     ],
   },
 ];
@@ -68,7 +68,163 @@ const DEFAULT_SETTINGS: Required<OrgSettings> = {
   min_priority_threshold: 20,
   product_direction: "",
   agent_config: {},
+  default_agent_type: "codex",
 };
+
+function DeviceCodeModal({ onClose }: { onClose: () => void }) {
+  const [deviceAuth, setDeviceAuth] = useState<CodexDeviceAuth | null>(null);
+  const [status, setStatus] = useState<string>("initiating");
+  const [error, setError] = useState<string>("");
+  const [timeLeft, setTimeLeft] = useState(0);
+  const pollRef = useRef<NodeJS.Timeout | null>(null);
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const onCloseRef = useRef(onClose);
+  const queryClient = useQueryClient();
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  const startAuth = useCallback(async () => {
+    try {
+      setStatus("initiating");
+      setError("");
+      const resp = await api.codexAuth.initiate();
+      setDeviceAuth(resp.data);
+      setTimeLeft(resp.data.expires_in);
+      setStatus("pending");
+    } catch {
+      setError("Failed to start authentication. Please try again.");
+      setStatus("error");
+    }
+  }, []);
+
+  useEffect(() => {
+    const id = setTimeout(() => {
+      void startAuth();
+    }, 0);
+    return () => clearTimeout(id);
+  }, [startAuth]);
+
+  useEffect(() => {
+    if (status !== "pending") return;
+
+    pollRef.current = setInterval(async () => {
+      try {
+        const resp = await api.codexAuth.status();
+        if (resp.data.status === "completed") {
+          setStatus("completed");
+          queryClient.invalidateQueries({ queryKey: ["codex-auth-status"] });
+          if (pollRef.current) clearInterval(pollRef.current);
+          if (timerRef.current) clearInterval(timerRef.current);
+          setTimeout(() => onCloseRef.current(), 1500);
+        } else if (resp.data.status === "expired") {
+          setStatus("expired");
+          setError("Code expired. Please try again.");
+          if (pollRef.current) clearInterval(pollRef.current);
+          if (timerRef.current) clearInterval(timerRef.current);
+        } else if (resp.data.status === "error") {
+          setStatus("error");
+          setError(resp.data.message || "Authentication failed.");
+          if (pollRef.current) clearInterval(pollRef.current);
+          if (timerRef.current) clearInterval(timerRef.current);
+        }
+      } catch {
+        // Ignore transient poll errors.
+      }
+    }, 3000);
+
+    timerRef.current = setInterval(() => {
+      setTimeLeft((t) => Math.max(0, t - 1));
+    }, 1000);
+
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, [status, queryClient]);
+
+  const minutes = Math.floor(timeLeft / 60);
+  const seconds = timeLeft % 60;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+      <div className="w-full max-w-md rounded-lg border bg-background p-6 shadow-lg">
+        <h3 className="text-lg font-medium">Connect your ChatGPT account</h3>
+
+        {status === "initiating" && (
+          <p className="mt-4 text-sm text-muted-foreground">Starting authentication...</p>
+        )}
+
+        {status === "pending" && deviceAuth && (
+          <div className="mt-4 space-y-4">
+            <div className="space-y-2">
+              <p className="text-sm text-muted-foreground">1. Open this link:</p>
+              <a
+                href={deviceAuth.verification_uri}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-sm font-medium text-primary underline"
+              >
+                {deviceAuth.verification_uri}
+              </a>
+            </div>
+
+            <div className="space-y-2">
+              <p className="text-sm text-muted-foreground">2. Enter this code:</p>
+              <div className="flex items-center gap-2">
+                <code className="rounded-md border bg-muted px-4 py-2 text-2xl font-mono font-bold tracking-widest">
+                  {deviceAuth.user_code}
+                </code>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => navigator.clipboard.writeText(deviceAuth.user_code)}
+                >
+                  Copy
+                </Button>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <p className="text-sm text-muted-foreground">Waiting for authentication...</p>
+              <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-primary transition-all duration-1000"
+                  style={{ width: `${deviceAuth ? Math.max(0, (timeLeft / deviceAuth.expires_in) * 100) : 0}%` }}
+                />
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Expires in {minutes}:{seconds.toString().padStart(2, "0")}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {status === "completed" && (
+          <div className="mt-4">
+            <p className="text-sm font-medium text-green-600">Connected successfully!</p>
+          </div>
+        )}
+
+        {(status === "error" || status === "expired") && (
+          <div className="mt-4 space-y-3">
+            <p className="text-sm text-destructive">{error}</p>
+            <Button size="sm" onClick={startAuth}>
+              Try Again
+            </Button>
+          </div>
+        )}
+
+        <div className="mt-6 flex justify-end">
+          <Button variant="outline" size="sm" onClick={onClose}>
+            {status === "completed" ? "Done" : "Cancel"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function SettingsPage() {
   const [github, sentry, linear] = INTEGRATIONS;
@@ -85,8 +241,16 @@ export default function SettingsPage() {
   });
   const serverAgentDefaults = agentDefaultsResponse?.data ?? {};
 
+  const { data: codexAuthStatusResp } = useQuery({
+    queryKey: ["codex-auth-status"],
+    queryFn: () => api.codexAuth.status(),
+    refetchInterval: false,
+  });
+  const codexAuthStatus = codexAuthStatusResp?.data;
+
   const orgSettings = (settings?.data?.settings ?? {}) as OrgSettings;
 
+  const [defaultAgentType, setDefaultAgentType] = useState(DEFAULT_SETTINGS.default_agent_type);
   const [autonomyLevel, setAutonomyLevel] = useState(DEFAULT_SETTINGS.autonomy_level);
   const [aggressiveness, setAggressiveness] = useState(String(DEFAULT_SETTINGS.execution_aggressiveness));
   const [maxConcurrent, setMaxConcurrent] = useState(String(DEFAULT_SETTINGS.max_concurrent_runs));
@@ -101,15 +265,15 @@ export default function SettingsPage() {
   const [agentConfig, setAgentConfig] = useState<Record<string, Record<string, string>>>({});
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "success" | "error">("idle");
+  const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
 
-  // Sync server data into form state during render (React-recommended
-  // pattern for adjusting state when external data changes, avoids the
-  // extra render cycle caused by setState-in-useEffect).
+  // Sync server data into form state.
   const [prevSettingsRef, setPrevSettingsRef] = useState<unknown>(undefined);
   const settingsData = settings?.data?.settings;
   if (settingsData && settingsData !== prevSettingsRef) {
     setPrevSettingsRef(settingsData);
     const s = orgSettings;
+    setDefaultAgentType(s.default_agent_type ?? DEFAULT_SETTINGS.default_agent_type);
     setAutonomyLevel(s.autonomy_level ?? DEFAULT_SETTINGS.autonomy_level);
     setAggressiveness(String(s.execution_aggressiveness ?? DEFAULT_SETTINGS.execution_aggressiveness));
     setMaxConcurrent(String(s.max_concurrent_runs ?? DEFAULT_SETTINGS.max_concurrent_runs));
@@ -139,6 +303,13 @@ export default function SettingsPage() {
     },
   });
 
+  const disconnectMutation = useMutation({
+    mutationFn: () => api.codexAuth.disconnect(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["codex-auth-status"] });
+    },
+  });
+
   const weightsSum =
     parseFloat(customerImpact || "0") +
     parseFloat(severity || "0") +
@@ -147,7 +318,6 @@ export default function SettingsPage() {
   const weightsValid = Math.abs(weightsSum - 1.0) < 0.01;
 
   function handleSave() {
-    // Only persist values that differ from the server default.
     const cleanedAgentConfig: Record<string, Record<string, string>> = {};
     for (const [agentKey, vars] of Object.entries(agentConfig)) {
       const filtered: Record<string, string> = {};
@@ -177,11 +347,15 @@ export default function SettingsPage() {
         },
         min_priority_threshold: parseInt(minThreshold, 10),
         product_direction: productDirection,
+        default_agent_type: defaultAgentType,
         ...(Object.keys(cleanedAgentConfig).length > 0 && { agent_config: cleanedAgentConfig }),
       },
     };
     mutation.mutate(payload);
   }
+
+  // Find the selected agent's config for rendering.
+  const selectedAgent = AGENT_TYPES.find((a) => a.key === defaultAgentType) ?? AGENT_TYPES[0];
 
   return (
     <div className="space-y-8">
@@ -230,6 +404,132 @@ export default function SettingsPage() {
             },
           ]}
         />
+      </section>
+
+      {/* Agent Setup — promoted from Advanced Settings */}
+      <section className="space-y-3">
+        <h2 className="text-[13px] font-medium text-foreground">Agent Setup</h2>
+        <Card>
+          <CardContent>
+            <div className="space-y-6">
+              <div className="space-y-3">
+                <Label>Default Agent</Label>
+                <RadioGroup
+                  value={defaultAgentType}
+                  onValueChange={(v) => setDefaultAgentType(v as OrgSettings["default_agent_type"] & string)}
+                  className="grid grid-cols-3 gap-3"
+                >
+                  {AGENT_TYPES.map((agent) => (
+                    <label
+                      key={agent.key}
+                      className={`relative flex cursor-pointer flex-col rounded-lg border p-3 transition-colors ${
+                        defaultAgentType === agent.key
+                          ? "border-primary bg-primary/5"
+                          : "border-input hover:bg-muted/50"
+                      }`}
+                    >
+                      <div className="flex items-center gap-2">
+                        <RadioGroupItem value={agent.key} />
+                        <span className="text-sm font-medium">{agent.label}</span>
+                      </div>
+                    </label>
+                  ))}
+                </RadioGroup>
+              </div>
+
+              {/* ChatGPT OAuth — shown when Codex is selected */}
+              {defaultAgentType === "codex" && (
+                <div className="space-y-4">
+                  <div className="rounded-lg border p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h4 className="text-sm font-medium">Sign in with ChatGPT</h4>
+                        <p className="text-xs text-muted-foreground">
+                          Use your ChatGPT subscription. Required for gpt-5.3-codex.
+                        </p>
+                      </div>
+                      <Badge variant="secondary">Recommended</Badge>
+                    </div>
+
+                    {codexAuthStatus?.status === "completed" ? (
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="h-2 w-2 rounded-full bg-green-500" />
+                          <span className="text-sm text-green-600">Connected</span>
+                        </div>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => disconnectMutation.mutate()}
+                          disabled={disconnectMutation.isPending}
+                        >
+                          Disconnect
+                        </Button>
+                      </div>
+                    ) : (
+                      <Button
+                        size="sm"
+                        onClick={() => setShowDeviceCodeModal(true)}
+                      >
+                        Sign in with ChatGPT
+                      </Button>
+                    )}
+                  </div>
+
+                  <div className="rounded-lg border p-4 space-y-3">
+                    <div>
+                      <h4 className="text-sm font-medium">API Key</h4>
+                      <p className="text-xs text-muted-foreground">
+                        Pay-as-you-go. Does not support gpt-5.3-codex.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Agent-specific env var config for selected agent */}
+              <div className="space-y-3">
+                {(() => {
+                  const serverVars = serverAgentDefaults[selectedAgent.key] ?? {};
+                  return selectedAgent.envVars.map((envVar) => {
+                    const serverDefault = serverVars[envVar.name] ?? "";
+                    const orgOverride = agentConfig[selectedAgent.key]?.[envVar.name] ?? "";
+                    const displayValue = orgOverride || serverDefault;
+                    const isServerDefault = !orgOverride && !!serverDefault;
+                    return (
+                      <div key={envVar.name} className="space-y-1">
+                        <div className="flex items-center justify-between">
+                          <Label htmlFor={`${selectedAgent.key}-${envVar.name}`} className="text-xs text-muted-foreground">
+                            {envVar.label}
+                          </Label>
+                          {isServerDefault && (
+                            <span className="text-[10px] text-muted-foreground">server default</span>
+                          )}
+                        </div>
+                        <Input
+                          id={`${selectedAgent.key}-${envVar.name}`}
+                          type={envVar.sensitive ? "password" : "text"}
+                          placeholder={envVar.placeholder ?? "Not set"}
+                          value={displayValue}
+                          className={isServerDefault ? "text-muted-foreground" : ""}
+                          onChange={(e) => {
+                            setAgentConfig((prev) => ({
+                              ...prev,
+                              [selectedAgent.key]: {
+                                ...prev[selectedAgent.key],
+                                [envVar.name]: e.target.value,
+                              },
+                            }));
+                          }}
+                        />
+                      </div>
+                    );
+                  });
+                })()}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
       </section>
 
       <section className="space-y-3">
@@ -487,13 +787,13 @@ export default function SettingsPage() {
               </Card>
             </div>
 
+            {/* Other agent configs (non-default) */}
             <div className="space-y-3">
-              <h3 className="text-[13px] font-medium text-foreground">Agent Configuration</h3>
+              <h3 className="text-[13px] font-medium text-foreground">Other Agent Configuration</h3>
               <p className="text-xs text-muted-foreground">
-                Override server-level agent credentials and model selection per agent.
-                Fields show the server default when no override is set.
+                Configure credentials for agents other than your default.
               </p>
-              {AGENT_TYPES.map((agent) => {
+              {AGENT_TYPES.filter((a) => a.key !== defaultAgentType).map((agent) => {
                 const serverVars = serverAgentDefaults[agent.key] ?? {};
                 const hasServerConfig = Object.keys(serverVars).length > 0;
                 return (
@@ -563,6 +863,10 @@ export default function SettingsPage() {
           <span className="text-sm text-destructive">Failed to save settings.</span>
         )}
       </div>
+
+      {showDeviceCodeModal && (
+        <DeviceCodeModal onClose={() => setShowDeviceCodeModal(false)} />
+      )}
     </div>
   );
 }
