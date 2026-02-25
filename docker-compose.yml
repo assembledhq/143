@@ -44,6 +44,7 @@ services:
       - .:/app
       - go_mod_cache:/go/pkg/mod
       - go_build_cache:/root/.cache/go-build
+      - go_bin_cache:/go/bin  # cache compiled binaries (e.g. air) across restarts
     deploy:
       resources:
         limits:
@@ -53,17 +54,32 @@ services:
   frontend:
     image: node:22-alpine
     working_dir: /app
-    command: sh -c "npm install && npm run dev"
+    # npm ci is faster than npm install and uses package-lock.json exactly.
+    # The node_modules volume persists packages across restarts so subsequent
+    # starts only verify the lockfile rather than re-downloading everything.
+    command: sh -c "npm ci && npm run dev"
     depends_on:
       - server
     environment:
       API_PROXY_TARGET: http://server:8080
+      NODE_ENV: development
+      # Cap the Node.js V8 heap so the process doesn't expand to fill all
+      # available container memory before triggering GC.
+      NODE_OPTIONS: "--max-old-space-size=512"
     ports:
       - "${FRONTEND_PORT:-3000}:3000"
     volumes:
       - ./frontend:/app
+      - frontend_node_modules:/app/node_modules  # persist node_modules across restarts
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "2.0"
 
 volumes:
   pgdata:
   go_mod_cache:
   go_build_cache:
+  go_bin_cache:            # persists compiled Go tool binaries (air, etc.)
+  frontend_node_modules:   # persists node_modules between container restarts
