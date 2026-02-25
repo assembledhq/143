@@ -1,4 +1,4 @@
-.PHONY: dev setup test test-coverage migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap secrets-setup secrets-encrypt secrets-decrypt secrets-edit
+.PHONY: dev dev-local dev-frontend-only setup test test-coverage migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap secrets-setup secrets-encrypt secrets-decrypt secrets-edit
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -12,6 +12,32 @@ dev:
 		exit 1; \
 	fi; \
 	docker compose up --build
+
+# Run the full stack natively without Docker — lowest resource footprint.
+# Requires Go, Node.js, and PostgreSQL installed locally (run: make setup first).
+# Run each command in a separate terminal:
+#   Terminal 1: make server-dev
+#   Terminal 2: make frontend-dev
+dev-local:
+	@echo "Run each of the following in a separate terminal:"
+	@echo ""
+	@echo "  Terminal 1 (backend):  make server-dev"
+	@echo "  Terminal 2 (frontend): make frontend-dev"
+	@echo ""
+	@echo "Both processes write to stdout in their own terminal."
+	@echo "Prerequisites: Go, Node.js, PostgreSQL (run 'make setup' first)."
+
+# Run only the Next.js frontend, proxying API calls to a remote backend.
+# Useful on low-resource machines or when you only need to work on the UI.
+# Usage: REMOTE_API_URL=https://staging.example.com make dev-frontend-only
+dev-frontend-only:
+	@if [ -z "$(REMOTE_API_URL)" ]; then \
+		echo "Error: REMOTE_API_URL is required."; \
+		echo ""; \
+		echo "Usage: REMOTE_API_URL=https://your-backend.example.com make dev-frontend-only"; \
+		exit 1; \
+	fi
+	cd frontend && API_PROXY_TARGET=$(REMOTE_API_URL) npm run dev
 
 setup:
 	./setup.sh
