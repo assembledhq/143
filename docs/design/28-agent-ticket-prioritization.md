@@ -93,6 +93,150 @@ Every ingested issue enqueues its own `prioritize` job, which scores it, estimat
 - **A new `pm_analyze` cron job** runs every N hours and is the main entry point for all work planning.
 - **Coding agents receive richer context** — the PM agent's suggested approach, cluster info, and risk assessment are injected into their prompts.
 
+## Product Context: What the PM Agent Needs to Know About You
+
+The PM agent's quality is directly proportional to how well it understands the org's goals, philosophy, and constraints. Today, `OrgSettings.ProductDirection` is a single free-text string — too vague for an agent making strategic decisions.
+
+Replace it with a structured `ProductContext` that captures the full picture an admin would give a new PM on day one:
+
+### `ProductContext` struct (replaces `ProductDirection` string)
+
+```go
+// ProductContext is the structured input that tells the PM agent who you are,
+// what you care about, and how you want work done. This is the single most
+// important configuration for PM agent quality — a PM without product context
+// is just a scoring function with extra steps.
+type ProductContext struct {
+    // Philosophy: how should the PM agent think about tradeoffs?
+    // This is the "personality" of the PM — it shapes every decision.
+    //
+    // Examples:
+    //   "We value simplicity above all else. The codebase should be small and
+    //    readable. Prefer deleting code over adding abstractions. If a fix
+    //    requires more than 50 lines, question whether the approach is right."
+    //
+    //   "We're building for enterprise — configurability and extensibility
+    //    matter more than minimalism. Every behavior should be overridable.
+    //    Edge cases matter because our customers hit all of them."
+    //
+    //   "We're a 3-person startup moving fast. Prefer working code over
+    //    perfect code. Skip edge cases that affect < 1% of users. Don't
+    //    gold-plate — ship and iterate."
+    Philosophy    string   `json:"philosophy"`
+
+    // Direction: what is the team focused on right now?
+    // This changes more frequently than philosophy (quarterly or monthly).
+    //
+    // Examples:
+    //   "Preparing for SOC2 audit — prioritize security and reliability."
+    //   "Launching payments v2 — billing module stability is critical."
+    //   "Reducing churn — focus on issues reported by paying customers."
+    Direction     string   `json:"direction"`
+
+    // FocusAreas: which parts of the codebase matter most right now?
+    // Issues in these areas get prioritized; the PM can also use this
+    // to give better approach hints (it knows where attention should go).
+    //
+    // Examples: ["payments", "onboarding", "API stability", "mobile app"]
+    FocusAreas    []string `json:"focus_areas,omitempty"`
+
+    // AvoidAreas: what should the agent NOT touch?
+    // Areas that are being rewritten, deprecated, or too risky for automation.
+    //
+    // Examples: ["legacy-auth (being rewritten)", "experimental-features"]
+    AvoidAreas    []string `json:"avoid_areas,omitempty"`
+
+    // FixStyle: what kind of fixes does the team prefer?
+    // Guides the PM's approach hints and the coding agent's behavior.
+    //
+    // Options:
+    //   "minimal"       — smallest possible diff, guard clauses, targeted patches
+    //   "thorough"      — fix root cause even if it means bigger changes, add tests
+    //   "conservative"  — prefer safe workarounds over risky root-cause fixes
+    FixStyle      string   `json:"fix_style,omitempty"`
+
+    // RiskTolerance: how much autonomy should the PM agent take?
+    // This is separate from the existing autonomy_level (which controls whether
+    // runs auto-trigger). Risk tolerance controls how the PM reasons about
+    // tradeoffs within its plan.
+    //
+    //   "low"    — only delegate high-confidence, low-complexity tasks
+    //   "medium" — delegate medium-confidence tasks, flag risks clearly
+    //   "high"   — delegate aggressively, accept that some fixes will need revision
+    RiskTolerance string   `json:"risk_tolerance,omitempty"`
+}
+```
+
+### How `ProductContext` flows into the PM prompt
+
+The PM agent receives `ProductContext` as a dedicated section at the top of its context, before the issue list:
+
+```
+## Product Context
+
+**Philosophy:** {philosophy}
+
+**Current direction:** {direction}
+
+**Focus areas:** {focus_areas}
+
+**Avoid areas:** {avoid_areas}
+
+**Fix style preference:** {fix_style}
+
+**Risk tolerance:** {risk_tolerance}
+```
+
+This shapes every decision the PM makes:
+- **Philosophy** determines *how* the PM thinks (minimal vs. thorough, fast vs. safe)
+- **Direction** determines *what* gets prioritized (security issues rise when preparing for SOC2)
+- **Focus/avoid areas** determine *where* the PM sends coding agents (and where it doesn't)
+- **Fix style** flows through to the approach hints the coding agents receive
+- **Risk tolerance** determines how aggressive the PM is with delegation
+
+### Why structured input, not auto-bootstrapped
+
+The PM agent can infer *what's broken* from the data (issue stats, failure patterns, occurrence trends). But it cannot infer *what the team cares about*. Product philosophy and strategic direction are fundamentally human inputs — they come from the founder's head, not from Sentry stack traces.
+
+The structured fields (with examples in the UI) make this fast to fill out — 5 minutes of admin time that dramatically improves every PM cycle.
+
+### Auto-bootstrapped context (supplements, doesn't replace)
+
+The PM agent also receives **auto-derived signals** that don't require user input. These are gathered from existing data at each PM cycle:
+
+| Signal | Source | What it tells the PM |
+|--------|--------|---------------------|
+| Failure patterns by repo/area | `agent_runs` grouped by `failure_category` | "The agent fails 80% of the time on repo X — deprioritize or flag for human" |
+| Trending issues | `issues.occurrence_count` delta over time | "This error went from 10/day to 500/day — it's getting worse" |
+| Reviewer friction areas | `review_patterns` grouped by category | "Reviewers keep requesting edge-case handling in the API module" |
+| Agent success rate by complexity | `agent_runs` joined with `complexity_estimates` | "Tier 1-2 issues succeed 85%, tier 3+ only 30%" |
+| Current workload | `agent_runs` in running/pending status | "2 of 3 slots are occupied, only delegate 1 task" |
+
+These auto-signals make the PM useful from day one even with minimal `ProductContext` input. But the PM gets dramatically better once the admin fills in philosophy + direction.
+
+### Settings UI for `ProductContext`
+
+The Settings page gains a "Product Context" section:
+
+- **Philosophy** — large textarea with placeholder examples
+- **Current Direction** — textarea with placeholder ("What is the team focused on this quarter?")
+- **Focus Areas** — tag input (type and press Enter)
+- **Avoid Areas** — tag input with warning styling
+- **Fix Style** — radio group: Minimal / Thorough / Conservative
+- **Risk Tolerance** — radio group: Low / Medium / High
+
+### Migration from `ProductDirection` string
+
+The existing `product_direction` string field maps to `ProductContext.Direction`. On first load, if `product_context` is null but `product_direction` is set, the system migrates it:
+
+```go
+if settings.ProductContext == nil && settings.ProductDirection != "" {
+    settings.ProductContext = &ProductContext{
+        Direction: settings.ProductDirection,
+    }
+}
+```
+
 ## Detailed Design
 
 ### 1. Batch Schedule: Simple Cron
@@ -197,9 +341,14 @@ type PMContext struct {
     RecentFailures   []FailureSummary  // last ~10 failures: why did the agent fail?
     RecentPRs        []PRSummary       // last ~20 PRs: merged? rejected? reverted?
 
-    // Strategic context
-    ProductDirection string            // admin-set product direction statement
+    // Strategic context (see ProductContext section above)
+    ProductContext   *ProductContext   // admin-set philosophy, direction, focus, risk
     OrgSettings      OrgSettingsSummary
+
+    // Auto-derived signals (no user input needed)
+    FailurePatterns  []FailurePatternSummary  // aggregated failure rates by repo/category
+    TrendingIssues   []TrendSummary           // issues with rapidly increasing occurrence_count
+    AgentSuccessRate map[string]float64       // success rate by complexity tier: "tier_1" -> 0.85
 
     // System constraints
     MaxConcurrentRuns int
@@ -240,6 +389,29 @@ understand what's happening in the codebase right now, and decide:
   3. What approach each coding agent should take
   4. What should be skipped or deferred, and why
 
+## Product Context
+
+You'll receive a "product_context" section describing the team's philosophy,
+current strategic direction, focus areas, and preferences. This is your most
+important input — it tells you how to think, not just what to look at.
+
+- **Philosophy** tells you the team's values (simplicity vs. configurability,
+  speed vs. correctness, etc.). Let it guide your approach hints. If the
+  philosophy says "prefer deleting code over adding abstractions", don't
+  recommend adding a new helper function.
+- **Direction** tells you what matters THIS quarter. Align your priorities.
+- **Focus areas** are where the team wants coding agents active. Prioritize
+  issues in these areas. Deprioritize issues outside them unless they're
+  critical.
+- **Avoid areas** are off-limits. Skip issues in these areas with a clear
+  reason, even if they have high severity.
+- **Fix style** tells you what kind of diffs to guide toward (minimal patches
+  vs. thorough root-cause fixes).
+- **Risk tolerance** tells you how aggressive to be with delegation.
+
+If product context is sparse or missing, fall back to data-driven defaults:
+prioritize by customer impact and severity, prefer high-confidence tasks.
+
 ## How to Think
 
 Think like a senior PM running a sprint planning meeting:
@@ -251,23 +423,34 @@ Think like a senior PM running a sprint planning meeting:
   the same code path, that's one work item, not five. Identify the root cause
   and fix it once.
 
-- PRIORITIZE by real impact. Consider:
+- PRIORITIZE by real impact, filtered through the product context. Consider:
   - How many customers are affected (and how badly)
-  - Whether it aligns with the product direction
-  - Whether it's getting worse (trending up in occurrences)
-  - Whether the coding agent can realistically fix it (based on past outcomes)
+  - Whether it aligns with the current direction and focus areas
+  - Whether it's getting worse (check the trending_issues data)
+  - Whether the coding agent can realistically fix it (check agent_success_rate
+    and failure_patterns — if this repo/complexity tier has a low success rate,
+    flag it or deprioritize)
   - Dependencies (does fixing X unblock Y?)
 
 - GIVE APPROACH HINTS. For each work item, tell the coding agent where to look
-  and what to be careful about. You're the PM briefing your engineer. Example:
+  and what to be careful about. Match the team's fix_style preference. You're
+  the PM briefing your engineer. Example:
   "The stack trace points to a nil pointer in handlers/payment.go:142. This is
   likely a missing nil check on the user's payment method. Be careful not to
   change the payment flow logic — just add the guard."
 
+- LEARN FROM HISTORY. You'll see recent outcomes (successes, failures, PR
+  rejections). Use them:
+  - If the agent failed on a similar issue recently, lower your confidence
+  - If a particular repo has high failure rates, flag it
+  - If PRs from the agent keep getting rejected for the same reason, adjust
+    your approach hints to address that pattern
+
 - SKIP things that shouldn't be auto-fixed:
+  - Issues in avoid_areas
   - Issues that need a human product decision
   - Duplicates of in-flight work
-  - Issues too complex for an AI agent (based on past failure patterns)
+  - Issues too complex for the agent (based on failure patterns and success rates)
   - Issues misaligned with product direction
 
 - RESPECT CONSTRAINTS. You have {available_slots} available agent slots
@@ -300,7 +483,7 @@ Respond with a JSON object:
   "skip": [
     {
       "issue_id": "<uuid>",
-      "reason": "<duplicate|needs_human_decision|too_complex|misaligned|already_in_flight>",
+      "reason": "<duplicate|needs_human_decision|too_complex|misaligned|in_avoid_area|already_in_flight>",
       "detail": "<explanation>"
     }
   ]
@@ -547,22 +730,25 @@ type AgentRun struct {
 
 ```sql
 CREATE TABLE pm_plans (
-    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    org_id           UUID NOT NULL REFERENCES organizations(id),
-    status           TEXT NOT NULL DEFAULT 'executing',   -- executing, completed, failed
-    analysis         TEXT,                                -- PM's situation analysis
-    tasks            JSONB NOT NULL DEFAULT '[]',         -- ordered task list
-    clusters         JSONB NOT NULL DEFAULT '[]',         -- issue clusters
-    skipped_issues   JSONB NOT NULL DEFAULT '[]',         -- skip list
-    issues_reviewed  INT NOT NULL DEFAULT 0,
-    token_usage      JSONB,
-    triggered_by     TEXT NOT NULL DEFAULT 'cron',        -- "cron" or "manual"
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    completed_at     TIMESTAMPTZ
+    id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id                   UUID NOT NULL REFERENCES organizations(id),
+    status                   TEXT NOT NULL DEFAULT 'executing',   -- executing, completed, failed
+    analysis                 TEXT,                                -- PM's situation analysis
+    tasks                    JSONB NOT NULL DEFAULT '[]',         -- ordered task list
+    clusters                 JSONB NOT NULL DEFAULT '[]',         -- issue clusters
+    skipped_issues           JSONB NOT NULL DEFAULT '[]',         -- skip list
+    issues_reviewed          INT NOT NULL DEFAULT 0,
+    product_context_snapshot JSONB,                               -- snapshot of ProductContext at plan time
+    token_usage              JSONB,
+    triggered_by             TEXT NOT NULL DEFAULT 'cron',        -- "cron" or "manual"
+    created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
+    completed_at             TIMESTAMPTZ
 );
 
 CREATE INDEX idx_pm_plans_org_created ON pm_plans(org_id, created_at DESC);
 ```
+
+The `product_context_snapshot` column captures the `ProductContext` that was active when the plan was generated. This makes plans self-contained and auditable — you can always see what product context led to a given set of decisions, even if the admin changes direction later.
 
 #### Alter Table: `agent_runs`
 
@@ -588,9 +774,12 @@ Existing endpoints are unchanged. The `GET /api/v1/runs/{id}` response gains the
 
 ```go
 // New fields in OrgSettings:
-PMScheduleHours  int    `json:"pm_schedule_hours"`  // hours between PM runs (default: 4)
-PMModel          string `json:"pm_model"`           // LLM model for PM agent (default: "sonnet")
+PMScheduleHours  int              `json:"pm_schedule_hours"`  // hours between PM runs (default: 4)
+PMModel          string           `json:"pm_model"`           // LLM model for PM agent (default: "sonnet")
+ProductContext   *ProductContext  `json:"product_context,omitempty"` // replaces product_direction string
 ```
+
+The existing `ProductDirection string` field is kept for backward compatibility but deprecated. `ParseOrgSettings()` migrates it into `ProductContext.Direction` when `ProductContext` is nil.
 
 ### 9. Frontend
 
@@ -645,17 +834,116 @@ Add PM configuration section: schedule interval, model selection.
 | `internal/models/models.go` | Add `PMPlanID`, `PMApproach`, `PMReasoning` fields to `AgentRun` |
 | `internal/cluster/scheduler_lock.go` | Add `pm_analyze` cron task |
 | `internal/api/router.go` | Add PM routes |
-| `internal/models/org_settings.go` | Add `PMScheduleHours`, `PMModel` settings |
+| `internal/models/org_settings.go` | Add `ProductContext` struct, `PMScheduleHours`, `PMModel` settings; migration from `ProductDirection` |
 | `cmd/server/main.go` | Wire up `pm.Service` |
+
+## PM Agent Quality: What Makes It Perform Well
+
+The PM agent is only as good as its inputs. This section addresses the key risks to PM quality and how to mitigate them.
+
+### Risk 1: Hallucinated approach hints
+
+The PM agent sees issue titles and truncated descriptions but doesn't have access to the actual codebase. Its approach hints ("look at handlers/payment.go:142") come from Sentry stack traces embedded in the issue data — but for Linear tickets without stack traces, the PM is guessing.
+
+**Mitigation:**
+- For Sentry issues: `IssueSummary.HasStackTrace = true` signals high-quality approach data. The PM should give specific file-level hints.
+- For Linear issues without stack traces: the PM should give directional hints ("this sounds like a data validation issue in the API layer") and set `confidence = "medium"` or lower. The coding agent will explore the codebase itself.
+- The PM prompt explicitly instructs: "If you don't have a stack trace, say so. Give directional guidance, not fake file paths."
+
+### Risk 2: Stale plans
+
+If the PM runs every 4 hours and a P0 Sentry error arrives at hour 0:05, it waits ~4 hours. Meanwhile, the admin sees it in the dashboard but there's no automated response.
+
+**Mitigation:**
+- The existing "Fix This" button on individual issues still works — it bypasses the PM and creates a direct agent run via `CheckAutoTrigger()`.
+- The manual `POST /pm/analyze` endpoint lets admins trigger an immediate PM cycle.
+- Consider adding a severity-based fast path in the future: if a `critical` severity issue arrives and no PM cycle is running, auto-trigger a mini PM cycle for just that issue. This is **not in v1** to keep complexity low.
+
+### Risk 3: Context window overflow
+
+With 100+ open issues, the PM context can get large. Each `IssueSummary` at ~200 chars is manageable, but combined with outcomes, failures, PRs, and product context, the full payload could hit 50K+ tokens.
+
+**Mitigation:**
+- **Two-tier summarization.** Top 30 issues by numeric score get full `IssueSummary` (200 chars). Remaining issues get a one-line summary (title + severity + occurrence count only, ~50 chars each).
+- **Recency windowing.** Only include outcomes/failures/PRs from the last 30 days. Older history is irrelevant to current planning.
+- **Cap at model limits.** If the assembled context exceeds 80% of the model's context window, truncate the lowest-priority issues. Log a warning so admins know the PM didn't see everything.
+- **Model choice matters.** Sonnet with 200K context handles most orgs. For very large orgs (500+ open issues), use a model with larger context or split into per-repo PM cycles.
+
+### Risk 4: Cold start (no historical outcomes)
+
+On day one, the PM has no completed runs, no failure patterns, no PR history. Its plans will be based purely on issue metadata + product context.
+
+**Mitigation:**
+- This is acceptable. On day one, the PM is essentially doing what the numeric formula does (prioritize by severity × customer impact), but with the added ability to cluster related issues and skip obviously misaligned ones.
+- The PM prompt includes: "If you have no historical outcome data, that's fine. Prioritize by customer impact and severity. Set confidence to 'medium' for all tasks until you have outcome data to calibrate against."
+- Quality improves rapidly: after ~10 agent runs (a few PM cycles), the PM has enough outcome data to start learning what works.
+
+### Risk 5: PM plans that are all skips
+
+If the product context is too restrictive (narrow focus areas, many avoid areas, low risk tolerance), the PM might skip everything and delegate nothing.
+
+**Mitigation:**
+- The PM prompt includes: "You must delegate at least 1 task per cycle if there are any open issues, even if confidence is medium. If all issues are in avoid areas or too complex, say so in your analysis and flag it for admin attention — but still recommend the single safest option."
+- The `Plan` tracks `issues_reviewed` vs. tasks delegated. If the ratio is consistently poor (>90% skip rate), surface a warning in the UI: "The PM agent is skipping most issues. Consider adjusting your product context."
+
+### Risk 6: Inconsistency between PM cycles
+
+The PM is non-deterministic. Issue A might be ranked #1 in one cycle and #3 in the next, with no underlying change. This is confusing for admins.
+
+**Mitigation:**
+- Store the `product_context_snapshot` on each plan so admins can see the inputs were the same.
+- The PM prompt includes the previous plan's task list as context: "Here was your previous plan. Explain any ranking changes." This encourages stability.
+- In the frontend, show a plan diff: highlight issues that moved up, down, or were newly added/removed between consecutive plans.
+
+## Plan Outcome Tracking (Feedback Loop)
+
+For the PM to improve over time, it needs to learn from what happened to its previous plans. This is the flywheel.
+
+### What to track
+
+After each PM cycle completes (all delegated tasks reach a terminal state), compute:
+
+```go
+type PlanOutcome struct {
+    PlanID           uuid.UUID
+    TasksTotal       int                 // how many tasks were in the plan
+    TasksDelegated   int                 // how many were delegated to agents
+    TasksSucceeded   int                 // agent run completed + validation passed + PR merged
+    TasksFailed      int                 // agent run failed or validation failed
+    TasksPRRejected  int                 // PR created but closed/rejected by reviewer
+    AvgConfidenceHit float64             // how often PM's confidence matched actual outcome
+    SkipAccuracy     float64             // % of skipped issues that are still open (skip was correct)
+}
+```
+
+### How to feed it back
+
+The next PM cycle receives the last 5 `PlanOutcome` summaries in its context:
+
+```
+## Your Recent Track Record
+
+Plan #42 (2 days ago): 3 tasks delegated, 2 succeeded, 1 failed (timeout on complex issue).
+  Your confidence was "high" for the failure — you overestimated.
+
+Plan #41 (3 days ago): 2 tasks delegated, 2 succeeded. You skipped issue X as "too complex"
+  but an admin manually fixed it in 1 line — the skip was wrong.
+
+Overall: 70% success rate on delegated tasks. Your "high confidence" predictions succeed 85%
+of the time. Your "medium confidence" predictions succeed 40%.
+```
+
+This self-calibration loop is the main mechanism for PM improvement. It's not needed in v1 but should be added early in v2.
 
 ## Migration Path
 
 ### Step 1: Add PM agent alongside existing system (no behavior change)
 
-- Add `pm_plans` table, `pm.Service`, API endpoints
+- Add `pm_plans` table, `pm.Service`, API endpoints, `ProductContext` to org settings
 - PM agent can be triggered manually via `POST /pm/analyze`
 - Plans are stored and viewable but don't create any agent runs
 - Existing per-issue prioritize → auto-trigger flow continues unchanged
+- Settings UI gains the Product Context section
 
 ### Step 2: Enable PM delegation
 
@@ -664,16 +952,19 @@ Add PM configuration section: schedule interval, model selection.
 - Add PM cron to scheduler
 - Now: PM agent is the only path to automated coding runs. Manual "Fix This" still works via direct agent run creation.
 
-### Step 3: Polish
+### Step 3: Polish and feedback loop
 
-- Frontend plan view page
+- Frontend plan view page with plan diffs between cycles
 - PM context display on run detail pages
-- Settings UI for schedule interval
+- Plan outcome tracking and feedback injection
+- Settings UI for schedule interval and model selection
 
-## Open Questions
+## Resolved Decisions
 
-1. **Model choice.** The PM agent benefits from strong reasoning (it's making strategic decisions, not just classifying). Recommendation: default to Sonnet-class. The cost is bounded — one LLM call per PM cycle, not per issue.
+1. **Model choice.** Default to Sonnet-class. The PM makes strategic decisions that benefit from strong reasoning, and the cost is bounded (one LLM call per cycle, not per issue). At 6 cycles/day with ~30K tokens each, that's ~$1-2/day at Sonnet pricing.
 
-2. **Issue volume.** With 100+ open issues, the context package could exceed model limits. Recommendation: summarize each issue to ~200 chars, include full detail only for the top 20 by numeric score. If still too large, paginate and have the PM focus on "new since last run" plus "still unresolved from previous plans."
+2. **Issue volume strategy.** Two-tier summarization: top 30 get full summaries (200 chars), remaining get one-liners. Recency window of 30 days for outcomes/PRs. Truncate if exceeding 80% of context window.
 
-3. **Plan staleness.** If a critical Sentry error arrives 5 minutes after the PM ran, it waits up to N hours. Recommendation: keep the manual `POST /pm/analyze` trigger. Admins can also still use the existing "Fix This" button to manually start an agent run for urgent issues outside the PM cycle.
+3. **Plan staleness.** Admins keep the manual trigger and the per-issue "Fix This" button. No automatic fast-path for critical issues in v1 — that's a future optimization that adds complexity without being proven necessary.
+
+4. **ProductContext vs. auto-bootstrap.** ProductContext (philosophy, direction, focus/avoid areas, fix style, risk tolerance) is user input. Auto-derived signals (failure patterns, trending issues, success rates) supplement it. The user input is what makes the PM a PM instead of a formula.
