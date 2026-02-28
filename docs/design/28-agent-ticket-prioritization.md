@@ -111,6 +111,8 @@ Replace it with a structured `ProductContext` that captures the full picture an 
 type ProductContext struct {
     // Philosophy: how should the PM agent think about tradeoffs?
     // This is the "personality" of the PM — it shapes every decision.
+    // Include your preferences on fix style (minimal vs. thorough),
+    // risk appetite, code quality standards, etc.
     //
     // Examples:
     //   "We value simplicity above all else. The codebase should be small and
@@ -147,25 +149,6 @@ type ProductContext struct {
     //
     // Examples: ["legacy-auth (being rewritten)", "experimental-features"]
     AvoidAreas    []string `json:"avoid_areas,omitempty"`
-
-    // FixStyle: what kind of fixes does the team prefer?
-    // Guides the PM's approach hints and the coding agent's behavior.
-    //
-    // Options:
-    //   "minimal"       — smallest possible diff, guard clauses, targeted patches
-    //   "thorough"      — fix root cause even if it means bigger changes, add tests
-    //   "conservative"  — prefer safe workarounds over risky root-cause fixes
-    FixStyle      string   `json:"fix_style,omitempty"`
-
-    // RiskTolerance: how much autonomy should the PM agent take?
-    // This is separate from the existing autonomy_level (which controls whether
-    // runs auto-trigger). Risk tolerance controls how the PM reasons about
-    // tradeoffs within its plan.
-    //
-    //   "low"    — only delegate high-confidence, low-complexity tasks
-    //   "medium" — delegate medium-confidence tasks, flag risks clearly
-    //   "high"   — delegate aggressively, accept that some fixes will need revision
-    RiskTolerance string   `json:"risk_tolerance,omitempty"`
 }
 ```
 
@@ -183,18 +166,12 @@ The PM agent receives `ProductContext` as a dedicated section at the top of its 
 **Focus areas:** {focus_areas}
 
 **Avoid areas:** {avoid_areas}
-
-**Fix style preference:** {fix_style}
-
-**Risk tolerance:** {risk_tolerance}
 ```
 
 This shapes every decision the PM makes:
-- **Philosophy** determines *how* the PM thinks (minimal vs. thorough, fast vs. safe)
+- **Philosophy** determines *how* the PM thinks — values, tradeoff preferences, fix style, risk appetite. It's the single most expressive field.
 - **Direction** determines *what* gets prioritized (security issues rise when preparing for SOC2)
 - **Focus/avoid areas** determine *where* the PM sends coding agents (and where it doesn't)
-- **Fix style** flows through to the approach hints the coding agents receive
-- **Risk tolerance** determines how aggressive the PM is with delegation
 
 ### Why structured input, not auto-bootstrapped
 
@@ -204,28 +181,23 @@ The structured fields (with examples in the UI) make this fast to fill out — 5
 
 ### Auto-bootstrapped context (supplements, doesn't replace)
 
-The PM agent also receives **auto-derived signals** that don't require user input. These are gathered from existing data at each PM cycle:
+The PM agent also receives **raw outcome data** that it can reason over directly — no pre-computed aggregates. Since the PM runs as a full agent with codebase access, it's capable of drawing its own conclusions from raw data:
 
-| Signal | Source | What it tells the PM |
-|--------|--------|---------------------|
-| Failure patterns by repo/area | `agent_runs` grouped by `failure_category` | "The agent fails 80% of the time on repo X — deprioritize or flag for human" |
-| Trending issues | `issues.occurrence_count` delta over time | "This error went from 10/day to 500/day — it's getting worse" |
-| Reviewer friction areas | `review_patterns` grouped by category | "Reviewers keep requesting edge-case handling in the API module" |
-| Agent success rate by complexity | `agent_runs` joined with `complexity_estimates` | "Tier 1-2 issues succeed 85%, tier 3+ only 30%" |
-| Current workload | `agent_runs` in running/pending status | "2 of 3 slots are occupied, only delegate 1 task" |
+- **Recent run outcomes** (last ~20): success/failure, failure category, confidence score, which issue. The PM can spot patterns itself ("3 of the last 5 failures were in repo X").
+- **Recent PR outcomes** (last ~20): merged/rejected/reverted, reviewer comments. The PM can see what reviewers are pushing back on.
+- **In-flight runs**: what's currently being worked on, so the PM doesn't duplicate effort.
+- **Issue timestamps**: `first_seen`, `last_seen`, and `occurrence_count` on each issue let the PM see trends directly.
 
-These auto-signals make the PM useful from day one even with minimal `ProductContext` input. But the PM gets dramatically better once the admin fills in philosophy + direction.
+These raw signals make the PM useful from day one even with minimal `ProductContext` input. But the PM gets dramatically better once the admin fills in philosophy + direction.
 
 ### Settings UI for `ProductContext`
 
 The Settings page gains a "Product Context" section:
 
-- **Philosophy** — large textarea with placeholder examples
+- **Philosophy** — large textarea with placeholder examples ("Tell the PM how you think about tradeoffs")
 - **Current Direction** — textarea with placeholder ("What is the team focused on this quarter?")
 - **Focus Areas** — tag input (type and press Enter)
 - **Avoid Areas** — tag input with warning styling
-- **Fix Style** — radio group: Minimal / Thorough / Conservative
-- **Risk Tolerance** — radio group: Low / Medium / High
 
 ### Migration from `ProductDirection` string
 
@@ -429,6 +401,8 @@ The PM agent sees everything relevant to making decisions:
 
 ```go
 // PMContext is the full picture the PM agent reasons over.
+// Kept deliberately lean — the PM agent has codebase access and can
+// derive patterns itself. We provide raw data, not pre-computed derivatives.
 type PMContext struct {
     // What needs attention
     OpenIssues       []IssueSummary    // all issues with status "open" or "triaged"
@@ -437,18 +411,11 @@ type PMContext struct {
     InFlightRuns     []RunSummary      // agent runs in "pending" or "running" status
 
     // What happened recently (learning from outcomes)
-    RecentOutcomes   []OutcomeSummary  // last ~20 completed runs: did the fix work?
-    RecentFailures   []FailureSummary  // last ~10 failures: why did the agent fail?
+    RecentOutcomes   []OutcomeSummary  // last ~20 completed runs: success/failure + reasoning
     RecentPRs        []PRSummary       // last ~20 PRs: merged? rejected? reverted?
 
     // Strategic context (see ProductContext section above)
-    ProductContext   *ProductContext   // admin-set philosophy, direction, focus, risk
-    OrgSettings      OrgSettingsSummary
-
-    // Auto-derived signals (no user input needed)
-    FailurePatterns  []FailurePatternSummary  // aggregated failure rates by repo/category
-    TrendingIssues   []TrendSummary           // issues with rapidly increasing occurrence_count
-    AgentSuccessRate map[string]float64       // success rate by complexity tier: "tier_1" -> 0.85
+    ProductContext   *ProductContext   // admin-set philosophy, direction, focus areas
 
     // System constraints
     MaxConcurrentRuns int
@@ -456,7 +423,6 @@ type PMContext struct {
 }
 
 // IssueSummary is a compact representation of an issue for the PM prompt.
-// Full raw data is too large — we summarize to ~200 chars per issue.
 type IssueSummary struct {
     ID                    string    `json:"id"`
     Source                string    `json:"source"`     // "sentry" or "linear"
@@ -468,8 +434,7 @@ type IssueSummary struct {
     FirstSeenAt           string    `json:"first_seen"`
     LastSeenAt            string    `json:"last_seen"`
     Tags                  []string  `json:"tags,omitempty"`
-    CurrentScore          *float64  `json:"current_priority_score,omitempty"`
-    HasStackTrace         bool      `json:"has_stack_trace"` // Sentry issues with stack traces are easier to fix
+    HasStackTrace         bool      `json:"has_stack_trace"`
 }
 ```
 
@@ -527,18 +492,16 @@ current strategic direction, focus areas, and preferences. This is your most
 important input — it tells you how to think, not just what to look at.
 
 - **Philosophy** tells you the team's values (simplicity vs. configurability,
-  speed vs. correctness, etc.). Let it guide your approach hints. If the
-  philosophy says "prefer deleting code over adding abstractions", don't
-  recommend adding a new helper function.
+  speed vs. correctness, etc.). It may include preferences on fix style,
+  risk appetite, and code quality standards. Let it guide your approach hints.
+  If the philosophy says "prefer deleting code over adding abstractions",
+  don't recommend adding a new helper function.
 - **Direction** tells you what matters THIS quarter. Align your priorities.
 - **Focus areas** are where the team wants coding agents active. Prioritize
   issues in these areas. Deprioritize issues outside them unless they're
   critical.
 - **Avoid areas** are off-limits. Skip issues in these areas with a clear
   reason, even if they have high severity.
-- **Fix style** tells you what kind of diffs to guide toward (minimal patches
-  vs. thorough root-cause fixes).
-- **Risk tolerance** tells you how aggressive to be with delegation.
 
 If product context is sparse or missing, fall back to data-driven defaults:
 prioritize by customer impact and severity, prefer high-confidence tasks.
@@ -1103,4 +1066,6 @@ This self-calibration loop is the main mechanism for PM improvement. It's not ne
 
 3. **Plan staleness.** Admins keep the manual trigger and the per-issue "Fix This" button. No automatic fast-path for critical issues in v1 — that's a future optimization that adds complexity without being proven necessary.
 
-4. **ProductContext vs. auto-bootstrap.** ProductContext (philosophy, direction, focus/avoid areas, fix style, risk tolerance) is user input. Auto-derived signals (failure patterns, trending issues, success rates) supplement it. The user input is what makes the PM a PM instead of a formula.
+4. **ProductContext vs. auto-bootstrap.** ProductContext (philosophy, direction, focus/avoid areas) is user input. Raw outcome data (recent runs, PRs, in-flight work) is auto-included for the PM to reason over. No pre-computed aggregates — the PM agent is smart enough to spot patterns in raw data, and pre-computing biases its reasoning.
+
+5. **Keep ProductContext lean.** Four fields: philosophy, direction, focus areas, avoid areas. Fix style and risk tolerance are subsumed by philosophy (e.g., "we prefer minimal diffs" or "we move fast and accept revisions"). Fewer knobs = less admin friction = more likely to actually get filled in.
