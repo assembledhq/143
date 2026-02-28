@@ -292,7 +292,7 @@ Single system of record. Bundled in Docker Compose for local dev, swappable to m
 | 22 | [Notification System](22-notifications.md) | Event taxonomy, multi-channel delivery, user preferences, escalation | Draft |
 | 23 | [Auto-Closing Feedback Loops](23-auto-closing-feedback-loops.md) | Self-tuning loops for complexity calibration, agent defaults, context, conventions | Draft |
 | 24 | [Design Resolutions](24-design-resolutions.md) | Cross-document clarifications, conflict resolutions, decision flowcharts | Draft |
-| 28 | [Agent-Driven Ticket Prioritization](28-agent-ticket-prioritization.md) | AI Product Manager triage agent, batch prioritization, work plan execution | Draft |
+| 28 | [AI Product Manager Agent](28-agent-ticket-prioritization.md) | Batch PM agent that analyzes all issues, produces prioritized work plans, and delegates to coding agents | Draft |
 
 # Build Order
 

@@ -1,547 +1,679 @@
-# Design: Agent-Driven Ticket Prioritization ("AI Product Manager")
+# Design: AI Product Manager Agent
 
-This document describes how to restructure 143.dev so that an LLM-powered **triage agent** acts as an autonomous product manager — analyzing all incoming Sentry, Linear, and GitHub issues in aggregate, reasoning about patterns, dependencies, and business impact, and producing a prioritized work plan that the coding agents then execute.
+This document describes how to restructure 143.dev so that the **main loop** is an LLM-powered Product Manager (PM) agent that runs on a batch schedule, analyzes all accumulated Sentry errors and Linear tickets, reasons about what matters most, and delegates work to coding agents.
 
 ## Problem Statement
 
-The current system processes tickets **individually and reactively**: each ingested issue gets a numeric priority score, a complexity estimate, and — if it clears the auto-trigger gates — an agent run. This works, but it has three limitations:
+The current system is **reactive and per-ticket**: each ingested issue immediately gets a numeric priority score, a complexity estimate, and — if it passes the auto-trigger gates — spawns a coding agent run. This has three problems:
 
-1. **No cross-ticket reasoning.** A cluster of 5 Sentry errors sharing the same root cause gets scored 5 separate times. The system doesn't see that fixing one underlying service timeout would resolve all five.
-2. **No strategic context.** The numeric score (customer impact × severity × recency + direction alignment) cannot reason about things like "we shipped a refactor to the payments module last week and 3 of these 8 tickets are regression artifacts from that deploy."
-3. **No workload planning.** The system makes per-ticket go/no-go decisions but never produces a plan like "these 3 issues are related, tackle them together in this order, and skip this one because it's a known flaky test."
+1. **No cross-ticket reasoning.** Five Sentry errors sharing the same root cause get five separate scores and five separate agent runs instead of one coordinated fix.
+2. **No strategic thinking.** A numeric formula (`customer_impact × severity × recency`) can't reason about things like "3 of these 8 tickets are regressions from last week's payments refactor — fix the root cause, not the symptoms."
+3. **No workload planning.** The system never says "do A first because it unblocks B, skip C because it's a known flaky test, and cluster D+E+F into one fix."
 
-## Proposed Architecture
+## Current vs. Proposed Architecture
 
 ### Current Flow (per-ticket, reactive)
 
 ```
-Webhook/Poll → Ingest → Normalize → Upsert Issue → [per issue] Prioritize → Estimate Complexity → Auto-Trigger → Run Agent
+Webhook → Ingest → Upsert Issue → [immediately, per-issue] Prioritize → Auto-Trigger → Run Coding Agent
 ```
 
-### New Flow (batch-aware, agent-driven)
+Every ingested issue enqueues its own `prioritize` job, which scores it, estimates complexity, and possibly spawns a coding agent. Each issue is evaluated in isolation.
+
+### Proposed Flow (batch, PM-agent-driven)
 
 ```
-                                                    ┌─────────────────────────────────────┐
-Webhook/Poll → Ingest → Normalize → Upsert Issue ──┤                                     │
-                                                    │  Triage Queue (accumulator)          │
-                                                    │  (issues table, status = "open")     │
-                                                    └──────────────┬──────────────────────┘
-                                                                   │
-                                                         trigger: timer / batch threshold
-                                                                   │
-                                                                   ▼
-                                                    ┌──────────────────────────────────────┐
-                                                    │  TRIAGE AGENT (AI Product Manager)   │
-                                                    │                                      │
-                                                    │  Inputs:                             │
-                                                    │   • All open/triaged issues          │
-                                                    │   • Recent agent run outcomes         │
-                                                    │   • PR merge/rejection history        │
-                                                    │   • Org settings + product direction  │
-                                                    │   • Repo context quality scores       │
-                                                    │   • Current in-flight agent runs      │
-                                                    │   • Failure patterns & learnings      │
-                                                    │                                      │
-                                                    │  Outputs:                            │
-                                                    │   • Prioritized work plan (ordered)   │
-                                                    │   • Issue clusters (related tickets)  │
-                                                    │   • Skip recommendations + reasoning  │
-                                                    │   • Risk assessment per issue          │
-                                                    │   • Suggested approach per issue       │
-                                                    └──────────────┬───────────────────────┘
-                                                                   │
-                                                                   ▼
-                                                    ┌──────────────────────────────────────┐
-                                                    │  PLAN EXECUTION                      │
-                                                    │                                      │
-                                                    │  For each item in plan (in order):   │
-                                                    │   1. Update issue status → triaged    │
-                                                    │   2. Store triage reasoning            │
-                                                    │   3. Check gates (autonomy,           │
-                                                    │      aggressiveness, concurrency)     │
-                                                    │   4. Enqueue run_agent with approach   │
-                                                    │      context from triage agent         │
-                                                    └──────────────────────────────────────┘
+                                     Webhooks still fire in real-time
+                                     ┌─────────────────────────────────────────────┐
+  Sentry webhook ──────────────────▶ │                                             │
+  Linear webhook ──────────────────▶ │  Ingestion (unchanged)                      │
+  GitHub webhook ──────────────────▶ │  Normalize → Upsert into issues table       │
+  Polling workers ─────────────────▶ │  (status = "open")                          │
+                                     └──────────────────────┬──────────────────────┘
+                                                            │
+                                              Issues accumulate in DB
+                                                            │
+                                     ┌──────────────────────┴──────────────────────┐
+                                     │                                             │
+                                     │  BATCH CRON: every N hours (e.g. every 4h)  │
+                                     │  Enqueues a "pm_analyze" job per org         │
+                                     │                                             │
+                                     └──────────────────────┬──────────────────────┘
+                                                            │
+                                                            ▼
+                              ┌─────────────────────────────────────────────────────┐
+                              │                                                     │
+                              │  PM AGENT  (the "brain" — runs as an LLM call)      │
+                              │                                                     │
+                              │  Reads:                                             │
+                              │   • All open/triaged issues (Sentry + Linear)       │
+                              │   • In-flight agent runs (what's already being      │
+                              │     worked on)                                      │
+                              │   • Recent agent run outcomes (successes, failures)  │
+                              │   • Recent PR outcomes (merged, rejected, reverted) │
+                              │   • Org product direction + settings                │
+                              │   • Failure patterns (what the agent struggles with) │
+                              │                                                     │
+                              │  Produces:                                          │
+                              │   • Situation analysis ("here's what's going on")   │
+                              │   • Prioritized task list with reasoning            │
+                              │   • Issue clusters (shared root cause)              │
+                              │   • Approach hints per task (for coding agents)     │
+                              │   • Skip list with reasons                          │
+                              │   • Risk flags                                      │
+                              │                                                     │
+                              └───────────────────────┬─────────────────────────────┘
+                                                      │
+                                                      ▼
+                              ┌─────────────────────────────────────────────────────┐
+                              │                                                     │
+                              │  DELEGATION: PM agent's plan → coding agent runs    │
+                              │                                                     │
+                              │  For each task in the plan (respecting concurrency  │
+                              │  limits):                                           │
+                              │   1. Mark issues as "triaged"                       │
+                              │   2. Create AgentRun with PM's approach hints       │
+                              │   3. Enqueue run_agent job                          │
+                              │                                                     │
+                              │  Skip entries → log reasoning, leave as "open"      │
+                              │  or mark "wont_fix" per PM recommendation           │
+                              │                                                     │
+                              └─────────────────────────────────────────────────────┘
 ```
 
-### Key Design Principle: Webhooks Stay, the Main Loop Changes
+### What Stays the Same
 
-**Ingestion is unchanged.** Sentry/Linear/GitHub webhooks still fire, normalize, and upsert issues exactly as today. The change is what happens *after* ingestion:
+- **All webhook handling.** Sentry, Linear, and GitHub webhooks still fire and ingest issues in real-time. The ingestion pipeline (`service.go`, adapters, normalization, dedup) is untouched.
+- **The coding agent pipeline.** Once a `run_agent` job is enqueued, everything downstream is identical: orchestrator → sandbox → execute → validate → open PR.
+- **The existing prioritization service.** Kept for manual "Reprioritize" button and dashboard score badges. It just no longer auto-triggers coding runs.
 
-- **Before:** Each ingested issue immediately enqueues its own `prioritize` job.
-- **After:** Ingested issues land in the issues table with `status = "open"` as usual, but instead of a per-issue `prioritize` job, the system accumulates issues and periodically runs a **batch triage** via an LLM agent that sees the full picture.
+### What Changes
+
+- **The `prioritize` job no longer auto-triggers `run_agent`.** Ingestion still enqueues `prioritize` for scoring/display, but `CheckAutoTrigger()` is removed from the automated flow. The PM agent owns that decision now.
+- **A new `pm_analyze` cron job** runs every N hours and is the main entry point for all work planning.
+- **Coding agents receive richer context** — the PM agent's suggested approach, cluster info, and risk assessment are injected into their prompts.
 
 ## Detailed Design
 
-### 1. Triage Trigger Strategy
+### 1. Batch Schedule: Simple Cron
 
-The triage agent runs when **any** of these conditions are met:
+The PM agent runs on a straightforward cron schedule. No complex trigger logic.
 
-| Trigger | Condition | Rationale |
-|---------|-----------|-----------|
-| **Timer** | Every 15 minutes (configurable via `triage_interval` in org settings) | Ensures regular cadence even during quiet periods |
-| **Batch threshold** | 5+ new issues since last triage (configurable via `triage_batch_size`) | Don't wait 15 min if a flood of errors arrives |
-| **Manual** | Admin clicks "Run Triage" in the UI or calls `POST /api/v1/triage/run` | On-demand when the admin wants a fresh plan |
-| **Settings change** | Admin updates product direction, weights, or autonomy level | Re-triage with new strategic context |
+```
+┌─────────────────────────────────────────────────────┐
+│  Scheduler (existing scheduler_lock.go)             │
+│                                                     │
+│  Every N hours (configurable per org, default: 4h): │
+│    For each org with active integrations:            │
+│      Enqueue "pm_analyze" job                       │
+│                                                     │
+│  Also runs on-demand via:                           │
+│    POST /api/v1/pm/analyze (admin-only)             │
+│                                                     │
+└─────────────────────────────────────────────────────┘
+```
 
-Implementation: A new `triage` job type with a scheduler rule. The ingestion service increments a per-org counter in the `triage_state` table; a scheduler check compares the counter against the batch threshold.
+**Why a simple cron instead of threshold-based triggers:**
+- Easier to reason about and debug ("the PM runs at 8am, 12pm, 4pm, 8pm")
+- Batching over hours gives the PM agent more data to reason about (patterns emerge from clusters, not single tickets)
+- Avoids the complexity of counter-based triggers, race conditions, and "how often is too often" tuning
+- Admins can always trigger manually when something urgent comes in
 
-### 2. Triage Agent: The AI Product Manager
+**Org setting:** `pm_schedule_hours` (default: `4`). The scheduler checks `last_pm_run_at + pm_schedule_hours < now()` for each org.
 
-#### New Service: `internal/services/triage/service.go`
+### 2. The PM Agent
+
+The PM agent is a single LLM call (not a sandbox execution — it doesn't write code). It receives a context package and returns a structured JSON plan.
+
+#### New Service: `internal/services/pm/service.go`
 
 ```go
-package triage
+package pm
 
-// TriageService orchestrates the AI product manager triage cycle.
-type TriageService struct {
-    issues           issueStore
-    priorities       priorityScoreStore
-    complexity       complexityEstimateStore
-    agentRuns        agentRunStore
-    pullRequests     pullRequestStore
-    orgs             orgStore
-    repos            repositoryStore
-    jobs             jobStore
-    triageState      triageStateStore
-    llm              llm.Client
-    logger           zerolog.Logger
+// Service is the AI Product Manager. It analyzes accumulated issues,
+// reasons about priorities and patterns, and produces a work plan
+// that gets delegated to coding agents.
+type Service struct {
+    issues       issueStore         // fetch open/triaged issues
+    agentRuns    agentRunStore      // fetch in-flight and recent runs
+    pullRequests prStore            // fetch recent PR outcomes
+    orgs         orgStore           // fetch org settings + product direction
+    jobs         jobStore           // enqueue run_agent jobs
+    plans        planStore          // persist PM plans
+    llm          llm.Client         // the LLM backing the PM agent
+    logger       zerolog.Logger
 }
 
-// RunTriage is the main entry point. It:
-//  1. Gathers all context (open issues, recent outcomes, org settings)
-//  2. Calls the LLM with a structured prompt
-//  3. Parses the triage plan
-//  4. Persists the plan and updates issue statuses
-//  5. Enqueues agent runs for top-priority items
-func (s *TriageService) RunTriage(ctx context.Context, orgID uuid.UUID) (*TriagePlan, error) {
-    // ... see detailed flow below
+// Analyze is the main entry point. It:
+//  1. Gathers full context for the org
+//  2. Calls the LLM with a PM-framed prompt
+//  3. Parses the structured plan
+//  4. Persists the plan
+//  5. Delegates work items to coding agents
+func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger string) (*Plan, error) {
+    // Step 1: Gather context
+    pmCtx, err := s.gatherContext(ctx, orgID)
+    if err != nil {
+        return nil, fmt.Errorf("gather context: %w", err)
+    }
+
+    // Step 2: Call LLM
+    plan, err := s.callPMAgent(ctx, pmCtx)
+    if err != nil {
+        return nil, fmt.Errorf("pm agent call: %w", err)
+    }
+
+    // Step 3: Persist plan
+    plan.OrgID = orgID
+    plan.TriggeredBy = trigger
+    if err := s.plans.Create(ctx, plan); err != nil {
+        return nil, fmt.Errorf("persist plan: %w", err)
+    }
+
+    // Step 4: Delegate to coding agents
+    if err := s.executePlan(ctx, orgID, plan); err != nil {
+        return nil, fmt.Errorf("execute plan: %w", err)
+    }
+
+    return plan, nil
 }
 ```
 
-#### Context Gathering (Step 1)
+#### Context Gathering
 
-The triage agent receives a **context package** assembled from multiple sources:
+The PM agent sees everything relevant to making decisions:
 
 ```go
-type TriageContext struct {
-    // All open issues that haven't been resolved or dismissed.
-    OpenIssues           []models.Issue           // status in ("open", "triaged")
+// PMContext is the full picture the PM agent reasons over.
+type PMContext struct {
+    // What needs attention
+    OpenIssues       []IssueSummary    // all issues with status "open" or "triaged"
 
-    // Issues currently being worked on by coding agents.
-    InFlightRuns         []models.AgentRun        // status in ("pending", "running")
+    // What's already happening
+    InFlightRuns     []RunSummary      // agent runs in "pending" or "running" status
 
-    // Recent outcomes to learn from.
-    RecentCompletedRuns  []AgentRunSummary        // last 20 completed runs with outcome
-    RecentFailedRuns     []AgentRunSummary        // last 10 failed runs with failure category
+    // What happened recently (learning from outcomes)
+    RecentOutcomes   []OutcomeSummary  // last ~20 completed runs: did the fix work?
+    RecentFailures   []FailureSummary  // last ~10 failures: why did the agent fail?
+    RecentPRs        []PRSummary       // last ~20 PRs: merged? rejected? reverted?
 
-    // PR outcomes — what got merged, what got rejected.
-    RecentPROutcomes     []PROutcomeSummary       // last 20 PRs with merge/close status
+    // Strategic context
+    ProductDirection string            // admin-set product direction statement
+    OrgSettings      OrgSettingsSummary
 
-    // Org-level strategic context.
-    ProductDirection     string                   // from org settings
-    AutonomyLevel        string                   // manual / auto_simple / auto_all
-    Aggressiveness       int                      // 1-4
+    // System constraints
+    MaxConcurrentRuns int
+    CurrentRunCount   int              // how many slots are available right now
+}
 
-    // Existing priority scores (for comparison / delta reasoning).
-    ExistingScores       map[uuid.UUID]float64    // issue_id -> current score
-
-    // Failure learnings — patterns of what the agent struggles with.
-    FailurePatterns      []FailurePatternSummary  // aggregated failure categories
-
-    // Repo context quality — so the agent knows where it has good context.
-    RepoContextQuality   map[uuid.UUID]float64    // repo_id -> quality score
+// IssueSummary is a compact representation of an issue for the PM prompt.
+// Full raw data is too large — we summarize to ~200 chars per issue.
+type IssueSummary struct {
+    ID                    string    `json:"id"`
+    Source                string    `json:"source"`     // "sentry" or "linear"
+    Title                 string    `json:"title"`
+    Description           string    `json:"description"` // truncated to 200 chars
+    Severity              string    `json:"severity"`
+    OccurrenceCount       int       `json:"occurrences"`
+    AffectedCustomerCount int       `json:"affected_customers"`
+    FirstSeenAt           string    `json:"first_seen"`
+    LastSeenAt            string    `json:"last_seen"`
+    Tags                  []string  `json:"tags,omitempty"`
+    CurrentScore          *float64  `json:"current_priority_score,omitempty"`
+    HasStackTrace         bool      `json:"has_stack_trace"` // Sentry issues with stack traces are easier to fix
 }
 ```
 
-#### LLM Prompt (Step 2)
+#### LLM Prompt
 
-The triage agent uses a structured system prompt that frames it as a product manager:
-
-```
-You are an AI Product Manager for a software engineering team. Your job is to
-analyze all incoming tickets (Sentry errors, Linear issues, customer reports),
-understand the current state of the codebase and recent engineering outcomes, and
-produce a prioritized work plan.
-
-You are NOT writing code. You are deciding WHAT should be worked on, in WHAT
-ORDER, and WHY.
-
-## Your Decision Framework
-
-1. **Cluster related issues.** Multiple tickets may share a root cause. Group
-   them and treat the cluster as one work item.
-
-2. **Assess fixability.** Given recent agent outcomes (successes, failures, PR
-   rejections), estimate whether the agent can realistically fix this issue.
-   Consider:
-   - Complexity (single file vs. architectural change)
-   - Repo context quality (well-documented repos succeed more)
-   - Similar past attempts (did a similar fix fail before?)
-
-3. **Prioritize by impact.** Consider:
-   - Customer impact (affected users × severity)
-   - Business alignment with product direction
-   - Recency and momentum (is this getting worse?)
-   - Dependencies (does fixing A unblock B?)
-
-4. **Respect constraints.** The team has a concurrency limit of {max_concurrent}
-   parallel agent runs. Plan within that budget.
-
-5. **Recommend an approach.** For each work item, provide:
-   - Which issue(s) it addresses
-   - Suggested approach (where to look, what to change)
-   - Risk assessment (what could go wrong)
-   - Confidence level (high/medium/low that the agent can handle this)
-
-6. **Flag items to skip.** Not everything should be auto-fixed. Flag issues that:
-   - Need human product decisions
-   - Are duplicates of in-flight work
-   - Are too complex for the current agent capabilities
-   - Are misaligned with product direction
-
-Respond with a JSON object following this exact schema: ...
-```
-
-#### Triage Plan Output (Step 3)
+The PM agent prompt frames it as a product manager running a planning session:
 
 ```go
-// TriagePlan is the structured output from the triage agent.
-type TriagePlan struct {
-    ID                uuid.UUID           `json:"id" db:"id"`
-    OrgID             uuid.UUID           `json:"org_id" db:"org_id"`
-    Status            string              `json:"status" db:"status"` // "draft", "approved", "executing", "completed"
+const pmSystemPrompt = `You are an AI Product Manager running a planning session for an autonomous
+software engineering team. Your team consists of AI coding agents that can fix
+bugs and implement small features.
 
-    // The ordered work items the agent recommends tackling.
-    WorkItems         []TriageWorkItem    `json:"work_items"`
+Your job is to look at all the incoming work (Sentry errors, Linear tickets),
+understand what's happening in the codebase right now, and decide:
+  1. What should be worked on next, and in what order
+  2. Which issues are related and should be tackled together
+  3. What approach each coding agent should take
+  4. What should be skipped or deferred, and why
 
-    // Issues the agent recommends skipping with reasoning.
-    SkippedIssues     []TriageSkipEntry   `json:"skipped_issues"`
+## How to Think
 
-    // High-level analysis and patterns the agent noticed.
-    AnalysisSummary   string              `json:"analysis_summary"`
+Think like a senior PM running a sprint planning meeting:
 
-    // Clusters of related issues the agent identified.
-    IssueClusters     []IssueCluster      `json:"issue_clusters"`
+- START by analyzing the situation. What patterns do you see? Are there clusters
+  of related errors? Is something getting worse? Did a recent deploy break things?
 
-    // Metadata.
-    IssuesAnalyzed    int                 `json:"issues_analyzed"`
-    TokenUsage        json.RawMessage     `json:"token_usage"`
-    ModelUsed         string              `json:"model_used"`
-    CreatedAt         time.Time           `json:"created_at" db:"created_at"`
-}
+- CLUSTER related issues. If 5 Sentry errors all point to the same service or
+  the same code path, that's one work item, not five. Identify the root cause
+  and fix it once.
 
-type TriageWorkItem struct {
-    Rank              int                 `json:"rank"`         // 1 = highest priority
-    IssueIDs          []uuid.UUID         `json:"issue_ids"`    // may be multiple if clustered
-    PrimaryIssueID    uuid.UUID           `json:"primary_issue_id"`
-    Title             string              `json:"title"`        // agent's summary
-    Reasoning         string              `json:"reasoning"`    // why this is prioritized here
-    SuggestedApproach string              `json:"suggested_approach"` // hints for the coding agent
-    RiskAssessment    string              `json:"risk_assessment"`
-    EstimatedTier     int                 `json:"estimated_tier"`     // 1-5 complexity
-    Confidence        string              `json:"confidence"`         // high / medium / low
-    Action            string              `json:"action"`             // "auto_fix", "fix_with_review", "needs_human"
-}
+- PRIORITIZE by real impact. Consider:
+  - How many customers are affected (and how badly)
+  - Whether it aligns with the product direction
+  - Whether it's getting worse (trending up in occurrences)
+  - Whether the coding agent can realistically fix it (based on past outcomes)
+  - Dependencies (does fixing X unblock Y?)
 
-type TriageSkipEntry struct {
-    IssueID    uuid.UUID `json:"issue_id"`
-    Reason     string    `json:"reason"`     // "duplicate", "needs_product_decision", "too_complex", "misaligned", "already_in_flight"
-    Detail     string    `json:"detail"`     // human-readable explanation
-}
+- GIVE APPROACH HINTS. For each work item, tell the coding agent where to look
+  and what to be careful about. You're the PM briefing your engineer. Example:
+  "The stack trace points to a nil pointer in handlers/payment.go:142. This is
+  likely a missing nil check on the user's payment method. Be careful not to
+  change the payment flow logic — just add the guard."
 
-type IssueCluster struct {
-    ClusterID    string       `json:"cluster_id"`
-    RootCause    string       `json:"root_cause"`    // agent's hypothesis
-    IssueIDs     []uuid.UUID  `json:"issue_ids"`
-    FixStrategy  string       `json:"fix_strategy"`  // "fix root cause first, others resolve automatically"
-}
+- SKIP things that shouldn't be auto-fixed:
+  - Issues that need a human product decision
+  - Duplicates of in-flight work
+  - Issues too complex for an AI agent (based on past failure patterns)
+  - Issues misaligned with product direction
+
+- RESPECT CONSTRAINTS. You have {available_slots} available agent slots
+  (out of {max_concurrent} total). Don't plan more work than you have capacity for.
+
+## Output Format
+
+Respond with a JSON object:
+{
+  "analysis": "<2-3 paragraph situation analysis: what patterns you see, what's urgent, what's trending>",
+  "tasks": [
+    {
+      "rank": 1,
+      "issue_ids": ["<uuid>", ...],
+      "title": "<your summary of the work item>",
+      "reasoning": "<why this is priority #1>",
+      "approach": "<specific guidance for the coding agent: where to look, what to change, what to watch out for>",
+      "risk": "<what could go wrong>",
+      "complexity": "<trivial|simple|moderate|complex>",
+      "confidence": "<high|medium|low — can the agent handle this?>"
+    }
+  ],
+  "clusters": [
+    {
+      "issue_ids": ["<uuid>", ...],
+      "root_cause": "<your hypothesis about the shared root cause>",
+      "strategy": "<fix root cause in issue X, others will resolve>"
+    }
+  ],
+  "skip": [
+    {
+      "issue_id": "<uuid>",
+      "reason": "<duplicate|needs_human_decision|too_complex|misaligned|already_in_flight>",
+      "detail": "<explanation>"
+    }
+  ]
+}`
 ```
 
-### 3. Plan Persistence and Execution
+The user prompt contains the serialized `PMContext` as JSON.
 
-#### New DB Table: `triage_plans`
-
-```sql
-CREATE TABLE triage_plans (
-    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    org_id            UUID NOT NULL REFERENCES organizations(id),
-    status            TEXT NOT NULL DEFAULT 'draft',    -- draft, approved, executing, completed, superseded
-    work_items        JSONB NOT NULL DEFAULT '[]',
-    skipped_issues    JSONB NOT NULL DEFAULT '[]',
-    issue_clusters    JSONB NOT NULL DEFAULT '[]',
-    analysis_summary  TEXT,
-    issues_analyzed   INT NOT NULL DEFAULT 0,
-    token_usage       JSONB,
-    model_used        TEXT,
-    triggered_by      TEXT NOT NULL,                    -- "timer", "batch_threshold", "manual", "settings_change"
-    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-    completed_at      TIMESTAMPTZ
-);
-
-CREATE INDEX idx_triage_plans_org_status ON triage_plans(org_id, status);
-```
-
-#### New DB Table: `triage_state`
-
-Tracks per-org triage state for trigger logic:
-
-```sql
-CREATE TABLE triage_state (
-    org_id              UUID PRIMARY KEY REFERENCES organizations(id),
-    last_triage_at      TIMESTAMPTZ,
-    last_triage_plan_id UUID REFERENCES triage_plans(id),
-    issues_since_triage INT NOT NULL DEFAULT 0,        -- counter reset after each triage
-    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-```
-
-#### Execution Flow
-
-After the triage agent produces a plan:
-
-1. **Auto-execute mode** (default for `auto_all` autonomy): The plan is immediately executed.
-   - For each work item in rank order (up to concurrency limit):
-     - Update issue status to `triaged`
-     - Store the triage reasoning on the issue (new `triage_reasoning` column or in a separate table)
-     - Create an `AgentRun` with the `suggested_approach` injected into the prompt context
-     - Enqueue `run_agent` job
-   - Skip entries: update issues with skip reason, optionally mark `wont_fix`
-
-2. **Review mode** (for `manual` or `auto_simple` autonomy): The plan is stored as `draft` and surfaces in the UI for admin approval.
-   - Admin can:
-     - Approve the full plan → executes as above
-     - Approve individual items → cherry-pick which to run
-     - Edit items → modify approach, reorder
-     - Dismiss items → skip with reason
-   - UI shows the plan as a draggable, interactive list
-
-3. **Superseding**: When a new triage runs, any previous `draft` or `executing` plan for the org is marked `superseded`. Only one active plan per org at a time.
-
-### 4. Changes to Existing Components
-
-#### Ingestion Service (`internal/services/ingestion/service.go`)
-
-**Change**: After upserting an issue, instead of enqueuing a `prioritize` job, increment the triage counter.
+#### Plan Output Types
 
 ```go
-// Before:
-dedupeKey := fmt.Sprintf("prioritize:%s", issue.ID.String())
-_, _ = s.jobStore.Enqueue(ctx, orgID, "default", "prioritize", ...)
-
-// After:
-if err := s.triageState.IncrementIssueCounter(ctx, orgID); err != nil {
-    s.logger.Warn().Err(err).Msg("failed to increment triage counter")
+// Plan is the PM agent's output — a prioritized, reasoned work plan.
+type Plan struct {
+    ID            uuid.UUID       `json:"id" db:"id"`
+    OrgID         uuid.UUID       `json:"org_id" db:"org_id"`
+    Status        string          `json:"status" db:"status"` // "executing", "completed", "failed"
+    Analysis      string          `json:"analysis" db:"analysis"`
+    Tasks         []Task          `json:"tasks"`
+    Clusters      []Cluster       `json:"clusters"`
+    SkippedIssues []SkipEntry     `json:"skipped_issues"`
+    IssuesReviewed int            `json:"issues_reviewed" db:"issues_reviewed"`
+    TokenUsage    json.RawMessage `json:"token_usage,omitempty" db:"token_usage"`
+    TriggeredBy   string          `json:"triggered_by" db:"triggered_by"` // "cron" or "manual"
+    CreatedAt     time.Time       `json:"created_at" db:"created_at"`
+    CompletedAt   *time.Time      `json:"completed_at,omitempty" db:"completed_at"`
 }
-// The triage scheduler checks this counter and triggers when threshold is met.
+
+// Task is a single work item the PM agent wants a coding agent to tackle.
+type Task struct {
+    Rank       int         `json:"rank"`
+    IssueIDs   []uuid.UUID `json:"issue_ids"`   // may be multiple if clustered
+    Title      string      `json:"title"`        // PM's summary
+    Reasoning  string      `json:"reasoning"`    // why it's at this rank
+    Approach   string      `json:"approach"`     // guidance for the coding agent
+    Risk       string      `json:"risk"`
+    Complexity string      `json:"complexity"`   // trivial, simple, moderate, complex
+    Confidence string      `json:"confidence"`   // high, medium, low
+
+    // Set during execution
+    AgentRunID *uuid.UUID  `json:"agent_run_id,omitempty"` // linked once delegated
+    Status     string      `json:"status"`                 // "pending", "delegated", "skipped_capacity"
+}
+
+// Cluster groups related issues the PM agent identified as sharing a root cause.
+type Cluster struct {
+    IssueIDs  []uuid.UUID `json:"issue_ids"`
+    RootCause string      `json:"root_cause"`
+    Strategy  string      `json:"strategy"`
+}
+
+// SkipEntry is an issue the PM agent recommends not working on, with reasoning.
+type SkipEntry struct {
+    IssueID uuid.UUID `json:"issue_id"`
+    Reason  string    `json:"reason"`
+    Detail  string    `json:"detail"`
+}
 ```
 
-**Note**: The per-issue `prioritize` job handler is **kept** as a fallback and for manual reprioritize requests via the API. The triage agent's work plan subsumes its role for the automated flow.
+### 3. Delegation: PM Plan → Coding Agent Runs
 
-#### Worker Handlers (`internal/worker/handlers.go`)
-
-**Add**: New `triage` job handler that calls `TriageService.RunTriage()`.
+After the PM agent produces a plan, the service executes it by creating coding agent runs:
 
 ```go
-w.Register("triage", newTriageHandler(stores, services, logger))
+// executePlan takes the PM's task list and delegates to coding agents.
+func (s *Service) executePlan(ctx context.Context, orgID uuid.UUID, plan *Plan) error {
+    org, _ := s.orgs.GetByID(ctx, orgID)
+    settings := models.ParseOrgSettings(org.Settings)
+
+    maxConcurrent := settings.MaxConcurrentRuns
+    if maxConcurrent <= 0 {
+        maxConcurrent = 3
+    }
+
+    running, _ := s.agentRuns.CountRunningByOrg(ctx, orgID)
+    available := maxConcurrent - running
+
+    delegated := 0
+    for i := range plan.Tasks {
+        task := &plan.Tasks[i]
+
+        if delegated >= available {
+            task.Status = "skipped_capacity"
+            continue
+        }
+
+        // Skip low-confidence tasks unless autonomy is "auto_all"
+        if task.Confidence == "low" && settings.AutonomyLevel != "auto_all" {
+            task.Status = "skipped_capacity"
+            continue
+        }
+
+        // Create the agent run with PM context injected
+        primaryIssueID := task.IssueIDs[0]
+        run := &models.AgentRun{
+            IssueID:       primaryIssueID,
+            OrgID:         orgID,
+            AgentType:     settings.DefaultAgentType,
+            Status:        "pending",
+            AutonomyLevel: settings.AutonomyLevel,
+            TokenMode:     tokenModeFromComplexity(task.Complexity),
+            PMPlanID:      &plan.ID,
+            PMApproach:    &task.Approach,
+            PMReasoning:   &task.Reasoning,
+        }
+        if err := s.agentRuns.Create(ctx, run); err != nil {
+            s.logger.Error().Err(err).Msg("failed to create agent run from PM plan")
+            continue
+        }
+
+        // Mark issues as triaged
+        for _, issueID := range task.IssueIDs {
+            _ = s.issues.UpdateStatus(ctx, orgID, issueID, "triaged")
+        }
+
+        // Enqueue the coding agent job
+        s.enqueueRunAgent(ctx, orgID, run.ID)
+        task.AgentRunID = &run.ID
+        task.Status = "delegated"
+        delegated++
+    }
+
+    // Update the plan with delegation results
+    return s.plans.Update(ctx, plan)
+}
 ```
 
-**Add**: New `execute_triage_plan` job handler that processes an approved plan.
+### 4. Injecting PM Context into Coding Agents
 
-```go
-w.Register("execute_triage_plan", newExecuteTriagePlanHandler(stores, services, logger))
-```
+When the orchestrator runs a coding agent, it checks if the run has PM context and injects it into the prompt.
 
-#### Agent Orchestrator (`internal/services/agent/orchestrator.go`)
-
-**Change**: `AgentInput` gains a `TriageContext` field so the coding agent receives the triage agent's suggested approach and cluster context.
+#### Change to `AgentInput` (`internal/services/agent/adapter.go`)
 
 ```go
 type AgentInput struct {
     Issue              *models.Issue
     RepoURL            string
     RepoBranch         string
-    OrgSettings        *models.OrgSettings
+    OrgSettings        json.RawMessage
     TokenMode          string
     ComplexityEstimate *ComplexityEstimate
+    ContextDocs        []string
     RevisionContext    *RevisionContext
-    // NEW: Context from the triage agent's analysis
-    TriageContext      *TriageWorkItemContext
+    // NEW: PM agent's guidance for this specific task
+    PMContext          *PMTaskContext
 }
 
-type TriageWorkItemContext struct {
-    SuggestedApproach  string     // "Look at the timeout handling in pkg/http/client.go..."
-    RiskAssessment     string     // "This touches the payment flow — be extra careful..."
-    RelatedIssueIDs    []uuid.UUID // Other issues in the same cluster
-    ClusterRootCause   string     // "All 3 errors stem from a missing nil check in..."
+// PMTaskContext carries the PM agent's analysis into the coding agent's prompt.
+type PMTaskContext struct {
+    Approach       string      // "The stack trace points to handlers/payment.go:142..."
+    Risk           string      // "Be careful not to change the payment flow logic"
+    Reasoning      string      // "This is P1 because it affects 2000 customers/day"
+    RelatedIssues  []string    // titles of other issues in the same cluster
+    RootCause      string      // "All 3 errors stem from a missing nil check on..."
 }
 ```
 
-The Claude Code adapter's `PreparePrompt()` injects this context into the system prompt when present.
+The Claude Code adapter's `PreparePrompt()` injects this as an additional section when present:
 
-#### Scheduler (`internal/cluster/scheduler_lock.go`)
+```
+## Product Manager Analysis
 
-**Add**: A new scheduled job that checks triage trigger conditions:
+The PM agent has analyzed this issue and recommends the following approach:
+
+**Why this is a priority:** {reasoning}
+
+**Suggested approach:** {approach}
+
+**Risk to watch for:** {risk}
+
+**Related issues (same root cause):**
+{related_issues}
+
+**Root cause hypothesis:** {root_cause}
+```
+
+### 5. Changes to Existing Components
+
+#### Ingestion Service (`internal/services/ingestion/service.go`)
+
+**Minimal change.** Ingestion still enqueues `prioritize` jobs for scoring/display (the dashboard badges still work). The only difference: `prioritize` no longer calls `CheckAutoTrigger()`.
 
 ```go
-// Every minute, check if any org needs a triage run:
-//  - Timer: last_triage_at + triage_interval < now()
-//  - Batch: issues_since_triage >= triage_batch_size
-func (s *Scheduler) checkTriageTriggers(ctx context.Context) {
-    orgs := s.triageState.ListOrgsNeedingTriage(ctx)
-    for _, orgID := range orgs {
-        s.jobs.Enqueue(ctx, orgID, "default", "triage", ...)
+// In handlers.go — the prioritize handler becomes score-only:
+func newPrioritizeHandler(...) JobHandler {
+    return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+        // ... parse payload ...
+        score, err := services.Prioritization.ComputeScore(ctx, orgID, issueID)
+        // ... estimate complexity ...
+        // REMOVED: services.Prioritization.CheckAutoTrigger(...)
+        // The PM agent now owns the decision to start coding runs.
+        return nil
     }
 }
 ```
 
-### 5. Prioritization Service: Kept but Scoped Down
+#### Prioritization Service (`internal/services/prioritization/service.go`)
 
-The existing `prioritization/service.go` is **not deleted**. It serves two purposes in the new architecture:
+`CheckAutoTrigger()` is kept but **only called from manual triggers** (admin clicks "Fix This" on a specific issue). The automated path goes through the PM agent.
 
-1. **Numeric scoring for display.** The dashboard still shows priority scores and complexity tiers. The triage agent's analysis augments but doesn't replace the UI badges.
+#### Scheduler (`internal/cluster/scheduler_lock.go`)
 
-2. **Fallback for manual triggers.** When an admin clicks "Reprioritize" on a single issue, the per-issue scoring still runs.
-
-3. **Input to the triage agent.** The numeric scores are part of the context package the triage agent receives. It can use them as one input among many.
-
-The key change: the `prioritize` job no longer auto-triggers `run_agent`. That responsibility moves to the triage plan execution flow.
-
-### 6. API Endpoints
-
-#### New Endpoints
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| `POST` | `/api/v1/triage/run` | admin | Manually trigger a triage run |
-| `GET` | `/api/v1/triage/plans` | viewer+ | List triage plans for the org (with pagination) |
-| `GET` | `/api/v1/triage/plans/{id}` | viewer+ | Get a specific triage plan with full details |
-| `GET` | `/api/v1/triage/plans/current` | viewer+ | Get the most recent active plan |
-| `POST` | `/api/v1/triage/plans/{id}/approve` | admin | Approve a draft plan for execution |
-| `POST` | `/api/v1/triage/plans/{id}/approve-items` | admin | Approve specific items from a plan |
-| `DELETE` | `/api/v1/triage/plans/{id}` | admin | Dismiss/cancel a draft plan |
-
-#### Modified Endpoints
-
-| Endpoint | Change |
-|----------|--------|
-| `GET /api/v1/issues` | Add `triage_reasoning` field in response if available |
-| `GET /api/v1/issues/{id}` | Include triage context (which plan, rank, cluster info) |
-| `PATCH /api/v1/organizations/settings` | Add `triage_interval`, `triage_batch_size` settings |
-
-### 7. Org Settings Additions
+Add a new scheduled task alongside the existing ones:
 
 ```go
-type OrgSettings struct {
+// In the scheduler's tick loop, add:
+case "pm_analyze":
+    // Every pm_schedule_hours, enqueue a PM analysis job for each org.
+    orgs := s.listOrgsWithActiveIntegrations(ctx)
+    for _, orgID := range orgs {
+        dedupeKey := fmt.Sprintf("pm_analyze:%s", orgID.String())
+        s.jobs.Enqueue(ctx, orgID, "default", "pm_analyze", map[string]string{
+            "org_id":  orgID.String(),
+            "trigger": "cron",
+        }, 5, &dedupeKey)
+    }
+```
+
+#### Worker Handlers (`internal/worker/handlers.go`)
+
+Add a new handler:
+
+```go
+w.Register("pm_analyze", newPMAnalyzeHandler(stores, services, logger))
+```
+
+#### Agent Run Model (`internal/models/models.go`)
+
+Add PM-linkage fields to `AgentRun`:
+
+```go
+type AgentRun struct {
     // ... existing fields ...
 
-    // Triage agent settings
-    TriageInterval       int    `json:"triage_interval"`         // minutes between auto-triage (default: 15)
-    TriageBatchThreshold int    `json:"triage_batch_threshold"`  // issue count to trigger early triage (default: 5)
-    TriageAutoExecute    bool   `json:"triage_auto_execute"`     // auto-execute plans or require approval (default: follows autonomy_level)
-    TriageModel          string `json:"triage_model"`            // LLM model for triage (default: same as prioritization)
+    // PM agent context (set when the run was created by the PM agent)
+    PMPlanID    *uuid.UUID `json:"pm_plan_id,omitempty" db:"pm_plan_id"`
+    PMApproach  *string    `json:"pm_approach,omitempty" db:"pm_approach"`
+    PMReasoning *string    `json:"pm_reasoning,omitempty" db:"pm_reasoning"`
 }
 ```
 
-### 8. Frontend Changes
+### 6. Database Changes
 
-#### New Page: Triage Plan View (`/triage`)
+#### New Table: `pm_plans`
 
-Shows the current triage plan as an interactive work queue:
+```sql
+CREATE TABLE pm_plans (
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id           UUID NOT NULL REFERENCES organizations(id),
+    status           TEXT NOT NULL DEFAULT 'executing',   -- executing, completed, failed
+    analysis         TEXT,                                -- PM's situation analysis
+    tasks            JSONB NOT NULL DEFAULT '[]',         -- ordered task list
+    clusters         JSONB NOT NULL DEFAULT '[]',         -- issue clusters
+    skipped_issues   JSONB NOT NULL DEFAULT '[]',         -- skip list
+    issues_reviewed  INT NOT NULL DEFAULT 0,
+    token_usage      JSONB,
+    triggered_by     TEXT NOT NULL DEFAULT 'cron',        -- "cron" or "manual"
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    completed_at     TIMESTAMPTZ
+);
 
-- **Plan header**: analysis summary, when it ran, how many issues analyzed, model used
-- **Work items list**: ordered cards showing rank, title, reasoning, confidence, action
-  - Each card expandable to show related issues, suggested approach, risk
-  - Drag-to-reorder for manual adjustment
-  - Approve/skip/edit actions per item
-- **Skipped issues section**: collapsible list of issues the agent recommended skipping with reasons
-- **Clusters view**: visual grouping of related issues with root cause hypothesis
-- **Plan history**: sidebar showing previous plans for comparison
+CREATE INDEX idx_pm_plans_org_created ON pm_plans(org_id, created_at DESC);
+```
 
-#### Modified Pages
+#### Alter Table: `agent_runs`
 
-- **Issues page**: Add "Triage Status" column showing the issue's position in the current plan
-- **Settings page**: Add triage configuration section (interval, batch size, auto-execute toggle)
-- **Overview/Dashboard**: Show active triage plan summary widget
+```sql
+ALTER TABLE agent_runs
+    ADD COLUMN pm_plan_id  UUID REFERENCES pm_plans(id),
+    ADD COLUMN pm_approach TEXT,
+    ADD COLUMN pm_reasoning TEXT;
+```
 
-### 9. Migration Plan (Incremental)
+### 7. API Endpoints
 
-This can be built incrementally without breaking the existing system:
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `POST` | `/api/v1/pm/analyze` | admin | Manually trigger a PM analysis run |
+| `GET` | `/api/v1/pm/plans` | viewer+ | List PM plans (paginated, newest first) |
+| `GET` | `/api/v1/pm/plans/{id}` | viewer+ | Get a specific plan with tasks, clusters, skips |
+| `GET` | `/api/v1/pm/plans/latest` | viewer+ | Get the most recent plan |
 
-#### Phase A: Foundation (no behavior change)
-1. Add `triage_plans` and `triage_state` tables (migration)
-2. Add `TriageService` with `RunTriage()` that produces a plan but doesn't execute it
-3. Add API endpoints for viewing plans
-4. Wire up manual trigger (`POST /triage/run`)
-5. Frontend: add read-only plan view page
+Existing endpoints are unchanged. The `GET /api/v1/runs/{id}` response gains the `pm_approach` and `pm_reasoning` fields.
 
-**At this point**: The system still works exactly as before. The triage agent can be triggered manually for experimentation, but it has no effect on the pipeline.
+### 8. Org Settings
 
-#### Phase B: Parallel Run (shadow mode)
-1. Add triage trigger logic to scheduler (timer + batch threshold)
-2. Triage runs automatically but plans are always `draft` (never auto-executed)
-3. Dashboard shows triage recommendations alongside the existing priority scores
-4. Team can compare triage agent recommendations vs. numeric scoring to validate quality
+```go
+// New fields in OrgSettings:
+PMScheduleHours  int    `json:"pm_schedule_hours"`  // hours between PM runs (default: 4)
+PMModel          string `json:"pm_model"`           // LLM model for PM agent (default: "sonnet")
+```
 
-**At this point**: The triage agent runs in parallel. Existing pipeline still drives all actual work.
+### 9. Frontend
 
-#### Phase C: Switchover
-1. Add `execute_triage_plan` handler
-2. Add plan approval flow in frontend
-3. For `manual` autonomy orgs: plans require approval before execution
-4. For `auto_simple`/`auto_all` orgs: plans auto-execute (configurable)
-5. Ingestion stops enqueuing `prioritize` jobs by default (counter-based trigger instead)
-6. Per-issue `prioritize` kept as manual action only
+#### New: PM Plan View (`/pm` or `/plans`)
 
-**At this point**: The triage agent is the primary decision-maker.
+A page showing the PM agent's latest analysis and work plan:
 
-#### Phase D: Optimization
-1. Add cluster-aware coding: when the triage agent identifies a cluster, the coding agent receives all related issues
-2. Add plan diff: show what changed between consecutive triage plans
-3. Add triage feedback loop: track which triage recommendations led to successful PRs
-4. Add triage agent self-improvement: inject past plan outcomes into future triage prompts
+- **Analysis section** — the PM's 2-3 paragraph situation summary
+- **Task list** — ordered cards showing rank, title, reasoning, approach, confidence badge
+  - Each card shows which coding agent run it spawned (linked)
+  - Status: delegated / skipped (capacity) / completed / failed
+- **Clusters section** — visual grouping of related issues with root cause
+- **Skip list** — collapsible section showing what was skipped and why
+- **History** — previous plans for comparison
+
+#### Modified: Runs Page
+
+Each agent run card shows a "PM Context" expandable section if `pm_plan_id` is set, showing the PM's reasoning and approach guidance.
+
+#### Modified: Settings Page
+
+Add PM configuration section: schedule interval, model selection.
 
 ## File Changes Summary
 
 ### New Files
+
 | File | Description |
 |------|-------------|
-| `internal/services/triage/service.go` | Triage agent service (context gathering, LLM call, plan parsing) |
-| `internal/services/triage/service_test.go` | Tests |
-| `internal/services/triage/context.go` | Context assembly logic |
-| `internal/services/triage/prompt.go` | LLM prompt construction |
-| `internal/services/triage/plan.go` | Plan types and execution logic |
-| `internal/db/triage_plans.go` | DB store for triage_plans table |
-| `internal/db/triage_plans_store_test.go` | Store tests |
-| `internal/db/triage_state.go` | DB store for triage_state table |
-| `internal/db/triage_state_store_test.go` | Store tests |
-| `internal/api/handlers/triage.go` | API handlers for triage endpoints |
-| `internal/api/handlers/triage_test.go` | Handler tests |
-| `migrations/000004_triage.up.sql` | Schema migration |
-| `migrations/000004_triage.down.sql` | Rollback migration |
-| `frontend/src/app/(dashboard)/triage/page.tsx` | Triage plan view page |
-| `frontend/src/components/triage/plan-view.tsx` | Plan view component |
-| `frontend/src/components/triage/work-item-card.tsx` | Work item card component |
+| `internal/services/pm/service.go` | PM agent service: context gathering, LLM call, plan parsing, delegation |
+| `internal/services/pm/service_test.go` | Tests |
+| `internal/services/pm/context.go` | Context assembly (queries issues, runs, PRs, settings) |
+| `internal/services/pm/prompt.go` | System/user prompt construction |
+| `internal/services/pm/types.go` | Plan, Task, Cluster, SkipEntry types |
+| `internal/db/pm_plans.go` | DB store for pm_plans table |
+| `internal/db/pm_plans_test.go` | Store tests |
+| `internal/api/handlers/pm.go` | API handlers for PM endpoints |
+| `migrations/000004_pm_agent.up.sql` | New table + agent_runs columns |
+| `migrations/000004_pm_agent.down.sql` | Rollback |
+| `frontend/src/app/(dashboard)/plans/page.tsx` | PM plan view page |
+| `frontend/src/components/pm/plan-view.tsx` | Plan view component |
+| `frontend/src/components/pm/task-card.tsx` | Task card component |
 
 ### Modified Files
+
 | File | Change |
 |------|--------|
-| `internal/services/ingestion/service.go` | Add triage counter increment after upsert |
-| `internal/worker/handlers.go` | Add `triage` and `execute_triage_plan` handlers |
-| `internal/services/agent/orchestrator.go` | Add `TriageContext` to `AgentInput` |
-| `internal/services/agent/adapter.go` | Add `TriageWorkItemContext` type |
-| `internal/services/agent/adapters/claude_code.go` | Inject triage context into prompts |
-| `internal/api/router.go` | Add triage routes |
-| `internal/models/models.go` | Add `TriagePlan` and related model types |
-| `internal/models/org_settings.go` | Add triage-related settings fields |
-| `cmd/server/main.go` | Wire up `TriageService` |
+| `internal/worker/handlers.go` | Add `pm_analyze` handler; remove `CheckAutoTrigger` call from `prioritize` handler |
+| `internal/services/agent/adapter.go` | Add `PMTaskContext` type to `AgentInput` |
+| `internal/services/agent/adapters/claude_code.go` | Inject PM context into prompts |
+| `internal/services/agent/orchestrator.go` | Read `PMApproach`/`PMReasoning` from run, populate `AgentInput.PMContext` |
+| `internal/models/models.go` | Add `PMPlanID`, `PMApproach`, `PMReasoning` fields to `AgentRun` |
+| `internal/cluster/scheduler_lock.go` | Add `pm_analyze` cron task |
+| `internal/api/router.go` | Add PM routes |
+| `internal/models/org_settings.go` | Add `PMScheduleHours`, `PMModel` settings |
+| `cmd/server/main.go` | Wire up `pm.Service` |
+
+## Migration Path
+
+### Step 1: Add PM agent alongside existing system (no behavior change)
+
+- Add `pm_plans` table, `pm.Service`, API endpoints
+- PM agent can be triggered manually via `POST /pm/analyze`
+- Plans are stored and viewable but don't create any agent runs
+- Existing per-issue prioritize → auto-trigger flow continues unchanged
+
+### Step 2: Enable PM delegation
+
+- PM agent's `executePlan()` starts creating agent runs
+- Remove `CheckAutoTrigger()` from the `prioritize` job handler
+- Add PM cron to scheduler
+- Now: PM agent is the only path to automated coding runs. Manual "Fix This" still works via direct agent run creation.
+
+### Step 3: Polish
+
+- Frontend plan view page
+- PM context display on run detail pages
+- Settings UI for schedule interval
 
 ## Open Questions
 
-1. **Token budget for triage.** With 50+ open issues, the context package could be large. Should we summarize issues before sending to the triage agent, or use a model with a large context window? Recommendation: summarize to ~200 chars per issue, include full detail only for top-20 by numeric score.
+1. **Model choice.** The PM agent benefits from strong reasoning (it's making strategic decisions, not just classifying). Recommendation: default to Sonnet-class. The cost is bounded — one LLM call per PM cycle, not per issue.
 
-2. **Triage agent model choice.** Should the triage agent use a more powerful model (Opus-class) than the per-issue complexity estimator (Haiku-class)? Recommendation: yes — the triage agent makes higher-stakes decisions and benefits from better reasoning. The cost per run is bounded (one call per triage cycle, not per issue).
+2. **Issue volume.** With 100+ open issues, the context package could exceed model limits. Recommendation: summarize each issue to ~200 chars, include full detail only for the top 20 by numeric score. If still too large, paginate and have the PM focus on "new since last run" plus "still unresolved from previous plans."
 
-3. **Plan staleness.** What happens if new issues arrive while a plan is being executed? Recommendation: new issues increment the counter; if the batch threshold is hit, a new triage runs and supersedes the current plan. In-flight agent runs from the old plan are not cancelled.
-
-4. **Relationship to numeric scoring.** Should the triage agent's ranking completely replace the numeric priority score, or coexist? Recommendation: coexist. Numeric scores are fast, deterministic, and useful for UI sorting. The triage agent's analysis is richer but slower and non-deterministic. Show both.
+3. **Plan staleness.** If a critical Sentry error arrives 5 minutes after the PM ran, it waits up to N hours. Recommendation: keep the manual `POST /pm/analyze` trigger. Admins can also still use the existing "Fix This" button to manually start an agent run for urgent issues outside the PM cycle.
