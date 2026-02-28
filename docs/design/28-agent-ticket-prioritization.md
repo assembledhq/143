@@ -43,9 +43,11 @@ Every ingested issue enqueues its own `prioritize` job, which scores it, estimat
                                                             ▼
                               ┌─────────────────────────────────────────────────────┐
                               │                                                     │
-                              │  PM AGENT  (the "brain" — runs as an LLM call)      │
+                              │  PM AGENT  (the "brain" — runs in a sandbox     │
+                              │  with full repo access, like a coding agent)     │
                               │                                                     │
-                              │  Reads:                                             │
+                              │  Has access to:                                     │
+                              │   • Full GitHub repo (cloned into sandbox)          │
                               │   • All open/triaged issues (Sentry + Linear)       │
                               │   • In-flight agent runs (what's already being      │
                               │     worked on)                                      │
@@ -267,54 +269,104 @@ The PM agent runs on a straightforward cron schedule. No complex trigger logic.
 
 ### 2. The PM Agent
 
-The PM agent is a single LLM call (not a sandbox execution — it doesn't write code). It receives a context package and returns a structured JSON plan.
+The PM agent **runs in a sandbox with the full GitHub repo cloned**, just like a coding agent — but instead of writing code, it reads the codebase, analyzes issues in context, and produces a prioritized work plan. This is the critical difference from a blind LLM call: the PM can browse files, read architecture docs, trace stack traces to actual code, and give approach hints grounded in real code.
+
+The PM agent uses the existing `AgentAdapter` and `SandboxProvider` infrastructure. It's a new adapter type (`pm_agent`) alongside `claude_code` and `codex`, but its prompt instructs it to analyze and plan rather than write diffs.
+
+#### Why sandbox execution, not a single LLM call
+
+A single LLM call would see only issue metadata and truncated descriptions. The PM would have to guess about code structure, file locations, and architectural context. With sandbox access:
+
+- **Approach hints are grounded.** The PM can `cat handlers/payment.go` and see the actual nil pointer at line 142 before telling a coding agent to fix it.
+- **Complexity estimates are real.** The PM can see how many files a change touches, whether there are tests, and how tangled the dependency graph is — not just guess from a bug title.
+- **Clustering is smarter.** The PM can trace two different Sentry errors to the same function and confirm they share a root cause by reading the code.
+- **Architecture awareness.** The PM reads CLAUDE.md, AGENTS.md, directory-level README files, and understands the codebase layout before making decisions.
 
 #### New Service: `internal/services/pm/service.go`
 
 ```go
 package pm
 
-// Service is the AI Product Manager. It analyzes accumulated issues,
-// reasons about priorities and patterns, and produces a work plan
-// that gets delegated to coding agents.
+// Service is the AI Product Manager. It spins up a sandbox with the repo
+// cloned, runs an agent that analyzes issues against the actual codebase,
+// and produces a work plan that gets delegated to coding agents.
 type Service struct {
     issues       issueStore         // fetch open/triaged issues
     agentRuns    agentRunStore      // fetch in-flight and recent runs
     pullRequests prStore            // fetch recent PR outcomes
     orgs         orgStore           // fetch org settings + product direction
+    repos        repoStore          // fetch repo URL, branch, credentials
     jobs         jobStore           // enqueue run_agent jobs
     plans        planStore          // persist PM plans
-    llm          llm.Client         // the LLM backing the PM agent
+    sandbox      agent.SandboxProvider  // reuse existing sandbox infrastructure
+    adapter      agent.AgentAdapter     // PM agent adapter (claude_code or codex in PM mode)
     logger       zerolog.Logger
 }
 
 // Analyze is the main entry point. It:
-//  1. Gathers full context for the org
-//  2. Calls the LLM with a PM-framed prompt
-//  3. Parses the structured plan
-//  4. Persists the plan
-//  5. Delegates work items to coding agents
+//  1. Gathers full context (issues, outcomes, settings)
+//  2. Prepares the PM prompt with issue context + codebase exploration instructions
+//  3. Spins up a sandbox, clones the repo, runs the PM agent
+//  4. Parses the structured plan from the agent's output
+//  5. Persists the plan
+//  6. Delegates work items to coding agents
 func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger string) (*Plan, error) {
-    // Step 1: Gather context
+    // Step 1: Gather issue/outcome context from DB
     pmCtx, err := s.gatherContext(ctx, orgID)
     if err != nil {
         return nil, fmt.Errorf("gather context: %w", err)
     }
 
-    // Step 2: Call LLM
-    plan, err := s.callPMAgent(ctx, pmCtx)
+    // Step 2: For each repo in the org, run the PM agent in a sandbox
+    // (For orgs with multiple repos, run once per repo or once with the primary repo)
+    repo, err := s.repos.GetPrimaryByOrg(ctx, orgID)
     if err != nil {
-        return nil, fmt.Errorf("pm agent call: %w", err)
+        return nil, fmt.Errorf("get primary repo: %w", err)
     }
 
-    // Step 3: Persist plan
+    // Step 3: Create sandbox and clone repo
+    sbCfg := agent.DefaultSandboxConfig()
+    sbCfg.Timeout = 10 * time.Minute // PM needs more time to explore
+    sb, err := s.sandbox.Create(ctx, sbCfg)
+    if err != nil {
+        return nil, fmt.Errorf("create sandbox: %w", err)
+    }
+    defer s.sandbox.Destroy(ctx, sb)
+
+    if err := s.sandbox.CloneRepo(ctx, sb, repo.URL, repo.DefaultBranch, repo.Token); err != nil {
+        return nil, fmt.Errorf("clone repo: %w", err)
+    }
+
+    // Step 4: Write the issue context as a file in the sandbox for the agent to read
+    contextJSON, _ := json.Marshal(pmCtx)
+    if err := s.sandbox.WriteFile(ctx, sb, "/workspace/.pm-context.json", contextJSON); err != nil {
+        return nil, fmt.Errorf("write context: %w", err)
+    }
+
+    // Step 5: Run the PM agent
+    prompt := s.preparePMPrompt(pmCtx)
+    logCh := make(chan agent.LogEntry, 100)
+    go func() { for range logCh {} }() // drain logs (or store them)
+    result, err := s.adapter.Execute(ctx, sb, prompt, logCh)
+    if err != nil {
+        return nil, fmt.Errorf("pm agent execution: %w", err)
+    }
+
+    // Step 6: Parse the plan from the agent's output
+    plan, err := parsePlan(result.Summary)
+    if err != nil {
+        return nil, fmt.Errorf("parse plan: %w", err)
+    }
+
+    // Step 7: Persist plan
     plan.OrgID = orgID
     plan.TriggeredBy = trigger
+    plan.TokenUsage, _ = json.Marshal(result.TokenUsage)
     if err := s.plans.Create(ctx, plan); err != nil {
         return nil, fmt.Errorf("persist plan: %w", err)
     }
 
-    // Step 4: Delegate to coding agents
+    // Step 8: Delegate to coding agents
     if err := s.executePlan(ctx, orgID, plan); err != nil {
         return nil, fmt.Errorf("execute plan: %w", err)
     }
@@ -322,6 +374,54 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger string) 
     return plan, nil
 }
 ```
+
+#### PM Agent Adapter
+
+The PM agent reuses the existing `AgentAdapter` interface. A new adapter (or a mode flag on the existing Claude Code adapter) configures the agent for analysis instead of code writing:
+
+```go
+// PMAdapter wraps an existing AgentAdapter (e.g., Claude Code) and overrides
+// PreparePrompt to use the PM system prompt instead of the coding prompt.
+// It reuses the same Execute flow — the agent runs in a sandbox with full
+// CLI tool access (file reading, grep, etc.) but is instructed not to write code.
+type PMAdapter struct {
+    inner agent.AgentAdapter // the underlying claude_code or codex adapter
+}
+
+func (a *PMAdapter) Name() string { return "pm_agent" }
+
+func (a *PMAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
+    // Use the PM-specific system prompt (see LLM Prompt section below)
+    // instead of the coding agent's fix-the-bug prompt
+    return &agent.AgentPrompt{
+        SystemPrompt: pmSystemPrompt,
+        UserPrompt:   input.PMContext.ContextJSON, // serialized PMContext
+        MaxTokens:    32000, // PM produces a structured plan, not a diff
+    }, nil
+}
+
+func (a *PMAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+    // Delegate to the underlying adapter's Execute — same sandbox, same CLI tools
+    return a.inner.Execute(ctx, sandbox, prompt, logCh)
+}
+```
+
+#### Sandbox Configuration for PM
+
+The PM agent uses a lighter sandbox config than coding agents:
+
+```go
+func pmSandboxConfig() agent.SandboxConfig {
+    cfg := agent.DefaultSandboxConfig()
+    cfg.Timeout = 10 * time.Minute  // more time to explore the codebase
+    cfg.CPULimit = 1                // doesn't need heavy compute — mostly reading
+    cfg.MemoryLimitMB = 2048       // less memory than coding agents
+    cfg.NetworkPolicy = "restricted" // same restricted network as coding agents
+    return cfg
+}
+```
+
+The PM agent has **read-only** intent — it explores the codebase but doesn't modify it. The sandbox is destroyed after the plan is produced. (The agent CLI technically has write access inside the sandbox, but the PM prompt instructs it to only read. Any files it creates are discarded when the sandbox is destroyed.)
 
 #### Context Gathering
 
@@ -382,12 +482,43 @@ const pmSystemPrompt = `You are an AI Product Manager running a planning session
 software engineering team. Your team consists of AI coding agents that can fix
 bugs and implement small features.
 
-Your job is to look at all the incoming work (Sentry errors, Linear tickets),
-understand what's happening in the codebase right now, and decide:
-  1. What should be worked on next, and in what order
-  2. Which issues are related and should be tackled together
-  3. What approach each coding agent should take
-  4. What should be skipped or deferred, and why
+You have FULL ACCESS to the codebase — it is cloned into /workspace. Use it.
+Browse files, read code, trace stack traces to actual source lines, check for
+tests, understand the architecture. Your approach hints should be grounded in
+real code, not guesses.
+
+Your job is to:
+  1. Understand the codebase architecture and current state
+  2. Analyze all incoming work (Sentry errors, Linear tickets)
+  3. Decide what should be worked on next, and in what order
+  4. Give each coding agent a specific, grounded briefing
+  5. Skip or defer work that shouldn't be auto-fixed, and explain why
+
+## Your Workflow
+
+1. START by reading the issue context from /workspace/.pm-context.json. This
+   contains all open issues, recent outcomes, failure patterns, and product
+   context.
+
+2. EXPLORE THE CODEBASE. Before analyzing issues:
+   - Read the repo's CLAUDE.md, AGENTS.md, and README.md for architecture context
+   - Understand the directory structure (ls the top-level dirs)
+   - Note the test infrastructure (are there tests? what framework?)
+   - Check recent git commits (git log --oneline -20) to understand recent changes
+
+3. FOR EACH ISSUE you're considering, investigate in the codebase:
+   - If it has a stack trace, go read the actual code at those locations
+   - Trace the call chain to understand the root cause
+   - Check if there are existing tests that cover this path
+   - Look for related code that might have the same bug pattern
+   - Assess how many files a fix would touch
+
+4. CLUSTER related issues after investigating. Now that you've read the actual
+   code, you can confirm (not just guess) whether issues share a root cause.
+
+5. PRODUCE YOUR PLAN with approach hints that reference real files, real
+   functions, and real code patterns you observed. The coding agent will get
+   your approach as part of its prompt — make it specific enough to be useful.
 
 ## Product Context
 
@@ -412,37 +543,30 @@ important input — it tells you how to think, not just what to look at.
 If product context is sparse or missing, fall back to data-driven defaults:
 prioritize by customer impact and severity, prefer high-confidence tasks.
 
-## How to Think
+## Decision Framework
 
-Think like a senior PM running a sprint planning meeting:
-
-- START by analyzing the situation. What patterns do you see? Are there clusters
-  of related errors? Is something getting worse? Did a recent deploy break things?
-
-- CLUSTER related issues. If 5 Sentry errors all point to the same service or
-  the same code path, that's one work item, not five. Identify the root cause
-  and fix it once.
+Think like a senior PM running a sprint planning meeting, but one who has
+actually read the code:
 
 - PRIORITIZE by real impact, filtered through the product context. Consider:
   - How many customers are affected (and how badly)
   - Whether it aligns with the current direction and focus areas
   - Whether it's getting worse (check the trending_issues data)
-  - Whether the coding agent can realistically fix it (check agent_success_rate
-    and failure_patterns — if this repo/complexity tier has a low success rate,
-    flag it or deprioritize)
+  - Whether the coding agent can realistically fix it — you've seen the code,
+    so you can assess complexity directly, not just from the bug title
   - Dependencies (does fixing X unblock Y?)
 
-- GIVE APPROACH HINTS. For each work item, tell the coding agent where to look
-  and what to be careful about. Match the team's fix_style preference. You're
-  the PM briefing your engineer. Example:
-  "The stack trace points to a nil pointer in handlers/payment.go:142. This is
-  likely a missing nil check on the user's payment method. Be careful not to
-  change the payment flow logic — just add the guard."
+- GIVE GROUNDED APPROACH HINTS. You've read the code. Tell the coding agent
+  exactly where the problem is. Example:
+  "The nil pointer is at handlers/payment.go:142 — the PaymentMethod field on
+  the User struct can be nil when the user hasn't set up billing yet. The fix
+  is a nil check before accessing user.PaymentMethod.ID. There's an existing
+  test in handlers/payment_test.go that covers the happy path but doesn't test
+  the nil case — add a test case for a user without a payment method."
 
 - LEARN FROM HISTORY. You'll see recent outcomes (successes, failures, PR
   rejections). Use them:
   - If the agent failed on a similar issue recently, lower your confidence
-  - If a particular repo has high failure rates, flag it
   - If PRs from the agent keep getting rejected for the same reason, adjust
     your approach hints to address that pattern
 
@@ -450,25 +574,34 @@ Think like a senior PM running a sprint planning meeting:
   - Issues in avoid_areas
   - Issues that need a human product decision
   - Duplicates of in-flight work
-  - Issues too complex for the agent (based on failure patterns and success rates)
+  - Issues too complex for the agent (based on failure patterns and your
+    assessment of the code)
   - Issues misaligned with product direction
 
 - RESPECT CONSTRAINTS. You have {available_slots} available agent slots
   (out of {max_concurrent} total). Don't plan more work than you have capacity for.
 
+## IMPORTANT: Do NOT modify any code
+
+You are analyzing and planning only. Do not write code, create branches, or
+modify files. Your output is a structured plan, not a diff.
+
 ## Output Format
 
-Respond with a JSON object:
+When you have completed your analysis, output your plan as a JSON object
+between <pm-plan> tags:
+
+<pm-plan>
 {
-  "analysis": "<2-3 paragraph situation analysis: what patterns you see, what's urgent, what's trending>",
+  "analysis": "<2-3 paragraph situation analysis: what you found in the codebase, what patterns you see, what's urgent>",
   "tasks": [
     {
       "rank": 1,
       "issue_ids": ["<uuid>", ...],
       "title": "<your summary of the work item>",
       "reasoning": "<why this is priority #1>",
-      "approach": "<specific guidance for the coding agent: where to look, what to change, what to watch out for>",
-      "risk": "<what could go wrong>",
+      "approach": "<specific, code-grounded guidance: exact files, functions, line numbers, what to change, what tests to add>",
+      "risk": "<what could go wrong, based on what you saw in the code>",
       "complexity": "<trivial|simple|moderate|complex>",
       "confidence": "<high|medium|low — can the agent handle this?>"
     }
@@ -476,7 +609,7 @@ Respond with a JSON object:
   "clusters": [
     {
       "issue_ids": ["<uuid>", ...],
-      "root_cause": "<your hypothesis about the shared root cause>",
+      "root_cause": "<confirmed root cause based on your code investigation>",
       "strategy": "<fix root cause in issue X, others will resolve>"
     }
   ],
@@ -487,10 +620,11 @@ Respond with a JSON object:
       "detail": "<explanation>"
     }
   ]
-}`
+}
+</pm-plan>`
 ```
 
-The user prompt contains the serialized `PMContext` as JSON.
+The PM context (issues, outcomes, product context, auto-derived signals) is written to `/workspace/.pm-context.json` for the agent to read. The agent then explores the codebase using its CLI tools (file reading, grep, git log, etc.) before producing its plan.
 
 #### Plan Output Types
 
@@ -809,8 +943,9 @@ Add PM configuration section: schedule interval, model selection.
 
 | File | Description |
 |------|-------------|
-| `internal/services/pm/service.go` | PM agent service: context gathering, LLM call, plan parsing, delegation |
+| `internal/services/pm/service.go` | PM agent service: context gathering, sandbox execution, plan parsing, delegation |
 | `internal/services/pm/service_test.go` | Tests |
+| `internal/services/pm/adapter.go` | PMAdapter: wraps existing AgentAdapter for PM-mode execution |
 | `internal/services/pm/context.go` | Context assembly (queries issues, runs, PRs, settings) |
 | `internal/services/pm/prompt.go` | System/user prompt construction |
 | `internal/services/pm/types.go` | Plan, Task, Cluster, SkipEntry types |
@@ -841,14 +976,15 @@ Add PM configuration section: schedule interval, model selection.
 
 The PM agent is only as good as its inputs. This section addresses the key risks to PM quality and how to mitigate them.
 
-### Risk 1: Hallucinated approach hints
+### Risk 1: PM agent explores too much / runs too long
 
-The PM agent sees issue titles and truncated descriptions but doesn't have access to the actual codebase. Its approach hints ("look at handlers/payment.go:142") come from Sentry stack traces embedded in the issue data — but for Linear tickets without stack traces, the PM is guessing.
+The PM has full repo access and could spend its entire 10-minute timeout reading every file instead of producing a plan. Unlike a coding agent that focuses on a single issue, the PM is analyzing potentially dozens of issues across the whole codebase.
 
 **Mitigation:**
-- For Sentry issues: `IssueSummary.HasStackTrace = true` signals high-quality approach data. The PM should give specific file-level hints.
-- For Linear issues without stack traces: the PM should give directional hints ("this sounds like a data validation issue in the API layer") and set `confidence = "medium"` or lower. The coding agent will explore the codebase itself.
-- The PM prompt explicitly instructs: "If you don't have a stack trace, say so. Give directional guidance, not fake file paths."
+- The PM prompt's workflow section gives it a structured sequence: read architecture docs first, then investigate issues in priority order, then produce the plan.
+- The sandbox timeout (10 minutes) acts as a hard cap. The prompt instructs the PM to produce a partial plan if it runs out of time: "If you're running low on time, produce a plan for the issues you've investigated so far. A partial plan is better than no plan."
+- For Sentry issues with stack traces, the PM should go directly to the referenced code. For Linear tickets without stack traces, the PM uses grep/search to find relevant code — but should limit exploration to 2-3 minutes per issue.
+- Token mode is set to "high" for the PM agent (it needs to explore and reason extensively).
 
 ### Risk 2: Stale plans
 
@@ -861,13 +997,13 @@ If the PM runs every 4 hours and a P0 Sentry error arrives at hour 0:05, it wait
 
 ### Risk 3: Context window overflow
 
-With 100+ open issues, the PM context can get large. Each `IssueSummary` at ~200 chars is manageable, but combined with outcomes, failures, PRs, and product context, the full payload could hit 50K+ tokens.
+With 100+ open issues, the PM context can get large. However, since the PM runs as a full agent with file access, the context is written to `/workspace/.pm-context.json` rather than being crammed into the system prompt. The PM agent reads this file and can selectively focus on subsets.
 
 **Mitigation:**
+- **File-based context.** The full issue context is written to a JSON file in the sandbox. The system prompt stays small (instructions only). The agent reads the file and can process it in chunks.
 - **Two-tier summarization.** Top 30 issues by numeric score get full `IssueSummary` (200 chars). Remaining issues get a one-line summary (title + severity + occurrence count only, ~50 chars each).
 - **Recency windowing.** Only include outcomes/failures/PRs from the last 30 days. Older history is irrelevant to current planning.
-- **Cap at model limits.** If the assembled context exceeds 80% of the model's context window, truncate the lowest-priority issues. Log a warning so admins know the PM didn't see everything.
-- **Model choice matters.** Sonnet with 200K context handles most orgs. For very large orgs (500+ open issues), use a model with larger context or split into per-repo PM cycles.
+- **For very large orgs (500+ open issues)**, split into per-repo PM cycles — one sandbox per repo with only that repo's issues.
 
 ### Risk 4: Cold start (no historical outcomes)
 
@@ -961,7 +1097,7 @@ This self-calibration loop is the main mechanism for PM improvement. It's not ne
 
 ## Resolved Decisions
 
-1. **Model choice.** Default to Sonnet-class. The PM makes strategic decisions that benefit from strong reasoning, and the cost is bounded (one LLM call per cycle, not per issue). At 6 cycles/day with ~30K tokens each, that's ~$1-2/day at Sonnet pricing.
+1. **Model choice.** Default to Sonnet-class. The PM makes strategic decisions that benefit from strong reasoning. Since the PM runs as a full agent with codebase access (not a single LLM call), token usage is higher — expect 50-100K tokens per PM cycle as it explores the repo and reasons over issues. At 6 cycles/day, that's ~$5-15/day at Sonnet pricing. Still modest compared to the cost of the coding agent runs it orchestrates.
 
 2. **Issue volume strategy.** Two-tier summarization: top 30 get full summaries (200 chars), remaining get one-liners. Recency window of 30 days for outcomes/PRs. Truncate if exceeding 80% of context window.
 
