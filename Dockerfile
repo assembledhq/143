@@ -1,11 +1,16 @@
+# syntax=docker/dockerfile:1
+
 # Stage 1: Go builder
 FROM golang:1.26 AS go-builder
 WORKDIR /app
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /bin/server ./cmd/server
-RUN CGO_ENABLED=0 go build -o /bin/migrate ./cmd/migrate
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -o /bin/server ./cmd/server && \
+    CGO_ENABLED=0 go build -o /bin/migrate ./cmd/migrate
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
