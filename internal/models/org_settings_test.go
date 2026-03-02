@@ -24,6 +24,9 @@ func TestParseOrgSettings_Defaults(t *testing.T) {
 	require.Equal(t, DefaultConfidenceHumanReview, s.ConfidenceThresholds.HumanReview, "should default human_review threshold")
 	require.Empty(t, s.LLMModel, "should default llm_model to empty")
 	require.Empty(t, s.ProductDirection, "should default product_direction to empty")
+	require.Equal(t, DefaultPMScheduleHours, s.PMScheduleHours, "should default pm_schedule_hours")
+	require.Equal(t, DefaultPMModel, s.PMModel, "should default pm_model")
+	require.Nil(t, s.ProductContext, "should default product_context to nil")
 }
 
 func TestParseOrgSettings_EmptyJSON(t *testing.T) {
@@ -44,6 +47,14 @@ func TestParseOrgSettings_OverrideValues(t *testing.T) {
 		"max_concurrent_runs": 10,
 		"min_priority_threshold": 50.0,
 		"product_direction": "focus on billing",
+		"pm_schedule_hours": 6,
+		"pm_model": "sonnet",
+		"product_context": {
+			"philosophy": "Prefer minimal diffs",
+			"direction": "Harden billing",
+			"focus_areas": ["billing", "api"],
+			"avoid_areas": ["legacy-auth"]
+		},
 		"llm_model": "gpt-4o",
 		"confidence_thresholds": {
 			"auto_proceed": 0.95,
@@ -64,6 +75,13 @@ func TestParseOrgSettings_OverrideValues(t *testing.T) {
 	require.Equal(t, 10, s.MaxConcurrentRuns, "should override max_concurrent_runs")
 	require.Equal(t, 50.0, s.MinPriorityThreshold, "should override min_priority_threshold")
 	require.Equal(t, "focus on billing", s.ProductDirection, "should override product_direction")
+	require.Equal(t, 6, s.PMScheduleHours, "should override pm_schedule_hours")
+	require.Equal(t, "sonnet", s.PMModel, "should override pm_model")
+	require.NotNil(t, s.ProductContext, "should parse product_context")
+	require.Equal(t, "Prefer minimal diffs", s.ProductContext.Philosophy, "should parse product_context.philosophy")
+	require.Equal(t, "Harden billing", s.ProductContext.Direction, "should parse product_context.direction")
+	require.Equal(t, []string{"billing", "api"}, s.ProductContext.FocusAreas, "should parse product_context.focus_areas")
+	require.Equal(t, []string{"legacy-auth"}, s.ProductContext.AvoidAreas, "should parse product_context.avoid_areas")
 	require.Equal(t, "gpt-4o", s.LLMModel, "should override llm_model")
 	require.Equal(t, 0.95, s.ConfidenceThresholds.AutoProceed, "should override auto_proceed")
 	require.Equal(t, 0.70, s.ConfidenceThresholds.HumanReview, "should override human_review")
@@ -83,6 +101,18 @@ func TestParseOrgSettings_PartialOverride(t *testing.T) {
 	require.Equal(t, "claude-sonnet-4-5", s.LLMModel, "should override llm_model")
 	require.Equal(t, DefaultAggressiveness, s.Aggressiveness, "should default aggressiveness when not provided")
 	require.Equal(t, DefaultMaxConcurrentRuns, s.MaxConcurrentRuns, "should default max_concurrent_runs when not provided")
+}
+
+func TestParseOrgSettings_ProductContextMigration(t *testing.T) {
+	t.Parallel()
+
+	raw := json.RawMessage(`{"product_direction":"shift to reliability"}`)
+	s := ParseOrgSettings(raw)
+
+	require.Equal(t, "shift to reliability", s.ProductDirection, "should preserve product_direction")
+	require.NotNil(t, s.ProductContext, "should migrate product_direction into product_context")
+	require.Equal(t, "shift to reliability", s.ProductContext.Direction, "should set product_context.direction from product_direction")
+	require.Empty(t, s.ProductContext.Philosophy, "should default product_context.philosophy to empty")
 }
 
 func TestParseOrgSettings_AgentConfig(t *testing.T) {

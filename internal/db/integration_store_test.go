@@ -253,3 +253,27 @@ func TestIntegrationStore_UpdateStatus(t *testing.T) {
 	require.NoError(t, err, "UpdateStatus should not return an error")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
+
+func TestIntegrationStore_ListOrgsWithActiveIntegrations(t *testing.T) {
+	t.Parallel()
+
+	orgID1 := uuid.New()
+	orgID2 := uuid.New()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	mock.ExpectQuery("SELECT DISTINCT org_id FROM integrations WHERE status = 'active'").
+		WillReturnRows(
+			pgxmock.NewRows([]string{"org_id"}).
+				AddRow(orgID1).
+				AddRow(orgID2),
+		)
+
+	store := NewIntegrationStore(mock)
+	orgs, err := store.ListOrgsWithActiveIntegrations(context.Background())
+	require.NoError(t, err, "ListOrgsWithActiveIntegrations should succeed")
+	require.Equal(t, []uuid.UUID{orgID1, orgID2}, orgs, "should return org IDs with active integrations")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}

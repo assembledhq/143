@@ -47,6 +47,30 @@ func (m *mockAgentAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, 
 	}, nil
 }
 
+type capturingAdapter struct {
+	name     string
+	captured *agent.AgentInput
+}
+
+func (c *capturingAdapter) Name() string { return c.name }
+
+func (c *capturingAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
+	c.captured = input
+	return &agent.AgentPrompt{
+		SystemPrompt: "test system prompt",
+		UserPrompt:   "test user prompt",
+		MaxTokens:    50000,
+	}, nil
+}
+
+func (c *capturingAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+	return &agent.AgentResult{
+		Summary:         "ok",
+		ConfidenceScore: 0.9,
+		ExitCode:        0,
+	}, nil
+}
+
 // mockGitHubTokenProvider implements agent.GitHubTokenProvider.
 type mockGitHubTokenProvider struct {
 	token string
@@ -165,6 +189,19 @@ func (m *mockAgentRunQuestionStore) getQuestions() []models.AgentRunQuestion {
 	return out
 }
 
+// mockDecisionLogStore implements agent.DecisionLogStore.
+type mockDecisionLogStore struct {
+	mu       sync.Mutex
+	outcomes []models.PMDecisionOutcome
+}
+
+func (m *mockDecisionLogStore) UpdateOutcome(ctx context.Context, orgID, planID, issueID uuid.UUID, outcome models.PMDecisionOutcome) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.outcomes = append(m.outcomes, outcome)
+	return nil
+}
+
 // mockIssueStore implements agent.IssueStore.
 type mockIssueStore struct {
 	issue models.Issue
@@ -189,6 +226,19 @@ func (m *mockRepositoryStore) GetByID(ctx context.Context, orgID, repoID uuid.UU
 		return models.Repository{}, m.err
 	}
 	return m.repo, nil
+}
+
+// mockOrgStore implements agent.OrgStore.
+type mockOrgStore struct {
+	org models.Organization
+	err error
+}
+
+func (m *mockOrgStore) GetByID(ctx context.Context, orgID uuid.UUID) (models.Organization, error) {
+	if m.err != nil {
+		return models.Organization{}, m.err
+	}
+	return m.org, nil
 }
 
 // mockJobStore implements agent.JobStore.
@@ -279,6 +329,7 @@ type testDeps struct {
 	repos     *mockRepositoryStore
 	logs      *mockAgentRunLogStore
 	questions *mockAgentRunQuestionStore
+	decisions *mockDecisionLogStore
 	jobs      *mockJobStore
 	github    *mockGitHubTokenProvider
 	codexAuth agent.CodexAuthProvider
@@ -294,6 +345,7 @@ func defaultDeps() testDeps {
 		repos:     &mockRepositoryStore{repo: testRepo(orgID)},
 		logs:      &mockAgentRunLogStore{},
 		questions: &mockAgentRunQuestionStore{},
+		decisions: &mockDecisionLogStore{},
 		jobs:      &mockJobStore{},
 		github:    &mockGitHubTokenProvider{token: "ghp_test123"},
 		codexAuth: nil,
@@ -307,6 +359,7 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		AgentRuns:         d.agentRuns,
 		AgentRunLogs:      d.logs,
 		AgentRunQuestions: d.questions,
+		DecisionLog:       d.decisions,
 		Issues:            d.issues,
 		Repositories:      d.repos,
 		Jobs:              d.jobs,
@@ -366,6 +419,72 @@ func TestRunAgent_SuccessfulRun(t *testing.T) {
 
 	// Sandbox should be destroyed.
 	require.Equal(t, 1, d.provider.GetDestroyCalls())
+}
+
+func TestRunAgent_PopulatesPMContext(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	issueID := uuid.New()
+	runID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+
+	pmApproach := "Check handlers/billing.go:42"
+	pmReasoning := "High impact"
+
+	run := &models.AgentRun{
+		ID:          runID,
+		IssueID:     issueID,
+		OrgID:       orgID,
+		AgentType:   "claude_code",
+		Status:      "pending",
+		TokenMode:   "low",
+		PMApproach:  &pmApproach,
+		PMReasoning: &pmReasoning,
+	}
+
+	mockRuns := &mockAgentRunStore{}
+	mockIssues := &mockIssueStore{issue: models.Issue{ID: issueID, OrgID: orgID, RepositoryID: &repoID, Title: "Issue"}}
+	mockRepos := &mockRepositoryStore{repo: models.Repository{
+		ID:             repoID,
+		OrgID:          orgID,
+		CloneURL:       "https://example.com/repo.git",
+		DefaultBranch:  "main",
+		InstallationID: 123,
+	}}
+	mockOrgs := &mockOrgStore{org: models.Organization{ID: orgID}}
+	mockJobs := &mockJobStore{}
+	mockLogs := &mockAgentRunLogStore{}
+	mockQuestions := &mockAgentRunQuestionStore{}
+	mockDecisions := &mockDecisionLogStore{}
+	mockGH := &mockGitHubTokenProvider{token: "token"}
+	sandboxProvider := testutil.NewMockSandboxProvider()
+
+	capAdapter := &capturingAdapter{name: "claude_code"}
+
+	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
+		Provider:          sandboxProvider,
+		Adapters:          map[string]agent.AgentAdapter{"claude_code": capAdapter},
+		AgentRuns:         mockRuns,
+		AgentRunLogs:      mockLogs,
+		AgentRunQuestions: mockQuestions,
+		DecisionLog:       mockDecisions,
+		Issues:            mockIssues,
+		Repositories:      mockRepos,
+		Orgs:              mockOrgs,
+		Jobs:              mockJobs,
+		GitHub:            mockGH,
+		Logger:            zerolog.Nop(),
+	})
+
+	err := orchestrator.RunAgent(context.Background(), run)
+	require.NoError(t, err, "RunAgent should succeed")
+	require.NotNil(t, capAdapter.captured, "adapter should capture input")
+	require.NotNil(t, capAdapter.captured.PMContext, "PMContext should be populated")
+	require.Equal(t, pmApproach, capAdapter.captured.PMContext.Approach, "PMContext should include approach")
+	require.Equal(t, pmReasoning, capAdapter.captured.PMContext.Reasoning, "PMContext should include reasoning")
+	require.WithinDuration(t, now, time.Now(), time.Minute, "sanity check")
 }
 
 func TestRunAgent_FailedExecution(t *testing.T) {
@@ -678,6 +797,7 @@ func TestRunAgent_AgentEnvInjected(t *testing.T) {
 		AgentRuns:         d.agentRuns,
 		AgentRunLogs:      d.logs,
 		AgentRunQuestions: d.questions,
+		DecisionLog:       d.decisions,
 		Issues:            d.issues,
 		Repositories:      d.repos,
 		Jobs:              d.jobs,
@@ -721,6 +841,7 @@ func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
 		AgentRuns:         d.agentRuns,
 		AgentRunLogs:      d.logs,
 		AgentRunQuestions: d.questions,
+		DecisionLog:       d.decisions,
 		Issues:            d.issues,
 		Repositories:      d.repos,
 		Jobs:              d.jobs,

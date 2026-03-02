@@ -9,6 +9,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/feedback"
+	"github.com/assembledhq/143/internal/services/pm"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
@@ -338,6 +339,51 @@ func TestAnalyzeFailureHandler_UsesJobOrgIDWhenPayloadMissingOrgID(t *testing.T)
 	require.Error(t, err, "analyze_failure handler should return an error when run fetch fails")
 	require.Contains(t, err.Error(), "fetch agent run", "analyze_failure handler should use org ID from job context before failing run fetch")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+type mockPMService struct {
+	calledOrgID uuid.UUID
+	trigger     models.PMTrigger
+}
+
+func (m *mockPMService) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger) (*pm.Plan, error) {
+	m.calledOrgID = orgID
+	m.trigger = trigger
+	return &pm.Plan{}, nil
+}
+
+func TestPMAnalyzeHandler_InvalidJSON(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	logger := zerolog.Nop()
+
+	services := &Services{PM: &mockPMService{}}
+	handler := newPMAnalyzeHandler(stores, services, logger)
+
+	err := handler(context.Background(), "pm_analyze", json.RawMessage(`{bad`))
+	require.Error(t, err, "pm_analyze handler should return error for invalid JSON")
+}
+
+func TestPMAnalyzeHandler_UsesJobOrgID(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	logger := zerolog.Nop()
+
+	pmSvc := &mockPMService{}
+	services := &Services{PM: pmSvc}
+	handler := newPMAnalyzeHandler(stores, services, logger)
+
+	orgID := uuid.New()
+	ctx := withJobOrgID(context.Background(), orgID)
+
+	err := handler(ctx, "pm_analyze", json.RawMessage(`{"trigger":"cron"}`))
+	require.NoError(t, err, "pm_analyze handler should succeed")
+	require.Equal(t, orgID, pmSvc.calledOrgID, "should use org ID from job context")
+	require.Equal(t, models.PMTriggerCron, pmSvc.trigger, "should pass trigger through")
 }
 
 func TestRegisterHandlers_AllRegistered(t *testing.T) {

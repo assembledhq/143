@@ -37,6 +37,17 @@ type AgentInput struct {
 	ComplexityEstimate *ComplexityEstimate
 	ContextDocs        []string // content of CLAUDE.md, AGENTS.md, etc.
 	RevisionContext    *RevisionContext
+	PMContext          *PMTaskContext // PM guidance for coding agents
+	PMContextJSON      string         // serialized PM context for PM agent runs
+}
+
+// PMTaskContext carries the PM agent's analysis into the coding agent's prompt.
+type PMTaskContext struct {
+	Approach      string
+	Risk          string
+	Reasoning     string
+	RelatedIssues []string
+	RootCause     string
 }
 
 // RevisionContext holds feedback that triggered a revision run.

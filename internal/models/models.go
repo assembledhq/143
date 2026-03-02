@@ -117,6 +117,9 @@ type AgentRun struct {
 	Error                *string         `db:"error" json:"error,omitempty"`
 	ResultSummary        *string         `db:"result_summary" json:"result_summary,omitempty"`
 	Diff                 *string         `db:"diff" json:"diff,omitempty"`
+	PMPlanID             *uuid.UUID      `db:"pm_plan_id" json:"pm_plan_id,omitempty"`
+	PMApproach           *string         `db:"pm_approach" json:"pm_approach,omitempty"`
+	PMReasoning          *string         `db:"pm_reasoning" json:"pm_reasoning,omitempty"`
 	CreatedAt            time.Time       `db:"created_at" json:"created_at"`
 }
 

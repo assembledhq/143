@@ -9,7 +9,9 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
+	"github.com/assembledhq/143/internal/testutil"
 )
 
 func TestGeminiCLIAdapter_Name(t *testing.T) {
@@ -78,21 +80,37 @@ func TestGeminiCLIAdapter_PreparePrompt(t *testing.T) {
 	}
 }
 
+func newTestIssue(source string, hasDescription bool) *models.Issue {
+	issue := &models.Issue{
+		Source: source,
+		Title:  "Test issue",
+	}
+	if hasDescription {
+		desc := "Test description"
+		issue.Description = &desc
+	}
+	return issue
+}
+
+func newMockProvider() *testutil.MockSandboxProvider {
+	return testutil.NewMockSandboxProvider()
+}
+
 func TestGeminiCLIAdapter_Execute(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name            string
-		geminiOutput    string
-		geminiExitCode  int
-		diffOutput      string
-		diffExitCode    int
-		expectErr       bool
-		checkResult     func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry)
+		name           string
+		geminiOutput   string
+		geminiExitCode int
+		diffOutput     string
+		diffExitCode   int
+		expectErr      bool
+		checkResult    func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry)
 	}{
 		{
-			name: "successful run with JSON output",
-			geminiOutput: `{"response":"I fixed the null pointer issue.\n{\"confidence_score\": 0.9, \"confidence_reasoning\": \"Simple null check\", \"risk_factors\": [\"edge case\"]}","stats":{"inputTokens":1000,"outputTokens":500}}`,
+			name:           "successful run with JSON output",
+			geminiOutput:   `{"response":"I fixed the null pointer issue.\n{\"confidence_score\": 0.9, \"confidence_reasoning\": \"Simple null check\", \"risk_factors\": [\"edge case\"]}","stats":{"inputTokens":1000,"outputTokens":500}}`,
 			geminiExitCode: 0,
 			diffOutput:     "diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -1 +1 @@\n-bad\n+good\n",
 			diffExitCode:   0,
@@ -109,8 +127,8 @@ func TestGeminiCLIAdapter_Execute(t *testing.T) {
 			},
 		},
 		{
-			name: "JSON output with error field",
-			geminiOutput: `{"response":"Partial fix applied.","error":"rate limit warning"}`,
+			name:           "JSON output with error field",
+			geminiOutput:   `{"response":"Partial fix applied.","error":"rate limit warning"}`,
 			geminiExitCode: 0,
 			diffOutput:     "",
 			diffExitCode:   0,

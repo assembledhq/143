@@ -16,6 +16,9 @@ type OrgSettings struct {
 	PriorityWeights      PriorityWeights      `json:"priority_weights"`
 	MinPriorityThreshold float64              `json:"min_priority_threshold"`
 	ProductDirection     string               `json:"product_direction"`
+	ProductContext       *ProductContext      `json:"product_context,omitempty"`
+	PMScheduleHours      int                  `json:"pm_schedule_hours"`
+	PMModel              string               `json:"pm_model"`
 	LLMModel             string               `json:"llm_model"`
 	AgentConfig          AgentEnvConfig       `json:"agent_config,omitempty"`
 	DefaultAgentType     string               `json:"default_agent_type,omitempty"`
@@ -42,6 +45,8 @@ const (
 	DefaultMaxConcurrentRuns    = 3
 	DefaultMinPriorityThreshold = 30.0
 	DefaultDefaultAgentType     = "codex"
+	DefaultPMScheduleHours      = 4
+	DefaultPMModel              = "sonnet"
 
 	DefaultWeightCustomerImpact = 0.35
 	DefaultWeightSeverity       = 0.25
@@ -51,6 +56,14 @@ const (
 	DefaultConfidenceAutoProceed = 0.85
 	DefaultConfidenceHumanReview = 0.60
 )
+
+// ProductContext captures the strategic context for the PM agent.
+type ProductContext struct {
+	Philosophy string   `json:"philosophy"`
+	Direction  string   `json:"direction"`
+	FocusAreas []string `json:"focus_areas,omitempty"`
+	AvoidAreas []string `json:"avoid_areas,omitempty"`
+}
 
 // ParseOrgSettings deserializes the JSONB settings column into OrgSettings,
 // applying defaults for any missing or zero-valued fields.
@@ -72,6 +85,12 @@ func ParseOrgSettings(raw json.RawMessage) OrgSettings {
 	if s.MinPriorityThreshold == 0 {
 		s.MinPriorityThreshold = DefaultMinPriorityThreshold
 	}
+	if s.PMScheduleHours == 0 {
+		s.PMScheduleHours = DefaultPMScheduleHours
+	}
+	if s.PMModel == "" {
+		s.PMModel = DefaultPMModel
+	}
 	if s.PriorityWeights == (PriorityWeights{}) {
 		s.PriorityWeights = PriorityWeights{
 			CustomerImpact: DefaultWeightCustomerImpact,
@@ -88,6 +107,11 @@ func ParseOrgSettings(raw json.RawMessage) OrgSettings {
 	}
 	if s.DefaultAgentType == "" {
 		s.DefaultAgentType = DefaultDefaultAgentType
+	}
+	if s.ProductContext == nil && s.ProductDirection != "" {
+		s.ProductContext = &ProductContext{
+			Direction: s.ProductDirection,
+		}
 	}
 	return s
 }

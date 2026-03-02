@@ -149,6 +149,38 @@ function OverviewTab({ run }: { run: AgentRun }) {
         </Card>
       )}
 
+      {(run.pm_plan_id || run.pm_reasoning || run.pm_approach) && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm">PM Context</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            {run.pm_reasoning && (
+              <div>
+                <p className="text-xs font-medium text-muted-foreground">Why this was prioritized</p>
+                <p>{run.pm_reasoning}</p>
+              </div>
+            )}
+            {run.pm_approach && (
+              <div>
+                <p className="text-xs font-medium text-muted-foreground">Suggested approach</p>
+                <p>{run.pm_approach}</p>
+              </div>
+            )}
+            {run.pm_plan_id && (
+              <div className="flex items-center gap-2">
+                <Badge variant="outline" className="text-[11px]">
+                  Plan {run.pm_plan_id.slice(0, 8)}
+                </Badge>
+                <Link href="/plans" className="text-xs text-primary underline">
+                  View plan
+                </Link>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
       {run.status === "failed" && run.failure_explanation && (
         <Card className="border-red-200">
           <CardHeader className="pb-2">
