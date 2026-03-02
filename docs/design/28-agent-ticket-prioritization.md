@@ -152,21 +152,40 @@ type ProductContext struct {
 }
 ```
 
-### How `ProductContext` flows into the PM prompt
+### How `ProductContext` flows into the PM agent via AGENTS.md
 
-The PM agent receives `ProductContext` as a dedicated section at the top of its context, before the issue list:
+The PM agent receives `ProductContext` through the repo's `AGENTS.md` file — the same file that coding agents already read for codebase instructions. Before the PM agent runs, the service **appends** a `## Product Context` section to the existing `AGENTS.md` in the sandbox:
 
-```
+```go
+// writeProductContextToAgentsMD appends the org's ProductContext to the repo's
+// AGENTS.md (or creates it if it doesn't exist). This means the PM agent discovers
+// product context naturally through its standard codebase exploration flow —
+// it reads AGENTS.md like any agent would, and finds the product context there.
+func (s *Service) writeProductContextToAgentsMD(ctx context.Context, sb *agent.Sandbox, pc *ProductContext) error {
+    // Read existing AGENTS.md (may not exist)
+    existing, _ := s.sandbox.ReadFile(ctx, sb, "/workspace/AGENTS.md")
+
+    section := fmt.Sprintf(`
+
 ## Product Context
 
-**Philosophy:** {philosophy}
+**Philosophy:** %s
 
-**Current direction:** {direction}
+**Current direction:** %s
 
-**Focus areas:** {focus_areas}
+**Focus areas:** %s
 
-**Avoid areas:** {avoid_areas}
+**Avoid areas:** %s
+`, pc.Philosophy, pc.Direction, strings.Join(pc.FocusAreas, ", "), strings.Join(pc.AvoidAreas, ", "))
+
+    return s.sandbox.WriteFile(ctx, sb, "/workspace/AGENTS.md", append(existing, []byte(section)...))
+}
 ```
+
+**Why AGENTS.md instead of a separate context file:**
+- The PM agent already reads `AGENTS.md` as part of its standard codebase exploration (step 2 of the workflow). Putting product context there means the agent finds it naturally — no need for a special instruction to read a custom file.
+- It mirrors how a human PM would work: they'd read the team's AGENTS.md/README to understand the project, and the product context is right there alongside the codebase instructions.
+- Coding agents also read `AGENTS.md`, so if the PM's approach hints reference product philosophy, the coding agent has the same shared context.
 
 This shapes every decision the PM makes:
 - **Philosophy** determines *how* the PM thinks — values, tradeoff preferences, fix style, risk appetite. It's the single most expressive field.
@@ -270,18 +289,21 @@ type Service struct {
     repos        repoStore          // fetch repo URL, branch, credentials
     jobs         jobStore           // enqueue run_agent jobs
     plans        planStore          // persist PM plans
+    decisionLog  decisionLogStore   // persist + query PM decision history
     sandbox      agent.SandboxProvider  // reuse existing sandbox infrastructure
     adapter      agent.AgentAdapter     // PM agent adapter (claude_code or codex in PM mode)
     logger       zerolog.Logger
 }
 
 // Analyze is the main entry point. It:
-//  1. Gathers full context (issues, outcomes, settings)
-//  2. Prepares the PM prompt with issue context + codebase exploration instructions
-//  3. Spins up a sandbox, clones the repo, runs the PM agent
-//  4. Parses the structured plan from the agent's output
-//  5. Persists the plan
-//  6. Delegates work items to coding agents
+//  1. Gathers full context (issues, outcomes, previous decisions)
+//  2. Spins up a sandbox, clones the repo
+//  3. Writes ProductContext into AGENTS.md in the sandbox
+//  4. Writes issue context + decision log to .pm-context.json
+//  5. Runs the PM agent (explores codebase, reads AGENTS.md, produces plan)
+//  6. Parses the structured plan from the agent's output
+//  7. Persists the plan + writes decisions to the decision log
+//  8. Delegates work items to coding agents
 func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger string) (*Plan, error) {
     // Step 1: Gather issue/outcome context from DB
     pmCtx, err := s.gatherContext(ctx, orgID)
@@ -309,13 +331,21 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger string) 
         return nil, fmt.Errorf("clone repo: %w", err)
     }
 
-    // Step 4: Write the issue context as a file in the sandbox for the agent to read
+    // Step 4: Write ProductContext into AGENTS.md in the sandbox.
+    // The PM agent reads AGENTS.md naturally during codebase exploration.
+    if pmCtx.productContext != nil {
+        if err := s.writeProductContextToAgentsMD(ctx, sb, pmCtx.productContext); err != nil {
+            s.logger.Warn().Err(err).Msg("failed to write product context to AGENTS.md")
+        }
+    }
+
+    // Step 5: Write the issue context + decision log as a file in the sandbox
     contextJSON, _ := json.Marshal(pmCtx)
     if err := s.sandbox.WriteFile(ctx, sb, "/workspace/.pm-context.json", contextJSON); err != nil {
         return nil, fmt.Errorf("write context: %w", err)
     }
 
-    // Step 5: Run the PM agent
+    // Step 6: Run the PM agent
     prompt := s.preparePMPrompt(pmCtx)
     logCh := make(chan agent.LogEntry, 100)
     go func() { for range logCh {} }() // drain logs (or store them)
@@ -324,13 +354,13 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger string) 
         return nil, fmt.Errorf("pm agent execution: %w", err)
     }
 
-    // Step 6: Parse the plan from the agent's output
+    // Step 7: Parse the plan from the agent's output
     plan, err := parsePlan(result.Summary)
     if err != nil {
         return nil, fmt.Errorf("parse plan: %w", err)
     }
 
-    // Step 7: Persist plan
+    // Step 8: Persist plan
     plan.OrgID = orgID
     plan.TriggeredBy = trigger
     plan.TokenUsage, _ = json.Marshal(result.TokenUsage)
@@ -338,7 +368,16 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger string) 
         return nil, fmt.Errorf("persist plan: %w", err)
     }
 
-    // Step 8: Delegate to coding agents
+    // Step 9: Write decisions to the decision log (institutional memory)
+    entries := planToDecisionLog(plan)
+    for _, entry := range entries {
+        entry.OrgID = orgID
+        if err := s.decisionLog.Create(ctx, &entry); err != nil {
+            s.logger.Error().Err(err).Msg("failed to write decision log entry")
+        }
+    }
+
+    // Step 10: Delegate to coding agents
     if err := s.executePlan(ctx, orgID, plan); err != nil {
         return nil, fmt.Errorf("execute plan: %w", err)
     }
@@ -414,8 +453,12 @@ type PMContext struct {
     RecentOutcomes   []OutcomeSummary  // last ~20 completed runs: success/failure + reasoning
     RecentPRs        []PRSummary       // last ~20 PRs: merged? rejected? reverted?
 
-    // Strategic context (see ProductContext section above)
-    ProductContext   *ProductContext   // admin-set philosophy, direction, focus areas
+    // Institutional memory: what the PM decided in previous cycles
+    // (see "Decision Log" section below)
+    PreviousDecisions []DecisionLogEntry // last ~50 entries with outcomes backfilled
+
+    // Strategic context is NOT included here — it's written into AGENTS.md
+    // in the sandbox so the PM discovers it naturally (see ProductContext section)
 
     // System constraints
     MaxConcurrentRuns int
@@ -461,12 +504,22 @@ Your job is to:
 
 ## Your Workflow
 
-1. START by reading the issue context from /workspace/.pm-context.json. This
-   contains all open issues, recent outcomes, failure patterns, and product
-   context.
+1. START by reading AGENTS.md in /workspace. This contains the codebase
+   instructions AND your Product Context (philosophy, direction, focus areas,
+   avoid areas). This is your most important input — internalize it before
+   reading anything else.
 
-2. EXPLORE THE CODEBASE. Before analyzing issues:
-   - Read the repo's CLAUDE.md, AGENTS.md, and README.md for architecture context
+2. READ the issue context from /workspace/.pm-context.json. This contains:
+   - All open issues (Sentry errors, Linear tickets)
+   - In-flight agent runs (what's already being worked on)
+   - Recent outcomes (what succeeded, what failed, and why)
+   - Your PREVIOUS DECISIONS from past cycles (with outcomes).
+     Review these carefully — maintain consistency with past decisions,
+     learn from failures, and don't re-evaluate issues you already skipped
+     unless circumstances have changed.
+
+3. EXPLORE THE CODEBASE. Before analyzing issues:
+   - Read CLAUDE.md and README.md for additional architecture context
    - Understand the directory structure (ls the top-level dirs)
    - Note the test infrastructure (are there tests? what framework?)
    - Check recent git commits (git log --oneline -20) to understand recent changes
@@ -485,11 +538,12 @@ Your job is to:
    functions, and real code patterns you observed. The coding agent will get
    your approach as part of its prompt — make it specific enough to be useful.
 
-## Product Context
+## Product Context (in AGENTS.md)
 
-You'll receive a "product_context" section describing the team's philosophy,
-current strategic direction, focus areas, and preferences. This is your most
-important input — it tells you how to think, not just what to look at.
+You'll find a "Product Context" section in the AGENTS.md file you read in
+step 1. This is the team's philosophy, strategic direction, focus areas,
+and avoid areas. It's your most important input — it tells you how to think,
+not just what to look at.
 
 - **Philosophy** tells you the team's values (simplicity vs. configurability,
   speed vs. correctness, etc.). It may include preferences on fix style,
@@ -497,6 +551,22 @@ important input — it tells you how to think, not just what to look at.
   If the philosophy says "prefer deleting code over adding abstractions",
   don't recommend adding a new helper function.
 - **Direction** tells you what matters THIS quarter. Align your priorities.
+
+## Previous Decisions (in .pm-context.json)
+
+The "previous_decisions" field in the context file contains your decisions
+from past cycles, with outcomes filled in where available. Use this to:
+
+- **Maintain consistency.** If you skipped an issue last cycle, don't suddenly
+  delegate it unless something changed (new occurrences, severity increase,
+  direction shift).
+- **Learn from failures.** If you delegated an issue with "high" confidence
+  and it failed, adjust your approach or confidence for similar issues.
+- **Avoid redundant work.** If an issue was already delegated and is still
+  in-flight, don't delegate it again.
+- **Build on observations.** Your past "observe" entries (e.g., "billing
+  module has no tests") should inform current approach hints and confidence
+  levels.
 - **Focus areas** are where the team wants coding agents active. Prioritize
   issues in these areas. Deprioritize issues outside them unless they're
   critical.
@@ -847,6 +917,10 @@ CREATE INDEX idx_pm_plans_org_created ON pm_plans(org_id, created_at DESC);
 
 The `product_context_snapshot` column captures the `ProductContext` that was active when the plan was generated. This makes plans self-contained and auditable — you can always see what product context led to a given set of decisions, even if the admin changes direction later.
 
+#### New Table: `pm_decision_log`
+
+See the "Decision Log: Institutional Memory" section below for the full table definition and usage. The migration creates both `pm_plans` and `pm_decision_log` together.
+
 #### Alter Table: `agent_runs`
 
 ```sql
@@ -911,11 +985,14 @@ Add PM configuration section: schedule interval, model selection.
 | `internal/services/pm/adapter.go` | PMAdapter: wraps existing AgentAdapter for PM-mode execution |
 | `internal/services/pm/context.go` | Context assembly (queries issues, runs, PRs, settings) |
 | `internal/services/pm/prompt.go` | System/user prompt construction |
-| `internal/services/pm/types.go` | Plan, Task, Cluster, SkipEntry types |
+| `internal/services/pm/types.go` | Plan, Task, Cluster, SkipEntry, DecisionLogEntry types |
+| `internal/services/pm/decision_log.go` | Decision log extraction from plans, outcome backfill |
 | `internal/db/pm_plans.go` | DB store for pm_plans table |
+| `internal/db/pm_decision_log.go` | DB store for pm_decision_log table |
 | `internal/db/pm_plans_test.go` | Store tests |
+| `internal/db/pm_decision_log_test.go` | Store tests |
 | `internal/api/handlers/pm.go` | API handlers for PM endpoints |
-| `migrations/000004_pm_agent.up.sql` | New table + agent_runs columns |
+| `migrations/000004_pm_agent.up.sql` | New tables (pm_plans, pm_decision_log) + agent_runs columns |
 | `migrations/000004_pm_agent.down.sql` | Rollback |
 | `frontend/src/app/(dashboard)/plans/page.tsx` | PM plan view page |
 | `frontend/src/components/pm/plan-view.tsx` | Plan view component |
@@ -990,8 +1067,8 @@ If the product context is too restrictive (narrow focus areas, many avoid areas,
 The PM is non-deterministic. Issue A might be ranked #1 in one cycle and #3 in the next, with no underlying change. This is confusing for admins.
 
 **Mitigation:**
+- The **decision log** (see below) gives the PM memory of its past decisions. The PM prompt instructs it to maintain consistency: "Review your previous decisions. Don't re-evaluate settled issues unless circumstances changed."
 - Store the `product_context_snapshot` on each plan so admins can see the inputs were the same.
-- The PM prompt includes the previous plan's task list as context: "Here was your previous plan. Explain any ranking changes." This encourages stability.
 - In the frontend, show a plan diff: highlight issues that moved up, down, or were newly added/removed between consecutive plans.
 
 ## Plan Outcome Tracking (Feedback Loop)
@@ -1034,13 +1111,154 @@ of the time. Your "medium confidence" predictions succeed 40%.
 
 This self-calibration loop is the main mechanism for PM improvement. It's not needed in v1 but should be added early in v2.
 
+## Decision Log: Institutional Memory Across PM Cycles
+
+Each PM agent run is ephemeral — the sandbox is destroyed after the plan is produced. Without a persistent record of past decisions, the next PM cycle starts from scratch and may re-evaluate the same issues, make contradictory decisions, or repeat mistakes. The **decision log** gives the PM agent institutional memory.
+
+### What gets logged
+
+Every PM cycle writes its key decisions to a `pm_decision_log` table. Each entry captures one decision the PM made about a specific issue or cluster:
+
+```go
+// DecisionLogEntry is a single decision the PM agent made during a planning cycle.
+// These accumulate over time and form the PM's "institutional memory."
+type DecisionLogEntry struct {
+    ID         uuid.UUID  `json:"id" db:"id"`
+    OrgID      uuid.UUID  `json:"org_id" db:"org_id"`
+    PlanID     uuid.UUID  `json:"plan_id" db:"plan_id"`          // which PM cycle produced this
+    IssueID    *uuid.UUID `json:"issue_id,omitempty" db:"issue_id"` // null for general observations
+    Decision   string     `json:"decision" db:"decision"`        // "delegate", "skip", "cluster", "defer", "observe"
+    Reasoning  string     `json:"reasoning" db:"reasoning"`      // PM's explanation (1-2 sentences)
+    Outcome    *string    `json:"outcome,omitempty" db:"outcome"` // filled in later: "succeeded", "failed", "pr_rejected", "still_open"
+    CreatedAt  time.Time  `json:"created_at" db:"created_at"`
+}
+```
+
+Decision types:
+- **`delegate`** — PM assigned this issue to a coding agent. Reasoning explains why it was prioritized.
+- **`skip`** — PM decided not to work on this issue. Reasoning explains why (too complex, wrong area, needs human input, etc.).
+- **`cluster`** — PM grouped this issue with others under a shared root cause. Reasoning identifies the root cause.
+- **`defer`** — PM recognized the issue but deliberately postponed it. Reasoning explains what would need to change.
+- **`observe`** — A general observation about the codebase or patterns that doesn't tie to a single issue (e.g., "the payments module has no tests — all payment issues are high risk until tests exist").
+
+### How decisions are extracted from the plan
+
+After `parsePlan()` returns a `Plan`, the service converts it into decision log entries:
+
+```go
+func planToDecisionLog(plan *Plan) []DecisionLogEntry {
+    var entries []DecisionLogEntry
+
+    for _, task := range plan.Tasks {
+        for _, issueID := range task.IssueIDs {
+            entries = append(entries, DecisionLogEntry{
+                PlanID:    plan.ID,
+                OrgID:     plan.OrgID,
+                IssueID:   &issueID,
+                Decision:  "delegate",
+                Reasoning: task.Reasoning,
+            })
+        }
+    }
+
+    for _, skip := range plan.SkippedIssues {
+        entries = append(entries, DecisionLogEntry{
+            PlanID:    plan.ID,
+            OrgID:     plan.OrgID,
+            IssueID:   &skip.IssueID,
+            Decision:  "skip",
+            Reasoning: skip.Detail,
+        })
+    }
+
+    for _, cluster := range plan.Clusters {
+        for _, issueID := range cluster.IssueIDs {
+            entries = append(entries, DecisionLogEntry{
+                PlanID:    plan.ID,
+                OrgID:     plan.OrgID,
+                IssueID:   &issueID,
+                Decision:  "cluster",
+                Reasoning: cluster.RootCause + " — " + cluster.Strategy,
+            })
+        }
+    }
+
+    return entries
+}
+```
+
+### How the decision log is fed to the next PM cycle
+
+The PM service fetches the last N decision log entries (default: last 50, or last 30 days, whichever is smaller) and includes them in the PM's context. The agent sees them as a structured history:
+
+```
+## Previous Decisions
+
+These are your decisions from recent planning cycles. Use them to maintain
+consistency, avoid re-evaluating settled issues, and learn from outcomes.
+
+### Cycle #45 (4 hours ago)
+- DELEGATED issue "NilPointer in payment handler" → succeeded (PR merged)
+- DELEGATED issue "Timeout in webhook processing" → failed (agent timed out)
+- SKIPPED issue "Refactor auth module" → reason: "Too complex for automated fix,
+  spans 12 files with no test coverage"
+- CLUSTERED issues "500 on /api/users", "500 on /api/teams" → root cause:
+  "Both hit the same malformed JSON decoder in pkg/api/decode.go"
+
+### Cycle #44 (8 hours ago)
+- DELEGATED issue "Missing CORS header" → succeeded (PR merged)
+- DEFERRED issue "Slow dashboard query" → reason: "Needs schema migration,
+  waiting for next deploy window"
+- OBSERVED: "The billing module has 0% test coverage — all billing issues
+  should be flagged as medium confidence until tests exist"
+```
+
+The decision log entries include their **outcomes** (filled in asynchronously as agent runs complete, PRs are merged/rejected, etc.). This gives the PM direct feedback on its past decisions — it can see which delegations succeeded, which skips were correct, and which deferrals are still waiting.
+
+### Decision log update flow
+
+Outcomes are backfilled by an async process (or the same plan-outcome tracker from the feedback loop section):
+
+```go
+// updateDecisionOutcomes is called when an agent run reaches a terminal state.
+// It finds the decision log entry for that run's issue and fills in the outcome.
+func (s *Service) updateDecisionOutcomes(ctx context.Context, run *models.AgentRun) error {
+    if run.PMPlanID == nil {
+        return nil // not a PM-delegated run
+    }
+
+    outcome := outcomeFromRunStatus(run.Status, run.ValidationResult)
+    return s.decisionLog.UpdateOutcome(ctx, *run.PMPlanID, run.IssueID, outcome)
+}
+```
+
+### Database table: `pm_decision_log`
+
+```sql
+CREATE TABLE pm_decision_log (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id      UUID NOT NULL REFERENCES organizations(id),
+    plan_id     UUID NOT NULL REFERENCES pm_plans(id),
+    issue_id    UUID REFERENCES issues(id),            -- null for "observe" entries
+    decision    TEXT NOT NULL,                          -- delegate, skip, cluster, defer, observe
+    reasoning   TEXT NOT NULL,
+    outcome     TEXT,                                   -- succeeded, failed, pr_rejected, still_open (filled async)
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_pm_decision_log_org_created ON pm_decision_log(org_id, created_at DESC);
+CREATE INDEX idx_pm_decision_log_plan ON pm_decision_log(plan_id);
+CREATE INDEX idx_pm_decision_log_issue ON pm_decision_log(issue_id);
+```
+
 ## Migration Path
 
 ### Step 1: Add PM agent alongside existing system (no behavior change)
 
-- Add `pm_plans` table, `pm.Service`, API endpoints, `ProductContext` to org settings
+- Add `pm_plans` and `pm_decision_log` tables, `pm.Service`, API endpoints, `ProductContext` to org settings
 - PM agent can be triggered manually via `POST /pm/analyze`
 - Plans are stored and viewable but don't create any agent runs
+- Decision log is written on each PM cycle
 - Existing per-issue prioritize → auto-trigger flow continues unchanged
 - Settings UI gains the Product Context section
 
@@ -1049,6 +1267,8 @@ This self-calibration loop is the main mechanism for PM improvement. It's not ne
 - PM agent's `executePlan()` starts creating agent runs
 - Remove `CheckAutoTrigger()` from the `prioritize` job handler
 - Add PM cron to scheduler
+- Decision log outcomes are backfilled as agent runs complete
+- ProductContext is written to AGENTS.md in the sandbox
 - Now: PM agent is the only path to automated coding runs. Manual "Fix This" still works via direct agent run creation.
 
 ### Step 3: Polish and feedback loop
@@ -1056,6 +1276,7 @@ This self-calibration loop is the main mechanism for PM improvement. It's not ne
 - Frontend plan view page with plan diffs between cycles
 - PM context display on run detail pages
 - Plan outcome tracking and feedback injection
+- Decision log viewer in the frontend (see past decisions + outcomes)
 - Settings UI for schedule interval and model selection
 
 ## Resolved Decisions
@@ -1069,3 +1290,7 @@ This self-calibration loop is the main mechanism for PM improvement. It's not ne
 4. **ProductContext vs. auto-bootstrap.** ProductContext (philosophy, direction, focus/avoid areas) is user input. Raw outcome data (recent runs, PRs, in-flight work) is auto-included for the PM to reason over. No pre-computed aggregates — the PM agent is smart enough to spot patterns in raw data, and pre-computing biases its reasoning.
 
 5. **Keep ProductContext lean.** Four fields: philosophy, direction, focus areas, avoid areas. Fix style and risk tolerance are subsumed by philosophy (e.g., "we prefer minimal diffs" or "we move fast and accept revisions"). Fewer knobs = less admin friction = more likely to actually get filled in.
+
+6. **ProductContext delivery via AGENTS.md.** Rather than injecting product context as a separate file or system prompt section, we append it to the repo's `AGENTS.md` in the sandbox. This means the PM discovers it naturally during its standard codebase exploration flow — the same way a human PM would read the team's docs before planning. It also means coding agents reading AGENTS.md see the same product context, ensuring shared alignment.
+
+7. **Decision log for institutional memory.** Each PM cycle writes its decisions (delegate, skip, cluster, defer, observe) to a `pm_decision_log` table with outcomes backfilled asynchronously. The last ~50 entries are provided to the next PM cycle as context, giving the agent continuity across runs. This prevents the PM from re-evaluating settled issues, enables learning from past failures, and makes the PM's behavior more consistent over time.
