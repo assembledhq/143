@@ -22,11 +22,25 @@ Every ingested issue enqueues its own `prioritize` job, which scores it, estimat
 
 ### Implementation Status (current codebase)
 
-The current implementation matches the **per-ticket reactive flow**:
+The codebase now matches the **PM-driven batch flow**:
 
-- `prioritize` jobs are enqueued by ingestion, recompute score + complexity, and **auto-trigger** runs when eligible.
-- `product_direction` exists in org settings and is already used by the prioritization LLM alignment check.
-- There is **no PM agent service**, **no PM tables**, **no pm_analyze job**, and **no PM UI** yet.
+- `prioritize` jobs recompute score + complexity for display only (no auto-trigger).
+- `ProductContext` + PM settings are available in org settings and mirrored into `product_direction` for compatibility.
+- PM tables (`pm_plans`, `pm_decision_log`) and PM service + `pm_analyze` job exist.
+- PM UI (plans view + settings) and run-level PM context display are implemented.
+
+### Implementation Progress (2026-03-02)
+
+- [x] Add `pm_plans` + `pm_decision_log` tables and `agent_runs` PM columns
+- [x] Add `ProductContext`, `pm_schedule_hours`, and `pm_model` to org settings (with migration from `product_direction`)
+- [x] Implement PM stores, plan parsing, and decision log helpers
+- [x] Implement PM service (context gathering, sandbox run, plan execution)
+- [x] Add `pm_analyze` worker handler + scheduler cron enqueue
+- [x] Add PM API endpoints (`/pm/analyze`, `/pm/plans`, `/pm/plans/latest`)
+- [x] Inject PM context into agent prompts and store PM fields on runs
+- [x] Remove auto-trigger from `prioritize` job handler
+- [x] Frontend PM plan view + PM context on runs + Product Context settings UI
+- [x] Add tests and run `go vet`, `go build`, `go test`, `npm run typecheck`, `npm run lint`, `npm run build`
 
 This document therefore describes a **planned transition** from the existing flow into the PM-driven loop below.
 

@@ -39,7 +39,9 @@ var agentRunColumns = []string{
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
 	"container_id", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
-	"parent_run_id", "revision_context", "error", "result_summary", "diff", "created_at",
+	"parent_run_id", "revision_context", "error", "result_summary", "diff",
+	"pm_plan_id", "pm_approach", "pm_reasoning",
+	"created_at",
 }
 
 func TestRunHandler_List(t *testing.T) {
@@ -65,7 +67,9 @@ func TestRunHandler_List(t *testing.T) {
 							nil, nil, nil, nil,
 							nil, &now, &now, nil,
 							nil, nil, nil, nil,
-							nil, nil, nil, nil, nil, now,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil,
+							now,
 						),
 					)
 			},
@@ -139,7 +143,9 @@ func TestRunHandler_Get(t *testing.T) {
 							nil, nil, nil, nil,
 							nil, &now, nil, nil,
 							nil, nil, nil, nil,
-							nil, nil, nil, nil, nil, now,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil,
+							now,
 						),
 					)
 			},
@@ -212,11 +218,12 @@ func triggerFixIssueMock(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
 			),
 		)
 
-	// Mock agent run create (9 named args)
+	// Mock agent run create (12 named args)
 	runID := uuid.New()
 	mock.ExpectQuery("INSERT INTO agent_runs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
 
 	// Mock job enqueue (6 named args)
@@ -257,11 +264,12 @@ func triggerFixIssueAndOrgDefaultMock(mock pgxmock.PgxPoolIface, orgID uuid.UUID
 				AddRow(orgID, "Acme", []byte(settings), now, now),
 		)
 
-	// Mock agent run create (9 named args)
+	// Mock agent run create (12 named args)
 	runID := uuid.New()
 	mock.ExpectQuery("INSERT INTO agent_runs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
 
 	// Mock job enqueue (6 named args)

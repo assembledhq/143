@@ -30,7 +30,9 @@ func (s *AgentRunStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters 
 		       complexity_tier, confidence_score, confidence_reasoning, risk_factors,
 		       container_id, started_at, completed_at, token_usage,
 		       failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
-		       parent_run_id, revision_context, error, result_summary, diff, created_at
+		       parent_run_id, revision_context, error, result_summary, diff,
+		       pm_plan_id, pm_approach, pm_reasoning,
+		       created_at
 		FROM agent_runs
 		WHERE org_id = @org_id`
 
@@ -69,7 +71,9 @@ func (s *AgentRunStore) GetByID(ctx context.Context, orgID, runID uuid.UUID) (mo
 		       complexity_tier, confidence_score, confidence_reasoning, risk_factors,
 		       container_id, started_at, completed_at, token_usage,
 		       failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
-		       parent_run_id, revision_context, error, result_summary, diff, created_at
+		       parent_run_id, revision_context, error, result_summary, diff,
+		       pm_plan_id, pm_approach, pm_reasoning,
+		       created_at
 		FROM agent_runs
 		WHERE id = @id AND org_id = @org_id`
 
@@ -85,8 +89,14 @@ func (s *AgentRunStore) GetByID(ctx context.Context, orgID, runID uuid.UUID) (mo
 
 func (s *AgentRunStore) Create(ctx context.Context, run *models.AgentRun) error {
 	query := `
-		INSERT INTO agent_runs (issue_id, org_id, agent_type, status, autonomy_level, token_mode, complexity_tier, parent_run_id, revision_context)
-		VALUES (@issue_id, @org_id, @agent_type, @status, @autonomy_level, @token_mode, @complexity_tier, @parent_run_id, @revision_context)
+		INSERT INTO agent_runs (
+			issue_id, org_id, agent_type, status, autonomy_level, token_mode, complexity_tier,
+			parent_run_id, revision_context, pm_plan_id, pm_approach, pm_reasoning
+		)
+		VALUES (
+			@issue_id, @org_id, @agent_type, @status, @autonomy_level, @token_mode, @complexity_tier,
+			@parent_run_id, @revision_context, @pm_plan_id, @pm_approach, @pm_reasoning
+		)
 		RETURNING id, created_at`
 
 	args := pgx.NamedArgs{
@@ -99,6 +109,9 @@ func (s *AgentRunStore) Create(ctx context.Context, run *models.AgentRun) error 
 		"complexity_tier":  run.ComplexityTier,
 		"parent_run_id":    run.ParentRunID,
 		"revision_context": run.RevisionContext,
+		"pm_plan_id":       run.PMPlanID,
+		"pm_approach":      run.PMApproach,
+		"pm_reasoning":     run.PMReasoning,
 	}
 
 	row := s.db.QueryRow(ctx, query, args)
@@ -176,7 +189,9 @@ func (s *AgentRunStore) ListByIssue(ctx context.Context, orgID, issueID uuid.UUI
 		       complexity_tier, confidence_score, confidence_reasoning, risk_factors,
 		       container_id, started_at, completed_at, token_usage,
 		       failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
-		       parent_run_id, revision_context, error, result_summary, diff, created_at
+		       parent_run_id, revision_context, error, result_summary, diff,
+		       pm_plan_id, pm_approach, pm_reasoning,
+		       created_at
 		FROM agent_runs
 		WHERE org_id = @org_id AND issue_id = @issue_id
 		ORDER BY created_at DESC`
@@ -187,6 +202,34 @@ func (s *AgentRunStore) ListByIssue(ctx context.Context, orgID, issueID uuid.UUI
 	})
 	if err != nil {
 		return nil, fmt.Errorf("query agent runs by issue: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.AgentRun])
+}
+
+func (s *AgentRunStore) ListRecentByOrg(ctx context.Context, orgID uuid.UUID, statuses []string, limit int) ([]models.AgentRun, error) {
+	query := `
+		SELECT id, issue_id, org_id, agent_type, status, autonomy_level, token_mode,
+		       complexity_tier, confidence_score, confidence_reasoning, risk_factors,
+		       container_id, started_at, completed_at, token_usage,
+		       failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
+		       parent_run_id, revision_context, error, result_summary, diff,
+		       pm_plan_id, pm_approach, pm_reasoning,
+		       created_at
+		FROM agent_runs
+		WHERE org_id = @org_id AND status = ANY(@statuses)
+		ORDER BY created_at DESC`
+
+	if limit <= 0 || limit > 200 {
+		limit = 20
+	}
+	query += fmt.Sprintf(` LIMIT %d`, limit)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":   orgID,
+		"statuses": statuses,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query agent runs: %w", err)
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.AgentRun])
 }

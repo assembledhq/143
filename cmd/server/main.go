@@ -14,6 +14,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/api"
+	"github.com/assembledhq/143/internal/cluster"
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/db"
@@ -24,6 +25,7 @@ import (
 	"github.com/assembledhq/143/internal/services/agent/providers"
 	"github.com/assembledhq/143/internal/services/codexauth"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	"github.com/assembledhq/143/internal/services/pm"
 	"github.com/assembledhq/143/internal/services/prioritization"
 	"github.com/assembledhq/143/internal/services/validation"
 	"github.com/assembledhq/143/internal/worker"
@@ -69,17 +71,20 @@ func main() {
 		jobStore := db.NewJobStore(pool)
 		orgStore := db.NewOrganizationStore(pool)
 		repoStore := db.NewRepositoryStore(pool)
+		integrationStore := db.NewIntegrationStore(pool)
 		validationStore := db.NewValidationStore(pool)
 		pullRequestStore := db.NewPullRequestStore(pool)
 		deployStore := db.NewDeployStore(pool)
 		priorityScoreStore := db.NewPriorityScoreStore(pool)
 		complexityEstimateStore := db.NewComplexityEstimateStore(pool)
+		pmPlanStore := db.NewPMPlanStore(pool)
+		pmDecisionLogStore := db.NewPMDecisionLogStore(pool)
 
 		stores := &worker.Stores{
 			Issues:              issueStore,
 			AgentRuns:           agentRunStore,
 			Jobs:                jobStore,
-			Integrations:        db.NewIntegrationStore(pool),
+			Integrations:        integrationStore,
 			Webhooks:            db.NewWebhookDeliveryStore(pool),
 			PriorityScores:      priorityScoreStore,
 			ComplexityEstimates: complexityEstimateStore,
@@ -90,11 +95,21 @@ func main() {
 		if canBuildServices(cfg, logger) {
 			services = buildServices(cfg, pool, logger, codexAuthSvc, issueStore, agentRunStore,
 				jobStore, orgStore, repoStore, validationStore, pullRequestStore,
-				deployStore, priorityScoreStore, complexityEstimateStore)
+				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore)
 		}
 		worker.RegisterHandlers(w, stores, services, logger)
 		go w.Start(ctx)
 		logger.Info().Msg("worker started with registered handlers")
+
+		scheduler := cluster.NewScheduler(
+			cluster.NewSchedulerLock(pool),
+			jobStore,
+			orgStore,
+			integrationStore,
+			pmPlanStore,
+			logger,
+		)
+		go scheduler.Start(ctx, 10*time.Minute)
 	}
 
 	srv := &http.Server{
@@ -152,6 +167,8 @@ func buildServices(
 	deployStore *db.DeployStore,
 	priorityScoreStore *db.PriorityScoreStore,
 	complexityEstimateStore *db.ComplexityEstimateStore,
+	pmPlanStore *db.PMPlanStore,
+	pmDecisionLogStore *db.PMDecisionLogStore,
 ) *worker.Services {
 	// GitHub App service (for installation tokens, PR creation).
 	ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
@@ -190,6 +207,7 @@ func buildServices(
 		AgentRuns:         agentRunStore,
 		AgentRunLogs:      agentRunLogStore,
 		AgentRunQuestions: agentRunQuestionStore,
+		DecisionLog:       pmDecisionLogStore,
 		Issues:            issueStore,
 		Repositories:      repoStore,
 		Orgs:              orgStore,
@@ -220,6 +238,22 @@ func buildServices(
 		agentRunStore, orgStore, jobStore, llmClient, logger,
 	)
 
+	pmAdapter := adapters.NewClaudeCodeAdapter(logger)
+	pmSvc := pm.NewService(
+		issueStore,
+		agentRunStore,
+		pullRequestStore,
+		orgStore,
+		repoStore,
+		jobStore,
+		pmPlanStore,
+		pmDecisionLogStore,
+		sandboxProvider,
+		pmAdapter,
+		ghSvc,
+		logger,
+	)
+
 	logger.Info().
 		Int("adapters", len(agentAdapters)).
 		Bool("llm_configured", llmClient != nil).
@@ -232,5 +266,6 @@ func buildServices(
 		Failure:         failureSvc,
 		SandboxProvider: sandboxProvider,
 		Prioritization:  prioritizationSvc,
+		PM:              pmSvc,
 	}
 }

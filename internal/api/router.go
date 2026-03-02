@@ -32,6 +32,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	pullRequestStore := db.NewPullRequestStore(pool)
 	webhookDeliveryStore := db.NewWebhookDeliveryStore(pool)
 	jobStore := db.NewJobStore(pool)
+	pmPlanStore := db.NewPMPlanStore(pool)
 
 	priorityScoreStore := db.NewPriorityScoreStore(pool)
 	complexityEstimateStore := db.NewComplexityEstimateStore(pool)
@@ -87,6 +88,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		orgStore,
 		jobStore,
 	)
+	pmHandler := handlers.NewPMHandler(pmPlanStore, jobStore)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
 	credentialHandler := handlers.NewCredentialHandler(credentialStore)
@@ -161,6 +163,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/runs/{id}/questions", runHandler.ListQuestions)
 			r.Get("/api/v1/settings", settingsHandler.Get)
 			r.Get("/api/v1/settings/agent-defaults", settingsHandler.GetAgentDefaults)
+			r.Get("/api/v1/pm/plans", pmHandler.List)
+			r.Get("/api/v1/pm/plans/{id}", pmHandler.Get)
+			r.Get("/api/v1/pm/plans/latest", pmHandler.Latest)
 		})
 
 		// Write routes (admin and member only)
@@ -178,6 +183,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 
 			r.Delete("/api/v1/repositories/{id}", repoHandler.Delete)
 			r.Post("/api/v1/issues/{id}/reprioritize", priorityHandler.Reprioritize)
+			r.Post("/api/v1/pm/analyze", pmHandler.Analyze)
 			r.Patch("/api/v1/settings", settingsHandler.Update)
 			r.Patch("/api/v1/review-patterns/{id}", reviewPatternHandler.UpdateStatus)
 			r.Put("/api/v1/review-patterns/{id}", reviewPatternHandler.UpdateRule)
@@ -192,7 +198,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/settings/codex-auth/status", codexAuthHandler.Status)
 			r.Post("/api/v1/settings/codex-auth/disconnect", codexAuthHandler.Disconnect)
 
-      // Team management
+			// Team management
 			r.Get("/api/v1/team/members", teamHandler.ListMembers)
 			r.Patch("/api/v1/team/members/{id}/role", teamHandler.ChangeRole)
 			r.Delete("/api/v1/team/members/{id}", teamHandler.RemoveMember)
