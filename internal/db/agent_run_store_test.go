@@ -17,7 +17,9 @@ var agentRunColumns = []string{
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
 	"container_id", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
-	"parent_run_id", "revision_context", "error", "result_summary", "diff", "created_at",
+	"parent_run_id", "revision_context", "error", "result_summary", "diff",
+	"pm_plan_id", "pm_approach", "pm_reasoning",
+	"created_at",
 }
 
 func newAgentRunRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
@@ -26,7 +28,9 @@ func newAgentRunRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 		nil, nil, nil, []string{},
 		nil, nil, nil, json.RawMessage(`{}`),
 		nil, nil, []string{}, nil,
-		nil, json.RawMessage(`{}`), nil, nil, nil, now,
+		nil, json.RawMessage(`{}`), nil, nil, nil,
+		nil, nil, nil,
+		now,
 	}
 }
 
@@ -157,6 +161,32 @@ func TestAgentRunStore_GetByID(t *testing.T) {
 	}
 }
 
+func TestAgentRunStore_ListRecentByOrg(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+	now := time.Now()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	mock.ExpectQuery("SELECT .+ FROM agent_runs WHERE org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(agentRunColumns).
+				AddRow(newAgentRunRow(runID, issueID, orgID, now)...),
+		)
+
+	store := NewAgentRunStore(mock)
+	runs, err := store.ListRecentByOrg(context.Background(), orgID, []string{"completed", "failed"}, 20)
+	require.NoError(t, err, "ListRecentByOrg should succeed")
+	require.Len(t, runs, 1, "should return expected runs")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestAgentRunStore_Create(t *testing.T) {
 	t.Parallel()
 
@@ -180,7 +210,7 @@ func TestAgentRunStore_Create(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO agent_runs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at"}).
 				AddRow(generatedID, now),
@@ -197,9 +227,9 @@ func TestAgentRunStore_UpdateStatus(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		status    string
-		queryRE   string
+		name    string
+		status  string
+		queryRE string
 	}{
 		{
 			name:    "sets started_at when transitioning to running",

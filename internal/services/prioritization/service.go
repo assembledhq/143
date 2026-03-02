@@ -8,12 +8,20 @@ import (
 	"strings"
 	"time"
 
+	_ "embed"
+
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
 	llmpkg "github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/models"
 )
+
+//go:embed direction_alignment_prompt.template
+var directionAlignmentPrompt string
+
+//go:embed complexity_estimate_prompt.template
+var complexityEstimatePrompt string
 
 // issueStore is the subset of db.IssueStore used by the service.
 type issueStore interface {
@@ -389,15 +397,7 @@ func computeRecency(lastSeenAt time.Time) float64 {
 // computeDirectionAlignment calls the LLM to assess how well an issue aligns
 // with the organization's product direction. Returns a value in [-1, 1].
 func (s *Service) computeDirectionAlignment(ctx context.Context, issue *models.Issue, productDirection string) (float64, error) {
-	systemPrompt := `You are a product alignment assessor. Given an issue and a product direction statement, assess how well fixing this issue aligns with the product direction.
-
-Respond with JSON only:
-{"alignment": <float between -1.0 and 1.0>, "reasoning": "..."}
-
-Where:
-- 1.0 = perfectly aligned with product direction
-- 0.0 = neutral / not related
-- -1.0 = actively misaligned with product direction`
+	systemPrompt := directionAlignmentPrompt
 
 	desc := ""
 	if issue.Description != nil {
@@ -438,17 +438,7 @@ Occurrences: %d`,
 
 // estimateComplexityViaLLM calls the LLM to estimate issue complexity.
 func (s *Service) estimateComplexityViaLLM(ctx context.Context, issue *models.Issue) (int, string, float64, string, error) {
-	systemPrompt := `You are a software complexity estimator. Given a bug report, estimate the complexity of fixing it.
-
-Respond with JSON only:
-{"tier": <1-5>, "label": "<label>", "confidence": <0.0-1.0>, "reasoning": "..."}
-
-Tier definitions:
-1 = "trivial" - typo, config change, single-line fix
-2 = "simple" - single-file fix, clear root cause
-3 = "moderate" - multi-file change, requires understanding of system
-4 = "complex" - architectural change, multiple components affected
-5 = "very_complex" - fundamental design issue, extensive refactoring needed`
+	systemPrompt := complexityEstimatePrompt
 
 	desc := ""
 	if issue.Description != nil {

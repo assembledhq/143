@@ -388,6 +388,11 @@ GET /api/v1/issues?cursor=<opaque>&limit=50
 
 Returns `meta.next_cursor` in the response for the next page.
 
+**PM plans cursor format**: `/api/v1/pm/plans` returns a cursor in the form
+`<created_at>|<id>` where `created_at` is `RFC3339Nano` in UTC (e.g.
+`2026-03-02T05:12:34.123456789Z|c0a8012e-7e6d-4f2e-9bbd-9a6b0b2f0e9a`). Clients
+should still treat the cursor as opaque and pass it back as-is.
+
 ## Middleware Stack
 
 Applied in order:

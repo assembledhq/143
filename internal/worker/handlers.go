@@ -16,6 +16,7 @@ import (
 	"github.com/assembledhq/143/internal/services/feedback"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
+	"github.com/assembledhq/143/internal/services/pm"
 	"github.com/assembledhq/143/internal/services/prioritization"
 	"github.com/assembledhq/143/internal/services/validation"
 )
@@ -26,6 +27,9 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, logger zero
 	w.Register("sync_sentry", newSyncSentryHandler(stores, logger))
 	if services != nil && services.Prioritization != nil {
 		w.Register("prioritize", newPrioritizeHandler(stores, services, logger))
+	}
+	if services != nil && services.PM != nil {
+		w.Register("pm_analyze", newPMAnalyzeHandler(stores, services, logger))
 	}
 	if hasServiceHandlersDependencies(services) {
 		w.Register("run_agent", newRunAgentHandler(stores, services, logger))
@@ -70,6 +74,11 @@ type Services struct {
 	SandboxProvider agent.SandboxProvider
 	Prioritization  *prioritization.Service
 	Feedback        *feedback.Service
+	PM              pmService
+}
+
+type pmService interface {
+	Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger) (*pm.Plan, error)
 }
 
 // ingest_webhook handler processes a webhook delivery asynchronously.
@@ -114,8 +123,7 @@ func newPrioritizeHandler(stores *Stores, services *Services, logger zerolog.Log
 			return fmt.Errorf("parse issue ID: %w", err)
 		}
 		// Compute priority score
-		score, err := services.Prioritization.ComputeScore(ctx, orgID, issueID)
-		if err != nil {
+		if _, err = services.Prioritization.ComputeScore(ctx, orgID, issueID); err != nil {
 			return fmt.Errorf("compute priority score: %w", err)
 		}
 		// Fetch issue for complexity estimation
@@ -124,18 +132,40 @@ func newPrioritizeHandler(stores *Stores, services *Services, logger zerolog.Log
 			return fmt.Errorf("fetch issue: %w", err)
 		}
 		// Estimate complexity
-		estimate, err := services.Prioritization.EstimateComplexity(ctx, orgID, issueID, &issue)
+		_, err = services.Prioritization.EstimateComplexity(ctx, orgID, issueID, &issue)
 		if err != nil {
 			logger.Warn().Err(err).Str("issue_id", issueID.String()).Msg("complexity estimation failed, skipping auto-trigger")
 			return nil
 		}
-		// Check auto-trigger
-		if score.EligibleForAgent {
-			if err := services.Prioritization.CheckAutoTrigger(ctx, orgID, score, estimate, &issue); err != nil {
-				logger.Warn().Err(err).Str("issue_id", issueID.String()).Msg("auto-trigger check failed")
-			}
-		}
 		return nil
+	}
+}
+
+func newPMAnalyzeHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID   string `json:"org_id"`
+			Trigger string `json:"trigger"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal pm_analyze payload: %w", err)
+		}
+
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		trigger := models.PMTrigger(input.Trigger)
+		if trigger == "" {
+			trigger = models.PMTriggerCron
+		}
+		if err := trigger.Validate(); err != nil {
+			return fmt.Errorf("invalid trigger: %w", err)
+		}
+
+		logger.Info().Str("org_id", orgID.String()).Str("trigger", string(trigger)).Msg("running pm analyze")
+		_, err = services.PM.Analyze(ctx, orgID, trigger)
+		return err
 	}
 }
 

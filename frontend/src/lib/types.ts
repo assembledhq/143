@@ -99,6 +99,9 @@ export interface AgentRun {
   failure_next_steps?: string[];
   failure_retry_advised?: boolean;
   parent_run_id?: string;
+  pm_plan_id?: string;
+  pm_approach?: string;
+  pm_reasoning?: string;
   error?: string;
   result_summary?: string;
   diff?: string;
@@ -205,6 +208,8 @@ export interface OrgSettings {
   autonomy_level?: 'manual' | 'auto_simple' | 'auto_all';
   execution_aggressiveness?: number;
   max_concurrent_runs?: number;
+  pm_schedule_hours?: number;
+  pm_model?: string;
   confidence_thresholds?: {
     auto_proceed?: number;
     human_review?: number;
@@ -217,8 +222,57 @@ export interface OrgSettings {
   };
   min_priority_threshold?: number;
   product_direction?: string;
+  product_context?: ProductContext;
   agent_config?: Record<string, Record<string, string>>;
   default_agent_type?: 'codex' | 'claude_code' | 'gemini_cli';
+}
+
+export interface ProductContext {
+  philosophy: string;
+  direction: string;
+  focus_areas?: string[];
+  avoid_areas?: string[];
+}
+
+export interface PMTask {
+  rank: number;
+  issue_ids: string[];
+  title: string;
+  reasoning: string;
+  approach: string;
+  risk: string;
+  complexity: string;
+  confidence: string;
+  agent_run_id?: string;
+  status?: string;
+}
+
+export interface PMCluster {
+  issue_ids: string[];
+  root_cause: string;
+  strategy: string;
+}
+
+export interface PMSkipEntry {
+  issue_id: string;
+  reason: string;
+  detail: string;
+}
+
+export interface PMPlan {
+  id: string;
+  org_id: string;
+  status: string;
+  analysis: string;
+  tasks: PMTask[];
+  clusters: PMCluster[];
+  skipped_issues: PMSkipEntry[];
+  issues_reviewed: number;
+  product_context_snapshot?: ProductContext;
+  token_usage?: Record<string, unknown>;
+  triggered_by: string;
+  created_at: string;
+  completed_at?: string;
 }
 
 export interface CodexAuthStatus {

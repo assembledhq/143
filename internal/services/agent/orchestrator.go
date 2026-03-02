@@ -49,6 +49,11 @@ type AgentRunQuestionStore interface {
 	Create(ctx context.Context, q *models.AgentRunQuestion) error
 }
 
+// DecisionLogStore updates PM decision log outcomes.
+type DecisionLogStore interface {
+	UpdateOutcome(ctx context.Context, orgID, planID, issueID uuid.UUID, outcome models.PMDecisionOutcome) error
+}
+
 // OrgStore defines the organization read operations needed for org-level config.
 type OrgStore interface {
 	GetByID(ctx context.Context, orgID uuid.UUID) (models.Organization, error)
@@ -77,6 +82,7 @@ type Orchestrator struct {
 	agentRuns         AgentRunStore
 	agentRunLogs      AgentRunLogStore
 	agentRunQuestions AgentRunQuestionStore
+	decisionLog       DecisionLogStore
 	issues            IssueStore
 	repositories      RepositoryStore
 	orgs              OrgStore
@@ -95,6 +101,7 @@ type OrchestratorConfig struct {
 	AgentRuns         AgentRunStore
 	AgentRunLogs      AgentRunLogStore
 	AgentRunQuestions AgentRunQuestionStore
+	DecisionLog       DecisionLogStore
 	Issues            IssueStore
 	Repositories      RepositoryStore
 	Orgs              OrgStore
@@ -128,6 +135,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		agentRuns:         cfg.AgentRuns,
 		agentRunLogs:      cfg.AgentRunLogs,
 		agentRunQuestions: cfg.AgentRunQuestions,
+		decisionLog:       cfg.DecisionLog,
 		issues:            cfg.Issues,
 		repositories:      cfg.Repositories,
 		orgs:              cfg.Orgs,
@@ -206,6 +214,16 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error
 		input.ComplexityEstimate = &ComplexityEstimate{
 			Tier: *run.ComplexityTier,
 		}
+	}
+	if run.PMApproach != nil || run.PMReasoning != nil {
+		pmCtx := &PMTaskContext{}
+		if run.PMApproach != nil {
+			pmCtx.Approach = *run.PMApproach
+		}
+		if run.PMReasoning != nil {
+			pmCtx.Reasoning = *run.PMReasoning
+		}
+		input.PMContext = pmCtx
 	}
 
 	prompt, err := adapter.PreparePrompt(ctx, input)
@@ -308,7 +326,29 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error
 		})
 	}
 
+	if run.PMPlanID != nil && o.decisionLog != nil {
+		outcome := outcomeFromRunStatus(status)
+		if outcome != "" {
+			if err := o.decisionLog.UpdateOutcome(ctx, run.OrgID, *run.PMPlanID, run.IssueID, outcome); err != nil {
+				o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update PM decision log outcome")
+			}
+		}
+	}
+
 	return nil
+}
+
+func outcomeFromRunStatus(status string) models.PMDecisionOutcome {
+	switch status {
+	case "completed":
+		return models.PMDecisionOutcomeSucceeded
+	case "failed":
+		return models.PMDecisionOutcomeFailed
+	case "needs_human_guidance":
+		return models.PMDecisionOutcomeStillOpen
+	default:
+		return ""
+	}
 }
 
 // checkConcurrency verifies the org hasn't exceeded its concurrent run limit.

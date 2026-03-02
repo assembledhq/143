@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 
+	_ "embed"
+
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
@@ -15,6 +17,16 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 )
+
+
+//go:embed direction_check_prompt.template
+var directionCheckPrompt string
+
+//go:embed correctness_check_prompt.template
+var correctnessCheckPrompt string
+
+//go:embed regression_check_prompt.template
+var regressionCheckPrompt string
 
 // validationStore is the subset of db.ValidationStore used by the service.
 type validationStore interface {
@@ -220,12 +232,7 @@ func (s *Service) checkDirection(ctx context.Context, diff string, issue *models
 		return "skipped", "LLM client not configured", nil
 	}
 
-	systemPrompt := `You are a code review validation agent. Your job is to check whether a code diff aligns with the reported issue and the organization's product direction.
-
-Respond with JSON only:
-{"result": "pass", "reasoning": "..."}
-or
-{"result": "fail", "reasoning": "..."}`
+	systemPrompt := directionCheckPrompt
 
 	var issueContext string
 	if issue != nil {
@@ -263,12 +270,7 @@ func (s *Service) checkCorrectness(ctx context.Context, diff string, issue *mode
 		return "skipped", "LLM client not configured", nil
 	}
 
-	systemPrompt := `You are a code review validation agent. Your job is to check whether a code diff correctly fixes the reported issue. Look for logical errors, incomplete fixes, or changes that could introduce new bugs.
-
-Respond with JSON only:
-{"result": "pass", "reasoning": "..."}
-or
-{"result": "fail", "reasoning": "..."}`
+	systemPrompt := correctnessCheckPrompt
 
 	var issueContext string
 	if issue != nil {
@@ -302,12 +304,7 @@ func (s *Service) checkRegressionTest(ctx context.Context, diff string, issue *m
 		return "skipped", "LLM client not configured", nil
 	}
 
-	systemPrompt := `You are a code review validation agent. Your job is to check whether a code diff includes appropriate regression tests for the fix. A good regression test should verify that the specific bug being fixed cannot recur.
-
-Respond with JSON only:
-{"result": "pass", "reasoning": "..."}
-or
-{"result": "fail", "reasoning": "..."}`
+	systemPrompt := regressionCheckPrompt
 
 	var issueContext string
 	if issue != nil {

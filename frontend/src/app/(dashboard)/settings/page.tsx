@@ -6,9 +6,10 @@ import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, X } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Slider } from "@/components/ui/slider";
 import { IntegrationsCard } from "@/components/integrations-card";
@@ -55,6 +56,8 @@ const DEFAULT_SETTINGS: Required<OrgSettings> = {
   autonomy_level: "manual",
   execution_aggressiveness: 2,
   max_concurrent_runs: 3,
+  pm_schedule_hours: 4,
+  pm_model: "sonnet",
   confidence_thresholds: {
     auto_proceed: 0.8,
     human_review: 0.5,
@@ -67,6 +70,12 @@ const DEFAULT_SETTINGS: Required<OrgSettings> = {
   },
   min_priority_threshold: 20,
   product_direction: "",
+  product_context: {
+    philosophy: "",
+    direction: "",
+    focus_areas: [],
+    avoid_areas: [],
+  },
   agent_config: {},
   default_agent_type: "codex",
 };
@@ -254,9 +263,16 @@ export default function SettingsPage() {
   const [autonomyLevel, setAutonomyLevel] = useState(DEFAULT_SETTINGS.autonomy_level);
   const [aggressiveness, setAggressiveness] = useState(String(DEFAULT_SETTINGS.execution_aggressiveness));
   const [maxConcurrent, setMaxConcurrent] = useState(String(DEFAULT_SETTINGS.max_concurrent_runs));
+  const [pmScheduleHours, setPmScheduleHours] = useState(String(DEFAULT_SETTINGS.pm_schedule_hours));
+  const [pmModel, setPmModel] = useState(DEFAULT_SETTINGS.pm_model);
   const [autoProceed, setAutoProceed] = useState(String(DEFAULT_SETTINGS.confidence_thresholds.auto_proceed));
   const [humanReview, setHumanReview] = useState(String(DEFAULT_SETTINGS.confidence_thresholds.human_review));
+  const [productPhilosophy, setProductPhilosophy] = useState(DEFAULT_SETTINGS.product_context.philosophy);
   const [productDirection, setProductDirection] = useState(DEFAULT_SETTINGS.product_direction);
+  const [focusAreas, setFocusAreas] = useState<string[]>(DEFAULT_SETTINGS.product_context.focus_areas ?? []);
+  const [avoidAreas, setAvoidAreas] = useState<string[]>(DEFAULT_SETTINGS.product_context.avoid_areas ?? []);
+  const [focusInput, setFocusInput] = useState("");
+  const [avoidInput, setAvoidInput] = useState("");
   const [customerImpact, setCustomerImpact] = useState(String(DEFAULT_SETTINGS.priority_weights.customer_impact));
   const [severity, setSeverity] = useState(String(DEFAULT_SETTINGS.priority_weights.severity));
   const [recency, setRecency] = useState(String(DEFAULT_SETTINGS.priority_weights.recency));
@@ -277,9 +293,19 @@ export default function SettingsPage() {
     setAutonomyLevel(s.autonomy_level ?? DEFAULT_SETTINGS.autonomy_level);
     setAggressiveness(String(s.execution_aggressiveness ?? DEFAULT_SETTINGS.execution_aggressiveness));
     setMaxConcurrent(String(s.max_concurrent_runs ?? DEFAULT_SETTINGS.max_concurrent_runs));
+    setPmScheduleHours(String(s.pm_schedule_hours ?? DEFAULT_SETTINGS.pm_schedule_hours));
+    setPmModel(s.pm_model ?? DEFAULT_SETTINGS.pm_model);
     setAutoProceed(String(s.confidence_thresholds?.auto_proceed ?? DEFAULT_SETTINGS.confidence_thresholds.auto_proceed));
     setHumanReview(String(s.confidence_thresholds?.human_review ?? DEFAULT_SETTINGS.confidence_thresholds.human_review));
-    setProductDirection(s.product_direction ?? DEFAULT_SETTINGS.product_direction);
+    const productContext = s.product_context;
+    setProductPhilosophy(productContext?.philosophy ?? DEFAULT_SETTINGS.product_context.philosophy);
+    setProductDirection(
+      productContext?.direction ??
+        s.product_direction ??
+        DEFAULT_SETTINGS.product_direction
+    );
+    setFocusAreas(productContext?.focus_areas ?? DEFAULT_SETTINGS.product_context.focus_areas ?? []);
+    setAvoidAreas(productContext?.avoid_areas ?? DEFAULT_SETTINGS.product_context.avoid_areas ?? []);
     setCustomerImpact(String(s.priority_weights?.customer_impact ?? DEFAULT_SETTINGS.priority_weights.customer_impact));
     setSeverity(String(s.priority_weights?.severity ?? DEFAULT_SETTINGS.priority_weights.severity));
     setRecency(String(s.priority_weights?.recency ?? DEFAULT_SETTINGS.priority_weights.recency));
@@ -317,6 +343,16 @@ export default function SettingsPage() {
     parseFloat(revenueRisk || "0");
   const weightsValid = Math.abs(weightsSum - 1.0) < 0.01;
 
+  const addTag = (value: string, list: string[], setList: (v: string[]) => void) => {
+    const trimmed = value.trim();
+    if (!trimmed || list.includes(trimmed)) return;
+    setList([...list, trimmed]);
+  };
+
+  const removeTag = (value: string, list: string[], setList: (v: string[]) => void) => {
+    setList(list.filter((item) => item !== value));
+  };
+
   function handleSave() {
     const cleanedAgentConfig: Record<string, Record<string, string>> = {};
     for (const [agentKey, vars] of Object.entries(agentConfig)) {
@@ -335,6 +371,8 @@ export default function SettingsPage() {
         autonomy_level: autonomyLevel,
         execution_aggressiveness: parseInt(aggressiveness, 10),
         max_concurrent_runs: parseInt(maxConcurrent, 10),
+        pm_schedule_hours: parseInt(pmScheduleHours, 10),
+        pm_model: pmModel,
         confidence_thresholds: {
           auto_proceed: parseFloat(autoProceed),
           human_review: parseFloat(humanReview),
@@ -347,6 +385,12 @@ export default function SettingsPage() {
         },
         min_priority_threshold: parseInt(minThreshold, 10),
         product_direction: productDirection,
+        product_context: {
+          philosophy: productPhilosophy,
+          direction: productDirection,
+          focus_areas: focusAreas,
+          avoid_areas: avoidAreas,
+        },
         default_agent_type: defaultAgentType,
         ...(Object.keys(cleanedAgentConfig).length > 0 && { agent_config: cleanedAgentConfig }),
       },
@@ -677,20 +721,132 @@ export default function SettingsPage() {
             </div>
 
             <div className="space-y-3">
+              <h3 className="text-[13px] font-medium text-foreground">PM Agent</h3>
+              <Card>
+                <CardContent>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label htmlFor="pm-schedule">Schedule (hours)</Label>
+                      <Input
+                        id="pm-schedule"
+                        type="number"
+                        min={1}
+                        max={24}
+                        value={pmScheduleHours}
+                        onChange={(e) => setPmScheduleHours(e.target.value)}
+                        placeholder="4"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        How often the PM agent runs automatically.
+                      </p>
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="pm-model">PM Model</Label>
+                      <Input
+                        id="pm-model"
+                        value={pmModel}
+                        onChange={(e) => setPmModel(e.target.value)}
+                        placeholder="sonnet"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        The LLM model used for PM planning.
+                      </p>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+
+            <div className="space-y-3">
               <h3 className="text-[13px] font-medium text-foreground">Prioritization</h3>
               <Card>
                 <CardContent>
                   <div className="space-y-4">
-                    <div className="space-y-2">
-                      <Label htmlFor="product-direction">Product Direction</Label>
-                      <textarea
-                        id="product-direction"
-                        rows={3}
-                        value={productDirection}
-                        onChange={(e) => setProductDirection(e.target.value)}
-                        placeholder="Describe your product direction to guide issue prioritization..."
-                        className="border-input bg-transparent placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 flex w-full rounded-md border px-3 py-2 text-sm shadow-xs outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
-                      />
+                    <div className="space-y-4">
+                      <div className="space-y-2">
+                        <Label htmlFor="product-philosophy">Philosophy</Label>
+                        <Textarea
+                          id="product-philosophy"
+                          rows={4}
+                          value={productPhilosophy}
+                          onChange={(e) => setProductPhilosophy(e.target.value)}
+                          placeholder="Describe how the PM should think about tradeoffs, risk, and fix style."
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="product-direction">Current Direction</Label>
+                        <Textarea
+                          id="product-direction"
+                          rows={3}
+                          value={productDirection}
+                          onChange={(e) => setProductDirection(e.target.value)}
+                          placeholder="What is the team focused on this quarter?"
+                        />
+                      </div>
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <div className="space-y-2">
+                          <Label htmlFor="focus-areas">Focus Areas</Label>
+                          <Input
+                            id="focus-areas"
+                            value={focusInput}
+                            onChange={(e) => setFocusInput(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" || e.key === ",") {
+                                e.preventDefault();
+                                addTag(focusInput, focusAreas, setFocusAreas);
+                                setFocusInput("");
+                              }
+                            }}
+                            placeholder="Add focus area and press Enter"
+                          />
+                          <div className="flex flex-wrap gap-2">
+                            {focusAreas.map((area) => (
+                              <Badge key={area} variant="secondary" className="text-[11px]">
+                                {area}
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="ml-1 h-4 w-4 p-0"
+                                  onClick={() => removeTag(area, focusAreas, setFocusAreas)}
+                                >
+                                  <X className="h-3 w-3" />
+                                </Button>
+                              </Badge>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="avoid-areas">Avoid Areas</Label>
+                          <Input
+                            id="avoid-areas"
+                            value={avoidInput}
+                            onChange={(e) => setAvoidInput(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" || e.key === ",") {
+                                e.preventDefault();
+                                addTag(avoidInput, avoidAreas, setAvoidAreas);
+                                setAvoidInput("");
+                              }
+                            }}
+                            placeholder="Add avoid area and press Enter"
+                          />
+                          <div className="flex flex-wrap gap-2">
+                            {avoidAreas.map((area) => (
+                              <Badge key={area} variant="secondary" className="text-[11px]">
+                                {area}
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="ml-1 h-4 w-4 p-0"
+                                  onClick={() => removeTag(area, avoidAreas, setAvoidAreas)}
+                                >
+                                  <X className="h-3 w-3" />
+                                </Button>
+                              </Badge>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
                     </div>
 
                     <div className="space-y-4">

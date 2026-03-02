@@ -136,3 +136,21 @@ func (s *IntegrationStore) GetByGitHubInstallationID(ctx context.Context, instal
 	}
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Integration])
 }
+
+func (s *IntegrationStore) ListOrgsWithActiveIntegrations(ctx context.Context) ([]uuid.UUID, error) {
+	query := `SELECT DISTINCT org_id FROM integrations WHERE status = 'active'`
+	rows, err := s.db.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("query orgs with active integrations: %w", err)
+	}
+
+	var orgIDs []uuid.UUID
+	for rows.Next() {
+		var orgID uuid.UUID
+		if err := rows.Scan(&orgID); err != nil {
+			return nil, fmt.Errorf("scan org id: %w", err)
+		}
+		orgIDs = append(orgIDs, orgID)
+	}
+	return orgIDs, nil
+}
