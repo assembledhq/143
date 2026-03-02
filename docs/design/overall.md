@@ -20,6 +20,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
 - Step 2: Prioritize and identify top issues based on business impact
     - The system determines how many customers were affected, regression severity, and optionally (if you integrate Salesforce or some other CRM) the revenue risk.
     - The admins can specify the product direction they want to move towards, to make sure that any issues that don’t jive with the product direction are filtered out.
+    - Planned evolution: a **PM agent** runs on a batch cadence, clusters related issues, and produces a prioritized plan that delegates work to coding agents (moving away from purely per-issue auto-triggering).
 - Step 3: Execute a coding agent
     - Admins set a **confidence threshold** that controls which issues the system will auto-attempt. Issues below the threshold require manual triggering.
     - The agent runs in a sandboxed container and produces a code diff.
