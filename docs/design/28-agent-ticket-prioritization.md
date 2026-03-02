@@ -20,6 +20,16 @@ Webhook → Ingest → Upsert Issue → [immediately, per-issue] Prioritize → 
 
 Every ingested issue enqueues its own `prioritize` job, which scores it, estimates complexity, and possibly spawns a coding agent. Each issue is evaluated in isolation.
 
+### Implementation Status (current codebase)
+
+The current implementation matches the **per-ticket reactive flow**:
+
+- `prioritize` jobs are enqueued by ingestion, recompute score + complexity, and **auto-trigger** runs when eligible.
+- `product_direction` exists in org settings and is already used by the prioritization LLM alignment check.
+- There is **no PM agent service**, **no PM tables**, **no pm_analyze job**, and **no PM UI** yet.
+
+This document therefore describes a **planned transition** from the existing flow into the PM-driven loop below.
+
 ### Proposed Flow (batch, PM-agent-driven)
 
 ```
@@ -973,6 +983,97 @@ Each agent run card shows a "PM Context" expandable section if `pm_plan_id` is s
 #### Modified: Settings Page
 
 Add PM configuration section: schedule interval, model selection.
+
+## OpenClaw-Style Autonomy Enhancements (Recommended)
+
+To behave like an **OpenClaw-style autonomous PM**, the agent should run as a
+continuous planning loop with memory, adaptive scheduling, and self-correction.
+These additions build on the base design without requiring new infrastructure.
+
+### A. Persistent PM State (Memory + Loop Control)
+
+Add a small `pm_state` table keyed by `(org_id, repo_id)`:
+
+- `last_plan_id`, `last_run_at`, `next_run_at`
+- `backlog_summary` (short natural-language memory)
+- `recent_outcome_summary` (last N plan outcomes)
+- `last_error` / `last_error_at` (for health + retry decisions)
+
+This gives the PM a **stable memory anchor** and allows the system to run
+autonomously without requiring admins to re-trigger analysis.
+
+### B. Adaptive Scheduling (Cron + Wakeups)
+
+Keep the base cron, but add **wakeups** for critical events:
+
+- new Sev-1 Sentry spikes
+- regression outcomes
+- Linear tickets tagged “blocking”
+
+Implementation: enqueue `pm_analyze` with a dedupe key, but **do not** bypass
+the `pm_state.next_run_at` guard unless severity is critical. This prevents
+thrashing while still enabling fast response.
+
+### C. Carryover + Replan Stability
+
+Plans should be **iterative** instead of re-solving the world each cycle:
+
+- Carry over unfinished tasks from the previous plan.
+- Only re-evaluate issues whose “fingerprint” changed (e.g. severity, last_seen,
+  occurrence_count).
+- Persist `carryover_from_plan_id` and `replan_reason` on the new plan.
+
+This prevents flip-flopping and encourages consistent behavior across cycles.
+
+### D. Guardrails that Reuse Existing Org Settings
+
+The PM should reuse the current settings model instead of inventing new knobs:
+
+- `autonomy_level` gates delegation vs. “plan-only”.
+- `execution_aggressiveness` caps delegated complexity tiers.
+- `max_concurrent_runs` caps the number of delegated tasks per plan.
+
+Add PM-specific **budgets** (soft caps) rather than new gate logic:
+`pm_max_tasks`, `pm_max_tokens`, and `pm_max_issue_count`.
+
+### E. Use Existing Scores as Inputs (Not Replacements)
+
+The current prioritization score + complexity estimate should be **inputs** to
+the PM, not replaced. This allows a smooth migration and avoids wasted LLM
+tokens recalculating the same data.
+
+### F. Outcome-Driven Self-Correction
+
+Pull existing data into the PM context to improve decision quality:
+
+- `agent_runs` failure categories + explanations
+- validation results
+- review feedback (reject / rework patterns)
+
+This should update the PM’s “confidence” and influence what it delegates next.
+
+### G. Multi-Repo Awareness
+
+Store `repo_id` on `pm_plans` + `pm_decision_log`, and run the PM per repo.
+The PM can still cluster issues across repos, but **delegation stays per-repo**
+to avoid invalid cross-repo assumptions.
+
+### H. Operator Visibility + Overrides
+
+Add UI controls to “approve plan”, “skip task”, or “retry as manual”, and log
+overrides in the decision log. Autonomy should be **observable and interruptible**.
+
+## Alignment With Current Implementation
+
+To transition cleanly from the current system:
+
+1. **Keep existing prioritize jobs** for scoring/complexity.
+2. **Stop auto-triggering** in `prioritize` once PM delegation is enabled.
+3. **Add `pm_analyze` as a job type** in the worker and enqueue via cron or
+   an external scheduler hitting `/api/v1/pm/analyze`.
+4. **Continue using `product_direction`** until `ProductContext` is added.
+5. **Use the existing job queue** for PM delegation (`run_agent`) so no new
+   execution pipeline is required.
 
 ## File Changes Summary
 
