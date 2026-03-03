@@ -15,7 +15,7 @@ type PMAdapter struct {
 	maxConcurrent  int
 }
 
-func NewPMAdapter(inner agent.AgentAdapter, availableSlots, maxConcurrent int) *PMAdapter {
+func NewPMAdapter(inner agent.AgentAdapter, availableSlots int, maxConcurrent int) *PMAdapter {
 	return &PMAdapter{inner: inner, availableSlots: availableSlots, maxConcurrent: maxConcurrent}
 }
 
