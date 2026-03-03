@@ -125,7 +125,7 @@ func TestExecutePlan_DelegatesWithinCapacity(t *testing.T) {
 		},
 	}
 
-	err = svc.executePlan(context.Background(), orgID, plan)
+	err = svc.executePlan(context.Background(), orgID, plan, settings, nil)
 	require.NoError(t, err, "executePlan should succeed")
 	require.Equal(t, models.PMTaskStatusDelegated, plan.Tasks[0].Status, "first task should be delegated")
 	require.Equal(t, models.PMTaskStatusSkippedCapacity, plan.Tasks[1].Status, "second task should be skipped by capacity")
@@ -177,7 +177,7 @@ func TestExecutePlan_ManualAutonomySkipsDelegation(t *testing.T) {
 		},
 	}
 
-	err = svc.executePlan(context.Background(), orgID, plan)
+	err = svc.executePlan(context.Background(), orgID, plan, settings, nil)
 	require.NoError(t, err, "executePlan should succeed")
 	require.Equal(t, models.PMTaskStatusSkippedCapacity, plan.Tasks[0].Status, "manual autonomy should skip delegation")
 
