@@ -10,11 +10,13 @@ import (
 // PMAdapter wraps an existing AgentAdapter and overrides the prompt
 // to use the PM system prompt and PM context payload.
 type PMAdapter struct {
-	inner agent.AgentAdapter
+	inner          agent.AgentAdapter
+	availableSlots int
+	maxConcurrent  int
 }
 
-func NewPMAdapter(inner agent.AgentAdapter) *PMAdapter {
-	return &PMAdapter{inner: inner}
+func NewPMAdapter(inner agent.AgentAdapter, availableSlots int, maxConcurrent int) *PMAdapter {
+	return &PMAdapter{inner: inner, availableSlots: availableSlots, maxConcurrent: maxConcurrent}
 }
 
 func (a *PMAdapter) Name() string { return "pm_agent" }
@@ -24,7 +26,7 @@ func (a *PMAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) 
 		return nil, fmt.Errorf("pm adapter requires input")
 	}
 	return &agent.AgentPrompt{
-		SystemPrompt: buildPMSystemPrompt(0, 0),
+		SystemPrompt: buildPMSystemPrompt(a.availableSlots, a.maxConcurrent),
 		UserPrompt:   input.PMContextJSON,
 		MaxTokens:    pmMaxTokens,
 	}, nil
