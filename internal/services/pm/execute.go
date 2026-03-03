@@ -7,13 +7,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func (s *Service) executePlan(ctx context.Context, orgID uuid.UUID, plan *Plan) error {
-	org, err := s.orgs.GetByID(ctx, orgID)
-	if err != nil {
-		return err
-	}
-	settings := models.ParseOrgSettings(org.Settings)
-
+func (s *Service) executePlan(ctx context.Context, orgID uuid.UUID, plan *Plan, settings models.OrgSettings, productContext *models.ProductContext) error {
 	maxConcurrent := settings.MaxConcurrentRuns
 	if maxConcurrent <= 0 {
 		maxConcurrent = models.DefaultMaxConcurrentRuns
@@ -77,21 +71,27 @@ func (s *Service) executePlan(ctx context.Context, orgID uuid.UUID, plan *Plan) 
 		}
 
 		for _, issueID := range task.IssueIDs {
-			_ = s.issues.UpdateStatus(ctx, orgID, issueID, "triaged")
+			if err := s.issues.UpdateStatus(ctx, orgID, issueID, "triaged"); err != nil {
+				s.logger.Warn().Err(err).Str("issue_id", issueID.String()).Msg("failed to mark issue as triaged")
+			}
 		}
 
 		payload := map[string]string{
 			"agent_run_id": run.ID.String(),
 			"org_id":       orgID.String(),
 		}
-		_, _ = s.jobs.Enqueue(ctx, orgID, "agent", "run_agent", payload, 5, nil)
+		if _, err := s.jobs.Enqueue(ctx, orgID, "agent", "run_agent", payload, 5, nil); err != nil {
+			s.logger.Error().Err(err).Str("agent_run_id", run.ID.String()).Msg("failed to enqueue agent run job")
+			task.Status = models.PMTaskStatusSkippedCapacity
+			continue
+		}
 
 		task.AgentRunID = &run.ID
 		task.Status = models.PMTaskStatusDelegated
 		delegated++
 	}
 
-	model, err := planToModel(plan, nil)
+	model, err := planToModel(plan, productContext)
 	if err != nil {
 		return err
 	}

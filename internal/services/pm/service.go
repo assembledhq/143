@@ -180,10 +180,10 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		for range logCh {
 		}
 	}()
+	defer close(logCh)
 
 	execCtx := adapters.WithSandboxProvider(ctx, s.sandbox)
 	result, err := s.adapter.Execute(execCtx, sb, prompt, logCh)
-	close(logCh)
 	if err != nil {
 		return nil, fmt.Errorf("pm agent execution: %w", err)
 	}
@@ -222,7 +222,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		}
 	}
 
-	if err := s.executePlan(ctx, orgID, plan); err != nil {
+	if err := s.executePlan(ctx, orgID, plan, ctxBundle.settings, ctxBundle.productContext); err != nil {
 		return nil, fmt.Errorf("execute plan: %w", err)
 	}
 
@@ -231,8 +231,12 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	plan.CompletedAt = &now
 
 	updatedModel, err := planToModel(plan, ctxBundle.productContext)
-	if err == nil {
-		_ = s.plans.Update(ctx, updatedModel)
+	if err != nil {
+		s.logger.Error().Err(err).Msg("failed to serialize completed plan")
+		return plan, nil
+	}
+	if err := s.plans.Update(ctx, updatedModel); err != nil {
+		s.logger.Error().Err(err).Msg("failed to persist completed plan status")
 	}
 
 	return plan, nil
