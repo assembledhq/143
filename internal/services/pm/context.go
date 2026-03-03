@@ -33,9 +33,11 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID) (*gathered
 	if err != nil {
 		return nil, err
 	}
-	allIssues := append(openIssues, triagedIssues...)
+	allIssues := make([]models.Issue, 0, len(openIssues)+len(triagedIssues))
+	allIssues = append(allIssues, openIssues...)
+	allIssues = append(allIssues, triagedIssues...)
 
-	var issueSummaries []IssueSummary
+	issueSummaries := make([]IssueSummary, 0, len(allIssues))
 	for _, issue := range allIssues {
 		issueSummaries = append(issueSummaries, summarizeIssue(issue))
 	}
@@ -48,9 +50,11 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID) (*gathered
 	if err != nil {
 		return nil, err
 	}
-	inFlight := append(pendingRuns, runningRuns...)
+	inFlight := make([]models.AgentRun, 0, len(pendingRuns)+len(runningRuns))
+	inFlight = append(inFlight, pendingRuns...)
+	inFlight = append(inFlight, runningRuns...)
 
-	var inFlightSummaries []RunSummary
+	inFlightSummaries := make([]RunSummary, 0, len(inFlight))
 	for _, run := range inFlight {
 		inFlightSummaries = append(inFlightSummaries, RunSummary{
 			ID:        run.ID,
@@ -64,7 +68,7 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID) (*gathered
 	if err != nil {
 		return nil, err
 	}
-	var outcomes []OutcomeSummary
+	outcomes := make([]OutcomeSummary, 0, len(recentRuns))
 	for _, run := range recentRuns {
 		outcomes = append(outcomes, OutcomeSummary{
 			RunID:              run.ID,
@@ -77,7 +81,7 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID) (*gathered
 		})
 	}
 
-	var prSummaries []PRSummary
+	prSummaries := make([]PRSummary, 0)
 	if s.pullRequests != nil {
 		prs, err := s.pullRequests.ListByOrg(ctx, orgID, db.PullRequestFilters{Limit: 20})
 		if err != nil {
@@ -95,7 +99,7 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID) (*gathered
 		}
 	}
 
-	var decisionSummaries []DecisionLogEntrySummary
+	decisionSummaries := make([]DecisionLogEntrySummary, 0)
 	if s.decisionLog != nil {
 		decisions, err := s.decisionLog.ListRecentByOrg(ctx, orgID, 50)
 		if err != nil {
@@ -166,8 +170,13 @@ func hasStackTrace(rawData json.RawMessage) bool {
 }
 
 func truncate(input string, max int) string {
-	if max <= 0 || len(input) <= max {
+	if max <= 0 {
 		return input
 	}
-	return input[:max]
+	runes := []rune(input)
+	if len(runes) <= max {
+		return input
+	}
+	return string(runes[:max])
 }
+
