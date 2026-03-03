@@ -21,17 +21,18 @@ export default function CtaSection({ isDark }: CtaSectionProps) {
             isDark ? "text-white" : "text-slate-900"
           }`}
         >
-          Ready to ship fixes
+          Your backlog, on
           <br />
-          while you sleep?
+          autopilot
         </h2>
         <p
           className={`text-sm sm:text-base leading-relaxed max-w-md mx-auto ${
             isDark ? "text-white/40" : "text-slate-600"
           }`}
         >
-          Connect your repo, point 143 at your issue tracker, and let the
-          agents handle the rest.
+          Connect your repos, give the PM agent your product context, and
+          watch production bugs, improvements, and tech debt get worked
+          through automatically.
         </p>
         <div className="pt-2">
           <Button
