@@ -41,9 +41,9 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
               isDark ? "text-white" : "text-slate-900"
             }`}
           >
-            Open source
+            AI agents that
             <br />
-            bug fixing for
+            fix and improve
             <br />
             production systems
           </h1>
@@ -51,9 +51,9 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
           <p
             className={`max-w-md text-sm sm:text-base leading-relaxed ${isDark ? "text-white/40" : "text-slate-600"}`}
           >
-            Connect your issue tracker and error monitoring. 143 spins
-            up an agent, validates the fix, and opens a PR, all before
-            you even wake up.
+            An AI product manager analyzes your Sentry errors, Linear
+            tickets, and support issues — plans the work, spins up
+            coding agents, and ships validated PRs. All on autopilot.
           </p>
 
           <div className="pt-2 pointer-events-auto">

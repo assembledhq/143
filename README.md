@@ -1,12 +1,12 @@
-# 143 — autonomous bug fixing
+# 143 — AI agents that fix and improve production systems
 
-**from issue to PR, with zero human intervention**
+**from issues to validated PRs, on autopilot**
 
 [Local Development](docs/local-development.md) · [Architecture](docs/design/overall.md) · [How it works](#how-it-works)
 
 ---
 
-143 ingests production issues from Sentry, Linear, and support tickets, runs AI coding agents in sandboxed containers to generate fixes, validates them, and ships PRs — with zero human intervention required.
+143 ingests production issues from Sentry, Linear, and support tickets. An AI product manager agent analyzes the full issue landscape, clusters related problems, and builds a prioritized plan. Coding agents execute the plan in sandboxed containers — fixing bugs, shipping improvements, and opening validated PRs.
 
 Every PR review makes the next run smarter. Learned conventions are extracted and fed back into future agent executions, creating a flywheel that compounds over time.
 
@@ -74,19 +74,18 @@ make secrets-decrypt   # decrypt .env.enc → .env
 ## How it works
 
 ```
-issues in → prioritize → estimate complexity → run agents → validate → ship PR → measure impact
-                                                                                       ↓
-                                                                              learn from outcomes
+issues in → PM agent plans → coding agents execute → validate → ship PRs → measure impact
+                                                                                  ↓
+                                                                         learn from outcomes
 ```
 
 1. **Ingest** — pull issues from Sentry, Linear, support tickets via webhooks
-2. **Prioritize** — score by customer count, severity, revenue risk
-3. **Estimate** — LLM pre-analysis to classify complexity before burning compute
-4. **Execute** — run coding agents in isolated Docker containers
-5. **Validate** — direction/correctness/quality checks + CI + regression tests
-6. **Ship** — open a GitHub PR with full context for human review
-7. **Observe** — measure post-deploy impact on error rates and support volume
-8. **Learn** — extract review feedback into conventions, feed back into future runs
+2. **Plan** — AI product manager analyzes all issues, clusters related problems, and builds a prioritized work plan
+3. **Execute** — coding agents run in isolated Docker containers with the PM's approach hints
+4. **Validate** — direction/correctness/quality checks + CI + regression tests
+5. **Ship** — open GitHub PRs with full context for human review
+6. **Observe** — measure post-deploy impact on error rates and support volume
+7. **Learn** — extract review feedback into conventions, feed back into future runs
 
 ## Project structure
 
@@ -116,7 +115,7 @@ docs/design/      # numbered design docs
 
 In 1943, Lockheed's Skunk Works team designed and built the XP-80 Shooting Star — America's first operational jet fighter — in just 143 days. A small, autonomous team with full ownership, no bureaucracy, and a bias toward shipping.
 
-Most bugs don't need a sprint planning meeting. They need someone (or something) to isolate the issue, write the fix, validate it, and open the PR. 143 is that something.
+Most issues in your backlog don't need a sprint planning meeting. They need someone (or something) to analyze the landscape, prioritize what matters, write the fix, validate it, and open the PR. 143 is that something.
 
 ## Contributing
 
