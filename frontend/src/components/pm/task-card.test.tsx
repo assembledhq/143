@@ -19,7 +19,7 @@ describe("TaskCard", () => {
 
     render(<TaskCard task={task} />);
 
-    expect(screen.getByText("Fix billing timeout")).toBeInTheDocument();
+    expect(screen.getByText("#1 · Fix billing timeout")).toBeInTheDocument();
     expect(screen.getByText("High impact")).toBeInTheDocument();
     expect(screen.getByText("Check handlers/billing.go")).toBeInTheDocument();
   });
