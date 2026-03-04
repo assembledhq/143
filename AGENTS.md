@@ -14,6 +14,8 @@ Use docs/design/overall.md as the overall design of the system, think of it as a
 
 **API response format**: Lists return `{data: [...], meta: {next_cursor}}` with cursor-based pagination. Errors return `{error: {code, message, details}}`. All routes under `/api/v1/`.
 
+**Enum response fields use typed strings**: For model fields that represent enums (especially API response fields like provider/status/state/type), define a dedicated typed string in `internal/models` with named constants and a `Validate() error` method. Prefer `IntegrationProvider`/`IntegrationStatus`-style types over raw `string` fields. When writing new enum-like fields, add table-driven validation tests.
+
 **Job queue**: Postgres-backed async work queue using the `jobs` table. Workers claim jobs with `SELECT ... FOR UPDATE SKIP LOCKED` — no external queue needed. Jobs have `status`, `attempts`, `max_attempts`, and exponential backoff on failure.
 
 ## Frontend Architecture (Next.js / React)

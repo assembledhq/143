@@ -10,6 +10,8 @@ const {
   codexDisconnectMock,
   codexInitiateMock,
   loginMock,
+  integrationsListMock,
+  connectLinearMock,
 } = vi.hoisted(() => ({
   settingsGetMock: vi.fn().mockResolvedValue({
     data: {
@@ -39,6 +41,8 @@ const {
     },
   }),
   loginMock: vi.fn(),
+  integrationsListMock: vi.fn().mockResolvedValue({ data: [] }),
+  connectLinearMock: vi.fn().mockResolvedValue({ data: { id: 'lin-1', provider: 'linear', status: 'active' } }),
 }));
 
 vi.mock('@/lib/api', () => ({
@@ -55,6 +59,10 @@ vi.mock('@/lib/api', () => ({
     },
     auth: {
       login: loginMock,
+    },
+    integrations: {
+      list: integrationsListMock,
+      connectLinear: connectLinearMock,
     },
   },
 }));
@@ -76,6 +84,8 @@ describe('SettingsPage', () => {
       },
     });
     loginMock.mockClear();
+    integrationsListMock.mockClear();
+    connectLinearMock.mockClear();
   });
 
   it('renders the General section with organization name', async () => {
@@ -93,6 +103,19 @@ describe('SettingsPage', () => {
 
     await waitFor(() => {
       expect(screen.getByText('Integrations')).toBeInTheDocument();
+    });
+  });
+
+  it('connects linear when clicking Connect Linear', async () => {
+    const user = userEvent.setup();
+
+    renderWithProviders(<SettingsPage />);
+
+    const button = await screen.findByRole('button', { name: 'Connect Linear' });
+    await user.click(button);
+
+    await waitFor(() => {
+      expect(connectLinearMock).toHaveBeenCalledTimes(1);
     });
   });
 
