@@ -32,6 +32,11 @@ type CodexAuthProvider interface {
 	GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAIChatGPTConfig, error)
 }
 
+// CredentialProvider abstracts retrieving org-scoped provider credentials.
+type CredentialProvider interface {
+	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
+}
+
 // AgentRunStore defines the agent run DB operations needed by the orchestrator.
 type AgentRunStore interface {
 	UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string) error
@@ -89,9 +94,9 @@ type Orchestrator struct {
 	jobs              JobStore
 	github            GitHubTokenProvider
 	codexAuth         CodexAuthProvider // can be nil
+	credentials       CredentialProvider
 	logger            zerolog.Logger
 	maxConcurrent     int
-	agentEnv          map[string]map[string]string
 }
 
 // OrchestratorConfig holds the dependencies for creating an Orchestrator.
@@ -108,13 +113,9 @@ type OrchestratorConfig struct {
 	Jobs              JobStore
 	GitHub            GitHubTokenProvider
 	CodexAuth         CodexAuthProvider // optional — enables ChatGPT OAuth for Codex agent
+	Credentials       CredentialProvider
 	Logger            zerolog.Logger
 	MaxConcurrent     int
-
-	// AgentEnv maps agent type names to the environment variables that should
-	// be injected into their sandbox containers. These are server-level defaults
-	// that can be overridden by org-level agent_config in org settings.
-	AgentEnv map[string]map[string]string
 }
 
 // NewOrchestrator creates an Orchestrator with the given dependencies.
@@ -122,11 +123,6 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 	maxConcurrent := cfg.MaxConcurrent
 	if maxConcurrent <= 0 {
 		maxConcurrent = defaultMaxConcurrent
-	}
-
-	agentEnv := cfg.AgentEnv
-	if agentEnv == nil {
-		agentEnv = make(map[string]map[string]string)
 	}
 
 	return &Orchestrator{
@@ -142,9 +138,9 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		jobs:              cfg.Jobs,
 		github:            cfg.GitHub,
 		codexAuth:         cfg.CodexAuth,
+		credentials:       cfg.Credentials,
 		logger:            cfg.Logger,
 		maxConcurrent:     maxConcurrent,
-		agentEnv:          agentEnv,
 	}
 }
 
@@ -461,28 +457,49 @@ func (o *Orchestrator) enqueueJob(ctx context.Context, orgID uuid.UUID, queue, j
 	}
 }
 
-// resolveAgentEnv merges server-level and org-level env vars for the given agent type.
-// Org-level values override server-level defaults.
+// resolveAgentEnv builds the sandbox env vars for the given agent type from
+// org-scoped credentials in org_credentials.
 func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, agentType string) map[string]string {
-	merged := make(map[string]string)
-
-	// Start with server-level defaults.
-	if base, ok := o.agentEnv[agentType]; ok {
-		for k, v := range base {
-			merged[k] = v
-		}
+	if o.credentials == nil {
+		return nil
 	}
 
-	// Overlay org-level overrides from settings.
-	if o.orgs != nil {
-		org, err := o.orgs.GetByID(ctx, orgID)
-		if err == nil {
-			orgSettings := models.ParseOrgSettings(org.Settings)
-			if orgOverrides, ok := orgSettings.AgentConfig[agentType]; ok {
-				for k, v := range orgOverrides {
-					if v != "" {
-						merged[k] = v
-					}
+	merged := make(map[string]string)
+
+	switch agentType {
+	case "claude_code":
+		cred, err := o.credentials.Get(ctx, orgID, models.ProviderAnthropic)
+		if err == nil && cred != nil {
+			if cfg, ok := cred.Config.(models.AnthropicConfig); ok {
+				if cfg.APIKey != "" {
+					merged["ANTHROPIC_API_KEY"] = cfg.APIKey
+				}
+				if cfg.BaseURL != "" {
+					merged["ANTHROPIC_BASE_URL"] = cfg.BaseURL
+				}
+			}
+		}
+	case "codex":
+		cred, err := o.credentials.Get(ctx, orgID, models.ProviderOpenAI)
+		if err == nil && cred != nil {
+			if cfg, ok := cred.Config.(models.OpenAIConfig); ok {
+				if cfg.APIKey != "" {
+					merged["OPENAI_API_KEY"] = cfg.APIKey
+				}
+				if cfg.BaseURL != "" {
+					merged["OPENAI_BASE_URL"] = cfg.BaseURL
+				}
+			}
+		}
+	case "gemini_cli":
+		cred, err := o.credentials.Get(ctx, orgID, models.ProviderGemini)
+		if err == nil && cred != nil {
+			if cfg, ok := cred.Config.(models.GeminiConfig); ok {
+				if cfg.APIKey != "" {
+					merged["GEMINI_API_KEY"] = cfg.APIKey
+				}
+				if cfg.Model != "" {
+					merged["GEMINI_MODEL"] = cfg.Model
 				}
 			}
 		}
@@ -491,6 +508,7 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 	if len(merged) == 0 {
 		return nil
 	}
+
 	return merged
 }
 
