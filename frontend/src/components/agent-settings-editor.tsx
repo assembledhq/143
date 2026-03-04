@@ -205,13 +205,15 @@ export function AgentSettingsEditor({
   title,
   description,
   onClose,
+  initialAgentType,
 }: {
   title: string;
   description: string;
   onClose?: () => void;
+  initialAgentType?: OrgSettings["default_agent_type"];
 }) {
   const queryClient = useQueryClient();
-  const [defaultAgentTypeOverride, setDefaultAgentTypeOverride] = useState<OrgSettings["default_agent_type"] | null>(null);
+  const [defaultAgentTypeOverride, setDefaultAgentTypeOverride] = useState<OrgSettings["default_agent_type"] | null>(initialAgentType ?? null);
   const [agentConfigOverride, setAgentConfigOverride] = useState<Record<string, Record<string, string>> | null>(null);
   const [saveStatus, setSaveStatus] = useState<"idle" | "success" | "error">("idle");
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
