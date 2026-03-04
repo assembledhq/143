@@ -11,6 +11,9 @@ import {
   LogOut,
   ChevronsUpDown,
   ClipboardList,
+  Plug,
+  Bot,
+  Target,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
@@ -127,7 +130,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                 <button
                   className={cn(
                     "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-[13px] font-medium transition-colors",
-                    pathname.startsWith("/settings") || pathname.startsWith("/team")
+                    pathname.startsWith("/settings") || pathname.startsWith("/team") || pathname.startsWith("/integrations") || pathname.startsWith("/agent") || pathname.startsWith("/prioritization")
                       ? "bg-sidebar-accent text-sidebar-accent-foreground"
                       : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
                   )}
@@ -148,13 +151,25 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" side="top" className="w-48">
+                <DropdownMenuItem onClick={() => router.push("/settings")}>
+                  <Settings className="h-4 w-4" />
+                  General
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => router.push("/integrations")}>
+                  <Plug className="h-4 w-4" />
+                  Integrations
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => router.push("/agent")}>
+                  <Bot className="h-4 w-4" />
+                  Agent
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => router.push("/prioritization")}>
+                  <Target className="h-4 w-4" />
+                  Prioritization
+                </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => router.push("/team")}>
                   <Users className="h-4 w-4" />
                   Team
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => router.push("/settings")}>
-                  <Settings className="h-4 w-4" />
-                  Organization Settings
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={logout}>
