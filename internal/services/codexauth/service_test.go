@@ -80,7 +80,7 @@ func TestInitiateDeviceAuth(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"device_code":      "dev_123",
+			"device_auth_id":   "dev_123",
 			"user_code":        "ABCD-1234",
 			"verification_uri": "https://auth.openai.com/codex/device",
 			"expires_in":       900,
@@ -125,7 +125,7 @@ func TestPollForToken_AuthorizationPending(t *testing.T) {
 	orgID := uuid.New()
 	// Store a pending auth.
 	svc.pending.Store(orgID.String(), &PendingAuth{
-		DeviceCode: "dev_123",
+		DeviceAuthID: "dev_123",
 		UserCode:   "ABCD-1234",
 		ExpiresAt:  time.Now().Add(15 * time.Minute),
 		Interval:   5,
@@ -159,7 +159,7 @@ func TestPollForToken_Success(t *testing.T) {
 
 	orgID := uuid.New()
 	svc.pending.Store(orgID.String(), &PendingAuth{
-		DeviceCode: "dev_123",
+		DeviceAuthID: "dev_123",
 		UserCode:   "ABCD-1234",
 		ExpiresAt:  time.Now().Add(15 * time.Minute),
 		Interval:   5,
@@ -190,7 +190,7 @@ func TestPollForToken_Expired(t *testing.T) {
 
 	orgID := uuid.New()
 	svc.pending.Store(orgID.String(), &PendingAuth{
-		DeviceCode: "dev_123",
+		DeviceAuthID: "dev_123",
 		ExpiresAt:  time.Now().Add(-1 * time.Minute), // Already expired.
 		Interval:   5,
 	})
@@ -220,7 +220,7 @@ func TestPollForToken_SlowDown(t *testing.T) {
 
 	orgID := uuid.New()
 	svc.pending.Store(orgID.String(), &PendingAuth{
-		DeviceCode: "dev_123",
+		DeviceAuthID: "dev_123",
 		ExpiresAt:  time.Now().Add(15 * time.Minute),
 		Interval:   5,
 	})
@@ -418,7 +418,7 @@ func TestPollForToken_RateLimited(t *testing.T) {
 
 	orgID := uuid.New()
 	svc.pending.Store(orgID.String(), &PendingAuth{
-		DeviceCode: "dev_123",
+		DeviceAuthID: "dev_123",
 		ExpiresAt:  time.Now().Add(15 * time.Minute),
 		Interval:   5,
 		LastPollAt: time.Now(), // Just polled.
@@ -453,7 +453,7 @@ func TestPollForToken_AccessDenied(t *testing.T) {
 
 	orgID := uuid.New()
 	svc.pending.Store(orgID.String(), &PendingAuth{
-		DeviceCode: "dev_123",
+		DeviceAuthID: "dev_123",
 		ExpiresAt:  time.Now().Add(15 * time.Minute),
 		Interval:   5,
 	})
@@ -491,7 +491,7 @@ func TestPollForToken_ExpiredToken(t *testing.T) {
 
 	orgID := uuid.New()
 	svc.pending.Store(orgID.String(), &PendingAuth{
-		DeviceCode: "dev_123",
+		DeviceAuthID: "dev_123",
 		ExpiresAt:  time.Now().Add(15 * time.Minute),
 		Interval:   5,
 	})
@@ -521,7 +521,7 @@ func TestPollForToken_UnknownError(t *testing.T) {
 
 	orgID := uuid.New()
 	svc.pending.Store(orgID.String(), &PendingAuth{
-		DeviceCode: "dev_123",
+		DeviceAuthID: "dev_123",
 		ExpiresAt:  time.Now().Add(15 * time.Minute),
 		Interval:   5,
 	})
@@ -582,7 +582,7 @@ func TestPollForToken_RestoreFromDB_PendingAuth(t *testing.T) {
 		OrgID:    orgID,
 		Provider: models.ProviderOpenAIChatGPT,
 		Config: models.OpenAIChatGPTConfig{
-			DeviceCode:      "dev_restored",
+			DeviceAuthID:    "dev_restored",
 			UserCode:        "REST-CODE",
 			VerificationURI: "https://auth.openai.com/codex/device",
 			ExpiresAt:       time.Now().Add(10 * time.Minute),

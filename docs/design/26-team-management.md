@@ -544,7 +544,7 @@ The frontend lives at `frontend/src/` and uses Next.js (App Router), React, TanS
 │  Team Members                              [Invite Member]  │
 │  ┌─────────────────────────────────────────────────────────┐│
 │  │  (avatar) Alice Chen                                    ││
-│  │  alice@example.com        Admin ▾         —             ││
+│  │  alice@example.com        Admin ▾   Current user         ││
 │  ├─────────────────────────────────────────────────────────┤│
 │  │  (avatar) Bob Smith                                     ││
 │  │  bob@example.com          Member ▾        [Remove]      ││
