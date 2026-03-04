@@ -99,4 +99,41 @@ describe('SessionDetailPage', () => {
     await screen.findByText('Analyzed 5 open issues and delegated 2 tasks.');
     expect(screen.getByText('5 issues reviewed')).toBeInTheDocument();
   });
+
+  it('shows task complexity badge', async () => {
+    renderWithProviders(<SessionDetailContent id="session-plan-1" />);
+    await screen.findByText('Analyzed 5 open issues and delegated 2 tasks.');
+    expect(screen.getByText('moderate')).toBeInTheDocument();
+  });
+
+  it('shows task confidence badge', async () => {
+    renderWithProviders(<SessionDetailContent id="session-plan-1" />);
+    await screen.findByText('Analyzed 5 open issues and delegated 2 tasks.');
+    expect(screen.getByText('high confidence')).toBeInTheDocument();
+  });
+
+  it('shows run confidence score as percentage', async () => {
+    renderWithProviders(<SessionDetailContent id="session-plan-1" />);
+    await screen.findByText('Analyzed 5 open issues and delegated 2 tasks.');
+    expect(screen.getByText('92% confidence')).toBeInTheDocument();
+  });
+
+  it('shows failed run status for manual session tasks', async () => {
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: mockSessions[1] });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-manual-1" />);
+    await screen.findByText('Run run-9876');
+    expect(screen.getAllByText('Failed').length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('shows task reasoning and approach details', async () => {
+    renderWithProviders(<SessionDetailContent id="session-plan-1" />);
+    await screen.findByText('Analyzed 5 open issues and delegated 2 tasks.');
+    expect(screen.getByText('Critical user-facing issue')).toBeInTheDocument();
+    expect(screen.getByText('Check session handler timeout config')).toBeInTheDocument();
+  });
 });
