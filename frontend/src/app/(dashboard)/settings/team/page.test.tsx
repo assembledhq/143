@@ -9,6 +9,7 @@ const {
   removeMemberMock,
   createInvitationMock,
   revokeInvitationMock,
+  currentUserMock,
 } = vi.hoisted(() => ({
   listMembersMock: vi.fn().mockResolvedValue({
     data: [
@@ -51,6 +52,12 @@ const {
   removeMemberMock: vi.fn().mockResolvedValue(undefined),
   createInvitationMock: vi.fn().mockResolvedValue({ data: {} }),
   revokeInvitationMock: vi.fn().mockResolvedValue(undefined),
+  currentUserMock: {
+    id: 'user-1',
+    email: 'admin@example.com',
+    name: 'Admin User',
+    role: 'admin',
+  },
 }));
 
 vi.mock('@/lib/api', () => ({
@@ -71,7 +78,7 @@ vi.mock('@/lib/api', () => ({
 
 vi.mock('@/hooks/use-auth', () => ({
   useAuth: () => ({
-    user: { id: 'user-1', email: 'admin@example.com', name: 'Admin User', role: 'admin' },
+    user: currentUserMock,
     isLoading: false,
   }),
 }));
@@ -84,6 +91,10 @@ describe('TeamSettingsPage', () => {
     removeMemberMock.mockClear();
     createInvitationMock.mockClear();
     revokeInvitationMock.mockClear();
+    currentUserMock.id = 'user-1';
+    currentUserMock.email = 'admin@example.com';
+    currentUserMock.name = 'Admin User';
+    currentUserMock.role = 'admin';
   });
 
   it('renders the Members section with team members', async () => {
@@ -96,6 +107,19 @@ describe('TeamSettingsPage', () => {
     expect(screen.getByText('Member User')).toBeInTheDocument();
     expect(screen.getByText('admin@example.com')).toBeInTheDocument();
     expect(screen.getByText('member@example.com')).toBeInTheDocument();
+  });
+
+  it('renders the members in list format with column headers', async () => {
+    renderWithProviders(<TeamSettingsPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Admin User')).toBeInTheDocument();
+    });
+
+    expect(screen.getByText('Name')).toBeInTheDocument();
+    expect(screen.getByText('Email')).toBeInTheDocument();
+    expect(screen.getByText('Role')).toBeInTheDocument();
+    expect(screen.getByText('Actions')).toBeInTheDocument();
   });
 
   it('shows (you) label for the current user', async () => {
@@ -115,6 +139,14 @@ describe('TeamSettingsPage', () => {
 
     expect(screen.getByLabelText('Email')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Send Invite' })).toBeInTheDocument();
+  });
+
+  it('uses consistent compact sizing for invite email input', async () => {
+    renderWithProviders(<TeamSettingsPage />);
+
+    const emailInput = await screen.findByLabelText('Email');
+    expect(emailInput).toHaveClass('h-9');
+    expect(emailInput).toHaveClass('text-sm');
   });
 
   it('renders pending invitations', async () => {
@@ -230,6 +262,39 @@ describe('TeamSettingsPage', () => {
     expect(screen.getAllByText('Admin').length).toBeGreaterThanOrEqual(1);
     // Other user should show "Member" role
     expect(screen.getAllByText('Member').length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('updates another member role when admin changes the role selection', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<TeamSettingsPage />);
+
+    const roleSelectTrigger = await screen.findByRole('combobox', {
+      name: 'Role for Member User',
+    });
+
+    await user.click(roleSelectTrigger);
+    await user.click(screen.getByRole('option', { name: 'Viewer' }));
+
+    await waitFor(() => {
+      expect(changeRoleMock).toHaveBeenCalledWith('user-2', 'viewer');
+    });
+  });
+
+  it('disables management actions for non-admin users', async () => {
+    currentUserMock.id = 'user-2';
+    currentUserMock.email = 'member@example.com';
+    currentUserMock.name = 'Member User';
+    currentUserMock.role = 'member';
+
+    renderWithProviders(<TeamSettingsPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Member User')).toBeInTheDocument();
+    });
+
+    expect(screen.queryByRole('button', { name: 'Send Invite' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Revoke' })).not.toBeInTheDocument();
   });
 
   it('shows loading state when members are loading', () => {
