@@ -58,7 +58,7 @@ func TestCodexAuthHandler_Initiate(t *testing.T) {
 	mockOpenAI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"device_code":      "dev_test_123",
+			"device_auth_id":   "dev_test_123",
 			"user_code":        "TEST-CODE",
 			"verification_uri": "https://auth.openai.com/codex/device",
 			"expires_in":       900,
