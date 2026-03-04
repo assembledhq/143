@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { renderWithProviders, screen, waitFor, userEvent } from '@/test/test-utils';
+import { renderWithProviders, screen, waitFor, userEvent, within } from '@/test/test-utils';
 import TeamSettingsPage from './page';
 
 const {
@@ -116,10 +116,14 @@ describe('TeamSettingsPage', () => {
       expect(screen.getByText('Admin User')).toBeInTheDocument();
     });
 
-    expect(screen.getByText('Name')).toBeInTheDocument();
-    expect(screen.getByText('Email')).toBeInTheDocument();
-    expect(screen.getByText('Role')).toBeInTheDocument();
-    expect(screen.getByText('Actions')).toBeInTheDocument();
+    const membersSection = screen.getByRole('heading', { name: 'Members' }).closest('section');
+    expect(membersSection).not.toBeNull();
+
+    const membersQueries = within(membersSection!);
+    expect(membersQueries.getByText('Name', { selector: 'div' })).toBeInTheDocument();
+    expect(membersQueries.getByText('Email', { selector: 'div' })).toBeInTheDocument();
+    expect(membersQueries.getByText('Role', { selector: 'div' })).toBeInTheDocument();
+    expect(membersQueries.getByText('Actions', { selector: 'div' })).toBeInTheDocument();
   });
 
   it('shows (you) label for the current user', async () => {
@@ -130,19 +134,24 @@ describe('TeamSettingsPage', () => {
     });
   });
 
-  it('renders the Invite a Member form', async () => {
+  it('renders an Invite button and opens the invite modal', async () => {
     renderWithProviders(<TeamSettingsPage />);
 
     await waitFor(() => {
-      expect(screen.getByText('Invite a Member')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Invite' })).toBeInTheDocument();
     });
 
+    await userEvent.click(screen.getByRole('button', { name: 'Invite' }));
+
+    expect(screen.getByText('Invite a member')).toBeInTheDocument();
     expect(screen.getByLabelText('Email')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Send Invite' })).toBeInTheDocument();
   });
 
-  it('uses consistent compact sizing for invite email input', async () => {
+  it('uses consistent compact sizing for invite email input in modal', async () => {
     renderWithProviders(<TeamSettingsPage />);
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Invite' }));
 
     const emailInput = await screen.findByLabelText('Email');
     expect(emailInput).toHaveClass('h-9');
@@ -164,6 +173,8 @@ describe('TeamSettingsPage', () => {
     const user = userEvent.setup();
     renderWithProviders(<TeamSettingsPage />);
 
+    await user.click(await screen.findByRole('button', { name: 'Invite' }));
+
     await waitFor(() => {
       expect(screen.getByLabelText('Email')).toBeInTheDocument();
     });
@@ -174,6 +185,17 @@ describe('TeamSettingsPage', () => {
     await waitFor(() => {
       expect(createInvitationMock).toHaveBeenCalledWith('newuser@test.com', 'member');
     });
+  });
+
+  it('shows informative self action text instead of a dash placeholder', async () => {
+    renderWithProviders(<TeamSettingsPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Admin User')).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText('—')).not.toBeInTheDocument();
+    expect(screen.getByText('Current user')).toBeInTheDocument();
   });
 
   it('shows Remove button for non-self members', async () => {
@@ -273,7 +295,8 @@ describe('TeamSettingsPage', () => {
     });
 
     await user.click(roleSelectTrigger);
-    await user.click(screen.getByRole('option', { name: 'Viewer' }));
+    const viewerOption = await screen.findByRole('option', { name: 'Viewer' });
+    await user.click(viewerOption);
 
     await waitFor(() => {
       expect(changeRoleMock).toHaveBeenCalledWith('user-2', 'viewer');
@@ -292,7 +315,7 @@ describe('TeamSettingsPage', () => {
       expect(screen.getByText('Member User')).toBeInTheDocument();
     });
 
-    expect(screen.queryByRole('button', { name: 'Send Invite' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Invite' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Revoke' })).not.toBeInTheDocument();
   });

@@ -36,6 +36,7 @@ export default function TeamSettingsPage() {
   const [inviteRole, setInviteRole] = useState("member");
   const [inviteError, setInviteError] = useState("");
   const [actionError, setActionError] = useState("");
+  const [isInviteDialogOpen, setIsInviteDialogOpen] = useState(false);
   const [removingMember, setRemovingMember] = useState<User | null>(null);
 
   const { data: membersData, isLoading: membersLoading } = useQuery<ListResponse<User>>({
@@ -79,6 +80,7 @@ export default function TeamSettingsPage() {
       setInviteEmail("");
       setInviteRole("member");
       setInviteError("");
+      setIsInviteDialogOpen(false);
     },
     onError: (error: Error & { code?: string }) => {
       if (error.message) {
@@ -135,7 +137,20 @@ export default function TeamSettingsPage() {
 
       {/* Members List */}
       <section className="space-y-3">
-        <h2 className="text-[13px] font-medium text-foreground">Members</h2>
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-[13px] font-medium text-foreground">Members</h2>
+          {canManageTeam && (
+            <Button
+              size="sm"
+              onClick={() => {
+                setInviteError("");
+                setIsInviteDialogOpen(true);
+              }}
+            >
+              Invite
+            </Button>
+          )}
+        </div>
         <Card>
           <CardContent className="p-0">
             {membersLoading ? (
@@ -232,8 +247,14 @@ export default function TeamSettingsPage() {
                           >
                             Remove
                           </Button>
+                        ) : isSelf ? (
+                          <span className="text-xs text-muted-foreground">
+                            Current user
+                          </span>
                         ) : (
-                          <span className="text-xs text-muted-foreground">—</span>
+                          <span className="text-xs text-muted-foreground">
+                            No access
+                          </span>
                         )}
                       </div>
                     </div>
@@ -244,54 +265,6 @@ export default function TeamSettingsPage() {
           </CardContent>
         </Card>
       </section>
-
-      {/* Invite Form */}
-      {canManageTeam && (
-        <section className="space-y-3">
-          <h2 className="text-[13px] font-medium text-foreground">
-            Invite a Member
-          </h2>
-          <Card>
-            <CardContent>
-              <form onSubmit={handleInvite} className="flex items-end gap-3">
-                <div className="flex-1 space-y-1.5">
-                  <Label htmlFor="invite-email">Email</Label>
-                  <Input
-                    id="invite-email"
-                    type="email"
-                    placeholder="colleague@company.com"
-                    value={inviteEmail}
-                    onChange={(e) => setInviteEmail(e.target.value)}
-                    className="h-9 text-sm"
-                    required
-                  />
-                </div>
-                <div className="w-28 space-y-1.5">
-                  <Label>Role</Label>
-                  <Select value={inviteRole} onValueChange={setInviteRole}>
-                    <SelectTrigger className="h-9 w-full text-sm">
-                      <SelectValue>
-                        {capitalize(inviteRole)}
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="admin">Admin</SelectItem>
-                      <SelectItem value="member">Member</SelectItem>
-                      <SelectItem value="viewer">Viewer</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <Button type="submit" className="h-9" disabled={inviteMutation.isPending}>
-                  {inviteMutation.isPending ? "Sending..." : "Send Invite"}
-                </Button>
-              </form>
-              {inviteError && (
-                <p className="mt-2 text-sm text-destructive">{inviteError}</p>
-              )}
-            </CardContent>
-          </Card>
-        </section>
-      )}
 
       {/* Pending Invitations */}
       {canManageTeam && invitations.length > 0 && (
@@ -333,6 +306,68 @@ export default function TeamSettingsPage() {
             </CardContent>
           </Card>
         </section>
+      )}
+
+      {/* Invite Member Dialog */}
+      {canManageTeam && (
+        <AlertDialog
+          open={isInviteDialogOpen}
+          onOpenChange={(open) => {
+            setIsInviteDialogOpen(open);
+            if (!open) {
+              setInviteError("");
+            }
+          }}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Invite a member</AlertDialogTitle>
+              <AlertDialogDescription>
+                Send an invitation by email and choose the member&apos;s initial role.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <form onSubmit={handleInvite} className="space-y-4">
+              <div className="space-y-1.5">
+                <Label htmlFor="invite-email">Email</Label>
+                <Input
+                  id="invite-email"
+                  type="email"
+                  placeholder="colleague@company.com"
+                  value={inviteEmail}
+                  onChange={(e) => setInviteEmail(e.target.value)}
+                  className="h-9 text-sm"
+                  required
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="invite-role">Role</Label>
+                <Select value={inviteRole} onValueChange={setInviteRole}>
+                  <SelectTrigger id="invite-role" className="h-9 w-full text-sm">
+                    <SelectValue>{capitalize(inviteRole)}</SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="admin">Admin</SelectItem>
+                    <SelectItem value="member">Member</SelectItem>
+                    <SelectItem value="viewer">Viewer</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              {inviteError && (
+                <p className="text-sm text-destructive">{inviteError}</p>
+              )}
+              <AlertDialogFooter>
+                <AlertDialogCancel type="button">Cancel</AlertDialogCancel>
+                <Button
+                  type="submit"
+                  className="h-9"
+                  disabled={inviteMutation.isPending}
+                >
+                  {inviteMutation.isPending ? "Sending..." : "Send Invite"}
+                </Button>
+              </AlertDialogFooter>
+            </form>
+          </AlertDialogContent>
+        </AlertDialog>
       )}
 
       {/* Remove Member Confirmation Dialog */}

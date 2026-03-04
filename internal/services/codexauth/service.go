@@ -4,6 +4,7 @@
 package codexauth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -28,8 +29,11 @@ const (
 	// Used by the entire ecosystem (Cline, Roo Code, Kilo Code, OpenCode).
 	DefaultClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
-	// deviceCodeGrantType is the OAuth 2.0 grant type for device code flow.
-	deviceCodeGrantType = "urn:ietf:params:oauth:grant-type:device_code"
+	// DefaultVerificationURI is the URL where users enter their device code.
+	DefaultVerificationURI = "https://auth.openai.com/codex/device"
+
+	// defaultExpiresIn is the default device code expiration in seconds (15 min).
+	defaultExpiresIn = 900
 
 	// refreshGrantType is the OAuth 2.0 grant type for token refresh.
 	refreshGrantType = "refresh_token"
@@ -51,7 +55,7 @@ var ErrCredentialNotFound = fmt.Errorf("credential not found")
 
 // PendingAuth tracks an in-progress device code auth flow.
 type PendingAuth struct {
-	DeviceCode      string
+	DeviceAuthID    string
 	UserCode        string
 	VerificationURI string
 	ExpiresAt       time.Time
@@ -110,15 +114,18 @@ func (s *Service) SetIssuer(issuer string) {
 func (s *Service) InitiateDeviceAuth(ctx context.Context, orgID uuid.UUID) (*DeviceAuthResponse, error) {
 	endpoint := s.issuer + "/api/accounts/deviceauth/usercode"
 
-	form := url.Values{
-		"client_id": {s.clientID},
+	reqBody, err := json.Marshal(map[string]string{
+		"client_id": s.clientID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(reqBody))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
@@ -136,7 +143,7 @@ func (s *Service) InitiateDeviceAuth(ctx context.Context, orgID uuid.UUID) (*Dev
 	}
 
 	var result struct {
-		DeviceCode      string `json:"device_code"`
+		DeviceAuthID    string `json:"device_auth_id"`
 		UserCode        string `json:"user_code"`
 		VerificationURI string `json:"verification_uri"`
 		ExpiresIn       int    `json:"expires_in"`
@@ -149,12 +156,18 @@ func (s *Service) InitiateDeviceAuth(ctx context.Context, orgID uuid.UUID) (*Dev
 	if result.Interval <= 0 {
 		result.Interval = 5
 	}
+	if result.VerificationURI == "" {
+		result.VerificationURI = DefaultVerificationURI
+	}
+	if result.ExpiresIn <= 0 {
+		result.ExpiresIn = defaultExpiresIn
+	}
 
 	expiresAt := time.Now().Add(time.Duration(result.ExpiresIn) * time.Second)
 
 	// Store pending auth state in memory.
 	pending := &PendingAuth{
-		DeviceCode:      result.DeviceCode,
+		DeviceAuthID:    result.DeviceAuthID,
 		UserCode:        result.UserCode,
 		VerificationURI: result.VerificationURI,
 		ExpiresAt:       expiresAt,
@@ -165,7 +178,7 @@ func (s *Service) InitiateDeviceAuth(ctx context.Context, orgID uuid.UUID) (*Dev
 	// Persist to DB so the pending state survives server restarts.
 	if s.credentials != nil {
 		pendingCfg := models.OpenAIChatGPTConfig{
-			DeviceCode:      result.DeviceCode,
+			DeviceAuthID:    result.DeviceAuthID,
 			UserCode:        result.UserCode,
 			VerificationURI: result.VerificationURI,
 			ExpiresAt:       expiresAt,
@@ -211,9 +224,9 @@ func (s *Service) PollForToken(ctx context.Context, orgID uuid.UUID) (*AuthStatu
 			// Restore pending auth from DB (survives server restart).
 			if err == nil && cred.Status == "pending_auth" {
 				cfg, cfgOk := cred.Config.(models.OpenAIChatGPTConfig)
-				if cfgOk && cfg.DeviceCode != "" && time.Now().Before(cfg.ExpiresAt) {
+				if cfgOk && cfg.DeviceAuthID != "" && time.Now().Before(cfg.ExpiresAt) {
 					restored := &PendingAuth{
-						DeviceCode:      cfg.DeviceCode,
+						DeviceAuthID:    cfg.DeviceAuthID,
 						UserCode:        cfg.UserCode,
 						VerificationURI: cfg.VerificationURI,
 						ExpiresAt:       cfg.ExpiresAt,
@@ -250,17 +263,19 @@ func (s *Service) PollForToken(ctx context.Context, orgID uuid.UUID) (*AuthStatu
 
 	// Poll the token endpoint.
 	endpoint := s.issuer + "/api/accounts/deviceauth/token"
-	form := url.Values{
-		"client_id":   {s.clientID},
-		"device_code": {pending.DeviceCode},
-		"grant_type":  {deviceCodeGrantType},
+	pollBody, err := json.Marshal(map[string]string{
+		"device_auth_id": pending.DeviceAuthID,
+		"user_code":      pending.UserCode,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal token request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(pollBody))
 	if err != nil {
 		return nil, fmt.Errorf("create token request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
