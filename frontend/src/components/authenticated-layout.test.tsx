@@ -40,10 +40,10 @@ describe("AuthenticatedLayout", () => {
       </AuthenticatedLayout>
     );
 
-    await user.click(screen.getByRole("button", { name: "Alex Doe" }));
+    await user.click(screen.getByRole("button", { name: /Alex Doe/ }));
 
-    expect(screen.getByRole("menuitem", { name: "Team" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: "Organization Settings" })).toBeInTheDocument();
+    expect(await screen.findByRole("menuitem", { name: "Team" })).toBeInTheDocument();
+    expect(await screen.findByRole("menuitem", { name: "Organization Settings" })).toBeInTheDocument();
   });
 
   it("routes to Team and organization settings from the user menu", async () => {
@@ -55,13 +55,13 @@ describe("AuthenticatedLayout", () => {
       </AuthenticatedLayout>
     );
 
-    await user.click(screen.getByRole("button", { name: "Alex Doe" }));
-    await user.click(screen.getByRole("menuitem", { name: "Team" }));
+    await user.click(screen.getByRole("button", { name: /Alex Doe/ }));
+    await user.click(await screen.findByRole("menuitem", { name: "Team" }));
 
     expect(pushMock).toHaveBeenCalledWith("/team");
 
-    await user.click(screen.getByRole("button", { name: "Alex Doe" }));
-    await user.click(screen.getByRole("menuitem", { name: "Organization Settings" }));
+    await user.click(screen.getByRole("button", { name: /Alex Doe/ }));
+    await user.click(await screen.findByRole("menuitem", { name: "Organization Settings" }));
 
     expect(pushMock).toHaveBeenCalledWith("/settings");
   });
