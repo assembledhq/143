@@ -96,13 +96,15 @@ function OverviewDeviceCodeModal({ onClose, onConnected }: { onClose: () => void
         )}
         {status === "completed" && <div className="mt-4"><p className="text-sm font-medium text-green-600">Connected successfully!</p></div>}
         {(status === "error" || status === "expired") && (
-          <div className="mt-4 space-y-3">
+          <div className="mt-4">
             <p className="text-sm text-destructive">{error}</p>
-            <Button size="sm" onClick={startAuth}>Try Again</Button>
           </div>
         )}
-        <div className="mt-6 flex justify-end">
+        <div className="mt-6 flex items-center justify-end gap-2">
           <Button variant="outline" size="sm" onClick={onClose}>{status === "completed" ? "Done" : "Cancel"}</Button>
+          {(status === "error" || status === "expired") && (
+            <Button size="sm" onClick={startAuth}>Try Again</Button>
+          )}
         </div>
       </div>
     </div>
