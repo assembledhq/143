@@ -97,6 +97,21 @@ func (m *mockCodexAuthProvider) GetValidToken(ctx context.Context, orgID uuid.UU
 	return m.cfg, nil
 }
 
+type mockCredentialProvider struct {
+	byProvider map[models.ProviderName]*models.DecryptedCredential
+	err        error
+}
+
+func (m *mockCredentialProvider) Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	if m.byProvider == nil {
+		return nil, nil
+	}
+	return m.byProvider[provider], nil
+}
+
 // mockAgentRunStore implements agent.AgentRunStore.
 type mockAgentRunStore struct {
 	mu              sync.Mutex
@@ -333,6 +348,7 @@ type testDeps struct {
 	jobs      *mockJobStore
 	github    *mockGitHubTokenProvider
 	codexAuth agent.CodexAuthProvider
+	creds     *mockCredentialProvider
 }
 
 func defaultDeps() testDeps {
@@ -349,6 +365,7 @@ func defaultDeps() testDeps {
 		jobs:      &mockJobStore{},
 		github:    &mockGitHubTokenProvider{token: "ghp_test123"},
 		codexAuth: nil,
+		creds:     &mockCredentialProvider{},
 	}
 }
 
@@ -365,6 +382,7 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		Jobs:              d.jobs,
 		GitHub:            d.github,
 		CodexAuth:         d.codexAuth,
+		Credentials:       d.creds,
 		Logger:            zerolog.Nop(),
 		MaxConcurrent:     3,
 	})
@@ -775,7 +793,7 @@ func TestRunAgent_ExactConfidenceThreshold(t *testing.T) {
 	require.Contains(t, d.jobs.getEnqueued(), "validate")
 }
 
-func TestRunAgent_AgentEnvInjected(t *testing.T) {
+func TestRunAgent_AgentCredentialsInjected(t *testing.T) {
 	t.Parallel()
 
 	orgID := testOrg()
@@ -791,6 +809,17 @@ func TestRunAgent_AgentEnvInjected(t *testing.T) {
 		return &agent.Sandbox{ID: "env-sandbox", Provider: "mock", WorkDir: "/workspace"}, nil
 	}
 
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderAnthropic: {
+				Provider: models.ProviderAnthropic,
+				Config: models.AnthropicConfig{
+					APIKey: "sk-ant-test-key",
+				},
+			},
+		},
+	}
+
 	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:          d.provider,
 		Adapters:          map[string]agent.AgentAdapter{d.adapter.Name(): d.adapter},
@@ -802,19 +831,15 @@ func TestRunAgent_AgentEnvInjected(t *testing.T) {
 		Repositories:      d.repos,
 		Jobs:              d.jobs,
 		GitHub:            d.github,
+		Credentials:       d.creds,
 		Logger:            zerolog.Nop(),
 		MaxConcurrent:     3,
-		AgentEnv: map[string]map[string]string{
-			"claude_code": {
-				"ANTHROPIC_API_KEY": "sk-ant-test-key",
-			},
-		},
 	})
 
 	err := orch.RunAgent(context.Background(), run)
 	require.NoError(t, err)
 
-	// Verify the sandbox was created with the correct env vars.
+	// Verify the sandbox was created with the credential-derived env vars.
 	require.NotNil(t, capturedCfg.Env, "sandbox config should have env vars")
 	require.Equal(t, "sk-ant-test-key", capturedCfg.Env["ANTHROPIC_API_KEY"])
 }
@@ -834,7 +859,7 @@ func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
 		return &agent.Sandbox{ID: "no-env-sandbox", Provider: "mock", WorkDir: "/workspace"}, nil
 	}
 
-	// AgentEnv only has "codex" configured, not "claude_code".
+	// No credential configured for "claude_code".
 	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:          d.provider,
 		Adapters:          map[string]agent.AgentAdapter{d.adapter.Name(): d.adapter},
@@ -846,22 +871,50 @@ func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
 		Repositories:      d.repos,
 		Jobs:              d.jobs,
 		GitHub:            d.github,
+		Credentials:       d.creds,
 		Logger:            zerolog.Nop(),
 		MaxConcurrent:     3,
-		AgentEnv: map[string]map[string]string{
-			"codex": {
-				"OPENAI_API_KEY": "sk-openai-test",
-			},
-		},
 	})
 
 	err := orch.RunAgent(context.Background(), run)
 	require.NoError(t, err)
 
-	// Sandbox should have no agent-specific env vars since "claude_code" isn't in AgentEnv,
+	// Sandbox should have no agent-specific env vars since "claude_code" has no credential,
 	// but HOME is always injected as a fallback.
 	require.Equal(t, map[string]string{"HOME": "/workspace"}, capturedCfg.Env,
 		"sandbox config should only have HOME for unconfigured agent type")
+}
+
+func TestRunAgent_CodexUsesOpenAICredentialFallback(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.AgentType = "codex"
+
+	d := defaultDeps()
+	d.adapter.name = "codex"
+	d.codexAuth = nil
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderOpenAI: {
+				Provider: models.ProviderOpenAI,
+				Config:   models.OpenAIConfig{APIKey: "sk-openai-fallback", BaseURL: "https://api.openai.com/v1", APIType: "chat"},
+			},
+		},
+	}
+
+	var capturedCfg agent.SandboxConfig
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		capturedCfg = cfg
+		return &agent.Sandbox{ID: "codex-fallback", Provider: "mock", WorkDir: "/workspace"}, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.NoError(t, err, "run should succeed when openai credential exists")
+	require.Equal(t, "sk-openai-fallback", capturedCfg.Env["OPENAI_API_KEY"], "codex should receive OPENAI_API_KEY from org credentials")
 }
 
 func TestRunAgent_CodexAuthWritesToSandboxWorkdir(t *testing.T) {
