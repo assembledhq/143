@@ -119,7 +119,6 @@ function AgentSettingsModal({ onClose }: { onClose: () => void }) {
         <AgentSettingsEditor
           title="Edit agent settings"
           description="Update your default coding agent and auth credentials without leaving setup."
-          showAdvancedLink
           onClose={onClose}
         />
       </div>

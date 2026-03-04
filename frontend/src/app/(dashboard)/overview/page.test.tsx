@@ -127,7 +127,7 @@ describe('OverviewPage', () => {
       expect(settingsUpdateMock).toHaveBeenCalledTimes(1);
     });
 
-    expect(screen.getByRole('link', { name: 'Open advanced agent settings' })).toHaveAttribute('href', '/settings/agents');
+    expect(settingsUpdateMock).toHaveBeenCalledTimes(1);
   });
 
   it('shows the AgentSetupCard as connected when auth status is completed', async () => {

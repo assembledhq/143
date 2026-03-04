@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
@@ -204,12 +203,10 @@ function DeviceCodeModal({ onClose }: { onClose: () => void }) {
 export function AgentSettingsEditor({
   title,
   description,
-  showAdvancedLink,
   onClose,
 }: {
   title: string;
   description: string;
-  showAdvancedLink?: boolean;
   onClose?: () => void;
 }) {
   const queryClient = useQueryClient();
@@ -418,11 +415,6 @@ export function AgentSettingsEditor({
           {saveStatus === "error" && <span className="text-destructive">Save failed.</span>}
         </div>
         <div className="flex items-center gap-2">
-          {showAdvancedLink && (
-            <Link href="/settings/agents" className="text-xs text-primary underline">
-              Open advanced agent settings
-            </Link>
-          )}
           {onClose && (
             <Button variant="outline" size="sm" onClick={onClose}>
               Cancel
