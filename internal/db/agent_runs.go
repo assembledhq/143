@@ -19,10 +19,10 @@ func NewAgentRunStore(db DBTX) *AgentRunStore {
 }
 
 type AgentRunFilters struct {
-	Status     string
-	Limit      int
-	Cursor     string
-	NoPlanOnly bool // When true, only return runs where pm_plan_id IS NULL.
+	Status    models.AgentRunStatus
+	Limit     int
+	Cursor    string
+	AdHocOnly bool // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
 }
 
 func (s *AgentRunStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters AgentRunFilters) ([]models.AgentRun, error) {
@@ -41,9 +41,9 @@ func (s *AgentRunStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters 
 
 	if filters.Status != "" {
 		query += ` AND status = @status`
-		args["status"] = filters.Status
+		args["status"] = string(filters.Status)
 	}
-	if filters.NoPlanOnly {
+	if filters.AdHocOnly {
 		query += ` AND pm_plan_id IS NULL`
 	}
 	if filters.Cursor != "" {

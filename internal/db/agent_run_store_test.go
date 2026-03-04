@@ -66,7 +66,7 @@ func TestAgentRunStore_ListByOrg(t *testing.T) {
 		},
 		{
 			name:    "returns filtered agent runs by status",
-			filters: AgentRunFilters{Status: "running"},
+			filters: AgentRunFilters{Status: models.AgentRunStatusRunning},
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				mock.ExpectQuery("SELECT .+ FROM agent_runs WHERE org_id .+ AND status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).

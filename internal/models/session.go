@@ -9,21 +9,21 @@ import (
 
 // AgentSessionTask is a task within a session, enriched with run data when available.
 type AgentSessionTask struct {
-	Rank               int      `json:"rank"`
-	Title              string   `json:"title"`
-	IssueIDs           []string `json:"issue_ids"`
-	Complexity         string   `json:"complexity,omitempty"`
-	Confidence         string   `json:"confidence,omitempty"`
-	Reasoning          string   `json:"reasoning,omitempty"`
-	Approach           string   `json:"approach,omitempty"`
-	Risk               string   `json:"risk,omitempty"`
-	Status             string   `json:"status,omitempty"`
-	AgentRunID         *string  `json:"agent_run_id,omitempty"`
-	RunStatus          *string  `json:"run_status,omitempty"`
-	RunResultSummary   *string  `json:"run_result_summary,omitempty"`
-	RunConfidenceScore *float64 `json:"run_confidence_score,omitempty"`
-	RunStartedAt       *string  `json:"run_started_at,omitempty"`
-	RunCompletedAt     *string  `json:"run_completed_at,omitempty"`
+	Rank               int              `json:"rank"`
+	Title              string           `json:"title"`
+	IssueIDs           []string         `json:"issue_ids"`
+	Complexity         PMTaskComplexity `json:"complexity,omitempty"`
+	Confidence         PMTaskConfidence `json:"confidence,omitempty"`
+	Reasoning          string           `json:"reasoning,omitempty"`
+	Approach           string           `json:"approach,omitempty"`
+	Risk               string           `json:"risk,omitempty"`
+	Status             PMTaskStatus     `json:"status,omitempty"`
+	AgentRunID         *string          `json:"agent_run_id,omitempty"`
+	RunStatus          *AgentRunStatus  `json:"run_status,omitempty"`
+	RunResultSummary   *string          `json:"run_result_summary,omitempty"`
+	RunConfidenceScore *float64         `json:"run_confidence_score,omitempty"`
+	RunStartedAt       *string          `json:"run_started_at,omitempty"`
+	RunCompletedAt     *string          `json:"run_completed_at,omitempty"`
 }
 
 // AgentSession is the API response type that merges PM plans and ad-hoc runs

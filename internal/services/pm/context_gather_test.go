@@ -48,10 +48,11 @@ func (m *gatherAgentRunStoreMock) Create(ctx context.Context, run *models.AgentR
 }
 
 func (m *gatherAgentRunStoreMock) ListByOrg(ctx context.Context, orgID uuid.UUID, filters db.AgentRunFilters) ([]models.AgentRun, error) {
-	if err := m.errByKey[filters.Status]; err != nil {
+	key := string(filters.Status)
+	if err := m.errByKey[key]; err != nil {
 		return nil, err
 	}
-	return m.byStatus[filters.Status], nil
+	return m.byStatus[key], nil
 }
 
 func (m *gatherAgentRunStoreMock) ListRecentByOrg(ctx context.Context, orgID uuid.UUID, statuses []string, limit int) ([]models.AgentRun, error) {
