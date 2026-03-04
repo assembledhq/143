@@ -180,6 +180,79 @@ describe('OverviewPage', () => {
     expect(cancelButton.compareDocumentPosition(tryAgainButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
+  it('shows completed state when polling returns completed', async () => {
+    // First call returns pending (for initial status check in AgentSetupCard)
+    // Second call onwards returns completed (for polling inside modal)
+    codexStatusMock
+      .mockResolvedValueOnce({ data: { status: 'pending' } })
+      .mockResolvedValue({ data: { status: 'completed' } });
+
+    const user = userEvent.setup();
+    renderWithProviders(<Overview />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Sign in with ChatGPT')).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByText('Sign in with ChatGPT'));
+
+    await waitFor(() => {
+      expect(screen.getByText('ABCD-1234')).toBeInTheDocument();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Connected successfully!')).toBeInTheDocument();
+    }, { timeout: 10000 });
+  });
+
+  it('shows expired state when polling returns expired', async () => {
+    codexStatusMock
+      .mockResolvedValueOnce({ data: { status: 'pending' } })
+      .mockResolvedValue({ data: { status: 'expired' } });
+
+    const user = userEvent.setup();
+    renderWithProviders(<Overview />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Sign in with ChatGPT')).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByText('Sign in with ChatGPT'));
+
+    await waitFor(() => {
+      expect(screen.getByText('ABCD-1234')).toBeInTheDocument();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Code expired. Please try again.')).toBeInTheDocument();
+    }, { timeout: 10000 });
+
+    expect(screen.getByRole('button', { name: 'Try Again' })).toBeInTheDocument();
+  });
+
+  it('shows error state when polling returns error', async () => {
+    codexStatusMock
+      .mockResolvedValueOnce({ data: { status: 'pending' } })
+      .mockResolvedValue({ data: { status: 'error', message: 'Auth denied' } });
+
+    const user = userEvent.setup();
+    renderWithProviders(<Overview />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Sign in with ChatGPT')).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByText('Sign in with ChatGPT'));
+
+    await waitFor(() => {
+      expect(screen.getByText('ABCD-1234')).toBeInTheDocument();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Auth denied')).toBeInTheDocument();
+    }, { timeout: 10000 });
+  });
+
   it('renders the expires timer text in the modal', async () => {
     const user = userEvent.setup();
     renderWithProviders(<Overview />);

@@ -68,6 +68,39 @@ describe('useAuth', () => {
 
     expect(result.current.isLoading).toBe(true);
   });
+
+  it('logout calls api, clears query cache and redirects', async () => {
+    meMock.mockResolvedValue({
+      data: { id: '1', email: 'test@test.com', name: 'Test' },
+    });
+    logoutMock.mockResolvedValue({});
+
+    const { result } = renderHook(() => useAuth(), { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false);
+    });
+
+    // Save original location
+    const originalLocation = window.location;
+    Object.defineProperty(window, 'location', {
+      value: { href: '' },
+      writable: true,
+      configurable: true,
+    });
+
+    await result.current.logout();
+
+    expect(logoutMock).toHaveBeenCalledTimes(1);
+    expect(window.location.href).toBe('/login');
+
+    // Restore original location
+    Object.defineProperty(window, 'location', {
+      value: originalLocation,
+      writable: true,
+      configurable: true,
+    });
+  });
 });
 
 describe('useAuthProviders', () => {
