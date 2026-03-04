@@ -93,7 +93,7 @@ func main() {
 		// Build Phase 3+ services if runtime dependencies are available.
 		var services *worker.Services
 		if canBuildServices(cfg, logger) {
-			services = buildServices(cfg, pool, logger, codexAuthSvc, issueStore, agentRunStore,
+			services = buildServices(cfg, pool, logger, codexAuthSvc, credentialStore, issueStore, agentRunStore,
 				jobStore, orgStore, repoStore, validationStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore)
 		}
@@ -157,6 +157,7 @@ func buildServices(
 	pool *pgxpool.Pool,
 	logger zerolog.Logger,
 	codexAuthSvc *codexauth.Service,
+	credentialStore *db.OrgCredentialStore,
 	issueStore *db.IssueStore,
 	agentRunStore *db.AgentRunStore,
 	jobStore *db.JobStore,
@@ -214,8 +215,8 @@ func buildServices(
 		Jobs:              jobStore,
 		GitHub:            ghSvc,
 		CodexAuth:         codexAuthSvc,
+		Credentials:       credentialStore,
 		Logger:            logger,
-		AgentEnv:          cfg.AgentEnv(),
 	})
 
 	// Validation service.

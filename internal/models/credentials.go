@@ -13,19 +13,20 @@ import (
 type ProviderName string
 
 const (
-	ProviderAnthropic      ProviderName = "anthropic"
-	ProviderOpenAI         ProviderName = "openai"
-	ProviderOpenAIChatGPT  ProviderName = "openai_chatgpt"
-	ProviderOpenRouter     ProviderName = "openrouter"
-	ProviderGitHubApp      ProviderName = "github_app"
-	ProviderGitHubOAuth    ProviderName = "github_oauth"
-	ProviderSentry         ProviderName = "sentry"
-	ProviderLinear         ProviderName = "linear"
+	ProviderAnthropic     ProviderName = "anthropic"
+	ProviderOpenAI        ProviderName = "openai"
+	ProviderGemini        ProviderName = "gemini"
+	ProviderOpenAIChatGPT ProviderName = "openai_chatgpt"
+	ProviderOpenRouter    ProviderName = "openrouter"
+	ProviderGitHubApp     ProviderName = "github_app"
+	ProviderGitHubOAuth   ProviderName = "github_oauth"
+	ProviderSentry        ProviderName = "sentry"
+	ProviderLinear        ProviderName = "linear"
 )
 
 // AllProviders is the canonical list of credential providers.
 var AllProviders = []ProviderName{
-	ProviderAnthropic, ProviderOpenAI, ProviderOpenAIChatGPT, ProviderOpenRouter,
+	ProviderAnthropic, ProviderOpenAI, ProviderGemini, ProviderOpenAIChatGPT, ProviderOpenRouter,
 	ProviderGitHubApp, ProviderGitHubOAuth,
 	ProviderSentry, ProviderLinear,
 }
@@ -73,6 +74,11 @@ type OpenAIConfig struct {
 	APIKey  string `json:"api_key"` // #nosec G117 -- JSON config field
 	BaseURL string `json:"base_url,omitempty"`
 	APIType string `json:"api_type"`
+}
+
+type GeminiConfig struct {
+	APIKey string `json:"api_key"` // #nosec G117 -- JSON config field
+	Model  string `json:"model,omitempty"`
 }
 
 type OpenRouterConfig struct {
@@ -127,14 +133,15 @@ func (c OpenAIChatGPTConfig) NeedsRefresh(window time.Duration) bool {
 
 // --- Provider() implementations ---
 
-func (c AnthropicConfig) Provider() ProviderName   { return ProviderAnthropic }
-func (c OpenAIConfig) Provider() ProviderName      { return ProviderOpenAI }
-func (c OpenRouterConfig) Provider() ProviderName   { return ProviderOpenRouter }
-func (c GitHubAppConfig) Provider() ProviderName    { return ProviderGitHubApp }
-func (c GitHubOAuthConfig) Provider() ProviderName  { return ProviderGitHubOAuth }
-func (c SentryConfig) Provider() ProviderName       { return ProviderSentry }
-func (c LinearConfig) Provider() ProviderName         { return ProviderLinear }
-func (c OpenAIChatGPTConfig) Provider() ProviderName  { return ProviderOpenAIChatGPT }
+func (c AnthropicConfig) Provider() ProviderName     { return ProviderAnthropic }
+func (c OpenAIConfig) Provider() ProviderName        { return ProviderOpenAI }
+func (c GeminiConfig) Provider() ProviderName        { return ProviderGemini }
+func (c OpenRouterConfig) Provider() ProviderName    { return ProviderOpenRouter }
+func (c GitHubAppConfig) Provider() ProviderName     { return ProviderGitHubApp }
+func (c GitHubOAuthConfig) Provider() ProviderName   { return ProviderGitHubOAuth }
+func (c SentryConfig) Provider() ProviderName        { return ProviderSentry }
+func (c LinearConfig) Provider() ProviderName        { return ProviderLinear }
+func (c OpenAIChatGPTConfig) Provider() ProviderName { return ProviderOpenAIChatGPT }
 
 // --- Validate() implementations ---
 
@@ -146,6 +153,13 @@ func (c AnthropicConfig) Validate() error {
 }
 
 func (c OpenAIConfig) Validate() error {
+	if c.APIKey == "" {
+		return errors.New("api_key is required")
+	}
+	return nil
+}
+
+func (c GeminiConfig) Validate() error {
 	if c.APIKey == "" {
 		return errors.New("api_key is required")
 	}
@@ -222,6 +236,14 @@ func (c OpenAIConfig) MaskedSummary() CredentialSummary {
 	}
 }
 
+func (c GeminiConfig) MaskedSummary() CredentialSummary {
+	return CredentialSummary{
+		Provider:   ProviderGemini,
+		Configured: true,
+		MaskedKey:  MaskKey(c.APIKey),
+	}
+}
+
 func (c OpenRouterConfig) MaskedSummary() CredentialSummary {
 	return CredentialSummary{
 		Provider:   ProviderOpenRouter,
@@ -289,6 +311,12 @@ func ParseProviderConfig(provider ProviderName, data []byte) (ProviderConfig, er
 		}
 		if cfg.APIType == "" {
 			cfg.APIType = "chat"
+		}
+		return cfg, nil
+	case ProviderGemini:
+		var cfg GeminiConfig
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("invalid gemini config: %w", err)
 		}
 		return cfg, nil
 	case ProviderOpenRouter:

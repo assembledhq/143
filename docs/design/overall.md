@@ -25,6 +25,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
 - Step 3: Execute a coding agent
     - Admins set a **confidence threshold** that controls which issues the system will auto-attempt. Issues below the threshold require manual triggering.
     - The agent runs in a sandboxed container and produces a code diff.
+    - Agent runtime credentials are loaded from org-scoped encrypted credentials (`org_credentials`) rather than process `.env` defaults, so each org can manage Codex/Claude/Gemini auth independently.
     - The agent outputs a **confidence score** with its fix. Low-confidence runs are paused for human review before proceeding to validation.
     - If the agent asks a clarifying question during execution, the run pauses and the question surfaces in the Fix Queue. The user can answer in the UI, provide guidance, or **resume the session locally** via CLI (e.g., `143 resume <run-id>` or `claude --resume <session-id>`) to take over the sandbox interactively.
     - When a run fails, the system generates a **human-readable failure explanation** with actionable next steps — see [17-failure-communication.md](17-failure-communication.md). Failures are classified by sub-type and feed back into the system to improve future runs.
