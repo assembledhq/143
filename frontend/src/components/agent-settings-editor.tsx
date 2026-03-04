@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { CheckCircle2, KeyRound, Sparkles } from "lucide-react";
 import { api } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -214,6 +215,7 @@ export function AgentSettingsEditor({
   const [agentConfigOverride, setAgentConfigOverride] = useState<Record<string, Record<string, string>> | null>(null);
   const [saveStatus, setSaveStatus] = useState<"idle" | "success" | "error">("idle");
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
+  const [codexCredentialMethodOverride, setCodexCredentialMethodOverride] = useState<"chatgpt" | "api_key" | null>(null);
 
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
     queryKey: ["settings"],
@@ -235,6 +237,16 @@ export function AgentSettingsEditor({
   const settings = settingsResponse?.data?.settings as OrgSettings | undefined;
   const defaultAgentType = defaultAgentTypeOverride ?? settings?.default_agent_type ?? "codex";
   const agentConfig = agentConfigOverride ?? settings?.agent_config ?? {};
+
+  const hasCodexAPIKey = useMemo(() => {
+    const codexServerDefaults = (agentDefaultsResponse?.data ?? {}).codex ?? {};
+    const codexOrgConfig = agentConfig.codex ?? {};
+    return Boolean(codexOrgConfig.OPENAI_API_KEY || codexServerDefaults.OPENAI_API_KEY);
+  }, [agentConfig.codex, agentDefaultsResponse?.data]);
+
+  const inferredCodexCredentialMethod: "chatgpt" | "api_key" =
+    hasCodexAPIKey && codexAuthStatus?.status !== "completed" ? "api_key" : "chatgpt";
+  const codexCredentialMethod = codexCredentialMethodOverride ?? inferredCodexCredentialMethod;
 
   const mutation = useMutation({
     mutationFn: (payload: Record<string, unknown>) => api.settings.update(payload),
@@ -320,58 +332,99 @@ export function AgentSettingsEditor({
 
       {defaultAgentType === "codex" && (
         <div className="space-y-4">
-          <div className="space-y-3 rounded-lg border p-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <h4 className="text-sm font-medium">Sign in with ChatGPT</h4>
-                <p className="text-xs text-muted-foreground">
-                  For gpt-5.3-codex model access.
-                </p>
-              </div>
-              <Badge variant="secondary">Recommended</Badge>
-            </div>
+          <div className="space-y-3 rounded-lg border bg-card p-4">
+            <Label>Credential method</Label>
+            <RadioGroup
+              value={codexCredentialMethod}
+              onValueChange={(value) => {
+                setCodexCredentialMethodOverride(value as "chatgpt" | "api_key");
+              }}
+              className="grid gap-3 md:grid-cols-2"
+            >
+              <label
+                className={`flex cursor-pointer items-start gap-3 rounded-md border p-3 transition-colors ${
+                  codexCredentialMethod === "chatgpt" ? "border-primary bg-primary/5" : "border-input hover:bg-muted/40"
+                }`}
+              >
+                <RadioGroupItem value="chatgpt" aria-label="Sign in with ChatGPT (Recommended)" />
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="h-4 w-4 text-primary" />
+                    <p className="text-sm font-medium">Sign in with ChatGPT (Recommended)</p>
+                  </div>
+                  <p className="text-xs text-muted-foreground">Best for gpt-5.3-codex model access.</p>
+                </div>
+              </label>
 
-            <div className="flex items-center gap-2">
-              {codexAuthStatus?.status === "completed" ? (
-                <>
-                  <Badge variant="outline" className="text-green-600 border-green-600">
-                    Connected
-                  </Badge>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => disconnectMutation.mutate()}
-                    disabled={disconnectMutation.isPending}
-                  >
-                    {disconnectMutation.isPending ? "Disconnecting..." : "Disconnect"}
-                  </Button>
-                </>
-              ) : (
-                <Button
-                  size="sm"
-                  onClick={() => setShowDeviceCodeModal(true)}
-                >
-                  Sign in with ChatGPT
-                </Button>
-              )}
-            </div>
+              <label
+                className={`flex cursor-pointer items-start gap-3 rounded-md border p-3 transition-colors ${
+                  codexCredentialMethod === "api_key" ? "border-primary bg-primary/5" : "border-input hover:bg-muted/40"
+                }`}
+              >
+                <RadioGroupItem value="api_key" aria-label="Use API key" />
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <KeyRound className="h-4 w-4 text-muted-foreground" />
+                    <p className="text-sm font-medium">Use API key</p>
+                  </div>
+                  <p className="text-xs text-muted-foreground">Pay-as-you-go credentials with configurable model/base URL.</p>
+                </div>
+              </label>
+            </RadioGroup>
           </div>
 
-          <div className="space-y-3 rounded-lg border p-4">
-            <div>
-              <h4 className="text-sm font-medium">API Key</h4>
+          {codexCredentialMethod === "chatgpt" ? (
+            <div className="space-y-3 rounded-lg border p-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h4 className="text-sm font-medium">Sign in with ChatGPT</h4>
+                  <p className="text-xs text-muted-foreground">Use your ChatGPT account to unlock gpt-5.3-codex.</p>
+                </div>
+                <Badge variant="secondary">Recommended</Badge>
+              </div>
+
+              <div className="flex items-center gap-2">
+                {codexAuthStatus?.status === "completed" ? (
+                  <>
+                    <Badge variant="outline" className="border-green-600 text-green-600">
+                      <CheckCircle2 className="mr-1 h-3.5 w-3.5" />
+                      Connected
+                    </Badge>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => disconnectMutation.mutate()}
+                      disabled={disconnectMutation.isPending}
+                    >
+                      {disconnectMutation.isPending ? "Disconnecting..." : "Disconnect"}
+                    </Button>
+                  </>
+                ) : (
+                  <Button size="sm" onClick={() => setShowDeviceCodeModal(true)}>
+                    Sign in with ChatGPT
+                  </Button>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-2 rounded-lg border p-4">
+              <h4 className="text-sm font-medium">API key configuration</h4>
               <p className="text-xs text-muted-foreground">
-                Pay-as-you-go. Does not support gpt-5.3-codex.
+                Enter API key, model, and optional base URL below. This method does not support gpt-5.3-codex.
               </p>
             </div>
-          </div>
+          )}
         </div>
       )}
 
       <div className="space-y-3">
         {(() => {
+          const envVarsToRender =
+            selectedAgent.key === "codex" && codexCredentialMethod === "chatgpt"
+              ? []
+              : selectedAgent.envVars;
           const serverVars = (agentDefaultsResponse?.data ?? {})[selectedAgent.key] ?? {};
-          return selectedAgent.envVars.map((envVar) => {
+          return envVarsToRender.map((envVar) => {
             const serverDefault = serverVars[envVar.name] ?? "";
             const orgOverride = agentConfig[selectedAgent.key]?.[envVar.name] ?? "";
             const displayValue = orgOverride || serverDefault;
@@ -407,6 +460,11 @@ export function AgentSettingsEditor({
             );
           });
         })()}
+        {selectedAgent.key === "codex" && codexCredentialMethod === "chatgpt" && (
+          <p className="text-xs text-muted-foreground">
+            API key fields are hidden while ChatGPT sign-in is selected.
+          </p>
+        )}
       </div>
 
       <div className="flex items-center justify-between gap-2 pt-2">
