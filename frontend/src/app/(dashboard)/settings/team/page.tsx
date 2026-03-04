@@ -31,6 +31,7 @@ import type { User, InvitationResponse, ListResponse } from "@/lib/types";
 export default function TeamSettingsPage() {
   const queryClient = useQueryClient();
   const { user: currentUser } = useAuth();
+  const canManageTeam = currentUser?.role === "admin";
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState("member");
   const [inviteError, setInviteError] = useState("");
@@ -126,6 +127,12 @@ export default function TeamSettingsPage() {
         </div>
       )}
 
+      {!canManageTeam && (
+        <div className="rounded-md bg-muted px-3 py-2 text-sm text-muted-foreground">
+          Only admins can manage member roles, invitations, and removals.
+        </div>
+      )}
+
       {/* Members List */}
       <section className="space-y-3">
         <h2 className="text-[13px] font-medium text-foreground">Members</h2>
@@ -141,12 +148,18 @@ export default function TeamSettingsPage() {
               </div>
             ) : (
               <div className="divide-y divide-border">
+                <div className="hidden items-center gap-4 bg-muted/30 px-4 py-2 text-xs font-medium uppercase tracking-wide text-muted-foreground md:grid md:grid-cols-[minmax(0,1.3fr)_minmax(0,1.3fr)_140px_100px]">
+                  <div>Name</div>
+                  <div>Email</div>
+                  <div>Role</div>
+                  <div>Actions</div>
+                </div>
                 {members.map((member) => {
                   const isSelf = currentUser?.id === member.id;
                   return (
                     <div
                       key={member.id}
-                      className="flex items-center justify-between px-4 py-3"
+                      className="grid gap-3 px-4 py-3 md:grid-cols-[minmax(0,1.3fr)_minmax(0,1.3fr)_140px_100px] md:items-center"
                     >
                       <div className="flex items-center gap-3 min-w-0">
                         {member.avatar_url ? (
@@ -171,13 +184,13 @@ export default function TeamSettingsPage() {
                               </span>
                             )}
                           </div>
-                          <div className="text-xs text-muted-foreground truncate">
-                            {member.email}
-                          </div>
                         </div>
                       </div>
-                      <div className="flex items-center gap-2 ml-4">
-                        {isSelf ? (
+                      <div className="min-w-0 text-sm text-muted-foreground truncate">
+                        {member.email}
+                      </div>
+                      <div className="flex items-center">
+                        {isSelf || !canManageTeam ? (
                           <Badge variant={roleBadgeVariant(member.role)}>
                             {capitalize(member.role)}
                           </Badge>
@@ -191,7 +204,11 @@ export default function TeamSettingsPage() {
                               })
                             }
                           >
-                            <SelectTrigger size="sm" className="w-24">
+                            <SelectTrigger
+                              size="default"
+                              className="h-9 w-full max-w-28"
+                              aria-label={`Role for ${member.name}`}
+                            >
                               <SelectValue>
                                 {capitalize(member.role)}
                               </SelectValue>
@@ -203,7 +220,9 @@ export default function TeamSettingsPage() {
                             </SelectContent>
                           </Select>
                         )}
-                        {!isSelf && (
+                      </div>
+                      <div className="flex items-center justify-start md:justify-end">
+                        {canManageTeam && !isSelf ? (
                           <Button
                             variant="ghost"
                             size="sm"
@@ -213,6 +232,8 @@ export default function TeamSettingsPage() {
                           >
                             Remove
                           </Button>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">—</span>
                         )}
                       </div>
                     </div>
@@ -225,52 +246,55 @@ export default function TeamSettingsPage() {
       </section>
 
       {/* Invite Form */}
-      <section className="space-y-3">
-        <h2 className="text-[13px] font-medium text-foreground">
-          Invite a Member
-        </h2>
-        <Card>
-          <CardContent>
-            <form onSubmit={handleInvite} className="flex items-end gap-3">
-              <div className="flex-1 space-y-1.5">
-                <Label htmlFor="invite-email">Email</Label>
-                <Input
-                  id="invite-email"
-                  type="email"
-                  placeholder="colleague@company.com"
-                  value={inviteEmail}
-                  onChange={(e) => setInviteEmail(e.target.value)}
-                  required
-                />
-              </div>
-              <div className="w-28 space-y-1.5">
-                <Label>Role</Label>
-                <Select value={inviteRole} onValueChange={setInviteRole}>
-                  <SelectTrigger className="h-9 w-full">
-                    <SelectValue>
-                      {capitalize(inviteRole)}
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="admin">Admin</SelectItem>
-                    <SelectItem value="member">Member</SelectItem>
-                    <SelectItem value="viewer">Viewer</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <Button type="submit" className="h-9" disabled={inviteMutation.isPending}>
-                {inviteMutation.isPending ? "Sending..." : "Send Invite"}
-              </Button>
-            </form>
-            {inviteError && (
-              <p className="mt-2 text-sm text-destructive">{inviteError}</p>
-            )}
-          </CardContent>
-        </Card>
-      </section>
+      {canManageTeam && (
+        <section className="space-y-3">
+          <h2 className="text-[13px] font-medium text-foreground">
+            Invite a Member
+          </h2>
+          <Card>
+            <CardContent>
+              <form onSubmit={handleInvite} className="flex items-end gap-3">
+                <div className="flex-1 space-y-1.5">
+                  <Label htmlFor="invite-email">Email</Label>
+                  <Input
+                    id="invite-email"
+                    type="email"
+                    placeholder="colleague@company.com"
+                    value={inviteEmail}
+                    onChange={(e) => setInviteEmail(e.target.value)}
+                    className="h-9 text-sm"
+                    required
+                  />
+                </div>
+                <div className="w-28 space-y-1.5">
+                  <Label>Role</Label>
+                  <Select value={inviteRole} onValueChange={setInviteRole}>
+                    <SelectTrigger className="h-9 w-full text-sm">
+                      <SelectValue>
+                        {capitalize(inviteRole)}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="admin">Admin</SelectItem>
+                      <SelectItem value="member">Member</SelectItem>
+                      <SelectItem value="viewer">Viewer</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <Button type="submit" className="h-9" disabled={inviteMutation.isPending}>
+                  {inviteMutation.isPending ? "Sending..." : "Send Invite"}
+                </Button>
+              </form>
+              {inviteError && (
+                <p className="mt-2 text-sm text-destructive">{inviteError}</p>
+              )}
+            </CardContent>
+          </Card>
+        </section>
+      )}
 
       {/* Pending Invitations */}
-      {invitations.length > 0 && (
+      {canManageTeam && invitations.length > 0 && (
         <section className="space-y-3">
           <h2 className="text-[13px] font-medium text-foreground">
             Pending Invitations
