@@ -1,0 +1,40 @@
+package models
+
+import "fmt"
+
+// IntegrationProvider identifies an external integration provider.
+type IntegrationProvider string
+
+const (
+	IntegrationProviderGitHub IntegrationProvider = "github"
+	IntegrationProviderSentry IntegrationProvider = "sentry"
+	IntegrationProviderLinear IntegrationProvider = "linear"
+)
+
+func (p IntegrationProvider) Validate() error {
+	switch p {
+	case IntegrationProviderGitHub, IntegrationProviderSentry, IntegrationProviderLinear:
+		return nil
+	default:
+		return fmt.Errorf("invalid IntegrationProvider: %q", p)
+	}
+}
+
+// IntegrationStatus captures lifecycle state for an integration.
+type IntegrationStatus string
+
+const (
+	IntegrationStatusActive   IntegrationStatus = "active"
+	IntegrationStatusInactive IntegrationStatus = "inactive"
+	IntegrationStatusError    IntegrationStatus = "error"
+)
+
+func (s IntegrationStatus) Validate() error {
+	switch s {
+	case IntegrationStatusActive, IntegrationStatusInactive, IntegrationStatusError:
+		return nil
+	default:
+		return fmt.Errorf("invalid IntegrationStatus: %q", s)
+	}
+}
+
