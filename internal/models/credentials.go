@@ -109,7 +109,7 @@ type OpenAIChatGPTConfig struct {
 
 	// Pending device auth fields — only populated during the device code flow.
 	// Stored encrypted so the pending state survives server restarts.
-	DeviceCode      string `json:"device_code,omitempty"`
+	DeviceAuthID    string `json:"device_auth_id,omitempty"`
 	UserCode        string `json:"user_code,omitempty"`
 	VerificationURI string `json:"verification_uri,omitempty"`
 	PollInterval    int    `json:"poll_interval,omitempty"`
