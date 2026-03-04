@@ -63,7 +63,50 @@ describe('OverviewPage', () => {
     agentDefaultsMock.mockClear();
   });
 
-  it('starts GitHub onboarding directly from the dashboard', async () => {
+  it('renders the page header', () => {
+    renderWithProviders(<Overview />);
+
+    expect(screen.getByText('Overview')).toBeInTheDocument();
+    expect(screen.getByText('Set up your coding agent and connect your tools to start fixing issues automatically.')).toBeInTheDocument();
+  });
+
+  it('renders the page description text', () => {
+    renderWithProviders(<Overview />);
+
+    expect(screen.getByText(/Once integrations are connected/)).toBeInTheDocument();
+  });
+
+  it('shows all three coding agent options with Codex as recommended', async () => {
+    renderWithProviders(<Overview />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Codex')).toBeInTheDocument();
+    });
+
+    expect(screen.getByText('Claude Code')).toBeInTheDocument();
+    expect(screen.getByText('Gemini CLI')).toBeInTheDocument();
+    expect(screen.getByText('Recommended')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Configure' })).toHaveLength(2);
+  });
+
+  it('shows coding agent section before source control and integrations', () => {
+    renderWithProviders(<Overview />);
+
+    const codingAgentHeader = screen.getByText('Coding agent');
+    const sourceControlHeader = screen.getByText('Source control');
+    const integrationsHeader = screen.getByText('Additional integrations');
+
+    // Verify ordering via DOM position
+    expect(
+      codingAgentHeader.compareDocumentPosition(sourceControlHeader) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    expect(
+      sourceControlHeader.compareDocumentPosition(integrationsHeader) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+  });
+
+  it('starts GitHub onboarding from the source control section', async () => {
     const user = userEvent.setup();
 
     renderWithProviders(<Overview />);
@@ -73,7 +116,7 @@ describe('OverviewPage', () => {
     expect(loginMock).toHaveBeenCalledTimes(1);
   });
 
-  it('starts Sentry onboarding directly from the dashboard', async () => {
+  it('starts Sentry onboarding from the additional integrations section', async () => {
     const user = userEvent.setup();
 
     renderWithProviders(<Overview />);
@@ -81,65 +124,25 @@ describe('OverviewPage', () => {
     await user.click(screen.getByRole('button', { name: 'Connect Sentry' }));
 
     expect(sentryLoginMock).toHaveBeenCalledTimes(1);
-    expect(screen.queryByRole('heading', { name: 'Integrations' })).not.toBeInTheDocument();
   });
 
-  it('shows Linear integration on the dashboard', () => {
+  it('shows Linear integration as coming soon', () => {
     renderWithProviders(<Overview />);
 
     expect(screen.getByText('Connect Linear')).toBeInTheDocument();
     expect(screen.getByText('Coming soon')).toBeInTheDocument();
   });
 
-  it('shows the AgentSetupCard with connect prompt when not authenticated', async () => {
-    renderWithProviders(<Overview />);
-
-    await waitFor(() => {
-      expect(screen.getByText('Connect your coding agent')).toBeInTheDocument();
-    });
-
-    expect(screen.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Settings' })).toBeInTheDocument();
-  });
-
-  it('opens agent settings modal from setup card and saves updates', async () => {
-    const user = userEvent.setup();
-    renderWithProviders(<Overview />);
-
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Settings' })).toBeInTheDocument();
-    });
-
-    await user.click(screen.getByRole('button', { name: 'Settings' }));
-
-    await waitFor(() => {
-      expect(screen.getByText('Edit agent settings')).toBeInTheDocument();
-    });
-
-    expect(screen.getByText('For gpt-5.3-codex model access.')).toBeInTheDocument();
-    expect(screen.getByText('Recommended')).toBeInTheDocument();
-
-    await user.clear(screen.getByLabelText('Model'));
-    await user.type(screen.getByLabelText('Model'), 'codex-mini');
-    await user.click(screen.getByRole('button', { name: 'Save changes' }));
-
-    await waitFor(() => {
-      expect(settingsUpdateMock).toHaveBeenCalledTimes(1);
-    });
-
-    expect(settingsUpdateMock).toHaveBeenCalledTimes(1);
-  });
-
-  it('shows the AgentSetupCard as connected when auth status is completed', async () => {
+  it('shows Codex as connected when ChatGPT auth status is completed', async () => {
     codexStatusMock.mockResolvedValue({ data: { status: 'completed' } });
 
     renderWithProviders(<Overview />);
 
     await waitFor(() => {
-      expect(screen.getByText('Codex is connected via ChatGPT.')).toBeInTheDocument();
+      expect(screen.getByText('Connected')).toBeInTheDocument();
     });
 
-    expect(screen.getByText('Connected')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Sign in with ChatGPT' })).not.toBeInTheDocument();
   });
 
   it('opens device code modal when Sign in with ChatGPT is clicked', async () => {
@@ -147,27 +150,42 @@ describe('OverviewPage', () => {
     renderWithProviders(<Overview />);
 
     await waitFor(() => {
-      expect(screen.getByText('Sign in with ChatGPT')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument();
     });
 
-    await user.click(screen.getByText('Sign in with ChatGPT'));
+    await user.click(screen.getByRole('button', { name: 'Sign in with ChatGPT' }));
 
     await waitFor(() => {
       expect(screen.getByText('Connect your ChatGPT account')).toBeInTheDocument();
     });
   });
 
-  it('renders the page description text', () => {
+  it('opens agent settings modal from Configure button on Claude Code card', async () => {
+    const user = userEvent.setup();
     renderWithProviders(<Overview />);
 
-    expect(screen.getByText(/Once integrations are connected/)).toBeInTheDocument();
-  });
+    await waitFor(() => {
+      expect(screen.getByText('Claude Code')).toBeInTheDocument();
+    });
 
-  it('renders the page header', () => {
-    renderWithProviders(<Overview />);
+    const configureButtons = screen.getAllByRole('button', { name: 'Configure' });
+    await user.click(configureButtons[0]);
 
-    expect(screen.getByText('Overview')).toBeInTheDocument();
-    expect(screen.getByText('Get started by connecting your tools.')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText('Configure coding agent')).toBeInTheDocument();
+    });
+
+    // Claude Code should be pre-selected, showing its env var fields
+    await waitFor(() => {
+      expect(screen.getByLabelText('Model')).toBeInTheDocument();
+    });
+
+    await user.type(screen.getByLabelText('Model'), 'claude-sonnet-4-5');
+    await user.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    await waitFor(() => {
+      expect(settingsUpdateMock).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('shows device code and verification URI in modal after initiation', async () => {
@@ -175,10 +193,10 @@ describe('OverviewPage', () => {
     renderWithProviders(<Overview />);
 
     await waitFor(() => {
-      expect(screen.getByText('Sign in with ChatGPT')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument();
     });
 
-    await user.click(screen.getByText('Sign in with ChatGPT'));
+    await user.click(screen.getByRole('button', { name: 'Sign in with ChatGPT' }));
 
     await waitFor(() => {
       expect(screen.getByText('ABCD-1234')).toBeInTheDocument();
@@ -195,10 +213,10 @@ describe('OverviewPage', () => {
     renderWithProviders(<Overview />);
 
     await waitFor(() => {
-      expect(screen.getByText('Sign in with ChatGPT')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument();
     });
 
-    await user.click(screen.getByText('Sign in with ChatGPT'));
+    await user.click(screen.getByRole('button', { name: 'Sign in with ChatGPT' }));
 
     await waitFor(() => {
       expect(screen.getByText('Connect your ChatGPT account')).toBeInTheDocument();
@@ -217,10 +235,10 @@ describe('OverviewPage', () => {
     renderWithProviders(<Overview />);
 
     await waitFor(() => {
-      expect(screen.getByText('Sign in with ChatGPT')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument();
     });
 
-    await user.click(screen.getByText('Sign in with ChatGPT'));
+    await user.click(screen.getByRole('button', { name: 'Sign in with ChatGPT' }));
 
     await waitFor(() => {
       expect(screen.getByText('Failed to start authentication. Please try again.')).toBeInTheDocument();
@@ -236,7 +254,7 @@ describe('OverviewPage', () => {
   });
 
   it('shows completed state when polling returns completed', async () => {
-    // First call returns pending (for initial status check in AgentSetupCard)
+    // First call returns pending (for initial status check in AgentSelectionSection)
     // Second call onwards returns completed (for polling inside modal)
     codexStatusMock
       .mockResolvedValueOnce({ data: { status: 'pending' } })
@@ -246,10 +264,10 @@ describe('OverviewPage', () => {
     renderWithProviders(<Overview />);
 
     await waitFor(() => {
-      expect(screen.getByText('Sign in with ChatGPT')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument();
     });
 
-    await user.click(screen.getByText('Sign in with ChatGPT'));
+    await user.click(screen.getByRole('button', { name: 'Sign in with ChatGPT' }));
 
     await waitFor(() => {
       expect(screen.getByText('ABCD-1234')).toBeInTheDocument();
@@ -269,10 +287,10 @@ describe('OverviewPage', () => {
     renderWithProviders(<Overview />);
 
     await waitFor(() => {
-      expect(screen.getByText('Sign in with ChatGPT')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument();
     });
 
-    await user.click(screen.getByText('Sign in with ChatGPT'));
+    await user.click(screen.getByRole('button', { name: 'Sign in with ChatGPT' }));
 
     await waitFor(() => {
       expect(screen.getByText('ABCD-1234')).toBeInTheDocument();
@@ -294,10 +312,10 @@ describe('OverviewPage', () => {
     renderWithProviders(<Overview />);
 
     await waitFor(() => {
-      expect(screen.getByText('Sign in with ChatGPT')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument();
     });
 
-    await user.click(screen.getByText('Sign in with ChatGPT'));
+    await user.click(screen.getByRole('button', { name: 'Sign in with ChatGPT' }));
 
     await waitFor(() => {
       expect(screen.getByText('ABCD-1234')).toBeInTheDocument();
@@ -313,10 +331,10 @@ describe('OverviewPage', () => {
     renderWithProviders(<Overview />);
 
     await waitFor(() => {
-      expect(screen.getByText('Sign in with ChatGPT')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument();
     });
 
-    await user.click(screen.getByText('Sign in with ChatGPT'));
+    await user.click(screen.getByRole('button', { name: 'Sign in with ChatGPT' }));
 
     await waitFor(() => {
       expect(screen.getByText('ABCD-1234')).toBeInTheDocument();
