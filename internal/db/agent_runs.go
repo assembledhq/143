@@ -19,9 +19,10 @@ func NewAgentRunStore(db DBTX) *AgentRunStore {
 }
 
 type AgentRunFilters struct {
-	Status string
-	Limit  int
-	Cursor string
+	Status     string
+	Limit      int
+	Cursor     string
+	NoPlanOnly bool // When true, only return runs where pm_plan_id IS NULL.
 }
 
 func (s *AgentRunStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters AgentRunFilters) ([]models.AgentRun, error) {
@@ -41,6 +42,9 @@ func (s *AgentRunStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters 
 	if filters.Status != "" {
 		query += ` AND status = @status`
 		args["status"] = filters.Status
+	}
+	if filters.NoPlanOnly {
+		query += ` AND pm_plan_id IS NULL`
 	}
 	if filters.Cursor != "" {
 		cursorID, err := uuid.Parse(filters.Cursor)
@@ -230,6 +234,32 @@ func (s *AgentRunStore) ListRecentByOrg(ctx context.Context, orgID uuid.UUID, st
 	})
 	if err != nil {
 		return nil, fmt.Errorf("query agent runs: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.AgentRun])
+}
+
+func (s *AgentRunStore) ListByIDs(ctx context.Context, orgID uuid.UUID, ids []uuid.UUID) ([]models.AgentRun, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	query := `
+		SELECT id, issue_id, org_id, agent_type, status, autonomy_level, token_mode,
+		       complexity_tier, confidence_score, confidence_reasoning, risk_factors,
+		       container_id, started_at, completed_at, token_usage,
+		       failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
+		       parent_run_id, revision_context, error, result_summary, diff,
+		       pm_plan_id, pm_approach, pm_reasoning,
+		       created_at
+		FROM agent_runs
+		WHERE org_id = @org_id AND id = ANY(@ids)`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id": orgID,
+		"ids":    ids,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query agent runs by ids: %w", err)
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.AgentRun])
 }

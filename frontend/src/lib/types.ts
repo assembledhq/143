@@ -275,6 +275,47 @@ export interface PMPlan {
   completed_at?: string;
 }
 
+export type AgentSessionType = 'plan' | 'manual';
+export type AgentSessionStatus = 'active' | 'completed' | 'failed';
+export type AgentSessionTriggeredBy = 'scheduled' | 'manual' | 'fix_this';
+
+export interface AgentSessionTask {
+  rank: number;
+  title: string;
+  issue_ids: string[];
+  complexity?: string;
+  confidence?: string;
+  reasoning?: string;
+  approach?: string;
+  risk?: string;
+  status?: string;
+  agent_run_id?: string;
+  run_status?: string;
+  run_result_summary?: string;
+  run_confidence_score?: number;
+  run_started_at?: string;
+  run_completed_at?: string;
+}
+
+export interface AgentSession {
+  id: string;
+  type: AgentSessionType;
+  status: AgentSessionStatus;
+  triggered_by: AgentSessionTriggeredBy;
+  title: string;
+  analysis?: string;
+  tasks: AgentSessionTask[];
+  clusters?: PMCluster[];
+  skipped_issues?: PMSkipEntry[];
+  issues_reviewed?: number;
+  task_count: number;
+  active_run_count: number;
+  completed_run_count: number;
+  failed_run_count: number;
+  created_at: string;
+  completed_at?: string;
+}
+
 export interface CodexAuthStatus {
   status: 'pending' | 'completed' | 'expired' | 'error' | 'none';
   account_type?: string;
