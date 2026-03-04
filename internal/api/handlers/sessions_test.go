@@ -16,15 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var agentRunColumns = []string{
-	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
-	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
-	"container_id", "started_at", "completed_at", "token_usage",
-	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
-	"parent_run_id", "revision_context", "error", "result_summary", "diff",
-	"pm_plan_id", "pm_approach", "pm_reasoning",
-	"created_at",
-}
+// agentRunColumns is defined in runs_test.go (same package).
 
 var pmPlanColumns = []string{
 	"id", "org_id", "status", "analysis", "tasks", "clusters", "skipped_issues",
@@ -256,6 +248,100 @@ func TestSessionHandler_Get_NotFound(t *testing.T) {
 
 	require.Equal(t, http.StatusNotFound, rr.Code, "should return 404")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestRunStatusToSessionStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		runStatus     string
+		sessionStatus models.AgentSessionStatus
+	}{
+		{"pending", models.AgentSessionStatusActive},
+		{"running", models.AgentSessionStatusActive},
+		{"awaiting_input", models.AgentSessionStatusActive},
+		{"needs_human_guidance", models.AgentSessionStatusActive},
+		{"completed", models.AgentSessionStatusCompleted},
+		{"pr_created", models.AgentSessionStatusCompleted},
+		{"skipped", models.AgentSessionStatusCompleted},
+		{"failed", models.AgentSessionStatusFailed},
+		{"cancelled", models.AgentSessionStatusFailed},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.runStatus, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.sessionStatus, runStatusToSessionStatus(tt.runStatus),
+				"run status %q should map to session status %q", tt.runStatus, tt.sessionStatus)
+		})
+	}
+}
+
+func TestPlanToSession_TypedTaskFields(t *testing.T) {
+	t.Parallel()
+
+	plan := models.PMPlan{
+		ID:             uuid.New(),
+		OrgID:          uuid.New(),
+		Status:         models.PMPlanStatusCompleted,
+		Analysis:       "Analysis text",
+		Tasks:          json.RawMessage(`[{"rank":1,"title":"Fix auth","issue_ids":["i1"],"complexity":"moderate","confidence":"high","status":"delegated","agent_run_id":"00000000-0000-0000-0000-000000000001"}]`),
+		Clusters:       json.RawMessage(`[]`),
+		SkippedIssues:  json.RawMessage(`[]`),
+		IssuesReviewed: 3,
+		TriggeredBy:    models.PMTriggerCron,
+		CreatedAt:      time.Now(),
+	}
+
+	session := planToSession(plan)
+
+	require.Equal(t, models.AgentSessionTypePlan, session.Type, "session type should be plan")
+	require.Equal(t, models.AgentSessionStatusCompleted, session.Status, "session status should match plan status")
+	require.Equal(t, models.AgentSessionTriggeredByScheduled, session.TriggeredBy, "cron trigger should map to scheduled")
+	require.Len(t, session.Tasks, 1, "should have one task")
+
+	task := session.Tasks[0]
+	require.Equal(t, models.PMTaskComplexity("moderate"), task.Complexity, "task complexity should be typed PMTaskComplexity")
+	require.Equal(t, models.PMTaskConfidence("high"), task.Confidence, "task confidence should be typed PMTaskConfidence")
+	require.Equal(t, models.PMTaskStatus("delegated"), task.Status, "task status should be typed PMTaskStatus")
+}
+
+func TestRunToSession_TypedTaskFields(t *testing.T) {
+	t.Parallel()
+
+	runID := uuid.New()
+	issueID := uuid.New()
+	summary := "Fixed the bug"
+	score := 0.88
+	now := time.Now()
+
+	run := models.AgentRun{
+		ID:              runID,
+		IssueID:         issueID,
+		OrgID:           uuid.New(),
+		Status:          "completed",
+		ResultSummary:   &summary,
+		ConfidenceScore: &score,
+		StartedAt:       &now,
+		CompletedAt:     &now,
+		CreatedAt:       now,
+	}
+
+	session := runToSession(run)
+
+	require.Equal(t, models.AgentSessionTypeManual, session.Type, "session type should be manual")
+	require.Equal(t, models.AgentSessionStatusCompleted, session.Status, "completed run should map to completed session")
+	require.Equal(t, models.AgentSessionTriggeredByFixThis, session.TriggeredBy, "ad-hoc run should be fix_this")
+	require.Len(t, session.Tasks, 1, "should have one task")
+
+	task := session.Tasks[0]
+	require.Equal(t, models.PMTaskStatusDelegated, task.Status, "task status should be PMTaskStatusDelegated")
+	require.NotNil(t, task.RunStatus, "run status should be set")
+	require.Equal(t, models.AgentRunStatusCompleted, *task.RunStatus, "run status should be typed AgentRunStatusCompleted")
+	require.NotNil(t, task.RunConfidenceScore, "confidence score should be set")
+	require.Equal(t, 0.88, *task.RunConfidenceScore, "confidence score should match")
+	require.NotNil(t, task.RunStartedAt, "started_at should be set")
+	require.NotNil(t, task.RunCompletedAt, "completed_at should be set")
 }
 
 func float64Ptr(f float64) *float64 { return &f }
