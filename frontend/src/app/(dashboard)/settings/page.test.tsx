@@ -138,38 +138,15 @@ describe('SettingsPage', () => {
     });
   });
 
-  it('renders the Agent Setup section with agent type options', async () => {
+  it('does not render Agent Setup on general settings page', async () => {
     renderWithProviders(<SettingsPage />);
 
     await waitFor(() => {
-      expect(screen.getByText('Agent Setup')).toBeInTheDocument();
+      expect(screen.getByText('General')).toBeInTheDocument();
     });
 
-    expect(screen.getByText('Codex')).toBeInTheDocument();
-    expect(screen.getByText('Claude Code')).toBeInTheDocument();
-    expect(screen.getByText('Gemini CLI')).toBeInTheDocument();
-  });
-
-  it('shows ChatGPT sign-in when Codex is selected and not connected', async () => {
-    renderWithProviders(<SettingsPage />);
-
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument();
-    });
-
-    expect(screen.getByText('Recommended')).toBeInTheDocument();
-  });
-
-  it('shows Connected status when ChatGPT OAuth is completed', async () => {
-    codexStatusMock.mockResolvedValue({ data: { status: 'completed' } });
-
-    renderWithProviders(<SettingsPage />);
-
-    await waitFor(() => {
-      expect(screen.getByText('Connected')).toBeInTheDocument();
-    });
-
-    expect(screen.getByText('Disconnect')).toBeInTheDocument();
+    expect(screen.getByText('Agent Setup')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open Agent Settings' })).toHaveAttribute('href', '/settings/agents');
   });
 
   it('renders the Agent Execution section with autonomy options', async () => {
@@ -219,7 +196,7 @@ describe('SettingsPage', () => {
     });
 
     expect(screen.getByText('Prioritization')).toBeInTheDocument();
-    expect(screen.getByText('Other Agent Configuration')).toBeInTheDocument();
+    expect(screen.getByText('PM Agent')).toBeInTheDocument();
   });
 
   it('calls settings update on save', async () => {
@@ -237,56 +214,6 @@ describe('SettingsPage', () => {
     });
   });
 
-  it('renders API Key section for selected agent', async () => {
-    renderWithProviders(<SettingsPage />);
-
-    await waitFor(() => {
-      expect(screen.getAllByText('API Key').length).toBeGreaterThanOrEqual(1);
-    });
-  });
-
-  it('opens device code modal when Sign in with ChatGPT button is clicked', async () => {
-    const user = userEvent.setup();
-    renderWithProviders(<SettingsPage />);
-
-    const btn = await screen.findByRole('button', { name: 'Sign in with ChatGPT' });
-    await user.click(btn);
-
-    expect(await screen.findByText('Connect your ChatGPT account')).toBeInTheDocument();
-
-    // Wait for device code to appear after async initiation
-    expect(await screen.findByText('TEST-1234')).toBeInTheDocument();
-    expect(screen.getByText('https://auth.openai.com/codex/device')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Copy' })).toBeInTheDocument();
-  });
-
-  it('shows Disconnect button when connected and calls disconnect on click', async () => {
-    codexStatusMock.mockResolvedValue({ data: { status: 'completed' } });
-    const user = userEvent.setup();
-
-    renderWithProviders(<SettingsPage />);
-
-    await waitFor(() => {
-      expect(screen.getByText('Connected')).toBeInTheDocument();
-    });
-
-    await user.click(screen.getByText('Disconnect'));
-
-    await waitFor(() => {
-      expect(codexDisconnectMock).toHaveBeenCalledTimes(1);
-    });
-  });
-
-  it('renders model and base URL fields for selected agent', async () => {
-    renderWithProviders(<SettingsPage />);
-
-    await waitFor(() => {
-      expect(screen.getByText('Model')).toBeInTheDocument();
-    });
-
-    expect(screen.getByText('Base URL')).toBeInTheDocument();
-  });
-
   it('renders Max Concurrent Runs input', async () => {
     renderWithProviders(<SettingsPage />);
 
@@ -295,23 +222,19 @@ describe('SettingsPage', () => {
     });
   });
 
-  it('shows error state in device code modal when initiation fails', async () => {
-    codexInitiateMock.mockRejectedValueOnce(new Error('fail'));
+  it('renders PM model input in advanced settings', async () => {
     const user = userEvent.setup();
-
     renderWithProviders(<SettingsPage />);
 
-    const btn = await screen.findByRole('button', { name: 'Sign in with ChatGPT' });
-    await user.click(btn);
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Advanced Settings' })).toBeInTheDocument();
+    });
 
-    expect(await screen.findByText('Failed to start authentication. Please try again.')).toBeInTheDocument();
-    const cancelButton = screen.getByRole('button', { name: 'Cancel' });
-    const tryAgainButton = screen.getByRole('button', { name: 'Try Again' });
+    await user.click(screen.getByRole('button', { name: 'Advanced Settings' }));
 
-    expect(cancelButton).toBeInTheDocument();
-    expect(tryAgainButton).toBeInTheDocument();
-    expect(cancelButton.parentElement).toBe(tryAgainButton.parentElement);
-    expect(cancelButton.compareDocumentPosition(tryAgainButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.getByLabelText('PM Model')).toBeInTheDocument();
+    });
   });
 
   it('syncs server settings into form state on load', async () => {

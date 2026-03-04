@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { renderWithProviders, screen, waitFor, userEvent } from '@/test/test-utils';
+import { renderWithProviders, screen, waitFor, userEvent, within } from '@/test/test-utils';
 import TeamSettingsPage from './page';
 
 const {
@@ -116,10 +116,14 @@ describe('TeamSettingsPage', () => {
       expect(screen.getByText('Admin User')).toBeInTheDocument();
     });
 
-    expect(screen.getByText('Name')).toBeInTheDocument();
-    expect(screen.getByText('Email')).toBeInTheDocument();
-    expect(screen.getByText('Role')).toBeInTheDocument();
-    expect(screen.getByText('Actions')).toBeInTheDocument();
+    const membersSection = screen.getByRole('heading', { name: 'Members' }).closest('section');
+    expect(membersSection).not.toBeNull();
+
+    const membersQueries = within(membersSection!);
+    expect(membersQueries.getByText('Name', { selector: 'div' })).toBeInTheDocument();
+    expect(membersQueries.getByText('Email', { selector: 'div' })).toBeInTheDocument();
+    expect(membersQueries.getByText('Role', { selector: 'div' })).toBeInTheDocument();
+    expect(membersQueries.getByText('Actions', { selector: 'div' })).toBeInTheDocument();
   });
 
   it('shows (you) label for the current user', async () => {
@@ -291,7 +295,8 @@ describe('TeamSettingsPage', () => {
     });
 
     await user.click(roleSelectTrigger);
-    await user.click(screen.getByRole('option', { name: 'Viewer' }));
+    const viewerOption = await screen.findByRole('option', { name: 'Viewer' });
+    await user.click(viewerOption);
 
     await waitFor(() => {
       expect(changeRoleMock).toHaveBeenCalledWith('user-2', 'viewer');
