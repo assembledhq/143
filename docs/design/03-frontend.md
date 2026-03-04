@@ -57,6 +57,8 @@ Settings        — "How is the system configured?"
 
 **Why 6, not 8:** Pull Requests were removed as a standalone page. PRs are a stage in a run's lifecycle (not a separate concept), so they appear as a tab on the run detail page.
 
+**User menu navigation:** Team management and organization-level settings are available from the bottom-left user dropdown. Team is a separate destination from organization settings to keep membership workflows distinct from configuration workflows.
+
 Deploy-impact experiments are shown inline on the run detail page's PR & Validation tab (where they contextually belong). Agent config experiments live under Settings > Experiments (they're a configuration concern, not a standalone workflow).
 
 ### Keyboard Navigation
@@ -83,8 +85,10 @@ frontend/
 │   │   │   └── page.tsx              # failure analytics dashboard
 │   │   ├── costs/
 │   │   │   └── page.tsx              # cost summary, budget, forecast, ROI
+│   │   ├── team/
+│   │   │   └── page.tsx              # team members, roles, invitations
 │   │   ├── settings/
-│   │   │   ├── page.tsx              # general settings + integrations
+│   │   │   ├── page.tsx              # organization settings + integrations
 │   │   │   ├── agents/
 │   │   │   │   └── page.tsx          # agent config, execution strategy
 │   │   │   ├── experiments/

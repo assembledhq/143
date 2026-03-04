@@ -7,6 +7,7 @@ import {
   BarChart3,
   DollarSign,
   Settings,
+  Users,
   LogOut,
   ChevronsUpDown,
   ClipboardList,
@@ -126,7 +127,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                 <button
                   className={cn(
                     "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-[13px] font-medium transition-colors",
-                    pathname.startsWith("/settings")
+                    pathname.startsWith("/settings") || pathname.startsWith("/team")
                       ? "bg-sidebar-accent text-sidebar-accent-foreground"
                       : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
                   )}
@@ -147,9 +148,13 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" side="top" className="w-48">
+                <DropdownMenuItem onClick={() => router.push("/team")}>
+                  <Users className="h-4 w-4" />
+                  Team
+                </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => router.push("/settings")}>
                   <Settings className="h-4 w-4" />
-                  Settings
+                  Organization Settings
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={logout}>
