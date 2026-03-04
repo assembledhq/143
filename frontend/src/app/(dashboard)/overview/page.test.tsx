@@ -116,8 +116,10 @@ describe('OverviewPage', () => {
       expect(screen.getByText('Edit agent settings')).toBeInTheDocument();
     });
 
-    expect(screen.getByText('For gpt-5.3-codex model access.')).toBeInTheDocument();
+    expect(screen.getByText('Best for gpt-5.3-codex model access.')).toBeInTheDocument();
     expect(screen.getByText('Recommended')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('radio', { name: 'Use API key' }));
 
     await user.clear(screen.getByLabelText('Model'));
     await user.type(screen.getByLabelText('Model'), 'codex-mini');
