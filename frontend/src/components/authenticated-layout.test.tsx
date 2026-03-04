@@ -31,7 +31,7 @@ vi.mock("@/hooks/use-auth", () => ({
 }));
 
 describe("AuthenticatedLayout", () => {
-  it("shows Team and organization settings entries in the user menu", async () => {
+  it("shows all settings entries in the user menu", async () => {
     const user = userEvent.setup();
 
     renderWithProviders(
@@ -42,11 +42,14 @@ describe("AuthenticatedLayout", () => {
 
     await user.click(screen.getByRole("button", { name: /Alex Doe/ }));
 
+    expect(await screen.findByRole("menuitem", { name: "General" })).toBeInTheDocument();
+    expect(await screen.findByRole("menuitem", { name: "Integrations" })).toBeInTheDocument();
+    expect(await screen.findByRole("menuitem", { name: "Agent" })).toBeInTheDocument();
+    expect(await screen.findByRole("menuitem", { name: "Prioritization" })).toBeInTheDocument();
     expect(await screen.findByRole("menuitem", { name: "Team" })).toBeInTheDocument();
-    expect(await screen.findByRole("menuitem", { name: "Organization Settings" })).toBeInTheDocument();
   });
 
-  it("routes to Team and organization settings from the user menu", async () => {
+  it("routes to settings pages from the user menu", async () => {
     const user = userEvent.setup();
 
     renderWithProviders(
@@ -61,8 +64,13 @@ describe("AuthenticatedLayout", () => {
     expect(pushMock).toHaveBeenCalledWith("/team");
 
     await user.click(screen.getByRole("button", { name: /Alex Doe/ }));
-    await user.click(await screen.findByRole("menuitem", { name: "Organization Settings" }));
+    await user.click(await screen.findByRole("menuitem", { name: "General" }));
 
     expect(pushMock).toHaveBeenCalledWith("/settings");
+
+    await user.click(screen.getByRole("button", { name: /Alex Doe/ }));
+    await user.click(await screen.findByRole("menuitem", { name: "Agent" }));
+
+    expect(pushMock).toHaveBeenCalledWith("/agent");
   });
 });
