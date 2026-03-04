@@ -10,21 +10,20 @@ globalThis.ResizeObserver ??= class ResizeObserver {
   disconnect() {}
 } as unknown as typeof globalThis.ResizeObserver;
 
-// Polyfill pointer capture APIs used by Radix Select in JSDOM
-if (!HTMLElement.prototype.hasPointerCapture) {
-  HTMLElement.prototype.hasPointerCapture = () => false;
+if (!Element.prototype.hasPointerCapture) {
+  Element.prototype.hasPointerCapture = () => false;
 }
 
-if (!HTMLElement.prototype.setPointerCapture) {
-  HTMLElement.prototype.setPointerCapture = () => {};
+if (!Element.prototype.setPointerCapture) {
+  Element.prototype.setPointerCapture = () => {};
 }
 
-if (!HTMLElement.prototype.releasePointerCapture) {
-  HTMLElement.prototype.releasePointerCapture = () => {};
+if (!Element.prototype.releasePointerCapture) {
+  Element.prototype.releasePointerCapture = () => {};
 }
 
-if (!HTMLElement.prototype.scrollIntoView) {
-  HTMLElement.prototype.scrollIntoView = () => {};
+if (!Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = () => {};
 }
 
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));

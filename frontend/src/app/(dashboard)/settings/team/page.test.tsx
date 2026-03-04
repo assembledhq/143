@@ -134,19 +134,24 @@ describe('TeamSettingsPage', () => {
     });
   });
 
-  it('renders the Invite a Member form', async () => {
+  it('renders an Invite button and opens the invite modal', async () => {
     renderWithProviders(<TeamSettingsPage />);
 
     await waitFor(() => {
-      expect(screen.getByText('Invite a Member')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Invite' })).toBeInTheDocument();
     });
 
+    await userEvent.click(screen.getByRole('button', { name: 'Invite' }));
+
+    expect(screen.getByText('Invite a member')).toBeInTheDocument();
     expect(screen.getByLabelText('Email')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Send Invite' })).toBeInTheDocument();
   });
 
-  it('uses consistent compact sizing for invite email input', async () => {
+  it('uses consistent compact sizing for invite email input in modal', async () => {
     renderWithProviders(<TeamSettingsPage />);
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Invite' }));
 
     const emailInput = await screen.findByLabelText('Email');
     expect(emailInput).toHaveClass('h-9');
@@ -168,6 +173,8 @@ describe('TeamSettingsPage', () => {
     const user = userEvent.setup();
     renderWithProviders(<TeamSettingsPage />);
 
+    await user.click(await screen.findByRole('button', { name: 'Invite' }));
+
     await waitFor(() => {
       expect(screen.getByLabelText('Email')).toBeInTheDocument();
     });
@@ -178,6 +185,17 @@ describe('TeamSettingsPage', () => {
     await waitFor(() => {
       expect(createInvitationMock).toHaveBeenCalledWith('newuser@test.com', 'member');
     });
+  });
+
+  it('shows informative self action text instead of a dash placeholder', async () => {
+    renderWithProviders(<TeamSettingsPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Admin User')).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText('—')).not.toBeInTheDocument();
+    expect(screen.getByText('Current user')).toBeInTheDocument();
   });
 
   it('shows Remove button for non-self members', async () => {
@@ -297,7 +315,7 @@ describe('TeamSettingsPage', () => {
       expect(screen.getByText('Member User')).toBeInTheDocument();
     });
 
-    expect(screen.queryByRole('button', { name: 'Send Invite' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Invite' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Revoke' })).not.toBeInTheDocument();
   });
