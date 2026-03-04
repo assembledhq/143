@@ -7,29 +7,24 @@ vi.mock('next/navigation', () => ({
 }));
 
 describe('SettingsLayout', () => {
-  it('renders organization settings header without team tab', () => {
+  it('renders general settings header', () => {
     renderWithProviders(
       <SettingsLayout>
         <div>child content</div>
       </SettingsLayout>
     );
 
-    expect(screen.getByText('Organization Settings')).toBeInTheDocument();
-    expect(screen.getByText('General')).toBeInTheDocument();
-    expect(screen.queryByText('Team')).not.toBeInTheDocument();
+    expect(screen.getByText('General Settings')).toBeInTheDocument();
     expect(screen.getByText('child content')).toBeInTheDocument();
   });
 
-  it('renders only the general tab link', () => {
+  it('does not render tab navigation', () => {
     renderWithProviders(
       <SettingsLayout>
         <div />
       </SettingsLayout>
     );
 
-    const generalLink = screen.getByRole('link', { name: 'General' });
-
-    expect(generalLink).toHaveAttribute('href', '/settings');
-    expect(screen.queryByRole('link', { name: 'Team' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link')).not.toBeInTheDocument();
   });
 });
