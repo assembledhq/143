@@ -173,6 +173,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Use(middleware.RequireRole("admin", "member"))
 
 			r.Patch("/api/v1/repositories/{id}", repoHandler.Update)
+			r.Post("/api/v1/integrations/linear/connect", integrationHandler.ConnectLinear)
 			r.Post("/api/v1/issues/{id}/fix", runHandler.TriggerFix)
 			r.Post("/api/v1/runs/{id}/questions/{qid}/answer", runHandler.AnswerQuestion)
 		})

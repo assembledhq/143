@@ -144,9 +144,9 @@ func (h *WebhookHandler) handleInstallation(w http.ResponseWriter, r *http.Reque
 		})
 		integration := &models.Integration{
 			OrgID:    org.ID,
-			Provider: "github",
+			Provider: models.IntegrationProviderGitHub,
 			Config:   configJSON,
-			Status:   "active",
+			Status:   models.IntegrationStatusActive,
 		}
 		if err := h.integrationStore.Create(ctx, integration); err != nil {
 			writeError(w, http.StatusInternalServerError, "INTEGRATION_CREATE_FAILED", "failed to create integration")
