@@ -17,6 +17,7 @@ func TestProviderName_Valid(t *testing.T) {
 	}{
 		{"anthropic is valid", ProviderAnthropic, true},
 		{"openai is valid", ProviderOpenAI, true},
+		{"gemini is valid", ProviderGemini, true},
 		{"openrouter is valid", ProviderOpenRouter, true},
 		{"github_app is valid", ProviderGitHubApp, true},
 		{"github_oauth is valid", ProviderGitHubOAuth, true},
@@ -129,6 +130,19 @@ func TestParseProviderConfig_OpenAI(t *testing.T) {
 	}
 }
 
+func TestParseProviderConfig_Gemini(t *testing.T) {
+	t.Parallel()
+
+	input := `{"api_key":"gm-test-key","model":"gemini-2.5-pro"}`
+	cfg, err := ParseProviderConfig(ProviderGemini, []byte(input))
+	require.NoError(t, err, "ParseProviderConfig should not return an error")
+
+	gc, ok := cfg.(GeminiConfig)
+	require.True(t, ok, "config should be GeminiConfig")
+	require.Equal(t, "gm-test-key", gc.APIKey, "should parse api_key")
+	require.Equal(t, "gemini-2.5-pro", gc.Model, "should parse model")
+}
+
 func TestParseProviderConfig_OpenRouter(t *testing.T) {
 	t.Parallel()
 
@@ -212,6 +226,7 @@ func TestProviderConfig_Provider(t *testing.T) {
 	}{
 		{"AnthropicConfig", AnthropicConfig{}, ProviderAnthropic},
 		{"OpenAIConfig", OpenAIConfig{}, ProviderOpenAI},
+		{"GeminiConfig", GeminiConfig{}, ProviderGemini},
 		{"OpenRouterConfig", OpenRouterConfig{}, ProviderOpenRouter},
 		{"GitHubAppConfig", GitHubAppConfig{}, ProviderGitHubApp},
 		{"GitHubOAuthConfig", GitHubOAuthConfig{}, ProviderGitHubOAuth},
@@ -242,6 +257,8 @@ func TestProviderConfig_Validate(t *testing.T) {
 		{"openai empty key", OpenAIConfig{APIKey: ""}, true},
 		{"openrouter valid", OpenRouterConfig{APIKey: "sk-or-test"}, false},
 		{"openrouter empty key", OpenRouterConfig{APIKey: ""}, true},
+		{"gemini valid", GeminiConfig{APIKey: "gm-test-key", Model: "gemini-2.5-pro"}, false},
+		{"gemini empty key", GeminiConfig{APIKey: ""}, true},
 		{"github_app valid", GitHubAppConfig{AppID: 123, PrivateKey: "key"}, false},
 		{"github_app missing app_id", GitHubAppConfig{AppID: 0, PrivateKey: "key"}, true},
 		{"github_app missing private_key", GitHubAppConfig{AppID: 123, PrivateKey: ""}, true},
@@ -323,6 +340,17 @@ func TestMaskedSummary_OpenRouter(t *testing.T) {
 
 	require.Equal(t, ProviderOpenRouter, summary.Provider, "summary should have correct provider")
 	require.Equal(t, "143", summary.AppName, "summary should include app_name")
+}
+
+func TestMaskedSummary_Gemini(t *testing.T) {
+	t.Parallel()
+
+	cfg := GeminiConfig{APIKey: "gm-test-key-12345"}
+	summary := cfg.MaskedSummary()
+
+	require.Equal(t, ProviderGemini, summary.Provider, "summary should have correct provider")
+	require.True(t, summary.Configured, "summary should be configured")
+	require.Equal(t, "gm-tes...2345", summary.MaskedKey, "summary should mask api key")
 }
 
 func TestMaskedSummary_GitHubApp(t *testing.T) {
@@ -454,6 +482,7 @@ func TestIsLLMProvider(t *testing.T) {
 		{"anthropic is LLM", ProviderAnthropic, true},
 		{"openai is LLM", ProviderOpenAI, true},
 		{"openrouter is LLM", ProviderOpenRouter, true},
+		{"gemini is not LLM", ProviderGemini, false},
 		{"github_app is not LLM", ProviderGitHubApp, false},
 		{"github_oauth is not LLM", ProviderGitHubOAuth, false},
 		{"sentry is not LLM", ProviderSentry, false},
