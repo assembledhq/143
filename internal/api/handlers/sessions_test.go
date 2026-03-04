@@ -136,11 +136,7 @@ func TestSessionHandler_Get_PlanSession(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+planID.String(), nil)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", planID.String())
-	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
-	req = req.WithContext(chi.NewRouteContext().WithValue(req.Context(), chi.RouteCtxKey, rctx))
-	// chi URL params: build context properly
-	ctx := req.Context()
-	ctx = chi.WithRouteContext(ctx, rctx)
+	ctx := chi.WithRouteContext(req.Context(), rctx)
 	req = req.WithContext(middleware.WithOrgID(ctx, orgID))
 
 	rr := httptest.NewRecorder()

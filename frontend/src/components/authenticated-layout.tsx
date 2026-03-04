@@ -8,7 +8,6 @@ import {
   Users,
   LogOut,
   ChevronsUpDown,
-  ClipboardList,
   Plug,
   Bot,
   Target,
