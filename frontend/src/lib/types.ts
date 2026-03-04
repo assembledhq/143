@@ -278,19 +278,23 @@ export interface PMPlan {
 export type AgentSessionType = 'plan' | 'manual';
 export type AgentSessionStatus = 'active' | 'completed' | 'failed';
 export type AgentSessionTriggeredBy = 'scheduled' | 'manual' | 'fix_this';
+export type AgentRunStatus = 'pending' | 'running' | 'awaiting_input' | 'needs_human_guidance' | 'completed' | 'pr_created' | 'failed' | 'cancelled' | 'skipped';
+export type PMTaskComplexity = 'trivial' | 'simple' | 'moderate' | 'complex';
+export type PMTaskConfidence = 'high' | 'medium' | 'low';
+export type PMTaskStatus = 'pending' | 'delegated' | 'skipped_capacity';
 
 export interface AgentSessionTask {
   rank: number;
   title: string;
   issue_ids: string[];
-  complexity?: string;
-  confidence?: string;
+  complexity?: PMTaskComplexity;
+  confidence?: PMTaskConfidence;
   reasoning?: string;
   approach?: string;
   risk?: string;
-  status?: string;
+  status?: PMTaskStatus;
   agent_run_id?: string;
-  run_status?: string;
+  run_status?: AgentRunStatus;
   run_result_summary?: string;
   run_confidence_score?: number;
   run_started_at?: string;

@@ -63,7 +63,7 @@ func TestSessionHandler_List(t *testing.T) {
 				),
 		)
 
-	// Mock orphan agent_runs query (NoPlanOnly).
+	// Mock ad-hoc agent_runs query (AdHocOnly).
 	mock.ExpectQuery("SELECT .+ FROM agent_runs WHERE org_id").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
@@ -161,7 +161,7 @@ func TestSessionHandler_Get_PlanSession(t *testing.T) {
 	require.Equal(t, models.AgentSessionTypePlan, resp.Data.Type, "session type should be plan")
 	require.Len(t, resp.Data.Tasks, 1, "should have one task")
 	require.NotNil(t, resp.Data.Tasks[0].RunStatus, "task should have enriched run status")
-	require.Equal(t, "completed", *resp.Data.Tasks[0].RunStatus, "run status should be completed")
+	require.Equal(t, models.AgentRunStatusCompleted, *resp.Data.Tasks[0].RunStatus, "run status should be completed")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

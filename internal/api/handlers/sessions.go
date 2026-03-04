@@ -35,8 +35,8 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 		plans = []models.PMPlan{}
 	}
 
-	// Fetch orphan runs (no PM plan).
-	orphanRuns, err := h.agentRunStore.ListByOrg(r.Context(), orgID, db.AgentRunFilters{Limit: limit, NoPlanOnly: true})
+	// Fetch ad-hoc runs (not linked to a PM plan).
+	orphanRuns, err := h.agentRunStore.ListByOrg(r.Context(), orgID, db.AgentRunFilters{Limit: limit, AdHocOnly: true})
 	if err != nil {
 		orphanRuns = []models.AgentRun{}
 	}
@@ -118,9 +118,9 @@ func planToSession(p models.PMPlan) models.AgentSession {
 	var activeCount, completedCount, failedCount int
 	for _, t := range tasks {
 		switch {
-		case t.Status == "delegated" && t.AgentRunID != "":
+		case t.Status == string(models.PMTaskStatusDelegated) && t.AgentRunID != "":
 			activeCount++ // assume active unless we have run data
-		case t.Status == "skipped_capacity":
+		case t.Status == string(models.PMTaskStatusSkippedCapacity):
 			// not counted
 		default:
 			// pending
@@ -220,18 +220,19 @@ func (h *SessionHandler) enrichPlanTasks(r *http.Request, orgID uuid.UUID, plan 
 			Rank:       t.Rank,
 			Title:      t.Title,
 			IssueIDs:   t.IssueIDs,
-			Complexity: t.Complexity,
-			Confidence: t.Confidence,
+			Complexity: models.PMTaskComplexity(t.Complexity),
+			Confidence: models.PMTaskConfidence(t.Confidence),
 			Reasoning:  t.Reasoning,
 			Approach:   t.Approach,
 			Risk:       t.Risk,
-			Status:     t.Status,
+			Status:     models.PMTaskStatus(t.Status),
 		}
 
 		if t.AgentRunID != "" {
 			st.AgentRunID = &t.AgentRunID
 			if run, ok := runMap[t.AgentRunID]; ok {
-				st.RunStatus = &run.Status
+				runStatus := models.AgentRunStatus(run.Status)
+				st.RunStatus = &runStatus
 				st.RunResultSummary = run.ResultSummary
 				st.RunConfidenceScore = run.ConfidenceScore
 				if run.StartedAt != nil {
@@ -271,12 +272,12 @@ func pmTasksToSessionTasks(tasks []pmTaskJSON) []models.AgentSessionTask {
 			Rank:       t.Rank,
 			Title:      t.Title,
 			IssueIDs:   t.IssueIDs,
-			Complexity: t.Complexity,
-			Confidence: t.Confidence,
+			Complexity: models.PMTaskComplexity(t.Complexity),
+			Confidence: models.PMTaskConfidence(t.Confidence),
 			Reasoning:  t.Reasoning,
 			Approach:   t.Approach,
 			Risk:       t.Risk,
-			Status:     t.Status,
+			Status:     models.PMTaskStatus(t.Status),
 		}
 		if t.AgentRunID != "" {
 			st.AgentRunID = &t.AgentRunID
@@ -288,13 +289,14 @@ func pmTasksToSessionTasks(tasks []pmTaskJSON) []models.AgentSessionTask {
 
 func runToTask(run models.AgentRun, rank int) models.AgentSessionTask {
 	runID := run.ID.String()
+	runStatus := models.AgentRunStatus(run.Status)
 	t := models.AgentSessionTask{
 		Rank:       rank,
 		Title:      "Fix issue",
 		IssueIDs:   []string{run.IssueID.String()},
-		Status:     "delegated",
+		Status:     models.PMTaskStatusDelegated,
 		AgentRunID: &runID,
-		RunStatus:  &run.Status,
+		RunStatus:  &runStatus,
 	}
 	if run.ResultSummary != nil {
 		t.Title = *run.ResultSummary
@@ -324,10 +326,10 @@ func planStatusToSessionStatus(s models.PMPlanStatus) models.AgentSessionStatus 
 }
 
 func runStatusToSessionStatus(s string) models.AgentSessionStatus {
-	switch s {
-	case "completed", "pr_created", "skipped":
+	switch models.AgentRunStatus(s) {
+	case models.AgentRunStatusCompleted, models.AgentRunStatusPRCreated, models.AgentRunStatusSkipped:
 		return models.AgentSessionStatusCompleted
-	case "failed", "cancelled":
+	case models.AgentRunStatusFailed, models.AgentRunStatusCancelled:
 		return models.AgentSessionStatusFailed
 	default:
 		return models.AgentSessionStatusActive
