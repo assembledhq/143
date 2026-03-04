@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { renderWithProviders, screen, userEvent } from '@/test/test-utils';
+import { renderWithProviders, screen, userEvent, waitFor } from '@/test/test-utils';
 import LoginPage from './page';
 
 const loginMock = vi.hoisted(() => vi.fn());
@@ -142,5 +142,33 @@ describe('LoginPage', () => {
     await user.click(screen.getByRole('button', { name: 'Sign In' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('invalid email or password');
+  });
+
+  it('disables sign-in button while request is pending', async () => {
+    let resolveLogin: ((value?: unknown) => void) | undefined;
+    loginEmailMock.mockReturnValue(
+      new Promise((resolve) => {
+        resolveLogin = resolve;
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<LoginPage />);
+
+    await user.type(screen.getByLabelText('Email', { exact: false }), 'test@example.com');
+    await user.type(screen.getByLabelText('Password', { exact: false }), 'password123');
+
+    const signInButton = screen.getByRole('button', { name: 'Sign In' });
+    await user.click(signInButton);
+
+    expect(signInButton).toBeDisabled();
+    expect(signInButton.querySelector('[data-slot="button-spinner"]')).toBeInTheDocument();
+    await user.click(signInButton);
+    expect(loginEmailMock).toHaveBeenCalledTimes(1);
+
+    resolveLogin?.();
+    await waitFor(() => {
+      expect(signInButton).toBeEnabled();
+    });
   });
 });
