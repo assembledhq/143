@@ -484,6 +484,13 @@ The main 143.dev container includes:
     - Sentry: Issue webhooks as well as retrieval of issues via the API. Also linkage of issues to Github PRs in the PR body.
     - Linear: Webhooks and retrieval of issues via the API. Also linkage of issues to Github PRs in the PR title.
 
+# Dashboard onboarding UX
+
+- The Overview dashboard keeps users in setup context when configuring coding agents.
+- In the "Connect your coding agent" card, the **Settings** action opens an in-place modal for common agent edits (default agent selection and provider credentials).
+- The modal includes a secondary path to advanced agent settings at `/settings/agents` for deeper configuration.
+- The UX goal is fast in-flow completion first, with a clear handoff to advanced controls when needed.
+
 # **Why 143?**
 
 The name comes from the XP-80 Shooting Star project. In 1943, a small team at Lockheed Skunk Works designed and built the first US jet fighter in exactly **143 days**. They did it by killing the bureaucracy and giving a small, autonomous team the freedom to execute.
