@@ -7,7 +7,6 @@ import { PageHeader } from "@/components/page-header";
 
 const settingsTabs = [
   { label: "General", href: "/settings" },
-  { label: "Team", href: "/settings/team" },
 ];
 
 export default function SettingsLayout({
@@ -20,8 +19,8 @@ export default function SettingsLayout({
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Settings"
-        description="Manage your organization, team, and integrations."
+        title="Organization Settings"
+        description="Manage your organization and integrations."
       />
       <nav className="flex gap-1 border-b border-border">
         {settingsTabs.map((tab) => {
