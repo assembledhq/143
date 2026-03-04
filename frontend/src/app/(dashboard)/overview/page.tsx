@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { PageHeader } from "@/components/page-header";
 import { IntegrationsCard } from "@/components/integrations-card";
+import { AgentSettingsEditor } from "@/components/agent-settings-editor";
 import { INTEGRATIONS } from "@/lib/integrations";
 import type { CodexAuthStatus, CodexDeviceAuth } from "@/lib/types";
 
@@ -111,9 +112,25 @@ function OverviewDeviceCodeModal({ onClose, onConnected }: { onClose: () => void
   );
 }
 
+function AgentSettingsModal({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+      <div className="w-full max-w-2xl rounded-lg border bg-background p-6 shadow-lg">
+        <AgentSettingsEditor
+          title="Edit agent settings"
+          description="Update your default coding agent and auth credentials without leaving setup."
+          showAdvancedLink
+          onClose={onClose}
+        />
+      </div>
+    </div>
+  );
+}
+
 function AgentSetupCard() {
   const [authStatus, setAuthStatus] = useState<CodexAuthStatus | null>(null);
   const [showModal, setShowModal] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
 
   const fetchStatus = useCallback(() => {
     api.codexAuth.status().then((res) => setAuthStatus(res.data)).catch(() => {});
@@ -149,9 +166,7 @@ function AgentSetupCard() {
           </div>
           <div className="flex shrink-0 gap-2">
             <Button size="sm" onClick={() => setShowModal(true)}>Sign in with ChatGPT</Button>
-            <a href="/settings">
-              <Button size="sm" variant="outline">Settings</Button>
-            </a>
+            <Button size="sm" variant="outline" onClick={() => setShowSettingsModal(true)}>Settings</Button>
           </div>
         </CardContent>
       </Card>
@@ -160,6 +175,9 @@ function AgentSetupCard() {
           onClose={() => setShowModal(false)}
           onConnected={() => { setShowModal(false); fetchStatus(); }}
         />
+      )}
+      {showSettingsModal && (
+        <AgentSettingsModal onClose={() => setShowSettingsModal(false)} />
       )}
     </>
   );
