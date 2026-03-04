@@ -259,6 +259,14 @@ export default function SettingsPage() {
   });
   const codexAuthStatus = codexAuthStatusResp?.data;
 
+  const { data: integrationsResp } = useQuery({
+    queryKey: ["integrations"],
+    queryFn: () => api.integrations.list(),
+  });
+  const linearIntegration = integrationsResp?.data?.find(
+    (integration) => integration.provider === "linear" && integration.status === "active"
+  );
+
   const orgSettings = (settings?.data?.settings ?? {}) as OrgSettings;
 
   const [defaultAgentType, setDefaultAgentType] = useState(DEFAULT_SETTINGS.default_agent_type);
@@ -335,6 +343,13 @@ export default function SettingsPage() {
     mutationFn: () => api.codexAuth.disconnect(),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["codex-auth-status"] });
+    },
+  });
+
+  const connectLinearMutation = useMutation({
+    mutationFn: () => api.integrations.connectLinear(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["integrations"] });
     },
   });
 
@@ -446,7 +461,17 @@ export default function SettingsPage() {
               id: linear.key,
               title: linear.name,
               description: linear.description,
-              action: <Badge variant="secondary">Coming soon</Badge>,
+              action: (
+                <Button
+                  size="sm"
+                  aria-label={linearIntegration ? "Linear Connected" : "Connect Linear"}
+                  loading={connectLinearMutation.isPending}
+                  disabled={Boolean(linearIntegration) || connectLinearMutation.isPending}
+                  onClick={() => connectLinearMutation.mutate()}
+                >
+                  {linearIntegration ? "Connected" : "Connect"}
+                </Button>
+              ),
             },
           ]}
         />

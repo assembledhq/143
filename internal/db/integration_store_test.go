@@ -120,8 +120,8 @@ func TestIntegrationStore_GetByOrgAndProvider(t *testing.T) {
 			require.NoError(t, err, "GetByOrgAndProvider should not return an error")
 			require.Equal(t, integrationID, integration.ID, "should return the correct integration ID")
 			require.Equal(t, orgID, integration.OrgID, "should return the correct org ID")
-			require.Equal(t, "github", integration.Provider, "should return the correct provider")
-			require.Equal(t, "active", integration.Status, "should return the correct status")
+			require.Equal(t, models.IntegrationProviderGitHub, integration.Provider, "should return the correct provider")
+			require.Equal(t, models.IntegrationStatusActive, integration.Status, "should return the correct status")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
@@ -178,7 +178,7 @@ func TestIntegrationStore_GetByID(t *testing.T) {
 			}
 			require.NoError(t, err, "GetByID should not return an error")
 			require.Equal(t, integrationID, integration.ID, "should return the correct integration ID")
-			require.Equal(t, "sentry", integration.Provider, "should return the correct provider")
+			require.Equal(t, models.IntegrationProviderSentry, integration.Provider, "should return the correct provider")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
