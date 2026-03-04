@@ -171,7 +171,13 @@ describe('OverviewPage', () => {
       expect(screen.getByText('Failed to start authentication. Please try again.')).toBeInTheDocument();
     });
 
-    expect(screen.getByRole('button', { name: 'Try Again' })).toBeInTheDocument();
+    const cancelButton = screen.getByRole('button', { name: 'Cancel' });
+    const tryAgainButton = screen.getByRole('button', { name: 'Try Again' });
+
+    expect(cancelButton).toBeInTheDocument();
+    expect(tryAgainButton).toBeInTheDocument();
+    expect(cancelButton.parentElement).toBe(tryAgainButton.parentElement);
+    expect(cancelButton.compareDocumentPosition(tryAgainButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('renders the expires timer text in the modal', async () => {
