@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { server } from '@/test/mocks/server';
 import { http, HttpResponse } from 'msw';
 import { api } from './api';
@@ -554,6 +554,327 @@ describe('api client', () => {
     });
   });
 
+  describe('auth - email login and register', () => {
+    it('loginEmail sends credentials', async () => {
+      let capturedBody: unknown;
+
+      server.use(
+        http.post('/api/v1/auth/login', async ({ request }) => {
+          capturedBody = await request.json();
+          return HttpResponse.json({ data: { id: '1', email: 'a@b.com' } });
+        }),
+      );
+
+      await api.auth.loginEmail('a@b.com', 'pass123');
+      expect(capturedBody).toEqual({ email: 'a@b.com', password: 'pass123' });
+    });
+
+    it('register sends user details', async () => {
+      let capturedBody: unknown;
+
+      server.use(
+        http.post('/api/v1/auth/register', async ({ request }) => {
+          capturedBody = await request.json();
+          return HttpResponse.json({ data: { id: '1', email: 'a@b.com' } });
+        }),
+      );
+
+      await api.auth.register('a@b.com', 'pass', 'Test User');
+      expect(capturedBody).toEqual({ email: 'a@b.com', password: 'pass', name: 'Test User' });
+    });
+
+    it('register includes invitation when provided', async () => {
+      let capturedBody: unknown;
+
+      server.use(
+        http.post('/api/v1/auth/register', async ({ request }) => {
+          capturedBody = await request.json();
+          return HttpResponse.json({ data: { id: '1' } });
+        }),
+      );
+
+      await api.auth.register('a@b.com', 'pass', 'Test', 'inv-1');
+      expect(capturedBody).toEqual({ email: 'a@b.com', password: 'pass', name: 'Test', invitation: 'inv-1' });
+    });
+
+    it('auth providers fetches provider info', async () => {
+      server.use(
+        http.get('/api/v1/auth/providers', () => {
+          return HttpResponse.json({ data: { github: true, google: false, email: true } });
+        }),
+      );
+
+      const result = await api.auth.providers();
+      expect(result.data.github).toBe(true);
+    });
+  });
+
+  describe('pm', () => {
+    it('triggers analysis', async () => {
+      let called = false;
+
+      server.use(
+        http.post('/api/v1/pm/analyze', () => {
+          called = true;
+          return HttpResponse.json({ data: { job_id: 'job-1' } });
+        }),
+      );
+
+      const result = await api.pm.analyze();
+      expect(called).toBe(true);
+      expect(result.data.job_id).toBe('job-1');
+    });
+
+    it('lists plans', async () => {
+      server.use(
+        http.get('/api/v1/pm/plans', () => {
+          return HttpResponse.json({ data: [{ id: 'plan-1' }], meta: {} });
+        }),
+      );
+
+      const result = await api.pm.list();
+      expect(result.data).toHaveLength(1);
+    });
+
+    it('lists plans with params', async () => {
+      let capturedUrl: string | undefined;
+
+      server.use(
+        http.get('/api/v1/pm/plans', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ data: [], meta: {} });
+        }),
+      );
+
+      await api.pm.list({ cursor: 'c1', limit: 5 });
+      const url = new URL(capturedUrl!);
+      expect(url.searchParams.get('cursor')).toBe('c1');
+      expect(url.searchParams.get('limit')).toBe('5');
+    });
+
+    it('fetches latest plan', async () => {
+      server.use(
+        http.get('/api/v1/pm/plans/latest', () => {
+          return HttpResponse.json({ data: { id: 'plan-latest' } });
+        }),
+      );
+
+      const result = await api.pm.latest();
+      expect(result.data.id).toBe('plan-latest');
+    });
+
+    it('fetches single plan', async () => {
+      server.use(
+        http.get('/api/v1/pm/plans/:id', () => {
+          return HttpResponse.json({ data: { id: 'plan-42' } });
+        }),
+      );
+
+      const result = await api.pm.get('plan-42');
+      expect(result.data.id).toBe('plan-42');
+    });
+  });
+
+  describe('codexAuth', () => {
+    it('initiates device auth', async () => {
+      server.use(
+        http.post('/api/v1/settings/codex-auth/initiate', () => {
+          return HttpResponse.json({
+            data: { user_code: 'CODE', verification_uri: 'https://example.com', expires_in: 600 },
+          });
+        }),
+      );
+
+      const result = await api.codexAuth.initiate();
+      expect(result.data.user_code).toBe('CODE');
+    });
+
+    it('fetches auth status', async () => {
+      server.use(
+        http.get('/api/v1/settings/codex-auth/status', () => {
+          return HttpResponse.json({ data: { status: 'completed' } });
+        }),
+      );
+
+      const result = await api.codexAuth.status();
+      expect(result.data.status).toBe('completed');
+    });
+
+    it('disconnects codex auth', async () => {
+      let called = false;
+
+      server.use(
+        http.post('/api/v1/settings/codex-auth/disconnect', () => {
+          called = true;
+          return HttpResponse.json({});
+        }),
+      );
+
+      await api.codexAuth.disconnect();
+      expect(called).toBe(true);
+    });
+  });
+
+  describe('issues - triggerFix', () => {
+    it('triggers fix for an issue', async () => {
+      let capturedBody: unknown;
+
+      server.use(
+        http.post('/api/v1/issues/:id/fix', async ({ request }) => {
+          capturedBody = await request.json();
+          return HttpResponse.json({ data: { id: 'run-1' } });
+        }),
+      );
+
+      await api.issues.triggerFix('issue-1', { agent_type: 'codex', autonomy_level: 'full' });
+      expect(capturedBody).toEqual({ agent_type: 'codex', autonomy_level: 'full' });
+    });
+  });
+
+  describe('team - additional methods', () => {
+    it('lists team members', async () => {
+      server.use(
+        http.get('/api/v1/team/members', () => {
+          return HttpResponse.json({ data: [{ id: 'u-1', name: 'Alice' }], meta: {} });
+        }),
+      );
+
+      const result = await api.team.listMembers();
+      expect(result.data).toHaveLength(1);
+      expect(result.data[0].name).toBe('Alice');
+    });
+
+    it('changes member role', async () => {
+      let capturedBody: unknown;
+
+      server.use(
+        http.patch('/api/v1/team/members/:id/role', async ({ request }) => {
+          capturedBody = await request.json();
+          return HttpResponse.json({ data: { id: 'u-1', role: 'admin' } });
+        }),
+      );
+
+      await api.team.changeRole('u-1', 'admin');
+      expect(capturedBody).toEqual({ role: 'admin' });
+    });
+
+    it('lists invitations', async () => {
+      server.use(
+        http.get('/api/v1/team/invitations', () => {
+          return HttpResponse.json({ data: [{ id: 'inv-1', email: 'bob@test.com' }], meta: {} });
+        }),
+      );
+
+      const result = await api.team.listInvitations();
+      expect(result.data).toHaveLength(1);
+    });
+
+    it('creates invitation', async () => {
+      let capturedBody: unknown;
+
+      server.use(
+        http.post('/api/v1/team/invitations', async ({ request }) => {
+          capturedBody = await request.json();
+          return HttpResponse.json({ data: { id: 'inv-new', email: 'bob@test.com' } });
+        }),
+      );
+
+      await api.team.createInvitation('bob@test.com', 'member');
+      expect(capturedBody).toEqual({ email: 'bob@test.com', role: 'member' });
+    });
+  });
+
+  describe('reviewPatterns - updateStatus and updateRule', () => {
+    it('updates review pattern status', async () => {
+      let capturedBody: unknown;
+
+      server.use(
+        http.patch('/api/v1/review-patterns/:id', async ({ request }) => {
+          capturedBody = await request.json();
+          return HttpResponse.json({ data: { id: 'rp-1', status: 'dismissed' } });
+        }),
+      );
+
+      await api.reviewPatterns.updateStatus('rp-1', 'dismissed');
+      expect(capturedBody).toEqual({ status: 'dismissed' });
+    });
+
+    it('updates review pattern rule with PUT', async () => {
+      let capturedBody: unknown;
+      let capturedMethod: string | undefined;
+
+      server.use(
+        http.put('/api/v1/review-patterns/:id', async ({ request }) => {
+          capturedBody = await request.json();
+          capturedMethod = request.method;
+          return HttpResponse.json({ data: { id: 'rp-1', rule: 'new rule' } });
+        }),
+      );
+
+      await api.reviewPatterns.updateRule('rp-1', 'new rule');
+      expect(capturedBody).toEqual({ rule: 'new rule' });
+      expect(capturedMethod).toBe('PUT');
+    });
+  });
+
+  describe('reviewComments', () => {
+    it('lists review comments', async () => {
+      server.use(
+        http.get('/api/v1/review-comments', () => {
+          return HttpResponse.json({ data: [{ id: 'rc-1' }], meta: {} });
+        }),
+      );
+
+      const result = await api.reviewComments.list();
+      expect(result.data).toHaveLength(1);
+    });
+
+    it('lists review comments with params', async () => {
+      let capturedUrl: string | undefined;
+
+      server.use(
+        http.get('/api/v1/review-comments', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ data: [], meta: {} });
+        }),
+      );
+
+      await api.reviewComments.list({ pull_request_id: 'pr-1', filter_status: 'pending', cursor: 'c1' });
+
+      const url = new URL(capturedUrl!);
+      expect(url.searchParams.get('pull_request_id')).toBe('pr-1');
+      expect(url.searchParams.get('filter_status')).toBe('pending');
+      expect(url.searchParams.get('cursor')).toBe('c1');
+    });
+  });
+
+  describe('priority - additional methods', () => {
+    it('fetches complexity estimate for an issue', async () => {
+      server.use(
+        http.get('/api/v1/issues/:issueId/complexity', () => {
+          return HttpResponse.json({ data: { issue_id: 'issue-1', estimate: 'medium' } });
+        }),
+      );
+
+      const result = await api.priority.getComplexity('issue-1');
+      expect(result.data.issue_id).toBe('issue-1');
+    });
+
+    it('reprioritizes an issue', async () => {
+      let called = false;
+
+      server.use(
+        http.post('/api/v1/issues/:issueId/reprioritize', () => {
+          called = true;
+          return HttpResponse.json({});
+        }),
+      );
+
+      await api.priority.reprioritize('issue-1');
+      expect(called).toBe(true);
+    });
+  });
+
   describe('error handling', () => {
     it('throws ApiError on non-ok response', async () => {
       server.use(
@@ -596,6 +917,79 @@ describe('api client', () => {
         expect(error.name).toBe('ApiError');
         expect(error.code).toBe('UNKNOWN');
       }
+    });
+  });
+
+  // These tests must be last because they modify window.location
+  describe('auth - browser redirects', () => {
+    const originalLocation = window.location;
+
+    afterEach(() => {
+      Object.defineProperty(window, 'location', {
+        value: originalLocation,
+        writable: true,
+        configurable: true,
+      });
+    });
+
+    it('login redirects to GitHub OAuth', () => {
+      const loc = { href: '' };
+      Object.defineProperty(window, 'location', {
+        value: loc,
+        writable: true,
+        configurable: true,
+      });
+
+      api.auth.login();
+      expect(loc.href).toBe('/api/v1/auth/github/login');
+    });
+
+    it('login passes invitation param', () => {
+      const loc = { href: '' };
+      Object.defineProperty(window, 'location', {
+        value: loc,
+        writable: true,
+        configurable: true,
+      });
+
+      api.auth.login('invite-123');
+      expect(loc.href).toBe('/api/v1/auth/github/login?invitation=invite-123');
+    });
+
+    it('loginGoogle redirects to Google OAuth', () => {
+      const loc = { href: '' };
+      Object.defineProperty(window, 'location', {
+        value: loc,
+        writable: true,
+        configurable: true,
+      });
+
+      api.auth.loginGoogle();
+      expect(loc.href).toBe('/api/v1/auth/google/login');
+    });
+
+    it('loginGoogle passes invitation param', () => {
+      const loc = { href: '' };
+      Object.defineProperty(window, 'location', {
+        value: loc,
+        writable: true,
+        configurable: true,
+      });
+
+      api.auth.loginGoogle('inv-456');
+      expect(loc.href).toBe('/api/v1/auth/google/login?invitation=inv-456');
+    });
+
+    it('loginSentry redirects to Sentry OAuth', () => {
+      const loc = { href: '' };
+      Object.defineProperty(window, 'location', {
+        value: loc,
+        writable: true,
+        configurable: true,
+      });
+
+      api.auth.loginSentry();
+      expect(loc.href).toContain('https://sentry.io/oauth/authorize/');
     });
   });
 });
