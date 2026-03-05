@@ -294,7 +294,13 @@ func (s *Service) PollForToken(ctx context.Context, orgID uuid.UUID) (*AuthStatu
 		return nil, fmt.Errorf("read token response: %w", err)
 	}
 
-	// Handle pending/slow_down/error responses.
+	// OpenAI returns 403/404 while the user hasn't entered the code yet.
+	// Treat these as "authorization pending" (matches Codex CLI behavior).
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
+		return &AuthStatus{Status: "pending", Message: "waiting for user to enter code"}, nil
+	}
+
+	// Handle other non-success responses (standard OAuth error format).
 	if resp.StatusCode != http.StatusOK {
 		var errResp struct {
 			Error string `json:"error"`
@@ -315,7 +321,11 @@ func (s *Service) PollForToken(ctx context.Context, orgID uuid.UUID) (*AuthStatu
 			s.pending.Delete(orgID.String())
 			return &AuthStatus{Status: "error", Message: "authentication denied by user"}, nil
 		default:
-			return &AuthStatus{Status: "error", Message: fmt.Sprintf("auth error: %s", errResp.Error)}, nil
+			msg := errResp.Error
+			if msg == "" {
+				msg = fmt.Sprintf("unexpected response (HTTP %d)", resp.StatusCode)
+			}
+			return &AuthStatus{Status: "error", Message: fmt.Sprintf("auth error: %s", msg)}, nil
 		}
 	}
 

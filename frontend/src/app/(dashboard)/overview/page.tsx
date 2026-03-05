@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Bot, Check } from "lucide-react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -13,114 +14,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { PageHeader } from "@/components/page-header";
 import {
   AdditionalIntegrationCards,
   SourceControlIntegrationCard,
 } from "@/components/integration-connection-cards";
 import { AgentSettingsEditor } from "@/components/agent-settings-editor";
-import type { CodexAuthStatus, CodexDeviceAuth, OrgSettings } from "@/lib/types";
-
-function OverviewDeviceCodeModal({ onClose, onConnected }: { onClose: () => void; onConnected: () => void }) {
-  const [deviceAuth, setDeviceAuth] = useState<CodexDeviceAuth | null>(null);
-  const [status, setStatus] = useState<string>("initiating");
-  const [error, setError] = useState<string>("");
-  const [timeLeft, setTimeLeft] = useState(0);
-  const pollRef = useRef<NodeJS.Timeout | null>(null);
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
-  const onConnectedRef = useRef(onConnected);
-
-  useEffect(() => { onConnectedRef.current = onConnected; }, [onConnected]);
-
-  const startAuth = useCallback(async () => {
-    try {
-      setStatus("initiating");
-      setError("");
-      const resp = await api.codexAuth.initiate();
-      setDeviceAuth(resp.data);
-      setTimeLeft(resp.data.expires_in);
-      setStatus("pending");
-    } catch {
-      setError("Failed to start authentication. Please try again.");
-      setStatus("error");
-    }
-  }, []);
-
-  useEffect(() => { const id = setTimeout(() => { void startAuth(); }, 0); return () => clearTimeout(id); }, [startAuth]);
-
-  useEffect(() => {
-    if (status !== "pending") return;
-    pollRef.current = setInterval(async () => {
-      try {
-        const resp = await api.codexAuth.status();
-        if (resp.data.status === "completed") {
-          setStatus("completed");
-          if (pollRef.current) clearInterval(pollRef.current);
-          if (timerRef.current) clearInterval(timerRef.current);
-          setTimeout(() => { onConnectedRef.current(); }, 1500);
-        } else if (resp.data.status === "expired") {
-          setStatus("expired");
-          setError("Code expired. Please try again.");
-          if (pollRef.current) clearInterval(pollRef.current);
-          if (timerRef.current) clearInterval(timerRef.current);
-        } else if (resp.data.status === "error") {
-          setStatus("error");
-          setError(resp.data.message || "Authentication failed.");
-          if (pollRef.current) clearInterval(pollRef.current);
-          if (timerRef.current) clearInterval(timerRef.current);
-        }
-      } catch { /* ignore transient errors */ }
-    }, 3000);
-    timerRef.current = setInterval(() => { setTimeLeft((t) => Math.max(0, t - 1)); }, 1000);
-    return () => { if (pollRef.current) clearInterval(pollRef.current); if (timerRef.current) clearInterval(timerRef.current); };
-  }, [status]);
-
-  const minutes = Math.floor(timeLeft / 60);
-  const seconds = timeLeft % 60;
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="w-full max-w-md rounded-lg border bg-background p-6 shadow-lg">
-        <h3 className="text-lg font-medium">Connect your ChatGPT account</h3>
-        {status === "initiating" && <p className="mt-4 text-sm text-muted-foreground">Starting authentication...</p>}
-        {status === "pending" && deviceAuth && (
-          <div className="mt-4 space-y-4">
-            <div className="space-y-2">
-              <p className="text-sm text-muted-foreground">1. Open this link:</p>
-              <a href={deviceAuth.verification_uri} target="_blank" rel="noopener noreferrer" className="text-sm font-medium text-primary underline">{deviceAuth.verification_uri}</a>
-            </div>
-            <div className="space-y-2">
-              <p className="text-sm text-muted-foreground">2. Enter this code:</p>
-              <div className="flex items-center gap-2">
-                <code className="rounded-md border bg-muted px-4 py-2 text-2xl font-mono font-bold tracking-widest">{deviceAuth.user_code}</code>
-                <Button size="sm" variant="outline" onClick={() => navigator.clipboard.writeText(deviceAuth.user_code)}>Copy</Button>
-              </div>
-            </div>
-            <div className="space-y-2">
-              <p className="text-sm text-muted-foreground">Waiting for authentication...</p>
-              <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-                <div className="h-full rounded-full bg-primary transition-all duration-1000" style={{ width: `${Math.max(0, (timeLeft / deviceAuth.expires_in) * 100)}%` }} />
-              </div>
-              <p className="text-xs text-muted-foreground">Expires in {minutes}:{seconds.toString().padStart(2, "0")}</p>
-            </div>
-          </div>
-        )}
-        {status === "completed" && <div className="mt-4"><p className="text-sm font-medium text-green-600">Connected successfully!</p></div>}
-        {(status === "error" || status === "expired") && (
-          <div className="mt-4">
-            <p className="text-sm text-destructive">{error}</p>
-          </div>
-        )}
-        <div className="mt-6 flex items-center justify-end gap-2">
-          <Button variant="outline" size="sm" onClick={onClose}>{status === "completed" ? "Done" : "Cancel"}</Button>
-          {(status === "error" || status === "expired") && (
-            <Button size="sm" onClick={startAuth}>Try Again</Button>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
+import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
+import type { CodexAuthStatus, OrgSettings } from "@/lib/types";
 
 function AgentSettingsModal({ onClose, initialAgentType }: { onClose: () => void; initialAgentType?: OrgSettings["default_agent_type"] }) {
   return (
@@ -138,7 +38,37 @@ function AgentSettingsModal({ onClose, initialAgentType }: { onClose: () => void
   );
 }
 
-function AgentSelectionSection() {
+function StepSection({
+  step,
+  title,
+  completed,
+  children,
+}: {
+  step: number;
+  title: string;
+  completed: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-3">
+        <div
+          className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${
+            completed
+              ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+              : "bg-muted text-muted-foreground"
+          }`}
+        >
+          {completed ? <Check className="h-4 w-4" /> : step}
+        </div>
+        <h2 className="text-sm font-medium text-foreground">{title}</h2>
+      </div>
+      <div className="ml-10">{children}</div>
+    </div>
+  );
+}
+
+function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (connected: boolean) => void }) {
   type AgentType = NonNullable<OrgSettings["default_agent_type"]>;
 
   const AGENT_OPTIONS: Array<{
@@ -211,25 +141,26 @@ function AgentSelectionSection() {
 
   const selectedAgent = AGENT_OPTIONS.find((agent) => agent.value === selectedAgentType) ?? AGENT_OPTIONS[0];
 
+  // Notify parent of connection state changes
+  useEffect(() => {
+    onConnectedChange?.(isSelectedAgentConnected);
+  }, [isSelectedAgentConnected, onConnectedChange]);
+
   return (
     <>
-      <div className="space-y-3">
-        <div className="space-y-1">
-          <h2 className="text-sm font-medium text-foreground">Coding agent</h2>
-          <p className="text-xs text-muted-foreground">
-            Start with Codex (recommended), or pick the agent you already use. You can change this later in settings.
-          </p>
-        </div>
-
-        <Card className={`py-0 ${selectedAgentType === "codex" && !isCodexConnected ? "border-primary" : ""}`} data-testid="agent-card-codex">
-          <CardContent className="flex items-center justify-between gap-4 py-4">
+      <Card className={`py-0 ${selectedAgentType === "codex" && !isCodexConnected ? "border-primary" : ""}`} data-testid="agent-card-codex">
+        <CardContent className="flex items-center justify-between gap-4 py-4">
+          <div className="flex items-center gap-3 min-w-0 flex-1">
+            <div className="flex shrink-0 items-center justify-center h-9 w-9 rounded-lg bg-muted text-muted-foreground">
+              <Bot className="h-5 w-5" />
+            </div>
             <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2 mb-2">
+              <div className="flex items-center gap-2 mb-1">
                 <Select
                   value={selectedAgentType}
                   onValueChange={(value) => setSelectedAgentType(value as AgentType)}
                 >
-                  <SelectTrigger aria-label="Coding agent provider" className="w-[220px]">
+                  <SelectTrigger aria-label="Coding agent provider" className="w-[180px] h-8">
                     <SelectValue placeholder="Select coding agent" />
                   </SelectTrigger>
                   <SelectContent>
@@ -241,34 +172,34 @@ function AgentSelectionSection() {
                   </SelectContent>
                 </Select>
               </div>
-              <p className="mt-0.5 text-sm text-muted-foreground">
+              <p className="text-sm text-muted-foreground">
                 {selectedAgent.description}
               </p>
             </div>
-            <div className="flex shrink-0 gap-2">
-              {isSelectedAgentConnected && <Badge variant="secondary">Connected</Badge>}
-              {selectedAgentType === "codex" && !isSelectedAgentConnected && (
-                <Button size="sm" onClick={() => setShowDeviceCodeModal(true)}>
-                  {selectedAgent.ctaLabel}
-                </Button>
-              )}
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => {
-                  setSettingsAgentType(selectedAgentType);
-                  setShowSettingsModal(true);
-                }}
-              >
-                {selectedAgent.configureLabel}
+          </div>
+          <div className="flex shrink-0 gap-2">
+            {isSelectedAgentConnected && <Badge variant="secondary">Connected</Badge>}
+            {selectedAgentType === "codex" && !isSelectedAgentConnected && (
+              <Button size="sm" onClick={() => setShowDeviceCodeModal(true)}>
+                {selectedAgent.ctaLabel}
               </Button>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
+            )}
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setSettingsAgentType(selectedAgentType);
+                setShowSettingsModal(true);
+              }}
+            >
+              {selectedAgent.configureLabel}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
 
       {showDeviceCodeModal && (
-        <OverviewDeviceCodeModal
+        <CodexDeviceCodeModal
           onClose={() => setShowDeviceCodeModal(false)}
           onConnected={() => { setShowDeviceCodeModal(false); fetchData(); }}
         />
@@ -285,11 +216,19 @@ function AgentSelectionSection() {
 
 export default function Overview() {
   const queryClient = useQueryClient();
+  const [agentConnected, setAgentConnected] = useState(false);
 
   const { data: integrationsResp } = useQuery({
     queryKey: ["integrations"],
     queryFn: () => api.integrations.list(),
   });
+
+  const githubIntegration = integrationsResp?.data?.find(
+    (integration) => integration.provider === "github" && integration.status === "active"
+  );
+  const sentryIntegration = integrationsResp?.data?.find(
+    (integration) => integration.provider === "sentry" && integration.status === "active"
+  );
   const linearIntegration = integrationsResp?.data?.find(
     (integration) => integration.provider === "linear" && integration.status === "active"
   );
@@ -301,46 +240,69 @@ export default function Overview() {
     },
   });
 
+  // Count connected steps (agent + GitHub required; sentry/linear optional but counted)
+  const connectedCount =
+    (agentConnected ? 1 : 0) +
+    (githubIntegration ? 1 : 0) +
+    (sentryIntegration ? 1 : 0) +
+    (linearIntegration ? 1 : 0);
+  const totalCount = 4;
+  const allRequiredConnected = agentConnected && Boolean(githubIntegration);
+
   return (
-    <div className="space-y-8">
-      <PageHeader
-        title="Overview"
-        description="Set up your coding agent and connect your tools to start fixing issues automatically."
-      />
-
-      {/* Step 1: Coding Agent — the core of the product */}
-      <AgentSelectionSection />
-
-      {/* Step 2: Source Control — needed so the agent can access repos and open PRs */}
+    <div className="space-y-6">
+      {/* Hero header */}
       <div className="space-y-3">
-        <div className="space-y-1">
-          <h2 className="text-sm font-medium text-foreground">Source control</h2>
-          <p className="text-xs text-muted-foreground">
-            Connect GitHub so the agent can access your repositories and open PRs.
+        <div>
+          <h1 className="text-lg font-semibold text-foreground">Get started</h1>
+          <p className="text-sm text-muted-foreground">
+            Connect your tools and start fixing issues automatically.
           </p>
         </div>
-        <SourceControlIntegrationCard onConnectGitHub={() => api.auth.login()} />
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between">
+            <p className="text-xs text-muted-foreground">
+              {connectedCount} of {totalCount} connected
+            </p>
+          </div>
+          <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+            <div
+              className="h-full rounded-full bg-primary transition-all duration-500"
+              style={{ width: `${(connectedCount / totalCount) * 100}%` }}
+            />
+          </div>
+        </div>
       </div>
 
-      {/* Step 3: Additional Integrations — optional, lower priority */}
-      <div className="space-y-3">
-        <div className="space-y-1">
-          <h2 className="text-sm font-medium text-muted-foreground">Additional integrations</h2>
-          <p className="text-xs text-muted-foreground">
-            Optional — connect issue and error sources to feed the agent automatically.
+      {/* Step 1: Coding Agent */}
+      <StepSection step={1} title="Coding agent" completed={agentConnected}>
+        <AgentSelectionSection onConnectedChange={setAgentConnected} />
+      </StepSection>
+
+      {/* Step 2: Connect Integrations (consolidated) */}
+      <StepSection step={2} title="Connect integrations" completed={Boolean(githubIntegration)}>
+        <div className="space-y-3">
+          <SourceControlIntegrationCard onConnectGitHub={() => api.auth.login()} />
+          <AdditionalIntegrationCards
+            linearConnected={Boolean(linearIntegration)}
+            linearLoading={connectLinearMutation.isPending}
+            onConnectSentry={() => api.auth.loginSentry()}
+            onConnectLinear={() => connectLinearMutation.mutate()}
+          />
+        </div>
+      </StepSection>
+
+      {/* Success banner when all required steps are done */}
+      {allRequiredConnected && (
+        <div className="flex items-center gap-3 rounded-lg border border-green-200 bg-green-50 px-4 py-3 dark:border-green-800 dark:bg-green-950/30">
+          <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-400">
+            <Check className="h-3.5 w-3.5" />
+          </div>
+          <p className="text-sm text-green-800 dark:text-green-300">
+            You&apos;re all set! 143 will pick up issues and open PRs automatically.
           </p>
         </div>
-        <AdditionalIntegrationCards
-          linearConnected={Boolean(linearIntegration)}
-          linearLoading={connectLinearMutation.isPending}
-          onConnectSentry={() => api.auth.loginSentry()}
-          onConnectLinear={() => connectLinearMutation.mutate()}
-        />
-      </div>
-
-      <p className="text-sm text-muted-foreground">
-        Once integrations are connected, 143 picks up issues, generates fixes, and opens PRs automatically.
-      </p>
+      )}
     </div>
   );
 }
