@@ -5,6 +5,13 @@ import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { PageHeader } from "@/components/page-header";
 import { IntegrationsCard } from "@/components/integrations-card";
 import { AgentSettingsEditor } from "@/components/agent-settings-editor";
@@ -128,18 +135,52 @@ function AgentSettingsModal({ onClose, initialAgentType }: { onClose: () => void
 }
 
 function AgentSelectionSection() {
+  type AgentType = NonNullable<OrgSettings["default_agent_type"]>;
+
+  const AGENT_OPTIONS: Array<{
+    value: AgentType;
+    label: string;
+    description: string;
+    configureLabel: string;
+    ctaLabel: string;
+  }> = [
+    {
+      value: "codex",
+      label: "Codex",
+      description: "Sign in with ChatGPT for instant access to gpt-5.3-codex. No API key needed.",
+      configureLabel: "Settings",
+      ctaLabel: "Sign in with ChatGPT",
+    },
+    {
+      value: "claude_code",
+      label: "Claude Code",
+      description: "Use your Anthropic API key for Claude-powered fixes.",
+      configureLabel: "Configure",
+      ctaLabel: "Configure",
+    },
+    {
+      value: "gemini_cli",
+      label: "Gemini CLI",
+      description: "Use your Google Gemini API key for Gemini-powered fixes.",
+      configureLabel: "Configure",
+      ctaLabel: "Configure",
+    },
+  ];
+
   const [codexAuthStatus, setCodexAuthStatus] = useState<CodexAuthStatus | null>(null);
   const [agentConfig, setAgentConfig] = useState<Record<string, Record<string, string>>>({});
   const [agentDefaults, setAgentDefaults] = useState<Record<string, Record<string, string>>>({});
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [settingsAgentType, setSettingsAgentType] = useState<OrgSettings["default_agent_type"]>("codex");
+  const [selectedAgentType, setSelectedAgentType] = useState<AgentType>("codex");
 
   const fetchData = useCallback(() => {
     api.codexAuth.status().then((res) => setCodexAuthStatus(res.data)).catch(() => {});
     api.settings.get().then((res) => {
       const settings = res.data?.settings as OrgSettings | undefined;
       setAgentConfig(settings?.agent_config ?? {});
+      setSelectedAgentType(settings?.default_agent_type ?? "codex");
     }).catch(() => {});
     api.settings.getAgentDefaults().then((res) => {
       setAgentDefaults(res.data ?? {});
@@ -158,108 +199,69 @@ function AgentSelectionSection() {
   const isGeminiConnected = Boolean(agentConfig.gemini_cli?.GEMINI_API_KEY)
     || Boolean(agentDefaults.gemini_cli?.GEMINI_API_KEY);
 
+  const isSelectedAgentConnected = selectedAgentType === "codex"
+    ? isCodexConnected
+    : selectedAgentType === "claude_code"
+      ? isClaudeConnected
+      : isGeminiConnected;
+
+  const selectedAgent = AGENT_OPTIONS.find((agent) => agent.value === selectedAgentType) ?? AGENT_OPTIONS[0];
+
   return (
     <>
       <div className="space-y-3">
         <div className="space-y-1">
           <h2 className="text-sm font-medium text-foreground">Coding agent</h2>
           <p className="text-xs text-muted-foreground">
-            Choose the agent that fixes your issues. You can change this later in settings.
+            Start with Codex (recommended), or pick the agent you already use. You can change this later in settings.
           </p>
         </div>
 
-        {/* Featured: Codex (Recommended) */}
-        <Card className={`py-0 ${!isCodexConnected ? "border-primary" : ""}`} data-testid="agent-card-codex">
+        <Card className={`py-0 ${selectedAgentType === "codex" && !isCodexConnected ? "border-primary" : ""}`} data-testid="agent-card-codex">
           <CardContent className="flex items-center justify-between gap-4 py-4">
             <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
-                <p className="text-sm font-medium text-foreground">Codex</p>
-                <Badge variant="secondary" className="text-xs">Recommended</Badge>
+              <div className="flex items-center gap-2 mb-2">
+                <Select
+                  value={selectedAgentType}
+                  onValueChange={(value) => setSelectedAgentType(value as AgentType)}
+                >
+                  <SelectTrigger aria-label="Coding agent provider" className="w-[220px]">
+                    <SelectValue placeholder="Select coding agent" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {AGENT_OPTIONS.map((agent) => (
+                      <SelectItem key={agent.value} value={agent.value}>
+                        {agent.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {selectedAgentType === "codex" && <Badge variant="secondary" className="text-xs">Recommended</Badge>}
               </div>
               <p className="mt-0.5 text-sm text-muted-foreground">
-                Sign in with ChatGPT for instant access to gpt-5.3-codex. No API key needed.
+                {selectedAgent.description}
               </p>
             </div>
             <div className="flex shrink-0 gap-2">
-              {isCodexConnected ? (
-                <Badge variant="secondary">Connected</Badge>
-              ) : (
-                <>
-                  <Button size="sm" onClick={() => setShowDeviceCodeModal(true)}>
-                    Sign in with ChatGPT
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => {
-                      setSettingsAgentType("codex");
-                      setShowSettingsModal(true);
-                    }}
-                  >
-                    Settings
-                  </Button>
-                </>
+              {isSelectedAgentConnected && <Badge variant="secondary">Connected</Badge>}
+              {selectedAgentType === "codex" && !isSelectedAgentConnected && (
+                <Button size="sm" onClick={() => setShowDeviceCodeModal(true)}>
+                  {selectedAgent.ctaLabel}
+                </Button>
               )}
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  setSettingsAgentType(selectedAgentType);
+                  setShowSettingsModal(true);
+                }}
+              >
+                {selectedAgent.configureLabel}
+              </Button>
             </div>
           </CardContent>
         </Card>
-
-        {/* Secondary agents: Claude Code + Gemini CLI */}
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Card className="py-0" data-testid="agent-card-claude">
-            <CardContent className="flex items-center justify-between gap-4 py-4">
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium text-foreground">Claude Code</p>
-                <p className="mt-0.5 text-sm text-muted-foreground">
-                  Use your Anthropic API key for Claude-powered fixes.
-                </p>
-              </div>
-              <div className="shrink-0">
-                {isClaudeConnected ? (
-                  <Badge variant="secondary">Connected</Badge>
-                ) : (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => {
-                      setSettingsAgentType("claude_code");
-                      setShowSettingsModal(true);
-                    }}
-                  >
-                    Configure
-                  </Button>
-                )}
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card className="py-0" data-testid="agent-card-gemini">
-            <CardContent className="flex items-center justify-between gap-4 py-4">
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium text-foreground">Gemini CLI</p>
-                <p className="mt-0.5 text-sm text-muted-foreground">
-                  Use your Google Gemini API key for Gemini-powered fixes.
-                </p>
-              </div>
-              <div className="shrink-0">
-                {isGeminiConnected ? (
-                  <Badge variant="secondary">Connected</Badge>
-                ) : (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => {
-                      setSettingsAgentType("gemini_cli");
-                      setShowSettingsModal(true);
-                    }}
-                  >
-                    Configure
-                  </Button>
-                )}
-              </div>
-            </CardContent>
-          </Card>
-        </div>
       </div>
 
       {showDeviceCodeModal && (
