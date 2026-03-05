@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { Badge } from "@/components/ui/badge";
+import { api } from "@/lib/api";
 import type { AgentRunLog } from "@/lib/types";
 
 const levelColors: Record<string, string> = {
@@ -33,43 +34,96 @@ const BASE_RECONNECT_DELAY_MS = 1000;
 
 export function LogViewer({ runId, isActive }: LogViewerProps) {
   const [logs, setLogs] = useState<AgentRunLog[]>([]);
-  const [connected, setConnected] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [streaming, setStreaming] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
   const reconnectAttempts = useRef(0);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(null);
+  const seenIds = useRef<Set<number>>(new Set());
 
+  // Merge new logs into state, deduplicating by ID.
+  const mergeLogs = useCallback((newLogs: AgentRunLog[]) => {
+    setLogs((prev) => {
+      const toAdd: AgentRunLog[] = [];
+      for (const log of newLogs) {
+        if (!seenIds.current.has(log.id)) {
+          seenIds.current.add(log.id);
+          toAdd.push(log);
+        }
+      }
+      if (toAdd.length === 0) return prev;
+      return [...prev, ...toAdd];
+    });
+  }, []);
+
+  // Fetch logs via REST API on mount (works for both active and completed runs).
   useEffect(() => {
+    let cancelled = false;
+
+    async function fetchLogs() {
+      try {
+        const response = await api.runs.getLogs(runId);
+        if (!cancelled) {
+          const fetched = response.data || [];
+          seenIds.current = new Set(fetched.map((l) => l.id));
+          setLogs(fetched);
+        }
+      } catch {
+        // Ignore fetch errors — logs may simply not exist yet.
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    }
+
+    fetchLogs();
+    return () => {
+      cancelled = true;
+    };
+  }, [runId]);
+
+  // Start SSE streaming only for active runs.
+  useEffect(() => {
+    if (!isActive) {
+      setStreaming(false);
+      return;
+    }
+
     let eventSource: EventSource | null = null;
 
     function connect() {
       eventSource = new EventSource(
-        `${apiBase}/api/v1/runs/${runId}/logs`,
+        `${apiBase}/api/v1/runs/${runId}/logs/stream`,
         { withCredentials: true }
       );
 
       eventSource.onopen = () => {
-        setConnected(true);
+        setStreaming(true);
         reconnectAttempts.current = 0;
       };
 
       eventSource.onmessage = (event) => {
         try {
           const log: AgentRunLog = JSON.parse(event.data);
-          setLogs((prev) => [...prev, log]);
+          mergeLogs([log]);
         } catch {
           // ignore unparseable messages
         }
       };
 
+      // Listen for the "done" event sent when the run reaches terminal status.
+      eventSource.addEventListener("done", () => {
+        setStreaming(false);
+        eventSource?.close();
+      });
+
       eventSource.onerror = () => {
-        setConnected(false);
+        setStreaming(false);
         eventSource?.close();
 
-        if (
-          isActive &&
-          reconnectAttempts.current < MAX_RECONNECT_ATTEMPTS
-        ) {
+        if (reconnectAttempts.current < MAX_RECONNECT_ATTEMPTS) {
           const delay =
             BASE_RECONNECT_DELAY_MS *
             Math.pow(2, reconnectAttempts.current);
@@ -87,7 +141,7 @@ export function LogViewer({ runId, isActive }: LogViewerProps) {
         clearTimeout(reconnectTimer.current);
       }
     };
-  }, [runId, apiBase, isActive]);
+  }, [runId, apiBase, isActive, mergeLogs]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -95,17 +149,17 @@ export function LogViewer({ runId, isActive }: LogViewerProps) {
     }
   }, [logs]);
 
-  if (!connected && logs.length === 0) {
+  if (loading) {
     return (
       <div className="text-center py-8 text-sm text-muted-foreground">
-        Connecting to log stream...
+        Loading logs...
       </div>
     );
   }
 
   return (
     <div className="space-y-2">
-      {isActive && connected && (
+      {isActive && streaming && (
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <span className="relative flex h-2 w-2">
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
