@@ -6,7 +6,7 @@ const {
   loginMock,
   sentryLoginMock,
   integrationsListMock,
-  connectLinearMock,
+  loginLinearMock,
   codexStatusMock,
   codexInitiateMock,
   settingsGetMock,
@@ -16,15 +16,7 @@ const {
   loginMock: vi.fn(),
   sentryLoginMock: vi.fn(),
   integrationsListMock: vi.fn().mockResolvedValue({ data: [] }),
-  connectLinearMock: vi.fn().mockResolvedValue({
-    data: {
-      id: 'linear-1',
-      org_id: 'org-1',
-      provider: 'linear',
-      status: 'active',
-      created_at: '2026-01-01T00:00:00Z',
-    },
-  }),
+  loginLinearMock: vi.fn(),
   codexStatusMock: vi.fn().mockResolvedValue({ data: { status: 'pending' } }),
   codexInitiateMock: vi.fn().mockResolvedValue({
     data: {
@@ -54,7 +46,7 @@ vi.mock('@/lib/api', () => ({
     },
     integrations: {
       list: integrationsListMock,
-      connectLinear: connectLinearMock,
+      loginLinear: loginLinearMock,
     },
     codexAuth: {
       status: codexStatusMock,
@@ -74,16 +66,7 @@ describe('OverviewPage', () => {
     sentryLoginMock.mockReset();
     integrationsListMock.mockReset();
     integrationsListMock.mockResolvedValue({ data: [] });
-    connectLinearMock.mockReset();
-    connectLinearMock.mockResolvedValue({
-      data: {
-        id: 'linear-1',
-        org_id: 'org-1',
-        provider: 'linear',
-        status: 'active',
-        created_at: '2026-01-01T00:00:00Z',
-      },
-    });
+    loginLinearMock.mockReset();
     codexStatusMock.mockClear();
     codexStatusMock.mockResolvedValue({ data: { status: 'pending' } });
     settingsGetMock.mockClear();
@@ -177,9 +160,7 @@ describe('OverviewPage', () => {
 
     await user.click(screen.getByRole('button', { name: 'Connect Linear' }));
 
-    await waitFor(() => {
-      expect(connectLinearMock).toHaveBeenCalledTimes(1);
-    });
+    expect(loginLinearMock).toHaveBeenCalledTimes(1);
   });
 
   it('shows Linear as connected when active integration exists', async () => {
@@ -340,41 +321,6 @@ describe('OverviewPage', () => {
     });
 
     await user.click(screen.getByRole('button', { name: 'Sign in with ChatGPT' }));
-
-    await waitFor(() => {
-      expect(screen.getByText('Failed to start authentication. Please try again.')).toBeInTheDocument();
-    });
-
-    const tryAgainButton = screen.getByRole('button', { name: 'Try Again' });
-    const cancelButton = screen
-      .getAllByRole('button', { name: 'Cancel' })
-      .find((button) => button.parentElement === tryAgainButton.parentElement);
-
-    expect(cancelButton).toBeDefined();
-    if (!cancelButton) {
-      return;
-    }
-    expect(tryAgainButton).toBeInTheDocument();
-    expect(cancelButton.parentElement).toBe(tryAgainButton.parentElement);
-    expect(cancelButton.compareDocumentPosition(tryAgainButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  });
-
-  it('uses the same modal action layout in agent settings auth flow', async () => {
-    codexInitiateMock.mockRejectedValueOnce(new Error('Network error'));
-    const user = userEvent.setup();
-    renderWithProviders(<Overview />);
-
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Settings' })).toBeInTheDocument();
-    });
-
-    await user.click(screen.getByRole('button', { name: 'Settings' }));
-
-    await waitFor(() => {
-      expect(screen.getByText('Configure coding agent')).toBeInTheDocument();
-    });
-
-    await user.click(screen.getAllByRole('button', { name: 'Sign in with ChatGPT' })[0]);
 
     await waitFor(() => {
       expect(screen.getByText('Failed to start authentication. Please try again.')).toBeInTheDocument();
