@@ -117,7 +117,7 @@ func (c *Config) AgentEnv() map[string]map[string]string {
 	result := make(map[string]map[string]string)
 
 	// Claude Code needs ANTHROPIC_API_KEY.
-	// ANTHROPIC_MODEL selects the model (e.g. "opus", "sonnet", "claude-opus-4-6").
+	// ANTHROPIC_MODEL selects the model (e.g. "opus", "sonnet", "claude-opus-4-6", "claude-sonnet-4-5").
 	if c.AnthropicAPIKey != "" {
 		env := map[string]string{"ANTHROPIC_API_KEY": c.AnthropicAPIKey}
 		if c.AnthropicBaseURL != "" {
@@ -131,7 +131,8 @@ func (c *Config) AgentEnv() map[string]map[string]string {
 
 	// Codex needs OPENAI_API_KEY.
 	// OPENAI_MODEL is not natively supported by Codex CLI (it uses config.toml),
-	// but we pass it so the adapter can use it in the --model flag.
+	// but we pass it so the adapter can use it in the --model flag
+	// (e.g. "gpt-5.3-codex", "gpt-5.2-codex", "gpt-5-codex").
 	if c.OpenAIAPIKey != "" {
 		env := map[string]string{"OPENAI_API_KEY": c.OpenAIAPIKey}
 		if c.OpenAIBaseURL != "" {
@@ -144,7 +145,7 @@ func (c *Config) AgentEnv() map[string]map[string]string {
 	}
 
 	// Gemini CLI needs GEMINI_API_KEY.
-	// GEMINI_MODEL selects the model (e.g. "gemini-2.5-pro", "gemini-2.5-flash").
+	// GEMINI_MODEL selects the model (e.g. "gemini-3-pro-preview", "gemini-3-flash-preview", "gemini-2.5-pro").
 	if c.GeminiAPIKey != "" {
 		env := map[string]string{"GEMINI_API_KEY": c.GeminiAPIKey}
 		if c.GeminiModel != "" {
