@@ -6,16 +6,30 @@ import {
   AVAILABLE_GEMINI_CLI_MODELS,
   AVAILABLE_PM_MODELS,
   DEFAULT_PM_MODEL,
-  PM_MODEL_SONNET,
+  CLAUDE_CODE_MODEL_SONNET,
+  LEGACY_PM_ALIASES,
+  PM_MODELS_BY_PROVIDER,
 } from "./model-constants";
 
 describe("model constants", () => {
-  it("uses sonnet as the PM default", () => {
-    expect(DEFAULT_PM_MODEL).toBe(PM_MODEL_SONNET);
+  it("uses claude-sonnet-4-5 as the PM default", () => {
+    expect(DEFAULT_PM_MODEL).toBe(CLAUDE_CODE_MODEL_SONNET);
   });
 
-  it("includes supported PM aliases", () => {
-    expect(AVAILABLE_PM_MODELS).toEqual(["opus", "sonnet", "haiku"]);
+  it("includes legacy aliases and all provider models in AVAILABLE_PM_MODELS", () => {
+    expect(AVAILABLE_PM_MODELS).toEqual([
+      ...LEGACY_PM_ALIASES,
+      ...AVAILABLE_CLAUDE_CODE_MODELS,
+      ...AVAILABLE_GEMINI_CLI_MODELS,
+      ...AVAILABLE_CODEX_MODELS,
+    ]);
+  });
+
+  it("PM_MODELS_BY_PROVIDER maps each provider to its models and api key", () => {
+    expect(Object.keys(PM_MODELS_BY_PROVIDER)).toEqual(["claude_code", "gemini_cli", "codex"]);
+    expect(PM_MODELS_BY_PROVIDER.claude_code.models).toEqual(AVAILABLE_CLAUDE_CODE_MODELS);
+    expect(PM_MODELS_BY_PROVIDER.gemini_cli.models).toEqual(AVAILABLE_GEMINI_CLI_MODELS);
+    expect(PM_MODELS_BY_PROVIDER.codex.models).toEqual(AVAILABLE_CODEX_MODELS);
   });
 
   it("includes latest Claude Code model aliases", () => {

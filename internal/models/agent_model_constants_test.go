@@ -10,7 +10,13 @@ func TestPMModelConstants(t *testing.T) {
 	t.Parallel()
 
 	require.Equal(t, PMModelSonnet, DefaultPMModel, "DefaultPMModel should use PMModelSonnet")
-	require.Equal(t, []string{PMModelOpus, PMModelSonnet, PMModelHaiku}, AvailablePMModels, "AvailablePMModels should expose all supported PM aliases")
+
+	// AvailablePMModels should include legacy aliases plus all provider models.
+	expected := []string{PMModelOpus, PMModelSonnet, PMModelHaiku}
+	expected = append(expected, AvailableClaudeCodeModels...)
+	expected = append(expected, AvailableGeminiCLIModels...)
+	expected = append(expected, AvailableCodexModels...)
+	require.Equal(t, expected, AvailablePMModels, "AvailablePMModels should include legacy aliases and all provider models")
 }
 
 func TestClaudeCodeModelConstants(t *testing.T) {
@@ -68,6 +74,24 @@ func TestValidateSettingsModels(t *testing.T) {
 				AgentConfig: AgentEnvConfig{
 					"claude_code": {"ANTHROPIC_MODEL": PMModelOpus},
 				},
+			},
+		},
+		{
+			name: "accepts claude code model as pm model",
+			settings: OrgSettings{
+				PMModel: ClaudeCodeModelSonnet,
+			},
+		},
+		{
+			name: "accepts gemini model as pm model",
+			settings: OrgSettings{
+				PMModel: GeminiCLIModelGemini3ProPreview,
+			},
+		},
+		{
+			name: "accepts codex model as pm model",
+			settings: OrgSettings{
+				PMModel: CodexModelGPT53Codex,
 			},
 		},
 		{
