@@ -1,6 +1,7 @@
 package adapters
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -70,9 +71,10 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 
 	// Build the CLI command.
 	// --full-auto: auto-approve all tool calls (non-interactive)
+	// --output-format stream-json: streaming JSONL with tool use detail
 	// -q: pass the prompt as a string
 	cmd := fmt.Sprintf(
-		"codex --full-auto -q \"$(cat '%s')\"",
+		"codex --full-auto --output-format stream-json -q \"$(cat '%s')\"",
 		shellEscapeCodex(promptPath),
 	)
 
@@ -94,7 +96,7 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 	result := &agent.AgentResult{
 		ExitCode: exitCode,
 	}
-	parseCodexOutput(stdout.Bytes(), result, logCh)
+	parseCodexStreamOutput(stdout.Bytes(), result, logCh)
 
 	if stderr.Len() > 0 {
 		logCh <- agent.LogEntry{
@@ -186,6 +188,184 @@ func parseCodexOutput(output []byte, result *agent.AgentResult, logCh chan<- age
 	}
 	result.Summary = text
 	tryExtractConfidence(text, result)
+}
+
+// codexStreamEvent represents a single line of Codex CLI's stream-json output.
+type codexStreamEvent struct {
+	Type      string          `json:"type"`
+	Content   string          `json:"content,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Arguments json.RawMessage `json:"arguments,omitempty"`
+	CallID    string          `json:"call_id,omitempty"`
+	Output    string          `json:"output,omitempty"`
+	Result    json.RawMessage `json:"result,omitempty"`
+	Message   string          `json:"message,omitempty"`
+	Stats     *struct {
+		InputTokens  int `json:"inputTokens"`
+		OutputTokens int `json:"outputTokens"`
+	} `json:"stats,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+// parseCodexStreamOutput processes the streaming JSONL output from Codex CLI,
+// populates the AgentResult, and sends log entries with detailed tool use metadata.
+// Falls back to parseCodexOutput for legacy single-object JSON responses.
+func parseCodexStreamOutput(output []byte, result *agent.AgentResult, logCh chan<- agent.LogEntry) {
+	trimmed := bytes.TrimSpace(output)
+	if len(trimmed) == 0 {
+		return
+	}
+
+	// Detect legacy single-object JSON format (non-streaming).
+	var legacyResp codexJSONOutput
+	if err := json.Unmarshal(trimmed, &legacyResp); err == nil && legacyResp.Response != "" {
+		parseCodexOutput(output, result, logCh)
+		return
+	}
+
+	// Parse as streaming JSONL line by line.
+	scanner := bufio.NewScanner(bytes.NewReader(output))
+	var summaryParts []string
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+
+		var event codexStreamEvent
+		if err := json.Unmarshal(line, &event); err != nil {
+			// Not JSON — emit as raw output and include in summary.
+			text := string(line)
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "output",
+				Message:   text,
+			}
+			summaryParts = append(summaryParts, text)
+			tryExtractConfidence(text, result)
+			continue
+		}
+
+		switch event.Type {
+		case "message", "text", "assistant":
+			content := event.Content
+			if content == "" {
+				content = event.Message
+			}
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "output",
+				Message:   content,
+			}
+			summaryParts = append(summaryParts, content)
+			tryExtractConfidence(content, result)
+
+		case "function_call", "tool_use", "tool_call":
+			toolName := event.Name
+			metadata := map[string]interface{}{"tool": toolName}
+			if len(event.Arguments) > 0 {
+				var argsMap map[string]interface{}
+				if err := json.Unmarshal(event.Arguments, &argsMap); err == nil {
+					metadata["input"] = argsMap
+				} else {
+					// Arguments might be a string (double-encoded JSON).
+					var argsStr string
+					if err := json.Unmarshal(event.Arguments, &argsStr); err == nil {
+						var innerArgs map[string]interface{}
+						if err := json.Unmarshal([]byte(argsStr), &innerArgs); err == nil {
+							metadata["input"] = innerArgs
+						} else {
+							metadata["input"] = argsStr
+						}
+					}
+				}
+			}
+			if event.CallID != "" {
+				metadata["call_id"] = event.CallID
+			}
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "tool_use",
+				Message:   fmt.Sprintf("using tool: %s", toolName),
+				Metadata:  metadata,
+			}
+
+		case "function_call_output", "tool_result":
+			metadata := map[string]interface{}{"type": "tool_result"}
+			if event.Name != "" {
+				metadata["tool"] = event.Name
+			}
+			if event.CallID != "" {
+				metadata["call_id"] = event.CallID
+			}
+			outputMsg := event.Output
+			if outputMsg == "" && len(event.Result) > 0 {
+				outputMsg = string(event.Result)
+			}
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "output",
+				Message:   outputMsg,
+				Metadata:  metadata,
+			}
+
+		case "thinking":
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "debug",
+				Message:   event.Content,
+				Metadata:  map[string]interface{}{"type": "thinking"},
+			}
+
+		case "error":
+			msg := event.Error
+			if msg == "" {
+				msg = event.Message
+			}
+			if msg == "" {
+				msg = event.Content
+			}
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "error",
+				Message:   msg,
+			}
+
+		case "usage", "result":
+			content := event.Content
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "info",
+				Message:   content,
+			}
+			if content != "" {
+				summaryParts = append(summaryParts, content)
+				tryExtractConfidence(content, result)
+			}
+			if event.Stats != nil {
+				result.TokenUsage = agent.TokenUsage{
+					InputTokens:  event.Stats.InputTokens,
+					OutputTokens: event.Stats.OutputTokens,
+				}
+			}
+			if len(event.Result) > 0 {
+				var usage agent.TokenUsage
+				if err := json.Unmarshal(event.Result, &usage); err == nil && usage.InputTokens > 0 {
+					result.TokenUsage = usage
+				}
+			}
+
+		default:
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "debug",
+				Message:   string(line),
+			}
+		}
+	}
+
+	result.Summary = strings.Join(summaryParts, "\n")
 }
 
 // shellEscapeCodex escapes single quotes in a path for use inside a

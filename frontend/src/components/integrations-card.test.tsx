@@ -15,7 +15,7 @@ describe("IntegrationsCard", () => {
           {
             id: "github",
             title: "GitHub",
-            description: "Connect your GitHub account to sync repositories and open PRs.",
+            description: "Sync repositories and open PRs.",
             action: (
               <Button size="sm" onClick={onConnect} aria-label="Connect GitHub">
                 Connect
@@ -25,7 +25,7 @@ describe("IntegrationsCard", () => {
           {
             id: "sentry",
             title: "Sentry",
-            description: "Pull production errors and auto-generate fixes.",
+            description: "Pull errors and auto-generate fixes.",
             action: <Badge variant="secondary">Coming soon</Badge>,
           },
         ]}

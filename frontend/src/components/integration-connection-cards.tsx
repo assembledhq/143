@@ -1,6 +1,8 @@
+import { Badge } from "@/components/ui/badge";
+import Image from "next/image";
 import { Button } from "@/components/ui/button";
 import { IntegrationsCard } from "@/components/integrations-card";
-import { INTEGRATIONS } from "@/lib/integrations";
+import { getIntegrationByKey } from "@/lib/integrations";
 
 type SourceControlIntegrationCardProps = {
   onConnectGitHub: () => void;
@@ -15,16 +17,31 @@ type AdditionalIntegrationCardsProps = {
 
 type AllIntegrationCardsProps = SourceControlIntegrationCardProps & AdditionalIntegrationCardsProps;
 
+function IntegrationLogo({ name, src }: { name: string; src: string }) {
+  return (
+    <Image
+      src={src}
+      alt={`${name} logo`}
+      className="h-6 w-6 rounded-sm object-contain"
+      width={24}
+      height={24}
+      unoptimized
+    />
+  );
+}
+
 export function SourceControlIntegrationCard({ onConnectGitHub }: SourceControlIntegrationCardProps) {
-  const github = INTEGRATIONS[0];
+  const github = getIntegrationByKey("github");
 
   return (
     <IntegrationsCard
       items={[
         {
           id: github.key,
-          title: `Connect ${github.name}`,
+          title: github.name,
           description: github.description,
+          logo: <IntegrationLogo name={github.name} src={github.logoSrc} />,
+          badge: <Badge variant="outline" className="text-xs">Required</Badge>,
           action: (
             <Button size="sm" onClick={onConnectGitHub} aria-label="Connect GitHub">
               Connect
@@ -42,20 +59,21 @@ export function AdditionalIntegrationCards({
   onConnectSentry,
   onConnectLinear,
 }: AdditionalIntegrationCardsProps) {
-  const sentry = INTEGRATIONS[1];
-  const linear = INTEGRATIONS[2];
+  const sentry = getIntegrationByKey("sentry");
+  const linear = getIntegrationByKey("linear");
 
   return (
     <IntegrationsCard
       items={[
         {
           id: sentry.key,
-          title: `Connect ${sentry.name}`,
+          title: sentry.name,
           description: sentry.description,
+          logo: <IntegrationLogo name={sentry.name} src={sentry.logoSrc} />,
+          badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
           action: (
             <Button
               size="sm"
-              variant="outline"
               onClick={onConnectSentry}
               aria-label="Connect Sentry"
             >
@@ -65,12 +83,13 @@ export function AdditionalIntegrationCards({
         },
         {
           id: linear.key,
-          title: `Connect ${linear.name}`,
+          title: linear.name,
           description: linear.description,
+          logo: <IntegrationLogo name={linear.name} src={linear.logoSrc} />,
+          badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
           action: (
             <Button
               size="sm"
-              variant="outline"
               aria-label={linearConnected ? "Linear Connected" : "Connect Linear"}
               loading={linearLoading}
               disabled={linearConnected || linearLoading}
@@ -92,17 +111,19 @@ export function AllIntegrationCards({
   linearConnected,
   linearLoading,
 }: AllIntegrationCardsProps) {
-  const github = INTEGRATIONS[0];
-  const sentry = INTEGRATIONS[1];
-  const linear = INTEGRATIONS[2];
+  const github = getIntegrationByKey("github");
+  const sentry = getIntegrationByKey("sentry");
+  const linear = getIntegrationByKey("linear");
 
   return (
     <IntegrationsCard
       items={[
         {
           id: github.key,
-          title: `Connect ${github.name}`,
+          title: github.name,
           description: github.description,
+          logo: <IntegrationLogo name={github.name} src={github.logoSrc} />,
+          badge: <Badge variant="outline" className="text-xs">Required</Badge>,
           action: (
             <Button size="sm" onClick={onConnectGitHub} aria-label="Connect GitHub">
               Connect
@@ -111,12 +132,13 @@ export function AllIntegrationCards({
         },
         {
           id: sentry.key,
-          title: `Connect ${sentry.name}`,
+          title: sentry.name,
           description: sentry.description,
+          logo: <IntegrationLogo name={sentry.name} src={sentry.logoSrc} />,
+          badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
           action: (
             <Button
               size="sm"
-              variant="outline"
               onClick={onConnectSentry}
               aria-label="Connect Sentry"
             >
@@ -126,12 +148,13 @@ export function AllIntegrationCards({
         },
         {
           id: linear.key,
-          title: `Connect ${linear.name}`,
+          title: linear.name,
           description: linear.description,
+          logo: <IntegrationLogo name={linear.name} src={linear.logoSrc} />,
+          badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
           action: (
             <Button
               size="sm"
-              variant="outline"
               aria-label={linearConnected ? "Linear Connected" : "Connect Linear"}
               loading={linearLoading}
               disabled={linearConnected || linearLoading}

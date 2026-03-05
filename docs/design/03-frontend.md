@@ -17,6 +17,13 @@ These patterns apply across every page. They are not optional — they define th
 - **Progressive disclosure via drawers** — Deep-dive information (traces, breadcrumbs, detailed metadata) opens in slide-out drawer panels from the right edge, preserving the parent page context. Prefer drawers over inline expand/collapse for complex content. Reserve inline expansion for simple one-level toggles.
 - **Stable layouts** — Page structure (tabs, columns, sections) should be consistent regardless of data state. Unavailable sections are grayed out or show placeholder text, never hidden. Users build muscle memory from predictable layouts.
 
+### Visual Density & Tone
+
+- **Dense default rhythm** — Use compact primitives (`h-8` inputs/buttons by default), tighter section spacing (`space-y-6` as a page baseline), and avoid oversized hero padding on app pages.
+- **Neutral-first palette** — Keep surfaces mostly neutral (`background`/`muted`/`border`) and reserve saturated color for primary actions and meaningful state.
+- **Separator-led hierarchy** — Prefer subtle borders/dividers over heavy shadows for panel structure. Shadows are optional and minimal.
+- **App-shell first layout** — Dashboard pages should feel like a working surface: persistent sidebar, full-width content region, and reduced `max-width` constraints unless readability requires one.
+
 ## Framework Decision: Next.js (React)
 
 ### Why Next.js
