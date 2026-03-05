@@ -9,6 +9,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import type { CodexDeviceAuth, OrgSettings, Organization, SingleResponse } from "@/lib/types";
 
 interface AgentEnvVar {
@@ -16,6 +23,9 @@ interface AgentEnvVar {
   label: string;
   sensitive?: boolean;
   placeholder?: string;
+  options?: string[];
+  advanced?: boolean;
+  hideInSetup?: boolean;
 }
 
 const AGENT_TYPES: { key: string; label: string; envVars: AgentEnvVar[] }[] = [
@@ -33,8 +43,18 @@ const AGENT_TYPES: { key: string; label: string; envVars: AgentEnvVar[] }[] = [
     label: "Claude Code",
     envVars: [
       { name: "ANTHROPIC_API_KEY", label: "API Key", sensitive: true },
-      { name: "ANTHROPIC_MODEL", label: "Model", placeholder: "e.g. claude-sonnet-4-5, opus" },
-      { name: "ANTHROPIC_BASE_URL", label: "Base URL", placeholder: "Custom API endpoint (optional)" },
+      {
+        name: "ANTHROPIC_MODEL",
+        label: "Model",
+        options: ["claude-sonnet-4-5", "claude-opus-4-1", "claude-3-5-haiku-latest"],
+      },
+      {
+        name: "ANTHROPIC_BASE_URL",
+        label: "Base URL",
+        placeholder: "Custom API endpoint (optional)",
+        advanced: true,
+        hideInSetup: true,
+      },
     ],
   },
   {
@@ -42,7 +62,11 @@ const AGENT_TYPES: { key: string; label: string; envVars: AgentEnvVar[] }[] = [
     label: "Gemini CLI",
     envVars: [
       { name: "GEMINI_API_KEY", label: "API Key", sensitive: true },
-      { name: "GEMINI_MODEL", label: "Model", placeholder: "e.g. gemini-2.5-pro, gemini-2.5-flash" },
+      {
+        name: "GEMINI_MODEL",
+        label: "Model",
+        options: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
+      },
     ],
   },
 ];
@@ -206,11 +230,13 @@ export function AgentSettingsEditor({
   description,
   onClose,
   initialAgentType,
+  setupMode = false,
 }: {
   title: string;
   description: string;
   onClose?: () => void;
   initialAgentType?: OrgSettings["default_agent_type"];
+  setupMode?: boolean;
 }) {
   const queryClient = useQueryClient();
   const [defaultAgentTypeOverride, setDefaultAgentTypeOverride] = useState<OrgSettings["default_agent_type"] | null>(initialAgentType ?? null);
@@ -218,6 +244,7 @@ export function AgentSettingsEditor({
   const [saveStatus, setSaveStatus] = useState<"idle" | "success" | "error">("idle");
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
   const [codexCredentialMethodOverride, setCodexCredentialMethodOverride] = useState<"chatgpt" | "api_key" | null>(null);
+  const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
 
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
     queryKey: ["settings"],
@@ -348,11 +375,11 @@ export function AgentSettingsEditor({
                   codexCredentialMethod === "chatgpt" ? "border-primary bg-primary/5" : "border-input hover:bg-muted/40"
                 }`}
               >
-                <RadioGroupItem value="chatgpt" aria-label="Sign in with ChatGPT (Recommended)" />
+                <RadioGroupItem value="chatgpt" aria-label="Sign in with ChatGPT" />
                 <div className="space-y-1">
                   <div className="flex items-center gap-2">
                     <Sparkles className="h-4 w-4 text-primary" />
-                    <p className="text-sm font-medium">Sign in with ChatGPT (Recommended)</p>
+                    <p className="text-sm font-medium">Sign in with ChatGPT</p>
                   </div>
                   <p className="text-xs text-muted-foreground">Best for gpt-5.3-codex model access.</p>
                 </div>
@@ -382,7 +409,6 @@ export function AgentSettingsEditor({
                   <h4 className="text-sm font-medium">Sign in with ChatGPT</h4>
                   <p className="text-xs text-muted-foreground">Use your ChatGPT account to unlock gpt-5.3-codex.</p>
                 </div>
-                <Badge variant="secondary">Recommended</Badge>
               </div>
 
               <div className="flex items-center gap-2">
@@ -424,9 +450,23 @@ export function AgentSettingsEditor({
           const envVarsToRender =
             selectedAgent.key === "codex" && codexCredentialMethod === "chatgpt"
               ? []
-              : selectedAgent.envVars;
+              : selectedAgent.envVars.filter((envVar) => !(setupMode && envVar.hideInSetup));
+          const hasAdvancedSettings = !setupMode && envVarsToRender.some((envVar) => envVar.advanced);
           const serverVars = (agentDefaultsResponse?.data ?? {})[selectedAgent.key] ?? {};
-          return envVarsToRender.map((envVar) => {
+          const visibleEnvVars = envVarsToRender.filter((envVar) => !envVar.advanced || showAdvancedSettings);
+          return (
+            <>
+              {hasAdvancedSettings && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setShowAdvancedSettings((current) => !current)}
+                >
+                  {showAdvancedSettings ? "Hide advanced settings" : "Show advanced settings"}
+                </Button>
+              )}
+              {visibleEnvVars.map((envVar) => {
             const serverDefault = serverVars[envVar.name] ?? "";
             const orgOverride = agentConfig[selectedAgent.key]?.[envVar.name] ?? "";
             const displayValue = orgOverride || serverDefault;
@@ -442,25 +482,57 @@ export function AgentSettingsEditor({
                     <span className="text-[10px] text-muted-foreground">server default</span>
                   )}
                 </div>
-                <Input
-                  id={`${selectedAgent.key}-${envVar.name}`}
-                  type={envVar.sensitive ? "password" : "text"}
-                  placeholder={envVar.placeholder ?? "Not set"}
-                  value={displayValue}
-                  className={isServerDefault ? "text-muted-foreground" : ""}
-                  onChange={(e) => {
-                    setAgentConfigOverride({
-                      ...(agentConfigOverride ?? agentConfig),
-                      [selectedAgent.key]: {
-                        ...(agentConfigOverride ?? agentConfig)[selectedAgent.key],
-                        [envVar.name]: e.target.value,
-                      },
-                    });
-                  }}
-                />
+                {envVar.options ? (
+                  <Select
+                    value={displayValue || undefined}
+                    onValueChange={(value) => {
+                      setAgentConfigOverride({
+                        ...(agentConfigOverride ?? agentConfig),
+                        [selectedAgent.key]: {
+                          ...(agentConfigOverride ?? agentConfig)[selectedAgent.key],
+                          [envVar.name]: value,
+                        },
+                      });
+                    }}
+                  >
+                    <SelectTrigger
+                      id={`${selectedAgent.key}-${envVar.name}`}
+                      aria-label={envVar.label}
+                      className={isServerDefault ? "text-muted-foreground" : ""}
+                    >
+                      <SelectValue placeholder="Select a model" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {envVar.options.map((option) => (
+                        <SelectItem key={option} value={option}>
+                          {option}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <Input
+                    id={`${selectedAgent.key}-${envVar.name}`}
+                    type={envVar.sensitive ? "password" : "text"}
+                    placeholder={envVar.placeholder ?? "Not set"}
+                    value={displayValue}
+                    className={isServerDefault ? "text-muted-foreground" : ""}
+                    onChange={(e) => {
+                      setAgentConfigOverride({
+                        ...(agentConfigOverride ?? agentConfig),
+                        [selectedAgent.key]: {
+                          ...(agentConfigOverride ?? agentConfig)[selectedAgent.key],
+                          [envVar.name]: e.target.value,
+                        },
+                      });
+                    }}
+                  />
+                )}
               </div>
             );
-          });
+              })}
+            </>
+          );
         })()}
         {selectedAgent.key === "codex" && codexCredentialMethod === "chatgpt" && (
           <p className="text-xs text-muted-foreground">
