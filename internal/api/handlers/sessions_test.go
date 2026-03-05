@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -136,7 +137,7 @@ func TestSessionHandler_Get_PlanSession(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+planID.String(), nil)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", planID.String())
-	ctx := chi.WithRouteContext(req.Context(), rctx)
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
 	req = req.WithContext(middleware.WithOrgID(ctx, orgID))
 
 	rr := httptest.NewRecorder()
@@ -192,7 +193,7 @@ func TestSessionHandler_Get_ManualSession(t *testing.T) {
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", runID.String())
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+runID.String(), nil)
-	ctx := chi.WithRouteContext(req.Context(), rctx)
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
 	req = req.WithContext(middleware.WithOrgID(ctx, orgID))
 
 	rr := httptest.NewRecorder()
@@ -236,7 +237,7 @@ func TestSessionHandler_Get_NotFound(t *testing.T) {
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", sessionID.String())
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+sessionID.String(), nil)
-	ctx := chi.WithRouteContext(req.Context(), rctx)
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
 	req = req.WithContext(middleware.WithOrgID(ctx, orgID))
 
 	rr := httptest.NewRecorder()
