@@ -599,13 +599,13 @@ func TestRunAgent_MediumConfidence(t *testing.T) {
 	err := orch.RunAgent(context.Background(), run)
 	require.NoError(t, err)
 
-	// Medium confidence (0.65 < default balanced auto_proceed 0.85) needs human guidance.
+	// Medium confidence (0.65 >= default aggressive auto_proceed 0.4) proceeds as completed.
 	results := d.agentRuns.getResultUpdates()
 	require.Len(t, results, 1)
-	require.Equal(t, "needs_human_guidance", results[0].status)
+	require.Equal(t, "completed", results[0].status)
 
-	// Validate job should NOT be enqueued.
-	require.NotContains(t, d.jobs.getEnqueued(), "validate")
+	// Validate job should be enqueued.
+	require.Contains(t, d.jobs.getEnqueued(), "validate")
 }
 
 func TestRunAgent_ConcurrencyLimit(t *testing.T) {
@@ -777,7 +777,7 @@ func TestRunAgent_ExactConfidenceThreshold(t *testing.T) {
 		return &agent.AgentResult{
 			Diff:            "--- a/fix.go\n+++ b/fix.go",
 			Summary:         "Fix at exact threshold",
-			ConfidenceScore: 0.85, // Exactly at the default balanced auto_proceed threshold.
+			ConfidenceScore: 0.4, // Exactly at the default aggressive auto_proceed threshold.
 			ExitCode:        0,
 		}, nil
 	}
@@ -786,7 +786,7 @@ func TestRunAgent_ExactConfidenceThreshold(t *testing.T) {
 	err := orch.RunAgent(context.Background(), run)
 	require.NoError(t, err)
 
-	// Score == 0.85 should proceed (>= balanced auto_proceed threshold).
+	// Score == 0.4 should proceed (>= aggressive auto_proceed threshold).
 	results := d.agentRuns.getResultUpdates()
 	require.Len(t, results, 1)
 	require.Equal(t, "completed", results[0].status)

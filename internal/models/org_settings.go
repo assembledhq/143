@@ -64,7 +64,7 @@ const (
 	DefaultAutonomyLevel        = "manual"
 	DefaultAggressiveness       = 5
 	DefaultMaxConcurrentRuns    = 3
-	DefaultAgentAutonomy        = AgentAutonomyBalanced
+	DefaultAgentAutonomy        = AgentAutonomyAggressive
 	DefaultMinPriorityThreshold = 30.0
 	DefaultDefaultAgentType     = "codex"
 	DefaultPMScheduleHours      = 4

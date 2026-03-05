@@ -27,7 +27,7 @@ import { DEFAULT_PM_MODEL, PM_MODELS_BY_PROVIDER } from "@/lib/model-constants";
 
 const DEFAULT_SETTINGS: Pick<
   Required<OrgSettings>,
-  "pm_schedule_hours" | "pm_model" | "priority_weights" | "min_priority_threshold" | "product_direction" | "product_context"
+  "pm_schedule_hours" | "pm_model" | "priority_weights" | "product_direction" | "product_context"
 > = {
   pm_schedule_hours: 4,
   pm_model: DEFAULT_PM_MODEL,
@@ -37,7 +37,6 @@ const DEFAULT_SETTINGS: Pick<
     recency: 0.2,
     revenue_risk: 0.2,
   },
-  min_priority_threshold: 20,
   product_direction: "",
   product_context: {
     philosophy: "",
@@ -89,7 +88,6 @@ export default function PrioritizationPage() {
   const [severity, setSeverity] = useState(String(DEFAULT_SETTINGS.priority_weights.severity));
   const [recency, setRecency] = useState(String(DEFAULT_SETTINGS.priority_weights.recency));
   const [revenueRisk, setRevenueRisk] = useState(String(DEFAULT_SETTINGS.priority_weights.revenue_risk));
-  const [minThreshold, setMinThreshold] = useState(String(DEFAULT_SETTINGS.min_priority_threshold));
   const [saveStatus, setSaveStatus] = useState<"idle" | "success" | "error">("idle");
 
   // Sync server data into form state.
@@ -113,7 +111,6 @@ export default function PrioritizationPage() {
     setSeverity(String(s.priority_weights?.severity ?? DEFAULT_SETTINGS.priority_weights.severity));
     setRecency(String(s.priority_weights?.recency ?? DEFAULT_SETTINGS.priority_weights.recency));
     setRevenueRisk(String(s.priority_weights?.revenue_risk ?? DEFAULT_SETTINGS.priority_weights.revenue_risk));
-    setMinThreshold(String(s.min_priority_threshold ?? DEFAULT_SETTINGS.min_priority_threshold));
   }
 
   const mutation = useMutation({
@@ -157,7 +154,6 @@ export default function PrioritizationPage() {
           recency: parseFloat(recency),
           revenue_risk: parseFloat(revenueRisk),
         },
-        min_priority_threshold: parseInt(minThreshold, 10),
         product_direction: productDirection,
         product_context: {
           philosophy: productPhilosophy,
@@ -403,24 +399,6 @@ export default function PrioritizationPage() {
                     onValueChange={([v]) => setRevenueRisk((v / 100).toFixed(2))}
                   />
                 </div>
-              </div>
-
-              <div className="space-y-3 pt-2">
-                <div className="flex items-center justify-between">
-                  <Label htmlFor="min-threshold">Minimum Score Threshold</Label>
-                  <span className="text-sm font-medium tabular-nums">{minThreshold}</span>
-                </div>
-                <Slider
-                  id="min-threshold"
-                  min={0}
-                  max={100}
-                  step={1}
-                  value={[parseInt(minThreshold, 10) || 0]}
-                  onValueChange={([v]) => setMinThreshold(String(v))}
-                />
-                <p className="text-xs text-muted-foreground">
-                  Issues scoring below this threshold will not be auto-processed.
-                </p>
               </div>
             </div>
           </CardContent>

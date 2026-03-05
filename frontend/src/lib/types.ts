@@ -208,7 +208,6 @@ export interface OrgSettings {
   autonomy_level?: 'manual' | 'auto_simple' | 'auto_all';
   execution_aggressiveness?: number;
   max_concurrent_runs?: number;
-  agent_autonomy?: 'conservative' | 'balanced' | 'aggressive';
   pm_schedule_hours?: number;
   pm_model?: string;
   priority_weights?: {
