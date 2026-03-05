@@ -19,14 +19,16 @@ type AllIntegrationCardsProps = SourceControlIntegrationCardProps & AdditionalIn
 
 function IntegrationLogo({ name, src }: { name: string; src: string }) {
   return (
-    <Image
-      src={src}
-      alt={`${name} logo`}
-      className="h-6 w-6 rounded-sm object-contain"
-      width={24}
-      height={24}
-      unoptimized
-    />
+    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-muted">
+      <Image
+        src={src}
+        alt={`${name} logo`}
+        className="h-5 w-5 object-contain"
+        width={20}
+        height={20}
+        unoptimized
+      />
+    </div>
   );
 }
 
