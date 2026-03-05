@@ -178,4 +178,52 @@ describe('SessionsPage', () => {
 
     expect(await screen.findByText('Starting session...')).toBeInTheDocument();
   });
+
+  it('starts a one-off manual session from chat composer', async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.post('/api/v1/sessions/manual', async ({ request }) => {
+        const body = await request.json() as { message: string; images?: string[] };
+        if (!body.message.includes('Investigate checkout timeout')) {
+          return HttpResponse.json({ error: { code: 'INVALID', message: 'bad body' } }, { status: 400 });
+        }
+        return HttpResponse.json(
+          {
+            data: {
+              id: 'session-manual-chat-1',
+              type: 'manual',
+              status: 'active',
+              triggered_by: 'manual',
+              title: 'Investigate checkout timeout and propose a fix',
+              task_count: 1,
+              active_run_count: 1,
+              completed_run_count: 0,
+              failed_run_count: 0,
+              tasks: [
+                {
+                  rank: 1,
+                  title: 'Investigate checkout timeout and propose a fix',
+                  issue_ids: ['issue-manual-1'],
+                  status: 'delegated',
+                  agent_run_id: 'run-manual-chat-1',
+                  run_status: 'running',
+                },
+              ],
+              created_at: '2026-03-05T12:00:00Z',
+            },
+          },
+          { status: 201 },
+        );
+      }),
+    );
+
+    renderWithProviders(<SessionsPageContent />);
+
+    await user.click(await screen.findByRole('button', { name: 'New Manual Session' }));
+    await user.type(screen.getByLabelText('Message'), 'Investigate checkout timeout and propose a fix.');
+    await user.click(screen.getByRole('button', { name: 'Start Session' }));
+
+    expect(await screen.findByText('Starting session...')).toBeInTheDocument();
+  });
 });
