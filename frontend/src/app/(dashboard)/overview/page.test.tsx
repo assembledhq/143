@@ -356,6 +356,36 @@ describe('OverviewPage', () => {
     expect(cancelButton.compareDocumentPosition(tryAgainButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
+  it('uses the same modal action layout in agent settings auth flow', async () => {
+    codexInitiateMock.mockRejectedValueOnce(new Error('Network error'));
+    const user = userEvent.setup();
+    renderWithProviders(<Overview />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Settings' })).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Configure coding agent')).toBeInTheDocument();
+    });
+
+    await user.click(screen.getAllByRole('button', { name: 'Sign in with ChatGPT' })[0]);
+
+    await waitFor(() => {
+      expect(screen.getByText('Failed to start authentication. Please try again.')).toBeInTheDocument();
+    });
+
+    const cancelButton = screen.getByRole('button', { name: 'Cancel' });
+    const tryAgainButton = screen.getByRole('button', { name: 'Try Again' });
+
+    expect(cancelButton).toBeInTheDocument();
+    expect(tryAgainButton).toBeInTheDocument();
+    expect(cancelButton.parentElement).toBe(tryAgainButton.parentElement);
+    expect(cancelButton.compareDocumentPosition(tryAgainButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it('shows completed state when polling returns completed', async () => {
     // First call returns pending (for initial status check in AgentSelectionSection)
     // Second call onwards returns completed (for polling inside modal)
