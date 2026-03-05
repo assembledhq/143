@@ -14,9 +14,11 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { PageHeader } from "@/components/page-header";
-import { IntegrationsCard } from "@/components/integrations-card";
+import {
+  AdditionalIntegrationCards,
+  SourceControlIntegrationCard,
+} from "@/components/integration-connection-cards";
 import { AgentSettingsEditor } from "@/components/agent-settings-editor";
-import { INTEGRATIONS } from "@/lib/integrations";
 import type { CodexAuthStatus, CodexDeviceAuth, OrgSettings } from "@/lib/types";
 
 function OverviewDeviceCodeModal({ onClose, onConnected }: { onClose: () => void; onConnected: () => void }) {
@@ -282,7 +284,6 @@ function AgentSelectionSection() {
 }
 
 export default function Overview() {
-  const [github, sentry, linear] = INTEGRATIONS;
   const queryClient = useQueryClient();
 
   const { data: integrationsResp } = useQuery({
@@ -318,20 +319,7 @@ export default function Overview() {
             Connect GitHub so the agent can access your repositories and open PRs.
           </p>
         </div>
-        <IntegrationsCard
-          items={[
-            {
-              id: github.key,
-              title: `Connect ${github.name}`,
-              description: github.description,
-              action: (
-                <Button size="sm" onClick={() => api.auth.login()} aria-label="Connect GitHub">
-                  Connect
-                </Button>
-              ),
-            },
-          ]}
-        />
+        <SourceControlIntegrationCard onConnectGitHub={() => api.auth.login()} />
       </div>
 
       {/* Step 3: Additional Integrations — optional, lower priority */}
@@ -342,41 +330,11 @@ export default function Overview() {
             Optional — connect issue and error sources to feed the agent automatically.
           </p>
         </div>
-        <IntegrationsCard
-          items={[
-            {
-              id: sentry.key,
-              title: `Connect ${sentry.name}`,
-              description: sentry.description,
-              action: (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => api.auth.loginSentry()}
-                  aria-label="Connect Sentry"
-                >
-                  Connect
-                </Button>
-              ),
-            },
-            {
-              id: linear.key,
-              title: `Connect ${linear.name}`,
-              description: linear.description,
-              action: (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  aria-label={linearIntegration ? "Linear Connected" : "Connect Linear"}
-                  loading={connectLinearMutation.isPending}
-                  disabled={Boolean(linearIntegration) || connectLinearMutation.isPending}
-                  onClick={() => connectLinearMutation.mutate()}
-                >
-                  {linearIntegration ? "Connected" : "Connect"}
-                </Button>
-              ),
-            },
-          ]}
+        <AdditionalIntegrationCards
+          linearConnected={Boolean(linearIntegration)}
+          linearLoading={connectLinearMutation.isPending}
+          onConnectSentry={() => api.auth.loginSentry()}
+          onConnectLinear={() => connectLinearMutation.mutate()}
         />
       </div>
 
