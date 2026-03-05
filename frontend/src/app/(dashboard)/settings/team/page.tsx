@@ -122,7 +122,7 @@ export default function TeamSettingsPage() {
   };
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       {actionError && (
         <div className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
           {actionError}

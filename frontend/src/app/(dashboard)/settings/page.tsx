@@ -14,7 +14,7 @@ export default function SettingsPage() {
   });
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       <section className="space-y-3">
         <h2 className="text-[13px] font-medium text-foreground">General</h2>
         <Card>

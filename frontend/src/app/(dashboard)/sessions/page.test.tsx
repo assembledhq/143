@@ -125,10 +125,10 @@ describe('SessionsPage', () => {
     expect(sessionLinks.length).toBeGreaterThan(0);
   });
 
-  it('shows Run Analysis button', async () => {
+  it('shows Analyze Issues button', async () => {
     renderWithProviders(<SessionsPageContent />);
 
-    expect(screen.getByText('Run Analysis')).toBeInTheDocument();
+    expect(screen.getByText('Analyze Issues')).toBeInTheDocument();
   });
 
   it('starts a one-off manual session from chat composer', async () => {

@@ -31,6 +31,19 @@ vi.mock("@/hooks/use-auth", () => ({
 }));
 
 describe("AuthenticatedLayout", () => {
+  it("uses a dense full-width content area", () => {
+    const { container } = renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
+
+    const contentWrapper = container.querySelector("main > div");
+    expect(contentWrapper).toHaveClass("max-w-none");
+    expect(contentWrapper).toHaveClass("px-4");
+    expect(contentWrapper).toHaveClass("py-4");
+  });
+
   it("shows all settings entries in the user menu", async () => {
     const user = userEvent.setup();
 
