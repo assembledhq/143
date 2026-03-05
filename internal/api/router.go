@@ -74,7 +74,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	healthHandler := handlers.NewHealthHandler(pool)
 	authHandler := handlers.NewAuthHandler(cfg, orgStore, userStore, sessionStore, invitationStore)
 	repoHandler := handlers.NewRepositoryHandler(repoStore)
-	integrationHandler := handlers.NewIntegrationHandler(integrationStore)
+	integrationHandler := handlers.NewIntegrationHandler(
+		integrationStore,
+		credentialStore,
+		cfg.LinearOAuthClientID,
+		cfg.LinearOAuthClientSecret,
+		cfg.BaseURL,
+		cfg.FrontendURL,
+	)
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, repoStore, integrationStore, prService)
 	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeAgentEnv())
 	issueHandler := handlers.NewIssueHandler(issueStore)
@@ -176,6 +183,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Use(middleware.RequireRole("admin", "member"))
 
 			r.Patch("/api/v1/repositories/{id}", repoHandler.Update)
+			r.Get("/api/v1/integrations/linear/login", integrationHandler.StartLinearOAuth)
+			r.Get("/api/v1/integrations/linear/callback", integrationHandler.HandleLinearOAuthCallback)
 			r.Post("/api/v1/integrations/linear/connect", integrationHandler.ConnectLinear)
 			r.Post("/api/v1/issues/{id}/fix", runHandler.TriggerFix)
 			r.Post("/api/v1/sessions/manual", sessionHandler.CreateManual)

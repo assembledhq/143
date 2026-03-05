@@ -28,9 +28,13 @@ type Config struct {
 	GoogleOAuthClientID     string `env:"GOOGLE_OAUTH_CLIENT_ID"`
 	GoogleOAuthClientSecret string `env:"GOOGLE_OAUTH_CLIENT_SECRET"`
 
+	// Linear OAuth
+	LinearOAuthClientID     string `env:"LINEAR_OAUTH_CLIENT_ID"`
+	LinearOAuthClientSecret string `env:"LINEAR_OAUTH_CLIENT_SECRET"`
+
 	// GitHub App
 	GitHubAppID         int64  `env:"GITHUB_APP_ID"`
-	GitHubAppPrivateKey  string `env:"GITHUB_APP_PRIVATE_KEY"`
+	GitHubAppPrivateKey string `env:"GITHUB_APP_PRIVATE_KEY"`
 	GitHubWebhookSecret string `env:"GITHUB_WEBHOOK_SECRET"`
 
 	// CSRF
@@ -205,6 +209,7 @@ func (c *Config) LogStatus(logger zerolog.Logger) {
 		{"Database", c.DatabaseURL != "", ""},
 		{"GitHub OAuth", c.GitHubOAuthClientID != "" && c.GitHubOAuthClientSecret != "", "login"},
 		{"Google OAuth", c.GoogleOAuthClientID != "" && c.GoogleOAuthClientSecret != "", "login"},
+		{"Linear OAuth", c.LinearOAuthClientID != "" && c.LinearOAuthClientSecret != "", "integration auth"},
 		{"GitHub App", c.GitHubAppID != 0 && c.GitHubAppPrivateKey != "", "webhooks, PRs"},
 		{"Credential encryption", c.EncryptionMasterKey != "", "encrypted credential storage"},
 	}
