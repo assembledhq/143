@@ -27,8 +27,10 @@ go.work.sum
 # env files (never commit plaintext secrets)
 .env
 .env.local
+.env.staging
+.env.production
 .env.*.local
-# .env.enc is the SOPS-encrypted version — safe to commit (intentionally NOT listed here)
+# .env*.enc files are SOPS-encrypted — safe to commit (intentionally NOT listed here)
 
 # air live reload
 tmp/

@@ -1,4 +1,4 @@
-.PHONY: dev dev-local dev-frontend-only setup test test-coverage migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap secrets-setup secrets-encrypt secrets-decrypt secrets-edit
+.PHONY: dev dev-local dev-frontend-only setup test test-coverage migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -91,18 +91,34 @@ lint-bootstrap:
 #
 # Prerequisites: brew install sops age  (or apt install sops age)
 #
-# How it works:
-#   1. make secrets-setup      — generate an age keypair (one-time)
-#   2. Fill in .env with real values
-#   3. make secrets-encrypt    — encrypt .env → .env.enc (committed to git)
-#   4. make secrets-decrypt    — decrypt .env.enc → .env (on deploy/new machine)
-#   5. make secrets-edit       — edit encrypted secrets in-place
+# Quick start:
+#   1. make secrets-setup        — generate an age keypair (one-time)
+#   2. Paste your public key into .sops.yaml
+#   3. Fill in .env with real values
+#   4. make secrets-encrypt      — encrypt .env → .env.enc
+#
+# Per-environment usage (ENV defaults to empty = development):
+#   make secrets-encrypt ENV=staging    — .env.staging → .env.staging.enc
+#   make secrets-decrypt ENV=staging    — .env.staging.enc → .env.staging
+#   make secrets-edit    ENV=staging    — edit .env.staging.enc in-place
+#
+# See docs/secrets/README.md for the full guide.
 
 SOPS_AGE_KEY_FILE ?= $(HOME)/.config/sops/age/keys.txt
+ENV ?=
+
+# Resolve file names from ENV. "" → .env / .env.enc, "staging" → .env.staging / .env.staging.enc
+ifdef ENV
+  _ENV_FILE     := .env.$(ENV)
+  _ENV_ENC_FILE := .env.$(ENV).enc
+else
+  _ENV_FILE     := .env
+  _ENV_ENC_FILE := .env.enc
+endif
 
 secrets-setup:
-	@command -v age-keygen >/dev/null 2>&1 || { echo "Install age: brew install age"; exit 1; }
-	@command -v sops >/dev/null 2>&1 || { echo "Install sops: brew install sops"; exit 1; }
+	@command -v age-keygen >/dev/null 2>&1 || { echo "Install age: brew install age  (or: apt install age)"; exit 1; }
+	@command -v sops >/dev/null 2>&1 || { echo "Install sops: brew install sops  (or: apt install sops)"; exit 1; }
 	@if [ -f $(SOPS_AGE_KEY_FILE) ]; then \
 		echo "age key already exists at $(SOPS_AGE_KEY_FILE)"; \
 		echo "Public key:"; grep "public key:" $(SOPS_AGE_KEY_FILE) | awk '{print $$4}'; \
@@ -111,21 +127,35 @@ secrets-setup:
 		age-keygen -o $(SOPS_AGE_KEY_FILE) 2>&1; \
 		echo ""; \
 		echo "Key saved to $(SOPS_AGE_KEY_FILE)"; \
-		echo "Add the public key above to .sops.yaml in the repo."; \
-		echo "Keep $(SOPS_AGE_KEY_FILE) safe — it's your decryption key."; \
+		echo ""; \
+		echo "Next steps:"; \
+		echo "  1. Copy the public key printed above"; \
+		echo "  2. Paste it into .sops.yaml (replace the TODO placeholder)"; \
+		echo "  3. Run: make secrets-encrypt"; \
 	fi
 
 secrets-encrypt:
-	@test -f .env || { echo "No .env file to encrypt. Copy .env.example to .env first."; exit 1; }
+	@test -f $(_ENV_FILE) || { echo "No $(_ENV_FILE) to encrypt. Copy .env.example to $(_ENV_FILE) first."; exit 1; }
 	@test -f .sops.yaml || { echo "No .sops.yaml found. Run make secrets-setup first."; exit 1; }
-	sops --encrypt .env > .env.enc
-	@echo "Encrypted .env → .env.enc (safe to commit)"
+	sops --encrypt $(_ENV_FILE) > $(_ENV_ENC_FILE)
+	@echo "Encrypted $(_ENV_FILE) → $(_ENV_ENC_FILE) (safe to commit)"
 
 secrets-decrypt:
-	@test -f .env.enc || { echo "No .env.enc file found."; exit 1; }
-	sops --decrypt .env.enc > .env
-	@echo "Decrypted .env.enc → .env"
+	@test -f $(_ENV_ENC_FILE) || { echo "No $(_ENV_ENC_FILE) found."; exit 1; }
+	sops --decrypt $(_ENV_ENC_FILE) > $(_ENV_FILE)
+	@echo "Decrypted $(_ENV_ENC_FILE) → $(_ENV_FILE)"
 
 secrets-edit:
-	@test -f .env.enc || { echo "No .env.enc file found."; exit 1; }
-	sops .env.enc
+	@test -f $(_ENV_ENC_FILE) || { echo "No $(_ENV_ENC_FILE) found."; exit 1; }
+	sops $(_ENV_ENC_FILE)
+
+# Re-encrypt all .enc files with the current .sops.yaml keys.
+# Run this after adding a new team member's public key to .sops.yaml.
+secrets-rotate:
+	@command -v sops >/dev/null 2>&1 || { echo "Install sops: brew install sops"; exit 1; }
+	@for f in .env*.enc; do \
+		[ -f "$$f" ] || continue; \
+		echo "Rotating keys for $$f ..."; \
+		sops updatekeys --yes "$$f"; \
+	done
+	@echo "Done. Commit the updated .enc files."
