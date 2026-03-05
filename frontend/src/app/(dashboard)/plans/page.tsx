@@ -130,9 +130,10 @@ export default function PlansPage() {
             size="sm"
             onClick={handleAnalyze}
             disabled={analyzeMutation.isPending || isAnalyzing}
+            title="Review open issues, prioritize them, and kick off agent runs"
           >
             <RefreshCw className={`mr-2 h-4 w-4 ${analyzeMutation.isPending || isAnalyzing ? "animate-spin" : ""}`} />
-            {analyzeMutation.isPending ? "Starting..." : isAnalyzing ? "Analyzing..." : "Run Analysis"}
+            {analyzeMutation.isPending ? "Starting..." : isAnalyzing ? "Analyzing..." : "Analyze Issues"}
           </Button>
         }
       />

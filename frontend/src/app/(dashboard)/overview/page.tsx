@@ -250,7 +250,7 @@ export default function Overview() {
   const allRequiredConnected = agentConnected && Boolean(githubIntegration);
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       {/* Hero header */}
       <div className="space-y-3">
         <div>

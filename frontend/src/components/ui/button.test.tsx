@@ -3,6 +3,15 @@ import { renderWithProviders, screen } from '@/test/test-utils';
 import { Button } from './button';
 
 describe('Button', () => {
+  it('uses compact default sizing', () => {
+    renderWithProviders(
+      <Button>Compact</Button>,
+    );
+
+    const button = screen.getByRole('button', { name: 'Compact' });
+    expect(button).toHaveClass('h-8');
+  });
+
   it('shows a spinner and disables the button when loading', () => {
     const { container } = renderWithProviders(
       <Button loading>Submit</Button>,
