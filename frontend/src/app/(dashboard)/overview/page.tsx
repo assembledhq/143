@@ -9,7 +9,7 @@ import { PageHeader } from "@/components/page-header";
 import { IntegrationsCard } from "@/components/integrations-card";
 import { AgentSettingsEditor } from "@/components/agent-settings-editor";
 import { INTEGRATIONS } from "@/lib/integrations";
-import type { CodexAuthStatus, CodexDeviceAuth } from "@/lib/types";
+import type { CodexAuthStatus, CodexDeviceAuth, OrgSettings } from "@/lib/types";
 
 function OverviewDeviceCodeModal({ onClose, onConnected }: { onClose: () => void; onConnected: () => void }) {
   const [deviceAuth, setDeviceAuth] = useState<CodexDeviceAuth | null>(null);
@@ -112,13 +112,14 @@ function OverviewDeviceCodeModal({ onClose, onConnected }: { onClose: () => void
   );
 }
 
-function AgentSettingsModal({ onClose }: { onClose: () => void }) {
+function AgentSettingsModal({ onClose, initialAgentType }: { onClose: () => void; initialAgentType?: OrgSettings["default_agent_type"] }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
       <div className="w-full max-w-2xl rounded-lg border bg-background p-6 shadow-lg">
         <AgentSettingsEditor
-          title="Edit agent settings"
-          description="Update your default coding agent and auth credentials without leaving setup."
+          title="Configure coding agent"
+          description="Set your default agent and configure credentials."
+          initialAgentType={initialAgentType}
           onClose={onClose}
         />
       </div>
@@ -126,57 +127,152 @@ function AgentSettingsModal({ onClose }: { onClose: () => void }) {
   );
 }
 
-function AgentSetupCard() {
-  const [authStatus, setAuthStatus] = useState<CodexAuthStatus | null>(null);
-  const [showModal, setShowModal] = useState(false);
+function AgentSelectionSection() {
+  const [codexAuthStatus, setCodexAuthStatus] = useState<CodexAuthStatus | null>(null);
+  const [agentConfig, setAgentConfig] = useState<Record<string, Record<string, string>>>({});
+  const [agentDefaults, setAgentDefaults] = useState<Record<string, Record<string, string>>>({});
+  const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [settingsAgentType, setSettingsAgentType] = useState<OrgSettings["default_agent_type"]>("codex");
 
-  const fetchStatus = useCallback(() => {
-    api.codexAuth.status().then((res) => setAuthStatus(res.data)).catch(() => {});
+  const fetchData = useCallback(() => {
+    api.codexAuth.status().then((res) => setCodexAuthStatus(res.data)).catch(() => {});
+    api.settings.get().then((res) => {
+      const settings = res.data?.settings as OrgSettings | undefined;
+      setAgentConfig(settings?.agent_config ?? {});
+    }).catch(() => {});
+    api.settings.getAgentDefaults().then((res) => {
+      setAgentDefaults(res.data ?? {});
+    }).catch(() => {});
   }, []);
 
-  useEffect(() => { fetchStatus(); }, [fetchStatus]);
+  useEffect(() => { fetchData(); }, [fetchData]);
 
-  if (authStatus?.status === "completed") {
-    return (
-      <Card className="py-0">
-        <CardContent className="flex items-center justify-between gap-4 py-4">
-          <div className="min-w-0 flex-1">
-            <p className="text-sm font-medium text-foreground">Coding Agent</p>
-            <p className="mt-0.5 text-sm text-muted-foreground">
-              Codex is connected via ChatGPT.
-            </p>
-          </div>
-          <Badge variant="secondary">Connected</Badge>
-        </CardContent>
-      </Card>
-    );
-  }
+  const isCodexConnected = codexAuthStatus?.status === "completed"
+    || Boolean(agentConfig.codex?.OPENAI_API_KEY)
+    || Boolean(agentDefaults.codex?.OPENAI_API_KEY);
+
+  const isClaudeConnected = Boolean(agentConfig.claude_code?.ANTHROPIC_API_KEY)
+    || Boolean(agentDefaults.claude_code?.ANTHROPIC_API_KEY);
+
+  const isGeminiConnected = Boolean(agentConfig.gemini_cli?.GEMINI_API_KEY)
+    || Boolean(agentDefaults.gemini_cli?.GEMINI_API_KEY);
 
   return (
     <>
-      <Card className="py-0">
-        <CardContent className="flex items-center justify-between gap-4 py-4">
-          <div className="min-w-0 flex-1">
-            <p className="text-sm font-medium text-foreground">Connect your coding agent</p>
-            <p className="mt-0.5 text-sm text-muted-foreground">
-              Sign in with ChatGPT to let Codex fix issues automatically, or configure an API key in Settings.
-            </p>
-          </div>
-          <div className="flex shrink-0 gap-2">
-            <Button size="sm" onClick={() => setShowModal(true)}>Sign in with ChatGPT</Button>
-            <Button size="sm" variant="outline" onClick={() => setShowSettingsModal(true)}>Settings</Button>
-          </div>
-        </CardContent>
-      </Card>
-      {showModal && (
+      <div className="space-y-3">
+        <div className="space-y-1">
+          <h2 className="text-sm font-medium text-foreground">Coding agent</h2>
+          <p className="text-xs text-muted-foreground">
+            Choose the agent that fixes your issues. You can change this later in settings.
+          </p>
+        </div>
+
+        {/* Featured: Codex (Recommended) */}
+        <Card className={`py-0 ${!isCodexConnected ? "border-primary" : ""}`} data-testid="agent-card-codex">
+          <CardContent className="flex items-center justify-between gap-4 py-4">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <p className="text-sm font-medium text-foreground">Codex</p>
+                <Badge variant="secondary" className="text-xs">Recommended</Badge>
+              </div>
+              <p className="mt-0.5 text-sm text-muted-foreground">
+                Sign in with ChatGPT for instant access to gpt-5.3-codex. No API key needed.
+              </p>
+            </div>
+            <div className="flex shrink-0 gap-2">
+              {isCodexConnected ? (
+                <Badge variant="secondary">Connected</Badge>
+              ) : (
+                <>
+                  <Button size="sm" onClick={() => setShowDeviceCodeModal(true)}>
+                    Sign in with ChatGPT
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      setSettingsAgentType("codex");
+                      setShowSettingsModal(true);
+                    }}
+                  >
+                    Settings
+                  </Button>
+                </>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Secondary agents: Claude Code + Gemini CLI */}
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Card className="py-0" data-testid="agent-card-claude">
+            <CardContent className="flex items-center justify-between gap-4 py-4">
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-foreground">Claude Code</p>
+                <p className="mt-0.5 text-sm text-muted-foreground">
+                  Use your Anthropic API key for Claude-powered fixes.
+                </p>
+              </div>
+              <div className="shrink-0">
+                {isClaudeConnected ? (
+                  <Badge variant="secondary">Connected</Badge>
+                ) : (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      setSettingsAgentType("claude_code");
+                      setShowSettingsModal(true);
+                    }}
+                  >
+                    Configure
+                  </Button>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="py-0" data-testid="agent-card-gemini">
+            <CardContent className="flex items-center justify-between gap-4 py-4">
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-foreground">Gemini CLI</p>
+                <p className="mt-0.5 text-sm text-muted-foreground">
+                  Use your Google Gemini API key for Gemini-powered fixes.
+                </p>
+              </div>
+              <div className="shrink-0">
+                {isGeminiConnected ? (
+                  <Badge variant="secondary">Connected</Badge>
+                ) : (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      setSettingsAgentType("gemini_cli");
+                      setShowSettingsModal(true);
+                    }}
+                  >
+                    Configure
+                  </Button>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+
+      {showDeviceCodeModal && (
         <OverviewDeviceCodeModal
-          onClose={() => setShowModal(false)}
-          onConnected={() => { setShowModal(false); fetchStatus(); }}
+          onClose={() => setShowDeviceCodeModal(false)}
+          onConnected={() => { setShowDeviceCodeModal(false); fetchData(); }}
         />
       )}
       {showSettingsModal && (
-        <AgentSettingsModal onClose={() => setShowSettingsModal(false)} />
+        <AgentSettingsModal
+          initialAgentType={settingsAgentType}
+          onClose={() => { setShowSettingsModal(false); fetchData(); }}
+        />
       )}
     </>
   );
@@ -186,13 +282,23 @@ export default function Overview() {
   const [github, sentry, linear] = INTEGRATIONS;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <PageHeader
         title="Overview"
-        description="Get started by connecting your tools."
+        description="Set up your coding agent and connect your tools to start fixing issues automatically."
       />
 
+      {/* Step 1: Coding Agent — the core of the product */}
+      <AgentSelectionSection />
+
+      {/* Step 2: Source Control — needed so the agent can access repos and open PRs */}
       <div className="space-y-3">
+        <div className="space-y-1">
+          <h2 className="text-sm font-medium text-foreground">Source control</h2>
+          <p className="text-xs text-muted-foreground">
+            Connect GitHub so the agent can access your repositories and open PRs.
+          </p>
+        </div>
         <IntegrationsCard
           items={[
             {
@@ -205,12 +311,31 @@ export default function Overview() {
                 </Button>
               ),
             },
+          ]}
+        />
+      </div>
+
+      {/* Step 3: Additional Integrations — optional, lower priority */}
+      <div className="space-y-3">
+        <div className="space-y-1">
+          <h2 className="text-sm font-medium text-muted-foreground">Additional integrations</h2>
+          <p className="text-xs text-muted-foreground">
+            Optional — connect issue and error sources to feed the agent automatically.
+          </p>
+        </div>
+        <IntegrationsCard
+          items={[
             {
               id: sentry.key,
               title: `Connect ${sentry.name}`,
               description: sentry.description,
               action: (
-                <Button size="sm" onClick={() => api.auth.loginSentry()} aria-label="Connect Sentry">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => api.auth.loginSentry()}
+                  aria-label="Connect Sentry"
+                >
                   Connect
                 </Button>
               ),
@@ -224,8 +349,6 @@ export default function Overview() {
           ]}
         />
       </div>
-
-      <AgentSetupCard />
 
       <p className="text-sm text-muted-foreground">
         Once integrations are connected, 143 picks up issues, generates fixes, and opens PRs automatically.
