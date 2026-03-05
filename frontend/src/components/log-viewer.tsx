@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
+import { AlertTriangle, RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 import type { AgentRunLog } from "@/lib/types";
 
@@ -36,6 +38,8 @@ export function LogViewer({ runId, isActive }: LogViewerProps) {
   const [logs, setLogs] = useState<AgentRunLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [streaming, setStreaming] = useState(false);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+  const [streamError, setStreamError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
   const reconnectAttempts = useRef(0);
@@ -57,32 +61,37 @@ export function LogViewer({ runId, isActive }: LogViewerProps) {
     });
   }, []);
 
-  // Fetch logs via REST API on mount (works for both active and completed runs).
-  useEffect(() => {
-    let cancelled = false;
-
-    async function fetchLogs() {
-      try {
-        const response = await api.runs.getLogs(runId);
-        if (!cancelled) {
-          const fetched = response.data || [];
-          seenIds.current = new Set(fetched.map((l) => l.id));
-          setLogs(fetched);
-        }
-      } catch {
-        // Ignore fetch errors — logs may simply not exist yet.
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
+  const fetchLogs = useCallback(async (signal?: AbortSignal) => {
+    setLoading(true);
+    setFetchError(null);
+    try {
+      const response = await api.runs.getLogs(runId);
+      if (!signal?.aborted) {
+        const fetched = response.data || [];
+        seenIds.current = new Set(fetched.map((l) => l.id));
+        setLogs(fetched);
+      }
+    } catch (err) {
+      if (!signal?.aborted) {
+        setFetchError(
+          err instanceof Error ? err.message : "Failed to load logs"
+        );
+      }
+    } finally {
+      if (!signal?.aborted) {
+        setLoading(false);
       }
     }
-
-    fetchLogs();
-    return () => {
-      cancelled = true;
-    };
   }, [runId]);
+
+  // Fetch logs via REST API on mount (works for both active and completed runs).
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchLogs(controller.signal);
+    return () => {
+      controller.abort();
+    };
+  }, [fetchLogs]);
 
   // Start SSE streaming only for active runs.
   useEffect(() => {
@@ -101,6 +110,7 @@ export function LogViewer({ runId, isActive }: LogViewerProps) {
 
       eventSource.onopen = () => {
         setStreaming(true);
+        setStreamError(null);
         reconnectAttempts.current = 0;
       };
 
@@ -129,6 +139,8 @@ export function LogViewer({ runId, isActive }: LogViewerProps) {
             Math.pow(2, reconnectAttempts.current);
           reconnectAttempts.current += 1;
           reconnectTimer.current = setTimeout(connect, delay);
+        } else {
+          setStreamError("Log stream disconnected. Retries exhausted.");
         }
       };
     }
@@ -157,6 +169,23 @@ export function LogViewer({ runId, isActive }: LogViewerProps) {
     );
   }
 
+  if (fetchError && logs.length === 0) {
+    return (
+      <div className="flex flex-col items-center gap-3 py-8 text-sm text-muted-foreground">
+        <AlertTriangle className="h-8 w-8 text-muted-foreground/50" />
+        <p>{fetchError}</p>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => fetchLogs()}
+        >
+          <RefreshCw className="mr-1.5 h-3 w-3" />
+          Retry
+        </Button>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-2">
       {isActive && streaming && (
@@ -166,6 +195,12 @@ export function LogViewer({ runId, isActive }: LogViewerProps) {
             <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500" />
           </span>
           Streaming...
+        </div>
+      )}
+      {streamError && (
+        <div className="flex items-center gap-2 text-xs text-destructive">
+          <AlertTriangle className="h-3 w-3 shrink-0" />
+          {streamError}
         </div>
       )}
       <div
