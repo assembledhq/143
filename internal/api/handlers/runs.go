@@ -181,6 +181,38 @@ func (h *RunHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.AgentRun]{Data: *run})
 }
 
+// GetLogs returns all logs for a run as a JSON array.
+// This is the primary endpoint for viewing historical logs for completed runs
+// and also serves as the initial log fetch for active runs.
+func (h *RunHandler) GetLogs(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	runID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid run ID")
+		return
+	}
+
+	// Verify run exists and belongs to org.
+	_, err = h.runStore.GetByID(r.Context(), orgID, runID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "run not found")
+		return
+	}
+
+	logs, err := h.logStore.ListByRunID(r.Context(), runID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list logs")
+		return
+	}
+	if logs == nil {
+		logs = []models.AgentRunLog{}
+	}
+
+	writeJSON(w, http.StatusOK, models.ListResponse[models.AgentRunLog]{
+		Data: logs,
+	})
+}
+
 // StreamLogs streams agent run logs as Server-Sent Events.
 // Note: agent_run_logs are scoped by agent_run_id (which is itself org-scoped),
 // so this endpoint verifies org ownership via the run lookup rather than
@@ -194,9 +226,16 @@ func (h *RunHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify run exists.
-	_, err = h.runStore.GetByID(r.Context(), orgID, runID)
+	run, err := h.runStore.GetByID(r.Context(), orgID, runID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "run not found")
+		return
+	}
+
+	// For terminal runs, return existing logs as JSON instead of SSE
+	// since there will be no new logs to stream.
+	if isTerminalStatus(run.Status) {
+		h.GetLogs(w, r)
 		return
 	}
 
@@ -251,6 +290,9 @@ func (h *RunHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 
 			if isTerminalStatus(run.Status) {
+				// Send a final "done" event so the client knows to stop.
+				fmt.Fprintf(w, "event: done\ndata: {}\n\n")
+				flusher.Flush()
 				return
 			}
 		}
