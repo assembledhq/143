@@ -27,8 +27,8 @@ import { useEffect } from "react";
 
 const navItems = [
   { label: "Overview", icon: LayoutDashboard, href: "/overview" },
-  { label: "Issues", icon: AlertCircle, href: "/issues" },
   { label: "Sessions", icon: Play, href: "/sessions" },
+  { label: "Issues", icon: AlertCircle, href: "/issues" },
 ];
 
 export function AuthenticatedLayout({ children }: { children: React.ReactNode }) {

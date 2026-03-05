@@ -251,36 +251,27 @@ export function AgentSettingsEditor({
           </div>
 
           {codexCredentialMethod === "chatgpt" ? (
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h4 className="text-sm font-medium">Sign in with ChatGPT</h4>
-                  <p className="text-xs text-muted-foreground">Use your ChatGPT account to unlock gpt-5.3-codex.</p>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2">
-                {codexAuthStatus?.status === "completed" ? (
-                  <>
-                    <Badge variant="outline" className="border-green-600 text-green-600">
-                      <CheckCircle2 className="mr-1 h-3.5 w-3.5" />
-                      Connected
-                    </Badge>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => disconnectMutation.mutate()}
-                      disabled={disconnectMutation.isPending}
-                    >
-                      {disconnectMutation.isPending ? "Disconnecting..." : "Disconnect"}
-                    </Button>
-                  </>
-                ) : (
-                  <Button size="sm" onClick={() => setShowDeviceCodeModal(true)}>
-                    Sign in with ChatGPT
+            <div className="flex items-center gap-2">
+              {codexAuthStatus?.status === "completed" ? (
+                <>
+                  <Badge variant="outline" className="border-green-600 text-green-600">
+                    <CheckCircle2 className="mr-1 h-3.5 w-3.5" />
+                    Connected
+                  </Badge>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => disconnectMutation.mutate()}
+                    disabled={disconnectMutation.isPending}
+                  >
+                    {disconnectMutation.isPending ? "Disconnecting..." : "Disconnect"}
                   </Button>
-                )}
-              </div>
+                </>
+              ) : (
+                <Button size="sm" onClick={() => setShowDeviceCodeModal(true)}>
+                  Sign in with ChatGPT
+                </Button>
+              )}
             </div>
           ) : (
             <div className="space-y-2">

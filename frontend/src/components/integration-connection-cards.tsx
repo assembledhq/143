@@ -61,7 +61,6 @@ export function AdditionalIntegrationCards({
           action: (
             <Button
               size="sm"
-              variant="outline"
               onClick={onConnectSentry}
               aria-label="Connect Sentry"
             >
@@ -78,7 +77,6 @@ export function AdditionalIntegrationCards({
           action: (
             <Button
               size="sm"
-              variant="outline"
               aria-label={linearConnected ? "Linear Connected" : "Connect Linear"}
               loading={linearLoading}
               disabled={linearConnected || linearLoading}
@@ -128,7 +126,6 @@ export function AllIntegrationCards({
           action: (
             <Button
               size="sm"
-              variant="outline"
               onClick={onConnectSentry}
               aria-label="Connect Sentry"
             >
@@ -145,7 +142,6 @@ export function AllIntegrationCards({
           action: (
             <Button
               size="sm"
-              variant="outline"
               aria-label={linearConnected ? "Linear Connected" : "Connect Linear"}
               loading={linearLoading}
               disabled={linearConnected || linearLoading}
