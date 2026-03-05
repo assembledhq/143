@@ -89,7 +89,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		jobStore,
 	)
 	pmHandler := handlers.NewPMHandler(pmPlanStore, jobStore)
-	sessionHandler := handlers.NewSessionHandler(pmPlanStore, agentRunStore)
+	sessionHandler := handlers.NewSessionHandler(pmPlanStore, agentRunStore, issueStore, orgStore, jobStore)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
 	credentialHandler := handlers.NewCredentialHandler(credentialStore)
@@ -178,6 +178,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Patch("/api/v1/repositories/{id}", repoHandler.Update)
 			r.Post("/api/v1/integrations/linear/connect", integrationHandler.ConnectLinear)
 			r.Post("/api/v1/issues/{id}/fix", runHandler.TriggerFix)
+			r.Post("/api/v1/sessions/manual", sessionHandler.CreateManual)
 			r.Post("/api/v1/runs/{id}/questions/{qid}/answer", runHandler.AnswerQuestion)
 		})
 
