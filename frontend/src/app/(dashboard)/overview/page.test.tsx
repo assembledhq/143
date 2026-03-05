@@ -250,8 +250,8 @@ describe('OverviewPage', () => {
 
     await user.click(screen.getByRole('radio', { name: 'Use API key' }));
 
-    await user.clear(screen.getByLabelText('Model'));
-    await user.type(screen.getByLabelText('Model'), 'codex-mini');
+    await user.click(screen.getByRole('combobox', { name: 'Model' }));
+    await user.click(await screen.findByRole('option', { name: 'gpt-5.2-codex' }));
     await user.click(screen.getByRole('button', { name: 'Save changes' }));
 
     await waitFor(() => {
