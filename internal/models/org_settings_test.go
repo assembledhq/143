@@ -20,8 +20,9 @@ func TestParseOrgSettings_Defaults(t *testing.T) {
 	require.Equal(t, DefaultWeightSeverity, s.PriorityWeights.Severity, "should default severity weight")
 	require.Equal(t, DefaultWeightRecency, s.PriorityWeights.Recency, "should default recency weight")
 	require.Equal(t, DefaultWeightRevenueRisk, s.PriorityWeights.RevenueRisk, "should default revenue_risk weight")
-	require.Equal(t, DefaultConfidenceAutoProceed, s.ConfidenceThresholds.AutoProceed, "should default auto_proceed threshold")
-	require.Equal(t, DefaultConfidenceHumanReview, s.ConfidenceThresholds.HumanReview, "should default human_review threshold")
+	require.Equal(t, DefaultAgentAutonomy, s.AgentAutonomy, "should default agent_autonomy")
+	require.Equal(t, 0.85, s.ConfidenceThresholds.AutoProceed, "should derive auto_proceed from balanced autonomy")
+	require.Equal(t, 0.5, s.ConfidenceThresholds.HumanReview, "should derive human_review from balanced autonomy")
 	require.Empty(t, s.LLMModel, "should default llm_model to empty")
 	require.Empty(t, s.ProductDirection, "should default product_direction to empty")
 	require.Equal(t, DefaultPMScheduleHours, s.PMScheduleHours, "should default pm_schedule_hours")
@@ -46,6 +47,7 @@ func TestParseOrgSettings_OverrideValues(t *testing.T) {
 		"execution_aggressiveness": 8,
 		"max_concurrent_runs": 10,
 		"min_priority_threshold": 50.0,
+		"agent_autonomy": "conservative",
 		"product_direction": "focus on billing",
 		"pm_schedule_hours": 6,
 		"pm_model": "sonnet",
@@ -56,10 +58,6 @@ func TestParseOrgSettings_OverrideValues(t *testing.T) {
 			"avoid_areas": ["legacy-auth"]
 		},
 		"llm_model": "gpt-4o",
-		"confidence_thresholds": {
-			"auto_proceed": 0.95,
-			"human_review": 0.70
-		},
 		"priority_weights": {
 			"customer_impact": 0.40,
 			"severity": 0.30,
@@ -83,8 +81,9 @@ func TestParseOrgSettings_OverrideValues(t *testing.T) {
 	require.Equal(t, []string{"billing", "api"}, s.ProductContext.FocusAreas, "should parse product_context.focus_areas")
 	require.Equal(t, []string{"legacy-auth"}, s.ProductContext.AvoidAreas, "should parse product_context.avoid_areas")
 	require.Equal(t, "gpt-4o", s.LLMModel, "should override llm_model")
-	require.Equal(t, 0.95, s.ConfidenceThresholds.AutoProceed, "should override auto_proceed")
-	require.Equal(t, 0.70, s.ConfidenceThresholds.HumanReview, "should override human_review")
+	require.Equal(t, "conservative", s.AgentAutonomy, "should override agent_autonomy")
+	require.Equal(t, 1.0, s.ConfidenceThresholds.AutoProceed, "should derive auto_proceed from conservative autonomy")
+	require.Equal(t, 0.8, s.ConfidenceThresholds.HumanReview, "should derive human_review from conservative autonomy")
 	require.Equal(t, 0.40, s.PriorityWeights.CustomerImpact, "should override customer_impact")
 	require.Equal(t, 0.30, s.PriorityWeights.Severity, "should override severity")
 	require.Equal(t, 0.15, s.PriorityWeights.Recency, "should override recency")

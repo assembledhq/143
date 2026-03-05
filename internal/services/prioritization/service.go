@@ -63,6 +63,7 @@ type OrgSettings struct {
 	AutonomyLevel    string `json:"autonomy_level"`
 	Aggressiveness   int    `json:"execution_aggressiveness"`
 	MaxConcurrentRuns int   `json:"max_concurrent_runs"`
+	AgentAutonomy    string `json:"agent_autonomy"`
 	ConfidenceThresholds struct {
 		AutoProceed float64 `json:"auto_proceed"`
 		HumanReview float64 `json:"human_review"`

@@ -12,6 +12,7 @@ type OrgSettings struct {
 	AutonomyLevel        string               `json:"autonomy_level"`
 	Aggressiveness       int                  `json:"execution_aggressiveness"`
 	MaxConcurrentRuns    int                  `json:"max_concurrent_runs"`
+	AgentAutonomy        string               `json:"agent_autonomy"`
 	ConfidenceThresholds ConfidenceThresholds `json:"confidence_thresholds"`
 	PriorityWeights      PriorityWeights      `json:"priority_weights"`
 	MinPriorityThreshold float64              `json:"min_priority_threshold"`
@@ -22,6 +23,26 @@ type OrgSettings struct {
 	LLMModel             string               `json:"llm_model"`
 	AgentConfig          AgentEnvConfig       `json:"agent_config,omitempty"`
 	DefaultAgentType     string               `json:"default_agent_type,omitempty"`
+}
+
+// Agent autonomy mode constants.
+const (
+	AgentAutonomyConservative = "conservative"
+	AgentAutonomyBalanced     = "balanced"
+	AgentAutonomyAggressive   = "aggressive"
+)
+
+// ConfidenceThresholdsForAutonomy returns the confidence thresholds that
+// correspond to the given agent autonomy mode.
+func ConfidenceThresholdsForAutonomy(mode string) ConfidenceThresholds {
+	switch mode {
+	case AgentAutonomyConservative:
+		return ConfidenceThresholds{AutoProceed: 1.0, HumanReview: 0.8}
+	case AgentAutonomyAggressive:
+		return ConfidenceThresholds{AutoProceed: 0.4, HumanReview: 0.2}
+	default: // balanced
+		return ConfidenceThresholds{AutoProceed: 0.85, HumanReview: 0.5}
+	}
 }
 
 // ConfidenceThresholds controls when to auto-proceed vs request human review.
@@ -43,6 +64,7 @@ const (
 	DefaultAutonomyLevel        = "manual"
 	DefaultAggressiveness       = 5
 	DefaultMaxConcurrentRuns    = 3
+	DefaultAgentAutonomy        = AgentAutonomyBalanced
 	DefaultMinPriorityThreshold = 30.0
 	DefaultDefaultAgentType     = "codex"
 	DefaultPMScheduleHours      = 4
@@ -82,6 +104,11 @@ func ParseOrgSettings(raw json.RawMessage) OrgSettings {
 	if s.MaxConcurrentRuns == 0 {
 		s.MaxConcurrentRuns = DefaultMaxConcurrentRuns
 	}
+	if s.AgentAutonomy == "" {
+		s.AgentAutonomy = DefaultAgentAutonomy
+	}
+	// Derive confidence thresholds from autonomy mode.
+	s.ConfidenceThresholds = ConfidenceThresholdsForAutonomy(s.AgentAutonomy)
 	if s.MinPriorityThreshold == 0 {
 		s.MinPriorityThreshold = DefaultMinPriorityThreshold
 	}
@@ -97,12 +124,6 @@ func ParseOrgSettings(raw json.RawMessage) OrgSettings {
 			Severity:       DefaultWeightSeverity,
 			Recency:        DefaultWeightRecency,
 			RevenueRisk:    DefaultWeightRevenueRisk,
-		}
-	}
-	if s.ConfidenceThresholds == (ConfidenceThresholds{}) {
-		s.ConfidenceThresholds = ConfidenceThresholds{
-			AutoProceed: DefaultConfidenceAutoProceed,
-			HumanReview: DefaultConfidenceHumanReview,
 		}
 	}
 	if s.DefaultAgentType == "" {
