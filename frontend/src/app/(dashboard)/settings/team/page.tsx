@@ -236,7 +236,7 @@ export default function TeamSettingsPage() {
                           </Select>
                         )}
                       </div>
-                      <div className="flex items-center justify-start md:justify-end">
+                      <div className="flex items-center justify-start">
                         {canManageTeam && !isSelf ? (
                           <Button
                             variant="ghost"
@@ -248,11 +248,11 @@ export default function TeamSettingsPage() {
                             Remove
                           </Button>
                         ) : isSelf ? (
-                          <span className="text-xs text-muted-foreground">
+                          <span className="text-sm text-muted-foreground">
                             Current user
                           </span>
                         ) : (
-                          <span className="text-xs text-muted-foreground">
+                          <span className="text-sm text-muted-foreground">
                             No access
                           </span>
                         )}
