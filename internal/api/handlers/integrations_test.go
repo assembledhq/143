@@ -154,3 +154,61 @@ func TestIntegrationHandler_ConnectLinear_ReturnsExistingIntegration(t *testing.
 	require.Equal(t, models.IntegrationProviderLinear, resp.Data.Provider, "ConnectLinear should return a linear integration")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
+
+func TestIntegrationHandler_ConnectLinear_ReturnsInternalErrorWhenLookupFails(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	handler := NewIntegrationHandler(store)
+
+	mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status = 'active'").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("db unavailable"))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/linear/connect", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.ConnectLinear(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code, "ConnectLinear should return 500 when lookup fails")
+	require.Contains(t, w.Body.String(), "CONNECT_LINEAR_FAILED", "ConnectLinear should return a stable error code")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestIntegrationHandler_ConnectLinear_ReturnsInternalErrorWhenCreateFails(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	handler := NewIntegrationHandler(store)
+
+	mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status = 'active'").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}))
+
+	mock.ExpectQuery("INSERT INTO integrations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("insert failed"))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/linear/connect", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.ConnectLinear(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code, "ConnectLinear should return 500 when create fails")
+	require.Contains(t, w.Body.String(), "CONNECT_LINEAR_FAILED", "ConnectLinear should return a stable error code")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
