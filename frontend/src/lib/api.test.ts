@@ -991,5 +991,17 @@ describe('api client', () => {
       api.auth.loginSentry();
       expect(loc.href).toContain('https://sentry.io/oauth/authorize/');
     });
+
+    it('loginLinear redirects to backend Linear OAuth start', () => {
+      const loc = { href: '' };
+      Object.defineProperty(window, 'location', {
+        value: loc,
+        writable: true,
+        configurable: true,
+      });
+
+      api.integrations.loginLinear();
+      expect(loc.href).toBe('/api/v1/integrations/linear/login');
+    });
   });
 });
