@@ -31,7 +31,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
     - A **PM agent** now runs on a batch cadence, clusters related issues, and produces a prioritized plan that delegates work to coding agents (replacing per-issue auto-triggering for automation).
 - Step 3: Execute a coding agent
     - Admins set a **confidence threshold** that controls which issues the system will auto-attempt. Issues below the threshold require manual triggering.
-    - The Sessions page supports **one-off manual sessions** with a chat-style composer. Users can start a manual run from free-form instructions (plus optional image URLs/context) without waiting for PM planning cadence.
+    - The Sessions area supports **one-off manual sessions** through a dedicated `/sessions/new` creation page with a chat-style composer. Users can start a manual run from free-form instructions, file/photo attachments, optional image URLs, and voice dictation without waiting for PM planning cadence.
     - The agent runs in a sandboxed container and produces a code diff.
     - Agent runtime credentials are loaded from org-scoped encrypted credentials (`org_credentials`) rather than process `.env` defaults, so each org can manage Codex/Claude/Gemini auth independently.
     - The agent outputs a **confidence score** with its fix. Low-confidence runs are paused for human review before proceeding to validation.

@@ -19,7 +19,7 @@ export default function SettingsPage() {
         <h2 className="text-[13px] font-medium text-foreground">General</h2>
         <Card>
           <CardContent>
-            <div className="space-y-2">
+            <div className="max-w-[560px] space-y-2">
               <Label htmlFor="org-name">Organization Name</Label>
               <Input
                 id="org-name"
