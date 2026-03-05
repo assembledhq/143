@@ -157,6 +157,15 @@ export const api = {
     latest: () => get<import('./types').SingleResponse<import('./types').PMPlan>>('/api/v1/pm/plans/latest'),
     get: (id: string) => get<import('./types').SingleResponse<import('./types').PMPlan>>(`/api/v1/pm/plans/${id}`),
   },
+  sessions: {
+    list: (params?: { limit?: number }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.limit) searchParams.set('limit', String(params.limit));
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').AgentSession>>(`/api/v1/sessions${qs ? `?${qs}` : ''}`);
+    },
+    get: (id: string) => get<import('./types').SingleResponse<import('./types').AgentSession>>(`/api/v1/sessions/${id}`),
+  },
   settings: {
     get: () => get<import('./types').SingleResponse<import('./types').Organization>>('/api/v1/settings'),
     update: (data: Record<string, unknown>) => patch<import('./types').SingleResponse<import('./types').Organization>>('/api/v1/settings', data),

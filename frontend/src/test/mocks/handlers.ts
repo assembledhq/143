@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import type { Issue, AgentRun, Validation, PullRequest, ListResponse, SingleResponse } from '@/lib/types';
+import type { Issue, AgentRun, AgentSession, Validation, PullRequest, ListResponse, SingleResponse } from '@/lib/types';
 
 export const mockIssues: Issue[] = [
   {
@@ -110,6 +110,70 @@ export const mockPR: PullRequest = {
   updated_at: '2026-02-17T07:06:00Z',
 };
 
+export const mockSessions: AgentSession[] = [
+  {
+    id: 'session-plan-1',
+    type: 'plan',
+    status: 'completed',
+    triggered_by: 'scheduled',
+    title: 'Analyzed 5 open issues and delegated 2 tasks.',
+    analysis: 'Found critical auth timeout and payment bug requiring immediate attention.',
+    tasks: [
+      {
+        rank: 1,
+        title: 'Fix auth timeout',
+        issue_ids: ['issue-1'],
+        complexity: 'moderate',
+        confidence: 'high',
+        reasoning: 'Critical user-facing issue',
+        approach: 'Check session handler timeout config',
+        risk: 'Low - isolated change',
+        status: 'delegated',
+        agent_run_id: 'run-abcdef12-3456-7890',
+        run_status: 'completed',
+        run_result_summary: 'Fixed TypeError by adding null check',
+        run_confidence_score: 0.92,
+        run_started_at: '2026-02-17T07:00:00Z',
+        run_completed_at: '2026-02-17T07:05:30Z',
+      },
+    ],
+    clusters: [],
+    skipped_issues: [],
+    issues_reviewed: 5,
+    task_count: 1,
+    active_run_count: 0,
+    completed_run_count: 1,
+    failed_run_count: 0,
+    created_at: '2026-02-17T08:00:00Z',
+    completed_at: '2026-02-17T08:10:00Z',
+  },
+  {
+    id: 'session-manual-1',
+    type: 'manual',
+    status: 'failed',
+    triggered_by: 'fix_this',
+    title: 'Run run-9876',
+    tasks: [
+      {
+        rank: 1,
+        title: 'Fix issue',
+        issue_ids: ['issue-2'],
+        status: 'delegated',
+        agent_run_id: 'run-98765432-abcd-ef01',
+        run_status: 'failed',
+        run_started_at: '2026-02-17T06:00:00Z',
+        run_completed_at: '2026-02-17T06:03:00Z',
+      },
+    ],
+    task_count: 1,
+    active_run_count: 0,
+    completed_run_count: 0,
+    failed_run_count: 1,
+    created_at: '2026-02-17T06:00:00Z',
+    completed_at: '2026-02-17T06:03:00Z',
+  },
+];
+
 export const handlers = [
   http.get('/api/v1/issues', () => {
     return HttpResponse.json({
@@ -152,5 +216,23 @@ export const handlers = [
     return HttpResponse.json({
       data: mockRuns[0],
     } satisfies SingleResponse<AgentRun>);
+  }),
+
+  http.get('/api/v1/sessions', () => {
+    return HttpResponse.json({
+      data: mockSessions,
+      meta: {},
+    } satisfies ListResponse<AgentSession>);
+  }),
+
+  http.get('/api/v1/sessions/:id', ({ params }) => {
+    const session = mockSessions.find((s) => s.id === params.id);
+    if (!session) {
+      return HttpResponse.json(
+        { error: { code: 'NOT_FOUND', message: 'Session not found' } },
+        { status: 404 },
+      );
+    }
+    return HttpResponse.json({ data: session } satisfies SingleResponse<AgentSession>);
   }),
 ];
