@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { CalendarClock, RefreshCw, Layers, Wrench, Plus, X } from "lucide-react";
+import { CalendarClock, RefreshCw, Layers, Wrench, Plus, X, AlertCircle } from "lucide-react";
 import Link from "next/link";
 import { useQueryState, parseAsString } from "nuqs";
 import { PageHeader } from "@/components/page-header";
@@ -132,18 +132,59 @@ export function SessionsPageContent() {
   const [imageInput, setImageInput] = useState("");
   const [manualImages, setManualImages] = useState<string[]>([]);
 
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analyzeError, setAnalyzeError] = useState<string | null>(null);
+  const sessionCountBeforeAnalyze = useRef<number | null>(null);
+  const analyzeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
   const { data, isLoading, error } = useQuery({
     queryKey: ["sessions"],
     queryFn: () => api.sessions.list({ limit: 50 }),
-    refetchInterval: 10000,
+    refetchInterval: isAnalyzing ? 2000 : 10000,
   });
+
+  // Detect when a new session appears after triggering analysis
+  const allSessionCount = data?.data?.length ?? 0;
+  useEffect(() => {
+    if (isAnalyzing && sessionCountBeforeAnalyze.current !== null && allSessionCount > sessionCountBeforeAnalyze.current) {
+      setIsAnalyzing(false);
+      sessionCountBeforeAnalyze.current = null;
+      if (analyzeTimeoutRef.current) {
+        clearTimeout(analyzeTimeoutRef.current);
+        analyzeTimeoutRef.current = null;
+      }
+    }
+  }, [isAnalyzing, allSessionCount]);
+
+  // Cleanup timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (analyzeTimeoutRef.current) clearTimeout(analyzeTimeoutRef.current);
+    };
+  }, []);
 
   const analyzeMutation = useMutation({
     mutationFn: () => api.pm.analyze(),
     onSuccess: () => {
+      setIsAnalyzing(true);
       queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      // Timeout after 90 seconds if no new session appears
+      analyzeTimeoutRef.current = setTimeout(() => {
+        setIsAnalyzing(false);
+        setAnalyzeError("Analysis may have failed or is taking longer than expected. Check your server logs for details.");
+        sessionCountBeforeAnalyze.current = null;
+      }, 90000);
+    },
+    onError: () => {
+      setAnalyzeError("Failed to start analysis. Make sure the backend is running.");
     },
   });
+
+  const handleAnalyze = useCallback(() => {
+    setAnalyzeError(null);
+    sessionCountBeforeAnalyze.current = allSessionCount;
+    analyzeMutation.mutate();
+  }, [allSessionCount, analyzeMutation]);
 
   const createManualSessionMutation = useMutation({
     mutationFn: () => api.sessions.createManual({ message: manualMessage.trim(), images: manualImages }),
@@ -186,15 +227,38 @@ export function SessionsPageContent() {
             </Button>
             <Button
               size="sm"
-              onClick={() => analyzeMutation.mutate()}
-              disabled={analyzeMutation.isPending}
+              onClick={handleAnalyze}
+              disabled={analyzeMutation.isPending || isAnalyzing}
             >
-              <RefreshCw className={`mr-2 h-4 w-4 ${analyzeMutation.isPending ? "animate-spin" : ""}`} />
-              {analyzeMutation.isPending ? "Running" : "Run Analysis"}
+              <RefreshCw className={`mr-2 h-4 w-4 ${analyzeMutation.isPending || isAnalyzing ? "animate-spin" : ""}`} />
+              {analyzeMutation.isPending ? "Starting..." : isAnalyzing ? "Analyzing..." : "Run Analysis"}
             </Button>
           </div>
         }
       />
+
+      {isAnalyzing && (
+        <Card className="border-blue-200 bg-blue-50 dark:border-blue-800 dark:bg-blue-950/30">
+          <CardContent className="flex items-center gap-3 py-3">
+            <RefreshCw className="h-4 w-4 animate-spin text-blue-600 dark:text-blue-400" />
+            <p className="text-sm text-blue-800 dark:text-blue-300">
+              Analysis in progress — reviewing issues and generating a plan. This may take a minute...
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {analyzeError && (
+        <Card className="border-red-200 bg-red-50 dark:border-red-800 dark:bg-red-950/30">
+          <CardContent className="flex items-center gap-3 py-3">
+            <AlertCircle className="h-4 w-4 shrink-0 text-red-600 dark:text-red-400" />
+            <p className="text-sm text-red-800 dark:text-red-300 flex-1">{analyzeError}</p>
+            <Button size="sm" variant="ghost" className="shrink-0 h-6 px-2" onClick={() => setAnalyzeError(null)}>
+              <X className="h-3 w-3" />
+            </Button>
+          </CardContent>
+        </Card>
+      )}
 
       {isManualComposerOpen && (
         <Card>
