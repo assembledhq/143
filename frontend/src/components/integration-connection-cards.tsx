@@ -1,8 +1,8 @@
-import { GitBranch, Bug, SquareKanban } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import Image from "next/image";
 import { Button } from "@/components/ui/button";
 import { IntegrationsCard } from "@/components/integrations-card";
-import { INTEGRATIONS } from "@/lib/integrations";
+import { getIntegrationByKey } from "@/lib/integrations";
 
 type SourceControlIntegrationCardProps = {
   onConnectGitHub: () => void;
@@ -17,8 +17,21 @@ type AdditionalIntegrationCardsProps = {
 
 type AllIntegrationCardsProps = SourceControlIntegrationCardProps & AdditionalIntegrationCardsProps;
 
+function IntegrationLogo({ name, src }: { name: string; src: string }) {
+  return (
+    <Image
+      src={src}
+      alt={`${name} logo`}
+      className="h-6 w-6 rounded-sm object-contain"
+      width={24}
+      height={24}
+      unoptimized
+    />
+  );
+}
+
 export function SourceControlIntegrationCard({ onConnectGitHub }: SourceControlIntegrationCardProps) {
-  const github = INTEGRATIONS[0];
+  const github = getIntegrationByKey("github");
 
   return (
     <IntegrationsCard
@@ -27,7 +40,7 @@ export function SourceControlIntegrationCard({ onConnectGitHub }: SourceControlI
           id: github.key,
           title: github.name,
           description: github.description,
-          icon: <GitBranch className="h-5 w-5" />,
+          logo: <IntegrationLogo name={github.name} src={github.logoSrc} />,
           badge: <Badge variant="outline" className="text-xs">Required</Badge>,
           action: (
             <Button size="sm" onClick={onConnectGitHub} aria-label="Connect GitHub">
@@ -46,8 +59,8 @@ export function AdditionalIntegrationCards({
   onConnectSentry,
   onConnectLinear,
 }: AdditionalIntegrationCardsProps) {
-  const sentry = INTEGRATIONS[1];
-  const linear = INTEGRATIONS[2];
+  const sentry = getIntegrationByKey("sentry");
+  const linear = getIntegrationByKey("linear");
 
   return (
     <IntegrationsCard
@@ -56,7 +69,7 @@ export function AdditionalIntegrationCards({
           id: sentry.key,
           title: sentry.name,
           description: sentry.description,
-          icon: <Bug className="h-5 w-5" />,
+          logo: <IntegrationLogo name={sentry.name} src={sentry.logoSrc} />,
           badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
           action: (
             <Button
@@ -72,7 +85,7 @@ export function AdditionalIntegrationCards({
           id: linear.key,
           title: linear.name,
           description: linear.description,
-          icon: <SquareKanban className="h-5 w-5" />,
+          logo: <IntegrationLogo name={linear.name} src={linear.logoSrc} />,
           badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
           action: (
             <Button
@@ -98,9 +111,9 @@ export function AllIntegrationCards({
   linearConnected,
   linearLoading,
 }: AllIntegrationCardsProps) {
-  const github = INTEGRATIONS[0];
-  const sentry = INTEGRATIONS[1];
-  const linear = INTEGRATIONS[2];
+  const github = getIntegrationByKey("github");
+  const sentry = getIntegrationByKey("sentry");
+  const linear = getIntegrationByKey("linear");
 
   return (
     <IntegrationsCard
@@ -109,7 +122,7 @@ export function AllIntegrationCards({
           id: github.key,
           title: github.name,
           description: github.description,
-          icon: <GitBranch className="h-5 w-5" />,
+          logo: <IntegrationLogo name={github.name} src={github.logoSrc} />,
           badge: <Badge variant="outline" className="text-xs">Required</Badge>,
           action: (
             <Button size="sm" onClick={onConnectGitHub} aria-label="Connect GitHub">
@@ -121,7 +134,7 @@ export function AllIntegrationCards({
           id: sentry.key,
           title: sentry.name,
           description: sentry.description,
-          icon: <Bug className="h-5 w-5" />,
+          logo: <IntegrationLogo name={sentry.name} src={sentry.logoSrc} />,
           badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
           action: (
             <Button
@@ -137,7 +150,7 @@ export function AllIntegrationCards({
           id: linear.key,
           title: linear.name,
           description: linear.description,
-          icon: <SquareKanban className="h-5 w-5" />,
+          logo: <IntegrationLogo name={linear.name} src={linear.logoSrc} />,
           badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
           action: (
             <Button
