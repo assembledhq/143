@@ -26,17 +26,19 @@ function LoginPageContent() {
   const { providers } = useAuthProviders();
 
   const invitation = searchParams.get("invitation") ?? undefined;
+  const invitedEmail = searchParams.get("email") ?? "";
+  const invitedOrg = searchParams.get("org") ?? "";
   const [tab, setTab] = useState(searchParams.get("tab") === "signup" ? "signup" : "signin");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   // Sign in form
-  const [signInEmail, setSignInEmail] = useState("");
+  const [signInEmail, setSignInEmail] = useState(invitedEmail);
   const [signInPassword, setSignInPassword] = useState("");
 
   // Sign up form
   const [signUpName, setSignUpName] = useState("");
-  const [signUpEmail, setSignUpEmail] = useState("");
+  const [signUpEmail, setSignUpEmail] = useState(invitedEmail);
   const [signUpPassword, setSignUpPassword] = useState("");
 
   useEffect(() => {
@@ -44,6 +46,13 @@ function LoginPageContent() {
       router.replace("/overview");
     }
   }, [authLoading, isAuthenticated, router]);
+
+  useEffect(() => {
+    if (invitedEmail) {
+      setSignInEmail(invitedEmail);
+      setSignUpEmail(invitedEmail);
+    }
+  }, [invitedEmail]);
 
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -108,6 +117,17 @@ function LoginPageContent() {
           <CardTitle className="text-lg font-semibold">143.dev</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
+          {invitation && invitedEmail && (
+            <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+              You were invited{invitedOrg ? (
+                <>
+                  {" "}to join <span className="font-medium text-foreground">{invitedOrg}</span>
+                </>
+              ) : null}{" "}
+              as <span className="font-medium text-foreground">{invitedEmail}</span>.
+            </div>
+          )}
+
           {/* Social login buttons */}
           <div className="space-y-2">
             {providers?.github !== false && (
@@ -167,6 +187,7 @@ function LoginPageContent() {
                     placeholder="you@example.com"
                     value={signInEmail}
                     onChange={(e) => setSignInEmail(e.target.value)}
+                    readOnly={Boolean(invitation && invitedEmail)}
                     required
                   />
                 </div>
@@ -207,6 +228,7 @@ function LoginPageContent() {
                     placeholder="you@example.com"
                     value={signUpEmail}
                     onChange={(e) => setSignUpEmail(e.target.value)}
+                    readOnly={Boolean(invitation && invitedEmail)}
                     required
                   />
                 </div>
