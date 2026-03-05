@@ -10,16 +10,16 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
   {
     key: "github",
     name: "GitHub",
-    description: "Connect your GitHub account to sync repositories and open PRs.",
+    description: "Sync repositories and open PRs.",
   },
   {
     key: "sentry",
     name: "Sentry",
-    description: "Pull production errors and auto-generate fixes.",
+    description: "Pull errors and auto-generate fixes.",
   },
   {
     key: "linear",
     name: "Linear",
-    description: "Sync issues from Linear and auto-assign fixes.",
+    description: "Sync issues and auto-assign fixes.",
   },
 ];

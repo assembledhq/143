@@ -94,14 +94,14 @@ describe('OverviewPage', () => {
   it('renders the page header', () => {
     renderWithProviders(<Overview />);
 
-    expect(screen.getByText('Overview')).toBeInTheDocument();
-    expect(screen.getByText('Set up your coding agent and connect your tools to start fixing issues automatically.')).toBeInTheDocument();
+    expect(screen.getByText('Get started')).toBeInTheDocument();
+    expect(screen.getByText('Connect your tools and start fixing issues automatically.')).toBeInTheDocument();
   });
 
-  it('renders the page description text', () => {
+  it('renders the progress indicator', () => {
     renderWithProviders(<Overview />);
 
-    expect(screen.getByText(/Once integrations are connected/)).toBeInTheDocument();
+    expect(screen.getByText(/of 4 connected/)).toBeInTheDocument();
   });
 
   it('shows a single coding agent card with dropdown defaulting to Codex', async () => {
@@ -138,19 +138,15 @@ describe('OverviewPage', () => {
     expect(screen.queryByRole('button', { name: 'Sign in with ChatGPT' })).not.toBeInTheDocument();
   });
 
-  it('shows coding agent section before source control and integrations', () => {
+  it('shows coding agent step before connect integrations step', () => {
     renderWithProviders(<Overview />);
 
     const codingAgentHeader = screen.getByText('Coding agent');
-    const sourceControlHeader = screen.getByText('Source control');
-    const integrationsHeader = screen.getByText('Additional integrations');
+    const integrationsHeader = screen.getByText('Connect integrations');
 
     // Verify ordering via DOM position
     expect(
-      codingAgentHeader.compareDocumentPosition(sourceControlHeader) & Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy();
-    expect(
-      sourceControlHeader.compareDocumentPosition(integrationsHeader) & Node.DOCUMENT_POSITION_FOLLOWING
+      codingAgentHeader.compareDocumentPosition(integrationsHeader) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy();
   });
 
