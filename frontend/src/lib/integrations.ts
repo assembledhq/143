@@ -12,19 +12,19 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
     key: "github",
     name: "GitHub",
     description: "Sync repositories and open PRs.",
-    logoSrc: "https://logo.clearbit.com/github.com",
+    logoSrc: "/integrations/github.svg",
   },
   {
     key: "sentry",
     name: "Sentry",
     description: "Pull errors and auto-generate fixes.",
-    logoSrc: "https://logo.clearbit.com/sentry.io",
+    logoSrc: "/integrations/sentry.svg",
   },
   {
     key: "linear",
     name: "Linear",
     description: "Sync issues and auto-assign fixes.",
-    logoSrc: "https://logo.clearbit.com/linear.app",
+    logoSrc: "/integrations/linear.svg",
   },
 ];
 

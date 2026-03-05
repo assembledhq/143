@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { CalendarClock, RefreshCw, Layers, Wrench, Plus, X, AlertCircle } from "lucide-react";
 import Link from "next/link";
@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
+import { useAnalyze } from "@/hooks/use-analyze";
 import type { AgentSession } from "@/lib/types";
 
 const sessionStatusConfig: Record<string, { color: string; label: string }> = {
@@ -132,59 +133,16 @@ export function SessionsPageContent() {
   const [imageInput, setImageInput] = useState("");
   const [manualImages, setManualImages] = useState<string[]>([]);
 
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [analyzeError, setAnalyzeError] = useState<string | null>(null);
-  const sessionCountBeforeAnalyze = useRef<number | null>(null);
-  const analyzeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-
   const { data, isLoading, error } = useQuery({
     queryKey: ["sessions"],
     queryFn: () => api.sessions.list({ limit: 50 }),
-    refetchInterval: isAnalyzing ? 2000 : 10000,
+    refetchInterval: 10000,
   });
 
-  // Detect when a new session appears after triggering analysis
-  const allSessionCount = data?.data?.length ?? 0;
-  useEffect(() => {
-    if (isAnalyzing && sessionCountBeforeAnalyze.current !== null && allSessionCount > sessionCountBeforeAnalyze.current) {
-      setIsAnalyzing(false);
-      sessionCountBeforeAnalyze.current = null;
-      if (analyzeTimeoutRef.current) {
-        clearTimeout(analyzeTimeoutRef.current);
-        analyzeTimeoutRef.current = null;
-      }
-    }
-  }, [isAnalyzing, allSessionCount]);
+  const allSessions = data?.data ?? [];
+  const hasActivePlanSession = allSessions.some((s) => s.type === "plan" && s.status === "active");
 
-  // Cleanup timeout on unmount
-  useEffect(() => {
-    return () => {
-      if (analyzeTimeoutRef.current) clearTimeout(analyzeTimeoutRef.current);
-    };
-  }, []);
-
-  const analyzeMutation = useMutation({
-    mutationFn: () => api.pm.analyze(),
-    onSuccess: () => {
-      setIsAnalyzing(true);
-      queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      // Timeout after 90 seconds if no new session appears
-      analyzeTimeoutRef.current = setTimeout(() => {
-        setIsAnalyzing(false);
-        setAnalyzeError("Analysis may have failed or is taking longer than expected. Check your server logs for details.");
-        sessionCountBeforeAnalyze.current = null;
-      }, 90000);
-    },
-    onError: () => {
-      setAnalyzeError("Failed to start analysis. Make sure the backend is running.");
-    },
-  });
-
-  const handleAnalyze = useCallback(() => {
-    setAnalyzeError(null);
-    sessionCountBeforeAnalyze.current = allSessionCount;
-    analyzeMutation.mutate();
-  }, [allSessionCount, analyzeMutation]);
+  const { isAnalyzing, isPending, analyzeError, handleAnalyze, dismissError } = useAnalyze(hasActivePlanSession);
 
   const createManualSessionMutation = useMutation({
     mutationFn: () => api.sessions.createManual({ message: manualMessage.trim(), images: manualImages }),
@@ -205,7 +163,6 @@ export function SessionsPageContent() {
     setImageInput("");
   }
 
-  const allSessions = data?.data ?? [];
   const sessions = filterSessions(allSessions, statusFilter);
 
   const showGrouped = !statusFilter || statusFilter === "all";
@@ -228,11 +185,11 @@ export function SessionsPageContent() {
             <Button
               size="sm"
               onClick={handleAnalyze}
-              disabled={analyzeMutation.isPending || isAnalyzing}
+              disabled={isPending || isAnalyzing}
               title="Review open issues, prioritize them, and kick off agent runs"
             >
-              <RefreshCw className={`mr-2 h-4 w-4 ${analyzeMutation.isPending || isAnalyzing ? "animate-spin" : ""}`} />
-              {analyzeMutation.isPending ? "Starting..." : isAnalyzing ? "Analyzing..." : "Analyze Issues"}
+              <RefreshCw className={`mr-2 h-4 w-4 ${isPending || isAnalyzing ? "animate-spin" : ""}`} />
+              {isPending ? "Starting..." : isAnalyzing ? "Analyzing..." : "Analyze Issues"}
             </Button>
           </div>
         }
@@ -254,7 +211,7 @@ export function SessionsPageContent() {
           <CardContent className="flex items-center gap-3 py-3">
             <AlertCircle className="h-4 w-4 shrink-0 text-red-600 dark:text-red-400" />
             <p className="text-sm text-red-800 dark:text-red-300 flex-1">{analyzeError}</p>
-            <Button size="sm" variant="ghost" className="shrink-0 h-6 px-2" onClick={() => setAnalyzeError(null)}>
+            <Button size="sm" variant="ghost" className="shrink-0 h-6 px-2" onClick={dismissError}>
               <X className="h-3 w-3" />
             </Button>
           </CardContent>
