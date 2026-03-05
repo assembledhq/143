@@ -325,6 +325,220 @@ func TestParseGeminiOutput(t *testing.T) {
 	}
 }
 
+func TestParseGeminiStreamOutput(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		output      string
+		checkResult func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry)
+	}{
+		{
+			name: "streaming output with tool use",
+			output: `{"type":"text","content":"Let me look at the code..."}
+{"type":"tool_call","tool":"read_file","input":{"path":"main.go"}}
+{"type":"tool_result","tool":"read_file","output":"package main\nfunc main() {}"}
+{"type":"text","content":"Found the issue. Fixing now."}
+{"type":"tool_call","tool":"edit_file","input":{"path":"main.go","old_text":"bad","new_text":"good"}}
+{"type":"tool_result","tool":"edit_file","output":"File updated."}
+{"type":"text","content":"Fixed the null pointer issue."}
+{"type":"usage","stats":{"inputTokens":1200,"outputTokens":350}}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Contains(t, result.Summary, "Let me look at the code...")
+				require.Contains(t, result.Summary, "Fixed the null pointer issue.")
+				require.Equal(t, 1200, result.TokenUsage.InputTokens)
+				require.Equal(t, 350, result.TokenUsage.OutputTokens)
+
+				toolUseCount := 0
+				for _, log := range logs {
+					if log.Level == "tool_use" {
+						toolUseCount++
+						require.NotNil(t, log.Metadata)
+						require.NotEmpty(t, log.Metadata["tool"])
+						require.NotNil(t, log.Metadata["input"], "tool_use should have input metadata")
+					}
+				}
+				require.Equal(t, 2, toolUseCount, "should have 2 tool_use log entries")
+			},
+		},
+		{
+			name: "tool use metadata contains input details",
+			output: `{"type":"tool_call","tool":"read_file","input":{"path":"src/handler.go","line_start":10,"line_end":50}}
+{"type":"tool_result","tool":"read_file","output":"func handler() {}"}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				var toolLog *agent.LogEntry
+				for i, log := range logs {
+					if log.Level == "tool_use" {
+						toolLog = &logs[i]
+						break
+					}
+				}
+				require.NotNil(t, toolLog, "should have tool_use log")
+				require.Equal(t, "read_file", toolLog.Metadata["tool"])
+				inputMap, ok := toolLog.Metadata["input"].(map[string]interface{})
+				require.True(t, ok, "input should be a map")
+				require.Equal(t, "src/handler.go", inputMap["path"])
+			},
+		},
+		{
+			name: "tool_call with name field instead of tool",
+			output: `{"type":"tool_call","name":"shell","input":{"command":"go test ./..."}}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Len(t, logs, 1)
+				require.Equal(t, "tool_use", logs[0].Level)
+				require.Equal(t, "shell", logs[0].Metadata["tool"])
+			},
+		},
+		{
+			name:   "falls back to legacy JSON",
+			output: `{"response":"Fixed the bug.","stats":{"inputTokens":200,"outputTokens":100}}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Equal(t, "Fixed the bug.", result.Summary)
+				require.Equal(t, 200, result.TokenUsage.InputTokens)
+				require.Equal(t, 100, result.TokenUsage.OutputTokens)
+			},
+		},
+		{
+			name:   "plain text emitted as raw output",
+			output: "Just some plain text output",
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				hasOutput := false
+				for _, log := range logs {
+					if log.Level == "output" && strings.Contains(log.Message, "plain text") {
+						hasOutput = true
+					}
+				}
+				require.True(t, hasOutput, "should emit plain text as output")
+			},
+		},
+		{
+			name:   "empty output",
+			output: "",
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Empty(t, result.Summary)
+				require.Empty(t, logs)
+			},
+		},
+		{
+			name: "error event in stream",
+			output: `{"type":"text","content":"Starting analysis..."}
+{"type":"error","error":"rate limit exceeded"}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				hasError := false
+				for _, log := range logs {
+					if log.Level == "error" && strings.Contains(log.Message, "rate limit") {
+						hasError = true
+					}
+				}
+				require.True(t, hasError, "should have error log entry")
+			},
+		},
+		{
+			name: "thinking events logged as debug",
+			output: `{"type":"thinking","content":"I need to check the imports..."}
+{"type":"text","content":"Let me fix the imports."}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				hasThinking := false
+				for _, log := range logs {
+					if log.Level == "debug" && log.Metadata != nil && log.Metadata["type"] == "thinking" {
+						hasThinking = true
+					}
+				}
+				require.True(t, hasThinking, "should have thinking debug log")
+			},
+		},
+		{
+			name: "confidence extraction from stream",
+			output: `{"type":"text","content":"Fixed it.\n{\"confidence_score\": 0.85, \"confidence_reasoning\": \"Simple fix\", \"risk_factors\": [\"edge case\"]}"}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.InDelta(t, 0.85, result.ConfidenceScore, 0.001)
+				require.Equal(t, "Simple fix", result.ConfidenceReasoning)
+				require.Equal(t, []string{"edge case"}, result.RiskFactors)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := &agent.AgentResult{}
+			logCh := make(chan agent.LogEntry, 100)
+
+			parseGeminiStreamOutput([]byte(tt.output), result, logCh)
+			close(logCh)
+
+			var logs []agent.LogEntry
+			for entry := range logCh {
+				logs = append(logs, entry)
+			}
+
+			tt.checkResult(t, result, logs)
+		})
+	}
+}
+
+func TestGeminiCLIAdapter_Execute_StreamingOutput(t *testing.T) {
+	t.Parallel()
+
+	streamOutput := `{"type":"text","content":"Analyzing the code..."}
+{"type":"tool_call","tool":"read_file","input":{"path":"main.go"}}
+{"type":"tool_result","tool":"read_file","output":"package main"}
+{"type":"text","content":"Applied the fix."}
+{"type":"usage","stats":{"inputTokens":800,"outputTokens":200}}`
+
+	provider := newMockProvider()
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if strings.HasPrefix(cmd, "gemini") {
+			_, _ = stdout.Write([]byte(streamOutput))
+			return 0, nil
+		}
+		if strings.HasPrefix(cmd, "git diff") {
+			_, _ = stdout.Write([]byte("diff --git a/main.go b/main.go\n"))
+			return 0, nil
+		}
+		return 0, nil
+	}
+
+	adapter := NewGeminiCLIAdapter(zerolog.Nop())
+	sandbox := &agent.Sandbox{ID: "test-sandbox", WorkDir: "/workspace"}
+	prompt := &agent.AgentPrompt{SystemPrompt: "Fix the bug.", UserPrompt: "Null pointer error.", MaxTokens: 50_000}
+
+	logCh := make(chan agent.LogEntry, 100)
+	ctx := WithSandboxProvider(context.Background(), provider)
+
+	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, 0, result.ExitCode)
+	require.Contains(t, result.Diff, "diff --git")
+	require.Equal(t, 800, result.TokenUsage.InputTokens)
+
+	close(logCh)
+	var logs []agent.LogEntry
+	for entry := range logCh {
+		logs = append(logs, entry)
+	}
+
+	// Should have tool_use entries from streaming output.
+	toolUseCount := 0
+	for _, log := range logs {
+		if log.Level == "tool_use" {
+			toolUseCount++
+		}
+	}
+	require.Equal(t, 1, toolUseCount, "should have 1 tool_use log entry")
+}
+
 func TestShellEscapeGemini(t *testing.T) {
 	t.Parallel()
 
