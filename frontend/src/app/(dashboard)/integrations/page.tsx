@@ -1,13 +1,11 @@
 "use client";
 
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { AllIntegrationCards } from "@/components/integration-connection-cards";
 import { PageHeader } from "@/components/page-header";
 
 export default function IntegrationsPage() {
-  const queryClient = useQueryClient();
-
   const { data: integrationsResp } = useQuery({
     queryKey: ["integrations"],
     queryFn: () => api.integrations.list(),
@@ -15,13 +13,6 @@ export default function IntegrationsPage() {
   const linearIntegration = integrationsResp?.data?.find(
     (integration) => integration.provider === "linear" && integration.status === "active"
   );
-
-  const connectLinearMutation = useMutation({
-    mutationFn: () => api.integrations.connectLinear(),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["integrations"] });
-    },
-  });
 
   return (
     <div className="space-y-6">
@@ -31,10 +22,10 @@ export default function IntegrationsPage() {
       />
       <AllIntegrationCards
         linearConnected={Boolean(linearIntegration)}
-        linearLoading={connectLinearMutation.isPending}
+        linearLoading={false}
         onConnectGitHub={() => api.auth.login()}
         onConnectSentry={() => api.auth.loginSentry()}
-        onConnectLinear={() => connectLinearMutation.mutate()}
+        onConnectLinear={() => api.integrations.loginLinear()}
       />
     </div>
   );

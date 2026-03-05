@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Bot, Check } from "lucide-react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -215,7 +215,6 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
 }
 
 export default function Overview() {
-  const queryClient = useQueryClient();
   const [agentConnected, setAgentConnected] = useState(false);
 
   const { data: integrationsResp } = useQuery({
@@ -232,13 +231,6 @@ export default function Overview() {
   const linearIntegration = integrationsResp?.data?.find(
     (integration) => integration.provider === "linear" && integration.status === "active"
   );
-
-  const connectLinearMutation = useMutation({
-    mutationFn: () => api.integrations.connectLinear(),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["integrations"] });
-    },
-  });
 
   // Count connected steps (agent + GitHub required; sentry/linear optional but counted)
   const connectedCount =
@@ -285,9 +277,9 @@ export default function Overview() {
           <SourceControlIntegrationCard onConnectGitHub={() => api.auth.login()} />
           <AdditionalIntegrationCards
             linearConnected={Boolean(linearIntegration)}
-            linearLoading={connectLinearMutation.isPending}
+            linearLoading={false}
             onConnectSentry={() => api.auth.loginSentry()}
-            onConnectLinear={() => connectLinearMutation.mutate()}
+            onConnectLinear={() => api.integrations.loginLinear()}
           />
         </div>
       </StepSection>
