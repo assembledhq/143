@@ -270,7 +270,6 @@ func (s *Service) PollForToken(ctx context.Context, orgID uuid.UUID) (*AuthStatu
 	// Poll the token endpoint.
 	endpoint := s.issuer + "/api/accounts/deviceauth/token"
 	pollBody, err := json.Marshal(map[string]string{
-		"client_id":      s.clientID,
 		"device_auth_id": pending.DeviceAuthID,
 		"user_code":      pending.UserCode,
 	})
@@ -295,7 +294,13 @@ func (s *Service) PollForToken(ctx context.Context, orgID uuid.UUID) (*AuthStatu
 		return nil, fmt.Errorf("read token response: %w", err)
 	}
 
-	// Handle pending/slow_down/error responses.
+	// OpenAI returns 403/404 while the user hasn't entered the code yet.
+	// Treat these as "authorization pending" (matches Codex CLI behavior).
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
+		return &AuthStatus{Status: "pending", Message: "waiting for user to enter code"}, nil
+	}
+
+	// Handle other non-success responses (standard OAuth error format).
 	if resp.StatusCode != http.StatusOK {
 		var errResp struct {
 			Error string `json:"error"`
