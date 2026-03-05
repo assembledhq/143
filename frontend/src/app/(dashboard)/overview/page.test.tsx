@@ -76,18 +76,38 @@ describe('OverviewPage', () => {
     expect(screen.getByText(/Once integrations are connected/)).toBeInTheDocument();
   });
 
-  it('shows all three coding agent options with Codex as recommended', async () => {
+  it('shows a single coding agent card with dropdown defaulting to Codex', async () => {
     renderWithProviders(<Overview />);
 
     await waitFor(() => {
-      expect(screen.getByText('Codex')).toBeInTheDocument();
+      expect(screen.getByRole('combobox', { name: 'Coding agent provider' })).toBeInTheDocument();
     });
 
-    expect(screen.getByText('Claude Code')).toBeInTheDocument();
-    expect(screen.getByText('Gemini CLI')).toBeInTheDocument();
+    expect(screen.getByText('Codex')).toBeInTheDocument();
     expect(screen.getByText('Recommended')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: 'Configure' })).toHaveLength(2);
+    expect(screen.queryByTestId('agent-card-claude')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('agent-card-gemini')).not.toBeInTheDocument();
+  });
+
+  it('updates the single card content when a different coding agent is selected', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<Overview />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('combobox', { name: 'Coding agent provider' })).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole('combobox', { name: 'Coding agent provider' }));
+    await user.click(await screen.findByRole('option', { name: 'Claude Code' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Claude Code')).toBeInTheDocument();
+    });
+
+    expect(screen.getByText('Use your Anthropic API key for Claude-powered fixes.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Configure' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Sign in with ChatGPT' })).not.toBeInTheDocument();
   });
 
   it('shows coding agent section before source control and integrations', () => {
@@ -188,16 +208,17 @@ describe('OverviewPage', () => {
     });
   });
 
-  it('opens agent settings modal from Configure button on Claude Code card', async () => {
+  it('opens agent settings modal from Configure after selecting Claude Code', async () => {
     const user = userEvent.setup();
     renderWithProviders(<Overview />);
 
     await waitFor(() => {
-      expect(screen.getByText('Claude Code')).toBeInTheDocument();
+      expect(screen.getByRole('combobox', { name: 'Coding agent provider' })).toBeInTheDocument();
     });
 
-    const configureButtons = screen.getAllByRole('button', { name: 'Configure' });
-    await user.click(configureButtons[0]);
+    await user.click(screen.getByRole('combobox', { name: 'Coding agent provider' }));
+    await user.click(await screen.findByRole('option', { name: 'Claude Code' }));
+    await user.click(screen.getByRole('button', { name: 'Configure' }));
 
     await waitFor(() => {
       expect(screen.getByText('Configure coding agent')).toBeInTheDocument();

@@ -8,6 +8,13 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
 
 # Overall flow
 
+## Onboarding dashboard UX
+
+- The Overview page uses a progressive, low-friction setup sequence: (1) choose coding agent, (2) connect GitHub, (3) add optional integrations.
+- Coding agent selection uses a **single card with an agent dropdown** (default `Codex`) instead of multiple parallel agent cards. This reduces first-run decision fatigue and keeps focus on the primary onboarding path.
+- The selected agent card always presents one clear next action: sign in (Codex) or configure credentials (Claude/Gemini), with a persistent settings entrypoint.
+- Codex remains visually recommended to guide most users toward the quickest "time to first fix" path while preserving flexibility for teams with existing Anthropic/Google setups.
+
 - Step 0: Connect repositories and build codebase context
     - Users sign in with GitHub OAuth and install the 143.dev GitHub App on their organization/repos. The GitHub App (same auth model used by Codex web, Claude Code web, and other modern AI coding platforms) provides fine-grained, short-lived installation tokens for repo access — no personal access tokens needed.
     - For each connected repo, the system automatically builds a **Repository Context Package** — a structured body of knowledge including architecture docs (CLAUDE.md, AGENTS.md), coding conventions extracted from the codebase and past PR reviews, a feature-to-file map (which files own which features), test infrastructure knowledge (how to run tests, what patterns are used), and a dependency map (service boundaries, safe-to-change-in-isolation analysis).
