@@ -66,10 +66,23 @@ func TestAgentRunStore_ListByOrg(t *testing.T) {
 		},
 		{
 			name:    "returns filtered agent runs by status",
-			filters: AgentRunFilters{Status: "running"},
+			filters: AgentRunFilters{Status: models.AgentRunStatusRunning},
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				mock.ExpectQuery("SELECT .+ FROM agent_runs WHERE org_id .+ AND status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(agentRunColumns).
+							AddRow(newAgentRunRow(runID1, issueID, orgID, now)...),
+					)
+			},
+			expected: 1,
+		},
+		{
+			name:    "returns only ad-hoc runs when AdHocOnly is true",
+			filters: AgentRunFilters{AdHocOnly: true},
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("SELECT .+ FROM agent_runs WHERE org_id .+ AND pm_plan_id IS NULL").
+					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(agentRunColumns).
 							AddRow(newAgentRunRow(runID1, issueID, orgID, now)...),

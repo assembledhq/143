@@ -25,10 +25,10 @@ describe('RunDetailPage', () => {
     expect(heading).toBeInTheDocument();
   });
 
-  it('shows back to runs link', async () => {
+  it('shows back to sessions link', async () => {
     renderWithProviders(<RunDetailContent id="run-abcdef12-3456-7890" />);
     await screen.findByRole('heading', { name: 'Fixed TypeError by adding null check' });
-    expect(screen.getByText('Back to runs')).toBeInTheDocument();
+    expect(screen.getByText('Back to sessions')).toBeInTheDocument();
   });
 
   it('renders all tab triggers', async () => {
