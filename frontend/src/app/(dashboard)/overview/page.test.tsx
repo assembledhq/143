@@ -156,11 +156,26 @@ describe('OverviewPage', () => {
     await user.click(screen.getByRole('button', { name: 'Sign in with ChatGPT' }));
 
     await waitFor(() => {
-      expect(screen.getByText('Edit agent settings')).toBeInTheDocument();
+      expect(screen.getByText('Connect your ChatGPT account')).toBeInTheDocument();
+    });
+  });
+
+  it('opens agent settings modal from Codex Settings button and saves updates', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<Overview />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Settings' })).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Configure coding agent')).toBeInTheDocument();
     });
 
     expect(screen.getByText('Best for gpt-5.3-codex model access.')).toBeInTheDocument();
-    expect(screen.getByText('Recommended')).toBeInTheDocument();
+    expect(screen.getAllByText('Recommended').length).toBeGreaterThanOrEqual(1);
 
     await user.click(screen.getByRole('radio', { name: 'Use API key' }));
 
