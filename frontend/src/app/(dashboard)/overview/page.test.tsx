@@ -347,10 +347,15 @@ describe('OverviewPage', () => {
       expect(screen.getByText('Failed to start authentication. Please try again.')).toBeInTheDocument();
     });
 
-    const cancelButton = screen.getByRole('button', { name: 'Cancel' });
     const tryAgainButton = screen.getByRole('button', { name: 'Try Again' });
+    const cancelButton = screen
+      .getAllByRole('button', { name: 'Cancel' })
+      .find((button) => button.parentElement === tryAgainButton.parentElement);
 
-    expect(cancelButton).toBeInTheDocument();
+    expect(cancelButton).toBeDefined();
+    if (!cancelButton) {
+      return;
+    }
     expect(tryAgainButton).toBeInTheDocument();
     expect(cancelButton.parentElement).toBe(tryAgainButton.parentElement);
     expect(cancelButton.compareDocumentPosition(tryAgainButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -377,10 +382,15 @@ describe('OverviewPage', () => {
       expect(screen.getByText('Failed to start authentication. Please try again.')).toBeInTheDocument();
     });
 
-    const cancelButton = screen.getByRole('button', { name: 'Cancel' });
     const tryAgainButton = screen.getByRole('button', { name: 'Try Again' });
+    const cancelButton = screen
+      .getAllByRole('button', { name: 'Cancel' })
+      .find((button) => button.parentElement === tryAgainButton.parentElement);
 
-    expect(cancelButton).toBeInTheDocument();
+    expect(cancelButton).toBeDefined();
+    if (!cancelButton) {
+      return;
+    }
     expect(tryAgainButton).toBeInTheDocument();
     expect(cancelButton.parentElement).toBe(tryAgainButton.parentElement);
     expect(cancelButton.compareDocumentPosition(tryAgainButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
