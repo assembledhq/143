@@ -1,14 +1,13 @@
 import TeamSettingsPage from "../settings/team/page";
-import { PageHeader } from "@/components/page-header";
+import { SettingsPageFrame } from "@/components/settings-page-frame";
 
 export default function TeamPage() {
   return (
-    <div className="space-y-6">
-      <PageHeader
-        title="Team"
-        description="Manage members, roles, and invitations for your organization."
-      />
+    <SettingsPageFrame
+      title="Team"
+      description="Manage members, roles, and invitations for your organization."
+    >
       <TeamSettingsPage />
-    </div>
+    </SettingsPageFrame>
   );
 }
