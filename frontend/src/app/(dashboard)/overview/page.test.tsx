@@ -156,7 +156,20 @@ describe('OverviewPage', () => {
     await user.click(screen.getByRole('button', { name: 'Sign in with ChatGPT' }));
 
     await waitFor(() => {
-      expect(screen.getByText('Connect your ChatGPT account')).toBeInTheDocument();
+      expect(screen.getByText('Edit agent settings')).toBeInTheDocument();
+    });
+
+    expect(screen.getByText('Best for gpt-5.3-codex model access.')).toBeInTheDocument();
+    expect(screen.getByText('Recommended')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('radio', { name: 'Use API key' }));
+
+    await user.clear(screen.getByLabelText('Model'));
+    await user.type(screen.getByLabelText('Model'), 'codex-mini');
+    await user.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    await waitFor(() => {
+      expect(settingsUpdateMock).toHaveBeenCalledTimes(1);
     });
   });
 
