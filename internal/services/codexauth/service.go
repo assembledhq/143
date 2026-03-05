@@ -270,6 +270,7 @@ func (s *Service) PollForToken(ctx context.Context, orgID uuid.UUID) (*AuthStatu
 	// Poll the token endpoint.
 	endpoint := s.issuer + "/api/accounts/deviceauth/token"
 	pollBody, err := json.Marshal(map[string]string{
+		"client_id":      s.clientID,
 		"device_auth_id": pending.DeviceAuthID,
 		"user_code":      pending.UserCode,
 	})
@@ -315,7 +316,11 @@ func (s *Service) PollForToken(ctx context.Context, orgID uuid.UUID) (*AuthStatu
 			s.pending.Delete(orgID.String())
 			return &AuthStatus{Status: "error", Message: "authentication denied by user"}, nil
 		default:
-			return &AuthStatus{Status: "error", Message: fmt.Sprintf("auth error: %s", errResp.Error)}, nil
+			msg := errResp.Error
+			if msg == "" {
+				msg = fmt.Sprintf("unexpected response (HTTP %d)", resp.StatusCode)
+			}
+			return &AuthStatus{Status: "error", Message: fmt.Sprintf("auth error: %s", msg)}, nil
 		}
 	}
 
