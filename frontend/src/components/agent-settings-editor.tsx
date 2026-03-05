@@ -18,7 +18,8 @@ import {
 } from "@/components/ui/select";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { AVAILABLE_CLAUDE_CODE_MODELS, AVAILABLE_CODEX_MODELS, AVAILABLE_GEMINI_CLI_MODELS } from "@/lib/model-constants";
-import type { CodexDeviceAuth, OrgSettings, Organization, SingleResponse } from "@/lib/types";
+import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
+import type { OrgSettings, Organization, SingleResponse } from "@/lib/types";
 
 interface AgentEnvVar {
   name: string;
