@@ -24,7 +24,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
     - Support tickets
     - Sentry errors
     - Linear issues
-    - Integration setup is initiated from dashboard integration cards (Overview + Integrations pages). "Connect Linear" calls `/api/v1/integrations/linear/connect`, which creates or reuses an active org-scoped Linear integration record so webhook ingestion can be enabled without manual DB setup.
+    - Integration setup is initiated from dashboard integration cards (Overview + Integrations pages). "Connect Linear" starts OAuth at `/api/v1/integrations/linear/login`, exchanges the callback code at `/api/v1/integrations/linear/callback`, stores the org-scoped Linear access token in `org_credentials` (`provider = linear`), and creates/reuses an active org-scoped Linear integration record for ingestion.
 - Step 2: Prioritize and identify top issues based on business impact
     - The system determines how many customers were affected, regression severity, and optionally (if you integrate Salesforce or some other CRM) the revenue risk.
     - The admins can specify product context (philosophy + direction + focus/avoid areas) to steer prioritization.

@@ -175,6 +175,9 @@ export const api = {
   },
   integrations: {
     list: () => get<import('./types').ListResponse<import('./types').Integration>>('/api/v1/integrations'),
+    loginLinear: () => {
+      window.location.href = `${API_BASE}/api/v1/integrations/linear/login`;
+    },
     connectLinear: () => post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/linear/connect'),
   },
   codexAuth: {
