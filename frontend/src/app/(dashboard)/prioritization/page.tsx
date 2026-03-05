@@ -13,13 +13,14 @@ import { Slider } from "@/components/ui/slider";
 import { PageHeader } from "@/components/page-header";
 import { X } from "lucide-react";
 import type { Organization, OrgSettings, SingleResponse } from "@/lib/types";
+import { DEFAULT_PM_MODEL } from "@/lib/model-constants";
 
 const DEFAULT_SETTINGS: Pick<
   Required<OrgSettings>,
   "pm_schedule_hours" | "pm_model" | "priority_weights" | "min_priority_threshold" | "product_direction" | "product_context"
 > = {
   pm_schedule_hours: 4,
-  pm_model: "sonnet",
+  pm_model: DEFAULT_PM_MODEL,
   priority_weights: {
     customer_impact: 0.35,
     severity: 0.25,
@@ -172,7 +173,7 @@ export default function PrioritizationPage() {
                   id="pm-model"
                   value={pmModel}
                   onChange={(e) => setPmModel(e.target.value)}
-                  placeholder="sonnet"
+                  placeholder={DEFAULT_PM_MODEL}
                 />
                 <p className="text-xs text-muted-foreground">
                   The LLM model used for PM planning.

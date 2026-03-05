@@ -46,7 +46,7 @@ const (
 	DefaultMinPriorityThreshold = 30.0
 	DefaultDefaultAgentType     = "codex"
 	DefaultPMScheduleHours      = 4
-	DefaultPMModel              = "sonnet"
+	DefaultPMModel              = PMModelSonnet
 
 	DefaultWeightCustomerImpact = 0.35
 	DefaultWeightSeverity       = 0.25
