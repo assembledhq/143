@@ -128,6 +128,7 @@ function AgentSettingsModal({ onClose, initialAgentType }: { onClose: () => void
           title="Configure coding agent"
           description="Set your default agent and configure credentials."
           initialAgentType={initialAgentType}
+          setupMode
           onClose={onClose}
         />
       </div>
@@ -237,7 +238,6 @@ function AgentSelectionSection() {
                     ))}
                   </SelectContent>
                 </Select>
-                {selectedAgentType === "codex" && <Badge variant="secondary" className="text-xs">Recommended</Badge>}
               </div>
               <p className="mt-0.5 text-sm text-muted-foreground">
                 {selectedAgent.description}

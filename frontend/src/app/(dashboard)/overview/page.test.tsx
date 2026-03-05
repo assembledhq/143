@@ -112,7 +112,7 @@ describe('OverviewPage', () => {
     });
 
     expect(screen.getByText('Codex')).toBeInTheDocument();
-    expect(screen.getByText('Recommended')).toBeInTheDocument();
+    expect(screen.queryByText('Recommended')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument();
     expect(screen.queryByTestId('agent-card-claude')).not.toBeInTheDocument();
     expect(screen.queryByTestId('agent-card-gemini')).not.toBeInTheDocument();
@@ -246,7 +246,7 @@ describe('OverviewPage', () => {
     });
 
     expect(screen.getByText('Best for gpt-5.3-codex model access.')).toBeInTheDocument();
-    expect(screen.getAllByText('Recommended').length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByText('Recommended')).not.toBeInTheDocument();
 
     await user.click(screen.getByRole('radio', { name: 'Use API key' }));
 
@@ -277,10 +277,13 @@ describe('OverviewPage', () => {
 
     // Claude Code should be pre-selected, showing its env var fields
     await waitFor(() => {
-      expect(screen.getByLabelText('Model')).toBeInTheDocument();
+      expect(screen.getByRole('combobox', { name: 'Model' })).toBeInTheDocument();
     });
 
-    await user.type(screen.getByLabelText('Model'), 'claude-sonnet-4-5');
+    expect(screen.queryByLabelText('Base URL')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('combobox', { name: 'Model' }));
+    await user.click(await screen.findByRole('option', { name: 'claude-sonnet-4-5' }));
     await user.click(screen.getByRole('button', { name: 'Save changes' }));
 
     await waitFor(() => {
