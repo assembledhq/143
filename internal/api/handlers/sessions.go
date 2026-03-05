@@ -151,7 +151,7 @@ func planToSession(p models.PMPlan) models.AgentSession {
 
 // runToSession converts an orphan AgentRun to a single-task AgentSession.
 func runToSession(run models.AgentRun) models.AgentSession {
-	title := "Manual Run"
+	var title string
 	if run.ResultSummary != nil && *run.ResultSummary != "" {
 		title = *run.ResultSummary
 	} else {
