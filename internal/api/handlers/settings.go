@@ -45,6 +45,18 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Settings != nil {
+		var parsedSettings models.OrgSettings
+		if err := json.Unmarshal(*req.Settings, &parsedSettings); err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid settings JSON")
+			return
+		}
+		if err := models.ValidateSettingsModels(parsedSettings); err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_SETTINGS", err.Error())
+			return
+		}
+	}
+
 	org, err := h.orgStore.GetByID(r.Context(), orgID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "organization not found")
