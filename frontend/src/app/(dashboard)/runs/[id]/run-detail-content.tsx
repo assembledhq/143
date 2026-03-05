@@ -170,10 +170,10 @@ function OverviewTab({ run }: { run: AgentRun }) {
             {run.pm_plan_id && (
               <div className="flex items-center gap-2">
                 <Badge variant="outline" className="text-[11px]">
-                  Plan {run.pm_plan_id.slice(0, 8)}
+                  Session {run.pm_plan_id.slice(0, 8)}
                 </Badge>
-                <Link href="/plans" className="text-xs text-primary underline">
-                  View plan
+                <Link href={`/sessions/${run.pm_plan_id}`} className="text-xs text-primary underline">
+                  View session
                 </Link>
               </div>
             )}
@@ -387,8 +387,8 @@ export function RunDetailContent({ id }: { id: string }) {
   if (isLoading) {
     return (
       <div className="space-y-6">
-        <Link href="/runs" className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
-          <ArrowLeft className="h-3 w-3" /> Back to runs
+        <Link href="/sessions" className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
+          <ArrowLeft className="h-3 w-3" /> Back to sessions
         </Link>
         <Card>
           <CardContent className="py-12 text-center text-sm text-muted-foreground">
@@ -402,8 +402,8 @@ export function RunDetailContent({ id }: { id: string }) {
   if (error || !run) {
     return (
       <div className="space-y-6">
-        <Link href="/runs" className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
-          <ArrowLeft className="h-3 w-3" /> Back to runs
+        <Link href="/sessions" className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
+          <ArrowLeft className="h-3 w-3" /> Back to sessions
         </Link>
         <Card>
           <CardContent className="py-12 text-center text-sm text-muted-foreground">
@@ -416,8 +416,8 @@ export function RunDetailContent({ id }: { id: string }) {
 
   return (
     <div className="space-y-6">
-      <Link href="/runs" className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
-        <ArrowLeft className="h-3 w-3" /> Back to runs
+      <Link href="/sessions" className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
+        <ArrowLeft className="h-3 w-3" /> Back to sessions
       </Link>
 
       <div>

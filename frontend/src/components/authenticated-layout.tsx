@@ -4,13 +4,10 @@ import {
   LayoutDashboard,
   AlertCircle,
   Play,
-  BarChart3,
-  DollarSign,
   Settings,
   Users,
   LogOut,
   ChevronsUpDown,
-  ClipboardList,
   Plug,
   Bot,
   Target,
@@ -31,10 +28,7 @@ import { useEffect } from "react";
 const navItems = [
   { label: "Overview", icon: LayoutDashboard, href: "/overview" },
   { label: "Issues", icon: AlertCircle, href: "/issues" },
-  { label: "Runs", icon: Play, href: "/runs" },
-  { label: "Plans", icon: ClipboardList, href: "/plans" },
-  { label: "Analytics", icon: BarChart3, href: "/analytics" },
-  { label: "Costs", icon: DollarSign, href: "/costs" },
+  { label: "Sessions", icon: Play, href: "/sessions" },
 ];
 
 export function AuthenticatedLayout({ children }: { children: React.ReactNode }) {

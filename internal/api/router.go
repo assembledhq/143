@@ -89,6 +89,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		jobStore,
 	)
 	pmHandler := handlers.NewPMHandler(pmPlanStore, jobStore)
+	sessionHandler := handlers.NewSessionHandler(pmPlanStore, agentRunStore)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
 	credentialHandler := handlers.NewCredentialHandler(credentialStore)
@@ -166,6 +167,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/pm/plans", pmHandler.List)
 			r.Get("/api/v1/pm/plans/{id}", pmHandler.Get)
 			r.Get("/api/v1/pm/plans/latest", pmHandler.Latest)
+			r.Get("/api/v1/sessions", sessionHandler.List)
+			r.Get("/api/v1/sessions/{id}", sessionHandler.Get)
 		})
 
 		// Write routes (admin and member only)

@@ -42,11 +42,11 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID) (*gathered
 		issueSummaries = append(issueSummaries, summarizeIssue(issue))
 	}
 
-	pendingRuns, err := s.agentRuns.ListByOrg(ctx, orgID, db.AgentRunFilters{Status: "pending", Limit: 50})
+	pendingRuns, err := s.agentRuns.ListByOrg(ctx, orgID, db.AgentRunFilters{Status: models.AgentRunStatusPending, Limit: 50})
 	if err != nil {
 		return nil, err
 	}
-	runningRuns, err := s.agentRuns.ListByOrg(ctx, orgID, db.AgentRunFilters{Status: "running", Limit: 50})
+	runningRuns, err := s.agentRuns.ListByOrg(ctx, orgID, db.AgentRunFilters{Status: models.AgentRunStatusRunning, Limit: 50})
 	if err != nil {
 		return nil, err
 	}
