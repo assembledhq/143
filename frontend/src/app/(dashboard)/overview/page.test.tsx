@@ -5,6 +5,8 @@ import Overview from './page';
 const {
   loginMock,
   sentryLoginMock,
+  integrationsListMock,
+  connectLinearMock,
   codexStatusMock,
   codexInitiateMock,
   settingsGetMock,
@@ -13,6 +15,16 @@ const {
 } = vi.hoisted(() => ({
   loginMock: vi.fn(),
   sentryLoginMock: vi.fn(),
+  integrationsListMock: vi.fn().mockResolvedValue({ data: [] }),
+  connectLinearMock: vi.fn().mockResolvedValue({
+    data: {
+      id: 'linear-1',
+      org_id: 'org-1',
+      provider: 'linear',
+      status: 'active',
+      created_at: '2026-01-01T00:00:00Z',
+    },
+  }),
   codexStatusMock: vi.fn().mockResolvedValue({ data: { status: 'pending' } }),
   codexInitiateMock: vi.fn().mockResolvedValue({
     data: {
@@ -40,6 +52,10 @@ vi.mock('@/lib/api', () => ({
       login: loginMock,
       loginSentry: sentryLoginMock,
     },
+    integrations: {
+      list: integrationsListMock,
+      connectLinear: connectLinearMock,
+    },
     codexAuth: {
       status: codexStatusMock,
       initiate: codexInitiateMock,
@@ -56,6 +72,18 @@ describe('OverviewPage', () => {
   beforeEach(() => {
     loginMock.mockReset();
     sentryLoginMock.mockReset();
+    integrationsListMock.mockReset();
+    integrationsListMock.mockResolvedValue({ data: [] });
+    connectLinearMock.mockReset();
+    connectLinearMock.mockResolvedValue({
+      data: {
+        id: 'linear-1',
+        org_id: 'org-1',
+        provider: 'linear',
+        status: 'active',
+        created_at: '2026-01-01T00:00:00Z',
+      },
+    });
     codexStatusMock.mockClear();
     codexStatusMock.mockResolvedValue({ data: { status: 'pending' } });
     settingsGetMock.mockClear();
@@ -146,11 +174,34 @@ describe('OverviewPage', () => {
     expect(sentryLoginMock).toHaveBeenCalledTimes(1);
   });
 
-  it('shows Linear integration as coming soon', () => {
+  it('connects Linear from the additional integrations section', async () => {
+    const user = userEvent.setup();
+
     renderWithProviders(<Overview />);
 
-    expect(screen.getByText('Connect Linear')).toBeInTheDocument();
-    expect(screen.getByText('Coming soon')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Connect Linear' }));
+
+    await waitFor(() => {
+      expect(connectLinearMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('shows Linear as connected when active integration exists', async () => {
+    integrationsListMock.mockResolvedValue({
+      data: [
+        {
+          id: 'linear-1',
+          org_id: 'org-1',
+          provider: 'linear',
+          status: 'active',
+          created_at: '2026-01-01T00:00:00Z',
+        },
+      ],
+    });
+
+    renderWithProviders(<Overview />);
+
+    expect(await screen.findByRole('button', { name: 'Linear Connected' })).toBeDisabled();
   });
 
   it('shows Codex as connected when ChatGPT auth status is completed', async () => {
