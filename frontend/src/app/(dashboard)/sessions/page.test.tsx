@@ -1,6 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
-import userEvent from '@testing-library/user-event';
 import { renderWithProviders, screen } from '@/test/test-utils';
 import { server } from '@/test/mocks/server';
 import { SessionsPageContent } from './sessions-page-content';
@@ -131,51 +130,10 @@ describe('SessionsPage', () => {
     expect(screen.getByText('Analyze Issues')).toBeInTheDocument();
   });
 
-  it('starts a one-off manual session from chat composer', async () => {
-    const user = userEvent.setup();
-
-    server.use(
-      http.post('/api/v1/sessions/manual', async ({ request }) => {
-        const body = await request.json() as { message: string; images?: string[] };
-        if (!body.message.includes('Investigate checkout timeout')) {
-          return HttpResponse.json({ error: { code: 'INVALID', message: 'bad body' } }, { status: 400 });
-        }
-        return HttpResponse.json(
-          {
-            data: {
-              id: 'session-manual-chat-1',
-              type: 'manual',
-              status: 'active',
-              triggered_by: 'manual',
-              title: 'Investigate checkout timeout and propose a fix',
-              task_count: 1,
-              active_run_count: 1,
-              completed_run_count: 0,
-              failed_run_count: 0,
-              tasks: [
-                {
-                  rank: 1,
-                  title: 'Investigate checkout timeout and propose a fix',
-                  issue_ids: ['issue-manual-1'],
-                  status: 'delegated',
-                  agent_run_id: 'run-manual-chat-1',
-                  run_status: 'running',
-                },
-              ],
-              created_at: '2026-03-05T12:00:00Z',
-            },
-          },
-          { status: 201 },
-        );
-      }),
-    );
-
+  it('links New Manual Session action to dedicated page', async () => {
     renderWithProviders(<SessionsPageContent />);
 
-    await user.click(await screen.findByRole('button', { name: 'New Manual Session' }));
-    await user.type(screen.getByLabelText('Message'), 'Investigate checkout timeout and propose a fix.');
-    await user.click(screen.getByRole('button', { name: 'Start Session' }));
-
-    expect(await screen.findByText('Starting session...')).toBeInTheDocument();
+    const link = await screen.findByRole('link', { name: 'New Manual Session' });
+    expect(link).toHaveAttribute('href', '/sessions/new');
   });
 });
