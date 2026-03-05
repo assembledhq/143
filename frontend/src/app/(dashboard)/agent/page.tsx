@@ -11,6 +11,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Slider } from "@/components/ui/slider";
 import { PageHeader } from "@/components/page-header";
 import { AgentSettingsEditor } from "@/components/agent-settings-editor";
+import { PageContainer } from "@/components/page-container";
 import type { Organization, OrgSettings, SingleResponse } from "@/lib/types";
 
 const DEFAULT_SETTINGS: Pick<
@@ -84,7 +85,8 @@ export default function AgentPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <PageContainer size="default">
+      <div className="space-y-6">
       <PageHeader
         title="Agent"
         description="Configure how the AI agent runs and behaves."
@@ -247,6 +249,7 @@ export default function AgentPage() {
           <span className="text-sm text-destructive">Failed to save settings.</span>
         )}
       </div>
-    </div>
+      </div>
+    </PageContainer>
   );
 }
