@@ -16,6 +16,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { AVAILABLE_CLAUDE_CODE_MODELS, AVAILABLE_CODEX_MODELS, AVAILABLE_GEMINI_CLI_MODELS } from "@/lib/model-constants";
 import type { CodexDeviceAuth, OrgSettings, Organization, SingleResponse } from "@/lib/types";
 
 interface AgentEnvVar {
@@ -34,7 +35,7 @@ const AGENT_TYPES: { key: string; label: string; envVars: AgentEnvVar[] }[] = [
     label: "Codex",
     envVars: [
       { name: "OPENAI_API_KEY", label: "API Key", sensitive: true },
-      { name: "OPENAI_MODEL", label: "Model", placeholder: "e.g. codex-mini, o3" },
+      { name: "OPENAI_MODEL", label: "Model", options: [...AVAILABLE_CODEX_MODELS] },
       { name: "OPENAI_BASE_URL", label: "Base URL", placeholder: "Custom API endpoint (optional)" },
     ],
   },
@@ -46,7 +47,7 @@ const AGENT_TYPES: { key: string; label: string; envVars: AgentEnvVar[] }[] = [
       {
         name: "ANTHROPIC_MODEL",
         label: "Model",
-        options: ["claude-sonnet-4-5", "claude-opus-4-1", "claude-3-5-haiku-latest"],
+        options: [...AVAILABLE_CLAUDE_CODE_MODELS],
       },
       {
         name: "ANTHROPIC_BASE_URL",
@@ -65,7 +66,7 @@ const AGENT_TYPES: { key: string; label: string; envVars: AgentEnvVar[] }[] = [
       {
         name: "GEMINI_MODEL",
         label: "Model",
-        options: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
+        options: [...AVAILABLE_GEMINI_CLI_MODELS],
       },
     ],
   },
@@ -438,7 +439,7 @@ export function AgentSettingsEditor({
             <div className="space-y-2 rounded-lg border p-4">
               <h4 className="text-sm font-medium">API key configuration</h4>
               <p className="text-xs text-muted-foreground">
-                Enter API key, model, and optional base URL below. This method does not support gpt-5.3-codex.
+                Enter API key, model, and optional base URL below.
               </p>
             </div>
           )}
