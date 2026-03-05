@@ -34,9 +34,11 @@ install_prereqs() {
   command -v go   >/dev/null 2>&1 || missing+=(go)
   command -v node >/dev/null 2>&1 || missing+=(node)
   command -v psql >/dev/null 2>&1 || missing+=(postgresql)
+  command -v sops >/dev/null 2>&1 || missing+=(sops)
+  command -v age  >/dev/null 2>&1 || missing+=(age)
 
   if [ ${#missing[@]} -eq 0 ]; then
-    info "All prerequisites found (go, node, psql)."
+    info "All prerequisites found (go, node, psql, sops, age)."
     return
   fi
 
@@ -51,6 +53,8 @@ install_prereqs() {
         go)         info "Installing Go...";         brew install go ;;
         node)       info "Installing Node.js...";    brew install node ;;
         postgresql) info "Installing PostgreSQL...";  brew install postgresql@17 && brew services start postgresql@17 ;;
+        sops)       info "Installing sops...";        brew install sops ;;
+        age)        info "Installing age...";         brew install age ;;
       esac
     done
   elif [ "$PLATFORM" = "linux" ]; then
@@ -61,6 +65,8 @@ install_prereqs() {
           go)         info "Installing Go...";         sudo apt-get install -y golang ;;
           node)       info "Installing Node.js...";    sudo apt-get install -y nodejs npm ;;
           postgresql) info "Installing PostgreSQL...";  sudo apt-get install -y postgresql postgresql-client && sudo systemctl start postgresql ;;
+          sops)       info "Installing sops...";        sudo apt-get install -y sops ;;
+          age)        info "Installing age...";         sudo apt-get install -y age ;;
         esac
       done
     else
@@ -68,10 +74,14 @@ install_prereqs() {
     fi
   fi
 
-  # Verify everything landed
+  # Verify core tools landed (sops/age are optional — warn but don't fail)
   command -v go   >/dev/null 2>&1 || fail "Go installation failed."
   command -v node >/dev/null 2>&1 || fail "Node.js installation failed."
   command -v psql >/dev/null 2>&1 || fail "PostgreSQL installation failed."
+  if ! command -v sops >/dev/null 2>&1 || ! command -v age >/dev/null 2>&1; then
+    warn "sops/age not available — encrypted secrets (make secrets-*) won't work."
+    warn "Install manually: brew install sops age"
+  fi
 
   info "All prerequisites installed."
 }
@@ -96,7 +106,25 @@ DB_PORT="5432"
 DATABASE_URL="postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=disable"
 
 if [ ! -f .env ]; then
-  if [ -f .env.example ]; then
+  # If an encrypted .env.enc exists and the developer has sops+age, decrypt it.
+  # This gives returning devs (or anyone with the age key) a seamless setup.
+  if [ -f .env.enc ] && command -v sops >/dev/null 2>&1; then
+    SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-$HOME/.config/sops/age/keys.txt}"
+    if [ -f "$SOPS_AGE_KEY_FILE" ]; then
+      info "Found .env.enc and age key — decrypting..."
+      if SOPS_AGE_KEY_FILE="$SOPS_AGE_KEY_FILE" sops --decrypt .env.enc > .env 2>/dev/null; then
+        info "Decrypted .env.enc → .env"
+      else
+        warn "Could not decrypt .env.enc (wrong key?). Falling back to .env.example."
+        cp .env.example .env
+        info "Created .env from .env.example — edit it to add your API keys."
+      fi
+    else
+      warn "Found .env.enc but no age key at $SOPS_AGE_KEY_FILE. Falling back to .env.example."
+      cp .env.example .env
+      info "Created .env from .env.example — edit it to add your API keys."
+    fi
+  elif [ -f .env.example ]; then
     cp .env.example .env
     info "Created .env from .env.example"
   else

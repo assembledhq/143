@@ -66,7 +66,7 @@ export default function PrioritizationPage() {
   const enabledPmModelGroups = useMemo(() => {
     const agentConfig = orgSettings.agent_config ?? {};
     const serverDefaults = agentDefaultsResponse?.data ?? {};
-    const defaultAgent = orgSettings.default_agent_type;
+    const defaultAgent = orgSettings.default_agent_type || "codex";
 
     return Object.entries(PM_MODELS_BY_PROVIDER)
       .filter(([providerKey, { apiKeyVar }]) => {
