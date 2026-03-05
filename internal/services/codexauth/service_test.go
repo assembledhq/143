@@ -110,6 +110,15 @@ func TestInitiateDeviceAuth(t *testing.T) {
 
 func TestPollForToken_AuthorizationPending(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify client_id is included in the poll request.
+		var reqBody map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			t.Errorf("failed to decode request body: %v", err)
+		}
+		if reqBody["client_id"] != DefaultClientID {
+			t.Errorf("expected client_id %q in poll request, got %q", DefaultClientID, reqBody["client_id"])
+		}
+
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{
 			"error": "authorization_pending",
@@ -532,6 +541,42 @@ func TestPollForToken_UnknownError(t *testing.T) {
 	}
 	if status.Status != "error" {
 		t.Errorf("expected error status, got %s", status.Status)
+	}
+	if status.Message != "auth error: some_unknown_error" {
+		t.Errorf("unexpected message: %s", status.Message)
+	}
+}
+
+func TestPollForToken_EmptyErrorField(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Simulate a response with no "error" field (e.g. unexpected format).
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`{"message": "forbidden"}`))
+	}))
+	defer server.Close()
+
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+	svc.SetHTTPClient(server.Client())
+	svc.SetIssuer(server.URL)
+
+	orgID := uuid.New()
+	svc.pending.Store(orgID.String(), &PendingAuth{
+		DeviceAuthID: "dev_123",
+		ExpiresAt:    time.Now().Add(15 * time.Minute),
+		Interval:     5,
+	})
+
+	status, err := svc.PollForToken(context.Background(), orgID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.Status != "error" {
+		t.Errorf("expected error status, got %s", status.Status)
+	}
+	// Should include HTTP status code instead of empty string.
+	if status.Message != "auth error: unexpected response (HTTP 403)" {
+		t.Errorf("unexpected message: %s", status.Message)
 	}
 }
 
