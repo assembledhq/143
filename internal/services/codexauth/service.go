@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -147,14 +148,19 @@ func (s *Service) InitiateDeviceAuth(ctx context.Context, orgID uuid.UUID) (*Dev
 		UserCode        string `json:"user_code"`
 		VerificationURI string `json:"verification_uri"`
 		ExpiresIn       int    `json:"expires_in"`
-		Interval        int    `json:"interval"`
+		Interval        any    `json:"interval"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, fmt.Errorf("parse device auth response: %w", err)
 	}
 
-	if result.Interval <= 0 {
-		result.Interval = 5
+	interval, err := parsePollInterval(result.Interval)
+	if err != nil {
+		return nil, fmt.Errorf("parse device auth response interval: %w", err)
+	}
+
+	if interval <= 0 {
+		interval = 5
 	}
 	if result.VerificationURI == "" {
 		result.VerificationURI = DefaultVerificationURI
@@ -171,7 +177,7 @@ func (s *Service) InitiateDeviceAuth(ctx context.Context, orgID uuid.UUID) (*Dev
 		UserCode:        result.UserCode,
 		VerificationURI: result.VerificationURI,
 		ExpiresAt:       expiresAt,
-		Interval:        result.Interval,
+		Interval:        interval,
 	}
 	s.pending.Store(orgID.String(), pending)
 
@@ -182,7 +188,7 @@ func (s *Service) InitiateDeviceAuth(ctx context.Context, orgID uuid.UUID) (*Dev
 			UserCode:        result.UserCode,
 			VerificationURI: result.VerificationURI,
 			ExpiresAt:       expiresAt,
-			PollInterval:    result.Interval,
+			PollInterval:    interval,
 		}
 		if err := s.credentials.Upsert(ctx, orgID, pendingCfg); err != nil {
 			s.logger.Warn().Err(err).Msg("failed to persist pending device auth to DB")
@@ -346,6 +352,25 @@ func (s *Service) PollForToken(ctx context.Context, orgID uuid.UUID) (*AuthStatu
 		Status:      "completed",
 		AccountType: cfg.AccountType,
 	}, nil
+}
+
+func parsePollInterval(raw any) (int, error) {
+	if raw == nil {
+		return 0, nil
+	}
+
+	switch v := raw.(type) {
+	case float64:
+		return int(v), nil
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return 0, fmt.Errorf("invalid interval value %q", v)
+		}
+		return parsed, nil
+	default:
+		return 0, fmt.Errorf("unsupported interval type %T", raw)
+	}
 }
 
 // RefreshToken refreshes an expired access token using the refresh token.
