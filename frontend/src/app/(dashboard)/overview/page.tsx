@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -280,6 +281,22 @@ function AgentSelectionSection() {
 
 export default function Overview() {
   const [github, sentry, linear] = INTEGRATIONS;
+  const queryClient = useQueryClient();
+
+  const { data: integrationsResp } = useQuery({
+    queryKey: ["integrations"],
+    queryFn: () => api.integrations.list(),
+  });
+  const linearIntegration = integrationsResp?.data?.find(
+    (integration) => integration.provider === "linear" && integration.status === "active"
+  );
+
+  const connectLinearMutation = useMutation({
+    mutationFn: () => api.integrations.connectLinear(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["integrations"] });
+    },
+  });
 
   return (
     <div className="space-y-8">
@@ -344,7 +361,18 @@ export default function Overview() {
               id: linear.key,
               title: `Connect ${linear.name}`,
               description: linear.description,
-              action: <Badge variant="secondary">Coming soon</Badge>,
+              action: (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  aria-label={linearIntegration ? "Linear Connected" : "Connect Linear"}
+                  loading={connectLinearMutation.isPending}
+                  disabled={Boolean(linearIntegration) || connectLinearMutation.isPending}
+                  onClick={() => connectLinearMutation.mutate()}
+                >
+                  {linearIntegration ? "Connected" : "Connect"}
+                </Button>
+              ),
             },
           ]}
         />

@@ -23,9 +23,9 @@ describe("IntegrationsCard", () => {
             ),
           },
           {
-            id: "linear",
-            title: "Linear",
-            description: "Sync issues from Linear and auto-assign fixes.",
+            id: "sentry",
+            title: "Sentry",
+            description: "Pull production errors and auto-generate fixes.",
             action: <Badge variant="secondary">Coming soon</Badge>,
           },
         ]}
@@ -33,7 +33,7 @@ describe("IntegrationsCard", () => {
     );
 
     expect(screen.getByText("GitHub")).toBeInTheDocument();
-    expect(screen.getByText("Linear")).toBeInTheDocument();
+    expect(screen.getByText("Sentry")).toBeInTheDocument();
     expect(screen.getAllByTestId("integration-card")).toHaveLength(2);
     await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
     expect(onConnect).toHaveBeenCalledTimes(1);
