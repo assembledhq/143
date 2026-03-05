@@ -136,4 +136,5 @@ describe('SessionsPage', () => {
     const link = await screen.findByRole('link', { name: 'New Manual Session' });
     expect(link).toHaveAttribute('href', '/sessions/new');
   });
+
 });
