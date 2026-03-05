@@ -17,7 +17,7 @@ import (
 
 const (
 	linearAuthorizeURL = "https://linear.app/oauth/authorize"
-	linearTokenURL     = "https://api.linear.app/oauth/token"
+	linearTokenURL     = "https://api.linear.app/oauth/token" // #nosec G101 -- OAuth endpoint URL, not credentials
 	linearGraphQLURL   = "https://api.linear.app/graphql"
 )
 
