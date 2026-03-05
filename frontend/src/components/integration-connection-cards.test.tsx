@@ -13,7 +13,8 @@ describe("integration connection cards", () => {
 
     renderWithProviders(<SourceControlIntegrationCard onConnectGitHub={onConnectGitHub} />);
 
-    expect(screen.getByText("Connect GitHub")).toBeInTheDocument();
+    expect(screen.getByText("GitHub")).toBeInTheDocument();
+    expect(screen.getByAltText("GitHub logo")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
 
@@ -34,8 +35,10 @@ describe("integration connection cards", () => {
       />
     );
 
-    expect(screen.getByText("Connect Sentry")).toBeInTheDocument();
-    expect(screen.getByText("Connect Linear")).toBeInTheDocument();
+    expect(screen.getByText("Sentry")).toBeInTheDocument();
+    expect(screen.getByText("Linear")).toBeInTheDocument();
+    expect(screen.getByAltText("Sentry logo")).toBeInTheDocument();
+    expect(screen.getByAltText("Linear logo")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Connect Sentry" }));
     await user.click(screen.getByRole("button", { name: "Connect Linear" }));

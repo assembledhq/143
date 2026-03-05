@@ -140,6 +140,64 @@ func TestPollForToken_AuthorizationPending(t *testing.T) {
 	}
 }
 
+func TestPollForToken_HTTP403Pending(t *testing.T) {
+	// OpenAI returns 403 while the user hasn't entered the code yet.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+	svc.SetHTTPClient(server.Client())
+	svc.SetIssuer(server.URL)
+
+	orgID := uuid.New()
+	svc.pending.Store(orgID.String(), &PendingAuth{
+		DeviceAuthID: "dev_123",
+		UserCode:     "ABCD-1234",
+		ExpiresAt:    time.Now().Add(15 * time.Minute),
+		Interval:     5,
+	})
+
+	status, err := svc.PollForToken(context.Background(), orgID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.Status != "pending" {
+		t.Errorf("expected pending status for 403, got %s", status.Status)
+	}
+}
+
+func TestPollForToken_HTTP404Pending(t *testing.T) {
+	// OpenAI may also return 404 while the user hasn't entered the code.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+	svc.SetHTTPClient(server.Client())
+	svc.SetIssuer(server.URL)
+
+	orgID := uuid.New()
+	svc.pending.Store(orgID.String(), &PendingAuth{
+		DeviceAuthID: "dev_123",
+		UserCode:     "ABCD-1234",
+		ExpiresAt:    time.Now().Add(15 * time.Minute),
+		Interval:     5,
+	})
+
+	status, err := svc.PollForToken(context.Background(), orgID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.Status != "pending" {
+		t.Errorf("expected pending status for 404, got %s", status.Status)
+	}
+}
+
 func TestPollForToken_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -532,6 +590,42 @@ func TestPollForToken_UnknownError(t *testing.T) {
 	}
 	if status.Status != "error" {
 		t.Errorf("expected error status, got %s", status.Status)
+	}
+	if status.Message != "auth error: some_unknown_error" {
+		t.Errorf("unexpected message: %s", status.Message)
+	}
+}
+
+func TestPollForToken_EmptyErrorField(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Simulate a response with no "error" field (e.g. unexpected format).
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"message": "internal error"}`))
+	}))
+	defer server.Close()
+
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+	svc.SetHTTPClient(server.Client())
+	svc.SetIssuer(server.URL)
+
+	orgID := uuid.New()
+	svc.pending.Store(orgID.String(), &PendingAuth{
+		DeviceAuthID: "dev_123",
+		ExpiresAt:    time.Now().Add(15 * time.Minute),
+		Interval:     5,
+	})
+
+	status, err := svc.PollForToken(context.Background(), orgID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.Status != "error" {
+		t.Errorf("expected error status, got %s", status.Status)
+	}
+	// Should include HTTP status code instead of empty string.
+	if status.Message != "auth error: unexpected response (HTTP 500)" {
+		t.Errorf("unexpected message: %s", status.Message)
 	}
 }
 

@@ -94,14 +94,14 @@ describe('OverviewPage', () => {
   it('renders the page header', () => {
     renderWithProviders(<Overview />);
 
-    expect(screen.getByText('Overview')).toBeInTheDocument();
-    expect(screen.getByText('Set up your coding agent and connect your tools to start fixing issues automatically.')).toBeInTheDocument();
+    expect(screen.getByText('Get started')).toBeInTheDocument();
+    expect(screen.getByText('Connect your tools and start fixing issues automatically.')).toBeInTheDocument();
   });
 
-  it('renders the page description text', () => {
+  it('renders the progress indicator', () => {
     renderWithProviders(<Overview />);
 
-    expect(screen.getByText(/Once integrations are connected/)).toBeInTheDocument();
+    expect(screen.getByText(/of 4 connected/)).toBeInTheDocument();
   });
 
   it('shows a single coding agent card with dropdown defaulting to Codex', async () => {
@@ -138,19 +138,15 @@ describe('OverviewPage', () => {
     expect(screen.queryByRole('button', { name: 'Sign in with ChatGPT' })).not.toBeInTheDocument();
   });
 
-  it('shows coding agent section before source control and integrations', () => {
+  it('shows coding agent step before connect integrations step', () => {
     renderWithProviders(<Overview />);
 
     const codingAgentHeader = screen.getByText('Coding agent');
-    const sourceControlHeader = screen.getByText('Source control');
-    const integrationsHeader = screen.getByText('Additional integrations');
+    const integrationsHeader = screen.getByText('Connect integrations');
 
     // Verify ordering via DOM position
     expect(
-      codingAgentHeader.compareDocumentPosition(sourceControlHeader) & Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy();
-    expect(
-      sourceControlHeader.compareDocumentPosition(integrationsHeader) & Node.DOCUMENT_POSITION_FOLLOWING
+      codingAgentHeader.compareDocumentPosition(integrationsHeader) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy();
   });
 
@@ -244,6 +240,8 @@ describe('OverviewPage', () => {
     await waitFor(() => {
       expect(screen.getByText('Configure coding agent')).toBeInTheDocument();
     });
+
+    expect(screen.getByText('Credential method').closest('div.space-y-3')).not.toHaveClass('bg-card');
 
     expect(screen.getByText('Best for gpt-5.3-codex model access.')).toBeInTheDocument();
     expect(screen.queryByText('Recommended')).not.toBeInTheDocument();
@@ -347,10 +345,50 @@ describe('OverviewPage', () => {
       expect(screen.getByText('Failed to start authentication. Please try again.')).toBeInTheDocument();
     });
 
-    const cancelButton = screen.getByRole('button', { name: 'Cancel' });
     const tryAgainButton = screen.getByRole('button', { name: 'Try Again' });
+    const cancelButton = screen
+      .getAllByRole('button', { name: 'Cancel' })
+      .find((button) => button.parentElement === tryAgainButton.parentElement);
 
-    expect(cancelButton).toBeInTheDocument();
+    expect(cancelButton).toBeDefined();
+    if (!cancelButton) {
+      return;
+    }
+    expect(tryAgainButton).toBeInTheDocument();
+    expect(cancelButton.parentElement).toBe(tryAgainButton.parentElement);
+    expect(cancelButton.compareDocumentPosition(tryAgainButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('uses the same modal action layout in agent settings auth flow', async () => {
+    codexInitiateMock.mockRejectedValueOnce(new Error('Network error'));
+    const user = userEvent.setup();
+    renderWithProviders(<Overview />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Settings' })).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Configure coding agent')).toBeInTheDocument();
+    });
+
+    await user.click(screen.getAllByRole('button', { name: 'Sign in with ChatGPT' })[0]);
+
+    await waitFor(() => {
+      expect(screen.getByText('Failed to start authentication. Please try again.')).toBeInTheDocument();
+    });
+
+    const tryAgainButton = screen.getByRole('button', { name: 'Try Again' });
+    const cancelButton = screen
+      .getAllByRole('button', { name: 'Cancel' })
+      .find((button) => button.parentElement === tryAgainButton.parentElement);
+
+    expect(cancelButton).toBeDefined();
+    if (!cancelButton) {
+      return;
+    }
     expect(tryAgainButton).toBeInTheDocument();
     expect(cancelButton.parentElement).toBe(tryAgainButton.parentElement);
     expect(cancelButton.compareDocumentPosition(tryAgainButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();

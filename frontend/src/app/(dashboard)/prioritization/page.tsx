@@ -140,7 +140,7 @@ export default function PrioritizationPage() {
   }
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       <PageHeader
         title="Prioritization"
         description="Define product context and how the PM agent prioritizes work."
