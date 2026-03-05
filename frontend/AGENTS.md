@@ -4,6 +4,15 @@ This file applies to the entire `frontend/` tree.
 
 ## UI Patterns
 
+### Page width and ultra-wide layouts
+
+- Use `PageContainer` (`src/components/page-container.tsx`) for dashboard pages instead of ad-hoc max-width classes.
+- Standardize constrained app pages to `max-w-[1200px]` for consistency across routes.
+- `PageContainer` sizes `narrow`, `default`, and `wide` all map to the same `max-w-[1200px]` baseline; use `full` only when true full-bleed interaction is required.
+- Keep app chrome full-width, but constrain the content region with `PageContainer`.
+- On form-heavy pages, cap individual field groups to readable widths (e.g. `max-w-[560px]`) so controls never span the entire monitor.
+- For settings-style routes, use `SettingsPageFrame` (`src/components/settings-page-frame.tsx`) so `/settings`-style and `/team`-style pages share the same narrow container and header rhythm.
+
 ### Modal action layout
 
 - Keep modal actions on a single horizontal row in the footer.

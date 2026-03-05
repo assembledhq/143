@@ -12,6 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
 import { useAnalyze } from "@/hooks/use-analyze";
 import type { PMPlan } from "@/lib/types";
+import { PageContainer } from "@/components/page-container";
 
 function formatDate(dateStr?: string) {
   if (!dateStr) return "-";
@@ -73,24 +74,25 @@ export default function PlansPage() {
   const history = historyData?.data ?? [];
 
   return (
-    <div className="space-y-6">
-      <PageHeader
-        title="PM Plans"
-        description="See the PM agent's latest analysis and delegated tasks."
-        action={
-          <Button
-            size="sm"
-            onClick={handleAnalyze}
-            disabled={isPending || isAnalyzing}
-            title="Review open issues, prioritize them, and kick off agent runs"
-          >
-            <RefreshCw className={`mr-2 h-4 w-4 ${isPending || isAnalyzing ? "animate-spin" : ""}`} />
-            {isPending ? "Starting..." : isAnalyzing ? "Analyzing..." : "Analyze Issues"}
-          </Button>
-        }
-      />
+    <PageContainer size="default">
+      <div className="space-y-6">
+        <PageHeader
+          title="PM Plans"
+          description="See the PM agent's latest analysis and delegated tasks."
+          action={
+            <Button
+              size="sm"
+              onClick={handleAnalyze}
+              disabled={isPending || isAnalyzing}
+              title="Review open issues, prioritize them, and kick off agent runs"
+            >
+              <RefreshCw className={`mr-2 h-4 w-4 ${isPending || isAnalyzing ? "animate-spin" : ""}`} />
+              {isPending ? "Starting..." : isAnalyzing ? "Analyzing..." : "Analyze Issues"}
+            </Button>
+          }
+        />
 
-      {isAnalyzing && (
+        {isAnalyzing && (
         <Card className="border-blue-200 bg-blue-50 dark:border-blue-800 dark:bg-blue-950/30">
           <CardContent className="flex items-center gap-3 py-3">
             <RefreshCw className="h-4 w-4 animate-spin text-blue-600 dark:text-blue-400" />
@@ -101,7 +103,7 @@ export default function PlansPage() {
         </Card>
       )}
 
-      {analyzeError && (
+        {analyzeError && (
         <Card className="border-red-200 bg-red-50 dark:border-red-800 dark:bg-red-950/30">
           <CardContent className="flex items-center gap-3 py-3">
             <AlertCircle className="h-4 w-4 shrink-0 text-red-600 dark:text-red-400" />
@@ -113,7 +115,7 @@ export default function PlansPage() {
         </Card>
       )}
 
-      {!latest && !isAnalyzing && (
+        {!latest && !isAnalyzing && (
         <EmptyState
           icon={CalendarClock}
           title="No PM plans yet"
@@ -121,7 +123,7 @@ export default function PlansPage() {
         />
       )}
 
-      {latest && (
+        {latest && (
         <Tabs defaultValue="latest" className="space-y-4">
           <TabsList>
             <TabsTrigger value="latest">Latest Plan</TabsTrigger>
@@ -141,7 +143,8 @@ export default function PlansPage() {
             <PlanHistory plans={history} />
           </TabsContent>
         </Tabs>
-      )}
-    </div>
+        )}
+      </div>
+    </PageContainer>
   );
 }
