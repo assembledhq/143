@@ -269,7 +269,7 @@ This is the endpoint hit when a user clicks the invite link in their email. The 
 
 **Flow:** When the user clicks the email link (`{FRONTEND_URL}/invite/accept?token=...`), the frontend calls this endpoint. Based on the response:
 - If `action: "joined"`, the user is already authenticated and now part of the org — redirect to dashboard.
-- If `action: "register"`, the frontend redirects to the registration page with the invitation token pre-filled. After registration completes, the auth handler checks for a pending invitation token, accepts it, and places the user in the correct org with the invited role.
+- If `action: "register"`, the frontend redirects to the registration page with the invitation token pre-filled and carries the invited email + org for display context. The registration form pre-fills the invited email and keeps it read-only so users set name/password without changing invite identity. After registration completes, the auth handler checks for a pending invitation token, accepts it, and places the user in the correct org with the invited role.
 
 ### Change member role
 
