@@ -362,7 +362,7 @@ export function AgentSettingsEditor({
 
       {defaultAgentType === "codex" && (
         <div className="space-y-4">
-          <div className="space-y-3 rounded-lg border bg-card p-4">
+          <div className="space-y-3">
             <Label>Credential method</Label>
             <RadioGroup
               value={codexCredentialMethod}
@@ -404,7 +404,7 @@ export function AgentSettingsEditor({
           </div>
 
           {codexCredentialMethod === "chatgpt" ? (
-            <div className="space-y-3 rounded-lg border p-4">
+            <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <div>
                   <h4 className="text-sm font-medium">Sign in with ChatGPT</h4>
@@ -436,7 +436,7 @@ export function AgentSettingsEditor({
               </div>
             </div>
           ) : (
-            <div className="space-y-2 rounded-lg border p-4">
+            <div className="space-y-2">
               <h4 className="text-sm font-medium">API key configuration</h4>
               <p className="text-xs text-muted-foreground">
                 Enter API key, model, and optional base URL below.

@@ -245,6 +245,9 @@ describe('OverviewPage', () => {
       expect(screen.getByText('Configure coding agent')).toBeInTheDocument();
     });
 
+    expect(screen.getByText('Credential method').closest('div.space-y-3')).not.toHaveClass('bg-card');
+    expect(screen.getByRole('heading', { name: 'Sign in with ChatGPT', level: 4 }).closest('div.space-y-3')).not.toHaveClass('border');
+
     expect(screen.getByText('Best for gpt-5.3-codex model access.')).toBeInTheDocument();
     expect(screen.queryByText('Recommended')).not.toBeInTheDocument();
 
