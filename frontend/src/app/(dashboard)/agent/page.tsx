@@ -84,7 +84,7 @@ export default function AgentPage() {
   }
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       <PageHeader
         title="Agent"
         description="Configure how the AI agent runs and behaves."
