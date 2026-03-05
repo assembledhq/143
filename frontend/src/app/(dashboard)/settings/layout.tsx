@@ -1,6 +1,6 @@
 "use client";
 
-import { PageHeader } from "@/components/page-header";
+import { SettingsPageFrame } from "@/components/settings-page-frame";
 
 export default function SettingsLayout({
   children,
@@ -8,12 +8,11 @@ export default function SettingsLayout({
   children: React.ReactNode;
 }) {
   return (
-    <div className="space-y-6">
-      <PageHeader
-        title="General Settings"
-        description="Manage your organization."
-      />
+    <SettingsPageFrame
+      title="General Settings"
+      description="Manage your organization."
+    >
       {children}
-    </div>
+    </SettingsPageFrame>
   );
 }

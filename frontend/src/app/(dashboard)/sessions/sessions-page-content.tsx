@@ -1,7 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback, useEffect } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { CalendarClock, RefreshCw, Layers, Wrench, Plus, X, AlertCircle } from "lucide-react";
 import Link from "next/link";
 import { useQueryState, parseAsString } from "nuqs";
@@ -10,10 +9,8 @@ import { EmptyState } from "@/components/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
+import { useAnalyze } from "@/hooks/use-analyze";
 import type { AgentSession } from "@/lib/types";
 
 const sessionStatusConfig: Record<string, { color: string; label: string }> = {
@@ -125,87 +122,19 @@ function SessionSection({ title, sessions, badge }: { title: string; sessions: A
 }
 
 export function SessionsPageContent() {
-  const queryClient = useQueryClient();
   const [statusFilter, setStatusFilter] = useQueryState("status", parseAsString);
-  const [isManualComposerOpen, setIsManualComposerOpen] = useState(false);
-  const [manualMessage, setManualMessage] = useState("");
-  const [imageInput, setImageInput] = useState("");
-  const [manualImages, setManualImages] = useState<string[]>([]);
-
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [analyzeError, setAnalyzeError] = useState<string | null>(null);
-  const sessionCountBeforeAnalyze = useRef<number | null>(null);
-  const analyzeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["sessions"],
     queryFn: () => api.sessions.list({ limit: 50 }),
-    refetchInterval: isAnalyzing ? 2000 : 10000,
+    refetchInterval: 10000,
   });
-
-  // Detect when a new session appears after triggering analysis
-  const allSessionCount = data?.data?.length ?? 0;
-  useEffect(() => {
-    if (isAnalyzing && sessionCountBeforeAnalyze.current !== null && allSessionCount > sessionCountBeforeAnalyze.current) {
-      setIsAnalyzing(false);
-      sessionCountBeforeAnalyze.current = null;
-      if (analyzeTimeoutRef.current) {
-        clearTimeout(analyzeTimeoutRef.current);
-        analyzeTimeoutRef.current = null;
-      }
-    }
-  }, [isAnalyzing, allSessionCount]);
-
-  // Cleanup timeout on unmount
-  useEffect(() => {
-    return () => {
-      if (analyzeTimeoutRef.current) clearTimeout(analyzeTimeoutRef.current);
-    };
-  }, []);
-
-  const analyzeMutation = useMutation({
-    mutationFn: () => api.pm.analyze(),
-    onSuccess: () => {
-      setIsAnalyzing(true);
-      queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      // Timeout after 90 seconds if no new session appears
-      analyzeTimeoutRef.current = setTimeout(() => {
-        setIsAnalyzing(false);
-        setAnalyzeError("Analysis may have failed or is taking longer than expected. Check your server logs for details.");
-        sessionCountBeforeAnalyze.current = null;
-      }, 90000);
-    },
-    onError: () => {
-      setAnalyzeError("Failed to start analysis. Make sure the backend is running.");
-    },
-  });
-
-  const handleAnalyze = useCallback(() => {
-    setAnalyzeError(null);
-    sessionCountBeforeAnalyze.current = allSessionCount;
-    analyzeMutation.mutate();
-  }, [allSessionCount, analyzeMutation]);
-
-  const createManualSessionMutation = useMutation({
-    mutationFn: () => api.sessions.createManual({ message: manualMessage.trim(), images: manualImages }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      setManualMessage("");
-      setManualImages([]);
-      setImageInput("");
-    },
-  });
-
-  function addImage() {
-    const trimmed = imageInput.trim();
-    if (!trimmed) {
-      return;
-    }
-    setManualImages((prev) => [...prev, trimmed]);
-    setImageInput("");
-  }
 
   const allSessions = data?.data ?? [];
+  const hasActivePlanSession = allSessions.some((s) => s.type === "plan" && s.status === "active");
+
+  const { isAnalyzing, isPending, analyzeError, handleAnalyze, dismissError } = useAnalyze(hasActivePlanSession);
+
   const sessions = filterSessions(allSessions, statusFilter);
 
   const showGrouped = !statusFilter || statusFilter === "all";
@@ -221,18 +150,20 @@ export function SessionsPageContent() {
         description="Each PM analysis cycle or manual fix creates a session."
         action={
           <div className="flex items-center gap-2">
-            <Button size="sm" variant="outline" onClick={() => setIsManualComposerOpen((prev) => !prev)}>
-              <Plus className="mr-2 h-4 w-4" />
-              New Manual Session
+            <Button size="sm" variant="outline" asChild>
+              <Link href="/sessions/new">
+                <Plus className="mr-2 h-4 w-4" />
+                New Manual Session
+              </Link>
             </Button>
             <Button
               size="sm"
               onClick={handleAnalyze}
-              disabled={analyzeMutation.isPending || isAnalyzing}
+              disabled={isPending || isAnalyzing}
               title="Review open issues, prioritize them, and kick off agent runs"
             >
-              <RefreshCw className={`mr-2 h-4 w-4 ${analyzeMutation.isPending || isAnalyzing ? "animate-spin" : ""}`} />
-              {analyzeMutation.isPending ? "Starting..." : isAnalyzing ? "Analyzing..." : "Analyze Issues"}
+              <RefreshCw className={`mr-2 h-4 w-4 ${isPending || isAnalyzing ? "animate-spin" : ""}`} />
+              {isPending ? "Starting..." : isAnalyzing ? "Analyzing..." : "Analyze Issues"}
             </Button>
           </div>
         }
@@ -254,82 +185,9 @@ export function SessionsPageContent() {
           <CardContent className="flex items-center gap-3 py-3">
             <AlertCircle className="h-4 w-4 shrink-0 text-red-600 dark:text-red-400" />
             <p className="text-sm text-red-800 dark:text-red-300 flex-1">{analyzeError}</p>
-            <Button size="sm" variant="ghost" className="shrink-0 h-6 px-2" onClick={() => setAnalyzeError(null)}>
+            <Button size="sm" variant="ghost" className="shrink-0 h-6 px-2" onClick={dismissError}>
               <X className="h-3 w-3" />
             </Button>
-          </CardContent>
-        </Card>
-      )}
-
-      {isManualComposerOpen && (
-        <Card>
-          <CardContent className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label htmlFor="manual-session-message">Message</Label>
-              <Textarea
-                id="manual-session-message"
-                aria-label="Message"
-                value={manualMessage}
-                onChange={(event) => setManualMessage(event.target.value)}
-                placeholder="Describe what you want the agent to do..."
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="manual-session-image">Image URL (optional)</Label>
-              <div className="flex items-center gap-2">
-                <Input
-                  id="manual-session-image"
-                  value={imageInput}
-                  onChange={(event) => setImageInput(event.target.value)}
-                  placeholder="https://..."
-                />
-                <Button type="button" variant="outline" onClick={addImage}>
-                  Add Image
-                </Button>
-              </div>
-              {manualImages.length > 0 && (
-                <div className="flex flex-wrap gap-2">
-                  {manualImages.map((imageURL) => (
-                    <Badge key={imageURL} variant="secondary" className="gap-1">
-                      {imageURL}
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => setManualImages((prev) => prev.filter((value) => value !== imageURL))}
-                        className="h-4 px-0.5"
-                        aria-label={`Remove ${imageURL}`}
-                      >
-                        <X className="h-3 w-3" />
-                      </Button>
-                    </Badge>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <div className="flex items-center justify-end gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => setIsManualComposerOpen(false)}
-                disabled={createManualSessionMutation.isPending}
-              >
-                Cancel
-              </Button>
-              <Button
-                type="button"
-                onClick={() => createManualSessionMutation.mutate()}
-                disabled={manualMessage.trim().length === 0 || createManualSessionMutation.isPending}
-              >
-                Start Session
-              </Button>
-            </div>
-
-            {(createManualSessionMutation.isPending || createManualSessionMutation.isSuccess) && (
-              <p className="text-xs text-muted-foreground">Starting session...</p>
-            )}
           </CardContent>
         </Card>
       )}

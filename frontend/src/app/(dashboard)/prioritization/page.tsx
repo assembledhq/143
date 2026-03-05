@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Slider } from "@/components/ui/slider";
 import { PageHeader } from "@/components/page-header";
+import { PageContainer } from "@/components/page-container";
 import { X } from "lucide-react";
 import type { Organization, OrgSettings, SingleResponse } from "@/lib/types";
 import { DEFAULT_PM_MODEL } from "@/lib/model-constants";
@@ -140,7 +141,8 @@ export default function PrioritizationPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <PageContainer size="default">
+      <div className="space-y-6">
       <PageHeader
         title="Prioritization"
         description="Define product context and how the PM agent prioritizes work."
@@ -390,6 +392,7 @@ export default function PrioritizationPage() {
           <span className="text-sm text-destructive">Failed to save settings.</span>
         )}
       </div>
-    </div>
+      </div>
+    </PageContainer>
   );
 }
