@@ -15,12 +15,11 @@ import type { Organization, OrgSettings, SingleResponse } from "@/lib/types";
 
 const DEFAULT_SETTINGS: Pick<
   Required<OrgSettings>,
-  "autonomy_level" | "execution_aggressiveness" | "max_concurrent_runs" | "agent_autonomy"
+  "autonomy_level" | "execution_aggressiveness" | "max_concurrent_runs"
 > = {
   autonomy_level: "manual",
   execution_aggressiveness: 2,
   max_concurrent_runs: 3,
-  agent_autonomy: "balanced",
 };
 
 export default function AgentPage() {
@@ -36,7 +35,6 @@ export default function AgentPage() {
   const [autonomyLevel, setAutonomyLevel] = useState(DEFAULT_SETTINGS.autonomy_level);
   const [aggressiveness, setAggressiveness] = useState(String(DEFAULT_SETTINGS.execution_aggressiveness));
   const [maxConcurrent, setMaxConcurrent] = useState(String(DEFAULT_SETTINGS.max_concurrent_runs));
-  const [agentAutonomy, setAgentAutonomy] = useState(DEFAULT_SETTINGS.agent_autonomy);
   const [saveStatus, setSaveStatus] = useState<"idle" | "success" | "error">("idle");
 
   // Sync server data into form state.
@@ -48,7 +46,6 @@ export default function AgentPage() {
     setAutonomyLevel(s.autonomy_level ?? DEFAULT_SETTINGS.autonomy_level);
     setAggressiveness(String(s.execution_aggressiveness ?? DEFAULT_SETTINGS.execution_aggressiveness));
     setMaxConcurrent(String(s.max_concurrent_runs ?? DEFAULT_SETTINGS.max_concurrent_runs));
-    setAgentAutonomy(s.agent_autonomy ?? DEFAULT_SETTINGS.agent_autonomy);
   }
 
   const mutation = useMutation({
@@ -70,7 +67,6 @@ export default function AgentPage() {
         autonomy_level: autonomyLevel,
         execution_aggressiveness: parseInt(aggressiveness, 10),
         max_concurrent_runs: parseInt(maxConcurrent, 10),
-        agent_autonomy: agentAutonomy,
       },
     });
   }
@@ -178,48 +174,6 @@ export default function AgentPage() {
                   onChange={(e) => setMaxConcurrent(e.target.value)}
                 />
               </div>
-            </div>
-          </CardContent>
-        </Card>
-      </section>
-
-      {/* Agent Autonomy */}
-      <section className="space-y-3">
-        <h2 className="text-[13px] font-medium text-foreground">Agent Autonomy</h2>
-        <Card>
-          <CardContent>
-            <div className="space-y-3">
-              <p className="text-xs text-muted-foreground">
-                Controls how much human oversight the agent requires before proceeding with its work.
-              </p>
-              <RadioGroup
-                value={agentAutonomy}
-                onValueChange={setAgentAutonomy}
-                className="grid grid-cols-3 gap-3"
-              >
-                {[
-                  { value: "conservative", label: "Conservative", description: "Always pause for human review" },
-                  { value: "balanced", label: "Balanced", description: "Auto-proceed when confidence is high" },
-                  { value: "aggressive", label: "Aggressive", description: "Auto-proceed unless confidence is very low" },
-                ].map((option) => (
-                  <label
-                    key={option.value}
-                    className={`relative flex cursor-pointer flex-col rounded-lg border p-3 transition-colors ${
-                      agentAutonomy === option.value
-                        ? "border-primary bg-primary/5"
-                        : "border-input hover:bg-muted/50"
-                    }`}
-                  >
-                    <div className="flex items-center gap-2">
-                      <RadioGroupItem value={option.value} />
-                      <span className="text-sm font-medium">{option.label}</span>
-                    </div>
-                    <span className="mt-1 pl-6 text-xs text-muted-foreground">
-                      {option.description}
-                    </span>
-                  </label>
-                ))}
-              </RadioGroup>
             </div>
           </CardContent>
         </Card>
