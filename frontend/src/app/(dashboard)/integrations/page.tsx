@@ -22,13 +22,13 @@ export default function IntegrationsPage() {
           title="Integrations"
           description="Connect external services to your organization."
         />
-        <AllIntegrationCards
-          linearConnected={Boolean(linearIntegration)}
-          linearLoading={connectLinearMutation.isPending}
-          onConnectGitHub={() => api.auth.login()}
-          onConnectSentry={() => api.auth.loginSentry()}
-          onConnectLinear={() => connectLinearMutation.mutate()}
-        />
+      <AllIntegrationCards
+        linearConnected={Boolean(linearIntegration)}
+        linearLoading={false}
+        onConnectGitHub={() => api.auth.login()}
+        onConnectSentry={() => api.auth.loginSentry()}
+        onConnectLinear={() => api.integrations.loginLinear()}
+      />
       </div>
     </PageContainer>
   );
