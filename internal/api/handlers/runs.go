@@ -51,7 +51,7 @@ func (h *RunHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	limit := queryInt(r, "limit", 50)
 	filters := db.AgentRunFilters{
-		Status: r.URL.Query().Get("status"),
+		Status: models.AgentRunStatus(r.URL.Query().Get("status")),
 		Limit:  limit,
 		Cursor: r.URL.Query().Get("cursor"),
 	}
