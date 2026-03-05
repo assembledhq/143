@@ -28,6 +28,7 @@ function AcceptInvitationContent() {
     isMissingToken ? "No invitation token provided." : ""
   );
   const [orgName, setOrgName] = useState("");
+  const [invitedEmail, setInvitedEmail] = useState("");
 
   useEffect(() => {
     if (!token) {
@@ -56,6 +57,9 @@ function AcceptInvitationContent() {
         const data = body?.data;
         if (data?.org_name) {
           setOrgName(data.org_name);
+        }
+        if (data?.email) {
+          setInvitedEmail(data.email);
         }
         if (data?.action === "login" || data?.action === "register") {
           setStatus(data.action);
@@ -107,13 +111,25 @@ function AcceptInvitationContent() {
                 <span className="font-medium text-foreground">
                   {orgName}
                 </span>
-                . Create an account to get started.
+                {invitedEmail ? (
+                  <>
+                    {" "}as <span className="font-medium text-foreground">{invitedEmail}</span>. Create an account to get started.
+                  </>
+                ) : (
+                  ". Create an account to get started."
+                )}
               </p>
               <Button
                 className="w-full"
                 onClick={() =>
                   router.push(
-                    `/login?tab=signup&invitation=${encodeURIComponent(token!)}`
+                    `/login?tab=signup&invitation=${encodeURIComponent(token!)}${
+                      invitedEmail
+                        ? `&email=${encodeURIComponent(invitedEmail)}`
+                        : ""
+                    }${
+                      orgName ? `&org=${encodeURIComponent(orgName)}` : ""
+                    }`
                   )
                 }
               >
@@ -124,7 +140,13 @@ function AcceptInvitationContent() {
                 className="w-full"
                 onClick={() =>
                   router.push(
-                    `/login?invitation=${encodeURIComponent(token!)}`
+                    `/login?invitation=${encodeURIComponent(token!)}${
+                      invitedEmail
+                        ? `&email=${encodeURIComponent(invitedEmail)}`
+                        : ""
+                    }${
+                      orgName ? `&org=${encodeURIComponent(orgName)}` : ""
+                    }`
                   )
                 }
               >
@@ -140,13 +162,25 @@ function AcceptInvitationContent() {
                 <span className="font-medium text-foreground">
                   {orgName}
                 </span>
-                . Sign in to accept the invitation.
+                {invitedEmail ? (
+                  <>
+                    {" "}as <span className="font-medium text-foreground">{invitedEmail}</span>. Sign in to accept the invitation.
+                  </>
+                ) : (
+                  ". Sign in to accept the invitation."
+                )}
               </p>
               <Button
                 className="w-full"
                 onClick={() =>
                   router.push(
-                    `/login?invitation=${encodeURIComponent(token!)}`
+                    `/login?invitation=${encodeURIComponent(token!)}${
+                      invitedEmail
+                        ? `&email=${encodeURIComponent(invitedEmail)}`
+                        : ""
+                    }${
+                      orgName ? `&org=${encodeURIComponent(orgName)}` : ""
+                    }`
                   )
                 }
               >
