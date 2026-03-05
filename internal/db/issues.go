@@ -108,6 +108,30 @@ func (s *IssueStore) GetByID(ctx context.Context, orgID, issueID uuid.UUID) (mod
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Issue])
 }
 
+func (s *IssueStore) ListByIDs(ctx context.Context, orgID uuid.UUID, issueIDs []uuid.UUID) ([]models.Issue, error) {
+	if len(issueIDs) == 0 {
+		return []models.Issue{}, nil
+	}
+
+	query := `
+		SELECT id, org_id, external_id, source, source_integration_id, repository_id,
+		       title, description, raw_data, status, first_seen_at, last_seen_at,
+		       occurrence_count, affected_customer_count, severity, tags, fingerprint,
+		       created_at, updated_at
+		FROM issues
+		WHERE org_id = @org_id AND id = ANY(@issue_ids)`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":    orgID,
+		"issue_ids": issueIDs,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query issues by ids: %w", err)
+	}
+
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Issue])
+}
+
 func (s *IssueStore) Upsert(ctx context.Context, issue *models.Issue) error {
 	query := `
 		INSERT INTO issues (org_id, external_id, source, source_integration_id, repository_id,
@@ -130,21 +154,21 @@ func (s *IssueStore) Upsert(ctx context.Context, issue *models.Issue) error {
 
 	args := pgx.NamedArgs{
 		"org_id":                  issue.OrgID,
-		"external_id":            issue.ExternalID,
-		"source":                 issue.Source,
-		"source_integration_id":  issue.SourceIntegrationID,
-		"repository_id":          issue.RepositoryID,
-		"title":                  issue.Title,
-		"description":            issue.Description,
-		"raw_data":               issue.RawData,
-		"status":                 issue.Status,
-		"first_seen_at":          issue.FirstSeenAt,
-		"last_seen_at":           issue.LastSeenAt,
-		"occurrence_count":       issue.OccurrenceCount,
+		"external_id":             issue.ExternalID,
+		"source":                  issue.Source,
+		"source_integration_id":   issue.SourceIntegrationID,
+		"repository_id":           issue.RepositoryID,
+		"title":                   issue.Title,
+		"description":             issue.Description,
+		"raw_data":                issue.RawData,
+		"status":                  issue.Status,
+		"first_seen_at":           issue.FirstSeenAt,
+		"last_seen_at":            issue.LastSeenAt,
+		"occurrence_count":        issue.OccurrenceCount,
 		"affected_customer_count": issue.AffectedCustomerCount,
-		"severity":               issue.Severity,
-		"tags":                   issue.Tags,
-		"fingerprint":            issue.Fingerprint,
+		"severity":                issue.Severity,
+		"tags":                    issue.Tags,
+		"fingerprint":             issue.Fingerprint,
 	}
 
 	row := s.db.QueryRow(ctx, query, args)
