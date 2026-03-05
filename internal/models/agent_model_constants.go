@@ -2,13 +2,25 @@ package models
 
 import "fmt"
 
+// Legacy PM model aliases (kept for backward compatibility).
 const (
 	PMModelOpus   = "opus"
 	PMModelSonnet = "sonnet"
 	PMModelHaiku  = "haiku"
 )
 
-var AvailablePMModels = []string{PMModelOpus, PMModelSonnet, PMModelHaiku}
+var legacyPMAliases = []string{PMModelOpus, PMModelSonnet, PMModelHaiku}
+
+// AvailablePMModels includes all models from every provider plus legacy aliases.
+// The PM agent can use any model from any configured provider.
+var AvailablePMModels []string
+
+func init() {
+	AvailablePMModels = append(AvailablePMModels, legacyPMAliases...)
+	AvailablePMModels = append(AvailablePMModels, AvailableClaudeCodeModels...)
+	AvailablePMModels = append(AvailablePMModels, AvailableGeminiCLIModels...)
+	AvailablePMModels = append(AvailablePMModels, AvailableCodexModels...)
+}
 
 const (
 	ClaudeCodeModelOpus   = "claude-opus-4-6"
@@ -56,8 +68,11 @@ func IsSupportedPMModel(model string) bool {
 }
 
 func IsSupportedClaudeCodeModel(model string) bool {
-	if IsSupportedPMModel(model) {
-		return true
+	// Accept legacy PM aliases (opus, sonnet, haiku) for Claude Code.
+	for _, alias := range legacyPMAliases {
+		if model == alias {
+			return true
+		}
 	}
 	for _, supportedModel := range AvailableClaudeCodeModels {
 		if model == supportedModel {
@@ -100,7 +115,7 @@ func ValidateSettingsModels(settings OrgSettings) error {
 		case "claude_code":
 			model := envVars["ANTHROPIC_MODEL"]
 			if model != "" && !IsSupportedClaudeCodeModel(model) {
-				return fmt.Errorf("agent_config.claude_code.ANTHROPIC_MODEL must be one of: %v or %v", AvailablePMModels, AvailableClaudeCodeModels)
+				return fmt.Errorf("agent_config.claude_code.ANTHROPIC_MODEL must be one of: %v or %v", legacyPMAliases, AvailableClaudeCodeModels)
 			}
 		case "gemini_cli":
 			model := envVars["GEMINI_MODEL"]

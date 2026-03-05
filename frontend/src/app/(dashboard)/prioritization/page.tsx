@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -10,11 +10,20 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Slider } from "@/components/ui/slider";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { X } from "lucide-react";
 import type { Organization, OrgSettings, SingleResponse } from "@/lib/types";
-import { DEFAULT_PM_MODEL } from "@/lib/model-constants";
+import { DEFAULT_PM_MODEL, PM_MODELS_BY_PROVIDER } from "@/lib/model-constants";
 
 const DEFAULT_SETTINGS: Pick<
   Required<OrgSettings>,
@@ -46,7 +55,27 @@ export default function PrioritizationPage() {
     queryFn: () => api.settings.get(),
   });
 
+  const { data: agentDefaultsResponse } = useQuery({
+    queryKey: ["agent-defaults"],
+    queryFn: () => api.settings.getAgentDefaults(),
+  });
+
   const orgSettings = (settings?.data?.settings ?? {}) as OrgSettings;
+
+  // Determine which providers are enabled (have an API key or are the default agent).
+  const enabledPmModelGroups = useMemo(() => {
+    const agentConfig = orgSettings.agent_config ?? {};
+    const serverDefaults = agentDefaultsResponse?.data ?? {};
+    const defaultAgent = orgSettings.default_agent_type;
+
+    return Object.entries(PM_MODELS_BY_PROVIDER)
+      .filter(([providerKey, { apiKeyVar }]) => {
+        const orgKey = agentConfig[providerKey]?.[apiKeyVar];
+        const serverKey = (serverDefaults[providerKey] ?? {})[apiKeyVar];
+        return Boolean(orgKey) || Boolean(serverKey) || providerKey === defaultAgent;
+      })
+      .map(([, { label, models }]) => ({ label, models }));
+  }, [orgSettings.agent_config, orgSettings.default_agent_type, agentDefaultsResponse?.data]);
 
   const [pmScheduleHours, setPmScheduleHours] = useState(String(DEFAULT_SETTINGS.pm_schedule_hours));
   const [pmModel, setPmModel] = useState(DEFAULT_SETTINGS.pm_model);
@@ -171,12 +200,29 @@ export default function PrioritizationPage() {
               </div>
               <div className="space-y-2">
                 <Label htmlFor="pm-model">PM Model</Label>
-                <Input
-                  id="pm-model"
-                  value={pmModel}
-                  onChange={(e) => setPmModel(e.target.value)}
-                  placeholder={DEFAULT_PM_MODEL}
-                />
+                <Select value={pmModel} onValueChange={setPmModel}>
+                  <SelectTrigger id="pm-model" aria-label="PM Model">
+                    <SelectValue placeholder="Select a model" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {enabledPmModelGroups.length === 0 ? (
+                      <SelectItem value={DEFAULT_PM_MODEL} disabled>
+                        No providers configured
+                      </SelectItem>
+                    ) : (
+                      enabledPmModelGroups.map((group) => (
+                        <SelectGroup key={group.label}>
+                          <SelectLabel>{group.label}</SelectLabel>
+                          {group.models.map((model) => (
+                            <SelectItem key={model} value={model}>
+                              {model}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                      ))
+                    )}
+                  </SelectContent>
+                </Select>
                 <p className="text-xs text-muted-foreground">
                   The LLM model used for PM planning.
                 </p>
