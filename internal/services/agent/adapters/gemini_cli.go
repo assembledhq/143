@@ -3,6 +3,7 @@
 package adapters
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -70,9 +71,9 @@ func (a *GeminiCLIAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, 
 	}
 
 	// Gemini CLI headless: -p for non-interactive, --yolo to auto-approve,
-	// --output-format json for structured output.
+	// --output-format stream-json for streaming JSONL with tool use detail.
 	cmd := fmt.Sprintf(
-		"gemini -p \"$(cat '%s')\" --yolo --output-format json",
+		"gemini -p \"$(cat '%s')\" --yolo --output-format stream-json",
 		shellEscapeGemini(promptPath),
 	)
 
@@ -94,7 +95,7 @@ func (a *GeminiCLIAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, 
 	result := &agent.AgentResult{
 		ExitCode: exitCode,
 	}
-	parseGeminiOutput(stdout.Bytes(), result, logCh)
+	parseGeminiStreamOutput(stdout.Bytes(), result, logCh)
 
 	if stderr.Len() > 0 {
 		logCh <- agent.LogEntry{
@@ -186,6 +187,174 @@ func parseGeminiOutput(output []byte, result *agent.AgentResult, logCh chan<- ag
 	}
 	result.Summary = text
 	tryExtractConfidence(text, result)
+}
+
+// geminiStreamEvent represents a single line of Gemini CLI's stream-json output.
+type geminiStreamEvent struct {
+	Type    string          `json:"type"`
+	Content string          `json:"content,omitempty"`
+	Tool    string          `json:"tool,omitempty"`
+	Name    string          `json:"name,omitempty"`
+	Input   json.RawMessage `json:"input,omitempty"`
+	Output  string          `json:"output,omitempty"`
+	Result  json.RawMessage `json:"result,omitempty"`
+	Message string          `json:"message,omitempty"`
+	Stats   *struct {
+		InputTokens  int `json:"inputTokens"`
+		OutputTokens int `json:"outputTokens"`
+	} `json:"stats,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+// parseGeminiStreamOutput processes the streaming JSONL output from Gemini CLI,
+// populates the AgentResult, and sends log entries with detailed tool use metadata.
+// Falls back to parseGeminiOutput for legacy single-object JSON responses.
+func parseGeminiStreamOutput(output []byte, result *agent.AgentResult, logCh chan<- agent.LogEntry) {
+	trimmed := bytes.TrimSpace(output)
+	if len(trimmed) == 0 {
+		return
+	}
+
+	// Detect legacy single-object JSON format (non-streaming).
+	var legacyResp geminiJSONOutput
+	if err := json.Unmarshal(trimmed, &legacyResp); err == nil && legacyResp.Response != "" {
+		parseGeminiOutput(output, result, logCh)
+		return
+	}
+
+	// Parse as streaming JSONL line by line.
+	scanner := bufio.NewScanner(bytes.NewReader(output))
+	var summaryParts []string
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+
+		var event geminiStreamEvent
+		if err := json.Unmarshal(line, &event); err != nil {
+			// Not JSON — emit as raw output and include in summary.
+			text := string(line)
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "output",
+				Message:   text,
+			}
+			summaryParts = append(summaryParts, text)
+			tryExtractConfidence(text, result)
+			continue
+		}
+
+		switch event.Type {
+		case "text", "assistant":
+			content := event.Content
+			if content == "" {
+				content = event.Message
+			}
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "output",
+				Message:   content,
+			}
+			summaryParts = append(summaryParts, content)
+			tryExtractConfidence(content, result)
+
+		case "tool_call", "tool_use":
+			toolName := event.Tool
+			if toolName == "" {
+				toolName = event.Name
+			}
+			metadata := map[string]interface{}{"tool": toolName}
+			if len(event.Input) > 0 {
+				var inputMap map[string]interface{}
+				if err := json.Unmarshal(event.Input, &inputMap); err == nil {
+					metadata["input"] = inputMap
+				}
+			}
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "tool_use",
+				Message:   fmt.Sprintf("using tool: %s", toolName),
+				Metadata:  metadata,
+			}
+
+		case "tool_result":
+			toolName := event.Tool
+			if toolName == "" {
+				toolName = event.Name
+			}
+			metadata := map[string]interface{}{"type": "tool_result"}
+			if toolName != "" {
+				metadata["tool"] = toolName
+			}
+			outputMsg := event.Output
+			if outputMsg == "" && len(event.Result) > 0 {
+				outputMsg = string(event.Result)
+			}
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "output",
+				Message:   outputMsg,
+				Metadata:  metadata,
+			}
+
+		case "thinking":
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "debug",
+				Message:   event.Content,
+				Metadata:  map[string]interface{}{"type": "thinking"},
+			}
+
+		case "error":
+			msg := event.Error
+			if msg == "" {
+				msg = event.Message
+			}
+			if msg == "" {
+				msg = event.Content
+			}
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "error",
+				Message:   msg,
+			}
+
+		case "usage", "result":
+			content := event.Content
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "info",
+				Message:   content,
+			}
+			if content != "" {
+				summaryParts = append(summaryParts, content)
+				tryExtractConfidence(content, result)
+			}
+			if event.Stats != nil {
+				result.TokenUsage = agent.TokenUsage{
+					InputTokens:  event.Stats.InputTokens,
+					OutputTokens: event.Stats.OutputTokens,
+				}
+			}
+			if len(event.Result) > 0 {
+				var usage agent.TokenUsage
+				if err := json.Unmarshal(event.Result, &usage); err == nil && usage.InputTokens > 0 {
+					result.TokenUsage = usage
+				}
+			}
+
+		default:
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "debug",
+				Message:   string(line),
+			}
+		}
+	}
+
+	result.Summary = strings.Join(summaryParts, "\n")
 }
 
 // shellEscapeGemini escapes single quotes for safe shell usage.
