@@ -8,7 +8,6 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { Slider } from "@/components/ui/slider";
 import { PageHeader } from "@/components/page-header";
 import { AgentSettingsEditor } from "@/components/agent-settings-editor";
 import { PageContainer } from "@/components/page-container";
@@ -16,15 +15,12 @@ import type { Organization, OrgSettings, SingleResponse } from "@/lib/types";
 
 const DEFAULT_SETTINGS: Pick<
   Required<OrgSettings>,
-  "autonomy_level" | "execution_aggressiveness" | "max_concurrent_runs" | "confidence_thresholds"
+  "autonomy_level" | "execution_aggressiveness" | "max_concurrent_runs" | "agent_autonomy"
 > = {
   autonomy_level: "manual",
   execution_aggressiveness: 2,
   max_concurrent_runs: 3,
-  confidence_thresholds: {
-    auto_proceed: 0.8,
-    human_review: 0.5,
-  },
+  agent_autonomy: "balanced",
 };
 
 export default function AgentPage() {
@@ -40,8 +36,7 @@ export default function AgentPage() {
   const [autonomyLevel, setAutonomyLevel] = useState(DEFAULT_SETTINGS.autonomy_level);
   const [aggressiveness, setAggressiveness] = useState(String(DEFAULT_SETTINGS.execution_aggressiveness));
   const [maxConcurrent, setMaxConcurrent] = useState(String(DEFAULT_SETTINGS.max_concurrent_runs));
-  const [autoProceed, setAutoProceed] = useState(String(DEFAULT_SETTINGS.confidence_thresholds.auto_proceed));
-  const [humanReview, setHumanReview] = useState(String(DEFAULT_SETTINGS.confidence_thresholds.human_review));
+  const [agentAutonomy, setAgentAutonomy] = useState(DEFAULT_SETTINGS.agent_autonomy);
   const [saveStatus, setSaveStatus] = useState<"idle" | "success" | "error">("idle");
 
   // Sync server data into form state.
@@ -53,8 +48,7 @@ export default function AgentPage() {
     setAutonomyLevel(s.autonomy_level ?? DEFAULT_SETTINGS.autonomy_level);
     setAggressiveness(String(s.execution_aggressiveness ?? DEFAULT_SETTINGS.execution_aggressiveness));
     setMaxConcurrent(String(s.max_concurrent_runs ?? DEFAULT_SETTINGS.max_concurrent_runs));
-    setAutoProceed(String(s.confidence_thresholds?.auto_proceed ?? DEFAULT_SETTINGS.confidence_thresholds.auto_proceed));
-    setHumanReview(String(s.confidence_thresholds?.human_review ?? DEFAULT_SETTINGS.confidence_thresholds.human_review));
+    setAgentAutonomy(s.agent_autonomy ?? DEFAULT_SETTINGS.agent_autonomy);
   }
 
   const mutation = useMutation({
@@ -76,10 +70,7 @@ export default function AgentPage() {
         autonomy_level: autonomyLevel,
         execution_aggressiveness: parseInt(aggressiveness, 10),
         max_concurrent_runs: parseInt(maxConcurrent, 10),
-        confidence_thresholds: {
-          auto_proceed: parseFloat(autoProceed),
-          human_review: parseFloat(humanReview),
-        },
+        agent_autonomy: agentAutonomy,
       },
     });
   }
@@ -192,47 +183,43 @@ export default function AgentPage() {
         </Card>
       </section>
 
-      {/* Confidence Thresholds */}
+      {/* Agent Autonomy */}
       <section className="space-y-3">
-        <h2 className="text-[13px] font-medium text-foreground">Confidence Thresholds</h2>
+        <h2 className="text-[13px] font-medium text-foreground">Agent Autonomy</h2>
         <Card>
           <CardContent>
-            <div className="space-y-6">
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <Label htmlFor="auto-proceed">Auto-proceed Threshold</Label>
-                  <span className="text-sm font-medium tabular-nums">{autoProceed}</span>
-                </div>
-                <Slider
-                  id="auto-proceed"
-                  min={0}
-                  max={100}
-                  step={5}
-                  value={[Math.round(parseFloat(autoProceed) * 100)]}
-                  onValueChange={([v]) => setAutoProceed((v / 100).toFixed(2))}
-                />
-                <p className="text-xs text-muted-foreground">
-                  Minimum confidence score to proceed without human review.
-                </p>
-              </div>
-
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <Label htmlFor="human-review">Human Review Threshold</Label>
-                  <span className="text-sm font-medium tabular-nums">{humanReview}</span>
-                </div>
-                <Slider
-                  id="human-review"
-                  min={0}
-                  max={100}
-                  step={5}
-                  value={[Math.round(parseFloat(humanReview) * 100)]}
-                  onValueChange={([v]) => setHumanReview((v / 100).toFixed(2))}
-                />
-                <p className="text-xs text-muted-foreground">
-                  Below this score, issues are flagged for human review.
-                </p>
-              </div>
+            <div className="space-y-3">
+              <p className="text-xs text-muted-foreground">
+                Controls how much human oversight the agent requires before proceeding with its work.
+              </p>
+              <RadioGroup
+                value={agentAutonomy}
+                onValueChange={setAgentAutonomy}
+                className="grid grid-cols-3 gap-3"
+              >
+                {[
+                  { value: "conservative", label: "Conservative", description: "Always pause for human review" },
+                  { value: "balanced", label: "Balanced", description: "Auto-proceed when confidence is high" },
+                  { value: "aggressive", label: "Aggressive", description: "Auto-proceed unless confidence is very low" },
+                ].map((option) => (
+                  <label
+                    key={option.value}
+                    className={`relative flex cursor-pointer flex-col rounded-lg border p-3 transition-colors ${
+                      agentAutonomy === option.value
+                        ? "border-primary bg-primary/5"
+                        : "border-input hover:bg-muted/50"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <RadioGroupItem value={option.value} />
+                      <span className="text-sm font-medium">{option.label}</span>
+                    </div>
+                    <span className="mt-1 pl-6 text-xs text-muted-foreground">
+                      {option.description}
+                    </span>
+                  </label>
+                ))}
+              </RadioGroup>
             </div>
           </CardContent>
         </Card>

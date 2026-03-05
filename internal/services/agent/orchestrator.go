@@ -16,10 +16,6 @@ import (
 
 const (
 	defaultMaxConcurrent = 3
-
-	// lowConfidenceThreshold is the threshold below which runs are paused
-	// for human guidance instead of proceeding to validation.
-	lowConfidenceThreshold = 0.5
 )
 
 // GitHubTokenProvider abstracts retrieving a GitHub App installation token.
@@ -296,12 +292,21 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error
 		return fmt.Errorf("execute agent: %w", err)
 	}
 
+	// Fetch org settings for confidence thresholds.
+	confidenceThresholds := models.ConfidenceThresholdsForAutonomy(models.DefaultAgentAutonomy)
+	if o.orgs != nil {
+		if org, orgErr := o.orgs.GetByID(ctx, run.OrgID); orgErr == nil {
+			orgSettings := models.ParseOrgSettings(org.Settings)
+			confidenceThresholds = orgSettings.ConfidenceThresholds
+		}
+	}
+
 	// Store the successful result.
 	runResult := o.buildRunResult(result)
 	status := "completed"
 
-	// 11. Confidence gating.
-	if result.ConfidenceScore < lowConfidenceThreshold {
+	// 11. Confidence gating: use org-configured auto-proceed threshold.
+	if result.ConfidenceScore < confidenceThresholds.AutoProceed {
 		status = "needs_human_guidance"
 	}
 
@@ -312,10 +317,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error
 	log.Info().
 		Str("status", status).
 		Float64("confidence", result.ConfidenceScore).
+		Float64("threshold", confidenceThresholds.AutoProceed).
 		Msg("agent run finished")
 
 	// 12. Enqueue follow-up job based on confidence.
-	if result.ConfidenceScore >= lowConfidenceThreshold {
+	if result.ConfidenceScore >= confidenceThresholds.AutoProceed {
 		o.enqueueJob(ctx, run.OrgID, "agent", "validate", map[string]interface{}{
 			"agent_run_id": run.ID.String(),
 			"org_id":       run.OrgID.String(),
