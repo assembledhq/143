@@ -44,6 +44,7 @@ export function useAnalyze(hasActivePlanSession: boolean) {
       // Backend created the plan — clear our local "enqueued" flag.  The
       // derived `isAnalyzing` will stay true via `hasActivePlanSession` until
       // the plan finishes.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setLocalAnalyzing(false);
       sessionStorage.removeItem(STORAGE_KEY);
       if (timeoutRef.current) {
@@ -61,6 +62,7 @@ export function useAnalyze(hasActivePlanSession: boolean) {
     const remaining = TIMEOUT_MS - (Date.now() - startedAt);
 
     if (remaining <= 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setLocalAnalyzing(false);
       sessionStorage.removeItem(STORAGE_KEY);
       setAnalyzeError(
