@@ -268,6 +268,7 @@ func TestProviderConfig_Validate(t *testing.T) {
 		{"sentry valid", SentryConfig{WebhookSecret: "secret"}, false},
 		{"sentry empty", SentryConfig{WebhookSecret: ""}, true},
 		{"linear valid", LinearConfig{WebhookSecret: "secret"}, false},
+		{"linear oauth valid", LinearConfig{AccessToken: "lin-token"}, false},
 		{"linear empty", LinearConfig{WebhookSecret: ""}, true},
 		{"openai_chatgpt valid", OpenAIChatGPTConfig{AccessToken: "cha_tok", RefreshToken: "chr_tok"}, false},
 		{"openai_chatgpt missing access_token", OpenAIChatGPTConfig{AccessToken: "", RefreshToken: "chr_tok"}, true},

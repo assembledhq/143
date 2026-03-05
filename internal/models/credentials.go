@@ -104,7 +104,12 @@ type SentryConfig struct {
 }
 
 type LinearConfig struct {
-	WebhookSecret string `json:"webhook_secret"`
+	WebhookSecret string `json:"webhook_secret,omitempty"`
+	AccessToken   string `json:"access_token,omitempty"` // #nosec G117 -- JSON config field
+	TokenType     string `json:"token_type,omitempty"`
+	Scope         string `json:"scope,omitempty"`
+	WorkspaceID   string `json:"workspace_id,omitempty"`
+	WorkspaceName string `json:"workspace_name,omitempty"`
 }
 
 type OpenAIChatGPTConfig struct {
@@ -201,8 +206,8 @@ func (c SentryConfig) Validate() error {
 }
 
 func (c LinearConfig) Validate() error {
-	if c.WebhookSecret == "" {
-		return errors.New("webhook_secret is required")
+	if c.WebhookSecret == "" && c.AccessToken == "" {
+		return errors.New("access_token or webhook_secret is required")
 	}
 	return nil
 }
