@@ -1,7 +1,8 @@
 "use client";
 
+import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { CalendarClock, RefreshCw, Layers, Wrench } from "lucide-react";
+import { CalendarClock, RefreshCw, Layers, Wrench, Plus, X } from "lucide-react";
 import Link from "next/link";
 import { useQueryState, parseAsString } from "nuqs";
 import { PageHeader } from "@/components/page-header";
@@ -9,6 +10,9 @@ import { EmptyState } from "@/components/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import type { AgentSession } from "@/lib/types";
 
@@ -123,6 +127,10 @@ function SessionSection({ title, sessions, badge }: { title: string; sessions: A
 export function SessionsPageContent() {
   const queryClient = useQueryClient();
   const [statusFilter, setStatusFilter] = useQueryState("status", parseAsString);
+  const [isManualComposerOpen, setIsManualComposerOpen] = useState(false);
+  const [manualMessage, setManualMessage] = useState("");
+  const [imageInput, setImageInput] = useState("");
+  const [manualImages, setManualImages] = useState<string[]>([]);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["sessions"],
@@ -136,6 +144,25 @@ export function SessionsPageContent() {
       queryClient.invalidateQueries({ queryKey: ["sessions"] });
     },
   });
+
+  const createManualSessionMutation = useMutation({
+    mutationFn: () => api.sessions.createManual({ message: manualMessage.trim(), images: manualImages }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      setManualMessage("");
+      setManualImages([]);
+      setImageInput("");
+    },
+  });
+
+  function addImage() {
+    const trimmed = imageInput.trim();
+    if (!trimmed) {
+      return;
+    }
+    setManualImages((prev) => [...prev, trimmed]);
+    setImageInput("");
+  }
 
   const allSessions = data?.data ?? [];
   const sessions = filterSessions(allSessions, statusFilter);
@@ -152,16 +179,95 @@ export function SessionsPageContent() {
         title="Sessions"
         description="Each PM analysis cycle or manual fix creates a session."
         action={
-          <Button
-            size="sm"
-            onClick={() => analyzeMutation.mutate()}
-            disabled={analyzeMutation.isPending}
-          >
-            <RefreshCw className={`mr-2 h-4 w-4 ${analyzeMutation.isPending ? "animate-spin" : ""}`} />
-            {analyzeMutation.isPending ? "Running" : "Run Analysis"}
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="outline" onClick={() => setIsManualComposerOpen((prev) => !prev)}>
+              <Plus className="mr-2 h-4 w-4" />
+              New Manual Session
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => analyzeMutation.mutate()}
+              disabled={analyzeMutation.isPending}
+            >
+              <RefreshCw className={`mr-2 h-4 w-4 ${analyzeMutation.isPending ? "animate-spin" : ""}`} />
+              {analyzeMutation.isPending ? "Running" : "Run Analysis"}
+            </Button>
+          </div>
         }
       />
+
+      {isManualComposerOpen && (
+        <Card>
+          <CardContent className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="manual-session-message">Message</Label>
+              <Textarea
+                id="manual-session-message"
+                aria-label="Message"
+                value={manualMessage}
+                onChange={(event) => setManualMessage(event.target.value)}
+                placeholder="Describe what you want the agent to do..."
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="manual-session-image">Image URL (optional)</Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  id="manual-session-image"
+                  value={imageInput}
+                  onChange={(event) => setImageInput(event.target.value)}
+                  placeholder="https://..."
+                />
+                <Button type="button" variant="outline" onClick={addImage}>
+                  Add Image
+                </Button>
+              </div>
+              {manualImages.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {manualImages.map((imageURL) => (
+                    <Badge key={imageURL} variant="secondary" className="gap-1">
+                      {imageURL}
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setManualImages((prev) => prev.filter((value) => value !== imageURL))}
+                        className="h-4 px-0.5"
+                        aria-label={`Remove ${imageURL}`}
+                      >
+                        <X className="h-3 w-3" />
+                      </Button>
+                    </Badge>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setIsManualComposerOpen(false)}
+                disabled={createManualSessionMutation.isPending}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                onClick={() => createManualSessionMutation.mutate()}
+                disabled={manualMessage.trim().length === 0 || createManualSessionMutation.isPending}
+              >
+                Start Session
+              </Button>
+            </div>
+
+            {(createManualSessionMutation.isPending || createManualSessionMutation.isSuccess) && (
+              <p className="text-xs text-muted-foreground">Starting session...</p>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       <div className="flex items-center gap-1">
         {statusFilterTabs.map((tab) => (

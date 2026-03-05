@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -17,10 +19,25 @@ import (
 type SessionHandler struct {
 	planStore     *db.PMPlanStore
 	agentRunStore *db.AgentRunStore
+	issueStore    *db.IssueStore
+	orgStore      *db.OrganizationStore
+	jobStore      *db.JobStore
 }
 
-func NewSessionHandler(planStore *db.PMPlanStore, agentRunStore *db.AgentRunStore) *SessionHandler {
-	return &SessionHandler{planStore: planStore, agentRunStore: agentRunStore}
+func NewSessionHandler(
+	planStore *db.PMPlanStore,
+	agentRunStore *db.AgentRunStore,
+	issueStore *db.IssueStore,
+	orgStore *db.OrganizationStore,
+	jobStore *db.JobStore,
+) *SessionHandler {
+	return &SessionHandler{
+		planStore:     planStore,
+		agentRunStore: agentRunStore,
+		issueStore:    issueStore,
+		orgStore:      orgStore,
+		jobStore:      jobStore,
+	}
 }
 
 // List returns a merged list of PM-plan sessions and ad-hoc (manual) run sessions,
@@ -46,8 +63,11 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 	for _, p := range plans {
 		sessions = append(sessions, planToSession(p))
 	}
+
+	runIssues := h.issueByIDMap(r, orgID, orphanRuns)
 	for _, run := range orphanRuns {
-		sessions = append(sessions, runToSession(run))
+		session := runToSessionWithIssue(run, runIssues[run.IssueID])
+		sessions = append(sessions, session)
 	}
 
 	// Sort merged list by created_at DESC.
@@ -92,9 +112,135 @@ func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	issue, issueErr := h.issueStore.GetByID(r.Context(), orgID, run.IssueID)
+	if issueErr == nil {
+		session := runToSessionWithIssue(run, &issue)
+		writeJSON(w, http.StatusOK, models.SingleResponse[models.AgentSession]{Data: session})
+		return
+	}
+
 	session := runToSession(run)
-	session.Tasks = []models.AgentSessionTask{runToTask(run, 1)}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.AgentSession]{Data: session})
+}
+
+type createManualSessionRequest struct {
+	Message       string   `json:"message"`
+	Images        []string `json:"images"`
+	AgentType     string   `json:"agent_type"`
+	AutonomyLevel string   `json:"autonomy_level"`
+	TokenMode     string   `json:"token_mode"`
+}
+
+func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+
+	var body createManualSessionRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+
+	body.Message = strings.TrimSpace(body.Message)
+	if body.Message == "" {
+		writeError(w, http.StatusBadRequest, "MISSING_MESSAGE", "message is required")
+		return
+	}
+
+	agentType := body.AgentType
+	if agentType == "" {
+		org, err := h.orgStore.GetByID(r.Context(), orgID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "DEFAULT_AGENT_LOOKUP_FAILED", "failed to load organization settings")
+			return
+		}
+		agentType = models.ParseOrgSettings(org.Settings).DefaultAgentType
+		if agentType == "" {
+			agentType = models.DefaultDefaultAgentType
+		}
+	}
+	validAgentTypes := map[string]bool{"claude_code": true, "gemini_cli": true, "codex": true}
+	if !validAgentTypes[agentType] {
+		writeError(w, http.StatusBadRequest, "INVALID_AGENT_TYPE", "agent_type must be one of: claude_code, gemini_cli, codex")
+		return
+	}
+
+	autonomyLevel := body.AutonomyLevel
+	if autonomyLevel == "" {
+		autonomyLevel = "semi"
+	}
+	validAutonomyLevels := map[string]bool{"full": true, "semi": true, "supervised": true}
+	if !validAutonomyLevels[autonomyLevel] {
+		writeError(w, http.StatusBadRequest, "INVALID_AUTONOMY_LEVEL", "autonomy_level must be one of: full, semi, supervised")
+		return
+	}
+
+	tokenMode := body.TokenMode
+	if tokenMode == "" {
+		tokenMode = "low"
+	}
+	validTokenModes := map[string]bool{"low": true, "high": true}
+	if !validTokenModes[tokenMode] {
+		writeError(w, http.StatusBadRequest, "INVALID_TOKEN_MODE", "token_mode must be one of: low, high")
+		return
+	}
+
+	now := time.Now()
+	fingerprint := fmt.Sprintf("manual:%x", sha256.Sum256([]byte(fmt.Sprintf("%s:%d", body.Message, now.UnixNano()))))
+	description := buildManualSessionDescription(body.Message, body.Images)
+	title := manualSessionTitle(body.Message)
+	rawData, err := json.Marshal(map[string]any{
+		"manual_session": true,
+		"images":         body.Images,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "ENCODE_FAILED", "failed to encode manual session context")
+		return
+	}
+	issue := &models.Issue{
+		OrgID:                 orgID,
+		ExternalID:            "manual-" + now.UTC().Format("20060102150405") + "-" + strings.ReplaceAll(uuid.NewString(), "-", ""),
+		Source:                "manual",
+		Title:                 title,
+		Description:           &description,
+		RawData:               rawData,
+		Status:                "open",
+		FirstSeenAt:           now,
+		LastSeenAt:            now,
+		OccurrenceCount:       1,
+		AffectedCustomerCount: 1,
+		Severity:              "medium",
+		Fingerprint:           fingerprint,
+	}
+
+	if err := h.issueStore.Upsert(r.Context(), issue); err != nil {
+		writeError(w, http.StatusInternalServerError, "ISSUE_CREATE_FAILED", "failed to create manual issue")
+		return
+	}
+
+	run := &models.AgentRun{
+		IssueID:       issue.ID,
+		OrgID:         orgID,
+		AgentType:     agentType,
+		Status:        "pending",
+		AutonomyLevel: autonomyLevel,
+		TokenMode:     tokenMode,
+	}
+	if err := h.agentRunStore.Create(r.Context(), run); err != nil {
+		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create manual run")
+		return
+	}
+
+	payload := map[string]string{
+		"agent_run_id": run.ID.String(),
+		"org_id":       orgID.String(),
+	}
+	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "run_agent", payload, 5, nil); err != nil {
+		writeError(w, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue manual run")
+		return
+	}
+
+	session := runToSessionWithIssue(*run, issue)
+	writeJSON(w, http.StatusCreated, models.SingleResponse[models.AgentSession]{Data: session})
 }
 
 // planToSession converts a PMPlan to an AgentSession summary.
@@ -151,9 +297,15 @@ func planToSession(p models.PMPlan) models.AgentSession {
 
 // runToSession converts an orphan AgentRun to a single-task AgentSession.
 func runToSession(run models.AgentRun) models.AgentSession {
+	return runToSessionWithIssue(run, nil)
+}
+
+func runToSessionWithIssue(run models.AgentRun, issue *models.Issue) models.AgentSession {
 	var title string
 	if run.ResultSummary != nil && *run.ResultSummary != "" {
 		title = *run.ResultSummary
+	} else if issue != nil && issue.Title != "" {
+		title = issue.Title
 	} else {
 		title = "Run " + run.ID.String()[:8]
 	}
@@ -170,13 +322,24 @@ func runToSession(run models.AgentRun) models.AgentSession {
 		failedCount = 1
 	}
 
+	triggeredBy := models.AgentSessionTriggeredByFixThis
+	if issue != nil && issue.Source == "manual" {
+		triggeredBy = models.AgentSessionTriggeredByManual
+	}
+
+	var analysis *string
+	if issue != nil && issue.Description != nil {
+		analysis = issue.Description
+	}
+
 	return models.AgentSession{
 		ID:                run.ID,
 		Type:              models.AgentSessionTypeManual,
 		Status:            status,
-		TriggeredBy:       models.AgentSessionTriggeredByFixThis,
+		TriggeredBy:       triggeredBy,
 		Title:             title,
-		Tasks:             []models.AgentSessionTask{runToTask(run, 1)},
+		Analysis:          analysis,
+		Tasks:             []models.AgentSessionTask{runToTask(run, 1, title)},
 		TaskCount:         1,
 		ActiveRunCount:    activeCount,
 		CompletedRunCount: completedCount,
@@ -287,16 +450,19 @@ func pmTasksToSessionTasks(tasks []pmTaskJSON) []models.AgentSessionTask {
 	return result
 }
 
-func runToTask(run models.AgentRun, rank int) models.AgentSessionTask {
+func runToTask(run models.AgentRun, rank int, fallbackTitle string) models.AgentSessionTask {
 	runID := run.ID.String()
 	runStatus := models.AgentRunStatus(run.Status)
 	t := models.AgentSessionTask{
 		Rank:       rank,
-		Title:      "Fix issue",
+		Title:      fallbackTitle,
 		IssueIDs:   []string{run.IssueID.String()},
 		Status:     models.PMTaskStatusDelegated,
 		AgentRunID: &runID,
 		RunStatus:  &runStatus,
+	}
+	if strings.TrimSpace(fallbackTitle) == "" {
+		t.Title = "Fix issue"
 	}
 	if run.ResultSummary != nil {
 		t.Title = *run.ResultSummary
@@ -312,6 +478,72 @@ func runToTask(run models.AgentRun, rank int) models.AgentSessionTask {
 		t.RunCompletedAt = &s
 	}
 	return t
+}
+
+func (h *SessionHandler) issueByIDMap(r *http.Request, orgID uuid.UUID, runs []models.AgentRun) map[uuid.UUID]*models.Issue {
+	result := map[uuid.UUID]*models.Issue{}
+	if len(runs) == 0 {
+		return result
+	}
+
+	issueIDs := make([]uuid.UUID, 0, len(runs))
+	seen := make(map[uuid.UUID]bool)
+	for _, run := range runs {
+		if seen[run.IssueID] {
+			continue
+		}
+		seen[run.IssueID] = true
+		issueIDs = append(issueIDs, run.IssueID)
+	}
+
+	issues, err := h.issueStore.ListByIDs(r.Context(), orgID, issueIDs)
+	if err != nil {
+		return result
+	}
+
+	for i := range issues {
+		issue := issues[i]
+		result[issue.ID] = &issue
+	}
+
+	return result
+}
+
+func buildManualSessionDescription(message string, images []string) string {
+	if len(images) == 0 {
+		return message
+	}
+
+	var b strings.Builder
+	b.WriteString(message)
+	b.WriteString("\n\n### Attached images\n")
+	for _, imageURL := range images {
+		if strings.TrimSpace(imageURL) == "" {
+			continue
+		}
+		b.WriteString("- ")
+		b.WriteString(imageURL)
+		b.WriteString("\n")
+	}
+
+	return strings.TrimSpace(b.String())
+}
+
+func manualSessionTitle(message string) string {
+	trimmed := strings.TrimSpace(message)
+	if trimmed == "" {
+		return "Manual Session"
+	}
+
+	if idx := strings.Index(trimmed, "\n"); idx > 0 {
+		trimmed = trimmed[:idx]
+	}
+
+	if len(trimmed) <= 120 {
+		return trimmed
+	}
+
+	return strings.TrimSpace(trimmed[:120]) + "..."
 }
 
 func planStatusToSessionStatus(s models.PMPlanStatus) models.AgentSessionStatus {
