@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { AllIntegrationCards } from "@/components/integration-connection-cards";
 import { PageHeader } from "@/components/page-header";
+import { PageContainer } from "@/components/page-container";
 
 export default function IntegrationsPage() {
   const { data: integrationsResp } = useQuery({
@@ -15,18 +16,20 @@ export default function IntegrationsPage() {
   );
 
   return (
-    <div className="space-y-6">
-      <PageHeader
-        title="Integrations"
-        description="Connect external services to your organization."
-      />
-      <AllIntegrationCards
-        linearConnected={Boolean(linearIntegration)}
-        linearLoading={false}
-        onConnectGitHub={() => api.auth.login()}
-        onConnectSentry={() => api.auth.loginSentry()}
-        onConnectLinear={() => api.integrations.loginLinear()}
-      />
-    </div>
+    <PageContainer size="default">
+      <div className="space-y-6">
+        <PageHeader
+          title="Integrations"
+          description="Connect external services to your organization."
+        />
+        <AllIntegrationCards
+          linearConnected={Boolean(linearIntegration)}
+          linearLoading={connectLinearMutation.isPending}
+          onConnectGitHub={() => api.auth.login()}
+          onConnectSentry={() => api.auth.loginSentry()}
+          onConnectLinear={() => connectLinearMutation.mutate()}
+        />
+      </div>
+    </PageContainer>
   );
 }

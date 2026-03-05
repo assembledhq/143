@@ -20,6 +20,7 @@ import {
 } from "@/components/integration-connection-cards";
 import { AgentSettingsEditor } from "@/components/agent-settings-editor";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
+import { PageContainer } from "@/components/page-container";
 import type { CodexAuthStatus, OrgSettings } from "@/lib/types";
 
 function AgentSettingsModal({ onClose, initialAgentType }: { onClose: () => void; initialAgentType?: OrgSettings["default_agent_type"] }) {
@@ -242,7 +243,8 @@ export default function Overview() {
   const allRequiredConnected = agentConnected && Boolean(githubIntegration);
 
   return (
-    <div className="space-y-6">
+    <PageContainer size="default">
+      <div className="space-y-6">
       {/* Hero header */}
       <div className="space-y-3">
         <div>
@@ -295,6 +297,7 @@ export default function Overview() {
           </p>
         </div>
       )}
-    </div>
+      </div>
+    </PageContainer>
   );
 }
