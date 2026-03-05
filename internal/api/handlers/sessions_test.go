@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,7 +35,10 @@ func TestSessionHandler_List(t *testing.T) {
 
 	planStore := db.NewPMPlanStore(mock)
 	runStore := db.NewAgentRunStore(mock)
-	handler := NewSessionHandler(planStore, runStore)
+	issueStore := db.NewIssueStore(mock)
+	orgStore := db.NewOrganizationStore(mock)
+	jobStore := db.NewJobStore(mock)
+	handler := NewSessionHandler(planStore, runStore, issueStore, orgStore, jobStore)
 
 	orgID := uuid.New()
 	planID := uuid.New()
@@ -71,6 +75,18 @@ func TestSessionHandler_List(t *testing.T) {
 				),
 		)
 
+	mock.ExpectQuery("SELECT id, org_id, external_id, source").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
+				"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
+				"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
+				"created_at", "updated_at",
+			}).
+				AddRow(issueID, orgID, "ISSUE-1", "sentry", nil, nil, "Checkout timeout", nil, json.RawMessage(`{}`), "open", now, now, 1, 1, "high", []string{}, "fp-1", now, now),
+		)
+
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
 	rr := httptest.NewRecorder()
@@ -99,7 +115,10 @@ func TestSessionHandler_Get_PlanSession(t *testing.T) {
 
 	planStore := db.NewPMPlanStore(mock)
 	runStore := db.NewAgentRunStore(mock)
-	handler := NewSessionHandler(planStore, runStore)
+	issueStore := db.NewIssueStore(mock)
+	orgStore := db.NewOrganizationStore(mock)
+	jobStore := db.NewJobStore(mock)
+	handler := NewSessionHandler(planStore, runStore, issueStore, orgStore, jobStore)
 
 	orgID := uuid.New()
 	planID := uuid.New()
@@ -163,7 +182,10 @@ func TestSessionHandler_Get_ManualSession(t *testing.T) {
 
 	planStore := db.NewPMPlanStore(mock)
 	runStore := db.NewAgentRunStore(mock)
-	handler := NewSessionHandler(planStore, runStore)
+	issueStore := db.NewIssueStore(mock)
+	orgStore := db.NewOrganizationStore(mock)
+	jobStore := db.NewJobStore(mock)
+	handler := NewSessionHandler(planStore, runStore, issueStore, orgStore, jobStore)
 
 	orgID := uuid.New()
 	runID := uuid.New()
@@ -188,6 +210,18 @@ func TestSessionHandler_Get_ManualSession(t *testing.T) {
 					nil, nil, nil,
 					now,
 				),
+		)
+
+	mock.ExpectQuery("SELECT id, org_id, external_id, source").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
+				"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
+				"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
+				"created_at", "updated_at",
+			}).
+				AddRow(issueID, orgID, "ISSUE-2", "sentry", nil, nil, "Fix issue", nil, json.RawMessage(`{}`), "open", now, now, 1, 1, "medium", []string{}, "fp-2", now, now),
 		)
 
 	rctx := chi.NewRouteContext()
@@ -219,7 +253,10 @@ func TestSessionHandler_Get_NotFound(t *testing.T) {
 
 	planStore := db.NewPMPlanStore(mock)
 	runStore := db.NewAgentRunStore(mock)
-	handler := NewSessionHandler(planStore, runStore)
+	issueStore := db.NewIssueStore(mock)
+	orgStore := db.NewOrganizationStore(mock)
+	jobStore := db.NewJobStore(mock)
+	handler := NewSessionHandler(planStore, runStore, issueStore, orgStore, jobStore)
 
 	orgID := uuid.New()
 	sessionID := uuid.New()
@@ -339,6 +376,77 @@ func TestRunToSession_TypedTaskFields(t *testing.T) {
 	require.Equal(t, 0.88, *task.RunConfidenceScore, "confidence score should match")
 	require.NotNil(t, task.RunStartedAt, "started_at should be set")
 	require.NotNil(t, task.RunCompletedAt, "completed_at should be set")
+}
+
+func TestSessionHandler_CreateManual(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	planStore := db.NewPMPlanStore(mock)
+	runStore := db.NewAgentRunStore(mock)
+	issueStore := db.NewIssueStore(mock)
+	orgStore := db.NewOrganizationStore(mock)
+	jobStore := db.NewJobStore(mock)
+	handler := NewSessionHandler(planStore, runStore, issueStore, orgStore, jobStore)
+
+	orgID := uuid.New()
+	issueID := uuid.New()
+	runID := uuid.New()
+	jobID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery(`(?s)INSERT INTO issues`).
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
+				AddRow(issueID, now, now),
+		)
+
+	mock.ExpectQuery(`(?s)INSERT INTO agent_runs`).
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "created_at"}).
+				AddRow(runID, now),
+		)
+
+	mock.ExpectQuery(`(?s)INSERT INTO jobs`).
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id"}).
+				AddRow(jobID),
+		)
+
+	body := `{"message":"Please investigate checkout timeout and include a fix.","images":["https://example.com/error.png"],"agent_type":"codex"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/manual", strings.NewReader(body))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.CreateManual(rr, req)
+
+	require.Equal(t, http.StatusCreated, rr.Code, "should create a manual session: %s", rr.Body.String())
+
+	var resp models.SingleResponse[models.AgentSession]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "response should be valid JSON")
+	require.Equal(t, models.AgentSessionTypeManual, resp.Data.Type, "session type should be manual")
+	require.Equal(t, models.AgentSessionTriggeredByManual, resp.Data.TriggeredBy, "manual session should be triggered manually")
+	require.Len(t, resp.Data.Tasks, 1, "manual session should include one task")
+	require.Equal(t, runID, resp.Data.ID, "session id should match created run id")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func float64Ptr(f float64) *float64 { return &f }

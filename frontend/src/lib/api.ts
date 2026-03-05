@@ -165,6 +165,8 @@ export const api = {
       return get<import('./types').ListResponse<import('./types').AgentSession>>(`/api/v1/sessions${qs ? `?${qs}` : ''}`);
     },
     get: (id: string) => get<import('./types').SingleResponse<import('./types').AgentSession>>(`/api/v1/sessions/${id}`),
+    createManual: (body: { message: string; images?: string[]; agent_type?: string; autonomy_level?: string; token_mode?: string }) =>
+      post<import('./types').SingleResponse<import('./types').AgentSession>>('/api/v1/sessions/manual', body),
   },
   settings: {
     get: () => get<import('./types').SingleResponse<import('./types').Organization>>('/api/v1/settings'),
