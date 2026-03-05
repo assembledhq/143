@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LogViewer } from './log-viewer';
 
@@ -176,5 +176,70 @@ describe('LogViewer', () => {
     });
 
     expect(MockEventSource.instances.length).toBeGreaterThan(1);
+  });
+
+  it('shows error state with retry button when REST fetch fails', async () => {
+    (api.runs.getLogs as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error('Network error')
+    );
+
+    render(<LogViewer runId="run-err" isActive={false} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Network error')).toBeInTheDocument();
+    });
+    expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument();
+  });
+
+  it('retries fetch when retry button is clicked', async () => {
+    (api.runs.getLogs as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce(new Error('Network error'))
+      .mockResolvedValueOnce({
+        data: [
+          { id: 1, level: 'info', message: 'Recovered log', created_at: '2026-02-18T10:15:30Z' },
+        ],
+      });
+
+    render(<LogViewer runId="run-retry" isActive={false} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Network error')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Recovered log')).toBeInTheDocument();
+    });
+  });
+
+  it('shows stream error after all reconnect attempts are exhausted', async () => {
+    vi.useFakeTimers();
+    (api.runs.getLogs as ReturnType<typeof vi.fn>).mockResolvedValue({
+      data: [
+        { id: 1, level: 'info', message: 'Existing log', created_at: '2026-02-18T10:15:30Z' },
+      ],
+    });
+
+    render(<LogViewer runId="run-stream-err" isActive={true} />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    // Exhaust all 5 reconnect attempts.
+    for (let i = 0; i < 6; i++) {
+      const source = MockEventSource.instances[MockEventSource.instances.length - 1];
+      act(() => {
+        source.onerror?.();
+      });
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
+    }
+
+    expect(screen.getByText(/log stream disconnected/i)).toBeInTheDocument();
+    // Existing logs should still be visible.
+    expect(screen.getByText('Existing log')).toBeInTheDocument();
   });
 });
