@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,10 @@ import (
 
 func codexTestLogger() zerolog.Logger {
 	return zerolog.Nop()
+}
+
+func codexBufferedLogger(buf *bytes.Buffer) zerolog.Logger {
+	return zerolog.New(buf)
 }
 
 func codexAddOrgContext(r *http.Request) *http.Request {
@@ -71,7 +76,7 @@ func TestCodexAuthHandler_Initiate(t *testing.T) {
 	svc.SetHTTPClient(mockOpenAI.Client())
 	svc.SetIssuer(mockOpenAI.URL)
 
-	handler := NewCodexAuthHandler(svc)
+	handler := NewCodexAuthHandler(svc, codexTestLogger())
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/codex-auth/initiate", nil)
 	req = codexAddOrgContext(req)
@@ -92,7 +97,7 @@ func TestCodexAuthHandler_Status_NoPending(t *testing.T) {
 
 	svc := codexauth.NewService(nil, codexTestLogger())
 
-	handler := NewCodexAuthHandler(svc)
+	handler := NewCodexAuthHandler(svc, codexTestLogger())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/codex-auth/status", nil)
 	req = codexAddOrgContext(req)
@@ -114,8 +119,10 @@ func TestCodexAuthHandler_Initiate_Error(t *testing.T) {
 	// Use an unreachable server URL to force an error.
 	svc := codexauth.NewService(nil, codexTestLogger())
 	svc.SetIssuer("http://127.0.0.1:1") // unreachable port
+	var logBuf bytes.Buffer
+	logger := codexBufferedLogger(&logBuf)
 
-	handler := NewCodexAuthHandler(svc)
+	handler := NewCodexAuthHandler(svc, logger)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/codex-auth/initiate", nil)
 	req = codexAddOrgContext(req)
@@ -128,6 +135,8 @@ func TestCodexAuthHandler_Initiate_Error(t *testing.T) {
 	var resp map[string]interface{}
 	err := json.NewDecoder(w.Body).Decode(&resp)
 	require.NoError(t, err, "error response should be valid JSON")
+	require.Contains(t, logBuf.String(), "failed to initiate codex device auth", "initiate error should be logged with context")
+	require.Contains(t, logBuf.String(), "device auth request", "initiate error log should include wrapped service error details")
 }
 
 func TestCodexAuthHandler_Disconnect_Error(t *testing.T) {
@@ -135,7 +144,7 @@ func TestCodexAuthHandler_Disconnect_Error(t *testing.T) {
 
 	store := &codexCredentialStoreStub{disableErr: errors.New("db error")}
 	svc := codexauth.NewService(store, codexTestLogger())
-	handler := NewCodexAuthHandler(svc)
+	handler := NewCodexAuthHandler(svc, codexTestLogger())
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/codex-auth/disconnect", nil)
 	req = codexAddOrgContext(req)
@@ -151,7 +160,7 @@ func TestCodexAuthHandler_Disconnect_ReturnsJSON(t *testing.T) {
 
 	store := &codexCredentialStoreStub{}
 	svc := codexauth.NewService(store, codexTestLogger())
-	handler := NewCodexAuthHandler(svc)
+	handler := NewCodexAuthHandler(svc, codexTestLogger())
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/codex-auth/disconnect", nil)
 	req = codexAddOrgContext(req)

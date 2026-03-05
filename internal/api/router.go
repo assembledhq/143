@@ -96,7 +96,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	reviewPatternHandler := handlers.NewReviewPatternHandler(reviewPatternStore, reviewCommentStore)
 	teamHandler := handlers.NewTeamHandler(userStore, sessionStore, invitationStore, orgStore, cfg.FrontendURL)
 
-	codexAuthHandler := handlers.NewCodexAuthHandler(codexAuthSvc)
+	codexAuthHandler := handlers.NewCodexAuthHandler(codexAuthSvc, logger)
 
 	r := chi.NewRouter()
 

@@ -6,16 +6,18 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/codexauth"
+	"github.com/rs/zerolog"
 )
 
 // CodexAuthHandler serves the /api/v1/settings/codex-auth endpoints.
 type CodexAuthHandler struct {
-	svc *codexauth.Service
+	svc    *codexauth.Service
+	logger zerolog.Logger
 }
 
 // NewCodexAuthHandler creates a new handler wrapping the codexauth service.
-func NewCodexAuthHandler(svc *codexauth.Service) *CodexAuthHandler {
-	return &CodexAuthHandler{svc: svc}
+func NewCodexAuthHandler(svc *codexauth.Service, logger zerolog.Logger) *CodexAuthHandler {
+	return &CodexAuthHandler{svc: svc, logger: logger}
 }
 
 // Initiate starts a new device code auth flow.
@@ -24,6 +26,7 @@ func (h *CodexAuthHandler) Initiate(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.svc.InitiateDeviceAuth(r.Context(), orgID)
 	if err != nil {
+		h.logger.Error().Err(err).Str("org_id", orgID.String()).Msg("failed to initiate codex device auth")
 		writeError(w, http.StatusInternalServerError, "AUTH_INITIATE_FAILED", "failed to initiate device auth")
 		return
 	}
