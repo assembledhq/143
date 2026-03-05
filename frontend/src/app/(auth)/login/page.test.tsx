@@ -9,6 +9,7 @@ const registerMock = vi.hoisted(() => vi.fn());
 
 const useAuthMock = vi.hoisted(() => vi.fn());
 const useAuthProvidersMock = vi.hoisted(() => vi.fn());
+const searchParamsMock = vi.hoisted(() => new URLSearchParams());
 
 vi.mock('@/lib/api', () => ({
   api: {
@@ -31,7 +32,7 @@ const pushMock = vi.hoisted(() => vi.fn());
 const replaceMock = vi.hoisted(() => vi.fn());
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: pushMock, replace: replaceMock }),
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => searchParamsMock,
 }));
 
 describe('LoginPage', () => {
@@ -42,6 +43,9 @@ describe('LoginPage', () => {
     registerMock.mockReset();
     pushMock.mockReset();
     replaceMock.mockReset();
+    searchParamsMock.forEach((_, key) => {
+      searchParamsMock.delete(key);
+    });
 
     useAuthMock.mockReturnValue({
       user: null,
@@ -170,5 +174,29 @@ describe('LoginPage', () => {
     await waitFor(() => {
       expect(signInButton).toBeEnabled();
     });
+  });
+
+  it('prefills invited email and keeps it read-only on sign up', async () => {
+    registerMock.mockResolvedValue({ data: { id: '1' } });
+    searchParamsMock.set('invitation', 'invite-123');
+    searchParamsMock.set('email', 'invitee@example.com');
+    searchParamsMock.set('org', 'Acme');
+    searchParamsMock.set('tab', 'signup');
+
+    const user = userEvent.setup();
+    renderWithProviders(<LoginPage />);
+
+    expect(screen.getByText(/invitee@example.com/i)).toBeInTheDocument();
+    expect(screen.getByText(/Acme/i)).toBeInTheDocument();
+
+    const signupEmail = screen.getByLabelText('Email');
+    expect(signupEmail).toHaveValue('invitee@example.com');
+    expect(signupEmail).toHaveAttribute('readonly');
+
+    await user.type(screen.getByLabelText('Name'), 'Invited User');
+    await user.type(screen.getByLabelText('Password'), 'invitepass123');
+    await user.click(screen.getByRole('button', { name: 'Create Account' }));
+
+    expect(registerMock).toHaveBeenCalledWith('invitee@example.com', 'invitepass123', 'Invited User', 'invite-123');
   });
 });
