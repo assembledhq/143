@@ -460,10 +460,15 @@ For each active project in your context:
 ## Slot Allocation
 
 The system already enforces a `max_concurrent_runs` limit per org (default: 3,
-configured in OrgSettings). Each agent run creates a Docker + gVisor sandbox,
-so this limit exists for practical resource reasons. The PM is already told
-how many slots are available (`available_slots`) and caps task delegation
-accordingly (see `pm/execute.go`).
+configured in OrgSettings, editable on the Agent settings page at `/agent`).
+Each agent run creates a Docker + gVisor sandbox, so this limit exists for
+practical resource reasons. The PM is already told how many slots are available
+(`available_slots`) and caps task delegation accordingly (see `pm/execute.go`).
+
+Users who adopt projects may want to increase `max_concurrent_runs` (currently
+capped at 10 in the UI) to give the PM more room to run project tasks alongside
+reactive work. The existing Agent settings page is the right place for this —
+no new settings surface needed.
 
 With projects, the PM must now split those same available slots between
 reactive issue triage and project work:
