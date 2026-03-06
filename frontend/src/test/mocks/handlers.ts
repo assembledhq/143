@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import type { Issue, AgentRun, AgentSession, Validation, PullRequest, ListResponse, SingleResponse } from '@/lib/types';
+import type { Issue, AgentRun, AgentRunLog, AgentSession, Validation, PullRequest, ListResponse, SingleResponse } from '@/lib/types';
 
 export const mockIssues: Issue[] = [
   {
@@ -198,6 +198,13 @@ export const handlers = [
       );
     }
     return HttpResponse.json({ data: run } satisfies SingleResponse<AgentRun>);
+  }),
+
+  http.get('/api/v1/runs/:id/logs', () => {
+    return HttpResponse.json({
+      data: [] as AgentRunLog[],
+      meta: {},
+    } satisfies ListResponse<AgentRunLog>);
   }),
 
   http.get('/api/v1/runs/:id/validation', () => {

@@ -174,7 +174,7 @@ type PullRequest struct {
 type AgentRunLog struct {
 	ID         int64           `db:"id" json:"id"`
 	AgentRunID uuid.UUID       `db:"agent_run_id" json:"agent_run_id"`
-	Timestamp  time.Time       `db:"timestamp" json:"timestamp"`
+	Timestamp  time.Time       `db:"timestamp" json:"created_at"`
 	Level      string          `db:"level" json:"level"`
 	Message    string          `db:"message" json:"message"`
 	Metadata   json.RawMessage `db:"metadata" json:"metadata,omitempty"`

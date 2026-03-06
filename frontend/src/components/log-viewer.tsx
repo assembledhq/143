@@ -1,7 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
+import { AlertTriangle, RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { api } from "@/lib/api";
 import type { AgentRunLog } from "@/lib/types";
 
 const levelColors: Record<string, string> = {
@@ -33,48 +36,111 @@ const BASE_RECONNECT_DELAY_MS = 1000;
 
 export function LogViewer({ runId, isActive }: LogViewerProps) {
   const [logs, setLogs] = useState<AgentRunLog[]>([]);
-  const [connected, setConnected] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [streaming, setStreaming] = useState(false);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+  const [streamError, setStreamError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
   const reconnectAttempts = useRef(0);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(null);
+  const seenIds = useRef<Set<number>>(new Set());
 
+  // Merge new logs into state, deduplicating by ID.
+  const mergeLogs = useCallback((newLogs: AgentRunLog[]) => {
+    setLogs((prev) => {
+      const toAdd: AgentRunLog[] = [];
+      for (const log of newLogs) {
+        if (!seenIds.current.has(log.id)) {
+          seenIds.current.add(log.id);
+          toAdd.push(log);
+        }
+      }
+      if (toAdd.length === 0) return prev;
+      return [...prev, ...toAdd];
+    });
+  }, []);
+
+  const fetchLogs = useCallback(async (signal?: AbortSignal) => {
+    setLoading(true);
+    setFetchError(null);
+    try {
+      const response = await api.runs.getLogs(runId);
+      if (!signal?.aborted) {
+        const fetched = response.data || [];
+        seenIds.current = new Set(fetched.map((l) => l.id));
+        setLogs(fetched);
+      }
+    } catch (err) {
+      if (!signal?.aborted) {
+        setFetchError(
+          err instanceof Error ? err.message : "Failed to load logs"
+        );
+      }
+    } finally {
+      if (!signal?.aborted) {
+        setLoading(false);
+      }
+    }
+  }, [runId]);
+
+  // Fetch logs via REST API on mount (works for both active and completed runs).
   useEffect(() => {
+    const controller = new AbortController();
+    fetchLogs(controller.signal);
+    return () => {
+      controller.abort();
+    };
+  }, [fetchLogs]);
+
+  // Start SSE streaming only for active runs.
+  useEffect(() => {
+    if (!isActive) {
+      setStreaming(false);
+      return;
+    }
+
     let eventSource: EventSource | null = null;
 
     function connect() {
       eventSource = new EventSource(
-        `${apiBase}/api/v1/runs/${runId}/logs`,
+        `${apiBase}/api/v1/runs/${runId}/logs/stream`,
         { withCredentials: true }
       );
 
       eventSource.onopen = () => {
-        setConnected(true);
+        setStreaming(true);
+        setStreamError(null);
         reconnectAttempts.current = 0;
       };
 
       eventSource.onmessage = (event) => {
         try {
           const log: AgentRunLog = JSON.parse(event.data);
-          setLogs((prev) => [...prev, log]);
+          mergeLogs([log]);
         } catch {
           // ignore unparseable messages
         }
       };
 
+      // Listen for the "done" event sent when the run reaches terminal status.
+      eventSource.addEventListener("done", () => {
+        setStreaming(false);
+        eventSource?.close();
+      });
+
       eventSource.onerror = () => {
-        setConnected(false);
+        setStreaming(false);
         eventSource?.close();
 
-        if (
-          isActive &&
-          reconnectAttempts.current < MAX_RECONNECT_ATTEMPTS
-        ) {
+        if (reconnectAttempts.current < MAX_RECONNECT_ATTEMPTS) {
           const delay =
             BASE_RECONNECT_DELAY_MS *
             Math.pow(2, reconnectAttempts.current);
           reconnectAttempts.current += 1;
           reconnectTimer.current = setTimeout(connect, delay);
+        } else {
+          setStreamError("Log stream disconnected. Retries exhausted.");
         }
       };
     }
@@ -87,7 +153,7 @@ export function LogViewer({ runId, isActive }: LogViewerProps) {
         clearTimeout(reconnectTimer.current);
       }
     };
-  }, [runId, apiBase, isActive]);
+  }, [runId, apiBase, isActive, mergeLogs]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -95,23 +161,46 @@ export function LogViewer({ runId, isActive }: LogViewerProps) {
     }
   }, [logs]);
 
-  if (!connected && logs.length === 0) {
+  if (loading) {
     return (
       <div className="text-center py-8 text-sm text-muted-foreground">
-        Connecting to log stream...
+        Loading logs...
+      </div>
+    );
+  }
+
+  if (fetchError && logs.length === 0) {
+    return (
+      <div className="flex flex-col items-center gap-3 py-8 text-sm text-muted-foreground">
+        <AlertTriangle className="h-8 w-8 text-muted-foreground/50" />
+        <p>{fetchError}</p>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => fetchLogs()}
+        >
+          <RefreshCw className="mr-1.5 h-3 w-3" />
+          Retry
+        </Button>
       </div>
     );
   }
 
   return (
     <div className="space-y-2">
-      {isActive && connected && (
+      {isActive && streaming && (
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <span className="relative flex h-2 w-2">
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
             <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500" />
           </span>
           Streaming...
+        </div>
+      )}
+      {streamError && (
+        <div className="flex items-center gap-2 text-xs text-destructive">
+          <AlertTriangle className="h-3 w-3 shrink-0" />
+          {streamError}
         </div>
       )}
       <div
