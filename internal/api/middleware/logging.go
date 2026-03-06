@@ -26,6 +26,12 @@ func (rw *responseWriter) Write(b []byte) (int, error) {
 	return rw.ResponseWriter.Write(b)
 }
 
+func (rw *responseWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 func (rw *responseWriter) captureErrorDetails(responseBody []byte) {
 	if rw.status < http.StatusInternalServerError {
 		return
