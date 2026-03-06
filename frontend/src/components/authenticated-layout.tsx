@@ -2,7 +2,6 @@
 
 import {
   LayoutDashboard,
-  AlertCircle,
   Play,
   Settings,
   Users,
@@ -29,7 +28,6 @@ import { useEffect } from "react";
 const navItems = [
   { label: "Overview", icon: LayoutDashboard, href: "/overview" },
   { label: "Sessions", icon: Play, href: "/sessions" },
-  { label: "Issues", icon: AlertCircle, href: "/issues" },
 ];
 
 export function AuthenticatedLayout({ children }: { children: React.ReactNode }) {
