@@ -120,6 +120,7 @@ type AgentRun struct {
 	PMPlanID             *uuid.UUID      `db:"pm_plan_id" json:"pm_plan_id,omitempty"`
 	PMApproach           *string         `db:"pm_approach" json:"pm_approach,omitempty"`
 	PMReasoning          *string         `db:"pm_reasoning" json:"pm_reasoning,omitempty"`
+	ProjectTaskID        *uuid.UUID      `db:"project_task_id" json:"project_task_id,omitempty"`
 	CreatedAt            time.Time       `db:"created_at" json:"created_at"`
 }
 

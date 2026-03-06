@@ -25,15 +25,18 @@ type AgentRunFilters struct {
 	AdHocOnly bool // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
 }
 
+const agentRunSelectColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-000000000000'::uuid) AS issue_id,
+	org_id, agent_type, status, autonomy_level, token_mode,
+	complexity_tier, confidence_score, confidence_reasoning, risk_factors,
+	container_id, started_at, completed_at, token_usage,
+	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
+	parent_run_id, revision_context, error, result_summary, diff,
+	pm_plan_id, pm_approach, pm_reasoning, project_task_id,
+	created_at`
+
 func (s *AgentRunStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters AgentRunFilters) ([]models.AgentRun, error) {
 	query := `
-		SELECT id, issue_id, org_id, agent_type, status, autonomy_level, token_mode,
-		       complexity_tier, confidence_score, confidence_reasoning, risk_factors,
-		       container_id, started_at, completed_at, token_usage,
-		       failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
-		       parent_run_id, revision_context, error, result_summary, diff,
-		       pm_plan_id, pm_approach, pm_reasoning,
-		       created_at
+		SELECT ` + agentRunSelectColumns + `
 		FROM agent_runs
 		WHERE org_id = @org_id`
 
@@ -71,13 +74,7 @@ func (s *AgentRunStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters 
 
 func (s *AgentRunStore) GetByID(ctx context.Context, orgID, runID uuid.UUID) (models.AgentRun, error) {
 	query := `
-		SELECT id, issue_id, org_id, agent_type, status, autonomy_level, token_mode,
-		       complexity_tier, confidence_score, confidence_reasoning, risk_factors,
-		       container_id, started_at, completed_at, token_usage,
-		       failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
-		       parent_run_id, revision_context, error, result_summary, diff,
-		       pm_plan_id, pm_approach, pm_reasoning,
-		       created_at
+		SELECT ` + agentRunSelectColumns + `
 		FROM agent_runs
 		WHERE id = @id AND org_id = @org_id`
 
@@ -95,16 +92,21 @@ func (s *AgentRunStore) Create(ctx context.Context, run *models.AgentRun) error 
 	query := `
 		INSERT INTO agent_runs (
 			issue_id, org_id, agent_type, status, autonomy_level, token_mode, complexity_tier,
-			parent_run_id, revision_context, pm_plan_id, pm_approach, pm_reasoning
+			parent_run_id, revision_context, pm_plan_id, pm_approach, pm_reasoning, project_task_id
 		)
 		VALUES (
 			@issue_id, @org_id, @agent_type, @status, @autonomy_level, @token_mode, @complexity_tier,
-			@parent_run_id, @revision_context, @pm_plan_id, @pm_approach, @pm_reasoning
+			@parent_run_id, @revision_context, @pm_plan_id, @pm_approach, @pm_reasoning, @project_task_id
 		)
 		RETURNING id, created_at`
 
+	var issueID interface{} = run.IssueID
+	if run.IssueID == uuid.Nil {
+		issueID = nil
+	}
+
 	args := pgx.NamedArgs{
-		"issue_id":         run.IssueID,
+		"issue_id":         issueID,
 		"org_id":           run.OrgID,
 		"agent_type":       run.AgentType,
 		"status":           run.Status,
@@ -116,6 +118,7 @@ func (s *AgentRunStore) Create(ctx context.Context, run *models.AgentRun) error 
 		"pm_plan_id":       run.PMPlanID,
 		"pm_approach":      run.PMApproach,
 		"pm_reasoning":     run.PMReasoning,
+		"project_task_id":  run.ProjectTaskID,
 	}
 
 	row := s.db.QueryRow(ctx, query, args)
@@ -189,13 +192,7 @@ func (s *AgentRunStore) CountRunningByOrg(ctx context.Context, orgID uuid.UUID) 
 
 func (s *AgentRunStore) ListByIssue(ctx context.Context, orgID, issueID uuid.UUID) ([]models.AgentRun, error) {
 	query := `
-		SELECT id, issue_id, org_id, agent_type, status, autonomy_level, token_mode,
-		       complexity_tier, confidence_score, confidence_reasoning, risk_factors,
-		       container_id, started_at, completed_at, token_usage,
-		       failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
-		       parent_run_id, revision_context, error, result_summary, diff,
-		       pm_plan_id, pm_approach, pm_reasoning,
-		       created_at
+		SELECT ` + agentRunSelectColumns + `
 		FROM agent_runs
 		WHERE org_id = @org_id AND issue_id = @issue_id
 		ORDER BY created_at DESC`
@@ -212,13 +209,7 @@ func (s *AgentRunStore) ListByIssue(ctx context.Context, orgID, issueID uuid.UUI
 
 func (s *AgentRunStore) ListRecentByOrg(ctx context.Context, orgID uuid.UUID, statuses []string, limit int) ([]models.AgentRun, error) {
 	query := `
-		SELECT id, issue_id, org_id, agent_type, status, autonomy_level, token_mode,
-		       complexity_tier, confidence_score, confidence_reasoning, risk_factors,
-		       container_id, started_at, completed_at, token_usage,
-		       failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
-		       parent_run_id, revision_context, error, result_summary, diff,
-		       pm_plan_id, pm_approach, pm_reasoning,
-		       created_at
+		SELECT ` + agentRunSelectColumns + `
 		FROM agent_runs
 		WHERE org_id = @org_id AND status = ANY(@statuses)
 		ORDER BY created_at DESC`
@@ -244,13 +235,7 @@ func (s *AgentRunStore) ListByIDs(ctx context.Context, orgID uuid.UUID, ids []uu
 	}
 
 	query := `
-		SELECT id, issue_id, org_id, agent_type, status, autonomy_level, token_mode,
-		       complexity_tier, confidence_score, confidence_reasoning, risk_factors,
-		       container_id, started_at, completed_at, token_usage,
-		       failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
-		       parent_run_id, revision_context, error, result_summary, diff,
-		       pm_plan_id, pm_approach, pm_reasoning,
-		       created_at
+		SELECT ` + agentRunSelectColumns + `
 		FROM agent_runs
 		WHERE org_id = @org_id AND id = ANY(@ids)`
 
