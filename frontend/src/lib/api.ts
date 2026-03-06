@@ -138,6 +138,7 @@ export const api = {
       return get<import('./types').ListResponse<import('./types').AgentRun>>(`/api/v1/runs${qs ? `?${qs}` : ''}`);
     },
     get: (id: string) => get<import('./types').SingleResponse<import('./types').AgentRun>>(`/api/v1/runs/${id}`),
+    getLogs: (runId: string) => get<import('./types').ListResponse<import('./types').AgentRunLog>>(`/api/v1/runs/${runId}/logs`),
     getValidation: (runId: string) => get<import('./types').SingleResponse<import('./types').Validation>>(`/api/v1/runs/${runId}/validation`),
     getPR: (runId: string) => get<import('./types').SingleResponse<import('./types').PullRequest>>(`/api/v1/runs/${runId}/pr`),
     getQuestions: (runId: string) => get<import('./types').ListResponse<import('./types').AgentRunQuestion>>(`/api/v1/runs/${runId}/questions`),
