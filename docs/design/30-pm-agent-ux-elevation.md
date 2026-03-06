@@ -126,11 +126,11 @@ Current task cards show reasoning/approach as plain text. Enhance them to show t
 │  │ simple │ │ high   │ │ delegated │                          │
 │  └────────┘ └────────┘ └───────────┘                          │
 │                                                                │
-│  Why this is priority #1                                       │
+│  Reasoning                                                     │
 │  "3 issues share a root cause in auth/token.go:142. Customer   │
 │   impact is rising (47 affected users, up 30% this week)."     │
 │                                                                │
-│  What I told the agent                                         │
+│  Approach                                                      │
 │  "The race condition is in refreshToken() at auth/token.go:142 │
 │   where the mutex isn't held across the network call. Add test │
 │   coverage for concurrent refresh scenarios in token_test.go." │
@@ -145,8 +145,7 @@ Current task cards show reasoning/approach as plain text. Enhance them to show t
 ```
 
 Key changes:
-- "Reasoning" becomes **"Why this is priority #1"** -- humanized label
-- "Approach" becomes **"What I told the agent"** -- makes clear the PM is delegating with instructions
+- Keep labels simple and direct: **Reasoning**, **Approach**, **Risk** -- no need to rename what already works
 - Add a **"Files identified"** section when the approach contains file paths (parse `path:line` patterns from the approach text)
 - Show live run status inline with duration
 
@@ -294,7 +293,7 @@ This makes the PM feel alive even when you're on other pages. Implementation: po
 | Prioritization page | Generic settings form | "Brief your PM" with usage examples |
 | Decision history | Not exposed | New dedicated table page |
 | Live status | Small blue banner | Hero banner with activity feed + sidebar dot |
-| Task cards | Plain text reasoning | Evidence trails with file references, humanized labels |
+| Task cards | Plain text reasoning | Evidence trails with file references, inline run status |
 | Skipped issues | "Skipped Issues" header | "Intentionally skipped" with deliberate framing |
 | Clusters | Flat badge list | Visual groupings with shared root cause emphasis |
 
@@ -303,7 +302,7 @@ This makes the PM feel alive even when you're on other pages. Implementation: po
 1. **Nav promotion** -- Move PM pages to top-level sidebar (low effort, high impact)
 2. **Context stats on plan response** -- Backend: add counts to PM plan API response
 3. **Dashboard hero + context cards** -- Frontend: build the status banner and stat cards
-4. **Task card enhancements** -- Frontend: humanized labels, file extraction, inline run status
+4. **Task card enhancements** -- Frontend: file extraction, inline run status
 5. **Decision log page** -- Backend endpoint + frontend table (medium effort, high trust-building)
 6. **Context page reframe** -- Frontend: conversational framing and usage hints
 7. **Live status indicator** -- Frontend: sidebar dot + hero activity feed
