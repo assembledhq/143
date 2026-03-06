@@ -128,7 +128,7 @@ CREATE TABLE projects (
 
     -- Lifecycle
     status              TEXT NOT NULL DEFAULT 'draft',
-        -- draft | planning | active | paused | completed | abandoned
+        -- proposed | draft | planning | active | paused | completed | cancelled
     priority            INT NOT NULL DEFAULT 50, -- 0=highest, 100=lowest
 
     -- Execution config
@@ -147,6 +147,11 @@ CREATE TABLE projects (
     total_tasks         INT NOT NULL DEFAULT 0,
     completed_tasks     INT NOT NULL DEFAULT 0,
     failed_tasks        INT NOT NULL DEFAULT 0,
+
+    -- Provenance (for PM-proposed projects)
+    proposed_by_pm      BOOLEAN NOT NULL DEFAULT false,
+    source_issue_ids    UUID[],               -- issues that motivated a PM proposal
+    proposal_reasoning  TEXT,                 -- PM's justification for the proposal
 
     -- Ownership
     created_by          UUID REFERENCES users(id),
@@ -182,9 +187,11 @@ CREATE TABLE project_tasks (
 
     -- Status
     status          TEXT NOT NULL DEFAULT 'pending',
-        -- pending | blocked | queued | running | completed | failed | skipped
-    complexity      TEXT,             -- trivial | simple | moderate | complex
-    confidence      TEXT,             -- high | medium | low
+        -- pending | blocked | delegated | running | completed | failed | skipped | cancelled
+        -- Maps to existing statuses: agent_runs use pending/running/completed/failed/cancelled/skipped;
+        -- PM tasks use pending/delegated/skipped_capacity. We add 'blocked' (dependencies unmet).
+    complexity      TEXT,             -- trivial | simple | moderate | complex  (matches PMTaskComplexity)
+    confidence      TEXT,             -- high | medium | low  (matches PMTaskConfidence)
 
     -- Execution links
     agent_run_id    UUID REFERENCES agent_runs(id),
@@ -243,7 +250,9 @@ POST   /api/v1/projects                         -- create a new project
 GET    /api/v1/projects                         -- list projects (filterable by status)
 GET    /api/v1/projects/{id}                    -- get project with tasks + cycles
 PATCH  /api/v1/projects/{id}                    -- update project settings/scope
-DELETE /api/v1/projects/{id}                    -- abandon a project
+DELETE /api/v1/projects/{id}                    -- cancel a project
+POST   /api/v1/projects/{id}/approve            -- approve a PM-proposed project (proposed → draft)
+POST   /api/v1/projects/{id}/dismiss            -- dismiss a PM-proposed project (proposed → cancelled)
 POST   /api/v1/projects/{id}/start             -- transition draft → active (first PM cycle)
 POST   /api/v1/projects/{id}/pause             -- pause execution
 POST   /api/v1/projects/{id}/resume            -- resume execution
@@ -450,8 +459,14 @@ For each active project in your context:
 
 ## Slot Allocation
 
-You must balance reactive triage (open issues) against project work.
-Allocation strategy:
+The system already enforces a `max_concurrent_runs` limit per org (default: 3,
+configured in OrgSettings). Each agent run creates a Docker + gVisor sandbox,
+so this limit exists for practical resource reasons. The PM is already told
+how many slots are available (`available_slots`) and caps task delegation
+accordingly (see `pm/execute.go`).
+
+With projects, the PM must now split those same available slots between
+reactive issue triage and project work:
 - If there are critical/high-severity issues → reserve at least 1 slot
 - Distribute remaining slots across active projects by priority
 - If no urgent issues and no active projects → use slots for reactive triage
@@ -479,6 +494,18 @@ The PM output gains `slot_allocation` and `project_plans` sections:
   "tasks": [ ... ],           // reactive issue tasks (existing format, unchanged)
   "clusters": [ ... ],        // existing, unchanged
   "skip": [ ... ],            // existing, unchanged
+
+  "proposed_projects": [           // NEW: PM suggests new projects
+    {
+      "title": "Standardize error handling in payments",
+      "goal": "All payment endpoints use consistent error types and HTTP codes",
+      "scope": "internal/api/handlers/payment*.go",
+      "completion_criteria": "All payment handlers return PaymentError types. No raw http.Error calls.",
+      "reasoning": "Issues #42, #47, #51 all stem from inconsistent error handling in payments",
+      "source_issue_ids": ["<uuid>", "<uuid>", "<uuid>"],
+      "suggested_priority": 30
+    }
+  ],
 
   "project_plans": [
     {
@@ -512,10 +539,10 @@ The PM output gains `slot_allocation` and `project_plans` sections:
 
 ### Slot allocation strategy
 
-The PM reasons about how to split available agent slots between reactive work and projects. The prompt instructs it to reason about this, but we also enforce guardrails in code:
+Today, `pm/execute.go` computes `available = settings.MaxConcurrentRuns - running` and delegates tasks until `available` is exhausted. With projects, the PM must reason about how to split those same available slots between reactive work and project work. The prompt instructs it to reason about this, and we enforce guardrails in code:
 
 ```go
-func (s *Service) enforceSlotAllocation(plan *Plan, settings OrgSettings, hasActiveProjets bool) {
+func (s *Service) enforceSlotAllocation(plan *Plan, settings OrgSettings, hasActiveProjects bool) {
     available := settings.MaxConcurrentRuns - currentRunning
 
     // Hard rules (code-enforced, not PM-discretion):
@@ -557,6 +584,11 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger PMTrigge
     // 5. Execute project plans
     for _, projectPlan := range plan.ProjectPlans {
         s.executeProjectPlan(ctx, orgID, projectPlan, ctxBundle.settings)
+    }
+
+    // 6. Create PM-proposed projects (status: proposed, no work starts)
+    for _, proposal := range plan.ProposedProjects {
+        s.createProposedProject(ctx, orgID, proposal)
     }
 
     return plan, nil
@@ -695,11 +727,124 @@ This means a project can complete even if not all originally-envisioned tasks we
 
 ---
 
-## 8. Frontend
+## 8. PM-Proposed Projects
+
+The PM can propose projects when it spots patterns in the issue stream that suggest a cohesive body of work. For example:
+
+- 5 issues all about inconsistent error handling in the payments module → PM proposes "Standardize error handling in payments"
+- 3 issues about REST endpoint bugs + a feature request for new endpoints → PM proposes "Migrate payments API to GraphQL"
+- Repeated test failures in the same subsystem → PM proposes "Fix flaky tests in notification service"
+
+### How it works
+
+The PM system prompt includes instructions for project proposal:
+
+```
+## Project Proposals
+
+When you see a cluster of related issues that share a root cause or would
+benefit from a coordinated fix rather than individual patches, you may
+propose a project. Include in your plan output:
+
+"proposed_projects": [
+  {
+    "title": "...",
+    "goal": "...",
+    "scope": "...",
+    "completion_criteria": "...",
+    "reasoning": "Why these issues are better addressed as a project than individually",
+    "source_issue_ids": ["..."],  // the issues that motivated this proposal
+    "suggested_priority": 30
+  }
+]
+
+Only propose a project when:
+- 3+ related issues would benefit from coordinated work
+- The work requires a shared approach or has ordering dependencies
+- Individual fixes would create inconsistency or duplicate effort
+```
+
+### Lifecycle
+
+```
+PM proposes project (status: proposed)
+    ↓
+User sees proposal in Projects page with "Proposed" badge
+    ↓
+User reviews: Approve → status becomes draft (user can edit goal/scope)
+         or: Dismiss → status becomes cancelled
+    ↓
+User starts project → status becomes active → normal project lifecycle
+```
+
+### Key rules
+
+- **No work happens on proposed projects.** Status `proposed` means the PM will not plan tasks for it or allocate slots to it. It's purely a suggestion.
+- **The PM can reference proposed projects.** If the PM sees a new issue that relates to a proposed project, it can note "this issue is related to proposed project X" in its analysis, reinforcing the case for approval.
+- **Proposed projects appear in the Projects list** with a distinct visual treatment (e.g., dashed border, "Proposed by PM" label, Approve/Dismiss buttons).
+- **The PM should not spam proposals.** The prompt instructs it to propose only when the signal is strong (3+ related issues, clear shared root cause). We can add a rate limit in code if needed (e.g., max 2 proposals per PM cycle).
+
+### Data model
+
+The `proposed` status is already in the `projects.status` enum. The `proposed_by_pm`, `source_issue_ids`, and `proposal_reasoning` columns are included in the main `projects` table definition (section 3).
+
+---
+
+## 9. Frontend
+
+### How projects relate to sessions
+
+Today, the UI has three top-level nav items: **Overview**, **Sessions**, and **Issues**. Sessions are the unified view that merges PM plan sessions (type: `"plan"`) and manual ad-hoc runs (type: `"manual"`) into a single timeline. Each session maps to either a PM analysis cycle or a single agent run.
+
+Projects introduce a new concept that must coexist without making the UI confusing. The key insight: **project tasks produce agent runs, and those agent runs already appear in sessions**. So sessions remain the "what's happening right now" view, while projects are the "what are we working toward" view.
+
+#### Navigation
+
+```
+Sidebar:
+├── Overview      → /overview        (unchanged)
+├── Sessions      → /sessions        (unchanged — still the activity feed)
+├── Projects      → /projects        (NEW — goal-oriented view)
+└── Issues        → /issues          (unchanged)
+```
+
+Projects gets its own top-level nav item rather than being nested under Sessions, because projects are a distinct concept (persistent goals) not a type of session (ephemeral execution).
+
+#### How they connect
+
+- A **project task** creates an **agent run** when dispatched
+- That agent run appears in the **Sessions** page as part of a PM plan session (since the PM delegated it)
+- The **Project detail** page links to each task's agent run, which links to the session
+- The **Session detail** page for a PM plan shows which tasks were project-sourced vs reactive-issue-sourced
+
+```
+Projects page          Sessions page          Issues page
+┌──────────────┐      ┌──────────────┐      ┌──────────────┐
+│ REST→GraphQL │      │ PM Session 5 │      │ Issue #42    │
+│  ├─ Task 1 ──┼──────┼─→ Run abc ───┼──────┼─→ (source)  │
+│  ├─ Task 2 ──┼──────┼─→ Run def    │      │ Issue #43    │
+│  └─ Task 3   │      │   Run ghi ───┼──────┼─→ (reactive) │
+└──────────────┘      └──────────────┘      └──────────────┘
+```
+
+Users who don't use projects see no change — Sessions and Issues work exactly as before. Users who create projects get the Projects page as a goal-tracking dashboard, with Sessions remaining the real-time activity feed.
+
+#### Session detail: project attribution
+
+When a session (PM plan) includes project-sourced tasks, the task cards show a small project badge linking back to the project. This is the only change to the existing session UI:
+
+```
+PM Session #5 — 3 tasks
+├─ [REST→GraphQL] Migrate /users GET to GraphQL   ← project badge
+├─ [REST→GraphQL] Migrate /products GET to GraphQL ← project badge
+└─ Fix null pointer in auth middleware              ← no badge (reactive)
+```
 
 ### Project list page (`/projects`)
 
-Shows all projects with status, priority, progress bar, and last activity. Filterable by status. Sortable by priority or updated_at.
+Shows all projects with status, priority, progress bar, and last activity. Filterable by status (proposed | active | completed | etc). Sortable by priority or updated_at.
+
+PM-proposed projects appear with a "Proposed" badge and a prominent "Approve" / "Dismiss" action (see section on PM-proposed projects below).
 
 ### Project detail page (`/projects/{id}`)
 
@@ -710,7 +855,7 @@ Kanban-style board with task cards in columns: Pending | Running | Completed | F
 Cycle-by-cycle history showing what the PM decided each cycle, tasks created, and outcomes. Useful for understanding how the project evolved.
 
 #### Settings panel
-Edit goal, scope, completion criteria, execution mode, max_concurrent, priority. Pause/resume/abandon controls.
+Edit goal, scope, completion criteria, execution mode, max_concurrent, priority. Pause/resume/cancel controls.
 
 ### Key behaviors
 
@@ -720,7 +865,7 @@ Edit goal, scope, completion criteria, execution mode, max_concurrent, priority.
 
 ---
 
-## 9. Scaling: Context Compression
+## 10. Scaling: Context Compression
 
 ### When this becomes necessary
 
@@ -883,7 +1028,7 @@ Overflow is surfaced to the PM:
 
 ---
 
-## 10. Multi-Repo Considerations
+## 11. Multi-Repo Considerations
 
 ### Short-term (Phase 1-2)
 
@@ -899,7 +1044,7 @@ Per-repo PM agents with a meta-scheduler. Only pursue if multi-repo projects bec
 
 ---
 
-## 11. Risk Analysis
+## 12. Risk Analysis
 
 ### PM produces incoherent project plans
 
@@ -949,7 +1094,7 @@ Mitigation:
 
 ---
 
-## 12. Symphony Comparison
+## 13. Symphony Comparison
 
 This design is inspired by [OpenAI's Symphony](https://github.com/openai/symphony), an open-source orchestration framework that turns Linear board issues into autonomous agent runs.
 
@@ -971,7 +1116,7 @@ The key philosophical difference: Symphony trusts the human to manage the projec
 
 ---
 
-## 13. Implementation Phases
+## 14. Implementation Phases
 
 ### Phase 1: Core Data Model + CRUD
 
@@ -984,11 +1129,13 @@ The key philosophical difference: Symphony trusts the human to manage the projec
 ### Phase 2: PM Planning Integration
 
 - Add `ActiveProjects` to `PMContext`, implement `buildProjectSummary`
-- Extend PM system prompt with project planning section
-- Parse `project_plans` from PM output
+- Extend PM system prompt with project planning + project proposal sections
+- Parse `project_plans` and `proposed_projects` from PM output
 - `executeProjectPlan` creates tasks, dispatches to agents
+- `createProposedProject` creates projects with status `proposed`
 - Agent run completion updates project task status + project progress
 - Record `project_cycles` for each PM cycle that touches a project
+- Approve/dismiss endpoints for PM-proposed projects
 
 ### Phase 3: Execution Orchestrator
 
@@ -1028,7 +1175,7 @@ The key philosophical difference: Symphony trusts the human to manage the projec
 
 1. **Should projects auto-pause after N consecutive failures?** Proposed: yes, at 3. Configurable per project?
 
-2. **Can the PM create projects on its own?** e.g., "I see 5 related issues that should be a project." Probably yes long-term, but keep it human-only for v1 to build trust.
+2. ~~**Can the PM create projects on its own?**~~ **Yes.** The PM can propose projects (status: `proposed`), but no work begins until a human confirms. See "PM-Proposed Projects" section.
 
 3. **How do projects interact with Linear/Sentry sync?** If a project task maps to a Linear issue, should task completion update Linear? Probably yes — bidirectional sync. Separate integration concern.
 
