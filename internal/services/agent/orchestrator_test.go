@@ -217,6 +217,26 @@ func (m *mockDecisionLogStore) UpdateOutcome(ctx context.Context, orgID, planID,
 	return nil
 }
 
+type mockProjectTaskUpdater struct {
+	mu       sync.Mutex
+	statuses []string
+}
+
+func (m *mockProjectTaskUpdater) OnAgentRunComplete(ctx context.Context, run *models.AgentRun, status string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.statuses = append(m.statuses, status)
+	return nil
+}
+
+func (m *mockProjectTaskUpdater) getStatuses() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, len(m.statuses))
+	copy(out, m.statuses)
+	return out
+}
+
 // mockIssueStore implements agent.IssueStore.
 type mockIssueStore struct {
 	issue models.Issue
@@ -340,6 +360,7 @@ type testDeps struct {
 	provider  *testutil.MockSandboxProvider
 	adapter   *mockAgentAdapter
 	agentRuns *mockAgentRunStore
+	projects  *mockProjectTaskUpdater
 	issues    *mockIssueStore
 	repos     *mockRepositoryStore
 	logs      *mockAgentRunLogStore
@@ -357,6 +378,7 @@ func defaultDeps() testDeps {
 		provider:  testutil.NewMockSandboxProvider(),
 		adapter:   &mockAgentAdapter{name: "claude_code"},
 		agentRuns: &mockAgentRunStore{countRunning: 0},
+		projects:  &mockProjectTaskUpdater{},
 		issues:    &mockIssueStore{issue: testIssue(orgID)},
 		repos:     &mockRepositoryStore{repo: testRepo(orgID)},
 		logs:      &mockAgentRunLogStore{},
@@ -377,6 +399,7 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		AgentRunLogs:      d.logs,
 		AgentRunQuestions: d.questions,
 		DecisionLog:       d.decisions,
+		ProjectTasks:      d.projects,
 		Issues:            d.issues,
 		Repositories:      d.repos,
 		Jobs:              d.jobs,
@@ -437,6 +460,26 @@ func TestRunAgent_SuccessfulRun(t *testing.T) {
 
 	// Sandbox should be destroyed.
 	require.Equal(t, 1, d.provider.GetDestroyCalls())
+}
+
+func TestRunAgent_ExecuteErrorUpdatesProjectTask(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	projectTaskID := uuid.New()
+	run := testRun(orgID, issue.ID)
+	run.ProjectTaskID = &projectTaskID
+
+	d := defaultDeps()
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return nil, errors.New("tool execution failed")
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.Error(t, err, "RunAgent should return an execution error")
+	require.Equal(t, []string{"failed"}, d.projects.getStatuses(), "project task hook should be called with failed status on execute error")
 }
 
 func TestRunAgent_PopulatesPMContext(t *testing.T) {
