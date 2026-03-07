@@ -144,8 +144,9 @@ func newPrioritizeHandler(stores *Stores, services *Services, logger zerolog.Log
 func newPMAnalyzeHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			OrgID   string `json:"org_id"`
+			OrgID  string `json:"org_id"`
 			Trigger string `json:"trigger"`
+			RepoID string `json:"repo_id,omitempty"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal pm_analyze payload: %w", err)
@@ -163,8 +164,17 @@ func newPMAnalyzeHandler(stores *Stores, services *Services, logger zerolog.Logg
 			return fmt.Errorf("invalid trigger: %w", err)
 		}
 
+		var repoID *uuid.UUID
+		if input.RepoID != "" {
+			parsed, err := uuid.Parse(input.RepoID)
+			if err != nil {
+				return fmt.Errorf("parse repo ID: %w", err)
+			}
+			repoID = &parsed
+		}
+
 		logger.Info().Str("org_id", orgID.String()).Str("trigger", string(trigger)).Msg("running pm analyze")
-		_, err = services.PM.Analyze(ctx, orgID, trigger)
+		_, err = services.PM.Analyze(ctx, orgID, trigger, repoID)
 		return err
 	}
 }

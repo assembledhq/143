@@ -22,7 +22,7 @@ import {
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { X } from "lucide-react";
-import type { Organization, OrgSettings, SingleResponse } from "@/lib/types";
+import type { Organization, OrgSettings, SingleResponse, Repository, ListResponse, RepoSettings } from "@/lib/types";
 import { DEFAULT_PM_MODEL, PM_MODELS_BY_PROVIDER } from "@/lib/model-constants";
 
 const DEFAULT_SETTINGS: Pick<
@@ -57,6 +57,16 @@ export default function PrioritizationPage() {
   const { data: agentDefaultsResponse } = useQuery({
     queryKey: ["agent-defaults"],
     queryFn: () => api.settings.getAgentDefaults(),
+  });
+
+  const { data: reposResponse } = useQuery<ListResponse<Repository>>({
+    queryKey: ["repositories"],
+    queryFn: () => api.repositories.list(),
+  });
+
+  const reposWithCustomPM = (reposResponse?.data ?? []).filter((repo) => {
+    const rs = (repo.settings ?? {}) as RepoSettings;
+    return rs.pm != null;
   });
 
   const orgSettings = (settings?.data?.settings ?? {}) as OrgSettings;
@@ -172,6 +182,24 @@ export default function PrioritizationPage() {
         title="Prioritization"
         description="Define product context and how the PM agent prioritizes work."
       />
+
+      {/* Org defaults notice */}
+      <div className="rounded-md border border-border bg-muted/50 px-4 py-3">
+        <p className="text-xs text-muted-foreground">
+          These are <span className="font-medium text-foreground">organization defaults</span>.
+          Individual repositories can override these settings from their repository settings page.
+        </p>
+        {reposWithCustomPM.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            <span className="text-xs text-muted-foreground">Custom PM settings:</span>
+            {reposWithCustomPM.map((repo) => (
+              <Badge key={repo.id} variant="secondary" className="text-[11px]">
+                {repo.full_name}
+              </Badge>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* PM Agent */}
       <section className="space-y-3">
