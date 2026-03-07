@@ -91,3 +91,36 @@ type ApproachRecord struct {
 	Outcome       string `json:"outcome"`
 	LessonLearned string `json:"lesson,omitempty"`
 }
+
+// ProjectAttachment is a screenshot, design file, or mockup linked to a project.
+type ProjectAttachment struct {
+	ID           uuid.UUID  `db:"id" json:"id"`
+	ProjectID    uuid.UUID  `db:"project_id" json:"project_id"`
+	OrgID        uuid.UUID  `db:"org_id" json:"org_id"`
+	FileName     string     `db:"file_name" json:"file_name"`
+	FileURL      string     `db:"file_url" json:"file_url"`
+	FileType     string     `db:"file_type" json:"file_type"`
+	ThumbnailURL *string    `db:"thumbnail_url" json:"thumbnail_url,omitempty"`
+	FileSize     *int       `db:"file_size" json:"file_size,omitempty"`
+	Category     string     `db:"category" json:"category"`
+	Caption      *string    `db:"caption" json:"caption,omitempty"`
+	SortOrder    int        `db:"sort_order" json:"sort_order"`
+	UploadedBy   *uuid.UUID `db:"uploaded_by" json:"uploaded_by,omitempty"`
+	CreatedAt    time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt    time.Time  `db:"updated_at" json:"updated_at"`
+}
+
+// ProjectSpec is a product requirements document (markdown) linked to a project.
+type ProjectSpec struct {
+	ID        uuid.UUID  `db:"id" json:"id"`
+	ProjectID uuid.UUID  `db:"project_id" json:"project_id"`
+	OrgID     uuid.UUID  `db:"org_id" json:"org_id"`
+	Title     string     `db:"title" json:"title"`
+	Content   string     `db:"content" json:"content"`
+	SpecType  string     `db:"spec_type" json:"spec_type"`
+	SortOrder int        `db:"sort_order" json:"sort_order"`
+	Version   int        `db:"version" json:"version"`
+	CreatedBy *uuid.UUID `db:"created_by" json:"created_by,omitempty"`
+	CreatedAt time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt time.Time  `db:"updated_at" json:"updated_at"`
+}
