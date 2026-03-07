@@ -311,5 +311,7 @@ func TestRegisterModel(t *testing.T) {
 	require.Equal(t, "custom-id", chain[0].modelID, "chain should use custom model ID")
 
 	// Clean up to avoid affecting other tests.
+	chainsMu.Lock()
 	delete(defaultChains, customModel)
+	chainsMu.Unlock()
 }
