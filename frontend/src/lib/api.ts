@@ -110,6 +110,8 @@ export const api = {
   repositories: {
     list: () => get<import('./types').ListResponse<import('./types').Repository>>('/api/v1/repositories'),
     get: (id: string) => get<import('./types').SingleResponse<import('./types').Repository>>(`/api/v1/repositories/${id}`),
+    update: (id: string, data: Record<string, unknown>) =>
+      patch<import('./types').SingleResponse<import('./types').Repository>>(`/api/v1/repositories/${id}`, data),
     delete: (id: string) => del(`/api/v1/repositories/${id}`),
   },
   issues: {
