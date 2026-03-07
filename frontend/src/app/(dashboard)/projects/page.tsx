@@ -1,21 +1,21 @@
 import { Suspense } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { PageContainer } from "@/components/page-container";
-import { IssuesPageContent } from "./issues-page-content";
+import { ProjectsPageContent } from "./projects-page-content";
 
-export default function IssuesPage() {
+export default function ProjectsPage() {
   return (
     <PageContainer size="wide">
       <Suspense
         fallback={
           <Card>
             <CardContent className="py-12 text-center text-sm text-muted-foreground">
-              Loading issues...
+              Loading projects...
             </CardContent>
           </Card>
         }
       >
-        <IssuesPageContent />
+        <ProjectsPageContent />
       </Suspense>
     </PageContainer>
   );

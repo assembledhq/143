@@ -79,6 +79,9 @@ func main() {
 		complexityEstimateStore := db.NewComplexityEstimateStore(pool)
 		pmPlanStore := db.NewPMPlanStore(pool)
 		pmDecisionLogStore := db.NewPMDecisionLogStore(pool)
+		projectStore := db.NewProjectStore(pool)
+		projectTaskStore := db.NewProjectTaskStore(pool)
+		projectCycleStore := db.NewProjectCycleStore(pool)
 
 		stores := &worker.Stores{
 			Issues:              issueStore,
@@ -88,6 +91,8 @@ func main() {
 			Webhooks:            db.NewWebhookDeliveryStore(pool),
 			PriorityScores:      priorityScoreStore,
 			ComplexityEstimates: complexityEstimateStore,
+			Projects:            projectStore,
+			ProjectTasks:        projectTaskStore,
 		}
 
 		// Build Phase 3+ services if runtime dependencies are available.
@@ -95,7 +100,8 @@ func main() {
 		if canBuildServices(cfg, logger) {
 			services = buildServices(cfg, pool, logger, codexAuthSvc, credentialStore, issueStore, agentRunStore,
 				jobStore, orgStore, repoStore, validationStore, pullRequestStore,
-				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore)
+				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
+				projectStore, projectTaskStore, projectCycleStore)
 		}
 		worker.RegisterHandlers(w, stores, services, logger)
 		go w.Start(ctx)
@@ -171,6 +177,9 @@ func buildServices(
 	complexityEstimateStore *db.ComplexityEstimateStore,
 	pmPlanStore *db.PMPlanStore,
 	pmDecisionLogStore *db.PMDecisionLogStore,
+	projectStore *db.ProjectStore,
+	projectTaskStore *db.ProjectTaskStore,
+	projectCycleStore *db.ProjectCycleStore,
 ) *worker.Services {
 	// GitHub App service (for installation tokens, PR creation).
 	ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
@@ -203,6 +212,7 @@ func buildServices(
 	// Orchestrator.
 	agentRunLogStore := db.NewAgentRunLogStore(pool)
 	agentRunQuestionStore := db.NewAgentRunQuestionStore(pool)
+	projectTaskUpdater := pm.NewProjectHooks(projectTaskStore, projectStore, logger)
 	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:          sandboxProvider,
 		Adapters:          agentAdapters,
@@ -210,6 +220,7 @@ func buildServices(
 		AgentRunLogs:      agentRunLogStore,
 		AgentRunQuestions: agentRunQuestionStore,
 		DecisionLog:       pmDecisionLogStore,
+		ProjectTasks:      projectTaskUpdater,
 		Issues:            issueStore,
 		Repositories:      repoStore,
 		Orgs:              orgStore,
@@ -255,6 +266,7 @@ func buildServices(
 		ghSvc,
 		logger,
 	)
+	pmSvc.SetProjectStores(projectStore, projectTaskStore, projectCycleStore)
 
 	logger.Info().
 		Int("adapters", len(agentAdapters)).
