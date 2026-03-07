@@ -11,67 +11,69 @@ export interface Zone {
 }
 
 export const ZONES: Zone[] = [
+  // — First half: The Big Picture (control tower view) —
   {
-    id: "issues-flow-in",
+    id: "everything-connects",
     number: "01",
-    name: "Issues Flow In",
+    name: "Everything Connects",
     description:
-      "Sentry errors, Linear tickets, and support issues accumulate automatically",
+      "Sentry errors, Linear tickets, support threads, and your product roadmap — the PM sees your entire production surface in one place",
     visual: "radar",
     progressStart: 0,
     progressEnd: 1 / 6,
     position: { x: 0.03, y: 0.65 },
   },
   {
-    id: "pm-agent-plans",
+    id: "projects",
     number: "02",
-    name: "PM Agent Plans",
+    name: "Projects",
     description:
-      "An AI product manager analyzes all issues, clusters related problems, and builds a prioritized plan",
+      "Define big initiatives — migrations, refactors, new capabilities. The PM breaks them into sequenced tasks and chips away across days and weeks",
     visual: "airfield",
     progressStart: 1 / 6,
     progressEnd: 2 / 6,
     position: { x: 0.03, y: 0.65 },
   },
   {
-    id: "agents-execute",
+    id: "you-guide-pm-decides",
     number: "03",
-    name: "Agents Execute",
+    name: "You Guide, PM Decides",
     description:
-      "Coding agents spin up with full codebase context and the PM\u2019s approach for each task",
+      "Set priorities in plain language — \"focus on auth this sprint\" or \"customer-reported bugs first.\" The PM balances your direction against bugs, projects, and tech debt",
     visual: "cockpit-launch",
     progressStart: 2 / 6,
     progressEnd: 3 / 6,
     position: { x: 0.03, y: 0.55 },
   },
+  // — Second half: The Execution (cockpit view) —
   {
-    id: "changes-validated",
+    id: "your-agents-execute",
     number: "04",
-    name: "Changes Validated",
+    name: "Your Agents Execute",
     description:
-      "Test suite, security scans, and quality checks confirm every change works",
+      "Bring your own coding agents — Claude Code, Codex, Gemini CLI, or any agent your team already uses. The PM dispatches work, your agents build it",
     visual: "cockpit-hud",
     progressStart: 3 / 6,
     progressEnd: 4 / 6,
     position: { x: 0.03, y: 0.55 },
   },
   {
-    id: "prs-shipped",
+    id: "production-validated",
     number: "05",
-    name: "PRs Shipped",
+    name: "Production Validated",
     description:
-      "Validated fixes and improvements land in your repo, linked to original issues",
+      "Your CI pipeline, test suite, and security scans — not ours. Every change is held to your team's standards before it ships",
     visual: "cockpit-kill",
     progressStart: 4 / 6,
     progressEnd: 5 / 6,
     position: { x: 0.03, y: 0.55 },
   },
   {
-    id: "system-learns",
+    id: "ship-and-learn",
     number: "06",
-    name: "System Learns",
+    name: "Ship & Learn",
     description:
-      "Every PR review and production outcome makes the next run smarter",
+      "Validated PRs land linked to their original issues. Every review and production outcome makes the next cycle smarter",
     visual: "aerial-return",
     progressStart: 5 / 6,
     progressEnd: 1,

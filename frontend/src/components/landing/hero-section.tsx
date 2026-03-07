@@ -41,19 +41,20 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
               isDark ? "text-white" : "text-slate-900"
             }`}
           >
-            AI agents that
+            An AI PM for
             <br />
-            fix and improve
+            production engineering
             <br />
-            production systems
+            teams
           </h1>
 
           <p
             className={`max-w-md text-sm sm:text-base leading-relaxed ${isDark ? "text-white/40" : "text-slate-600"}`}
           >
-            An AI product manager analyzes your Sentry errors, Linear
-            tickets, and support issues — plans the work, spins up
-            coding agents, and ships validated PRs. All on autopilot.
+            Prioritizes across bugs, projects, and tech debt — then
+            dispatches your coding agents to ship validated PRs.
+            Works with Claude Code, Codex, Gemini CLI, or any agent
+            your team already runs.
           </p>
 
           <div className="pt-2 pointer-events-auto">
