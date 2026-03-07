@@ -21,18 +21,18 @@ export default function CtaSection({ isDark }: CtaSectionProps) {
             isDark ? "text-white" : "text-slate-900"
           }`}
         >
-          Your backlog, on
+          Built for teams that
           <br />
-          autopilot
+          ship to production
         </h2>
         <p
           className={`text-sm sm:text-base leading-relaxed max-w-md mx-auto ${
             isDark ? "text-white/40" : "text-slate-600"
           }`}
         >
-          Connect your repos, give the PM agent your product context, and
-          watch production bugs, improvements, and tech debt get worked
-          through automatically.
+          Connect your repos, bring your own coding agents, and let the
+          PM optimize across bugs, projects, and tech debt — with your
+          CI, your standards, your review process.
         </p>
         <div className="pt-2">
           <Button
