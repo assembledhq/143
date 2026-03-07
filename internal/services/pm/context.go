@@ -141,6 +141,17 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 		CurrentRunCount:   currentRunning,
 	}
 
+	// Gather project context if projects feature is enabled.
+	if s.projects != nil && s.projectTasks != nil && s.projectCycles != nil {
+		projectSummaries, err := s.buildProjectSummaries(ctx, orgID)
+		if err != nil {
+			// Non-fatal: log and continue without project context.
+			s.logger.Warn().Err(err).Msg("failed to build project summaries for PM context")
+		} else {
+			pmCtx.ActiveProjects = projectSummaries
+		}
+	}
+
 	return &gatheredContext{
 		pmContext:      pmCtx,
 		productContext: settings.ProductContext,
@@ -186,5 +197,109 @@ func truncate(input string, max int) string {
 		return input
 	}
 	return string(runes[:max])
+}
+
+func (s *Service) buildProjectSummaries(ctx context.Context, orgID uuid.UUID) ([]ProjectSummary, error) {
+	projects, err := s.projects.ListByOrg(ctx, orgID, db.ProjectFilters{Status: "active"})
+	if err != nil {
+		return nil, err
+	}
+
+	summaries := make([]ProjectSummary, 0, len(projects))
+	for _, project := range projects {
+		summary, err := s.buildProjectSummary(ctx, orgID, &project)
+		if err != nil {
+			s.logger.Warn().Err(err).Str("project_id", project.ID.String()).Msg("failed to build project summary")
+			continue
+		}
+		summaries = append(summaries, summary)
+	}
+	return summaries, nil
+}
+
+func (s *Service) buildProjectSummary(ctx context.Context, orgID uuid.UUID, project *models.Project) (ProjectSummary, error) {
+	tasks, err := s.projectTasks.ListByProject(ctx, orgID, project.ID, db.ProjectTaskFilters{})
+	if err != nil {
+		return ProjectSummary{}, err
+	}
+
+	cycles, err := s.projectCycles.ListByProject(ctx, orgID, project.ID, 3)
+	if err != nil {
+		return ProjectSummary{}, err
+	}
+
+	summary := ProjectSummary{
+		ID:             project.ID.String(),
+		Title:          project.Title,
+		Goal:           project.Goal,
+		Priority:       project.Priority,
+		Status:         string(project.Status),
+		ExecutionMode:  string(project.ExecutionMode),
+		MaxConcurrent:  project.MaxConcurrent,
+		TotalTasks:     project.TotalTasks,
+		CompletedTasks: project.CompletedTasks,
+		FailedTasks:    project.FailedTasks,
+		LessonsLearned: project.LessonsLearned,
+		ApproachHistory: project.ApproachHistory,
+	}
+
+	if project.Scope != nil {
+		summary.Scope = *project.Scope
+	}
+	if project.CompletionCriteria != nil {
+		summary.CompletionCriteria = *project.CompletionCriteria
+	}
+	if project.CurrentPhase != nil {
+		summary.CurrentPhase = *project.CurrentPhase
+	}
+
+	if project.TotalTasks > 0 {
+		summary.ProgressPct = (project.CompletedTasks * 100) / project.TotalTasks
+	}
+
+	for _, cycle := range cycles {
+		summary.RecentCycles = append(summary.RecentCycles, CycleSummary{
+			CycleNumber:    cycle.CycleNumber,
+			Analysis:       cycle.Analysis,
+			TasksCreated:   cycle.TasksCreatedThisCycle,
+			TasksCompleted: cycle.TasksCompletedThisCycle,
+			TasksFailed:    cycle.TasksFailedThisCycle,
+			CreatedAt:      cycle.CreatedAt.Format(time.RFC3339),
+		})
+	}
+
+	for _, task := range tasks {
+		ts := TaskSummary{
+			ID:          task.ID.String(),
+			Title:       task.Title,
+			Status:      string(task.Status),
+			BatchNumber: task.BatchNumber,
+		}
+		if task.Approach != nil {
+			ts.Approach = *task.Approach
+		}
+		if task.OutcomeNotes != nil {
+			ts.OutcomeNotes = *task.OutcomeNotes
+		}
+		if task.Complexity != nil {
+			ts.Complexity = *task.Complexity
+		}
+		if task.Confidence != nil {
+			ts.Confidence = *task.Confidence
+		}
+
+		switch task.Status {
+		case models.ProjectTaskStatusPending:
+			summary.PendingTasks = append(summary.PendingTasks, ts)
+		case models.ProjectTaskStatusRunning, models.ProjectTaskStatusDelegated:
+			summary.RunningTasks = append(summary.RunningTasks, ts)
+		case models.ProjectTaskStatusCompleted:
+			summary.RecentlyCompleted = append(summary.RecentlyCompleted, ts)
+		case models.ProjectTaskStatusFailed:
+			summary.RecentlyFailed = append(summary.RecentlyFailed, ts)
+		}
+	}
+
+	return summary, nil
 }
 
