@@ -2,7 +2,6 @@
 
 import {
   LayoutDashboard,
-  AlertCircle,
   Play,
   FolderKanban,
   Settings,
@@ -31,7 +30,6 @@ const navItems = [
   { label: "Overview", icon: LayoutDashboard, href: "/overview" },
   { label: "Sessions", icon: Play, href: "/sessions" },
   { label: "Projects", icon: FolderKanban, href: "/projects" },
-  { label: "Issues", icon: AlertCircle, href: "/issues" },
 ];
 
 export function AuthenticatedLayout({ children }: { children: React.ReactNode }) {
