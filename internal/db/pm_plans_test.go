@@ -15,7 +15,9 @@ import (
 
 var pmPlanColumns = []string{
 	"id", "org_id", "status", "analysis", "tasks", "clusters", "skipped_issues",
-	"issues_reviewed", "product_context_snapshot", "token_usage", "triggered_by",
+	"issues_reviewed", "in_flight_runs_checked", "past_outcomes_reviewed",
+	"recent_prs_checked", "past_decisions_reviewed", "commits_analyzed",
+	"product_context_snapshot", "token_usage", "triggered_by",
 	"created_at", "completed_at",
 }
 
@@ -29,6 +31,11 @@ func newPMPlanRow(planID, orgID uuid.UUID, now time.Time) []interface{} {
 		json.RawMessage(`[]`),
 		json.RawMessage(`[]`),
 		5,
+		3,  // in_flight_runs_checked
+		8,  // past_outcomes_reviewed
+		1,  // recent_prs_checked
+		12, // past_decisions_reviewed
+		20, // commits_analyzed
 		json.RawMessage(`{"direction":"focus"}`),
 		json.RawMessage(`{"input_tokens":100}`),
 		"cron",
@@ -50,6 +57,7 @@ func TestPMPlanStore_Create(t *testing.T) {
 
 	mock.ExpectQuery("INSERT INTO pm_plans").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(planID, now))
 
@@ -213,6 +221,7 @@ func TestPMPlanStore_Update(t *testing.T) {
 
 	mock.ExpectExec("UPDATE pm_plans").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))

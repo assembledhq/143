@@ -24,6 +24,13 @@ type PMPlanFilters struct {
 	Cursor string
 }
 
+// pmPlanSelectColumns is the column list shared across all pm_plans queries.
+const pmPlanSelectColumns = `id, org_id, status, analysis, tasks, clusters, skipped_issues,
+	issues_reviewed, in_flight_runs_checked, past_outcomes_reviewed,
+	recent_prs_checked, past_decisions_reviewed, commits_analyzed,
+	product_context_snapshot, token_usage, triggered_by,
+	created_at, completed_at`
+
 func FormatPMPlanCursor(plan models.PMPlan) string {
 	if plan.ID == uuid.Nil {
 		return ""
@@ -51,11 +58,15 @@ func (s *PMPlanStore) Create(ctx context.Context, plan *models.PMPlan) error {
 	query := `
 		INSERT INTO pm_plans (
 			org_id, status, analysis, tasks, clusters, skipped_issues,
-			issues_reviewed, product_context_snapshot, token_usage, triggered_by
+			issues_reviewed, in_flight_runs_checked, past_outcomes_reviewed,
+			recent_prs_checked, past_decisions_reviewed, commits_analyzed,
+			product_context_snapshot, token_usage, triggered_by
 		)
 		VALUES (
 			@org_id, @status, @analysis, @tasks, @clusters, @skipped_issues,
-			@issues_reviewed, @product_context_snapshot, @token_usage, @triggered_by
+			@issues_reviewed, @in_flight_runs_checked, @past_outcomes_reviewed,
+			@recent_prs_checked, @past_decisions_reviewed, @commits_analyzed,
+			@product_context_snapshot, @token_usage, @triggered_by
 		)
 		RETURNING id, created_at`
 
@@ -67,6 +78,11 @@ func (s *PMPlanStore) Create(ctx context.Context, plan *models.PMPlan) error {
 		"clusters":                 plan.Clusters,
 		"skipped_issues":           plan.SkippedIssues,
 		"issues_reviewed":          plan.IssuesReviewed,
+		"in_flight_runs_checked":   plan.InFlightRunsChecked,
+		"past_outcomes_reviewed":   plan.PastOutcomesReviewed,
+		"recent_prs_checked":       plan.RecentPRsChecked,
+		"past_decisions_reviewed":  plan.PastDecisionsReviewed,
+		"commits_analyzed":         plan.CommitsAnalyzed,
 		"product_context_snapshot": plan.ProductContextSnapshot,
 		"token_usage":              plan.TokenUsage,
 		"triggered_by":             plan.TriggeredBy,
@@ -85,6 +101,11 @@ func (s *PMPlanStore) Update(ctx context.Context, plan *models.PMPlan) error {
 		    clusters = @clusters,
 		    skipped_issues = @skipped_issues,
 		    issues_reviewed = @issues_reviewed,
+		    in_flight_runs_checked = @in_flight_runs_checked,
+		    past_outcomes_reviewed = @past_outcomes_reviewed,
+		    recent_prs_checked = @recent_prs_checked,
+		    past_decisions_reviewed = @past_decisions_reviewed,
+		    commits_analyzed = @commits_analyzed,
 		    token_usage = @token_usage,
 		    triggered_by = @triggered_by,
 		    completed_at = @completed_at
@@ -98,28 +119,28 @@ func (s *PMPlanStore) Update(ctx context.Context, plan *models.PMPlan) error {
 	}
 
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
-		"id":              plan.ID,
-		"org_id":          plan.OrgID,
-		"status":          plan.Status,
-		"analysis":        plan.Analysis,
-		"tasks":           plan.Tasks,
-		"clusters":        plan.Clusters,
-		"skipped_issues":  plan.SkippedIssues,
-		"issues_reviewed": plan.IssuesReviewed,
-		"token_usage":     plan.TokenUsage,
-		"triggered_by":    plan.TriggeredBy,
-		"completed_at":    completedAt,
+		"id":                      plan.ID,
+		"org_id":                  plan.OrgID,
+		"status":                  plan.Status,
+		"analysis":                plan.Analysis,
+		"tasks":                   plan.Tasks,
+		"clusters":                plan.Clusters,
+		"skipped_issues":          plan.SkippedIssues,
+		"issues_reviewed":         plan.IssuesReviewed,
+		"in_flight_runs_checked":  plan.InFlightRunsChecked,
+		"past_outcomes_reviewed":  plan.PastOutcomesReviewed,
+		"recent_prs_checked":      plan.RecentPRsChecked,
+		"past_decisions_reviewed": plan.PastDecisionsReviewed,
+		"commits_analyzed":        plan.CommitsAnalyzed,
+		"token_usage":             plan.TokenUsage,
+		"triggered_by":            plan.TriggeredBy,
+		"completed_at":            completedAt,
 	})
 	return err
 }
 
 func (s *PMPlanStore) GetByID(ctx context.Context, orgID, planID uuid.UUID) (models.PMPlan, error) {
-	query := `
-		SELECT id, org_id, status, analysis, tasks, clusters, skipped_issues,
-		       issues_reviewed, product_context_snapshot, token_usage, triggered_by,
-		       created_at, completed_at
-		FROM pm_plans
-		WHERE id = @id AND org_id = @org_id`
+	query := fmt.Sprintf(`SELECT %s FROM pm_plans WHERE id = @id AND org_id = @org_id`, pmPlanSelectColumns)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"id":     planID,
@@ -132,12 +153,7 @@ func (s *PMPlanStore) GetByID(ctx context.Context, orgID, planID uuid.UUID) (mod
 }
 
 func (s *PMPlanStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters PMPlanFilters) ([]models.PMPlan, error) {
-	query := `
-		SELECT id, org_id, status, analysis, tasks, clusters, skipped_issues,
-		       issues_reviewed, product_context_snapshot, token_usage, triggered_by,
-		       created_at, completed_at
-		FROM pm_plans
-		WHERE org_id = @org_id`
+	query := fmt.Sprintf(`SELECT %s FROM pm_plans WHERE org_id = @org_id`, pmPlanSelectColumns)
 
 	args := pgx.NamedArgs{"org_id": orgID}
 
@@ -166,14 +182,7 @@ func (s *PMPlanStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters PM
 }
 
 func (s *PMPlanStore) GetLatestByOrg(ctx context.Context, orgID uuid.UUID) (models.PMPlan, error) {
-	query := `
-		SELECT id, org_id, status, analysis, tasks, clusters, skipped_issues,
-		       issues_reviewed, product_context_snapshot, token_usage, triggered_by,
-		       created_at, completed_at
-		FROM pm_plans
-		WHERE org_id = @org_id
-		ORDER BY created_at DESC
-		LIMIT 1`
+	query := fmt.Sprintf(`SELECT %s FROM pm_plans WHERE org_id = @org_id ORDER BY created_at DESC LIMIT 1`, pmPlanSelectColumns)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID})
 	if err != nil {

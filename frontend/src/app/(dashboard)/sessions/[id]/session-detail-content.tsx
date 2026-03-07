@@ -1,11 +1,12 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Layers, Wrench } from "lucide-react";
+import { ArrowLeft, Layers, Wrench, FileCode2 } from "lucide-react";
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import { ContextStats } from "@/components/pm/context-stats";
 import { api } from "@/lib/api";
 import type { AgentSession, AgentSessionTask } from "@/lib/types";
 
@@ -54,6 +55,47 @@ function confidenceColor(score: number): string {
   if (score > 0.8) return "text-green-700";
   if (score >= 0.5) return "text-yellow-700";
   return "text-red-700";
+}
+
+/** Parse `path:line` or `path` references from approach text. */
+function parseFileRefs(text: string): { path: string; line?: number }[] {
+  // Match patterns like `src/auth/token.go:142` or `auth/token_test.go`
+  const regex = /(?:^|\s|`)([a-zA-Z0-9_\-./]+\.[a-zA-Z0-9]+(?::\d+)?)(?:`|\s|$|,|;)/g;
+  const refs: { path: string; line?: number }[] = [];
+  const seen = new Set<string>();
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    const raw = match[1];
+    // Filter out things that don't look like file paths
+    if (!raw.includes("/") && !raw.includes(".go") && !raw.includes(".ts") && !raw.includes(".js") && !raw.includes(".py")) continue;
+    if (seen.has(raw)) continue;
+    seen.add(raw);
+    const parts = raw.split(":");
+    const path = parts[0];
+    const line = parts[1] ? parseInt(parts[1], 10) : undefined;
+    refs.push({ path, line: line && !isNaN(line) ? line : undefined });
+  }
+  return refs;
+}
+
+function FileRefs({ text }: { text: string }) {
+  const refs = parseFileRefs(text);
+  if (refs.length === 0) return null;
+
+  return (
+    <div className="flex items-center gap-1.5 flex-wrap">
+      <FileCode2 className="h-3 w-3 text-muted-foreground shrink-0" />
+      <span className="text-[11px] text-muted-foreground">Files:</span>
+      {refs.map((ref) => (
+        <code
+          key={ref.path + (ref.line ?? "")}
+          className="text-[11px] bg-muted px-1.5 py-0.5 rounded font-mono text-muted-foreground"
+        >
+          {ref.path}{ref.line ? `:${ref.line}` : ""}
+        </code>
+      ))}
+    </div>
+  );
 }
 
 function TaskRow({ task }: { task: AgentSessionTask }) {
@@ -123,6 +165,9 @@ function TaskRow({ task }: { task: AgentSessionTask }) {
           <div>
             <p className="text-xs font-medium text-muted-foreground">Approach</p>
             <p>{task.approach}</p>
+            <div className="mt-1.5">
+              <FileRefs text={task.approach} />
+            </div>
           </div>
         )}
         {task.risk && (
@@ -149,6 +194,8 @@ function TaskRow({ task }: { task: AgentSessionTask }) {
 function PlanSessionDetail({ session }: { session: AgentSession }) {
   return (
     <div className="space-y-6">
+      {session.type === "plan" && <ContextStats session={session} />}
+
       {session.analysis && (
         <Card>
           <CardHeader>
@@ -303,6 +350,16 @@ export function SessionDetailContent({ id }: { id: string }) {
           <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${status.color}`}>
             {status.label}
           </span>
+          {session.project_title && (
+            <Link
+              href={`/projects/${session.project_id}`}
+              className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+            >
+              <Badge variant="outline" className="text-[11px] px-1.5 py-0">
+                {session.project_title}
+              </Badge>
+            </Link>
+          )}
         </div>
         <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
           <Badge variant="outline" className="text-[11px] px-1.5 py-0">
