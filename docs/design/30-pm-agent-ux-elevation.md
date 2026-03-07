@@ -1,6 +1,6 @@
 # 30 - PM Agent UX Elevation
 
-> Surface the PM agent's intelligence through the UI without adding complexity.
+> Surface the PM agent's intelligence through the UI. Add projects as the primary organizing concept.
 
 ## Problem
 
@@ -9,14 +9,14 @@ The PM agent reads your codebase, traces stack traces, learns from past decision
 - **Plans page** (`/plans`): Flat cards with badges. No visibility into what the PM actually read or considered.
 - **Prioritization page** (`/prioritization`): Settings form buried in the user dropdown. Fine where it is, but disconnected from the PM's output.
 - **Navigation**: PM lives in a user dropdown alongside "General" and "Team" -- treated as config, not a core workflow.
-- **No live presence**: Small blue banner when running. No sense of what it's doing.
+- **No project concept**: Work is organized as a flat list of issues. No way to group related work into named projects that track progress over time.
 
 ## Design Principles
 
-1. **Show the thinking, not just the output** -- Surface what the PM read, considered, and decided against
-2. **One page, not many** -- Everything PM-related lives on a single page with two tabs
-3. **Keep it simple** -- Plain labels, no marketing copy, minimal new UI patterns
-4. **Earned trust through transparency** -- Show the evidence behind every decision
+1. **Projects as the organizing concept** -- Related work groups into named projects you can track over time
+2. **Show the thinking, not just the output** -- Surface what the PM read, considered, and decided against
+3. **One page, two tabs** -- Everything PM-related lives on a single page
+4. **Keep it simple** -- Plain labels, minimal new UI patterns
 
 ---
 
@@ -39,28 +39,66 @@ User dropdown (unchanged):
   Log out
 ```
 
-One new sidebar item. Prioritization stays in the dropdown -- it's configuration, not a daily workflow. The `/plans` route moves to `/pm`.
+One new sidebar item. Prioritization stays in the dropdown. The `/plans` route moves to `/pm`.
 
-**Implementation**: Add one entry to `navItems` in `authenticated-layout.tsx`. Remove `/plans` if it existed in nav.
+---
+
+## Projects
+
+A **project** is a named container that groups related issues, agent runs, and PM decisions together over time. Think "Auth Overhaul" or "API Rate Limiting" -- ongoing efforts, not one-off analyses.
+
+### Where projects come from
+
+Both user-created and PM-suggested:
+
+1. **User creates**: Name a project, optionally assign issues to it
+2. **PM suggests**: When the PM runs its global analysis and clusters related issues, it can propose a new project. The user approves or dismisses the suggestion. PM clusters that map to an existing project get filed there automatically.
+
+### How PM analysis works with projects
+
+PM still runs globally -- it analyzes all open issues, all in-flight runs, all past decisions. But when it produces its plan, it sorts tasks and clusters into projects:
+
+- Tasks linked to issues in an existing project go under that project
+- New clusters with no project get surfaced as a "suggested project"
+- Uncategorized tasks (one-off fixes, no clear grouping) appear in an "Unassigned" section
+
+This keeps the PM simple (one global run) while giving users project-level organization.
+
+### Project data model
+
+```
+Project {
+  id
+  org_id
+  name                    // "Auth Overhaul"
+  description             // optional, brief summary
+  status                  // active, completed, archived
+  created_by              // "user" or "pm_suggestion"
+  created_at
+  updated_at
+}
+```
+
+Issues get a nullable `project_id` foreign key. Agent runs inherit project from their issue. PM tasks reference project_id when sorted.
 
 ---
 
 ## The PM Agent Page (`/pm`)
 
-Single page with two tabs: **Plan** and **Decisions**.
+Single page with two tabs: **Projects** (default) and **Decisions**.
 
-### Tab 1: Plan (default)
+### Tab 1: Projects (default)
 
-Shows the latest PM analysis with status and context.
-
-#### Status Banner
+#### Status Banner (top of page, above tabs)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  PM Agent                                              Active   │
 │                                                                 │
-│  Last run: 2h ago  ·  12 issues reviewed  ·  Next run: in 2h   │
-│  3 tasks delegated  ·  1 completed  ·  2 in progress            │
+│  Last run: 2h ago  ·  14 issues reviewed  ·  Next run: in 2h   │
+│                                                                 │
+│  Context considered:                                            │
+│  14 issues · 3 in-flight runs · 12 past decisions · 20 commits │
 │                                                                 │
 │  [Analyze Now]                                                  │
 └─────────────────────────────────────────────────────────────────┘
@@ -72,7 +110,6 @@ When running:
 ┌─────────────────────────────────────────────────────────────────┐
 │  ● PM Agent is analyzing...                          Running    │
 │                                                                 │
-│  Reading codebase structure...                                  │
 │  ├─ Read CLAUDE.md, README.md                                   │
 │  ├─ Scanned git history (20 commits)                            │
 │  ├─ Reviewing 14 open issues                                    │
@@ -82,120 +119,128 @@ When running:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-#### Situation Analysis + Context Stats
+#### Project List
+
+Below the status banner, a list of active projects:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  Situation Analysis                                  2h ago     │
+│  Projects                                     [+ New Project]   │
 │                                                                 │
-│  "Your authentication service has 3 related issues that share   │
-│   a root cause in token validation. Two customer-facing bugs    │
-│   are trending upward. The team's recent commits suggest active │
-│   work on the payments module, so I'm avoiding changes there."  │
+│  ┌─ Auth Overhaul ──────────────────────────────── active ────┐ │
+│  │  5 issues · 3 resolved · 2 agent runs in progress          │ │
+│  │  Last activity: 1h ago                                     │ │
+│  └────────────────────────────────────────────────────────────┘ │
 │                                                                 │
-│  Context considered:                                            │
-│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐             │
-│  │ 14 issues    │ │ 3 in-flight  │ │ 8 past runs  │             │
-│  │ reviewed     │ │ agent runs   │ │ learned from │             │
-│  └──────────────┘ └──────────────┘ └──────────────┘             │
-│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐             │
-│  │ 5 recent PRs │ │ 12 past      │ │ 20 commits   │             │
-│  │ checked      │ │ decisions    │ │ analyzed     │             │
-│  └──────────────┘ └──────────────┘ └──────────────┘             │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-These stat cards are the single biggest win -- users don't know the PM reads git history, past decisions, in-flight runs, etc. All data already gathered in `context.go`, just count and return.
-
-**Backend**: Extend PM plan API response with: issues_reviewed, in_flight_runs_checked, past_outcomes_reviewed, recent_prs_checked, past_decisions_reviewed, commits_analyzed.
-
-#### Task Cards
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  #1 · Fix token refresh race condition                          │
-│  ┌────────┐ ┌────────┐ ┌───────────┐                           │
-│  │ simple │ │ high   │ │ delegated │                           │
-│  └────────┘ └────────┘ └───────────┘                           │
+│  ┌─ API Rate Limiting ─────────────────────────── active ────┐ │
+│  │  3 issues · 1 resolved · 1 agent run completed             │ │
+│  │  Last activity: 3h ago                                     │ │
+│  └────────────────────────────────────────────────────────────┘ │
 │                                                                 │
-│  Reasoning                                                      │
-│  "3 issues share a root cause in auth/token.go:142. Customer    │
-│   impact is rising (47 affected users, up 30% this week)."      │
+│  ┌─ PM suggestion ──────────────────────────── needs review ─┐ │
+│  │  "3 issues share a root cause in database connection       │ │
+│  │   pooling. Consider grouping as a project."                │ │
+│  │  3 issues · [Accept] [Dismiss]                             │ │
+│  └────────────────────────────────────────────────────────────┘ │
 │                                                                 │
-│  Approach                                                       │
-│  "The race condition is in refreshToken() at auth/token.go:142  │
-│   where the mutex isn't held across the network call. Add test  │
-│   coverage for concurrent refresh scenarios in token_test.go."  │
-│                                                                 │
-│  Files identified                                               │
-│  auth/token.go:142  ·  auth/token_test.go                      │
-│                                                                 │
-│  Risk: Low -- isolated change, existing test file               │
-│  ───────────────────────────────────────────────────────────     │
-│  Agent run: Running (2m 14s)                     [View Run →]   │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-Changes from current:
-- **Files identified** section: parse `path:line` patterns from the approach text
-- Inline agent run status with duration and link
-
-#### Issue Clusters
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  Clusters                                            2 clusters │
-│                                                                 │
-│  ┌─ Token validation failures ────────────────────────────────┐ │
-│  │  ● AUTH-3f2a  ● AUTH-7b1c  ● AUTH-9d4e                    │ │
-│  │  Root cause: Missing null check in validateToken()         │ │
-│  │  Strategy: Fix the shared validation path, all three       │ │
-│  │  issues resolve with a single change                       │ │
+│  Unassigned tasks                                    2 tasks    │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │  #1 · Fix CORS header on /api/health  · simple · high     │ │
+│  │  #2 · Update deprecated lodash call   · trivial · high    │ │
 │  └────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-#### Skipped Issues
+Key elements:
+- Active projects show issue count, resolved count, in-flight runs
+- PM suggestions appear as a distinct card type with Accept/Dismiss actions
+- Unassigned tasks (from latest PM plan, no project) appear at the bottom
+- "+ New Project" button to create manually
+
+#### Project Detail (click into a project)
+
+Clicking a project navigates to `/pm/{project_id}`. Back link returns to `/pm`.
 
 ```
-  Skipped                                                 3 issues
-
-  ┌─ ISSUE-a1b2 ──────────────────────── already in flight ─┐
-  │  "Agent run #47 is already working on this exact issue." │
-  └──────────────────────────────────────────────────────────┘
-
-  ┌─ ISSUE-c3d4 ────────────────────── in avoid area ───────┐
-  │  "This touches the payments module which is in your      │
-  │   avoid areas. Leaving for manual review."               │
-  └──────────────────────────────────────────────────────────┘
+┌─ ← Back to PM Agent
+│
+│  Auth Overhaul                                         active
+│  5 issues · 3 resolved · 60% complete
+│
+│  ┌─────────────────────────────────────────────────────────┐
+│  │  Situation                                              │
+│  │  "3 related auth issues share a root cause in token     │
+│  │   validation. 2 have been resolved by agent runs,       │
+│  │   1 is in progress."                                    │
+│  └─────────────────────────────────────────────────────────┘
+│
+│  Tasks
+│  ┌─────────────────────────────────────────────────────────┐
+│  │  #1 · Fix token refresh race condition                  │
+│  │  simple · high · delegated                              │
+│  │                                                         │
+│  │  Reasoning                                              │
+│  │  "Root cause in auth/token.go:142. Customer impact      │
+│  │   rising (47 affected users, up 30% this week)."        │
+│  │                                                         │
+│  │  Approach                                               │
+│  │  "Race condition in refreshToken() at auth/token.go:142 │
+│  │   -- mutex not held across network call. Add test       │
+│  │   coverage in token_test.go."                           │
+│  │                                                         │
+│  │  Files: auth/token.go:142 · auth/token_test.go          │
+│  │  Risk: Low                                              │
+│  │  ─────────────────────────────────────────────────────── │
+│  │  Agent run: Running (2m 14s)            [View Run →]    │
+│  └─────────────────────────────────────────────────────────┘
+│
+│  ┌─────────────────────────────────────────────────────────┐
+│  │  #2 · Add null check in validateToken()                 │
+│  │  trivial · high · ✓ completed                           │
+│  │  Agent run: Succeeded · PR #142 merged  [View Run →]    │
+│  └─────────────────────────────────────────────────────────┘
+│
+│  Clusters
+│  ┌─ Token validation failures ────────────────────────────┐
+│  │  ● AUTH-3f2a  ● AUTH-7b1c  ● AUTH-9d4e                 │
+│  │  Root cause: Missing null check in validateToken()      │
+│  │  Strategy: Fix the shared validation path               │
+│  └────────────────────────────────────────────────────────┘
+│
+│  Skipped                                          1 issue
+│  ┌─ AUTH-f1e2 ───────────────── already in flight ───────┐
+│  │  "Agent run #47 is already working on this."          │
+│  └───────────────────────────────────────────────────────┘
+│
+└─────────────────────────────────────────────────────────────
 ```
 
-Show the skip reason badge inline with each issue so it's clear the PM made a deliberate call.
+The detail view shows everything scoped to this project: its tasks, clusters, skipped issues, and completed work. Completed tasks show their outcome inline.
 
 ---
 
 ### Tab 2: Decisions
 
-Shows the PM's track record from the existing `pm_decision_log` table.
+Global view across all projects. Shows the PM's overall track record.
 
 ```
   Decisions                                             Last 30 days
 
   Success rate: 73% (11/15 delegated tasks succeeded)
 
-  ┌────────┬───────────┬────────────┬──────────────────────────┐
-  │ Date   │ Issue     │ Decision   │ Outcome                  │
-  ├────────┼───────────┼────────────┼──────────────────────────┤
-  │ Mar 5  │ AUTH-3f2a │ Delegated  │ ✓ Succeeded (PR merged)  │
-  │ Mar 5  │ PAY-7b1c  │ Skipped    │ — Still open             │
-  │ Mar 4  │ UI-9d4e   │ Delegated  │ ✗ Failed (test failures) │
-  │ Mar 3  │ API-2e5f  │ Clustered  │ ✓ Succeeded              │
-  └────────┴───────────┴────────────┴──────────────────────────┘
+  ┌──────────┬──────────────────┬───────────┬────────────┬──────────────────┐
+  │ Date     │ Project          │ Issue     │ Decision   │ Outcome          │
+  ├──────────┼──────────────────┼───────────┼────────────┼──────────────────┤
+  │ Mar 5    │ Auth Overhaul    │ AUTH-3f2a │ Delegated  │ ✓ Succeeded      │
+  │ Mar 5    │ —                │ PAY-7b1c  │ Skipped    │ — Still open     │
+  │ Mar 4    │ Auth Overhaul    │ UI-9d4e   │ Delegated  │ ✗ Failed         │
+  │ Mar 3    │ API Rate Limit   │ API-2e5f  │ Clustered  │ ✓ Succeeded      │
+  └──────────┴──────────────────┴───────────┴────────────┴──────────────────┘
 ```
 
-Success rate at the top is the strongest proof the PM is valuable. Simple paginated table below it.
+Includes project column so you can see patterns per project. Paginated.
 
-**Backend**: Add `GET /api/v1/pm/decisions` endpoint returning paginated decision log entries. The `pm_decision_log` table already has all the data.
+**Backend**: Add `GET /api/v1/pm/decisions` endpoint returning paginated decision log entries with project info.
 
 ---
 
@@ -203,11 +248,9 @@ Success rate at the top is the strongest proof the PM is valuable. Simple pagina
 
 Small dot next to "PM Agent" in the nav:
 
-- Green dot: recent plan completed
-- Pulsing blue: PM is currently running
-- No dot: idle / no recent activity
-
-Poll latest plan status on an interval. Makes the PM feel present even on other pages.
+- Green: recent plan completed
+- Pulsing blue: PM is running
+- No dot: idle
 
 ---
 
@@ -216,31 +259,38 @@ Poll latest plan status on an interval. Makes the PM feel present even on other 
 | Area | Current | Proposed |
 |------|---------|----------|
 | Navigation | Hidden in user dropdown | Top-level sidebar item with status dot |
-| Plans page | Flat card output | `/pm` page, Plan tab: status banner, context stats, task cards with file refs |
-| Decision history | Not exposed | `/pm` page, Decisions tab: table with success rate |
+| Organizing concept | Flat list of issues/plans | Named projects grouping related work |
+| Plans page | Flat card output | `/pm` page, Projects tab with list → detail drill-down |
+| Decision history | Not exposed | `/pm` page, Decisions tab with global table + success rate |
 | Prioritization | In user dropdown | Stays in user dropdown (no change) |
-| Task cards | Plain text | Add file references parsed from approach, inline run status |
-| Clusters | Flat list | Visual groupings with root cause |
-| Skipped issues | List | Show skip reason badge inline |
+| Task cards | Plain text | Add file references, inline run status |
+| Project creation | N/A | User-created + PM-suggested from clusters |
 
 ## Implementation Order
 
-1. **Nav item** -- Add "PM Agent" to sidebar, route to `/pm`
-2. **Backend: context counts** -- Add counts to PM plan API response
-3. **Plan tab** -- Status banner, context stat cards, enhanced task/cluster/skip views
-4. **Backend: decisions endpoint** -- `GET /api/v1/pm/decisions` with pagination
-5. **Decisions tab** -- Table with success rate
-6. **Status dot** -- Sidebar indicator polling latest plan status
+1. **Project model + DB migration** -- Add projects table, project_id FK on issues
+2. **Nav item** -- Add "PM Agent" to sidebar, route to `/pm`
+3. **Backend: project CRUD** -- Create, list, update, archive projects
+4. **Backend: PM plan → project sorting** -- Extend PM service to sort tasks/clusters into projects, suggest new projects from unclaimed clusters
+5. **Backend: context counts** -- Add counts to PM plan API response
+6. **Projects tab** -- Status banner, project list, project detail view
+7. **Backend: decisions endpoint** -- `GET /api/v1/pm/decisions` with pagination + project info
+8. **Decisions tab** -- Table with success rate
+9. **Status dot** -- Sidebar indicator
 
 ## Backend Changes Required
 
-1. **Extend PM plan API response** with context counts (issues_reviewed, in_flight_runs_checked, past_outcomes_reviewed, recent_prs_checked, past_decisions_reviewed, commits_analyzed)
-2. **Add `GET /api/v1/pm/decisions`** endpoint for decision log with pagination
-3. **Optional**: PM status endpoint for live progress during analysis
+1. **New `projects` table** with id, org_id, name, description, status, created_by, timestamps
+2. **Add `project_id`** nullable FK to issues table
+3. **Project CRUD endpoints**: `GET/POST /api/v1/pm/projects`, `GET/PATCH /api/v1/pm/projects/{id}`
+4. **Extend PM service** to sort plan output into projects and generate project suggestions
+5. **Extend PM plan API response** with context counts
+6. **Add `GET /api/v1/pm/decisions`** endpoint with pagination and project join
+7. **Optional**: PM status endpoint for live progress during analysis
 
 ## Non-Goals
 
-- Changing the PM agent's prompt or intelligence -- presentation layer only
-- Adding new PM features -- surface what already exists
+- Changing the PM agent's prompt or intelligence -- presentation layer only (except project sorting logic)
+- Full project management features (milestones, deadlines, assignments) -- keep it simple
 - Moving prioritization settings -- they're fine where they are
-- Adding new pages -- everything fits on one page with two tabs
+- Multiple pages -- one page with two tabs + detail drill-down
