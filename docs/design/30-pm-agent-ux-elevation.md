@@ -1,21 +1,22 @@
 # 30 - PM Agent UX Elevation
 
-> Surface the PM agent's intelligence through the UI. Add projects as the primary organizing concept.
+> Surface the PM agent's intelligence through the existing Sessions page. Add projects as a grouping concept.
 
 ## Problem
 
-The PM agent reads your codebase, traces stack traces, learns from past decisions, clusters related issues, and delegates work to agents with specific guidance. But the UI hides all of that. Today:
+The PM agent reads your codebase, traces stack traces, learns from past decisions, clusters related issues, and delegates work to agents with specific guidance. But the UI hides all of that:
 
-- **Plans page** (`/plans`): Flat cards with badges. No visibility into what the PM actually read or considered.
-- **Prioritization page** (`/prioritization`): Settings form buried in the user dropdown. Fine where it is, but disconnected from the PM's output.
-- **Navigation**: PM lives in a user dropdown alongside "General" and "Team" -- treated as config, not a core workflow.
-- **No project concept**: Work is organized as a flat list of issues. No way to group related work into named projects that track progress over time.
+- **Sessions page** shows PM plans and manual runs as a flat list. No grouping, no context stats, no sense of what the PM considered.
+- **Session detail** shows tasks/clusters/skipped but not what the PM read to make those decisions (how many issues reviewed, commits scanned, past decisions learned from).
+- **No project concept**: Related work across multiple sessions has no grouping. You can't track "Auth Overhaul" as an ongoing effort.
+- **Decision history**: The backend tracks outcomes (`pm_decision_log`) but the UI never shows them. Users can't see if the PM is getting better over time.
+- **Prioritization page** is buried in user dropdown, disconnected from the PM's output.
 
 ## Design Principles
 
-1. **Projects as the organizing concept** -- Related work groups into named projects you can track over time
-2. **Show the thinking, not just the output** -- Surface what the PM read, considered, and decided against
-3. **One page, two tabs** -- Everything PM-related lives on a single page
+1. **Enhance, don't add** -- Build on Sessions, don't create new pages
+2. **Projects group related work** -- Named containers that span multiple sessions
+3. **Show the thinking** -- Surface what the PM read and considered
 4. **Keep it simple** -- Plain labels, minimal new UI patterns
 
 ---
@@ -25,86 +26,70 @@ The PM agent reads your codebase, traces stack traces, learns from past decision
 ```
 ┌──────────────────────────────┐
 │  Overview                    │
-│  Sessions                    │
+│  Sessions  ●                 │  <-- enhanced, dot shows active PM run
 │  Issues                      │
-│  PM Agent  ●                 │  <-- new top-level item, dot shows status
 └──────────────────────────────┘
 
 User dropdown (unchanged):
   General
   Integrations
   Agent
-  Prioritization                   <-- stays here, it's settings
+  Prioritization
   Team
   Log out
 ```
 
-One new sidebar item. Prioritization stays in the dropdown. The `/plans` route moves to `/pm`.
+No new nav items. Sessions page gets enhanced with project grouping, context stats, and decision history. Prioritization stays in the dropdown.
 
 ---
 
 ## Projects
 
-A **project** is a named container that groups related issues, agent runs, and PM decisions together over time. Think "Auth Overhaul" or "API Rate Limiting" -- ongoing efforts, not one-off analyses.
+A **project** is a named container that groups related sessions, issues, and agent runs over time.
 
 ### Where projects come from
 
-Both user-created and PM-suggested:
+1. **User creates**: Click "+ New Project", give it a name and optional description
+2. **PM suggests**: When PM analysis finds issue clusters that don't belong to any project, it surfaces them as a suggestion. User accepts (names the project) or dismisses.
 
-1. **User creates**: Name a project, optionally assign issues to it
-2. **PM suggests**: When the PM runs its global analysis and clusters related issues, it can propose a new project. The user approves or dismisses the suggestion. PM clusters that map to an existing project get filed there automatically.
+### How they relate to sessions
 
-### How PM analysis works with projects
+- Sessions can optionally belong to a project
+- PM plan sessions get auto-assigned to projects based on which issues they address
+- A single PM plan session can touch multiple projects (its tasks get grouped by project in the UI)
+- Manual sessions ("Fix This") can also be assigned to a project
 
-PM still runs globally -- it analyzes all open issues, all in-flight runs, all past decisions. But when it produces its plan, it sorts tasks and clusters into projects:
-
-- Tasks linked to issues in an existing project go under that project
-- New clusters with no project get surfaced as a "suggested project"
-- Uncategorized tasks (one-off fixes, no clear grouping) appear in an "Unassigned" section
-
-This keeps the PM simple (one global run) while giving users project-level organization.
-
-### Project data model
+### Data model
 
 ```
 Project {
-  id
-  org_id
-  name                    // "Auth Overhaul"
-  description             // optional, brief summary
-  status                  // active, completed, archived
-  created_by              // "user" or "pm_suggestion"
-  created_at
-  updated_at
+  id, org_id, name, description, status (active/completed/archived),
+  created_by ("user" | "pm_suggestion"), created_at, updated_at
 }
 ```
 
-Issues get a nullable `project_id` foreign key. Agent runs inherit project from their issue. PM tasks reference project_id when sorted.
+Issues get a nullable `project_id` FK. Agent runs inherit project from their issue. PM tasks reference project_id when sorted.
 
 ---
 
-## The PM Agent Page (`/pm`)
+## Enhanced Sessions Page
 
-Single page with two tabs: **Projects** (default) and **Decisions**.
+### Status Banner (new, top of page)
 
-### Tab 1: Projects (default)
-
-#### Status Banner (top of page, above tabs)
+Shows the PM agent's current state above the session list:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  PM Agent                                              Active   │
 │                                                                 │
 │  Last run: 2h ago  ·  14 issues reviewed  ·  Next run: in 2h   │
+│  73% success rate (11/15 delegated tasks)                       │
 │                                                                 │
-│  Context considered:                                            │
-│  14 issues · 3 in-flight runs · 12 past decisions · 20 commits │
-│                                                                 │
-│  [Analyze Now]                                                  │
+│  [Analyze Now]                            [+ New Manual Session] │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-When running:
+When PM is running:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -119,113 +104,96 @@ When running:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-#### Project List
+Replaces the current small blue "Analysis in progress" card with something that shows what the PM is actually doing.
 
-Below the status banner, a list of active projects:
+### Session List with Project Grouping
+
+Below the status banner, sessions grouped by project:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  Projects                                     [+ New Project]   │
+│  All  Active  Completed  Failed        [+ New Project]          │
 │                                                                 │
-│  ┌─ Auth Overhaul ──────────────────────────────── active ────┐ │
-│  │  5 issues · 3 resolved · 2 agent runs in progress          │ │
-│  │  Last activity: 1h ago                                     │ │
-│  └────────────────────────────────────────────────────────────┘ │
-│                                                                 │
-│  ┌─ API Rate Limiting ─────────────────────────── active ────┐ │
-│  │  3 issues · 1 resolved · 1 agent run completed             │ │
-│  │  Last activity: 3h ago                                     │ │
-│  └────────────────────────────────────────────────────────────┘ │
-│                                                                 │
-│  ┌─ PM suggestion ──────────────────────────── needs review ─┐ │
-│  │  "3 issues share a root cause in database connection       │ │
-│  │   pooling. Consider grouping as a project."                │ │
-│  │  3 issues · [Accept] [Dismiss]                             │ │
-│  └────────────────────────────────────────────────────────────┘ │
-│                                                                 │
-│  Unassigned tasks                                    2 tasks    │
-│  ┌────────────────────────────────────────────────────────────┐ │
-│  │  #1 · Fix CORS header on /api/health  · simple · high     │ │
-│  │  #2 · Update deprecated lodash call   · trivial · high    │ │
-│  └────────────────────────────────────────────────────────────┘ │
+│  ┌─ Auth Overhaul ───────────────────────────── active ───────┐ │
+│  │  5 issues · 3 resolved · 2 sessions                        │ │
+│  │                                                             │ │
+│  │  ● Active  PM Analysis · 3 tasks · 1 running      2h ago  │ │
+│  │  ✓ Done    PM Analysis · 2 tasks · 2 completed     1d ago  │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│                                                                  │
+│  ┌─ API Rate Limiting ───────────────────────── active ───────┐ │
+│  │  3 issues · 1 resolved · 1 session                         │ │
+│  │                                                             │ │
+│  │  ✓ Done    PM Analysis · 1 task · 1 completed      3h ago  │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│                                                                  │
+│  ┌─ PM suggestion ─────────────────────────── needs review ───┐ │
+│  │  "3 issues share a root cause in database connection        │ │
+│  │   pooling. Group as a project?"                             │ │
+│  │  [Accept] [Dismiss]                                         │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│                                                                  │
+│  Ungrouped                                                       │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │  ● Active  Manual · Fix CORS header · fix_this     30m ago │ │
+│  │  ✗ Failed  PM Analysis · 4 tasks                    2d ago │ │
+│  └─────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 Key elements:
-- Active projects show issue count, resolved count, in-flight runs
-- PM suggestions appear as a distinct card type with Accept/Dismiss actions
-- Unassigned tasks (from latest PM plan, no project) appear at the bottom
+- Sessions grouped under their project with a collapsible header
+- Project header shows issue count, resolved count, and status
+- PM suggestions appear as a distinct card with Accept/Dismiss
+- Ungrouped sessions (no project) appear at the bottom
+- Existing status filter tabs still work (filter across all projects)
 - "+ New Project" button to create manually
 
-#### Project Detail (click into a project)
+### Enhanced Session Detail (click into a session)
 
-Clicking a project navigates to `/pm/{project_id}`. Back link returns to `/pm`.
+The existing session detail view gets two additions:
 
-```
-┌─ ← Back to PM Agent
-│
-│  Auth Overhaul                                         active
-│  5 issues · 3 resolved · 60% complete
-│
-│  ┌─────────────────────────────────────────────────────────┐
-│  │  Situation                                              │
-│  │  "3 related auth issues share a root cause in token     │
-│  │   validation. 2 have been resolved by agent runs,       │
-│  │   1 is in progress."                                    │
-│  └─────────────────────────────────────────────────────────┘
-│
-│  Tasks
-│  ┌─────────────────────────────────────────────────────────┐
-│  │  #1 · Fix token refresh race condition                  │
-│  │  simple · high · delegated                              │
-│  │                                                         │
-│  │  Reasoning                                              │
-│  │  "Root cause in auth/token.go:142. Customer impact      │
-│  │   rising (47 affected users, up 30% this week)."        │
-│  │                                                         │
-│  │  Approach                                               │
-│  │  "Race condition in refreshToken() at auth/token.go:142 │
-│  │   -- mutex not held across network call. Add test       │
-│  │   coverage in token_test.go."                           │
-│  │                                                         │
-│  │  Files: auth/token.go:142 · auth/token_test.go          │
-│  │  Risk: Low                                              │
-│  │  ─────────────────────────────────────────────────────── │
-│  │  Agent run: Running (2m 14s)            [View Run →]    │
-│  └─────────────────────────────────────────────────────────┘
-│
-│  ┌─────────────────────────────────────────────────────────┐
-│  │  #2 · Add null check in validateToken()                 │
-│  │  trivial · high · ✓ completed                           │
-│  │  Agent run: Succeeded · PR #142 merged  [View Run →]    │
-│  └─────────────────────────────────────────────────────────┘
-│
-│  Clusters
-│  ┌─ Token validation failures ────────────────────────────┐
-│  │  ● AUTH-3f2a  ● AUTH-7b1c  ● AUTH-9d4e                 │
-│  │  Root cause: Missing null check in validateToken()      │
-│  │  Strategy: Fix the shared validation path               │
-│  └────────────────────────────────────────────────────────┘
-│
-│  Skipped                                          1 issue
-│  ┌─ AUTH-f1e2 ───────────────── already in flight ───────┐
-│  │  "Agent run #47 is already working on this."          │
-│  └───────────────────────────────────────────────────────┘
-│
-└─────────────────────────────────────────────────────────────
-```
+#### Context Stats (new section, plan sessions only)
 
-The detail view shows everything scoped to this project: its tasks, clusters, skipped issues, and completed work. Completed tasks show their outcome inline.
-
----
-
-### Tab 2: Decisions
-
-Global view across all projects. Shows the PM's overall track record.
+Added below the session header, above the situation analysis:
 
 ```
-  Decisions                                             Last 30 days
+  Context considered:
+  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+  │ 14 issues    │ │ 3 in-flight  │ │ 8 past runs  │
+  │ reviewed     │ │ agent runs   │ │ learned from │
+  └──────────────┘ └──────────────┘ └──────────────┘
+  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+  │ 5 recent PRs │ │ 12 past      │ │ 20 commits   │
+  │ checked      │ │ decisions    │ │ analyzed     │
+  └──────────────┘ └──────────────┘ └──────────────┘
+```
 
+This is the single biggest gap today -- users don't know the PM reads git history, past decisions, in-flight runs, etc. All data is already gathered in `context.go`, just count and return.
+
+#### Files Identified (new section on task cards)
+
+Parse `path:line` patterns from the approach text and show them:
+
+```
+  Files: auth/token.go:142 · auth/token_test.go
+```
+
+#### Inline Run Status (already exists, keep as-is)
+
+Task cards already show run status, duration, and "View run details" links. No changes needed.
+
+### Decision History (new filter/view on Sessions page)
+
+Add a "Decisions" filter tab alongside All/Active/Completed/Failed:
+
+```
+  All  Active  Completed  Failed  Decisions
+```
+
+When "Decisions" is selected, the view switches to a table showing the PM's track record across all sessions:
+
+```
   Success rate: 73% (11/15 delegated tasks succeeded)
 
   ┌──────────┬──────────────────┬───────────┬────────────┬──────────────────┐
@@ -238,15 +206,13 @@ Global view across all projects. Shows the PM's overall track record.
   └──────────┴──────────────────┴───────────┴────────────┴──────────────────┘
 ```
 
-Includes project column so you can see patterns per project. Paginated.
-
-**Backend**: Add `GET /api/v1/pm/decisions` endpoint returning paginated decision log entries with project info.
+This surfaces the `pm_decision_log` table data that's already being collected but never shown.
 
 ---
 
 ### Sidebar Status Dot
 
-Small dot next to "PM Agent" in the nav:
+Small dot next to "Sessions" in the nav:
 
 - Green: recent plan completed
 - Pulsing blue: PM is running
@@ -258,39 +224,42 @@ Small dot next to "PM Agent" in the nav:
 
 | Area | Current | Proposed |
 |------|---------|----------|
-| Navigation | Hidden in user dropdown | Top-level sidebar item with status dot |
-| Organizing concept | Flat list of issues/plans | Named projects grouping related work |
-| Plans page | Flat card output | `/pm` page, Projects tab with list → detail drill-down |
-| Decision history | Not exposed | `/pm` page, Decisions tab with global table + success rate |
-| Prioritization | In user dropdown | Stays in user dropdown (no change) |
-| Task cards | Plain text | Add file references, inline run status |
+| Navigation | Sessions (no indicator) | Sessions with status dot (no new items) |
+| Session list | Flat list of all sessions | Grouped by project with project headers |
+| Session detail | Tasks, clusters, skipped | Add context stats showing what PM considered |
+| Decision history | Not exposed | "Decisions" filter tab on sessions page |
+| Projects | Don't exist | Named containers grouping related sessions/issues |
 | Project creation | N/A | User-created + PM-suggested from clusters |
+| Task cards | Plain text | Add parsed file references |
+| Status banner | Small blue card when running | Persistent banner with PM state, stats, live progress |
+| Prioritization | In user dropdown | Stays in user dropdown (no change) |
 
 ## Implementation Order
 
 1. **Project model + DB migration** -- Add projects table, project_id FK on issues
-2. **Nav item** -- Add "PM Agent" to sidebar, route to `/pm`
-3. **Backend: project CRUD** -- Create, list, update, archive projects
-4. **Backend: PM plan → project sorting** -- Extend PM service to sort tasks/clusters into projects, suggest new projects from unclaimed clusters
-5. **Backend: context counts** -- Add counts to PM plan API response
-6. **Projects tab** -- Status banner, project list, project detail view
-7. **Backend: decisions endpoint** -- `GET /api/v1/pm/decisions` with pagination + project info
-8. **Decisions tab** -- Table with success rate
-9. **Status dot** -- Sidebar indicator
+2. **Backend: project CRUD** -- Create, list, update, archive projects
+3. **Backend: PM plan → project sorting** -- Extend PM service to sort tasks/clusters into projects, suggest new projects from unclaimed clusters
+4. **Backend: context counts** -- Add counts to session/plan API response
+5. **Status banner** -- Replace the blue analysis card with persistent PM status banner
+6. **Project grouping on sessions list** -- Group sessions under projects, add project suggestions UI
+7. **Context stats on session detail** -- Show what PM considered
+8. **Backend: decisions endpoint** -- `GET /api/v1/pm/decisions` with pagination + project info
+9. **Decisions filter tab** -- Table view with success rate on sessions page
+10. **Status dot** -- Sidebar indicator on Sessions nav item
 
 ## Backend Changes Required
 
 1. **New `projects` table** with id, org_id, name, description, status, created_by, timestamps
 2. **Add `project_id`** nullable FK to issues table
-3. **Project CRUD endpoints**: `GET/POST /api/v1/pm/projects`, `GET/PATCH /api/v1/pm/projects/{id}`
+3. **Project CRUD endpoints**: `GET/POST /api/v1/projects`, `GET/PATCH /api/v1/projects/{id}`
 4. **Extend PM service** to sort plan output into projects and generate project suggestions
-5. **Extend PM plan API response** with context counts
+5. **Extend session API response** with context counts (issues_reviewed, in_flight_runs_checked, past_outcomes_reviewed, recent_prs_checked, past_decisions_reviewed, commits_analyzed)
 6. **Add `GET /api/v1/pm/decisions`** endpoint with pagination and project join
 7. **Optional**: PM status endpoint for live progress during analysis
 
 ## Non-Goals
 
-- Changing the PM agent's prompt or intelligence -- presentation layer only (except project sorting logic)
-- Full project management features (milestones, deadlines, assignments) -- keep it simple
-- Moving prioritization settings -- they're fine where they are
-- Multiple pages -- one page with two tabs + detail drill-down
+- New pages -- everything lives on the enhanced Sessions page
+- Full project management (milestones, deadlines, sprints) -- projects are just named groups
+- Changing the PM agent's prompt or intelligence -- presentation layer only (except project sorting)
+- Moving prioritization settings -- they're fine in the dropdown
