@@ -44,6 +44,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	projectStore := db.NewProjectStore(pool)
 	projectTaskStore := db.NewProjectTaskStore(pool)
 	projectCycleStore := db.NewProjectCycleStore(pool)
+	projectAttachmentStore := db.NewProjectAttachmentStore(pool)
+	projectSpecStore := db.NewProjectSpecStore(pool)
 
 	// Create credential store with optional encryption.
 	var cryptoSvc *crypto.Service
@@ -109,6 +111,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	teamHandler := handlers.NewTeamHandler(userStore, sessionStore, invitationStore, orgStore, cfg.FrontendURL)
 
 	projectHandler := handlers.NewProjectHandler(projectStore, projectTaskStore, projectCycleStore)
+	projectHandler.SetAttachmentStore(projectAttachmentStore)
+	projectHandler.SetSpecStore(projectSpecStore)
+	projectAttachmentHandler := handlers.NewProjectAttachmentHandler(projectAttachmentStore, projectStore)
+	projectSpecHandler := handlers.NewProjectSpecHandler(projectSpecStore, projectStore)
+	projectAIHandler := handlers.NewProjectAIHandler(projectStore, projectSpecStore, projectAttachmentStore, projectTaskStore)
 	codexAuthHandler := handlers.NewCodexAuthHandler(codexAuthSvc, logger)
 
 	r := chi.NewRouter()
@@ -189,6 +196,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/projects/{id}", projectHandler.Get)
 			r.Get("/api/v1/projects/{id}/cycles", projectHandler.ListCycles)
 			r.Get("/api/v1/projects/{id}/cycles/{cycleId}", projectHandler.GetCycle)
+			r.Get("/api/v1/projects/{id}/attachments", projectAttachmentHandler.List)
+			r.Get("/api/v1/projects/{id}/specs", projectSpecHandler.List)
+			r.Get("/api/v1/projects/{id}/specs/{specId}", projectSpecHandler.Get)
 		})
 
 		// Write routes (admin and member only)
@@ -214,6 +224,13 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Patch("/api/v1/projects/{id}/tasks/{taskId}", projectHandler.UpdateTask)
 			r.Delete("/api/v1/projects/{id}/tasks/{taskId}", projectHandler.DeleteTask)
 			r.Post("/api/v1/projects/{id}/tasks/{taskId}/retry", projectHandler.RetryTask)
+			r.Post("/api/v1/projects/{id}/attachments", projectAttachmentHandler.Create)
+			r.Patch("/api/v1/projects/{id}/attachments/{attachmentId}", projectAttachmentHandler.Update)
+			r.Delete("/api/v1/projects/{id}/attachments/{attachmentId}", projectAttachmentHandler.Delete)
+			r.Post("/api/v1/projects/{id}/specs", projectSpecHandler.Create)
+			r.Patch("/api/v1/projects/{id}/specs/{specId}", projectSpecHandler.Update)
+			r.Delete("/api/v1/projects/{id}/specs/{specId}", projectSpecHandler.Delete)
+			r.Post("/api/v1/projects/{id}/ai/improve", projectAIHandler.Improve)
 		})
 
 		// Admin-only routes
