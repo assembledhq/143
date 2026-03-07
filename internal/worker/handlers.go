@@ -63,6 +63,8 @@ type Stores struct {
 	Webhooks            *db.WebhookDeliveryStore
 	PriorityScores      *db.PriorityScoreStore
 	ComplexityEstimates *db.ComplexityEstimateStore
+	Projects            *db.ProjectStore      // nil-safe: projects feature disabled if nil
+	ProjectTasks        *db.ProjectTaskStore  // nil-safe
 }
 
 // Services holds the service dependencies needed by job handlers.

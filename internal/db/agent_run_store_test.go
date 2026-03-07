@@ -19,6 +19,7 @@ var agentRunColumns = []string{
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_run_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "pm_approach", "pm_reasoning",
+	"project_task_id",
 	"created_at",
 }
 
@@ -30,6 +31,7 @@ func newAgentRunRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 		nil, nil, []string{}, nil,
 		nil, json.RawMessage(`{}`), nil, nil, nil,
 		nil, nil, nil,
+		nil, // project_task_id
 		now,
 	}
 }
@@ -223,7 +225,8 @@ func TestAgentRunStore_Create(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO agent_runs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at"}).
 				AddRow(generatedID, now),
@@ -231,6 +234,43 @@ func TestAgentRunStore_Create(t *testing.T) {
 
 	err = store.Create(context.Background(), run)
 	require.NoError(t, err, "Create should not return an error")
+	require.Equal(t, generatedID, run.ID, "should set the generated ID on the agent run")
+	require.Equal(t, now, run.CreatedAt, "should set the created_at timestamp on the agent run")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestAgentRunStore_Create_AllowsNilIssueID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewAgentRunStore(mock)
+	now := time.Now()
+	generatedID := uuid.New()
+
+	run := &models.AgentRun{
+		IssueID:       uuid.Nil,
+		OrgID:         uuid.New(),
+		AgentType:     "fixer",
+		Status:        "pending",
+		AutonomyLevel: "supervised",
+		TokenMode:     "standard",
+	}
+
+	mock.ExpectQuery("INSERT INTO agent_runs").
+		WithArgs(nil, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "created_at"}).
+				AddRow(generatedID, now),
+		)
+
+	err = store.Create(context.Background(), run)
+	require.NoError(t, err, "Create should not return an error for nil issue ID")
 	require.Equal(t, generatedID, run.ID, "should set the generated ID on the agent run")
 	require.Equal(t, now, run.CreatedAt, "should set the created_at timestamp on the agent run")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")

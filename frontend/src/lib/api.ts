@@ -228,6 +228,42 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').InvitationResponse>>('/api/v1/team/invitations', { email, role }),
     revokeInvitation: (id: string) => del<void>(`/api/v1/team/invitations/${id}`),
   },
+  projects: {
+    list: (params?: { status?: string; cursor?: string; limit?: number }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.status) searchParams.set('status', params.status);
+      if (params?.cursor) searchParams.set('cursor', params.cursor);
+      if (params?.limit) searchParams.set('limit', String(params.limit));
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').Project>>(`/api/v1/projects${qs ? `?${qs}` : ''}`);
+    },
+    get: (id: string) => get<import('./types').SingleResponse<import('./types').ProjectDetail>>(`/api/v1/projects/${id}`),
+    create: (body: { title: string; goal: string; repository_id: string; scope?: string; completion_criteria?: string; execution_mode?: string; max_concurrent?: number; priority?: number; base_branch?: string }) =>
+      post<import('./types').SingleResponse<import('./types').Project>>('/api/v1/projects', body),
+    update: (id: string, body: Record<string, unknown>) =>
+      patch<import('./types').SingleResponse<import('./types').Project>>(`/api/v1/projects/${id}`, body),
+    del: (id: string) => del(`/api/v1/projects/${id}`),
+    start: (id: string) => post(`/api/v1/projects/${id}/start`),
+    pause: (id: string) => post(`/api/v1/projects/${id}/pause`),
+    resume: (id: string) => post(`/api/v1/projects/${id}/resume`),
+    approve: (id: string) => post(`/api/v1/projects/${id}/approve`),
+    dismiss: (id: string) => post(`/api/v1/projects/${id}/dismiss`),
+    createTask: (projectId: string, body: { title: string; description?: string; approach?: string }) =>
+      post<import('./types').SingleResponse<import('./types').ProjectTask>>(`/api/v1/projects/${projectId}/tasks`, body),
+    updateTask: (projectId: string, taskId: string, body: Record<string, unknown>) =>
+      patch<import('./types').SingleResponse<import('./types').ProjectTask>>(`/api/v1/projects/${projectId}/tasks/${taskId}`, body),
+    deleteTask: (projectId: string, taskId: string) => del(`/api/v1/projects/${projectId}/tasks/${taskId}`),
+    retryTask: (projectId: string, taskId: string) =>
+      post<import('./types').SingleResponse<import('./types').ProjectTask>>(`/api/v1/projects/${projectId}/tasks/${taskId}/retry`),
+    listCycles: (projectId: string, params?: { limit?: number }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.limit) searchParams.set('limit', String(params.limit));
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').ProjectCycle>>(`/api/v1/projects/${projectId}/cycles${qs ? `?${qs}` : ''}`);
+    },
+    getCycle: (projectId: string, cycleId: string) =>
+      get<import('./types').SingleResponse<import('./types').ProjectCycle>>(`/api/v1/projects/${projectId}/cycles/${cycleId}`),
+  },
   reviewComments: {
     list: (params?: { pull_request_id?: string; filter_status?: string; cursor?: string }) => {
       const searchParams = new URLSearchParams();

@@ -1,0 +1,602 @@
+package handlers
+
+import (
+	"encoding/json"
+	"net/http"
+
+	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/models"
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+)
+
+type ProjectHandler struct {
+	projectStore      *db.ProjectStore
+	projectTaskStore  *db.ProjectTaskStore
+	projectCycleStore *db.ProjectCycleStore
+}
+
+func NewProjectHandler(
+	projectStore *db.ProjectStore,
+	projectTaskStore *db.ProjectTaskStore,
+	projectCycleStore *db.ProjectCycleStore,
+) *ProjectHandler {
+	return &ProjectHandler{
+		projectStore:      projectStore,
+		projectTaskStore:  projectTaskStore,
+		projectCycleStore: projectCycleStore,
+	}
+}
+
+// ProjectDetailResponse combines a project with its tasks and recent cycles.
+type ProjectDetailResponse struct {
+	Project      models.Project        `json:"project"`
+	Tasks        []models.ProjectTask  `json:"tasks"`
+	RecentCycles []models.ProjectCycle `json:"recent_cycles"`
+}
+
+// validStatusTransition checks whether a project status transition is allowed.
+func validStatusTransition(from, to models.ProjectStatus) bool {
+	switch from {
+	case models.ProjectStatusProposed:
+		return to == models.ProjectStatusDraft || to == models.ProjectStatusCancelled
+	case models.ProjectStatusDraft:
+		return to == models.ProjectStatusPlanning || to == models.ProjectStatusActive || to == models.ProjectStatusCancelled
+	case models.ProjectStatusPlanning:
+		return to == models.ProjectStatusActive || to == models.ProjectStatusCancelled
+	case models.ProjectStatusActive:
+		return to == models.ProjectStatusPaused || to == models.ProjectStatusCompleted || to == models.ProjectStatusCancelled
+	case models.ProjectStatusPaused:
+		return to == models.ProjectStatusActive || to == models.ProjectStatusCancelled
+	default:
+		return false
+	}
+}
+
+func (h *ProjectHandler) List(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+
+	limit := queryInt(r, "limit", 50)
+	filters := db.ProjectFilters{
+		Status: r.URL.Query().Get("status"),
+		Limit:  limit,
+		Cursor: r.URL.Query().Get("cursor"),
+	}
+
+	projects, err := h.projectStore.ListByOrg(r.Context(), orgID, filters)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list projects")
+		return
+	}
+	if projects == nil {
+		projects = []models.Project{}
+	}
+
+	var nextCursor string
+	if len(projects) > 0 && len(projects) == filters.Limit {
+		nextCursor = projects[len(projects)-1].ID.String()
+	}
+
+	writeJSON(w, http.StatusOK, models.ListResponse[models.Project]{
+		Data: projects,
+		Meta: models.PaginationMeta{NextCursor: nextCursor},
+	})
+}
+
+func (h *ProjectHandler) Get(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		return
+	}
+
+	project, err := h.projectStore.GetByID(r.Context(), orgID, projectID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "project not found")
+		return
+	}
+
+	tasks, err := h.projectTaskStore.ListByProject(r.Context(), orgID, projectID, db.ProjectTaskFilters{})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "LIST_TASKS_FAILED", "failed to list project tasks")
+		return
+	}
+	if tasks == nil {
+		tasks = []models.ProjectTask{}
+	}
+
+	cycles, err := h.projectCycleStore.ListByProject(r.Context(), orgID, projectID, 10)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "LIST_CYCLES_FAILED", "failed to list project cycles")
+		return
+	}
+	if cycles == nil {
+		cycles = []models.ProjectCycle{}
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[ProjectDetailResponse]{
+		Data: ProjectDetailResponse{
+			Project:      project,
+			Tasks:        tasks,
+			RecentCycles: cycles,
+		},
+	})
+}
+
+func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
+
+	var req struct {
+		Title              string  `json:"title"`
+		Goal               string  `json:"goal"`
+		RepositoryID       string  `json:"repository_id"`
+		Scope              *string `json:"scope"`
+		CompletionCriteria *string `json:"completion_criteria"`
+		ExecutionMode      *string `json:"execution_mode"`
+		MaxConcurrent      *int    `json:"max_concurrent"`
+		Priority           *int    `json:"priority"`
+		BaseBranch         *string `json:"base_branch"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+
+	if req.Title == "" || req.Goal == "" {
+		writeError(w, http.StatusBadRequest, "MISSING_FIELD", "title and goal are required")
+		return
+	}
+
+	repoID, err := uuid.Parse(req.RepositoryID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "invalid repository_id")
+		return
+	}
+
+	execMode := models.ProjectExecModeSequential
+	if req.ExecutionMode != nil {
+		execMode = models.ProjectExecMode(*req.ExecutionMode)
+		if err := execMode.Validate(); err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_EXECUTION_MODE", err.Error())
+			return
+		}
+	}
+
+	maxConcurrent := 1
+	if req.MaxConcurrent != nil && *req.MaxConcurrent > 0 {
+		maxConcurrent = *req.MaxConcurrent
+	}
+
+	priority := 50
+	if req.Priority != nil {
+		priority = *req.Priority
+	}
+
+	baseBranch := "main"
+	if req.BaseBranch != nil && *req.BaseBranch != "" {
+		baseBranch = *req.BaseBranch
+	}
+
+	project := models.Project{
+		OrgID:              orgID,
+		RepositoryID:       repoID,
+		Title:              req.Title,
+		Goal:               req.Goal,
+		Scope:              req.Scope,
+		CompletionCriteria: req.CompletionCriteria,
+		Status:             models.ProjectStatusDraft,
+		Priority:           priority,
+		ExecutionMode:      execMode,
+		MaxConcurrent:      maxConcurrent,
+		AutoMerge:          false,
+		BaseBranch:         baseBranch,
+		CreatedBy:          &user.ID,
+	}
+
+	if err := h.projectStore.Create(r.Context(), &project); err != nil {
+		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create project")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, models.SingleResponse[models.Project]{Data: project})
+}
+
+func (h *ProjectHandler) Update(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		return
+	}
+
+	project, err := h.projectStore.GetByID(r.Context(), orgID, projectID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "project not found")
+		return
+	}
+
+	var req struct {
+		Title              *string `json:"title"`
+		Goal               *string `json:"goal"`
+		Scope              *string `json:"scope"`
+		CompletionCriteria *string `json:"completion_criteria"`
+		Status             *string `json:"status"`
+		Priority           *int    `json:"priority"`
+		ExecutionMode      *string `json:"execution_mode"`
+		MaxConcurrent      *int    `json:"max_concurrent"`
+		AutoMerge          *bool   `json:"auto_merge"`
+		BaseBranch         *string `json:"base_branch"`
+		CurrentPhase       *string `json:"current_phase"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+
+	if req.Title != nil {
+		project.Title = *req.Title
+	}
+	if req.Goal != nil {
+		project.Goal = *req.Goal
+	}
+	if req.Scope != nil {
+		project.Scope = req.Scope
+	}
+	if req.CompletionCriteria != nil {
+		project.CompletionCriteria = req.CompletionCriteria
+	}
+	if req.Status != nil {
+		newStatus := models.ProjectStatus(*req.Status)
+		if err := newStatus.Validate(); err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_STATUS", err.Error())
+			return
+		}
+		if !validStatusTransition(project.Status, newStatus) {
+			writeError(w, http.StatusBadRequest, "INVALID_TRANSITION", "invalid status transition")
+			return
+		}
+		project.Status = newStatus
+	}
+	if req.Priority != nil {
+		project.Priority = *req.Priority
+	}
+	if req.ExecutionMode != nil {
+		execMode := models.ProjectExecMode(*req.ExecutionMode)
+		if err := execMode.Validate(); err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_EXECUTION_MODE", err.Error())
+			return
+		}
+		project.ExecutionMode = execMode
+	}
+	if req.MaxConcurrent != nil {
+		project.MaxConcurrent = *req.MaxConcurrent
+	}
+	if req.AutoMerge != nil {
+		project.AutoMerge = *req.AutoMerge
+	}
+	if req.BaseBranch != nil {
+		project.BaseBranch = *req.BaseBranch
+	}
+	if req.CurrentPhase != nil {
+		project.CurrentPhase = req.CurrentPhase
+	}
+
+	if err := h.projectStore.Update(r.Context(), &project); err != nil {
+		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update project")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.Project]{Data: project})
+}
+
+func (h *ProjectHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		return
+	}
+
+	if err := h.projectStore.UpdateStatus(r.Context(), orgID, projectID, string(models.ProjectStatusCancelled)); err != nil {
+		writeError(w, http.StatusInternalServerError, "DELETE_FAILED", "failed to cancel project")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *ProjectHandler) Start(w http.ResponseWriter, r *http.Request) {
+	h.transitionStatus(w, r, models.ProjectStatusActive)
+}
+
+func (h *ProjectHandler) Pause(w http.ResponseWriter, r *http.Request) {
+	h.transitionStatus(w, r, models.ProjectStatusPaused)
+}
+
+func (h *ProjectHandler) Resume(w http.ResponseWriter, r *http.Request) {
+	h.transitionStatus(w, r, models.ProjectStatusActive)
+}
+
+func (h *ProjectHandler) Approve(w http.ResponseWriter, r *http.Request) {
+	h.transitionStatus(w, r, models.ProjectStatusDraft)
+}
+
+func (h *ProjectHandler) Dismiss(w http.ResponseWriter, r *http.Request) {
+	h.transitionStatus(w, r, models.ProjectStatusCancelled)
+}
+
+func (h *ProjectHandler) transitionStatus(w http.ResponseWriter, r *http.Request, target models.ProjectStatus) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		return
+	}
+
+	project, err := h.projectStore.GetByID(r.Context(), orgID, projectID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "project not found")
+		return
+	}
+
+	if !validStatusTransition(project.Status, target) {
+		writeError(w, http.StatusBadRequest, "INVALID_TRANSITION", "invalid status transition")
+		return
+	}
+
+	if err := h.projectStore.UpdateStatus(r.Context(), orgID, projectID, string(target)); err != nil {
+		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update project status")
+		return
+	}
+
+	project.Status = target
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.Project]{Data: project})
+}
+
+// Task sub-endpoints
+
+func (h *ProjectHandler) CreateTask(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		return
+	}
+
+	// Verify project exists
+	if _, err := h.projectStore.GetByID(r.Context(), orgID, projectID); err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "project not found")
+		return
+	}
+
+	var req struct {
+		Title       string  `json:"title"`
+		Description *string `json:"description"`
+		Approach    *string `json:"approach"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+
+	if req.Title == "" {
+		writeError(w, http.StatusBadRequest, "MISSING_FIELD", "title is required")
+		return
+	}
+
+	maxBatch, err := h.projectTaskStore.GetMaxBatchNumber(r.Context(), orgID, projectID)
+	if err != nil {
+		maxBatch = 0
+	}
+
+	task := models.ProjectTask{
+		ProjectID:   projectID,
+		OrgID:       orgID,
+		Title:       req.Title,
+		Description: req.Description,
+		Approach:    req.Approach,
+		Status:      models.ProjectTaskStatusPending,
+		BatchNumber: maxBatch + 1,
+	}
+
+	if err := h.projectTaskStore.Create(r.Context(), &task); err != nil {
+		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create task")
+		return
+	}
+
+	// Update project progress counts
+	_ = h.projectStore.UpdateProgress(r.Context(), orgID, projectID)
+
+	writeJSON(w, http.StatusCreated, models.SingleResponse[models.ProjectTask]{Data: task})
+}
+
+func (h *ProjectHandler) UpdateTask(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		return
+	}
+	taskID, err := uuid.Parse(chi.URLParam(r, "taskId"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid task ID")
+		return
+	}
+
+	task, err := h.projectTaskStore.GetByID(r.Context(), orgID, taskID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "task not found")
+		return
+	}
+	if task.ProjectID != projectID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "task not found")
+		return
+	}
+
+	var req struct {
+		Title        *string `json:"title"`
+		Description  *string `json:"description"`
+		Approach     *string `json:"approach"`
+		Status       *string `json:"status"`
+		OutcomeNotes *string `json:"outcome_notes"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+
+	if req.Title != nil {
+		task.Title = *req.Title
+	}
+	if req.Description != nil {
+		task.Description = req.Description
+	}
+	if req.Approach != nil {
+		task.Approach = req.Approach
+	}
+	if req.Status != nil {
+		newStatus := models.ProjectTaskStatus(*req.Status)
+		if err := newStatus.Validate(); err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_STATUS", err.Error())
+			return
+		}
+		task.Status = newStatus
+	}
+	if req.OutcomeNotes != nil {
+		task.OutcomeNotes = req.OutcomeNotes
+	}
+
+	if err := h.projectTaskStore.Update(r.Context(), &task); err != nil {
+		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update task")
+		return
+	}
+
+	_ = h.projectStore.UpdateProgress(r.Context(), orgID, task.ProjectID)
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.ProjectTask]{Data: task})
+}
+
+func (h *ProjectHandler) DeleteTask(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		return
+	}
+	taskID, err := uuid.Parse(chi.URLParam(r, "taskId"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid task ID")
+		return
+	}
+
+	task, err := h.projectTaskStore.GetByID(r.Context(), orgID, taskID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "task not found")
+		return
+	}
+	if task.ProjectID != projectID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "task not found")
+		return
+	}
+
+	if err := h.projectTaskStore.Delete(r.Context(), orgID, taskID); err != nil {
+		writeError(w, http.StatusInternalServerError, "DELETE_FAILED", "failed to delete task")
+		return
+	}
+
+	_ = h.projectStore.UpdateProgress(r.Context(), orgID, task.ProjectID)
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *ProjectHandler) RetryTask(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		return
+	}
+	taskID, err := uuid.Parse(chi.URLParam(r, "taskId"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid task ID")
+		return
+	}
+
+	task, err := h.projectTaskStore.GetByID(r.Context(), orgID, taskID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "task not found")
+		return
+	}
+	if task.ProjectID != projectID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "task not found")
+		return
+	}
+
+	if task.Status != models.ProjectTaskStatusFailed {
+		writeError(w, http.StatusBadRequest, "INVALID_STATUS", "only failed tasks can be retried")
+		return
+	}
+
+	task.Status = models.ProjectTaskStatusPending
+	task.RetryCount++
+
+	if err := h.projectTaskStore.Update(r.Context(), &task); err != nil {
+		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to retry task")
+		return
+	}
+
+	_ = h.projectStore.UpdateProgress(r.Context(), orgID, task.ProjectID)
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.ProjectTask]{Data: task})
+}
+
+// Cycle endpoints
+
+func (h *ProjectHandler) ListCycles(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		return
+	}
+
+	limit := queryInt(r, "limit", 20)
+
+	cycles, err := h.projectCycleStore.ListByProject(r.Context(), orgID, projectID, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list cycles")
+		return
+	}
+	if cycles == nil {
+		cycles = []models.ProjectCycle{}
+	}
+
+	writeJSON(w, http.StatusOK, models.ListResponse[models.ProjectCycle]{
+		Data: cycles,
+		Meta: models.PaginationMeta{},
+	})
+}
+
+func (h *ProjectHandler) GetCycle(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	cycleID, err := uuid.Parse(chi.URLParam(r, "cycleId"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid cycle ID")
+		return
+	}
+
+	cycle, err := h.projectCycleStore.GetByID(r.Context(), orgID, cycleID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "cycle not found")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.ProjectCycle]{Data: cycle})
+}

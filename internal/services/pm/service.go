@@ -54,20 +54,45 @@ type decisionLogStore interface {
 	UpdateOutcome(ctx context.Context, orgID, planID, issueID uuid.UUID, outcome models.PMDecisionOutcome) error
 }
 
+type projectStore interface {
+	ListByOrg(ctx context.Context, orgID uuid.UUID, filters db.ProjectFilters) ([]models.Project, error)
+	GetByID(ctx context.Context, orgID, projectID uuid.UUID) (models.Project, error)
+	Update(ctx context.Context, p *models.Project) error
+	UpdateProgress(ctx context.Context, orgID, projectID uuid.UUID) error
+	UpdateStatus(ctx context.Context, orgID, projectID uuid.UUID, status string) error
+}
+
+type projectTaskStore interface {
+	Create(ctx context.Context, t *models.ProjectTask) error
+	GetByID(ctx context.Context, orgID, taskID uuid.UUID) (models.ProjectTask, error)
+	ListByProject(ctx context.Context, orgID, projectID uuid.UUID, filters db.ProjectTaskFilters) ([]models.ProjectTask, error)
+	Update(ctx context.Context, t *models.ProjectTask) error
+	CountByProjectAndStatus(ctx context.Context, orgID, projectID uuid.UUID, status string) (int, error)
+	GetMaxBatchNumber(ctx context.Context, orgID, projectID uuid.UUID) (int, error)
+}
+
+type projectCycleStore interface {
+	Create(ctx context.Context, c *models.ProjectCycle) error
+	ListByProject(ctx context.Context, orgID, projectID uuid.UUID, limit int) ([]models.ProjectCycle, error)
+}
+
 // Service is the AI Product Manager. It runs the PM agent and delegates work.
 type Service struct {
-	issues       issueStore
-	agentRuns    agentRunStore
-	pullRequests prStore
-	orgs         orgStore
-	repos        repoStore
-	jobs         jobStore
-	plans        planStore
-	decisionLog  decisionLogStore
-	sandbox      agent.SandboxProvider
-	adapter      agent.AgentAdapter
-	github       agent.GitHubTokenProvider
-	logger       zerolog.Logger
+	issues        issueStore
+	agentRuns     agentRunStore
+	pullRequests  prStore
+	orgs          orgStore
+	repos         repoStore
+	jobs          jobStore
+	plans         planStore
+	decisionLog   decisionLogStore
+	projects      projectStore      // nil-safe: projects feature disabled if nil
+	projectTasks  projectTaskStore  // nil-safe
+	projectCycles projectCycleStore // nil-safe
+	sandbox       agent.SandboxProvider
+	adapter       agent.AgentAdapter
+	github        agent.GitHubTokenProvider
+	logger        zerolog.Logger
 }
 
 func NewService(
@@ -100,8 +125,13 @@ func NewService(
 	}
 }
 
-// Analyze runs PM analysis for an org. When repoID is non-nil, analysis is
-// scoped to that repository and repo-level PM settings are applied.
+// SetProjectStores injects project store dependencies. Nil-safe: if not called, projects feature is disabled.
+func (s *Service) SetProjectStores(projects projectStore, tasks projectTaskStore, cycles projectCycleStore) {
+	s.projects = projects
+	s.projectTasks = tasks
+	s.projectCycles = cycles
+}
+
 func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID) (*Plan, error) {
 	if s.adapter == nil || s.sandbox == nil {
 		return nil, fmt.Errorf("pm adapter or sandbox not configured")
@@ -190,7 +220,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	}
 
 	prompt := &agent.AgentPrompt{
-		SystemPrompt: buildPMSystemPrompt(available, ctxBundle.pmContext.MaxConcurrentRuns),
+		SystemPrompt: buildPMSystemPrompt(available, ctxBundle.pmContext.MaxConcurrentRuns, len(ctxBundle.pmContext.ActiveProjects)),
 		UserPrompt:   string(contextJSON),
 		MaxTokens:    pmMaxTokens,
 	}
@@ -244,6 +274,15 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 
 	if err := s.executePlan(ctx, orgID, plan, ctxBundle.settings, ctxBundle.productContext); err != nil {
 		return nil, fmt.Errorf("execute plan: %w", err)
+	}
+
+	// Execute project plans if projects feature is enabled.
+	if s.projects != nil && s.projectTasks != nil && s.projectCycles != nil {
+		for _, pp := range plan.ProjectPlans {
+			if err := s.executeProjectPlan(ctx, orgID, &pp, ctxBundle.settings, plan.ID); err != nil {
+				s.logger.Error().Err(err).Str("project_id", pp.ProjectID.String()).Msg("failed to execute project plan")
+			}
+		}
 	}
 
 	plan.Status = models.PMPlanStatusCompleted
