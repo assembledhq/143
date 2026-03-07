@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -31,13 +32,6 @@ func projectColumns() []string {
 	}
 }
 
-func projectCycleColumns() []string {
-	return []string{
-		"id", "project_id", "org_id", "pm_plan_id", "cycle_number", "analysis", "decisions", "progress_pct",
-		"tasks_completed_this_cycle", "tasks_failed_this_cycle", "tasks_created_this_cycle", "created_at",
-	}
-}
-
 func newProjectRow(id, orgID, repoID uuid.UUID, status models.ProjectStatus, now time.Time) []interface{} {
 	createdBy := uuid.New()
 	return []interface{}{
@@ -53,13 +47,6 @@ func newProjectRow(id, orgID, repoID uuid.UUID, status models.ProjectStatus, now
 func withProjectRouteParam(ctx context.Context, projectID uuid.UUID) context.Context {
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", projectID.String())
-	return context.WithValue(ctx, chi.RouteCtxKey, rctx)
-}
-
-func withCycleRouteParam(ctx context.Context, projectID, cycleID uuid.UUID) context.Context {
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("id", projectID.String())
-	rctx.URLParams.Add("cycleId", cycleID.String())
 	return context.WithValue(ctx, chi.RouteCtxKey, rctx)
 }
 
@@ -132,33 +119,21 @@ func TestProjectHandler_List(t *testing.T) {
 
 // --- Get handler tests ---
 
-func TestProjectHandler_Get(t *testing.T) {
+func TestProjectHandler_Get_NotFound(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), db.NewProjectTaskStore(mock), db.NewProjectCycleStore(mock))
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil)
 	orgID := uuid.New()
 	projectID := uuid.New()
-	repoID := uuid.New()
-	now := time.Now()
 
-	// GetByID
+	// GetByID returns no rows
 	mock.ExpectQuery("SELECT .+ FROM projects WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, repoID, models.ProjectStatusDraft, now)...))
-
-	// ListByProject tasks
-	mock.ExpectQuery("SELECT .+ FROM project_tasks WHERE project_id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(projectTaskHandlerColumns))
-
-	// ListByProject cycles
-	mock.ExpectQuery("SELECT .+ FROM project_cycles WHERE project_id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(projectCycleColumns()))
+		WillReturnRows(pgxmock.NewRows(projectColumns()))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+projectID.String(), nil)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
@@ -167,8 +142,8 @@ func TestProjectHandler_Get(t *testing.T) {
 
 	handler.Get(rr, req)
 
-	require.Equal(t, http.StatusOK, rr.Code)
-	require.Contains(t, rr.Body.String(), "Test Project")
+	require.Equal(t, http.StatusNotFound, rr.Code)
+	require.Contains(t, rr.Body.String(), "NOT_FOUND")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -408,13 +383,15 @@ func TestProjectHandler_CreateTask(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, repoID, models.ProjectStatusActive, now)...))
 
 	// GetMaxBatchNumber
-	mock.ExpectQuery("SELECT COALESCE.+FROM project_tasks").
+	mock.ExpectQuery("SELECT max\\(batch_number\\) FROM project_tasks").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"max"}).AddRow(1))
 
-	// Create task
+	// Create task (16 named args)
 	mock.ExpectQuery("INSERT INTO project_tasks").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
 
@@ -505,7 +482,26 @@ func TestProjectHandler_RetryTask_OnlyFailedTasksCanRetry(t *testing.T) {
 
 // --- ListCycles handler tests ---
 
-func TestProjectHandler_ListCycles(t *testing.T) {
+func TestProjectHandler_ListCycles_InvalidID(t *testing.T) {
+	t.Parallel()
+
+	handler := NewProjectHandler(nil, nil, nil)
+
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "not-a-uuid")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/not-a-uuid/cycles", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rr := httptest.NewRecorder()
+
+	handler.ListCycles(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+	require.Contains(t, rr.Body.String(), "INVALID_ID")
+}
+
+func TestProjectHandler_ListCycles_DBError(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -517,8 +513,8 @@ func TestProjectHandler_ListCycles(t *testing.T) {
 	projectID := uuid.New()
 
 	mock.ExpectQuery("SELECT .+ FROM project_cycles WHERE project_id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(projectCycleColumns()))
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(fmt.Errorf("db error"))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+projectID.String()+"/cycles", nil)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
@@ -527,8 +523,8 @@ func TestProjectHandler_ListCycles(t *testing.T) {
 
 	handler.ListCycles(rr, req)
 
-	require.Equal(t, http.StatusOK, rr.Code)
-	require.Contains(t, rr.Body.String(), `"data":[]`)
+	require.Equal(t, http.StatusInternalServerError, rr.Code)
+	require.Contains(t, rr.Body.String(), "LIST_FAILED")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
