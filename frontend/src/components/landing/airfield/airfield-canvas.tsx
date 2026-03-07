@@ -510,56 +510,44 @@ function drawRadarRoom(
     }
   }
 
-  // Main blip
-  if (p > 0.25) {
-    const ba = Math.min(1, (p - 0.25) / 0.15);
-    const bAngle = -Math.PI * 0.3;
-    const bDist = r * 0.62;
-    const bx = cx + Math.cos(bAngle) * bDist;
-    const by = cy + Math.sin(bAngle) * bDist;
+  // Signal blips — multiple types appearing across the production surface
+  const signals = [
+    { angle: -Math.PI * 0.3,  dist: 0.62, label: "BUG",       detail: "TypeError: null ref",       color: "255, 60, 40",  threshold: 0.15 },
+    { angle: Math.PI * 0.15,  dist: 0.45, label: "ISSUE",     detail: "LIN-342: auth flow",        color: "255, 180, 40", threshold: 0.30 },
+    { angle: -Math.PI * 0.7,  dist: 0.55, label: "PROJECT",   detail: "DB migration v3",           color: "100, 140, 255", threshold: 0.45 },
+    { angle: Math.PI * 0.6,   dist: 0.38, label: "TECH DEBT", detail: "deprecated API calls",      color: "180, 120, 255", threshold: 0.60 },
+    { angle: -Math.PI * 0.05, dist: 0.75, label: "SUPPORT",   detail: "\"login broken on mobile\"", color: "255, 140, 80",  threshold: 0.75 },
+  ];
 
-    const glow = ctx.createRadialGradient(bx, by, 0, bx, by, 20);
-    glow.addColorStop(0, `rgba(255, 50, 30, ${ba * 0.7})`);
-    glow.addColorStop(1, "rgba(255, 50, 30, 0)");
+  for (const sig of signals) {
+    if (p <= sig.threshold) continue;
+    const ba = Math.min(1, (p - sig.threshold) / 0.12);
+    const bx = cx + Math.cos(sig.angle) * r * sig.dist;
+    const by = cy + Math.sin(sig.angle) * r * sig.dist;
+
+    // Glow
+    const glow = ctx.createRadialGradient(bx, by, 0, bx, by, 16);
+    glow.addColorStop(0, `rgba(${sig.color}, ${ba * 0.6})`);
+    glow.addColorStop(1, `rgba(${sig.color}, 0)`);
     ctx.fillStyle = glow;
-    ctx.beginPath(); ctx.arc(bx, by, 20, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(bx, by, 16, 0, Math.PI * 2); ctx.fill();
 
-    const blink = Math.sin(time * 0.005) > 0 ? 1 : 0.4;
-    ctx.fillStyle = `rgba(255, 60, 40, ${ba * blink})`;
-    ctx.beginPath(); ctx.arc(bx, by, 5, 0, Math.PI * 2); ctx.fill();
+    // Dot
+    const blink = Math.sin(time * 0.005 + sig.threshold * 10) > 0 ? 1 : 0.4;
+    ctx.fillStyle = `rgba(${sig.color}, ${ba * blink})`;
+    ctx.beginPath(); ctx.arc(bx, by, 4, 0, Math.PI * 2); ctx.fill();
 
-    // Tracking brackets
-    if (p > 0.4) {
-      const tb = Math.min(1, (p - 0.4) / 0.1);
-      ctx.strokeStyle = `rgba(255, 60, 40, ${tb * 0.7})`;
-      ctx.lineWidth = 1.5;
-      const bs = 14;
-      const corners = [[-bs, -bs], [bs, -bs], [bs, bs], [-bs, bs]];
-      for (const [dx, dy] of corners) {
-        ctx.beginPath();
-        ctx.moveTo(bx + dx, by + dy + (dy < 0 ? 5 : -5) * Math.sign(dy));
-        ctx.lineTo(bx + dx, by + dy);
-        ctx.lineTo(bx + dx + (dx < 0 ? 5 : -5) * Math.sign(dx), by + dy);
-        ctx.stroke();
-      }
-    }
-
-    if (p > 0.45) {
-      const la = Math.min(1, (p - 0.45) / 0.15);
-      ctx.fillStyle = `rgba(255, 60, 40, ${la})`;
-      ctx.font = "bold 14px monospace";
+    // Label
+    if (p > sig.threshold + 0.06) {
+      const la = Math.min(1, (p - sig.threshold - 0.06) / 0.08);
+      ctx.fillStyle = `rgba(${sig.color}, ${la * 0.9})`;
+      ctx.font = "bold 11px monospace";
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
-      ctx.fillText("INCIDENT", bx + 18, by - 8);
-
-      if (p > 0.6) {
-        const da = Math.min(1, (p - 0.6) / 0.15);
-        ctx.fillStyle = `rgba(0, 220, 80, ${da * 0.8})`;
-        ctx.font = "12px monospace";
-        ctx.fillText("TypeError: null ref", bx + 18, by + 8);
-        ctx.fillText("POST /api/users 500", bx + 18, by + 22);
-        ctx.fillText("src/handlers/user.ts:142", bx + 18, by + 36);
-      }
+      ctx.fillText(sig.label, bx + 14, by - 6);
+      ctx.fillStyle = `rgba(0, 220, 80, ${la * 0.5})`;
+      ctx.font = "10px monospace";
+      ctx.fillText(sig.detail, bx + 14, by + 8);
     }
   }
 
@@ -573,10 +561,11 @@ function drawRadarRoom(
   drawVignette(ctx, w, h, 0.5);
 
   // Corner data blocks (bumped sizes)
-  hudText(ctx, 24, 22, "ALERT RECEIVED", 0.6, 14);
-  hudText(ctx, 24, 40, "SENTRY \u2022 LINEAR \u2022 PAGERDUTY", 0.25, 10);
+  const signalCount = signals.filter(s => p > s.threshold).length;
+  hudText(ctx, 24, 22, "PRODUCTION SURFACE", 0.6, 14);
+  hudText(ctx, 24, 40, "SENTRY \u2022 LINEAR \u2022 SUPPORT \u2022 ROADMAP", 0.25, 10);
   hudText(ctx, w - 24, 22, "STEP 1/6", 0.35, 11, "right");
-  hudText(ctx, w - 24, 38, p > 0.25 ? "1 INCIDENT" : "MONITORING", p > 0.25 ? 0.6 : 0.3, 10, "right");
+  hudText(ctx, w - 24, 38, signalCount > 0 ? `${signalCount} SIGNALS` : "MONITORING", signalCount > 0 ? 0.6 : 0.3, 10, "right");
 
   // Bottom status bar
   ctx.fillStyle = "rgba(0, 180, 60, 0.08)";
@@ -996,9 +985,58 @@ function drawScramble(
   drawVignette(ctx, w, h, 0.35);
 
   // ── 13. HUD text ──
-  hudText(ctx, 24, 22, "AGENT ACTIVATED", 0.6, 14);
-  hudText(ctx, 24, 40, p > 0.4 ? "CODEBASE LOADED" : "LOADING CONTEXT...", 0.25, 10);
+  hudText(ctx, 24, 22, "PROJECT LOADED", 0.6, 14);
+  hudText(ctx, 24, 40, p > 0.4 ? "12 TASKS SEQUENCED" : "BREAKING DOWN...", 0.25, 10);
   hudText(ctx, w - 24, 22, "STEP 2/6", 0.35, 11, "right");
+
+  // Project task breakdown — HUD overlay on the right side
+  if (p > 0.2) {
+    const taskAlpha = Math.min(1, (p - 0.2) / 0.15);
+    const taskX = w * 0.72;
+    const taskY = h * 0.42;
+    const taskW = Math.min(200, w * 0.22);
+    const taskH = 120;
+
+    // Panel background
+    ctx.fillStyle = `rgba(2, 8, 4, ${0.6 * taskAlpha})`;
+    ctx.beginPath();
+    ctx.roundRect(taskX, taskY, taskW, taskH, 3);
+    ctx.fill();
+    ctx.strokeStyle = `rgba(0, 255, 100, ${0.15 * taskAlpha})`;
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    ctx.roundRect(taskX, taskY, taskW, taskH, 3);
+    ctx.stroke();
+
+    // Header
+    ctx.fillStyle = `rgba(0, 255, 100, ${0.6 * taskAlpha})`;
+    ctx.font = "bold 10px monospace";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillText("PROJECT: DB MIGRATION V3", taskX + 8, taskY + 14);
+
+    // Task items appearing over time
+    const tasks = [
+      { label: "1. Schema changes", done: p > 0.35 },
+      { label: "2. Migration scripts", done: p > 0.50 },
+      { label: "3. Update queries", done: false },
+      { label: "4. Integration tests", done: false },
+      { label: "5. Rollback plan", done: false },
+    ];
+
+    ctx.font = "9px monospace";
+    for (let i = 0; i < tasks.length; i++) {
+      const taskThreshold = 0.25 + i * 0.08;
+      if (p <= taskThreshold) continue;
+      const ta = Math.min(1, (p - taskThreshold) / 0.06) * taskAlpha;
+      const lineY = taskY + 32 + i * 16;
+      const check = tasks[i].done ? "\u2713 " : "  ";
+      ctx.fillStyle = tasks[i].done
+        ? `rgba(0, 255, 100, ${ta * 0.7})`
+        : `rgba(0, 255, 100, ${ta * 0.35})`;
+      ctx.fillText(check + tasks[i].label, taskX + 8, lineY);
+    }
+  }
 }
 
 // ── Scene 3: Cockpit Launch ──────────────────────────────────
@@ -1087,22 +1125,24 @@ function drawCockpitLaunch(
 
   cockpitFrame(ctx, w, h);
 
-  // HUD readouts (bumped sizes)
-  const filesScanned = Math.round(20 + p * 2400);
-  const depth = p > 0.55 ? Math.round((p - 0.55) * 12) : 0;
-  hudText(ctx, w * 0.14, h * 0.30, `${filesScanned} FILES`, 0.7, 16);
-  hudText(ctx, w * 0.14, h * 0.35, `${Math.round(p * 48)} MODULES`, 0.4, 12);
-  if (depth > 0) {
-    hudText(ctx, w * 0.86, h * 0.30, `DEPTH ${depth}`, 0.7, 16, "right");
-    hudText(ctx, w * 0.86, h * 0.35, `${Math.round(depth * 3)} REFS`, 0.4, 12, "right");
+  // HUD readouts — priority balancing
+  const bugsQueued = Math.round(3 + p * 8);
+  const projectTasks = Math.round(2 + p * 12);
+  hudText(ctx, w * 0.14, h * 0.30, `${bugsQueued} BUGS`, 0.7, 16);
+  hudText(ctx, w * 0.14, h * 0.35, `${projectTasks} PROJECT TASKS`, 0.4, 12);
+  if (p > 0.4) {
+    const prioAlpha = Math.min(1, (p - 0.4) / 0.15);
+    hudText(ctx, w * 0.86, h * 0.30, "PRIORITY: AUTH", prioAlpha * 0.7, 14, "right");
+    hudText(ctx, w * 0.86, h * 0.35, "\"focus on auth\"", prioAlpha * 0.4, 11, "right");
   }
-  hudText(ctx, w * 0.5, h * 0.12, p > 0.55 ? "SCANNING CALL GRAPH" : "LOADING CODEBASE", 0.5, 14, "center");
+
+  const statusMsg = p > 0.6 ? "PM OPTIMIZING" : p > 0.3 ? "DIRECTION SET" : "READING PRIORITIES";
+  hudText(ctx, w * 0.5, h * 0.12, statusMsg, 0.5, 14, "center");
 
   // Blinking cursor after status text
   if (Math.sin(time * 0.005) > 0) {
-    const statusText = p > 0.55 ? "SCANNING CALL GRAPH" : "LOADING CODEBASE";
     ctx.font = "bold 14px monospace";
-    const textW = ctx.measureText(statusText).width;
+    const textW = ctx.measureText(statusMsg).width;
     hudText(ctx, w * 0.5 + textW / 2 + 6, h * 0.12, "\u2588", 0.4, 14, "left");
   }
 
@@ -1112,11 +1152,18 @@ function drawCockpitLaunch(
   ctx.beginPath(); ctx.moveTo(w * 0.3, h * 0.06); ctx.lineTo(w * 0.7, h * 0.06); ctx.stroke();
   hudText(ctx, w * 0.5, h * 0.06, "\u25BD", 0.4, 12, "center");
 
+  // Autopilot indicator
+  if (p > 0.55) {
+    const apAlpha = Math.min(1, (p - 0.55) / 0.15);
+    const apBlink = Math.sin(time * 0.004) > 0 ? 1 : 0.6;
+    hudText(ctx, w * 0.5, h * 0.20, "AUTOPILOT ENGAGED", apAlpha * apBlink * 0.6, 12, "center");
+  }
+
   drawCRTGrain(ctx, w, h, time, 0.02);
   drawVignette(ctx, w, h, 0.3);
 
-  hudText(ctx, 24, 22, "ROOT CAUSE ANALYSIS", 0.6, 14);
-  hudText(ctx, 24, 40, "TRACING CALL GRAPH", 0.25, 10);
+  hudText(ctx, 24, 22, "YOU GUIDE", 0.6, 14);
+  hudText(ctx, 24, 40, "PM BALANCING WORKSTREAMS", 0.25, 10);
   hudText(ctx, w - 24, 22, "STEP 3/6", 0.35, 11, "right");
 }
 
@@ -1497,12 +1544,12 @@ function drawLockOn(
     const la = Math.min(1, (p - 0.7) / 0.15);
     const blink = Math.sin(time * 0.01) > 0 ? 1 : 0.5;
 
-    // "PATCH READY" flashing text
+    // "CHANGES READY" flashing text
     ctx.fillStyle = `rgba(255,60,40,${la * blink * fadeIn})`;
     ctx.font = "bold 16px monospace";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText("PATCH READY", rcx, rcy + rs + 30);
+    ctx.fillText("CHANGES READY", rcx, rcy + rs + 30);
 
     // Pulsing concentric lock rings
     const pulse = Math.sin(time * 0.008);
@@ -1524,29 +1571,57 @@ function drawLockOn(
   hudText(ctx, w * 0.86, h * 0.30, `DIFF +${linesAdded} -${linesRemoved}`, 0.7 * fadeIn, 13, "right");
   hudText(ctx, w * 0.86, h * 0.34, `${filesCount} FILES`, 0.4 * fadeIn, 11, "right");
 
-  // Sandbox active (pulsing)
-  const sandboxPulse = 0.3 + Math.sin(time * 0.004) * 0.15;
-  hudText(ctx, w * 0.14, h * 0.35, "SANDBOX ACTIVE", sandboxPulse * fadeIn, 11);
+  // Agent type indicator (pulsing)
+  const agentPulse = 0.3 + Math.sin(time * 0.004) * 0.15;
+  hudText(ctx, w * 0.14, h * 0.35, "SANDBOX ACTIVE", agentPulse * fadeIn, 11);
 
-  // ── 15. Cockpit frame + post-processing ─────────────────────
+  // ── 15. Agent labels — BYOA indicator panel ─────────────────
+  if (p > 0.15) {
+    const agentFade = Math.min(1, (p - 0.15) / 0.15) * fadeIn;
+    const agents = [
+      { name: "CLAUDE CODE", active: true },
+      { name: "CODEX", active: p > 0.35 },
+      { name: "GEMINI CLI", active: p > 0.55 },
+    ];
+    const apX = w * 0.14;
+    const apY = h * 0.58;
+    ctx.fillStyle = `rgba(0, 255, 100, ${0.45 * agentFade})`;
+    ctx.font = "bold 9px monospace";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillText("AGENTS DISPATCHED", apX, apY);
+    for (let i = 0; i < agents.length; i++) {
+      const ag = agents[i];
+      const agAlpha = ag.active ? 0.7 : 0.2;
+      const dot = ag.active ? "\u25CF " : "\u25CB ";
+      ctx.fillStyle = ag.active
+        ? `rgba(0, 255, 100, ${agAlpha * agentFade})`
+        : `rgba(0, 255, 100, ${agAlpha * agentFade})`;
+      ctx.font = "9px monospace";
+      ctx.fillText(dot + ag.name, apX, apY + 14 + i * 13);
+    }
+  }
+
+  // ── 16. Cockpit frame + post-processing ─────────────────────
   cockpitFrame(ctx, w, h);
 
-  // Center status "GENERATING PATCH" with blinking cursor
-  hudText(ctx, w * 0.5, h * 0.12, "GENERATING PATCH", 0.5 * fadeIn, 14, "center");
+  // Center status
+  const agentStatus = p > 0.5 ? "AGENTS BUILDING" : "DISPATCHING AGENTS";
+  hudText(ctx, w * 0.5, h * 0.12, agentStatus, 0.5 * fadeIn, 14, "center");
   if (Math.sin(time * 0.005) > 0) {
     ctx.font = "bold 14px monospace";
-    const tw = ctx.measureText("GENERATING PATCH").width;
+    const tw = ctx.measureText(agentStatus).width;
     hudText(ctx, w * 0.5 + tw / 2 + 6, h * 0.12, "\u2588", 0.4 * fadeIn, 14, "left");
   }
 
   drawCRTGrain(ctx, w, h, time, 0.02);
   drawVignette(ctx, w, h, 0.3);
 
-  // ── 16. HUD text labels ─────────────────────────────────────
-  hudText(ctx, 24, 22, "FIX GENERATED", 0.6 * fadeIn, 14);
-  hudText(ctx, 24, 40, "BUILDING PATCH", 0.25 * fadeIn, 10);
+  // ── 17. HUD text labels ─────────────────────────────────────
+  hudText(ctx, 24, 22, "YOUR AGENTS", 0.6 * fadeIn, 14);
+  hudText(ctx, 24, 40, "MULTI-AGENT EXECUTION", 0.25 * fadeIn, 10);
   hudText(ctx, w - 24, 22, "STEP 4/6", 0.35 * fadeIn, 11, "right");
-  hudText(ctx, w * 0.14, h * 0.30, "BUILDING FIX", 0.6 * fadeIn, 15);
+  hudText(ctx, w * 0.14, h * 0.30, "AGENTS EXECUTE", 0.6 * fadeIn, 15);
 }
 
 // ── Scene 5: Neutralized ─────────────────────────────────────
@@ -1674,11 +1749,11 @@ function drawNeutralized(
   }
 
   cockpitFrame(ctx, w, h);
-  hudText(ctx, w * 0.5, h * 0.12, p > 0.3 ? "47/47 PASSED" : "RUNNING TESTS", p > 0.3 ? 0.6 : 0.4, 14, "center");
+  hudText(ctx, w * 0.5, h * 0.12, p > 0.3 ? "47/47 PASSED" : "YOUR CI RUNNING", p > 0.3 ? 0.6 : 0.4, 14, "center");
 
   // Blinking cursor
   if (Math.sin(time * 0.005) > 0) {
-    const stxt = p > 0.3 ? "47/47 PASSED" : "RUNNING TESTS";
+    const stxt = p > 0.3 ? "47/47 PASSED" : "YOUR CI RUNNING";
     ctx.font = "bold 14px monospace";
     const tw = ctx.measureText(stxt).width;
     hudText(ctx, w * 0.5 + tw / 2 + 6, h * 0.12, "\u2588", 0.4, 14, "left");
@@ -1687,8 +1762,8 @@ function drawNeutralized(
   drawCRTGrain(ctx, w, h, time, 0.02);
   drawVignette(ctx, w, h, 0.3);
 
-  hudText(ctx, 24, 22, "TESTS PASSING", 0.6, 14);
-  hudText(ctx, 24, 40, "VALIDATING FIX", 0.25, 10);
+  hudText(ctx, 24, 22, "YOUR PIPELINE", 0.6, 14);
+  hudText(ctx, 24, 40, "YOUR STANDARDS", 0.25, 10);
   hudText(ctx, w - 24, 22, "STEP 5/6", 0.35, 11, "right");
 }
 
@@ -1825,15 +1900,15 @@ function drawReturnToBase(
   drawVignette(ctx, w, h, 0.4);
 
   // ── HUD text — positioned well clear of moon ──
-  hudText(ctx, 24, 22, "PR MERGED", 0.6, 14);
-  hudText(ctx, 24, 40, "main \u2190 fix/null-ref-users", 0.25, 10);
+  hudText(ctx, 24, 22, "PR SHIPPED", 0.6, 14);
+  hudText(ctx, 24, 40, "LINKED TO ORIGINAL ISSUES", 0.25, 10);
   hudText(ctx, w - 24, 22, "STEP 6/6", 0.35, 11, "right");
 
   if (p > 0.35) {
-    hudText(ctx, w * 0.5, h * 0.12, "PR MERGED", Math.min(1, (p - 0.35) / 0.2) * 0.8, 22, "center");
+    hudText(ctx, w * 0.5, h * 0.12, "PR SHIPPED", Math.min(1, (p - 0.35) / 0.2) * 0.8, 22, "center");
   }
   if (p > 0.6) {
-    hudText(ctx, w * 0.5, h * 0.18, "ISSUE RESOLVED", Math.min(1, (p - 0.6) / 0.2) * 0.5, 12, "center");
+    hudText(ctx, w * 0.5, h * 0.18, "SYSTEM LEARNING", Math.min(1, (p - 0.6) / 0.2) * 0.5, 12, "center");
   }
 }
 
