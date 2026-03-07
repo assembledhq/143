@@ -80,7 +80,7 @@ type Services struct {
 }
 
 type pmService interface {
-	Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger) (*pm.Plan, error)
+	Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID) (*pm.Plan, error)
 }
 
 // ingest_webhook handler processes a webhook delivery asynchronously.

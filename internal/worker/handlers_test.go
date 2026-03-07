@@ -346,7 +346,7 @@ type mockPMService struct {
 	trigger     models.PMTrigger
 }
 
-func (m *mockPMService) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger) (*pm.Plan, error) {
+func (m *mockPMService) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID) (*pm.Plan, error) {
 	m.calledOrgID = orgID
 	m.trigger = trigger
 	return &pm.Plan{}, nil
