@@ -75,6 +75,12 @@ type JobStore interface {
 	Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
 }
 
+// ProjectTaskUpdater is called after an agent run completes to update
+// the associated project task, if any.
+type ProjectTaskUpdater interface {
+	OnAgentRunComplete(ctx context.Context, run *models.AgentRun, status string) error
+}
+
 // Orchestrator coordinates end-to-end agent execution: sandbox lifecycle,
 // agent invocation, log streaming, result handling, and follow-up job enqueuing.
 type Orchestrator struct {
@@ -84,6 +90,7 @@ type Orchestrator struct {
 	agentRunLogs      AgentRunLogStore
 	agentRunQuestions AgentRunQuestionStore
 	decisionLog       DecisionLogStore
+	projectTasks      ProjectTaskUpdater // can be nil
 	issues            IssueStore
 	repositories      RepositoryStore
 	orgs              OrgStore
@@ -103,6 +110,7 @@ type OrchestratorConfig struct {
 	AgentRunLogs      AgentRunLogStore
 	AgentRunQuestions AgentRunQuestionStore
 	DecisionLog       DecisionLogStore
+	ProjectTasks      ProjectTaskUpdater // optional — updates project tasks on run completion
 	Issues            IssueStore
 	Repositories      RepositoryStore
 	Orgs              OrgStore
@@ -128,6 +136,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		agentRunLogs:      cfg.AgentRunLogs,
 		agentRunQuestions: cfg.AgentRunQuestions,
 		decisionLog:       cfg.DecisionLog,
+		projectTasks:      cfg.ProjectTasks,
 		issues:            cfg.Issues,
 		repositories:      cfg.Repositories,
 		orgs:              cfg.Orgs,
@@ -331,9 +340,20 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error
 	if run.PMPlanID != nil && o.decisionLog != nil {
 		outcome := outcomeFromRunStatus(status)
 		if outcome != "" {
-			if err := o.decisionLog.UpdateOutcome(ctx, run.OrgID, *run.PMPlanID, run.IssueID, outcome); err != nil {
-				o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update PM decision log outcome")
+			if run.IssueID != uuid.Nil {
+				if err := o.decisionLog.UpdateOutcome(ctx, run.OrgID, *run.PMPlanID, run.IssueID, outcome); err != nil {
+					o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update PM decision log outcome")
+				}
+			} else {
+				o.logger.Debug().Str("run_id", run.ID.String()).Msg("skipping PM decision log outcome update because run has no issue_id")
 			}
+		}
+	}
+
+	// 13. Update project task status if this run is part of a project.
+	if run.ProjectTaskID != nil && o.projectTasks != nil {
+		if err := o.projectTasks.OnAgentRunComplete(ctx, run, status); err != nil {
+			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update project task on run completion")
 		}
 	}
 
@@ -435,6 +455,11 @@ func (o *Orchestrator) failRun(ctx context.Context, run *models.AgentRun, errMsg
 	}
 	if err := o.agentRuns.UpdateResult(ctx, run.OrgID, run.ID, "failed", result); err != nil {
 		o.logger.Error().Err(err).Str("run_id", run.ID.String()).Msg("failed to update run to failed")
+	}
+	if run.ProjectTaskID != nil && o.projectTasks != nil {
+		if err := o.projectTasks.OnAgentRunComplete(ctx, run, "failed"); err != nil {
+			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update project task on run failure")
+		}
 	}
 }
 
