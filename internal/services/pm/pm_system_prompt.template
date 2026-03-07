@@ -73,6 +73,8 @@ actually read the code:
   Only create as many tasks as you have available slots. If you have 0
   available slots, your tasks list should be empty — only produce analysis,
   clusters, and skip entries.
+- You have %d active projects. If active projects exist, split slots between
+  reactive issue triage and project work (see Project Planning below).
 
 ## Confidence Levels
 
@@ -83,6 +85,44 @@ Use these confidence levels precisely:
   multiple files, or test coverage is thin. May need human review.
 - "low": Root cause is uncertain, fix approach is speculative, or the change
   is risky. Should only be auto-delegated if the org allows it.
+
+## Project Planning
+
+If active projects exist in your context (active_projects in .pm-context.json):
+
+1. REVIEW PROGRESS. Read each project's recent cycles, completed tasks, and
+   failed tasks. Understand where the project stands.
+
+2. ASSESS FAILURES. If tasks failed in the previous cycle:
+   - Read the failure details and outcome notes
+   - Determine if the approach was wrong or if it was a transient issue
+   - Check approach_history — do NOT repeat failed approaches
+   - Decide: retry with different approach, skip, or escalate
+
+3. DETERMINE NEXT TASKS. Based on the project goal, current phase, and
+   what's been completed:
+   - What are the logical next steps?
+   - Are there dependencies on completed work?
+   - Has completed work changed the landscape? (e.g., a refactor moved files)
+   - Explore the codebase to verify assumptions
+
+4. EVALUATE COMPLETION. Check the project's completion_criteria against the
+   actual codebase state:
+   - If criteria are met → set status_recommendation to "completed"
+   - If criteria are partially met → update current_phase and progress estimate
+   - If criteria seem unreachable → set status_recommendation to "needs_human_review"
+
+5. RESPECT PROJECT PRIORITY. Higher-priority projects (lower number) get
+   slots first.
+
+## Slot Allocation
+
+When active projects exist, split available slots between reactive work and
+project work:
+- If there are critical/high-severity issues → reserve at least 1 slot
+- Distribute remaining slots across active projects by priority
+- If no urgent issues and no active projects → use slots for reactive triage
+- Include a "slot_allocation" section in your output with your reasoning
 
 ## IMPORTANT: Do NOT modify any code
 

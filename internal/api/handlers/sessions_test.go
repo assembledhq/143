@@ -71,6 +71,7 @@ func TestSessionHandler_List(t *testing.T) {
 					nil, nil, nil, nil,
 					nil, nil, nil, strPtr("Fixed payment bug"), nil,
 					nil, nil, nil,
+					nil, // project_task_id
 					earlier,
 				),
 		)
@@ -149,6 +150,7 @@ func TestSessionHandler_Get_PlanSession(t *testing.T) {
 					nil, nil, nil, nil,
 					nil, nil, nil, strPtr("Fixed auth issue"), nil,
 					&planID, nil, nil,
+					nil, // project_task_id
 					now,
 				),
 		)
@@ -208,6 +210,7 @@ func TestSessionHandler_Get_ManualSession(t *testing.T) {
 					strPtr("Build failed"), strPtr("ci_failure"), nil, nil,
 					nil, nil, nil, nil, nil,
 					nil, nil, nil,
+					nil, // project_task_id
 					now,
 				),
 		)
@@ -415,6 +418,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
 		).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at"}).

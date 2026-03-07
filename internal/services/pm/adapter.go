@@ -26,7 +26,7 @@ func (a *PMAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) 
 		return nil, fmt.Errorf("pm adapter requires input")
 	}
 	return &agent.AgentPrompt{
-		SystemPrompt: buildPMSystemPrompt(a.availableSlots, a.maxConcurrent),
+		SystemPrompt: buildPMSystemPrompt(a.availableSlots, a.maxConcurrent, 0),
 		UserPrompt:   input.PMContextJSON,
 		MaxTokens:    pmMaxTokens,
 	}, nil
