@@ -22,7 +22,9 @@ import (
 
 var pmPlanColumns = []string{
 	"id", "org_id", "status", "analysis", "tasks", "clusters", "skipped_issues",
-	"issues_reviewed", "product_context_snapshot", "token_usage", "triggered_by",
+	"issues_reviewed", "in_flight_runs_checked", "past_outcomes_reviewed",
+	"recent_prs_checked", "past_decisions_reviewed", "commits_analyzed",
+	"product_context_snapshot", "token_usage", "triggered_by",
 	"created_at", "completed_at",
 }
 
@@ -55,7 +57,8 @@ func TestSessionHandler_List(t *testing.T) {
 				AddRow(planID, orgID, "completed", "Full analysis of issues",
 					json.RawMessage(`[{"rank":1,"title":"Fix auth","issue_ids":["i1"],"reasoning":"r","approach":"a","risk":"low","complexity":"simple","confidence":"high","status":"delegated"}]`),
 					json.RawMessage(`[]`), json.RawMessage(`[]`),
-					5, json.RawMessage(`{}`), json.RawMessage(`{}`), "cron",
+					5, 0, 0, 0, 0, 0,
+					json.RawMessage(`{}`), json.RawMessage(`{}`), "cron",
 					now, nil,
 				),
 		)
@@ -134,7 +137,8 @@ func TestSessionHandler_Get_PlanSession(t *testing.T) {
 				AddRow(planID, orgID, "completed", "Analysis text",
 					json.RawMessage(`[{"rank":1,"title":"Fix auth","issue_ids":["i1"],"reasoning":"r","approach":"a","risk":"low","complexity":"simple","confidence":"high","status":"delegated","agent_run_id":"`+runID.String()+`"}]`),
 					json.RawMessage(`[]`), json.RawMessage(`[]`),
-					3, json.RawMessage(`{}`), json.RawMessage(`{}`), "manual",
+					3, 0, 0, 0, 0, 0,
+					json.RawMessage(`{}`), json.RawMessage(`{}`), "manual",
 					now, nil,
 				),
 		)

@@ -333,6 +333,62 @@ export interface AgentSession {
   failed_run_count: number;
   created_at: string;
   completed_at?: string;
+  // Project grouping
+  project_id?: string;
+  project_title?: string;
+  // Context counts (plan sessions only)
+  in_flight_runs_checked?: number;
+  past_outcomes_reviewed?: number;
+  recent_prs_checked?: number;
+  past_decisions_reviewed?: number;
+  commits_analyzed?: number;
+}
+
+// PM Decision types for the decisions view
+export type PMDecisionType = 'delegate' | 'skip' | 'cluster';
+export type PMDecisionOutcome = 'succeeded' | 'failed' | 'still_open';
+
+export interface PMDecisionView {
+  id: string;
+  plan_id: string;
+  issue_id?: string;
+  issue_title?: string;
+  project_id?: string;
+  project_title?: string;
+  decision: PMDecisionType;
+  reasoning: string;
+  outcome?: PMDecisionOutcome;
+  created_at: string;
+}
+
+export interface PMDecisionSummary {
+  total_delegated: number;
+  succeeded: number;
+  failed: number;
+  still_open: number;
+}
+
+export interface PMDecisionsResponse {
+  data: PMDecisionView[];
+  summary: PMDecisionSummary;
+  meta: { next_cursor?: string };
+}
+
+export interface PMStatus {
+  is_running: boolean;
+  last_run_at?: string;
+  last_run_status?: string;
+  issues_reviewed: number;
+  success_rate: number;
+  success_count: number;
+  total_delegated: number;
+  next_run_in?: string;
+}
+
+export interface SessionsListResponse {
+  data: AgentSession[];
+  projects: Project[];
+  meta: { next_cursor?: string };
 }
 
 export interface CodexAuthStatus {

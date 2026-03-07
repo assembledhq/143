@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { CalendarClock, RefreshCw, Layers, Wrench, Plus, X, AlertCircle } from "lucide-react";
+import { CalendarClock, Layers, Wrench, FolderKanban } from "lucide-react";
 import Link from "next/link";
 import { useQueryState, parseAsString } from "nuqs";
 import { PageHeader } from "@/components/page-header";
@@ -9,9 +9,10 @@ import { EmptyState } from "@/components/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { PMStatusBanner } from "@/components/pm/pm-status-banner";
+import { DecisionsView } from "@/components/pm/decisions-view";
 import { api } from "@/lib/api";
-import { useAnalyze } from "@/hooks/use-analyze";
-import type { AgentSession } from "@/lib/types";
+import type { AgentSession, Project } from "@/lib/types";
 
 const sessionStatusConfig: Record<string, { color: string; label: string }> = {
   active: { color: "bg-blue-100 text-blue-800", label: "Active" },
@@ -25,11 +26,12 @@ const triggeredByLabels: Record<string, string> = {
   fix_this: "Fix This",
 };
 
-const statusFilterTabs = [
+const filterTabs = [
   { value: "all", label: "All" },
   { value: "active", label: "Active" },
   { value: "completed", label: "Completed" },
   { value: "failed", label: "Failed" },
+  { value: "decisions", label: "Decisions" },
 ];
 
 function formatTimeAgo(dateStr: string): string {
@@ -101,12 +103,18 @@ function SessionRow({ session }: { session: AgentSession }) {
   );
 }
 
-function SessionSection({ title, sessions, badge }: { title: string; sessions: AgentSession[]; badge?: React.ReactNode }) {
+function SessionSection({ title, sessions, badge, icon }: {
+  title: string;
+  sessions: AgentSession[];
+  badge?: React.ReactNode;
+  icon?: React.ReactNode;
+}) {
   if (sessions.length === 0) return null;
   return (
     <Card>
       <CardContent className="p-0">
         <div className="flex items-center gap-2 px-4 py-3 border-b border-border bg-muted/30">
+          {icon}
           <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
             {title}
           </span>
@@ -121,8 +129,83 @@ function SessionSection({ title, sessions, badge }: { title: string; sessions: A
   );
 }
 
+function ProjectGroup({ project, sessions }: { project: Project; sessions: AgentSession[] }) {
+  if (sessions.length === 0) return null;
+
+  const statusColor = project.status === "active" ? "bg-blue-100 text-blue-800"
+    : project.status === "completed" ? "bg-green-100 text-green-800"
+    : "bg-gray-100 text-gray-700";
+
+  return (
+    <Card>
+      <CardContent className="p-0">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-muted/30">
+          <div className="flex items-center gap-2">
+            <FolderKanban className="h-3.5 w-3.5 text-muted-foreground" />
+            <Link
+              href={`/projects/${project.id}`}
+              className="text-xs font-semibold text-foreground hover:underline"
+            >
+              {project.title}
+            </Link>
+            <span className={`inline-flex items-center rounded-full px-1.5 py-0 text-[10px] font-medium ${statusColor}`}>
+              {project.status}
+            </span>
+          </div>
+          <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
+            <span>{project.total_tasks} task{project.total_tasks !== 1 ? "s" : ""}</span>
+            {project.completed_tasks > 0 && (
+              <span className="text-green-600">{project.completed_tasks} completed</span>
+            )}
+            <span>{sessions.length} session{sessions.length !== 1 ? "s" : ""}</span>
+          </div>
+        </div>
+        {sessions.map((session) => (
+          <SessionRow key={session.id} session={session} />
+        ))}
+      </CardContent>
+    </Card>
+  );
+}
+
+function groupSessionsByProject(sessions: AgentSession[], projects: Project[]) {
+  const projectMap = new Map<string, Project>();
+  for (const p of projects) {
+    projectMap.set(p.id, p);
+  }
+
+  const grouped = new Map<string, AgentSession[]>();
+  const ungrouped: AgentSession[] = [];
+
+  for (const session of sessions) {
+    if (session.project_id && projectMap.has(session.project_id)) {
+      const list = grouped.get(session.project_id) ?? [];
+      list.push(session);
+      grouped.set(session.project_id, list);
+    } else {
+      ungrouped.push(session);
+    }
+  }
+
+  // Sort project groups: active projects first, then by most recent session
+  const sortedGroups = Array.from(grouped.entries())
+    .map(([projectId, sessions]) => ({
+      project: projectMap.get(projectId)!,
+      sessions,
+    }))
+    .sort((a, b) => {
+      if (a.project.status === "active" && b.project.status !== "active") return -1;
+      if (a.project.status !== "active" && b.project.status === "active") return 1;
+      const aTime = new Date(a.sessions[0]?.created_at ?? 0).getTime();
+      const bTime = new Date(b.sessions[0]?.created_at ?? 0).getTime();
+      return bTime - aTime;
+    });
+
+  return { sortedGroups, ungrouped };
+}
+
 export function SessionsPageContent() {
-  const [statusFilter, setStatusFilter] = useQueryState("status", parseAsString);
+  const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["sessions"],
@@ -131,75 +214,39 @@ export function SessionsPageContent() {
   });
 
   const allSessions = data?.data ?? [];
+  const projects = data?.projects ?? [];
   const hasActivePlanSession = allSessions.some((s) => s.type === "plan" && s.status === "active");
 
-  const { isAnalyzing, isPending, analyzeError, handleAnalyze, dismissError } = useAnalyze(hasActivePlanSession);
-
-  const sessions = filterSessions(allSessions, statusFilter);
-
-  const showGrouped = !statusFilter || statusFilter === "all";
+  const currentFilter = activeFilter ?? "all";
+  const showDecisions = currentFilter === "decisions";
 
   const activeSessions = allSessions.filter((s) => s.status === "active");
-  const completedSessions = allSessions.filter((s) => s.status === "completed");
   const failedSessions = allSessions.filter((s) => s.status === "failed");
+
+  // For non-decisions views, filter sessions
+  const filteredSessions = showDecisions ? [] : filterSessions(allSessions, activeFilter);
+  const showGrouped = currentFilter === "all";
+
+  const { sortedGroups, ungrouped } = groupSessionsByProject(filteredSessions, projects);
+  const hasProjects = sortedGroups.length > 0;
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="Sessions"
         description="Each PM analysis cycle or manual fix creates a session."
-        action={
-          <div className="flex items-center gap-2">
-            <Button size="sm" variant="outline" asChild>
-              <Link href="/sessions/new">
-                <Plus className="mr-2 h-4 w-4" />
-                New Manual Session
-              </Link>
-            </Button>
-            <Button
-              size="sm"
-              onClick={handleAnalyze}
-              disabled={isPending || isAnalyzing}
-              title="Review open issues, prioritize them, and kick off agent runs"
-            >
-              <RefreshCw className={`mr-2 h-4 w-4 ${isPending || isAnalyzing ? "animate-spin" : ""}`} />
-              {isPending ? "Starting..." : isAnalyzing ? "Analyzing..." : "Analyze Issues"}
-            </Button>
-          </div>
-        }
       />
 
-      {isAnalyzing && (
-        <Card className="border-blue-200 bg-blue-50 dark:border-blue-800 dark:bg-blue-950/30">
-          <CardContent className="flex items-center gap-3 py-3">
-            <RefreshCw className="h-4 w-4 animate-spin text-blue-600 dark:text-blue-400" />
-            <p className="text-sm text-blue-800 dark:text-blue-300">
-              Analysis in progress — reviewing issues and generating a plan. This may take a minute...
-            </p>
-          </CardContent>
-        </Card>
-      )}
-
-      {analyzeError && (
-        <Card className="border-red-200 bg-red-50 dark:border-red-800 dark:bg-red-950/30">
-          <CardContent className="flex items-center gap-3 py-3">
-            <AlertCircle className="h-4 w-4 shrink-0 text-red-600 dark:text-red-400" />
-            <p className="text-sm text-red-800 dark:text-red-300 flex-1">{analyzeError}</p>
-            <Button size="sm" variant="ghost" className="shrink-0 h-6 px-2" onClick={dismissError}>
-              <X className="h-3 w-3" />
-            </Button>
-          </CardContent>
-        </Card>
-      )}
+      <PMStatusBanner hasActivePlanSession={hasActivePlanSession} />
 
       <div className="flex items-center gap-1">
-        {statusFilterTabs.map((tab) => (
+        {filterTabs.map((tab) => (
           <Button
             key={tab.value}
-            variant={(statusFilter ?? "all") === tab.value ? "default" : "ghost"}
+            variant={currentFilter === tab.value ? "default" : "ghost"}
             size="sm"
             className="text-xs"
-            onClick={() => setStatusFilter(tab.value === "all" ? null : tab.value)}
+            onClick={() => setActiveFilter(tab.value === "all" ? null : tab.value)}
           >
             {tab.label}
             {tab.value === "active" && activeSessions.length > 0 && (
@@ -212,7 +259,9 @@ export function SessionsPageContent() {
         ))}
       </div>
 
-      {isLoading && (
+      {showDecisions && <DecisionsView />}
+
+      {!showDecisions && isLoading && (
         <Card>
           <CardContent className="py-12 text-center text-sm text-muted-foreground">
             Loading sessions...
@@ -220,7 +269,7 @@ export function SessionsPageContent() {
         </Card>
       )}
 
-      {error && (
+      {!showDecisions && error && (
         <Card>
           <CardContent className="py-12 text-center text-sm text-muted-foreground">
             Failed to load sessions. Make sure the backend is running.
@@ -228,7 +277,7 @@ export function SessionsPageContent() {
         </Card>
       )}
 
-      {!isLoading && !error && allSessions.length === 0 && (
+      {!showDecisions && !isLoading && !error && allSessions.length === 0 && (
         <EmptyState
           icon={CalendarClock}
           title="No sessions yet"
@@ -236,39 +285,57 @@ export function SessionsPageContent() {
         />
       )}
 
-      {!isLoading && !error && allSessions.length > 0 && showGrouped && (
+      {!showDecisions && !isLoading && !error && allSessions.length > 0 && showGrouped && (
         <div className="space-y-4">
-          <SessionSection
-            title="Active"
-            sessions={activeSessions}
-            badge={
-              activeSessions.length > 0 ? (
-                <span className="relative flex h-2 w-2">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
-                </span>
-              ) : undefined
-            }
-          />
-          <SessionSection title="Failed" sessions={failedSessions} />
-          <SessionSection title="Completed" sessions={completedSessions} />
+          {hasProjects && sortedGroups.map(({ project, sessions }) => (
+            <ProjectGroup key={project.id} project={project} sessions={sessions} />
+          ))}
+
+          {ungrouped.length > 0 && (
+            <>
+              {hasProjects && (
+                <SessionSection
+                  title="Ungrouped"
+                  sessions={ungrouped}
+                />
+              )}
+              {!hasProjects && (
+                <>
+                  <SessionSection
+                    title="Active"
+                    sessions={ungrouped.filter((s) => s.status === "active")}
+                    badge={
+                      activeSessions.length > 0 ? (
+                        <span className="relative flex h-2 w-2">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+                          <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+                        </span>
+                      ) : undefined
+                    }
+                  />
+                  <SessionSection title="Failed" sessions={ungrouped.filter((s) => s.status === "failed")} />
+                  <SessionSection title="Completed" sessions={ungrouped.filter((s) => s.status === "completed")} />
+                </>
+              )}
+            </>
+          )}
         </div>
       )}
 
-      {!isLoading && !error && allSessions.length > 0 && !showGrouped && (
+      {!showDecisions && !isLoading && !error && allSessions.length > 0 && !showGrouped && (
         <Card>
           <CardContent className="p-0">
             <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-muted/30">
               <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                {sessions.length} session{sessions.length !== 1 ? "s" : ""}
+                {filteredSessions.length} session{filteredSessions.length !== 1 ? "s" : ""}
               </span>
             </div>
-            {sessions.length === 0 ? (
+            {filteredSessions.length === 0 ? (
               <div className="py-8 text-center text-sm text-muted-foreground">
                 No sessions match this filter.
               </div>
             ) : (
-              sessions.map((session) => (
+              filteredSessions.map((session) => (
                 <SessionRow key={session.id} session={session} />
               ))
             )}

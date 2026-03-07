@@ -17,6 +17,11 @@ type PMPlan struct {
 	Clusters               json.RawMessage `json:"clusters" db:"clusters"`
 	SkippedIssues          json.RawMessage `json:"skipped_issues" db:"skipped_issues"`
 	IssuesReviewed         int             `json:"issues_reviewed" db:"issues_reviewed"`
+	InFlightRunsChecked    int             `json:"in_flight_runs_checked" db:"in_flight_runs_checked"`
+	PastOutcomesReviewed   int             `json:"past_outcomes_reviewed" db:"past_outcomes_reviewed"`
+	RecentPRsChecked       int             `json:"recent_prs_checked" db:"recent_prs_checked"`
+	PastDecisionsReviewed  int             `json:"past_decisions_reviewed" db:"past_decisions_reviewed"`
+	CommitsAnalyzed        int             `json:"commits_analyzed" db:"commits_analyzed"`
 	ProductContextSnapshot json.RawMessage `json:"product_context_snapshot" db:"product_context_snapshot"`
 	TokenUsage             json.RawMessage `json:"token_usage,omitempty" db:"token_usage"`
 	TriggeredBy            PMTrigger       `json:"triggered_by" db:"triggered_by"`
@@ -26,12 +31,47 @@ type PMPlan struct {
 
 // PMDecisionLogEntry captures a single PM decision for institutional memory.
 type PMDecisionLogEntry struct {
-	ID        uuid.UUID  `json:"id" db:"id"`
-	OrgID     uuid.UUID  `json:"org_id" db:"org_id"`
-	PlanID    uuid.UUID  `json:"plan_id" db:"plan_id"`
-	IssueID   *uuid.UUID `json:"issue_id,omitempty" db:"issue_id"`
-	Decision  PMDecisionType `json:"decision" db:"decision"`
-	Reasoning string     `json:"reasoning" db:"reasoning"`
+	ID        uuid.UUID         `json:"id" db:"id"`
+	OrgID     uuid.UUID         `json:"org_id" db:"org_id"`
+	PlanID    uuid.UUID         `json:"plan_id" db:"plan_id"`
+	IssueID   *uuid.UUID        `json:"issue_id,omitempty" db:"issue_id"`
+	Decision  PMDecisionType    `json:"decision" db:"decision"`
+	Reasoning string            `json:"reasoning" db:"reasoning"`
 	Outcome   PMDecisionOutcome `json:"outcome,omitempty" db:"outcome"`
-	CreatedAt time.Time  `json:"created_at" db:"created_at"`
+	CreatedAt time.Time         `json:"created_at" db:"created_at"`
+}
+
+// PMDecisionView is an enriched view of a PM decision for the API response,
+// including issue title and project info from joins.
+type PMDecisionView struct {
+	ID           uuid.UUID         `json:"id"`
+	PlanID       uuid.UUID         `json:"plan_id"`
+	IssueID      *uuid.UUID        `json:"issue_id,omitempty"`
+	IssueTitle   *string           `json:"issue_title,omitempty"`
+	ProjectID    *uuid.UUID        `json:"project_id,omitempty"`
+	ProjectTitle *string           `json:"project_title,omitempty"`
+	Decision     PMDecisionType    `json:"decision"`
+	Reasoning    string            `json:"reasoning"`
+	Outcome      PMDecisionOutcome `json:"outcome,omitempty"`
+	CreatedAt    time.Time         `json:"created_at"`
+}
+
+// PMDecisionSummary is the aggregate stats for the decisions endpoint.
+type PMDecisionSummary struct {
+	TotalDelegated int `json:"total_delegated"`
+	Succeeded      int `json:"succeeded"`
+	Failed         int `json:"failed"`
+	StillOpen      int `json:"still_open"`
+}
+
+// PMStatus represents the PM agent's current state for the status banner.
+type PMStatus struct {
+	IsRunning      bool       `json:"is_running"`
+	LastRunAt      *time.Time `json:"last_run_at,omitempty"`
+	LastRunStatus  string     `json:"last_run_status,omitempty"`
+	IssuesReviewed int        `json:"issues_reviewed"`
+	SuccessRate    float64    `json:"success_rate"`
+	SuccessCount   int        `json:"success_count"`
+	TotalDelegated int        `json:"total_delegated"`
+	NextRunIn      *string    `json:"next_run_in,omitempty"`
 }
