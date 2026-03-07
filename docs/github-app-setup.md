@@ -43,6 +43,12 @@ GITHUB_OAUTH_CLIENT_ID=your_client_id
 GITHUB_OAUTH_CLIENT_SECRET=your_client_secret
 ```
 
+If your `BASE_URL` doesn't match the callback URL registered in GitHub (e.g. you're behind a reverse proxy or using a tunnel), set the redirect URI explicitly:
+
+```env
+GITHUB_OAUTH_REDIRECT_URI=https://your-public-domain.com/api/v1/auth/github/callback
+```
+
 That's it for OAuth. This only requests `read:user` and `user:email` scopes — just enough to identify who's logging in.
 
 ## Part 2: GitHub App
@@ -197,4 +203,5 @@ Create separate GitHub OAuth Apps and GitHub Apps for development and production
 | "Resource not accessible by integration" on API calls | The app is missing a required permission — check the permissions table above and update in GitHub App settings |
 | PRs aren't being created | Verify the app is installed on the target repo and has Contents + Pull Requests write access |
 | Webhooks not arriving | Check that the webhook URL is correct and reachable. Use the Recent Deliveries tab in GitHub App settings to debug |
+| "redirect_uri is not associated with this application" | Your `BASE_URL` doesn't match the callback URL in GitHub OAuth App settings. Either update the callback URL in GitHub, or set `GITHUB_OAUTH_REDIRECT_URI` to match what's registered |
 | Private key parse error | Make sure the full PEM is included, including `-----BEGIN RSA PRIVATE KEY-----` and `-----END RSA PRIVATE KEY-----` |
