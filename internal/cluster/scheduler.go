@@ -29,6 +29,10 @@ type schedulerPlanStore interface {
 	GetLatestByOrg(ctx context.Context, orgID uuid.UUID) (models.PMPlan, error)
 }
 
+type schedulerRepoStore interface {
+	ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.Repository, error)
+}
+
 // Scheduler enqueues periodic jobs like PM analysis.
 type schedulerLock interface {
 	TryAcquire(ctx context.Context) (bool, error)
@@ -41,6 +45,7 @@ type Scheduler struct {
 	orgs         schedulerOrgStore
 	integrations schedulerIntegrationStore
 	plans        schedulerPlanStore
+	repos        schedulerRepoStore
 	logger       zerolog.Logger
 }
 
@@ -50,6 +55,7 @@ func NewScheduler(
 	orgs schedulerOrgStore,
 	integrations schedulerIntegrationStore,
 	plans schedulerPlanStore,
+	repos schedulerRepoStore,
 	logger zerolog.Logger,
 ) *Scheduler {
 	return &Scheduler{
@@ -58,6 +64,7 @@ func NewScheduler(
 		orgs:         orgs,
 		integrations: integrations,
 		plans:        plans,
+		repos:        repos,
 		logger:       logger,
 	}
 }
@@ -105,12 +112,12 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 			continue
 		}
 		settings := models.ParseOrgSettings(org.Settings)
-		scheduleHours := settings.PMScheduleHours
-		if scheduleHours <= 0 {
-			scheduleHours = models.DefaultPMScheduleHours
+		orgScheduleHours := settings.PMScheduleHours
+		if orgScheduleHours <= 0 {
+			orgScheduleHours = models.DefaultPMScheduleHours
 		}
 
-		shouldRun, err := s.shouldRunPM(ctx, orgID, now, time.Duration(scheduleHours)*time.Hour)
+		shouldRun, err := s.shouldRunPM(ctx, orgID, now, time.Duration(orgScheduleHours)*time.Hour)
 		if err != nil {
 			s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("scheduler failed to check PM schedule")
 			continue
@@ -119,13 +126,44 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 			continue
 		}
 
-		dedupeKey := fmt.Sprintf("pm_analyze:%s", orgID.String())
-		payload := map[string]string{
-			"org_id":  orgID.String(),
-			"trigger": string(models.PMTriggerCron),
+		// Check if any repos have custom PM settings; if so, enqueue per-repo jobs.
+		repos, err := s.repos.ListByOrg(ctx, orgID)
+		if err != nil {
+			s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("scheduler failed to list repos")
+			repos = nil
 		}
-		if _, err := s.jobs.Enqueue(ctx, orgID, "default", "pm_analyze", payload, 5, &dedupeKey); err != nil {
-			s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to enqueue pm_analyze job")
+
+		hasCustomRepos := false
+		for _, repo := range repos {
+			if repo.Status != "active" {
+				continue
+			}
+			repoSettings := models.ParseRepoSettings(repo.Settings)
+			if repoSettings.PM != nil {
+				hasCustomRepos = true
+				dedupeKey := fmt.Sprintf("pm_analyze:%s:%s", orgID.String(), repo.ID.String())
+				payload := map[string]string{
+					"org_id":  orgID.String(),
+					"repo_id": repo.ID.String(),
+					"trigger": string(models.PMTriggerCron),
+				}
+				if _, err := s.jobs.Enqueue(ctx, orgID, "default", "pm_analyze", payload, 5, &dedupeKey); err != nil {
+					s.logger.Warn().Err(err).Str("org_id", orgID.String()).Str("repo_id", repo.ID.String()).Msg("failed to enqueue repo pm_analyze job")
+				}
+			}
+		}
+
+		// Enqueue an org-level job (no repo_id) for repos without custom settings,
+		// or as the default when no repos have custom PM config.
+		if !hasCustomRepos {
+			dedupeKey := fmt.Sprintf("pm_analyze:%s", orgID.String())
+			payload := map[string]string{
+				"org_id":  orgID.String(),
+				"trigger": string(models.PMTriggerCron),
+			}
+			if _, err := s.jobs.Enqueue(ctx, orgID, "default", "pm_analyze", payload, 5, &dedupeKey); err != nil {
+				s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to enqueue pm_analyze job")
+			}
 		}
 	}
 }
