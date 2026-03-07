@@ -390,3 +390,101 @@ export interface ComplexityEstimate {
   computed_at: string;
   created_at: string;
 }
+
+// Project types
+export type ProjectStatus = 'proposed' | 'draft' | 'planning' | 'active' | 'paused' | 'completed' | 'cancelled';
+export type ProjectExecMode = 'sequential' | 'parallel' | 'dependency_graph';
+export type ProjectTaskStatus = 'pending' | 'blocked' | 'delegated' | 'running' | 'completed' | 'failed' | 'skipped' | 'cancelled';
+
+export interface ApproachRecord {
+  task_title: string;
+  approach: string;
+  outcome: string;
+  lesson?: string;
+}
+
+export interface Project {
+  id: string;
+  org_id: string;
+  repository_id: string;
+  title: string;
+  goal: string;
+  scope?: string;
+  completion_criteria?: string;
+  status: ProjectStatus;
+  priority: number;
+  execution_mode: ProjectExecMode;
+  max_concurrent: number;
+  auto_merge: boolean;
+  base_branch: string;
+  current_phase?: string;
+  lessons_learned?: string[];
+  approach_history?: ApproachRecord[];
+  total_tasks: number;
+  completed_tasks: number;
+  failed_tasks: number;
+  proposed_by_pm: boolean;
+  source_issue_ids?: string[];
+  proposal_reasoning?: string;
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
+  completed_at?: string;
+}
+
+export interface ProjectTask {
+  id: string;
+  project_id: string;
+  org_id: string;
+  title: string;
+  description?: string;
+  approach?: string;
+  reasoning?: string;
+  sort_order: number;
+  depends_on?: string[];
+  batch_number: number;
+  status: ProjectTaskStatus;
+  complexity?: string;
+  confidence?: string;
+  agent_run_id?: string;
+  issue_id?: string;
+  branch_name?: string;
+  pr_url?: string;
+  outcome_notes?: string;
+  retry_count: number;
+  max_retries: number;
+  created_at: string;
+  updated_at: string;
+  completed_at?: string;
+}
+
+export interface ProjectCycle {
+  id: string;
+  project_id: string;
+  org_id: string;
+  pm_plan_id?: string;
+  cycle_number: number;
+  analysis: string;
+  decisions: Record<string, unknown>;
+  progress_pct?: number;
+  tasks_completed_this_cycle: number;
+  tasks_failed_this_cycle: number;
+  tasks_created_this_cycle: number;
+  created_at: string;
+}
+
+export interface ProjectDetail {
+  project: Project;
+  tasks: ProjectTask[];
+  recent_cycles: ProjectCycle[];
+}
+
+export const projectStatusConfig: Record<string, { color: string; label: string }> = {
+  proposed: { color: "bg-purple-100 text-purple-800", label: "Proposed" },
+  draft: { color: "bg-gray-100 text-gray-800", label: "Draft" },
+  planning: { color: "bg-yellow-100 text-yellow-800", label: "Planning" },
+  active: { color: "bg-blue-100 text-blue-800", label: "Active" },
+  paused: { color: "bg-orange-100 text-orange-800", label: "Paused" },
+  completed: { color: "bg-green-100 text-green-800", label: "Completed" },
+  cancelled: { color: "bg-red-100 text-red-800", label: "Cancelled" },
+};

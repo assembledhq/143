@@ -8,6 +8,6 @@ import (
 //go:embed pm_system_prompt.template
 var pmSystemPromptTemplate string
 
-func buildPMSystemPrompt(availableSlots, maxConcurrent int) string {
-	return fmt.Sprintf(pmSystemPromptTemplate, availableSlots, maxConcurrent)
+func buildPMSystemPrompt(availableSlots, maxConcurrent, activeProjectCount int) string {
+	return fmt.Sprintf(pmSystemPromptTemplate, availableSlots, maxConcurrent, activeProjectCount)
 }
