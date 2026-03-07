@@ -132,16 +132,12 @@ func (s *Service) SetProjectStores(projects projectStore, tasks projectTaskStore
 	s.projectCycles = cycles
 }
 
-func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger) (*Plan, error) {
+func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID) (*Plan, error) {
 	if s.adapter == nil || s.sandbox == nil {
 		return nil, fmt.Errorf("pm adapter or sandbox not configured")
 	}
 	if err := trigger.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid trigger: %w", err)
-	}
-	ctxBundle, err := s.gatherContext(ctx, orgID)
-	if err != nil {
-		return nil, fmt.Errorf("gather context: %w", err)
 	}
 
 	repos, err := s.repos.ListByOrg(ctx, orgID)
@@ -151,12 +147,34 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	if len(repos) == 0 {
 		return nil, fmt.Errorf("no repositories configured for org")
 	}
-	repo := repos[0]
-	for _, candidate := range repos {
-		if candidate.Status == "active" {
-			repo = candidate
-			break
+
+	// Select the target repository.
+	var repo models.Repository
+	if repoID != nil {
+		found := false
+		for _, candidate := range repos {
+			if candidate.ID == *repoID {
+				repo = candidate
+				found = true
+				break
+			}
 		}
+		if !found {
+			return nil, fmt.Errorf("repository %s not found in org", repoID)
+		}
+	} else {
+		repo = repos[0]
+		for _, candidate := range repos {
+			if candidate.Status == "active" {
+				repo = candidate
+				break
+			}
+		}
+	}
+
+	ctxBundle, err := s.gatherContext(ctx, orgID, &repo)
+	if err != nil {
+		return nil, fmt.Errorf("gather context: %w", err)
 	}
 
 	sbCfg := pmSandboxConfig()

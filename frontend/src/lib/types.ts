@@ -230,6 +230,25 @@ export interface ProductContext {
   avoid_areas?: string[];
 }
 
+/** Per-repository PM agent overrides. All fields are optional — omitted means "inherit from org". */
+export interface RepoPMSettings {
+  product_context?: ProductContext;
+  pm_schedule_hours?: number;
+  pm_model?: string;
+  priority_weights?: {
+    customer_impact?: number;
+    severity?: number;
+    recency?: number;
+    revenue_risk?: number;
+  };
+  min_priority_threshold?: number;
+}
+
+/** Strongly-typed repository settings JSONB. */
+export interface RepoSettings {
+  pm?: RepoPMSettings;
+}
+
 export interface PMTask {
   rank: number;
   issue_ids: string[];

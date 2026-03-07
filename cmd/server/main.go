@@ -113,6 +113,7 @@ func main() {
 			orgStore,
 			integrationStore,
 			pmPlanStore,
+			repoStore,
 			logger,
 		)
 		go scheduler.Start(ctx, 10*time.Minute)

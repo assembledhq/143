@@ -252,7 +252,7 @@ func TestServiceGatherContext(t *testing.T) {
 				decisionLog:  tt.decisionLog,
 			}
 
-			bundle, err := svc.gatherContext(context.Background(), orgID)
+			bundle, err := svc.gatherContext(context.Background(), orgID, nil)
 			if tt.expectErr != "" {
 				require.Error(t, err, "gatherContext should return an error")
 				require.Contains(t, err.Error(), tt.expectErr, "gatherContext should return the expected error")
