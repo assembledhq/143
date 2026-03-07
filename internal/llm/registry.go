@@ -1,5 +1,10 @@
 package llm
 
+import "sync"
+
+// chainsMu protects defaultChains from concurrent read/write access.
+var chainsMu sync.RWMutex
+
 // providerModel maps a model name to a specific provider and its model ID.
 type providerModel struct {
 	// ProviderName matches a key in the available providers map (e.g., "anthropic", "openai_chat").
@@ -62,7 +67,9 @@ var defaultChains = map[string][]providerModel{
 // filtering to only providers that are available (configured with API keys).
 // Returns an error if no providers are available for the requested model.
 func buildChain(model string, available map[string]Provider) ([]chainLink, error) {
+	chainsMu.RLock()
 	entries, ok := defaultChains[model]
+	chainsMu.RUnlock()
 	if !ok {
 		return nil, &UnknownModelError{Model: model}
 	}
@@ -88,5 +95,7 @@ func buildChain(model string, available map[string]Provider) ([]chainLink, error
 // RegisterModel adds or replaces a model's provider chain in the registry.
 // This allows custom models to be added at runtime.
 func RegisterModel(model string, entries []providerModel) {
+	chainsMu.Lock()
 	defaultChains[model] = entries
+	chainsMu.Unlock()
 }
