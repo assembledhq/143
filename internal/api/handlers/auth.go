@@ -213,7 +213,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 
 	params := url.Values{
 		"client_id":    {h.cfg.GitHubOAuthClientID},
-		"redirect_uri": {h.cfg.BaseURL + "/api/v1/auth/github/callback"},
+		"redirect_uri": {h.cfg.GitHubOAuthRedirectURI},
 		"scope":        {"read:user,user:email"},
 		"state":        {state},
 	}
