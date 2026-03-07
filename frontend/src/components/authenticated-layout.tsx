@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import { useQuery } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
 import {
   DropdownMenu,
@@ -24,11 +25,12 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/use-auth";
+import { api } from "@/lib/api";
 import { useEffect } from "react";
 
 const navItems = [
   { label: "Overview", icon: LayoutDashboard, href: "/overview" },
-  { label: "Sessions", icon: Play, href: "/sessions" },
+  { label: "Sessions", icon: Play, href: "/sessions", showStatusDot: true },
   { label: "Projects", icon: FolderKanban, href: "/projects" },
 ];
 
@@ -36,6 +38,19 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
   const pathname = usePathname();
   const router = useRouter();
   const { user, isLoading, isAuthenticated, logout } = useAuth();
+
+  const { data: pmStatusData } = useQuery({
+    queryKey: ["pm", "status"],
+    queryFn: () => api.pm.status(),
+    refetchInterval: 30000,
+    enabled: isAuthenticated,
+  });
+  const pmStatus = pmStatusData?.data;
+  const pmDotColor = pmStatus?.is_running
+    ? "running" as const
+    : pmStatus?.last_run_status === "completed" || pmStatus?.last_run_status === "executing"
+      ? "completed" as const
+      : null;
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated) {
@@ -114,6 +129,15 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
               >
                 <item.icon className="h-4 w-4" />
                 {item.label}
+                {item.showStatusDot && pmDotColor === "running" && (
+                  <span className="relative flex h-2 w-2 ml-auto">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+                  </span>
+                )}
+                {item.showStatusDot && pmDotColor === "completed" && (
+                  <span className="inline-flex rounded-full h-2 w-2 bg-green-500 ml-auto" />
+                )}
               </Link>
             );
           })}

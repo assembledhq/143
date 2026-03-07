@@ -26,6 +26,12 @@ type AgentSessionTask struct {
 	RunCompletedAt     *string          `json:"run_completed_at,omitempty"`
 }
 
+// AgentSessionTask files parsed from approach text.
+type AgentSessionFileRef struct {
+	Path string `json:"path"`
+	Line *int   `json:"line,omitempty"`
+}
+
 // AgentSession is the API response type that merges PM plans and ad-hoc runs
 // into a unified "session" concept. It is NOT a database model.
 type AgentSession struct {
@@ -45,4 +51,15 @@ type AgentSession struct {
 	FailedRunCount    int                     `json:"failed_run_count"`
 	CreatedAt         time.Time               `json:"created_at"`
 	CompletedAt       *time.Time              `json:"completed_at,omitempty"`
+
+	// Project grouping (populated when session tasks link to a project).
+	ProjectID    *uuid.UUID `json:"project_id,omitempty"`
+	ProjectTitle *string    `json:"project_title,omitempty"`
+
+	// Context counts (plan sessions only) showing what the PM considered.
+	InFlightRunsChecked   *int `json:"in_flight_runs_checked,omitempty"`
+	PastOutcomesReviewed  *int `json:"past_outcomes_reviewed,omitempty"`
+	RecentPRsChecked      *int `json:"recent_prs_checked,omitempty"`
+	PastDecisionsReviewed *int `json:"past_decisions_reviewed,omitempty"`
+	CommitsAnalyzed       *int `json:"commits_analyzed,omitempty"`
 }

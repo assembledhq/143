@@ -33,6 +33,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	webhookDeliveryStore := db.NewWebhookDeliveryStore(pool)
 	jobStore := db.NewJobStore(pool)
 	pmPlanStore := db.NewPMPlanStore(pool)
+	pmDecisionLogStore := db.NewPMDecisionLogStore(pool)
 
 	priorityScoreStore := db.NewPriorityScoreStore(pool)
 	complexityEstimateStore := db.NewComplexityEstimateStore(pool)
@@ -98,8 +99,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		orgStore,
 		jobStore,
 	)
-	pmHandler := handlers.NewPMHandler(pmPlanStore, jobStore)
+	pmHandler := handlers.NewPMHandler(pmPlanStore, pmDecisionLogStore, jobStore)
 	sessionHandler := handlers.NewSessionHandler(pmPlanStore, agentRunStore, issueStore, orgStore, jobStore)
+	sessionHandler.SetProjectStore(projectStore)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
 	credentialHandler := handlers.NewCredentialHandler(credentialStore)
@@ -179,6 +181,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/pm/plans", pmHandler.List)
 			r.Get("/api/v1/pm/plans/{id}", pmHandler.Get)
 			r.Get("/api/v1/pm/plans/latest", pmHandler.Latest)
+			r.Get("/api/v1/pm/decisions", pmHandler.Decisions)
+			r.Get("/api/v1/pm/status", pmHandler.Status)
 			r.Get("/api/v1/sessions", sessionHandler.List)
 			r.Get("/api/v1/sessions/{id}", sessionHandler.Get)
 			r.Get("/api/v1/projects", projectHandler.List)

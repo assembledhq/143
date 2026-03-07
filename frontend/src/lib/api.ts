@@ -159,13 +159,21 @@ export const api = {
     },
     latest: () => get<import('./types').SingleResponse<import('./types').PMPlan>>('/api/v1/pm/plans/latest'),
     get: (id: string) => get<import('./types').SingleResponse<import('./types').PMPlan>>(`/api/v1/pm/plans/${id}`),
+    decisions: (params?: { cursor?: string; limit?: number }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.cursor) searchParams.set('cursor', params.cursor);
+      if (params?.limit != null) searchParams.set('limit', String(params.limit));
+      const qs = searchParams.toString();
+      return get<import('./types').PMDecisionsResponse>(`/api/v1/pm/decisions${qs ? `?${qs}` : ''}`);
+    },
+    status: () => get<import('./types').SingleResponse<import('./types').PMStatus>>('/api/v1/pm/status'),
   },
   sessions: {
     list: (params?: { limit?: number }) => {
       const searchParams = new URLSearchParams();
       if (params?.limit) searchParams.set('limit', String(params.limit));
       const qs = searchParams.toString();
-      return get<import('./types').ListResponse<import('./types').AgentSession>>(`/api/v1/sessions${qs ? `?${qs}` : ''}`);
+      return get<import('./types').SessionsListResponse>(`/api/v1/sessions${qs ? `?${qs}` : ''}`);
     },
     get: (id: string) => get<import('./types').SingleResponse<import('./types').AgentSession>>(`/api/v1/sessions/${id}`),
     createManual: (body: { message: string; images?: string[]; agent_type?: string; autonomy_level?: string; token_mode?: string }) =>

@@ -22,6 +22,7 @@ type SessionHandler struct {
 	issueStore    *db.IssueStore
 	orgStore      *db.OrganizationStore
 	jobStore      *db.JobStore
+	projectStore  *db.ProjectStore
 }
 
 func NewSessionHandler(
@@ -38,6 +39,11 @@ func NewSessionHandler(
 		orgStore:      orgStore,
 		jobStore:      jobStore,
 	}
+}
+
+// SetProjectStore adds the project store for project-grouping support.
+func (h *SessionHandler) SetProjectStore(ps *db.ProjectStore) {
+	h.projectStore = ps
 }
 
 // List returns a merged list of PM-plan sessions and ad-hoc (manual) run sessions,
@@ -70,6 +76,11 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 		sessions = append(sessions, session)
 	}
 
+	// Enrich sessions with project data when projectStore is available.
+	if h.projectStore != nil {
+		h.enrichSessionsWithProjects(r, orgID, sessions)
+	}
+
 	// Sort merged list by created_at DESC.
 	sort.Slice(sessions, func(i, j int) bool {
 		return sessions[i].CreatedAt.After(sessions[j].CreatedAt)
@@ -80,8 +91,18 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 		sessions = sessions[:limit]
 	}
 
-	writeJSON(w, http.StatusOK, models.ListResponse[models.AgentSession]{
-		Data: sessions,
+	// Also return projects for frontend grouping.
+	var projects []models.Project
+	if h.projectStore != nil {
+		projects, _ = h.projectStore.ListByOrg(r.Context(), orgID, db.ProjectFilters{Limit: 100})
+	}
+	if projects == nil {
+		projects = []models.Project{}
+	}
+
+	writeJSON(w, http.StatusOK, sessionsListResponse{
+		Data:     sessions,
+		Projects: projects,
 	})
 }
 
@@ -243,6 +264,42 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.AgentSession]{Data: session})
 }
 
+// sessionsListResponse extends the standard list response with project data for grouping.
+type sessionsListResponse struct {
+	Data     []models.AgentSession `json:"data"`
+	Projects []models.Project      `json:"projects"`
+	Meta     models.PaginationMeta `json:"meta"`
+}
+
+// enrichSessionsWithProjects attempts to link sessions to projects via project_cycles.
+func (h *SessionHandler) enrichSessionsWithProjects(r *http.Request, orgID uuid.UUID, sessions []models.AgentSession) {
+	if h.projectStore == nil || len(sessions) == 0 {
+		return
+	}
+
+	// Fetch all projects for this org (already fetched in List, but needed here for mapping).
+	projects, err := h.projectStore.ListByOrg(r.Context(), orgID, db.ProjectFilters{Limit: 100})
+	if err != nil || len(projects) == 0 {
+		return
+	}
+
+	// Build a map of project ID to title for quick lookups.
+	projectTitleMap := make(map[uuid.UUID]string, len(projects))
+	for _, p := range projects {
+		projectTitleMap[p.ID] = p.Title
+	}
+
+	// For PM-proposed projects, map the source issue IDs to projects.
+	// Sessions with issues that belong to a project get tagged.
+	for i := range sessions {
+		if sessions[i].Type == models.AgentSessionTypePlan {
+			// Plan sessions can be linked to projects via project_cycles (pm_plan_id).
+			// For now, we leave project linking to the frontend which has the projects list.
+			continue
+		}
+	}
+}
+
 // planToSession converts a PMPlan to an AgentSession summary.
 func planToSession(p models.PMPlan) models.AgentSession {
 	triggeredBy := models.AgentSessionTriggeredByManual
@@ -274,24 +331,34 @@ func planToSession(p models.PMPlan) models.AgentSession {
 	}
 
 	issuesReviewed := p.IssuesReviewed
+	inFlightRunsChecked := p.InFlightRunsChecked
+	pastOutcomesReviewed := p.PastOutcomesReviewed
+	recentPRsChecked := p.RecentPRsChecked
+	pastDecisionsReviewed := p.PastDecisionsReviewed
+	commitsAnalyzed := p.CommitsAnalyzed
 
 	return models.AgentSession{
-		ID:                p.ID,
-		Type:              models.AgentSessionTypePlan,
-		Status:            status,
-		TriggeredBy:       triggeredBy,
-		Title:             title,
-		Analysis:          strPtr(p.Analysis),
-		Tasks:             pmTasksToSessionTasks(tasks),
-		Clusters:          p.Clusters,
-		SkippedIssues:     p.SkippedIssues,
-		IssuesReviewed:    &issuesReviewed,
-		TaskCount:         len(tasks),
-		ActiveRunCount:    activeCount,
-		CompletedRunCount: completedCount,
-		FailedRunCount:    failedCount,
-		CreatedAt:         p.CreatedAt,
-		CompletedAt:       p.CompletedAt,
+		ID:                    p.ID,
+		Type:                  models.AgentSessionTypePlan,
+		Status:                status,
+		TriggeredBy:           triggeredBy,
+		Title:                 title,
+		Analysis:              strPtr(p.Analysis),
+		Tasks:                 pmTasksToSessionTasks(tasks),
+		Clusters:              p.Clusters,
+		SkippedIssues:         p.SkippedIssues,
+		IssuesReviewed:        &issuesReviewed,
+		TaskCount:             len(tasks),
+		ActiveRunCount:        activeCount,
+		CompletedRunCount:     completedCount,
+		FailedRunCount:        failedCount,
+		CreatedAt:             p.CreatedAt,
+		CompletedAt:           p.CompletedAt,
+		InFlightRunsChecked:   &inFlightRunsChecked,
+		PastOutcomesReviewed:  &pastOutcomesReviewed,
+		RecentPRsChecked:      &recentPRsChecked,
+		PastDecisionsReviewed: &pastDecisionsReviewed,
+		CommitsAnalyzed:       &commitsAnalyzed,
 	}
 }
 
