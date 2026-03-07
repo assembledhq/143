@@ -18,12 +18,20 @@ type gatheredContext struct {
 	settings       models.OrgSettings
 }
 
-func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID) (*gatheredContext, error) {
+// gatherContext collects the context needed for PM analysis. When repo is
+// non-nil, repo-level PM settings are merged on top of the org defaults.
+func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *models.Repository) (*gatheredContext, error) {
 	org, err := s.orgs.GetByID(ctx, orgID)
 	if err != nil {
 		return nil, err
 	}
 	settings := models.ParseOrgSettings(org.Settings)
+
+	// Apply repo-level PM overrides when running for a specific repository.
+	if repo != nil {
+		repoSettings := models.ParseRepoSettings(repo.Settings)
+		settings = models.MergeRepoPMSettings(settings, repoSettings)
+	}
 
 	openIssues, err := s.issues.ListByOrg(ctx, orgID, db.IssueFilters{Status: "open", Limit: 100})
 	if err != nil {

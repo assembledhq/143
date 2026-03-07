@@ -48,6 +48,14 @@ func (m *mockIntegrations) ListOrgsWithActiveIntegrations(ctx context.Context) (
 	return m.orgs, nil
 }
 
+type mockRepos struct {
+	repos []models.Repository
+}
+
+func (m *mockRepos) ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.Repository, error) {
+	return m.repos, nil
+}
+
 func TestScheduler_ShouldRunPM_NoPlans(t *testing.T) {
 	t.Parallel()
 
@@ -57,6 +65,7 @@ func TestScheduler_ShouldRunPM_NoPlans(t *testing.T) {
 		orgs:         &mockOrgs{},
 		integrations: &mockIntegrations{},
 		plans:        &mockPlanStore{err: pgx.ErrNoRows},
+		repos:        &mockRepos{},
 		logger:       zerolog.Nop(),
 	}
 
@@ -75,6 +84,7 @@ func TestScheduler_ShouldRunPM_TooSoon(t *testing.T) {
 		orgs:         &mockOrgs{},
 		integrations: &mockIntegrations{},
 		plans:        &mockPlanStore{plan: models.PMPlan{CreatedAt: now}},
+		repos:        &mockRepos{},
 		logger:       zerolog.Nop(),
 	}
 
@@ -93,6 +103,7 @@ func TestScheduler_ShouldRunPM_Overdue(t *testing.T) {
 		orgs:         &mockOrgs{},
 		integrations: &mockIntegrations{},
 		plans:        &mockPlanStore{plan: models.PMPlan{CreatedAt: now.Add(-5 * time.Hour)}},
+		repos:        &mockRepos{},
 		logger:       zerolog.Nop(),
 	}
 
