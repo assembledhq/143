@@ -32,9 +32,7 @@ func TestProjectHandler_Get_FailsWhenAttachmentsQueryFails(t *testing.T) {
 	cycleStore := db.NewProjectCycleStore(mock)
 	attachmentStore := db.NewProjectAttachmentStore(mock)
 	specStore := db.NewProjectSpecStore(mock)
-	handler := NewProjectHandler(projectStore, taskStore, cycleStore)
-	handler.SetAttachmentStore(attachmentStore)
-	handler.SetSpecStore(specStore)
+	handler := NewProjectHandler(projectStore, taskStore, cycleStore, attachmentStore, specStore)
 
 	orgID := uuid.New()
 	projectID := uuid.New()

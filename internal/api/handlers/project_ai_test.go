@@ -27,7 +27,7 @@ func TestProjectAIHandler_ImproveFailsWhenSpecsQueryFails(t *testing.T) {
 	specStore := db.NewProjectSpecStore(mock)
 	attachmentStore := db.NewProjectAttachmentStore(mock)
 	taskStore := db.NewProjectTaskStore(mock)
-	handler := NewProjectAIHandler(projectStore, specStore, attachmentStore, taskStore)
+	handler := NewProjectAnalysisHandler(projectStore, specStore, attachmentStore, taskStore)
 
 	orgID := uuid.New()
 	projectID := uuid.New()
