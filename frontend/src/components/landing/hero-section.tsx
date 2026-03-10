@@ -41,20 +41,17 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
               isDark ? "text-white" : "text-slate-900"
             }`}
           >
-            An AI PM for
+            Open-source autopilot
             <br />
-            production engineering
-            <br />
-            teams
+            for coding agents
           </h1>
 
           <p
-            className={`max-w-md text-sm sm:text-base leading-relaxed ${isDark ? "text-white/40" : "text-slate-600"}`}
+            className={`max-w-md text-sm leading-relaxed ${isDark ? "text-white/45" : "text-slate-600"}`}
           >
-            Prioritizes across bugs, projects, and tech debt — then
-            dispatches your coding agents to ship validated PRs.
-            Works with Claude Code, Codex, Gemini CLI, or any agent
-            your team already runs.
+            Finds bugs worth fixing and breaks down your projects.
+            Ships the work to Claude Code, Codex, or any coding
+            agent your team runs.
           </p>
 
           <div className="pt-2 pointer-events-auto">
@@ -73,16 +70,6 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
             </Button>
           </div>
         </div>
-      </div>
-
-      {/* Bottom-right: 143 origin story */}
-      <div className={`absolute bottom-12 right-6 sm:right-10 z-10 hidden md:block max-w-[280px] text-right ${isDark ? "text-white/40" : "text-slate-600"}`}>
-        <p className="text-[11px] leading-relaxed tracking-wide">
-          The first US jet fighter, the P-80 Shooting Star,
-          was designed and built by Lockheed&apos;s Skunk Works
-          in just 143&nbsp;days. We named this project after
-          that same spirit of speed.
-        </p>
       </div>
 
       {/* Scroll indicator */}
