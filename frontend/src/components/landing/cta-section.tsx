@@ -10,7 +10,7 @@ interface CtaSectionProps {
 export default function CtaSection({ isDark }: CtaSectionProps) {
   return (
     <div
-      className="relative flex min-h-screen items-center justify-center px-6"
+      className="relative flex min-h-[60vh] items-center justify-center px-6"
       style={{
         background: isDark ? "#08080f" : "#d4e6f5",
       }}
@@ -21,18 +21,19 @@ export default function CtaSection({ isDark }: CtaSectionProps) {
             isDark ? "text-white" : "text-slate-900"
           }`}
         >
-          Built for teams that
+          Connect your repos.
           <br />
-          ship to production
+          Set your priorities.
+          <br />
+          Let the PM handle the rest.
         </h2>
         <p
-          className={`text-sm sm:text-base leading-relaxed max-w-md mx-auto ${
-            isDark ? "text-white/40" : "text-slate-600"
+          className={`text-sm leading-relaxed max-w-md mx-auto ${
+            isDark ? "text-white/45" : "text-slate-600"
           }`}
         >
-          Connect your repos, bring your own coding agents, and let the
-          PM optimize across bugs, projects, and tech debt — with your
-          CI, your standards, your review process.
+          Bring your repos, your coding agents, and your CI pipeline. The PM
+          dispatches validated PRs on your behalf.
         </p>
         <div className="pt-2">
           <Button

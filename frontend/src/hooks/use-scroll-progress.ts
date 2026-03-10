@@ -1,47 +1,44 @@
-"use client";
+import { useRef, useState, useEffect, useCallback } from "react";
 
-import { useEffect, useState, type RefObject } from "react";
+interface ScrollProgressOptions {
+  /** Viewport fraction where progress = 0 (1.0 = bottom). Default 0.95. */
+  startViewport?: number;
+  /** Viewport fraction where progress = 1 (0.0 = top). Default 0.15. */
+  endViewport?: number;
+}
 
-export function useScrollProgress(ref: RefObject<HTMLElement | null>): number {
-  const [progress, setProgress] = useState(0);
+export function useScrollProgress<T extends HTMLElement = HTMLDivElement>(
+  options: ScrollProgressOptions = {}
+): { ref: React.RefObject<T | null>; progress: number } {
+  const { startViewport = 0.95, endViewport = 0.15 } = options;
+  const ref = useRef<T | null>(null);
+  const reducedMotion =
+    typeof window !== "undefined" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const [progress, setProgress] = useState(reducedMotion ? 1 : 0);
 
-  useEffect(() => {
+  const handleScroll = useCallback(() => {
     const el = ref.current;
     if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const vh = window.innerHeight;
+    const startY = vh * startViewport;
+    const endY = vh * endViewport;
+    const raw = (startY - rect.top) / (startY - endY);
+    setProgress(Math.min(1, Math.max(0, raw)));
+  }, [startViewport, endViewport]);
 
-    let rafId: number | null = null;
+  useEffect(() => {
+    if (reducedMotion) return;
 
-    const update = () => {
-      const rect = el.getBoundingClientRect();
-      const scrollableDistance = el.offsetHeight - window.innerHeight;
-      if (scrollableDistance <= 0) {
-        setProgress(0);
-        return;
-      }
-      // rect.top starts positive (below viewport), goes negative as we scroll
-      const scrolled = -rect.top;
-      const p = Math.min(1, Math.max(0, scrolled / scrollableDistance));
-      setProgress(p);
-    };
-
-    const onScroll = () => {
-      if (rafId !== null) return;
-      rafId = requestAnimationFrame(() => {
-        update();
-        rafId = null;
-      });
-    };
-
-    update();
-    window.addEventListener("scroll", onScroll, { passive: true });
-    window.addEventListener("resize", onScroll, { passive: true });
-
+    handleScroll();
+    window.addEventListener("scroll", handleScroll, { passive: true });
+    window.addEventListener("resize", handleScroll, { passive: true });
     return () => {
-      window.removeEventListener("scroll", onScroll);
-      window.removeEventListener("resize", onScroll);
-      if (rafId !== null) cancelAnimationFrame(rafId);
+      window.removeEventListener("scroll", handleScroll);
+      window.removeEventListener("resize", handleScroll);
     };
-  }, [ref]);
+  }, [handleScroll]);
 
-  return progress;
+  return { ref, progress };
 }
