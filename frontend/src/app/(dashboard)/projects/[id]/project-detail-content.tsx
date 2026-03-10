@@ -268,7 +268,7 @@ function SpecsSection({
 
       {specs.length === 0 && !showAddForm && (
         <p className="text-xs text-muted-foreground py-2">
-          No specs yet. Add product requirements, technical specs, or user stories to define what you're building.
+          No specs yet. Add product requirements, technical specs, or user stories to define what you&apos;re building.
         </p>
       )}
 
