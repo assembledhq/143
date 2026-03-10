@@ -1,5 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
-import { renderWithProviders, screen } from "@/test/test-utils";
+import { fireEvent } from "@testing-library/react";
+import { http, HttpResponse } from "msw";
+import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
+import { server } from "@/test/mocks/server";
 import type { Project, ProjectTask, ProjectCycle } from "@/lib/types";
 import { WorkTab } from "./work-tab";
 
@@ -173,5 +176,140 @@ describe("WorkTab", () => {
       <WorkTab project={mockProject} tasks={mockTasks} cycles={[]} />,
     );
     expect(screen.queryByText("Planning Cycles")).not.toBeInTheDocument();
+  });
+
+  it("toggles add task form visibility", async () => {
+    const user = userEvent.setup();
+
+    renderWithProviders(
+      <WorkTab project={mockProject} tasks={mockTasks} cycles={[]} />,
+    );
+
+    // Click "Add Task" to show form
+    await user.click(screen.getByText("Add Task"));
+    expect(screen.getByPlaceholderText("Task title")).toBeInTheDocument();
+
+    // Click "Cancel" to hide form
+    await user.click(screen.getByText("Cancel"));
+    expect(screen.queryByPlaceholderText("Task title")).not.toBeInTheDocument();
+  });
+
+  it("creates a task via the form", async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.post("*/api/v1/projects/:id/tasks", () => {
+        return HttpResponse.json(
+          {
+            data: {
+              id: "task-new",
+              project_id: "proj-1",
+              org_id: "org-1",
+              title: "New Task",
+              status: "pending",
+              sort_order: 5,
+              batch_number: 1,
+              retry_count: 0,
+              max_retries: 2,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            },
+          },
+          { status: 201 },
+        );
+      }),
+    );
+
+    renderWithProviders(
+      <WorkTab project={mockProject} tasks={mockTasks} cycles={[]} />,
+    );
+
+    await user.click(screen.getByText("Add Task"));
+    await user.type(screen.getByPlaceholderText("Task title"), "New Task");
+    await user.click(screen.getByRole("button", { name: "Add" }));
+
+    await waitFor(() => {
+      expect(screen.queryByPlaceholderText("Task title")).not.toBeInTheDocument();
+    });
+  });
+
+  it("disables Add button when title is empty", async () => {
+    const user = userEvent.setup();
+
+    renderWithProviders(
+      <WorkTab project={mockProject} tasks={mockTasks} cycles={[]} />,
+    );
+
+    await user.click(screen.getByText("Add Task"));
+
+    expect(screen.getByRole("button", { name: "Add" })).toBeDisabled();
+  });
+
+  it("renders task with complexity badge", () => {
+    const tasksWithComplexity: ProjectTask[] = [
+      {
+        id: "task-cx",
+        project_id: "proj-1",
+        org_id: "org-1",
+        title: "Complex Task",
+        status: "pending",
+        complexity: "hard",
+        sort_order: 1,
+        batch_number: 1,
+        retry_count: 0,
+        max_retries: 2,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    ];
+
+    renderWithProviders(
+      <WorkTab project={mockProject} tasks={tasksWithComplexity} cycles={[]} />,
+    );
+
+    expect(screen.getByText("hard")).toBeInTheDocument();
+  });
+
+  it("renders task with agent_run_id as Run link", () => {
+    const tasksWithRun: ProjectTask[] = [
+      {
+        id: "task-run",
+        project_id: "proj-1",
+        org_id: "org-1",
+        title: "Task with Run",
+        status: "running",
+        agent_run_id: "run-123",
+        sort_order: 1,
+        batch_number: 1,
+        retry_count: 0,
+        max_retries: 2,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    ];
+
+    renderWithProviders(
+      <WorkTab project={mockProject} tasks={tasksWithRun} cycles={[]} />,
+    );
+
+    const runLink = screen.getByText("Run").closest("a");
+    expect(runLink).toHaveAttribute("href", "/runs/run-123");
+  });
+
+  it("renders planning cycle details when expanded", async () => {
+    const user = userEvent.setup();
+
+    renderWithProviders(
+      <WorkTab project={mockProject} tasks={mockTasks} cycles={mockCycles} />,
+    );
+
+    // Planning Cycles section is collapsed by default (defaultOpen={false})
+    await user.click(screen.getByText("Planning Cycles"));
+
+    expect(screen.getByText("Cycle #1")).toBeInTheDocument();
+    expect(screen.getByText("First planning cycle analysis")).toBeInTheDocument();
+    expect(screen.getByText("25% done")).toBeInTheDocument();
+    expect(screen.getByText("1 completed")).toBeInTheDocument();
+    expect(screen.getByText("4 created")).toBeInTheDocument();
   });
 });

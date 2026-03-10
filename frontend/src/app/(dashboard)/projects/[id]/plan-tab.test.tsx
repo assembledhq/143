@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { fireEvent } from "@testing-library/react";
-import { renderWithProviders, screen } from "@/test/test-utils";
+import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
+import { server } from "@/test/mocks/server";
+import { http, HttpResponse } from "msw";
 import type { Project, ProjectSpec, ProjectAttachment } from "@/lib/types";
 import { SpecsSection, DesignsSection, AnalysisSection, PlanTab } from "./plan-tab";
 
@@ -175,6 +177,121 @@ describe("SpecsSection", () => {
     expect(screen.getByText("Confirm")).toBeInTheDocument();
     expect(screen.getByText("Cancel")).toBeInTheDocument();
   });
+
+  it("toggles add form visibility", () => {
+    renderWithProviders(
+      <SpecsSection project={mockProject} specs={[]} />,
+    );
+
+    // Click the Add button to show the form
+    fireEvent.click(screen.getByText("Add"));
+
+    // Form elements should appear
+    expect(screen.getByText("Title")).toBeInTheDocument();
+    expect(screen.getByText("Create Spec")).toBeInTheDocument();
+
+    // Click Cancel to hide the form
+    fireEvent.click(screen.getByText("Cancel"));
+
+    // Form should be gone
+    expect(screen.queryByText("Create Spec")).not.toBeInTheDocument();
+  });
+
+  it("creates a spec via the form", async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.post("*/api/v1/projects/:id/specs", () => {
+        return HttpResponse.json(
+          {
+            data: {
+              id: "spec-new",
+              project_id: "proj-1",
+              org_id: "org-1",
+              title: "New Spec",
+              content: "# New content",
+              spec_type: "prd",
+              sort_order: 0,
+              version: 1,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            },
+          },
+          { status: 201 },
+        );
+      }),
+    );
+
+    renderWithProviders(
+      <SpecsSection project={mockProject} specs={[]} />,
+    );
+
+    // Open the add form
+    await user.click(screen.getByText("Add"));
+
+    // Fill in the form
+    await user.type(
+      screen.getByPlaceholderText("Product Requirements Document"),
+      "New Spec",
+    );
+    await user.type(
+      screen.getByPlaceholderText(/# Overview/),
+      "# New content",
+    );
+
+    // Submit the form
+    await user.click(screen.getByText("Create Spec"));
+
+    // Wait for the form to disappear after successful creation
+    await waitFor(() => {
+      expect(screen.queryByText("Create Spec")).not.toBeInTheDocument();
+    });
+  });
+
+  it("enters and cancels edit mode", () => {
+    renderWithProviders(
+      <SpecsSection project={mockProject} specs={[mockSpec]} />,
+    );
+
+    // Click the pencil icon button to enter edit mode
+    const pencilButton = screen.getAllByRole("button").find(
+      (btn) => btn.querySelector('[data-testid="icon-Pencil"]'),
+    )!;
+    fireEvent.click(pencilButton);
+
+    // The title should now be in an input
+    expect(screen.getByDisplayValue("Test PRD")).toBeInTheDocument();
+
+    // Click the X icon button to cancel editing
+    const xButton = screen.getAllByRole("button").find(
+      (btn) => btn.querySelector('[data-testid="icon-X"]'),
+    )!;
+    fireEvent.click(xButton);
+
+    // The title should be back as plain text
+    expect(screen.getByText("Test PRD")).toBeInTheDocument();
+  });
+
+  it("cancels delete", () => {
+    renderWithProviders(
+      <SpecsSection project={mockProject} specs={[mockSpec]} />,
+    );
+
+    // Click the trash icon
+    const trashButton = screen.getAllByRole("button").find(
+      (btn) => btn.querySelector('[data-testid="icon-Trash2"]'),
+    )!;
+    fireEvent.click(trashButton);
+
+    // Confirm should appear
+    expect(screen.getByText("Confirm")).toBeInTheDocument();
+
+    // Click Cancel
+    fireEvent.click(screen.getByText("Cancel"));
+
+    // Confirm should be gone
+    expect(screen.queryByText("Confirm")).not.toBeInTheDocument();
+  });
 });
 
 describe("DesignsSection", () => {
@@ -227,6 +344,85 @@ describe("DesignsSection", () => {
     expect(screen.getByText("Confirm")).toBeInTheDocument();
     expect(screen.getByText("Cancel")).toBeInTheDocument();
   });
+
+  it("toggles add form and creates attachment", async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.post("*/api/v1/projects/:id/attachments", () => {
+        return HttpResponse.json(
+          {
+            data: {
+              id: "attach-new",
+              project_id: "proj-1",
+              org_id: "org-1",
+              file_name: "new-mockup.png",
+              file_url: "https://example.com/new-mockup.png",
+              file_type: "image",
+              category: "screenshot",
+              sort_order: 0,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            },
+          },
+          { status: 201 },
+        );
+      }),
+    );
+
+    renderWithProviders(
+      <DesignsSection project={mockProject} attachments={[]} />,
+    );
+
+    // Click Add to show the form
+    await user.click(screen.getByText("Add"));
+
+    // Form should appear
+    expect(screen.getByText("File Name")).toBeInTheDocument();
+
+    // Fill in the form
+    await user.type(
+      screen.getByPlaceholderText("homepage-mockup.png"),
+      "new-mockup.png",
+    );
+    await user.type(
+      screen.getByPlaceholderText("https://..."),
+      "https://example.com/new-mockup.png",
+    );
+
+    // Click the submit Add button (inside the form, not the header one)
+    const addButtons = screen.getAllByRole("button").filter(
+      (btn) => btn.textContent === "Add",
+    );
+    // The last "Add" button is the submit button inside the form
+    await user.click(addButtons[addButtons.length - 1]);
+
+    // Wait for the form to disappear after successful creation
+    await waitFor(() => {
+      expect(screen.queryByText("File Name")).not.toBeInTheDocument();
+    });
+  });
+
+  it("confirms delete of attachment", async () => {
+    server.use(
+      http.delete("*/api/v1/projects/:id/attachments/:attachId", () => {
+        return HttpResponse.json(undefined, { status: 204 });
+      }),
+    );
+
+    renderWithProviders(
+      <DesignsSection project={mockProject} attachments={[mockAttachment]} />,
+    );
+
+    // Click trash icon
+    const trashButton = screen.getAllByRole("button").find(
+      (btn) => btn.querySelector('[data-testid="icon-Trash2"]'),
+    )!;
+    fireEvent.click(trashButton);
+
+    // Click Confirm
+    fireEvent.click(screen.getByText("Confirm"));
+  });
 });
 
 describe("AnalysisSection", () => {
@@ -245,6 +441,70 @@ describe("AnalysisSection", () => {
     // The target select should have the default options
     const select = screen.getByDisplayValue("Specs");
     expect(select).toBeInTheDocument();
+  });
+
+  it("shows suggestions after analyze", async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.post("*/api/v1/projects/:id/ai/improve", () => {
+        return HttpResponse.json({
+          data: {
+            suggestions: [
+              {
+                type: "addition",
+                title: "Add error handling",
+                description: "Consider adding error handling for edge cases",
+                priority: "high",
+              },
+            ],
+            summary: "Analysis complete",
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<AnalysisSection project={mockProject} />);
+
+    // Open the collapsed section
+    await user.click(screen.getByText("Project Analysis"));
+
+    // Click Analyze
+    await user.click(screen.getByText("Analyze"));
+
+    // Wait for the suggestion to appear
+    await waitFor(() => {
+      expect(screen.getByText("Add error handling")).toBeInTheDocument();
+    });
+
+    // Verify priority badge
+    expect(screen.getByText("high")).toBeInTheDocument();
+  });
+
+  it("shows error on failed analysis", async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.post("*/api/v1/projects/:id/ai/improve", () => {
+        return HttpResponse.json(
+          { error: { code: "INTERNAL_ERROR", message: "Something went wrong" } },
+          { status: 500 },
+        );
+      }),
+    );
+
+    renderWithProviders(<AnalysisSection project={mockProject} />);
+
+    // Open the collapsed section
+    await user.click(screen.getByText("Project Analysis"));
+
+    // Click Analyze
+    await user.click(screen.getByText("Analyze"));
+
+    // Wait for the error message to appear
+    await waitFor(() => {
+      expect(screen.getByText("Failed to get suggestions.")).toBeInTheDocument();
+    });
   });
 });
 
