@@ -211,6 +211,17 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	if returnTo := r.URL.Query().Get("return_to"); returnTo != "" {
+		http.SetCookie(w, &http.Cookie{
+			Name:     "oauth_return_to",
+			Value:    returnTo,
+			Path:     "/",
+			MaxAge:   600,
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+		})
+	}
+
 	params := url.Values{
 		"client_id":    {h.cfg.GitHubOAuthClientID},
 		"redirect_uri": {h.cfg.GitHubOAuthRedirectURI},
@@ -380,6 +391,17 @@ func (h *AuthHandler) GoogleLogin(w http.ResponseWriter, r *http.Request) {
 		http.SetCookie(w, &http.Cookie{
 			Name:     "pending_invitation",
 			Value:    invToken,
+			Path:     "/",
+			MaxAge:   600,
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+		})
+	}
+
+	if returnTo := r.URL.Query().Get("return_to"); returnTo != "" {
+		http.SetCookie(w, &http.Cookie{
+			Name:     "oauth_return_to",
+			Value:    returnTo,
 			Path:     "/",
 			MaxAge:   600,
 			HttpOnly: true,
@@ -589,7 +611,17 @@ func (h *AuthHandler) createSessionAndRedirect(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	http.Redirect(w, r, h.cfg.FrontendURL, http.StatusTemporaryRedirect)
+	redirectURL := h.cfg.FrontendURL
+	if returnCookie, err := r.Cookie("oauth_return_to"); err == nil && returnCookie.Value != "" {
+		// Clear the cookie.
+		http.SetCookie(w, &http.Cookie{Name: "oauth_return_to", Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
+		// Only allow relative paths to prevent open redirect.
+		if len(returnCookie.Value) > 0 && returnCookie.Value[0] == '/' {
+			redirectURL = h.cfg.FrontendURL + returnCookie.Value
+		}
+	}
+
+	http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 }
 
 func (h *AuthHandler) createSessionAndRespond(w http.ResponseWriter, r *http.Request, user *models.User) {
