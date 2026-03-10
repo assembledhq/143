@@ -99,7 +99,7 @@ func TestProjectHandler_List(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
 	orgID := uuid.New()
 
 	mock.ExpectQuery("SELECT .+ FROM projects WHERE org_id").
@@ -126,7 +126,7 @@ func TestProjectHandler_Get_NotFound(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
 	orgID := uuid.New()
 	projectID := uuid.New()
 
@@ -147,10 +147,329 @@ func TestProjectHandler_Get_NotFound(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+// --- Update handler tests ---
+
+func TestProjectHandler_Update(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	orgID := uuid.New()
+	projectID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+
+	// GetByID returns a draft project
+	mock.ExpectQuery("SELECT .+ FROM projects WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, repoID, models.ProjectStatusDraft, now)...))
+
+	// Update (19 named args)
+	mock.ExpectExec("UPDATE projects SET").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	body, _ := json.Marshal(map[string]string{"title": "Updated Title"})
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/projects/"+projectID.String(), bytes.NewBuffer(body))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	req = req.WithContext(withProjectRouteParam(req.Context(), projectID))
+	rr := httptest.NewRecorder()
+
+	handler.Update(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Contains(t, rr.Body.String(), "Updated Title")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestProjectHandler_Update_InvalidTransition(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	orgID := uuid.New()
+	projectID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+
+	// GetByID returns a draft project
+	mock.ExpectQuery("SELECT .+ FROM projects WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, repoID, models.ProjectStatusDraft, now)...))
+
+	// Try to transition from draft -> completed (invalid)
+	body, _ := json.Marshal(map[string]string{"status": "completed"})
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/projects/"+projectID.String(), bytes.NewBuffer(body))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	req = req.WithContext(withProjectRouteParam(req.Context(), projectID))
+	rr := httptest.NewRecorder()
+
+	handler.Update(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+	require.Contains(t, rr.Body.String(), "INVALID_TRANSITION")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// --- Pause handler tests ---
+
+func TestProjectHandler_Pause(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	orgID := uuid.New()
+	projectID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+
+	// GetByID returns an active project
+	mock.ExpectQuery("SELECT .+ FROM projects WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, repoID, models.ProjectStatusActive, now)...))
+
+	// UpdateStatus
+	mock.ExpectExec("UPDATE projects SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID.String()+"/pause", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	req = req.WithContext(withProjectRouteParam(req.Context(), projectID))
+	rr := httptest.NewRecorder()
+
+	handler.Pause(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Contains(t, rr.Body.String(), `"status":"paused"`)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// --- Resume handler tests ---
+
+func TestProjectHandler_Resume(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	orgID := uuid.New()
+	projectID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+
+	// GetByID returns a paused project
+	mock.ExpectQuery("SELECT .+ FROM projects WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, repoID, models.ProjectStatusPaused, now)...))
+
+	// UpdateStatus
+	mock.ExpectExec("UPDATE projects SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID.String()+"/resume", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	req = req.WithContext(withProjectRouteParam(req.Context(), projectID))
+	rr := httptest.NewRecorder()
+
+	handler.Resume(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Contains(t, rr.Body.String(), `"status":"active"`)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// --- Approve handler tests ---
+
+func TestProjectHandler_Approve(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	orgID := uuid.New()
+	projectID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+
+	// GetByID returns a proposed project
+	mock.ExpectQuery("SELECT .+ FROM projects WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, repoID, models.ProjectStatusProposed, now)...))
+
+	// UpdateStatus
+	mock.ExpectExec("UPDATE projects SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID.String()+"/approve", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	req = req.WithContext(withProjectRouteParam(req.Context(), projectID))
+	rr := httptest.NewRecorder()
+
+	handler.Approve(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Contains(t, rr.Body.String(), `"status":"draft"`)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// --- Dismiss handler tests ---
+
+func TestProjectHandler_Dismiss(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	orgID := uuid.New()
+	projectID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+
+	// GetByID returns a proposed project
+	mock.ExpectQuery("SELECT .+ FROM projects WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, repoID, models.ProjectStatusProposed, now)...))
+
+	// UpdateStatus (cancelled triggers completed_at = now() variant)
+	mock.ExpectExec("UPDATE projects SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID.String()+"/dismiss", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	req = req.WithContext(withProjectRouteParam(req.Context(), projectID))
+	rr := httptest.NewRecorder()
+
+	handler.Dismiss(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Contains(t, rr.Body.String(), `"status":"cancelled"`)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// --- UpdateTask success handler tests ---
+
+func TestProjectHandler_UpdateTask_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewProjectHandler(db.NewProjectStore(mock), db.NewProjectTaskStore(mock), nil, nil, nil)
+	orgID := uuid.New()
+	projectID := uuid.New()
+	taskID := uuid.New()
+	now := time.Now()
+
+	// GetByID returns task matching project
+	mock.ExpectQuery("SELECT .+ FROM project_tasks WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(projectTaskHandlerColumns).
+				AddRow(newProjectTaskHandlerRow(taskID, projectID, orgID, models.ProjectTaskStatusPending, now)...),
+		)
+
+	// Update task
+	mock.ExpectExec("UPDATE project_tasks SET").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	// UpdateProgress
+	mock.ExpectExec("UPDATE projects SET").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	body, _ := json.Marshal(map[string]string{"title": "Updated Task Title"})
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/projects/"+projectID.String()+"/tasks/"+taskID.String(), bytes.NewBuffer(body))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	req = req.WithContext(withProjectTaskRouteParams(req.Context(), projectID, taskID))
+	rr := httptest.NewRecorder()
+
+	handler.UpdateTask(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Contains(t, rr.Body.String(), "Updated Task Title")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// --- DeleteTask success handler tests ---
+
+func TestProjectHandler_DeleteTask_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewProjectHandler(db.NewProjectStore(mock), db.NewProjectTaskStore(mock), nil, nil, nil)
+	orgID := uuid.New()
+	projectID := uuid.New()
+	taskID := uuid.New()
+	now := time.Now()
+
+	// GetByID returns task matching project
+	mock.ExpectQuery("SELECT .+ FROM project_tasks WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(projectTaskHandlerColumns).
+				AddRow(newProjectTaskHandlerRow(taskID, projectID, orgID, models.ProjectTaskStatusPending, now)...),
+		)
+
+	// Delete task
+	mock.ExpectExec("DELETE FROM project_tasks WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("DELETE", 1))
+
+	// UpdateProgress
+	mock.ExpectExec("UPDATE projects SET").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/projects/"+projectID.String()+"/tasks/"+taskID.String(), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	req = req.WithContext(withProjectTaskRouteParams(req.Context(), projectID, taskID))
+	rr := httptest.NewRecorder()
+
+	handler.DeleteTask(rr, req)
+
+	require.Equal(t, http.StatusNoContent, rr.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestProjectHandler_Get_InvalidID(t *testing.T) {
 	t.Parallel()
 
-	handler := NewProjectHandler(nil, nil, nil)
+	handler := NewProjectHandler(nil, nil, nil, nil, nil)
 
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", "not-a-uuid")
@@ -175,7 +494,7 @@ func TestProjectHandler_Create(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
 	orgID := uuid.New()
 	userID := uuid.New()
 	repoID := uuid.New()
@@ -210,7 +529,7 @@ func TestProjectHandler_Create(t *testing.T) {
 func TestProjectHandler_Create_MissingFields(t *testing.T) {
 	t.Parallel()
 
-	handler := NewProjectHandler(nil, nil, nil)
+	handler := NewProjectHandler(nil, nil, nil, nil, nil)
 	orgID := uuid.New()
 
 	body, _ := json.Marshal(map[string]string{"title": "No goal"})
@@ -230,7 +549,7 @@ func TestProjectHandler_Create_MissingFields(t *testing.T) {
 func TestProjectHandler_Create_InvalidJSON(t *testing.T) {
 	t.Parallel()
 
-	handler := NewProjectHandler(nil, nil, nil)
+	handler := NewProjectHandler(nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects", bytes.NewBufferString("{bad json"))
 	ctx := middleware.WithOrgID(req.Context(), uuid.New())
@@ -247,7 +566,7 @@ func TestProjectHandler_Create_InvalidJSON(t *testing.T) {
 func TestProjectHandler_Create_InvalidRepoID(t *testing.T) {
 	t.Parallel()
 
-	handler := NewProjectHandler(nil, nil, nil)
+	handler := NewProjectHandler(nil, nil, nil, nil, nil)
 
 	body, _ := json.Marshal(map[string]string{
 		"title":         "Test",
@@ -276,7 +595,7 @@ func TestProjectHandler_Delete(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
 	orgID := uuid.New()
 	projectID := uuid.New()
 
@@ -304,7 +623,7 @@ func TestProjectHandler_Start(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
 	orgID := uuid.New()
 	projectID := uuid.New()
 	repoID := uuid.New()
@@ -339,7 +658,7 @@ func TestProjectHandler_Start_InvalidTransition(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
 	orgID := uuid.New()
 	projectID := uuid.New()
 	repoID := uuid.New()
@@ -371,7 +690,7 @@ func TestProjectHandler_CreateTask(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), db.NewProjectTaskStore(mock), nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), db.NewProjectTaskStore(mock), nil, nil, nil)
 	orgID := uuid.New()
 	projectID := uuid.New()
 	repoID := uuid.New()
@@ -421,7 +740,7 @@ func TestProjectHandler_CreateTask_MissingTitle(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
 	orgID := uuid.New()
 	projectID := uuid.New()
 	repoID := uuid.New()
@@ -454,7 +773,7 @@ func TestProjectHandler_RetryTask_OnlyFailedTasksCanRetry(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), db.NewProjectTaskStore(mock), nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), db.NewProjectTaskStore(mock), nil, nil, nil)
 	orgID := uuid.New()
 	projectID := uuid.New()
 	taskID := uuid.New()
@@ -485,7 +804,7 @@ func TestProjectHandler_RetryTask_OnlyFailedTasksCanRetry(t *testing.T) {
 func TestProjectHandler_ListCycles_InvalidID(t *testing.T) {
 	t.Parallel()
 
-	handler := NewProjectHandler(nil, nil, nil)
+	handler := NewProjectHandler(nil, nil, nil, nil, nil)
 
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", "not-a-uuid")
@@ -508,7 +827,7 @@ func TestProjectHandler_ListCycles_DBError(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewProjectHandler(nil, nil, db.NewProjectCycleStore(mock))
+	handler := NewProjectHandler(nil, nil, db.NewProjectCycleStore(mock), nil, nil)
 	orgID := uuid.New()
 	projectID := uuid.New()
 
@@ -533,7 +852,7 @@ func TestProjectHandler_ListCycles_DBError(t *testing.T) {
 func TestProjectHandler_GetCycle_InvalidID(t *testing.T) {
 	t.Parallel()
 
-	handler := NewProjectHandler(nil, nil, nil)
+	handler := NewProjectHandler(nil, nil, nil, nil, nil)
 
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", uuid.New().String())

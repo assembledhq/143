@@ -47,7 +47,7 @@ func TestProjectHandler_UpdateTaskRejectsMismatchedProjectPath(t *testing.T) {
 	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), db.NewProjectTaskStore(mock), nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), db.NewProjectTaskStore(mock), nil, nil, nil)
 	orgID := uuid.New()
 	projectInPath := uuid.New()
 	taskProjectID := uuid.New()
@@ -79,7 +79,7 @@ func TestProjectHandler_DeleteTaskRejectsMismatchedProjectPath(t *testing.T) {
 	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), db.NewProjectTaskStore(mock), nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), db.NewProjectTaskStore(mock), nil, nil, nil)
 	orgID := uuid.New()
 	projectInPath := uuid.New()
 	taskProjectID := uuid.New()
@@ -111,7 +111,7 @@ func TestProjectHandler_RetryTaskRejectsMismatchedProjectPath(t *testing.T) {
 	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), db.NewProjectTaskStore(mock), nil)
+	handler := NewProjectHandler(db.NewProjectStore(mock), db.NewProjectTaskStore(mock), nil, nil, nil)
 	orgID := uuid.New()
 	projectInPath := uuid.New()
 	taskProjectID := uuid.New()

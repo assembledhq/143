@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import type { Issue, AgentRun, AgentRunLog, AgentSession, Validation, PullRequest, ListResponse, SingleResponse } from '@/lib/types';
+import type { Issue, AgentRun, AgentRunLog, AgentSession, Validation, PullRequest, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, ProjectDetail } from '@/lib/types';
 
 export const mockIssues: Issue[] = [
   {
@@ -174,6 +174,41 @@ export const mockSessions: AgentSession[] = [
   },
 ];
 
+export const mockProjectDetail: ProjectDetail = {
+  project: {
+    id: 'proj-1',
+    org_id: 'org-1',
+    repository_id: 'repo-1',
+    title: 'Test Project',
+    goal: 'Build something great',
+    status: 'draft',
+    priority: 50,
+    execution_mode: 'sequential',
+    max_concurrent: 1,
+    auto_merge: false,
+    base_branch: 'main',
+    total_tasks: 3,
+    completed_tasks: 1,
+    failed_tasks: 0,
+    proposed_by_pm: false,
+    source_issue_ids: [],
+    created_at: '2026-02-17T08:00:00Z',
+    updated_at: '2026-02-17T08:00:00Z',
+  },
+  tasks: [],
+  recent_cycles: [],
+  attachments: [],
+  specs: [],
+};
+
+export const mockPMStatus: PMStatus = {
+  is_running: false,
+  issues_reviewed: 0,
+  success_rate: 0,
+  success_count: 0,
+  total_delegated: 0,
+};
+
 export const handlers = [
   http.get('/api/v1/issues', () => {
     return HttpResponse.json({
@@ -230,6 +265,26 @@ export const handlers = [
       data: mockSessions,
       meta: {},
     } satisfies ListResponse<AgentSession>);
+  }),
+
+  http.get('/api/v1/projects/:id', () => {
+    return HttpResponse.json({ data: mockProjectDetail } satisfies SingleResponse<ProjectDetail>);
+  }),
+
+  http.get('/api/v1/pm/status', () => {
+    return HttpResponse.json({ data: mockPMStatus } satisfies SingleResponse<PMStatus>);
+  }),
+
+  http.post('/api/v1/pm/analyze', () => {
+    return HttpResponse.json({ data: { job_id: 'job-1' } });
+  }),
+
+  http.get('/api/v1/pm/decisions', () => {
+    return HttpResponse.json({
+      data: [],
+      summary: { total_delegated: 0, succeeded: 0, failed: 0, still_open: 0 },
+      meta: {},
+    } satisfies PMDecisionsResponse);
   }),
 
   http.get('/api/v1/sessions/:id', ({ params }) => {

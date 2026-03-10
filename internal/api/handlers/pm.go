@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"fmt"
 	"net/http"
 
 	"github.com/assembledhq/143/internal/api/middleware"
@@ -168,7 +167,7 @@ func (h *PMHandler) Status(w http.ResponseWriter, r *http.Request) {
 	// Estimate next run from org settings (pm_schedule_hours).
 	if status.LastRunAt != nil && !status.IsRunning {
 		// Default schedule is 4 hours; compute approximate next run.
-		nextRunIn := fmt.Sprintf("in ~4h")
+		nextRunIn := "in ~4h"
 		status.NextRunIn = &nextRunIn
 	}
 

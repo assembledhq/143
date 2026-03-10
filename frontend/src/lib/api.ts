@@ -271,6 +271,29 @@ export const api = {
     },
     getCycle: (projectId: string, cycleId: string) =>
       get<import('./types').SingleResponse<import('./types').ProjectCycle>>(`/api/v1/projects/${projectId}/cycles/${cycleId}`),
+    // Attachments
+    listAttachments: (projectId: string) =>
+      get<import('./types').ListResponse<import('./types').ProjectAttachment>>(`/api/v1/projects/${projectId}/attachments`),
+    createAttachment: (projectId: string, body: { file_name: string; file_url: string; file_type?: string; thumbnail_url?: string; file_size?: number; category?: string; caption?: string }) =>
+      post<import('./types').SingleResponse<import('./types').ProjectAttachment>>(`/api/v1/projects/${projectId}/attachments`, body),
+    updateAttachment: (projectId: string, attachmentId: string, body: Record<string, unknown>) =>
+      patch<import('./types').SingleResponse<import('./types').ProjectAttachment>>(`/api/v1/projects/${projectId}/attachments/${attachmentId}`, body),
+    deleteAttachment: (projectId: string, attachmentId: string) =>
+      del(`/api/v1/projects/${projectId}/attachments/${attachmentId}`),
+    // Specs
+    listSpecs: (projectId: string) =>
+      get<import('./types').ListResponse<import('./types').ProjectSpec>>(`/api/v1/projects/${projectId}/specs`),
+    createSpec: (projectId: string, body: { title: string; content?: string; spec_type?: string }) =>
+      post<import('./types').SingleResponse<import('./types').ProjectSpec>>(`/api/v1/projects/${projectId}/specs`, body),
+    getSpec: (projectId: string, specId: string) =>
+      get<import('./types').SingleResponse<import('./types').ProjectSpec>>(`/api/v1/projects/${projectId}/specs/${specId}`),
+    updateSpec: (projectId: string, specId: string, body: Record<string, unknown>) =>
+      patch<import('./types').SingleResponse<import('./types').ProjectSpec>>(`/api/v1/projects/${projectId}/specs/${specId}`, body),
+    deleteSpec: (projectId: string, specId: string) =>
+      del(`/api/v1/projects/${projectId}/specs/${specId}`),
+    // AI
+    aiImprove: (projectId: string, body: { target: string; spec_id?: string; prompt?: string }) =>
+      post<import('./types').SingleResponse<import('./types').AIImprovementResponse>>(`/api/v1/projects/${projectId}/ai/improve`, body),
   },
   reviewComments: {
     list: (params?: { pull_request_id?: string; filter_status?: string; cursor?: string }) => {
