@@ -2,8 +2,8 @@ package handlers
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
+	"strconv"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
@@ -12,20 +12,23 @@ import (
 	"github.com/google/uuid"
 )
 
-type ProjectAIHandler struct {
+// ProjectAnalysisHandler provides rule-based project analysis.
+// It examines specs, designs, and tasks to produce structured improvement
+// suggestions using heuristics (not an LLM).
+type ProjectAnalysisHandler struct {
 	projectStore    *db.ProjectStore
 	specStore       *db.ProjectSpecStore
 	attachmentStore *db.ProjectAttachmentStore
 	taskStore       *db.ProjectTaskStore
 }
 
-func NewProjectAIHandler(
+func NewProjectAnalysisHandler(
 	projectStore *db.ProjectStore,
 	specStore *db.ProjectSpecStore,
 	attachmentStore *db.ProjectAttachmentStore,
 	taskStore *db.ProjectTaskStore,
-) *ProjectAIHandler {
-	return &ProjectAIHandler{
+) *ProjectAnalysisHandler {
+	return &ProjectAnalysisHandler{
 		projectStore:    projectStore,
 		specStore:       specStore,
 		attachmentStore: attachmentStore,
@@ -33,28 +36,28 @@ func NewProjectAIHandler(
 	}
 }
 
-// AIImprovementRequest is the request body for AI improvement suggestions.
-type AIImprovementRequest struct {
-	Target  string  `json:"target"`            // "spec", "design", "tasks"
-	SpecID  *string `json:"spec_id,omitempty"`  // for spec improvements
-	Prompt  *string `json:"prompt,omitempty"`   // additional user instruction
+// AnalysisRequest is the request body for project analysis suggestions.
+type AnalysisRequest struct {
+	Target string  `json:"target"`           // "spec", "design", "tasks", or "all"
+	SpecID *string `json:"spec_id,omitempty"` // for spec-specific analysis
+	Prompt *string `json:"prompt,omitempty"`  // additional user instruction
 }
 
-// AIImprovementResponse returns suggestions from the AI analysis.
-type AIImprovementResponse struct {
-	Suggestions []AISuggestion `json:"suggestions"`
-	Summary     string         `json:"summary"`
+// AnalysisResponse returns suggestions from the rule-based analysis.
+type AnalysisResponse struct {
+	Suggestions []AnalysisSuggestion `json:"suggestions"`
+	Summary     string               `json:"summary"`
 }
 
-type AISuggestion struct {
-	Type        string `json:"type"`        // "addition", "revision", "question", "task"
+type AnalysisSuggestion struct {
+	Type        string `json:"type"`     // "addition", "revision", "question", "task"
 	Title       string `json:"title"`
 	Description string `json:"description"`
-	Priority    string `json:"priority"`    // "high", "medium", "low"
+	Priority    string `json:"priority"` // "high", "medium", "low"
 }
 
-// Improve generates AI suggestions for a project's specs, designs, or tasks.
-func (h *ProjectAIHandler) Improve(w http.ResponseWriter, r *http.Request) {
+// Improve generates rule-based suggestions for a project's specs, designs, or tasks.
+func (h *ProjectAnalysisHandler) Improve(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
@@ -68,7 +71,7 @@ func (h *ProjectAIHandler) Improve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req AIImprovementRequest
+	var req AnalysisRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
@@ -79,7 +82,6 @@ func (h *ProjectAIHandler) Improve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Gather context for the AI
 	specs, err := h.specStore.ListByProject(r.Context(), orgID, projectID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "LIST_SPECS_FAILED", "failed to list project specs")
@@ -96,12 +98,10 @@ func (h *ProjectAIHandler) Improve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build suggestions based on analysis of current project state.
-	// This is a structured analysis that can be consumed by an AI agent or returned as-is.
 	suggestions := analyzeProject(project, specs, attachments, tasks, req)
 
-	writeJSON(w, http.StatusOK, models.SingleResponse[AIImprovementResponse]{
-		Data: AIImprovementResponse{
+	writeJSON(w, http.StatusOK, models.SingleResponse[AnalysisResponse]{
+		Data: AnalysisResponse{
 			Suggestions: suggestions,
 			Summary:     buildSummary(project, specs, attachments, tasks, req.Target),
 		},
@@ -113,9 +113,9 @@ func analyzeProject(
 	specs []models.ProjectSpec,
 	attachments []models.ProjectAttachment,
 	tasks []models.ProjectTask,
-	req AIImprovementRequest,
-) []AISuggestion {
-	var suggestions []AISuggestion
+	req AnalysisRequest,
+) []AnalysisSuggestion {
+	var suggestions []AnalysisSuggestion
 
 	switch req.Target {
 	case "spec":
@@ -125,7 +125,6 @@ func analyzeProject(
 	case "tasks":
 		suggestions = analyzeTasks(project, tasks, specs)
 	default:
-		// General analysis covering all areas
 		suggestions = append(suggestions, analyzeSpecs(project, specs)...)
 		suggestions = append(suggestions, analyzeDesigns(project, attachments, specs)...)
 		suggestions = append(suggestions, analyzeTasks(project, tasks, specs)...)
@@ -134,11 +133,11 @@ func analyzeProject(
 	return suggestions
 }
 
-func analyzeSpecs(project models.Project, specs []models.ProjectSpec) []AISuggestion {
-	var suggestions []AISuggestion
+func analyzeSpecs(project models.Project, specs []models.ProjectSpec) []AnalysisSuggestion {
+	var suggestions []AnalysisSuggestion
 
 	if len(specs) == 0 {
-		suggestions = append(suggestions, AISuggestion{
+		suggestions = append(suggestions, AnalysisSuggestion{
 			Type:        "addition",
 			Title:       "Add a Product Requirements Document",
 			Description: "This project has no specs yet. Create a PRD to define the user stories, acceptance criteria, and technical requirements for: " + project.Goal,
@@ -147,18 +146,34 @@ func analyzeSpecs(project models.Project, specs []models.ProjectSpec) []AISugges
 		return suggestions
 	}
 
+	hasTechnicalSpec := false
+	for _, spec := range specs {
+		if spec.SpecType == "technical" {
+			hasTechnicalSpec = true
+		}
+	}
+
 	for _, spec := range specs {
 		if len(spec.Content) < 100 {
-			suggestions = append(suggestions, AISuggestion{
+			suggestions = append(suggestions, AnalysisSuggestion{
 				Type:        "revision",
 				Title:       "Expand spec: " + spec.Title,
 				Description: "This spec is very short. Consider adding user stories, acceptance criteria, edge cases, and technical constraints.",
 				Priority:    "high",
 			})
 		}
+	}
 
-		if spec.SpecType == "prd" {
-			suggestions = append(suggestions, AISuggestion{
+	if !hasTechnicalSpec {
+		hasPRD := false
+		for _, spec := range specs {
+			if spec.SpecType == "prd" {
+				hasPRD = true
+				break
+			}
+		}
+		if hasPRD {
+			suggestions = append(suggestions, AnalysisSuggestion{
 				Type:        "question",
 				Title:       "Consider adding a technical spec",
 				Description: "You have a PRD but no technical spec. A technical design document would help the AI agent understand implementation details, architecture decisions, and API contracts.",
@@ -168,7 +183,7 @@ func analyzeSpecs(project models.Project, specs []models.ProjectSpec) []AISugges
 	}
 
 	if project.CompletionCriteria == nil || *project.CompletionCriteria == "" {
-		suggestions = append(suggestions, AISuggestion{
+		suggestions = append(suggestions, AnalysisSuggestion{
 			Type:        "revision",
 			Title:       "Define completion criteria",
 			Description: "The project has no completion criteria. Adding measurable completion criteria will help the AI agent know when the project is done.",
@@ -179,11 +194,11 @@ func analyzeSpecs(project models.Project, specs []models.ProjectSpec) []AISugges
 	return suggestions
 }
 
-func analyzeDesigns(project models.Project, attachments []models.ProjectAttachment, specs []models.ProjectSpec) []AISuggestion {
-	var suggestions []AISuggestion
+func analyzeDesigns(project models.Project, attachments []models.ProjectAttachment, specs []models.ProjectSpec) []AnalysisSuggestion {
+	var suggestions []AnalysisSuggestion
 
 	if len(attachments) == 0 {
-		suggestions = append(suggestions, AISuggestion{
+		suggestions = append(suggestions, AnalysisSuggestion{
 			Type:        "addition",
 			Title:       "Add design references",
 			Description: "No screenshots or mockups have been added. Upload screenshots, wireframes, or Figma exports to give the AI agent visual context for the implementation.",
@@ -203,7 +218,7 @@ func analyzeDesigns(project models.Project, attachments []models.ProjectAttachme
 	}
 
 	if screenshotCount > 0 && mockupCount == 0 {
-		suggestions = append(suggestions, AISuggestion{
+		suggestions = append(suggestions, AnalysisSuggestion{
 			Type:        "addition",
 			Title:       "Add mockups or wireframes",
 			Description: "You have screenshots showing the current state, but no mockups showing the desired state. Adding mockups or wireframes will help clarify the target design.",
@@ -211,7 +226,6 @@ func analyzeDesigns(project models.Project, attachments []models.ProjectAttachme
 		})
 	}
 
-	// Check if any attachments lack captions
 	uncaptionedCount := 0
 	for _, a := range attachments {
 		if a.Caption == nil || *a.Caption == "" {
@@ -219,7 +233,7 @@ func analyzeDesigns(project models.Project, attachments []models.ProjectAttachme
 		}
 	}
 	if uncaptionedCount > 0 {
-		suggestions = append(suggestions, AISuggestion{
+		suggestions = append(suggestions, AnalysisSuggestion{
 			Type:        "revision",
 			Title:       "Add captions to attachments",
 			Description: "Some attachments don't have captions. Adding descriptions helps the AI agent understand what each screenshot or mockup represents.",
@@ -230,11 +244,11 @@ func analyzeDesigns(project models.Project, attachments []models.ProjectAttachme
 	return suggestions
 }
 
-func analyzeTasks(project models.Project, tasks []models.ProjectTask, specs []models.ProjectSpec) []AISuggestion {
-	var suggestions []AISuggestion
+func analyzeTasks(project models.Project, tasks []models.ProjectTask, specs []models.ProjectSpec) []AnalysisSuggestion {
+	var suggestions []AnalysisSuggestion
 
 	if len(tasks) == 0 && len(specs) > 0 {
-		suggestions = append(suggestions, AISuggestion{
+		suggestions = append(suggestions, AnalysisSuggestion{
 			Type:        "task",
 			Title:       "Break specs into tasks",
 			Description: "You have specs but no tasks. Consider breaking the requirements into discrete, implementable tasks that the AI agent can work on.",
@@ -250,7 +264,7 @@ func analyzeTasks(project models.Project, tasks []models.ProjectTask, specs []mo
 	}
 
 	if failedCount > 0 {
-		suggestions = append(suggestions, AISuggestion{
+		suggestions = append(suggestions, AnalysisSuggestion{
 			Type:        "revision",
 			Title:       "Review failed tasks",
 			Description: "Some tasks have failed. Review the failure notes, consider simplifying the approach, or break them into smaller tasks.",
@@ -265,7 +279,7 @@ func analyzeTasks(project models.Project, tasks []models.ProjectTask, specs []mo
 		}
 	}
 	if noDescriptionCount > 2 {
-		suggestions = append(suggestions, AISuggestion{
+		suggestions = append(suggestions, AnalysisSuggestion{
 			Type:        "revision",
 			Title:       "Add descriptions to tasks",
 			Description: "Several tasks lack descriptions. Adding detailed descriptions with acceptance criteria will improve agent success rates.",
@@ -295,13 +309,9 @@ func buildSummary(
 	}
 
 	return "Project: " + project.Title +
-		" | Specs: " + itoa(len(specs)) +
-		" | Designs: " + itoa(len(attachments)) +
-		" | Tasks: " + itoa(len(tasks)) +
-		" (" + itoa(completedTasks) + " done, " + itoa(failedTasks) + " failed)" +
+		" | Specs: " + strconv.Itoa(len(specs)) +
+		" | Designs: " + strconv.Itoa(len(attachments)) +
+		" | Tasks: " + strconv.Itoa(len(tasks)) +
+		" (" + strconv.Itoa(completedTasks) + " done, " + strconv.Itoa(failedTasks) + " failed)" +
 		" | Focus: " + target
-}
-
-func itoa(n int) string {
-	return fmt.Sprintf("%d", n)
 }

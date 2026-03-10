@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
@@ -81,6 +82,11 @@ func (h *ProjectAttachmentHandler) Create(w http.ResponseWriter, r *http.Request
 
 	if req.FileName == "" || req.FileURL == "" {
 		writeError(w, http.StatusBadRequest, "MISSING_FIELD", "file_name and file_url are required")
+		return
+	}
+
+	if !strings.HasPrefix(req.FileURL, "https://") && !strings.HasPrefix(req.FileURL, "http://") {
+		writeError(w, http.StatusBadRequest, "INVALID_URL", "file_url must start with https:// or http://")
 		return
 	}
 

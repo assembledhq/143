@@ -110,12 +110,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	reviewPatternHandler := handlers.NewReviewPatternHandler(reviewPatternStore, reviewCommentStore)
 	teamHandler := handlers.NewTeamHandler(userStore, sessionStore, invitationStore, orgStore, cfg.FrontendURL)
 
-	projectHandler := handlers.NewProjectHandler(projectStore, projectTaskStore, projectCycleStore)
-	projectHandler.SetAttachmentStore(projectAttachmentStore)
-	projectHandler.SetSpecStore(projectSpecStore)
+	projectHandler := handlers.NewProjectHandler(projectStore, projectTaskStore, projectCycleStore, projectAttachmentStore, projectSpecStore)
 	projectAttachmentHandler := handlers.NewProjectAttachmentHandler(projectAttachmentStore, projectStore)
 	projectSpecHandler := handlers.NewProjectSpecHandler(projectSpecStore, projectStore)
-	projectAIHandler := handlers.NewProjectAIHandler(projectStore, projectSpecStore, projectAttachmentStore, projectTaskStore)
+	projectAnalysisHandler := handlers.NewProjectAnalysisHandler(projectStore, projectSpecStore, projectAttachmentStore, projectTaskStore)
 	codexAuthHandler := handlers.NewCodexAuthHandler(codexAuthSvc, logger)
 
 	r := chi.NewRouter()
@@ -230,7 +228,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Post("/api/v1/projects/{id}/specs", projectSpecHandler.Create)
 			r.Patch("/api/v1/projects/{id}/specs/{specId}", projectSpecHandler.Update)
 			r.Delete("/api/v1/projects/{id}/specs/{specId}", projectSpecHandler.Delete)
-			r.Post("/api/v1/projects/{id}/ai/improve", projectAIHandler.Improve)
+			r.Post("/api/v1/projects/{id}/ai/improve", projectAnalysisHandler.Improve)
 		})
 
 		// Admin-only routes
