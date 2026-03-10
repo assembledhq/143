@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from "react";
 import HeroSection from "@/components/landing/hero-section";
-import AirfieldSection from "@/components/landing/airfield/airfield-section";
+import HowItWorksSection from "@/components/landing/how-it-works-section";
+import StorySection from "@/components/landing/story-section";
 import CtaSection from "@/components/landing/cta-section";
 
 export default function LandingPage() {
@@ -19,7 +20,8 @@ export default function LandingPage() {
   return (
     <div className="relative">
       <HeroSection isDark={isDark} />
-      <AirfieldSection isDark={isDark} />
+      <HowItWorksSection isDark={isDark} />
+      <StorySection isDark={isDark} />
       <CtaSection isDark={isDark} />
     </div>
   );
