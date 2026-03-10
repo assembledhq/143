@@ -37,27 +37,18 @@ export default function StorySection({ isDark }: StorySectionProps) {
 
       ctx!.clearRect(0, 0, w, h);
 
-      // Plane slowly flies right-to-left across the canvas, looping
       const cycleDuration = 10000;
       const t = (time % cycleDuration) / cycleDuration;
 
-      // Position: enters from right, exits left
       const planeX = w * (1.15 - t * 1.3);
       const planeY = h * 0.5 + Math.sin(t * Math.PI * 2) * h * 0.06;
-
-      // Slight heading variation for natural movement
       const heading = Math.PI + Math.sin(t * Math.PI * 2) * 0.08;
-
-      // Size relative to canvas
       const size = Math.min(w, h) * 0.32;
-
-      // Fade in/out at edges
       const edgeFade =
         t < 0.08 ? t / 0.08 : t > 0.88 ? (1 - t) / 0.12 : 1;
 
       drawP80(ctx!, planeX, planeY, size, heading, 0.4, edgeFade * 0.8, theme);
 
-      // Subtle contrail
       if (edgeFade > 0.3) {
         const cosH = Math.cos(heading);
         const sinH = Math.sin(heading);
@@ -88,33 +79,33 @@ export default function StorySection({ isDark }: StorySectionProps) {
 
   return (
     <section
-      className="relative py-16 sm:py-20 px-6 sm:px-10 overflow-hidden"
+      className="relative py-20 sm:py-24 px-6 sm:px-10 overflow-hidden"
       style={{ background: isDark ? "#0c0c14" : "#f5f7fa" }}
     >
-      <div className="mx-auto max-w-4xl flex flex-col sm:flex-row items-center gap-8 sm:gap-12">
+      <div className="mx-auto max-w-5xl flex flex-col sm:flex-row items-center gap-10 sm:gap-16">
         <div className="w-full sm:w-[320px] h-[160px] flex-shrink-0">
           <canvas
             ref={canvasRef}
             style={{ width: "100%", height: "100%", display: "block" }}
           />
         </div>
-        <div>
+        <div className="space-y-3">
           <h3
-            className={`text-lg sm:text-xl font-light tracking-tight mb-3 ${
-              isDark ? "text-white/80" : "text-slate-800"
+            className={`text-xl sm:text-2xl font-light tracking-tight ${
+              isDark ? "text-white" : "text-slate-900"
             }`}
           >
             Why 143?
           </h3>
           <p
-            className={`text-sm leading-relaxed max-w-md ${
-              isDark ? "text-white/40" : "text-slate-600"
+            className={`text-sm leading-relaxed max-w-sm ${
+              isDark ? "text-white/45" : "text-slate-600"
             }`}
           >
-            The first US jet fighter, the P-80 Shooting Star, was designed and
-            built by Lockheed&apos;s Skunk Works in just 143&nbsp;days. We named
-            this project after that same spirit of speed &mdash; the belief that
-            a small team with the right tools can ship what seems impossible.
+            The P-80 Shooting Star was designed and built by Lockheed&apos;s
+            Skunk Works in just 143&nbsp;days. We named this project after that
+            same spirit &mdash; a small team with the right tools can ship what
+            seems impossible.
           </p>
         </div>
       </div>
