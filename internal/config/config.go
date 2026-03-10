@@ -21,8 +21,9 @@ type Config struct {
 	Mode               string   `env:"MODE"                  envDefault:"all"`
 
 	// GitHub OAuth
-	GitHubOAuthClientID     string `env:"GITHUB_OAUTH_CLIENT_ID"`
-	GitHubOAuthClientSecret string `env:"GITHUB_OAUTH_CLIENT_SECRET"`
+	GitHubOAuthClientID      string `env:"GITHUB_OAUTH_CLIENT_ID"`
+	GitHubOAuthClientSecret  string `env:"GITHUB_OAUTH_CLIENT_SECRET"`
+	GitHubOAuthRedirectURI   string `env:"GITHUB_OAUTH_REDIRECT_URI"`
 
 	// Google OAuth
 	GoogleOAuthClientID     string `env:"GOOGLE_OAUTH_CLIENT_ID"`
@@ -88,6 +89,11 @@ func Load() *Config {
 	}
 	if len(cfg.CORSAllowedOrigins) == 0 {
 		cfg.CORSAllowedOrigins = []string{cfg.FrontendURL}
+	}
+
+	// Default GitHub OAuth redirect URI to BASE_URL + callback path.
+	if cfg.GitHubOAuthRedirectURI == "" {
+		cfg.GitHubOAuthRedirectURI = cfg.BaseURL + "/api/v1/auth/github/callback"
 	}
 
 	// Fall back to SessionSecret for CSRF signing if not explicitly set.
