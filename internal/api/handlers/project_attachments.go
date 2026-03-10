@@ -117,6 +117,11 @@ func (h *ProjectAttachmentHandler) Create(w http.ResponseWriter, r *http.Request
 
 func (h *ProjectAttachmentHandler) Update(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
+	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		return
+	}
 	attachmentID, err := uuid.Parse(chi.URLParam(r, "attachmentId"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid attachment ID")
@@ -125,6 +130,10 @@ func (h *ProjectAttachmentHandler) Update(w http.ResponseWriter, r *http.Request
 
 	attachment, err := h.attachmentStore.GetByID(r.Context(), orgID, attachmentID)
 	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "attachment not found")
+		return
+	}
+	if attachment.ProjectID != projectID {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "attachment not found")
 		return
 	}
@@ -160,9 +169,23 @@ func (h *ProjectAttachmentHandler) Update(w http.ResponseWriter, r *http.Request
 
 func (h *ProjectAttachmentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
+	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		return
+	}
 	attachmentID, err := uuid.Parse(chi.URLParam(r, "attachmentId"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid attachment ID")
+		return
+	}
+	attachment, err := h.attachmentStore.GetByID(r.Context(), orgID, attachmentID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "attachment not found")
+		return
+	}
+	if attachment.ProjectID != projectID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "attachment not found")
 		return
 	}
 

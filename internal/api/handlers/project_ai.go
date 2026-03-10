@@ -80,9 +80,21 @@ func (h *ProjectAIHandler) Improve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Gather context for the AI
-	specs, _ := h.specStore.ListByProject(r.Context(), orgID, projectID)
-	attachments, _ := h.attachmentStore.ListByProject(r.Context(), orgID, projectID)
-	tasks, _ := h.taskStore.ListByProject(r.Context(), orgID, projectID, db.ProjectTaskFilters{})
+	specs, err := h.specStore.ListByProject(r.Context(), orgID, projectID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "LIST_SPECS_FAILED", "failed to list project specs")
+		return
+	}
+	attachments, err := h.attachmentStore.ListByProject(r.Context(), orgID, projectID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "LIST_ATTACHMENTS_FAILED", "failed to list project attachments")
+		return
+	}
+	tasks, err := h.taskStore.ListByProject(r.Context(), orgID, projectID, db.ProjectTaskFilters{})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "LIST_TASKS_FAILED", "failed to list project tasks")
+		return
+	}
 
 	// Build suggestions based on analysis of current project state.
 	// This is a structured analysis that can be consumed by an AI agent or returned as-is.

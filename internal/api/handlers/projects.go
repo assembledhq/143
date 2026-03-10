@@ -132,7 +132,11 @@ func (h *ProjectHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 	var attachments []models.ProjectAttachment
 	if h.attachmentStore != nil {
-		attachments, _ = h.attachmentStore.ListByProject(r.Context(), orgID, projectID)
+		attachments, err = h.attachmentStore.ListByProject(r.Context(), orgID, projectID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "LIST_ATTACHMENTS_FAILED", "failed to list project attachments")
+			return
+		}
 	}
 	if attachments == nil {
 		attachments = []models.ProjectAttachment{}
@@ -140,7 +144,11 @@ func (h *ProjectHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 	var specs []models.ProjectSpec
 	if h.specStore != nil {
-		specs, _ = h.specStore.ListByProject(r.Context(), orgID, projectID)
+		specs, err = h.specStore.ListByProject(r.Context(), orgID, projectID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "LIST_SPECS_FAILED", "failed to list project specs")
+			return
+		}
 	}
 	if specs == nil {
 		specs = []models.ProjectSpec{}
