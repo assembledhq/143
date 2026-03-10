@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { ZONES, getActiveZone, getZoneProgress } from "./zones";
-import { drawP80, drawP80Side } from "../draw-p80";
+import { drawP80Side } from "../draw-p80";
 
 interface AirfieldCanvasProps {
   progress: number;

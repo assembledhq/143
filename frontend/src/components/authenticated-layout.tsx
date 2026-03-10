@@ -157,6 +157,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                   )}
                 >
                   {user.avatar_url ? (
+                    /* eslint-disable-next-line @next/next/no-img-element */
                     <img
                       src={user.avatar_url}
                       alt=""

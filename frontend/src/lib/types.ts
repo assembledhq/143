@@ -548,10 +548,55 @@ export interface ProjectCycle {
   created_at: string;
 }
 
+export interface ProjectAttachment {
+  id: string;
+  project_id: string;
+  org_id: string;
+  file_name: string;
+  file_url: string;
+  file_type: string;
+  thumbnail_url?: string;
+  file_size?: number;
+  category: string;
+  caption?: string;
+  sort_order: number;
+  uploaded_by?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectSpec {
+  id: string;
+  project_id: string;
+  org_id: string;
+  title: string;
+  content: string;
+  spec_type: string;
+  sort_order: number;
+  version: number;
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AISuggestion {
+  type: string;
+  title: string;
+  description: string;
+  priority: string;
+}
+
+export interface AIImprovementResponse {
+  suggestions: AISuggestion[];
+  summary: string;
+}
+
 export interface ProjectDetail {
   project: Project;
   tasks: ProjectTask[];
   recent_cycles: ProjectCycle[];
+  attachments: ProjectAttachment[];
+  specs: ProjectSpec[];
 }
 
 export const projectStatusConfig: Record<string, { color: string; label: string }> = {
