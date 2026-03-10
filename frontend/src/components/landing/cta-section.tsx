@@ -28,13 +28,12 @@ export default function CtaSection({ isDark }: CtaSectionProps) {
           Let the PM handle the rest.
         </h2>
         <p
-          className={`text-sm sm:text-base leading-relaxed max-w-md mx-auto ${
-            isDark ? "text-white/40" : "text-slate-600"
+          className={`text-sm leading-relaxed max-w-md mx-auto ${
+            isDark ? "text-white/45" : "text-slate-600"
           }`}
         >
-          Bring your repos, your coding agents, and your CI pipeline.
-          The PM prioritizes across bugs, projects, and tech debt &mdash;
-          then dispatches validated PRs on your behalf.
+          Bring your repos, your coding agents, and your CI pipeline. The PM
+          dispatches validated PRs on your behalf.
         </p>
         <div className="pt-2">
           <Button
