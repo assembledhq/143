@@ -23,22 +23,16 @@ func NewProjectHandler(
 	projectStore *db.ProjectStore,
 	projectTaskStore *db.ProjectTaskStore,
 	projectCycleStore *db.ProjectCycleStore,
+	attachmentStore *db.ProjectAttachmentStore,
+	specStore *db.ProjectSpecStore,
 ) *ProjectHandler {
 	return &ProjectHandler{
 		projectStore:      projectStore,
 		projectTaskStore:  projectTaskStore,
 		projectCycleStore: projectCycleStore,
+		attachmentStore:   attachmentStore,
+		specStore:         specStore,
 	}
-}
-
-// SetAttachmentStore sets the attachment store for project detail enrichment.
-func (h *ProjectHandler) SetAttachmentStore(s *db.ProjectAttachmentStore) {
-	h.attachmentStore = s
-}
-
-// SetSpecStore sets the spec store for project detail enrichment.
-func (h *ProjectHandler) SetSpecStore(s *db.ProjectSpecStore) {
-	h.specStore = s
 }
 
 // ProjectDetailResponse combines a project with its tasks, cycles, attachments, and specs.
