@@ -49,7 +49,7 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
           </h1>
 
           <p
-            className={`max-w-md text-sm sm:text-base leading-relaxed ${isDark ? "text-white/40" : "text-slate-600"}`}
+            className={`max-w-md text-sm leading-relaxed ${isDark ? "text-white/45" : "text-slate-600"}`}
           >
             Prioritizes across bugs, projects, and tech debt — then
             dispatches your coding agents to ship validated PRs.
