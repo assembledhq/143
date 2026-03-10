@@ -2,7 +2,6 @@
 
 import { useEffect, useRef } from "react";
 import {
-  pseudoRandom,
   hudText,
   drawCRTGrain,
   drawVignette,

@@ -12,14 +12,13 @@ export function useInView<T extends HTMLElement = HTMLDivElement>(
 ): { ref: React.RefObject<T | null>; inView: boolean } {
   const { threshold = 0.85, once = true } = options;
   const ref = useRef<T | null>(null);
-  const [inView, setInView] = useState(false);
+  const reducedMotion =
+    typeof window !== "undefined" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const [inView, setInView] = useState(reducedMotion);
 
   useEffect(() => {
-    // Respect reduced motion
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      setInView(true);
-      return;
-    }
+    if (reducedMotion) return;
 
     const el = ref.current;
     if (!el) return;
