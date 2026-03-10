@@ -18,14 +18,6 @@ import (
 
 // -- row helpers --
 
-func newAttachmentRow(id, projectID, orgID uuid.UUID, now time.Time) []interface{} {
-	userID := uuid.New()
-	return []interface{}{
-		id, projectID, orgID, "test.png", "https://example.com/test.png", "image",
-		nil, nil, "screenshot", nil, 0, &userID, now, now,
-	}
-}
-
 func newSpecRow(id, projectID, orgID uuid.UUID, specType string, content string, now time.Time) []interface{} {
 	userID := uuid.New()
 	return []interface{}{
@@ -268,6 +260,50 @@ func TestProjectAttachmentHandler_Delete_MismatchedProject(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestProjectAttachmentHandler_Update_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewProjectAttachmentHandler(db.NewProjectAttachmentStore(mock), nil)
+	orgID := uuid.New()
+	projectID := uuid.New()
+	attachmentID := uuid.New()
+	uploadedBy := uuid.New()
+	now := time.Now()
+
+	// GetByID returns attachment belonging to the correct project
+	mock.ExpectQuery("SELECT .+ FROM project_attachments WHERE id = @id AND org_id = @org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(projectAttachmentHandlerColumns).AddRow(
+				attachmentID, projectID, orgID, "old-name.png", "https://example.com/old.png", "image",
+				nil, nil, "screenshot", nil, 0, &uploadedBy, now, now,
+			),
+		)
+
+	// Update attachment (Exec, not QueryRow)
+	mock.ExpectExec("UPDATE project_attachments SET").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	body, _ := json.Marshal(map[string]string{"file_name": "new-name.png"})
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/projects/"+projectID.String()+"/attachments/"+attachmentID.String(), bytes.NewBuffer(body))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	req = req.WithContext(withProjectAttachmentRouteParams(req.Context(), projectID, attachmentID))
+	rr := httptest.NewRecorder()
+
+	handler.Update(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Contains(t, rr.Body.String(), "new-name.png")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 // ===== ProjectSpecHandler tests =====
 
 func TestProjectSpecHandler_List(t *testing.T) {
@@ -450,6 +486,50 @@ func TestProjectSpecHandler_Get_MismatchedProject(t *testing.T) {
 
 	require.Equal(t, http.StatusNotFound, rr.Code)
 	require.Contains(t, rr.Body.String(), "NOT_FOUND")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestProjectSpecHandler_Update_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewProjectSpecHandler(db.NewProjectSpecStore(mock), nil)
+	orgID := uuid.New()
+	projectID := uuid.New()
+	specID := uuid.New()
+	createdBy := uuid.New()
+	now := time.Now()
+
+	// GetByID returns spec belonging to the correct project
+	mock.ExpectQuery("SELECT .+ FROM project_specs WHERE id = @id AND org_id = @org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(projectSpecHandlerColumns).AddRow(
+				specID, projectID, orgID, "Old Title", "Old content", "prd", 0, 1, &createdBy, now, now,
+			),
+		)
+
+	// Update spec (QueryRow with RETURNING version, updated_at)
+	updatedAt := time.Now()
+	mock.ExpectQuery("UPDATE project_specs SET").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"version", "updated_at"}).AddRow(2, updatedAt))
+
+	body, _ := json.Marshal(map[string]string{"title": "New Title", "content": "New content"})
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/projects/"+projectID.String()+"/specs/"+specID.String(), bytes.NewBuffer(body))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	req = req.WithContext(withProjectSpecRouteParams(req.Context(), projectID, specID))
+	rr := httptest.NewRecorder()
+
+	handler.Update(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Contains(t, rr.Body.String(), "New Title")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
