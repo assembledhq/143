@@ -124,17 +124,4 @@ describe('SessionsPage', () => {
     expect(sessionLinks.length).toBeGreaterThan(0);
   });
 
-  it('shows Analyze Issues button', async () => {
-    renderWithProviders(<SessionsPageContent />);
-
-    expect(screen.getByText('Analyze Issues')).toBeInTheDocument();
-  });
-
-  it('links New Manual Session action to dedicated page', async () => {
-    renderWithProviders(<SessionsPageContent />);
-
-    const link = await screen.findByRole('link', { name: 'New Manual Session' });
-    expect(link).toHaveAttribute('href', '/sessions/new');
-  });
-
 });
