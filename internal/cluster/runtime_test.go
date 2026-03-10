@@ -84,6 +84,18 @@ func (m *schedulerRuntimePlanStoreMock) GetLatestByOrg(ctx context.Context, orgI
 	return m.plansByOrg[orgID], nil
 }
 
+type schedulerRuntimeRepoStoreMock struct {
+	repos []models.Repository
+	err   error
+}
+
+func (m *schedulerRuntimeRepoStoreMock) ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.Repository, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.repos, nil
+}
+
 func TestSchedulerRunOnce(t *testing.T) {
 	t.Parallel()
 
@@ -100,6 +112,7 @@ func TestSchedulerRunOnce(t *testing.T) {
 		integrations    *schedulerRuntimeIntegrationStoreMock
 		orgs            *schedulerRuntimeOrgStoreMock
 		plans           *schedulerRuntimePlanStoreMock
+		repos           *schedulerRuntimeRepoStoreMock
 		jobs            *schedulerRuntimeJobsMock
 		expectedEnqueue int
 		expectedRelease int
@@ -110,6 +123,7 @@ func TestSchedulerRunOnce(t *testing.T) {
 			integrations:    &schedulerRuntimeIntegrationStoreMock{},
 			orgs:            &schedulerRuntimeOrgStoreMock{},
 			plans:           &schedulerRuntimePlanStoreMock{},
+			repos:           &schedulerRuntimeRepoStoreMock{},
 			jobs:            &schedulerRuntimeJobsMock{},
 			expectedEnqueue: 0,
 			expectedRelease: 0,
@@ -120,6 +134,7 @@ func TestSchedulerRunOnce(t *testing.T) {
 			integrations:    &schedulerRuntimeIntegrationStoreMock{},
 			orgs:            &schedulerRuntimeOrgStoreMock{},
 			plans:           &schedulerRuntimePlanStoreMock{},
+			repos:           &schedulerRuntimeRepoStoreMock{},
 			jobs:            &schedulerRuntimeJobsMock{},
 			expectedEnqueue: 0,
 			expectedRelease: 0,
@@ -150,6 +165,7 @@ func TestSchedulerRunOnce(t *testing.T) {
 					newOrgID: pgx.ErrNoRows,
 				},
 			},
+			repos:           &schedulerRuntimeRepoStoreMock{},
 			jobs:            &schedulerRuntimeJobsMock{},
 			expectedEnqueue: 2,
 			expectedRelease: 1,
@@ -167,6 +183,7 @@ func TestSchedulerRunOnce(t *testing.T) {
 				orgs:         tt.orgs,
 				integrations: tt.integrations,
 				plans:        tt.plans,
+				repos:        tt.repos,
 				logger:       zerolog.Nop(),
 			}
 
