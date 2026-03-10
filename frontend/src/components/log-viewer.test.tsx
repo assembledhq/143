@@ -27,6 +27,7 @@ class MockEventSource {
     MockEventSource.instances.push(this);
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   addEventListener(_event: string, _handler: () => void) {
     // no-op for tests
   }
