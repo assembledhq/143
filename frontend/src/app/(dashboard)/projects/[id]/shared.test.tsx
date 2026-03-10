@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { fireEvent } from "@testing-library/react";
 import { renderWithProviders, screen } from "@/test/test-utils";
 import { formatTimestamp, formatRelativeTime, ProgressBar, CollapsibleSection, taskStatusConfig, specTypeConfig, attachmentCategoryConfig } from "./shared";
+import { FileText } from "lucide-react";
 
 // Mock lucide-react icons
 vi.mock("lucide-react", () => {
@@ -75,9 +76,6 @@ describe("ProgressBar", () => {
 });
 
 describe("CollapsibleSection", () => {
-  // Need to import a real icon - use the mocked FileText
-  const { FileText } = require("lucide-react");
-
   it("renders title and children when defaultOpen", () => {
     renderWithProviders(
       <CollapsibleSection title="Test Section" icon={FileText} defaultOpen={true}>
