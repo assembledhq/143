@@ -23,8 +23,9 @@ func TestAuthHandler_Login_Redirects(t *testing.T) {
 	t.Parallel()
 
 	cfg := &config.Config{
-		GitHubOAuthClientID: "test-client-id",
-		BaseURL:             "http://localhost:8080",
+		GitHubOAuthClientID:    "test-client-id",
+		BaseURL:                "http://localhost:8080",
+		GitHubOAuthRedirectURI: "http://localhost:8080/api/v1/auth/github/callback",
 	}
 	handler := NewAuthHandler(cfg, nil, nil, nil, nil)
 
@@ -900,8 +901,9 @@ func TestAuthHandler_Login_SetsInvitationCookie(t *testing.T) {
 	t.Parallel()
 
 	cfg := &config.Config{
-		GitHubOAuthClientID: "test-client-id",
-		BaseURL:             "http://localhost:8080",
+		GitHubOAuthClientID:    "test-client-id",
+		BaseURL:                "http://localhost:8080",
+		GitHubOAuthRedirectURI: "http://localhost:8080/api/v1/auth/github/callback",
 	}
 	handler := NewAuthHandler(cfg, nil, nil, nil, nil)
 
@@ -927,8 +929,9 @@ func TestAuthHandler_Login_NoInvitationCookieWithoutParam(t *testing.T) {
 	t.Parallel()
 
 	cfg := &config.Config{
-		GitHubOAuthClientID: "test-client-id",
-		BaseURL:             "http://localhost:8080",
+		GitHubOAuthClientID:    "test-client-id",
+		BaseURL:                "http://localhost:8080",
+		GitHubOAuthRedirectURI: "http://localhost:8080/api/v1/auth/github/callback",
 	}
 	handler := NewAuthHandler(cfg, nil, nil, nil, nil)
 
