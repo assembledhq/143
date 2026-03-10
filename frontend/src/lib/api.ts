@@ -86,12 +86,16 @@ export const api = {
     providers: () => get<import('./types').SingleResponse<import('./types').AuthProviders>>('/api/v1/auth/providers'),
     me: () => get<import('./types').SingleResponse<import('./types').User>>('/api/v1/auth/me'),
     login: (invitation?: string) => {
-      const params = invitation ? `?invitation=${encodeURIComponent(invitation)}` : '';
-      window.location.href = `${API_BASE}/api/v1/auth/github/login${params}`;
+      const searchParams = new URLSearchParams();
+      if (invitation) searchParams.set('invitation', invitation);
+      searchParams.set('return_to', window.location.pathname);
+      window.location.href = `${API_BASE}/api/v1/auth/github/login?${searchParams.toString()}`;
     },
     loginGoogle: (invitation?: string) => {
-      const params = invitation ? `?invitation=${encodeURIComponent(invitation)}` : '';
-      window.location.href = `${API_BASE}/api/v1/auth/google/login${params}`;
+      const searchParams = new URLSearchParams();
+      if (invitation) searchParams.set('invitation', invitation);
+      searchParams.set('return_to', window.location.pathname);
+      window.location.href = `${API_BASE}/api/v1/auth/google/login?${searchParams.toString()}`;
     },
     loginSentry: () => {
       const params = new URLSearchParams({
