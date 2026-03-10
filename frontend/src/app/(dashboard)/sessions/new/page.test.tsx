@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { act } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { renderWithProviders, screen, userEvent, waitFor } from '@/test/test-utils';
 import { server } from '@/test/mocks/server';
@@ -75,5 +76,117 @@ describe('ManualSessionCreatePage', () => {
     await waitFor(() => {
       expect(pushMock).toHaveBeenCalledWith('/sessions/session-manual-chat-1');
     });
+  });
+
+  it('shows dictation not supported error', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    await user.click(screen.getByRole('button', { name: 'Dictate' }));
+
+    expect(screen.getByText('Dictation is not supported in this browser.')).toBeInTheDocument();
+  });
+
+  it('shows dictation error when recognition fails', async () => {
+    let capturedInstance: { onerror: (() => void) | null; onend: (() => void) | null };
+
+    class MockSpeechRecognition {
+      continuous = false;
+      interimResults = false;
+      lang = '';
+      onresult: ((event: unknown) => void) | null = null;
+      onerror: (() => void) | null = null;
+      onend: (() => void) | null = null;
+      start() { /* noop */ }
+      stop() { /* noop */ }
+      constructor() {
+        // eslint-disable-next-line @typescript-eslint/no-this-alias
+        capturedInstance = this;
+      }
+    }
+
+    (window as unknown as Record<string, unknown>).SpeechRecognition = MockSpeechRecognition;
+
+    const user = userEvent.setup();
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    await user.click(screen.getByRole('button', { name: 'Dictate' }));
+
+    // Trigger the error handler inside act to ensure React processes state updates
+    act(() => {
+      capturedInstance!.onerror!();
+    });
+
+    expect(screen.getByText('Dictation failed. Please type your request.')).toBeInTheDocument();
+
+    delete (window as unknown as Record<string, unknown>).SpeechRecognition;
+  });
+
+  it('removes attachment when clicking remove button', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    await user.click(screen.getByRole('button', { name: 'Add files or photos' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Add image URL' }));
+    await user.type(screen.getByPlaceholderText('https://example.com/screenshot.png'), 'https://example.com/test.png');
+    await user.click(screen.getByRole('button', { name: 'Add Image' }));
+
+    expect(screen.getByText('https://example.com/test.png')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Remove https://example.com/test.png' }));
+
+    expect(screen.queryByText('https://example.com/test.png')).not.toBeInTheDocument();
+  });
+
+  it('does not add empty URL', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    await user.click(screen.getByRole('button', { name: 'Add files or photos' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Add image URL' }));
+    await user.click(screen.getByRole('button', { name: 'Add Image' }));
+
+    // The image URL input area should still be visible (not dismissed)
+    // and no attachment badges should appear
+    expect(screen.getByPlaceholderText('https://example.com/screenshot.png')).toBeInTheDocument();
+  });
+
+  it('shows error when session creation fails', async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.post('/api/v1/sessions/manual', () => {
+        return HttpResponse.json(
+          { error: { code: 'INTERNAL', message: 'server error' } },
+          { status: 500 },
+        );
+      }),
+    );
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    await user.type(screen.getByPlaceholderText('Tell the agent what to do...'), 'Test message');
+    await user.click(screen.getByRole('button', { name: 'Start Session' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Could not start session. Please try again.')).toBeInTheDocument();
+    });
+  });
+
+  it('shows Starting... text while pending', async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.post('/api/v1/sessions/manual', () => {
+        return new Promise(() => {}); // Never resolves
+      }),
+    );
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    await user.type(screen.getByPlaceholderText('Tell the agent what to do...'), 'Test message');
+    await user.click(screen.getByRole('button', { name: 'Start Session' }));
+
+    expect(screen.getByText('Starting...')).toBeInTheDocument();
   });
 });

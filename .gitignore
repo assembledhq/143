@@ -39,6 +39,9 @@ tmp/
 bin/
 coverage.html
 
+# Node modules
+node_modules/
+
 # Editor/IDE
 # .idea/
 # .vscode/

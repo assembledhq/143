@@ -1,0 +1,121 @@
+"use client";
+
+import { useState } from "react";
+import {
+  FileText,
+  ChevronDown,
+  ChevronRight,
+  AlertCircle,
+  CheckCircle2,
+  Circle,
+  Loader2,
+  Ban,
+  Pause,
+  ArrowUpRight,
+} from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+
+export const taskStatusConfig: Record<
+  string,
+  { color: string; label: string; icon: typeof Circle }
+> = {
+  pending: { color: "bg-gray-100 text-gray-800", label: "Pending", icon: Circle },
+  blocked: { color: "bg-yellow-100 text-yellow-800", label: "Blocked", icon: Pause },
+  delegated: { color: "bg-indigo-100 text-indigo-800", label: "Delegated", icon: ArrowUpRight },
+  running: { color: "bg-blue-100 text-blue-800", label: "Running", icon: Loader2 },
+  completed: { color: "bg-green-100 text-green-800", label: "Completed", icon: CheckCircle2 },
+  failed: { color: "bg-red-100 text-red-800", label: "Failed", icon: AlertCircle },
+  skipped: { color: "bg-gray-100 text-gray-700", label: "Skipped", icon: Ban },
+  cancelled: { color: "bg-gray-100 text-gray-700", label: "Cancelled", icon: Ban },
+};
+
+export const specTypeConfig: Record<string, { label: string; color: string }> = {
+  prd: { label: "PRD", color: "bg-blue-100 text-blue-800" },
+  technical: { label: "Technical", color: "bg-purple-100 text-purple-800" },
+  design: { label: "Design", color: "bg-pink-100 text-pink-800" },
+  user_story: { label: "User Story", color: "bg-green-100 text-green-800" },
+};
+
+export const attachmentCategoryConfig: Record<string, { label: string; color: string }> = {
+  screenshot: { label: "Screenshot", color: "bg-blue-100 text-blue-800" },
+  mockup: { label: "Mockup", color: "bg-purple-100 text-purple-800" },
+  wireframe: { label: "Wireframe", color: "bg-orange-100 text-orange-800" },
+  reference: { label: "Reference", color: "bg-gray-100 text-gray-800" },
+};
+
+export function formatTimestamp(dateStr?: string): string {
+  if (!dateStr) return "-";
+  return new Date(dateStr).toLocaleString();
+}
+
+export function formatRelativeTime(dateStr: string): string {
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const minutes = Math.floor(diff / 60000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+export function ProgressBar({ completed, total }: { completed: number; total: number }) {
+  const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
+  return (
+    <div className="flex items-center gap-3">
+      <div className="h-2 flex-1 rounded-full bg-muted overflow-hidden">
+        <div
+          className="h-full rounded-full bg-primary transition-all"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <span className="text-sm text-muted-foreground whitespace-nowrap">
+        {completed}/{total} ({pct}%)
+      </span>
+    </div>
+  );
+}
+
+export function CollapsibleSection({
+  title,
+  icon: Icon,
+  count,
+  defaultOpen = true,
+  children,
+  actions,
+}: {
+  title: string;
+  icon: typeof FileText;
+  count?: number;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+  actions?: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div>
+      <button
+        onClick={() => setOpen(!open)}
+        className="flex items-center gap-2 w-full text-left py-2 group"
+      >
+        {open ? (
+          <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+        ) : (
+          <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
+        )}
+        <Icon className="h-3.5 w-3.5 text-muted-foreground" />
+        <span className="text-sm font-semibold">{title}</span>
+        {count != null && count > 0 && (
+          <Badge variant="secondary" className="text-[9px] px-1.5 py-0">
+            {count}
+          </Badge>
+        )}
+        <div className="flex-1" />
+        {actions && (
+          <span onClick={(e) => e.stopPropagation()}>{actions}</span>
+        )}
+      </button>
+      {open && <div className="pl-6 pb-4">{children}</div>}
+    </div>
+  );
+}
