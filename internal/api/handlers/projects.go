@@ -15,25 +15,33 @@ type ProjectHandler struct {
 	projectStore      *db.ProjectStore
 	projectTaskStore  *db.ProjectTaskStore
 	projectCycleStore *db.ProjectCycleStore
+	attachmentStore   *db.ProjectAttachmentStore
+	specStore         *db.ProjectSpecStore
 }
 
 func NewProjectHandler(
 	projectStore *db.ProjectStore,
 	projectTaskStore *db.ProjectTaskStore,
 	projectCycleStore *db.ProjectCycleStore,
+	attachmentStore *db.ProjectAttachmentStore,
+	specStore *db.ProjectSpecStore,
 ) *ProjectHandler {
 	return &ProjectHandler{
 		projectStore:      projectStore,
 		projectTaskStore:  projectTaskStore,
 		projectCycleStore: projectCycleStore,
+		attachmentStore:   attachmentStore,
+		specStore:         specStore,
 	}
 }
 
-// ProjectDetailResponse combines a project with its tasks and recent cycles.
+// ProjectDetailResponse combines a project with its tasks, cycles, attachments, and specs.
 type ProjectDetailResponse struct {
-	Project      models.Project        `json:"project"`
-	Tasks        []models.ProjectTask  `json:"tasks"`
-	RecentCycles []models.ProjectCycle `json:"recent_cycles"`
+	Project      models.Project             `json:"project"`
+	Tasks        []models.ProjectTask       `json:"tasks"`
+	RecentCycles []models.ProjectCycle      `json:"recent_cycles"`
+	Attachments  []models.ProjectAttachment `json:"attachments"`
+	Specs        []models.ProjectSpec       `json:"specs"`
 }
 
 // validStatusTransition checks whether a project status transition is allowed.
@@ -116,11 +124,37 @@ func (h *ProjectHandler) Get(w http.ResponseWriter, r *http.Request) {
 		cycles = []models.ProjectCycle{}
 	}
 
+	var attachments []models.ProjectAttachment
+	if h.attachmentStore != nil {
+		attachments, err = h.attachmentStore.ListByProject(r.Context(), orgID, projectID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "LIST_ATTACHMENTS_FAILED", "failed to list project attachments")
+			return
+		}
+	}
+	if attachments == nil {
+		attachments = []models.ProjectAttachment{}
+	}
+
+	var specs []models.ProjectSpec
+	if h.specStore != nil {
+		specs, err = h.specStore.ListByProject(r.Context(), orgID, projectID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "LIST_SPECS_FAILED", "failed to list project specs")
+			return
+		}
+	}
+	if specs == nil {
+		specs = []models.ProjectSpec{}
+	}
+
 	writeJSON(w, http.StatusOK, models.SingleResponse[ProjectDetailResponse]{
 		Data: ProjectDetailResponse{
 			Project:      project,
 			Tasks:        tasks,
 			RecentCycles: cycles,
+			Attachments:  attachments,
+			Specs:        specs,
 		},
 	})
 }

@@ -19,6 +19,7 @@ This file applies to the entire `frontend/` tree.
 - In left-to-right layouts, place `Cancel` on the left and the primary action on the right.
 - For retry-style flows, use `Cancel` (secondary/outline) on the left and `Try Again` (primary) on the right.
 - Do not split related modal actions across different vertical sections/heights.
+- If you're doing a destructive action like a delete, especially for important things that are unrecoverable, please add a confirmation model to ensure that someone actually wants to make a deletion.
 
 ### Dialog consistency
 

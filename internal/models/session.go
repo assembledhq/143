@@ -26,7 +26,7 @@ type AgentSessionTask struct {
 	RunCompletedAt     *string          `json:"run_completed_at,omitempty"`
 }
 
-// AgentSessionTask files parsed from approach text.
+// AgentSessionFileRef represents a file reference parsed from approach text.
 type AgentSessionFileRef struct {
 	Path string `json:"path"`
 	Line *int   `json:"line,omitempty"`
