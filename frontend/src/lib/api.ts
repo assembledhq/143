@@ -88,14 +88,16 @@ export const api = {
     login: (invitation?: string) => {
       const searchParams = new URLSearchParams();
       if (invitation) searchParams.set('invitation', invitation);
-      searchParams.set('return_to', window.location.pathname);
-      window.location.href = `${API_BASE}/api/v1/auth/github/login?${searchParams.toString()}`;
+      if (window.location.pathname) searchParams.set('return_to', window.location.pathname);
+      const qs = searchParams.toString();
+      window.location.href = `${API_BASE}/api/v1/auth/github/login${qs ? `?${qs}` : ''}`;
     },
     loginGoogle: (invitation?: string) => {
       const searchParams = new URLSearchParams();
       if (invitation) searchParams.set('invitation', invitation);
-      searchParams.set('return_to', window.location.pathname);
-      window.location.href = `${API_BASE}/api/v1/auth/google/login?${searchParams.toString()}`;
+      if (window.location.pathname) searchParams.set('return_to', window.location.pathname);
+      const qs = searchParams.toString();
+      window.location.href = `${API_BASE}/api/v1/auth/google/login${qs ? `?${qs}` : ''}`;
     },
     loginSentry: () => {
       const params = new URLSearchParams({
