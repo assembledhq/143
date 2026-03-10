@@ -75,16 +75,6 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
         </div>
       </div>
 
-      {/* Bottom-right: 143 origin story */}
-      <div className={`absolute bottom-12 right-6 sm:right-10 z-10 hidden md:block max-w-[280px] text-right ${isDark ? "text-white/40" : "text-slate-600"}`}>
-        <p className="text-[11px] leading-relaxed tracking-wide">
-          The first US jet fighter, the P-80 Shooting Star,
-          was designed and built by Lockheed&apos;s Skunk Works
-          in just 143&nbsp;days. We named this project after
-          that same spirit of speed.
-        </p>
-      </div>
-
       {/* Scroll indicator */}
       <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10">
         <div
