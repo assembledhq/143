@@ -326,6 +326,93 @@ func TestProjectStore_UpdateStatus(t *testing.T) {
 	}
 }
 
+func TestProjectStore_ListDueForSchedule(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	orgID := uuid.New()
+	repoID := uuid.New()
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface)
+		expected  int
+		expectErr bool
+	}{
+		{
+			name: "returns due projects",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("SELECT .+ FROM projects").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(projectTestColumns).
+							AddRow(newProjectRow(uuid.New(), orgID, repoID, now)...),
+					)
+			},
+			expected: 1,
+		},
+		{
+			name: "returns empty when no projects due",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("SELECT .+ FROM projects").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(projectTestColumns))
+			},
+			expected: 0,
+		},
+		{
+			name: "returns error on db failure",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("SELECT .+ FROM projects").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnError(fmt.Errorf("connection refused"))
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewProjectStore(mock)
+			tt.setupMock(mock)
+
+			projects, err := store.ListDueForSchedule(context.Background(), now)
+			if tt.expectErr {
+				require.Error(t, err, "ListDueForSchedule should return an error")
+				return
+			}
+			require.NoError(t, err, "ListDueForSchedule should not return an error")
+			require.Len(t, projects, tt.expected, "should return expected number of projects")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestProjectStore_UpdateNextRunAt(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewProjectStore(mock)
+
+	// UpdateNextRunAt has 3 named args: id, org_id, next_run_at
+	mock.ExpectExec("UPDATE projects SET next_run_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdateNextRunAt(context.Background(), uuid.New(), uuid.New(), time.Now())
+	require.NoError(t, err, "UpdateNextRunAt should not return an error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestProjectStore_UpdateProgress(t *testing.T) {
 	t.Parallel()
 
