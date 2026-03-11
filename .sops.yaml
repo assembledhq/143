@@ -29,7 +29,7 @@ creation_rules:
       age1xyvl6ral4fq757tpnz30cuzefrpngnuv6zutjsg7wtnmza4uyqlshc2ucl
   - path_regex: \.env\.production$
     age: >-
-      age1xyvl6ral4fq757tpnz30cuzefrpngnuv6zutjsg7wtnmza4uyqlshc2ucl
+      age1xyvl6ral4fq757tpnz30cuzefrpngnuv6zutjsg7wtnmza4uyqlshc2ucl,age1javfprksts8jt07rga3ltdnhllstv7rkt09s9lvgz8twy9sgps7q3xtgs5
   # Default: catches .env and any other .env.* files
   - path_regex: \.env(\..*)?$
     age: >-
