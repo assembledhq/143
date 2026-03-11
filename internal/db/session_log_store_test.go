@@ -13,32 +13,32 @@ import (
 )
 
 var logColumns = []string{
-	"id", "agent_run_id", "timestamp", "level", "message", "metadata",
+	"id", "session_id", "timestamp", "level", "message", "metadata",
 }
 
-func newLogRow(id int64, agentRunID uuid.UUID, now time.Time) []any {
+func newLogRow(id int64, sessionID uuid.UUID, now time.Time) []any {
 	return []any{
-		id, agentRunID, now, "info", "doing something", json.RawMessage(`{}`),
+		id, sessionID, now, "info", "doing something", json.RawMessage(`{}`),
 	}
 }
 
-func TestAgentRunLogStore_Create_Success(t *testing.T) {
+func TestSessionLogStore_Create_Success(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "should create mock pool without error")
 	defer mock.Close()
 
-	store := NewAgentRunLogStore(mock)
+	store := NewSessionLogStore(mock)
 	now := time.Now()
 
-	log := &models.AgentRunLog{
-		AgentRunID: uuid.New(),
+	log := &models.SessionLog{
+		SessionID: uuid.New(),
 		Level:      "info",
 		Message:    "started execution",
 		Metadata:   json.RawMessage(`{"step": 1}`),
 	}
 
-	mock.ExpectQuery("INSERT INTO agent_run_logs").
+	mock.ExpectQuery("INSERT INTO session_logs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "timestamp"}).
@@ -52,76 +52,78 @@ func TestAgentRunLogStore_Create_Success(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestAgentRunLogStore_ListByRunID_Success(t *testing.T) {
+func TestSessionLogStore_ListByRunID_Success(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "should create mock pool without error")
 	defer mock.Close()
 
-	store := NewAgentRunLogStore(mock)
-	agentRunID := uuid.New()
+	store := NewSessionLogStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery("SELECT .+ FROM agent_run_logs WHERE agent_run_id").
-		WithArgs(pgxmock.AnyArg()).
+	mock.ExpectQuery("SELECT .+ FROM session_logs .+ JOIN sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(logColumns).
-				AddRow(newLogRow(1, agentRunID, now)...).
-				AddRow(newLogRow(2, agentRunID, now)...),
+				AddRow(newLogRow(1, sessionID, now)...).
+				AddRow(newLogRow(2, sessionID, now)...),
 		)
 
-	logs, err := store.ListByRunID(context.Background(), agentRunID)
-	require.NoError(t, err, "should list agent run logs without error")
-	require.Len(t, logs, 2, "should return both log entries for the agent run")
+	logs, err := store.ListByRunID(context.Background(), orgID, sessionID)
+	require.NoError(t, err, "should list session logs without error")
+	require.Len(t, logs, 2, "should return both log entries for the session")
 	require.Equal(t, int64(1), logs[0].ID, "first log entry should have the correct ID")
-	require.Equal(t, agentRunID, logs[0].AgentRunID, "first log entry should have the correct agent run ID")
+	require.Equal(t, sessionID, logs[0].SessionID, "first log entry should have the correct session ID")
 	require.Equal(t, "info", logs[0].Level, "first log entry should have the correct level")
 	require.Equal(t, "doing something", logs[0].Message, "first log entry should have the correct message")
 	require.Equal(t, int64(2), logs[1].ID, "second log entry should have the correct ID")
-	require.Equal(t, agentRunID, logs[1].AgentRunID, "second log entry should have the correct agent run ID")
+	require.Equal(t, sessionID, logs[1].SessionID, "second log entry should have the correct session ID")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestAgentRunLogStore_ListByRunID_Empty(t *testing.T) {
+func TestSessionLogStore_ListByRunID_Empty(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "should create mock pool without error")
 	defer mock.Close()
 
-	store := NewAgentRunLogStore(mock)
+	store := NewSessionLogStore(mock)
 
-	mock.ExpectQuery("SELECT .+ FROM agent_run_logs WHERE agent_run_id").
-		WithArgs(pgxmock.AnyArg()).
+	mock.ExpectQuery("SELECT .+ FROM session_logs .+ JOIN sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(logColumns))
 
-	logs, err := store.ListByRunID(context.Background(), uuid.New())
+	logs, err := store.ListByRunID(context.Background(), uuid.New(), uuid.New())
 	require.NoError(t, err, "should return no error for empty result set")
 	require.Empty(t, logs, "should return empty slice when no logs exist")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestAgentRunLogStore_ListByRunIDSince_Success(t *testing.T) {
+func TestSessionLogStore_ListByRunIDSince_Success(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "should create mock pool without error")
 	defer mock.Close()
 
-	store := NewAgentRunLogStore(mock)
-	agentRunID := uuid.New()
+	store := NewSessionLogStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery("SELECT .+ FROM agent_run_logs WHERE agent_run_id .+ AND id >").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl JOIN sessions s ON .+ WHERE .+\\.id >").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(logColumns).
-				AddRow(newLogRow(5, agentRunID, now)...),
+				AddRow(newLogRow(5, sessionID, now)...),
 		)
 
-	logs, err := store.ListByRunIDSince(context.Background(), agentRunID, 4)
-	require.NoError(t, err, "should list agent run logs since given ID without error")
+	logs, err := store.ListByRunIDSince(context.Background(), orgID, sessionID, 4)
+	require.NoError(t, err, "should list session logs since given ID without error")
 	require.Len(t, logs, 1, "should return only log entries after the specified ID")
 	require.Equal(t, int64(5), logs[0].ID, "returned log entry should have the correct ID")
-	require.Equal(t, agentRunID, logs[0].AgentRunID, "returned log entry should have the correct agent run ID")
+	require.Equal(t, sessionID, logs[0].SessionID, "returned log entry should have the correct session ID")
 	require.Equal(t, "info", logs[0].Level, "returned log entry should have the correct level")
 	require.Equal(t, "doing something", logs[0].Message, "returned log entry should have the correct message")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")

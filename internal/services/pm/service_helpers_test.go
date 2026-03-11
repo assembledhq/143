@@ -14,14 +14,14 @@ func TestNewService(t *testing.T) {
 	t.Parallel()
 
 	issues := &mockIssueStore{}
-	agentRuns := &mockAgentRunStore{}
+	sessions := &mockSessionStore{}
 	orgs := &mockOrgStore{}
 	jobs := &mockJobStore{}
 	plans := &mockPlanStore{}
 
-	svc := NewService(issues, agentRuns, nil, orgs, nil, jobs, plans, nil, nil, nil, nil, zerolog.Nop())
+	svc := NewService(issues, sessions, nil, orgs, nil, jobs, plans, nil, nil, nil, nil, zerolog.Nop())
 	require.Equal(t, issues, svc.issues, "NewService should store issue dependency")
-	require.Equal(t, agentRuns, svc.agentRuns, "NewService should store agent run dependency")
+	require.Equal(t, sessions, svc.sessions, "NewService should store agent run dependency")
 	require.Equal(t, orgs, svc.orgs, "NewService should store org dependency")
 	require.Equal(t, jobs, svc.jobs, "NewService should store job dependency")
 	require.Equal(t, plans, svc.plans, "NewService should store plan dependency")

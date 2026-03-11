@@ -25,25 +25,25 @@ func (m *mockIssueStore) UpdateStatus(ctx context.Context, orgID, issueID uuid.U
 	return nil
 }
 
-type mockAgentRunStore struct {
-	created []*models.AgentRun
+type mockSessionStore struct {
+	created []*models.Session
 	running int
 }
 
-func (m *mockAgentRunStore) CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error) {
+func (m *mockSessionStore) CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error) {
 	return m.running, nil
 }
 
-func (m *mockAgentRunStore) Create(ctx context.Context, run *models.AgentRun) error {
+func (m *mockSessionStore) Create(ctx context.Context, run *models.Session) error {
 	m.created = append(m.created, run)
 	return nil
 }
 
-func (m *mockAgentRunStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters db.AgentRunFilters) ([]models.AgentRun, error) {
+func (m *mockSessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters db.SessionFilters) ([]models.Session, error) {
 	return nil, nil
 }
 
-func (m *mockAgentRunStore) ListRecentByOrg(ctx context.Context, orgID uuid.UUID, statuses []string, limit int) ([]models.AgentRun, error) {
+func (m *mockSessionStore) ListRecentByOrg(ctx context.Context, orgID uuid.UUID, statuses []string, limit int) ([]models.Session, error) {
 	return nil, nil
 }
 
@@ -95,7 +95,7 @@ func TestExecutePlan_DelegatesWithinCapacity(t *testing.T) {
 
 	svc := &Service{
 		issues:    &mockIssueStore{},
-		agentRuns: &mockAgentRunStore{},
+		sessions: &mockSessionStore{},
 		orgs:      &mockOrgStore{org: models.Organization{ID: orgID, Settings: settingsJSON}},
 		jobs:      &mockJobStore{},
 		plans:     &mockPlanStore{},
@@ -130,7 +130,7 @@ func TestExecutePlan_DelegatesWithinCapacity(t *testing.T) {
 	require.Equal(t, models.PMTaskStatusDelegated, plan.Tasks[0].Status, "first task should be delegated")
 	require.Equal(t, models.PMTaskStatusSkippedCapacity, plan.Tasks[1].Status, "second task should be skipped by capacity")
 
-	runStore := svc.agentRuns.(*mockAgentRunStore)
+	runStore := svc.sessions.(*mockSessionStore)
 	require.Len(t, runStore.created, 1, "should create one agent run")
 	require.NotNil(t, runStore.created[0].PMPlanID, "created run should link to PM plan")
 	require.Equal(t, planID, *runStore.created[0].PMPlanID, "PM plan ID should be set")
@@ -155,7 +155,7 @@ func TestExecutePlan_ManualAutonomySkipsDelegation(t *testing.T) {
 
 	svc := &Service{
 		issues:    &mockIssueStore{},
-		agentRuns: &mockAgentRunStore{},
+		sessions: &mockSessionStore{},
 		orgs:      &mockOrgStore{org: models.Organization{ID: orgID, Settings: settingsJSON}},
 		jobs:      &mockJobStore{},
 		plans:     &mockPlanStore{},
@@ -181,6 +181,6 @@ func TestExecutePlan_ManualAutonomySkipsDelegation(t *testing.T) {
 	require.NoError(t, err, "executePlan should succeed")
 	require.Equal(t, models.PMTaskStatusSkippedCapacity, plan.Tasks[0].Status, "manual autonomy should skip delegation")
 
-	runStore := svc.agentRuns.(*mockAgentRunStore)
+	runStore := svc.sessions.(*mockSessionStore)
 	require.Len(t, runStore.created, 0, "should not create agent runs in manual mode")
 }

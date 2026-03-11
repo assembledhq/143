@@ -20,7 +20,7 @@ func TestMultiTenancyAudit(t *testing.T) {
 	// Tables that require org_id filtering
 	multiTenantTables := []string{
 		"issues",
-		"agent_runs",
+		"sessions",
 		"pm_plans",
 		"pm_decision_log",
 		"webhook_deliveries",
@@ -31,8 +31,8 @@ func TestMultiTenancyAudit(t *testing.T) {
 		"users",
 		"pull_requests",
 		"validations",
-		"agent_run_logs",
-		"agent_run_questions",
+		"session_logs",
+		"session_questions",
 		"issue_events",
 		"priority_scores",
 		"complexity_estimates",
@@ -58,8 +58,8 @@ func TestMultiTenancyAudit(t *testing.T) {
 		{"sessions", "where user_id"},
 		{"repositories", "installation_id"},
 		{"integrations", "from integrations"},
-		{"agent_run_logs", "from agent_run_logs"}, // no org_id column; scoped via agent_run_id FK
-		{"agent_run_logs", "into agent_run_logs"}, // no org_id column; scoped via agent_run_id FK
+		{"session_logs", "from session_logs"}, // no org_id column; scoped via session_id FK
+		{"session_logs", "into session_logs"}, // no org_id column; scoped via session_id FK
 		{"users", "where github_id"},              // pre-auth lookup by GitHub ID
 		{"users", "where email"},                  // pre-auth lookup by email
 		{"users", "where google_id"},              // pre-auth lookup by Google ID

@@ -50,15 +50,15 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 		issueSummaries = append(issueSummaries, summarizeIssue(issue))
 	}
 
-	pendingRuns, err := s.agentRuns.ListByOrg(ctx, orgID, db.AgentRunFilters{Status: models.AgentRunStatusPending, Limit: 50})
+	pendingRuns, err := s.sessions.ListByOrg(ctx, orgID, db.SessionFilters{Status: models.SessionStatusPending, Limit: 50})
 	if err != nil {
 		return nil, err
 	}
-	runningRuns, err := s.agentRuns.ListByOrg(ctx, orgID, db.AgentRunFilters{Status: models.AgentRunStatusRunning, Limit: 50})
+	runningRuns, err := s.sessions.ListByOrg(ctx, orgID, db.SessionFilters{Status: models.SessionStatusRunning, Limit: 50})
 	if err != nil {
 		return nil, err
 	}
-	inFlight := make([]models.AgentRun, 0, len(pendingRuns)+len(runningRuns))
+	inFlight := make([]models.Session, 0, len(pendingRuns)+len(runningRuns))
 	inFlight = append(inFlight, pendingRuns...)
 	inFlight = append(inFlight, runningRuns...)
 
@@ -72,7 +72,7 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 		})
 	}
 
-	recentRuns, err := s.agentRuns.ListRecentByOrg(ctx, orgID, []string{"completed", "failed", "needs_human_guidance"}, 20)
+	recentRuns, err := s.sessions.ListRecentByOrg(ctx, orgID, []string{"completed", "failed", "needs_human_guidance"}, 20)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +98,7 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 		for _, pr := range prs {
 			prSummaries = append(prSummaries, PRSummary{
 				ID:           pr.ID,
-				AgentRunID:   pr.AgentRunID,
+				SessionID:   pr.SessionID,
 				Title:        pr.Title,
 				Status:       pr.Status,
 				ReviewStatus: pr.ReviewStatus,
@@ -126,7 +126,7 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 		}
 	}
 
-	currentRunning, err := s.agentRuns.CountRunningByOrg(ctx, orgID)
+	currentRunning, err := s.sessions.CountRunningByOrg(ctx, orgID)
 	if err != nil {
 		return nil, err
 	}

@@ -22,13 +22,13 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	// Create stores
 	orgStore := db.NewOrganizationStore(pool)
 	userStore := db.NewUserStore(pool)
-	sessionStore := db.NewSessionStore(pool)
+	authSessionStore := db.NewAuthSessionStore(pool)
 	repoStore := db.NewRepositoryStore(pool)
 	integrationStore := db.NewIntegrationStore(pool)
 	issueStore := db.NewIssueStore(pool)
-	agentRunStore := db.NewAgentRunStore(pool)
-	agentRunLogStore := db.NewAgentRunLogStore(pool)
-	agentRunQuestionStore := db.NewAgentRunQuestionStore(pool)
+	sessionStore := db.NewSessionStore(pool)
+	sessionLogStore := db.NewSessionLogStore(pool)
+	sessionQuestionStore := db.NewSessionQuestionStore(pool)
 	validationStore := db.NewValidationStore(pool)
 	pullRequestStore := db.NewPullRequestStore(pool)
 	webhookDeliveryStore := db.NewWebhookDeliveryStore(pool)
@@ -70,7 +70,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			logger.Warn().Err(err).Msg("failed to initialize GitHub App service, PR webhooks will be disabled")
 		} else {
 			prService = ghservice.NewPRService(
-				ghSvc, pullRequestStore, agentRunStore, issueStore,
+				ghSvc, pullRequestStore, sessionStore, issueStore,
 				deployStore, validationStore, repoStore, jobStore, logger,
 			)
 			prService.SetReviewCommentStore(reviewCommentStore)
@@ -79,7 +79,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 
 	// Create handlers
 	healthHandler := handlers.NewHealthHandler(pool)
-	authHandler := handlers.NewAuthHandler(cfg, orgStore, userStore, sessionStore, invitationStore)
+	authHandler := handlers.NewAuthHandler(cfg, orgStore, userStore, authSessionStore, invitationStore)
 	repoHandler := handlers.NewRepositoryHandler(repoStore)
 	integrationHandler := handlers.NewIntegrationHandler(
 		integrationStore,
@@ -95,10 +95,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, repoStore, integrationStore, prService)
 	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeAgentEnv(), cfg.SafeLLMEnv())
 	issueHandler := handlers.NewIssueHandler(issueStore)
-	runHandler := handlers.NewRunHandler(
-		agentRunStore,
-		agentRunLogStore,
-		agentRunQuestionStore,
+	sessionHandler := handlers.NewSessionHandler(
+		sessionStore,
+		sessionLogStore,
+		sessionQuestionStore,
 		validationStore,
 		pullRequestStore,
 		issueStore,
@@ -106,13 +106,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		jobStore,
 	)
 	pmHandler := handlers.NewPMHandler(pmPlanStore, pmDecisionLogStore, jobStore)
-	sessionHandler := handlers.NewSessionHandler(pmPlanStore, agentRunStore, issueStore, orgStore, jobStore)
-	sessionHandler.SetProjectStore(projectStore)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
 	credentialHandler := handlers.NewCredentialHandler(credentialStore)
 	reviewPatternHandler := handlers.NewReviewPatternHandler(reviewPatternStore, reviewCommentStore)
-	teamHandler := handlers.NewTeamHandler(userStore, sessionStore, invitationStore, orgStore, cfg.FrontendURL)
+	teamHandler := handlers.NewTeamHandler(userStore, authSessionStore, invitationStore, orgStore, cfg.FrontendURL)
 
 	projectHandler := handlers.NewProjectHandler(projectStore, projectTaskStore, projectCycleStore, projectAttachmentStore, projectSpecStore)
 	projectAttachmentHandler := handlers.NewProjectAttachmentHandler(projectAttachmentStore, projectStore)
@@ -158,7 +156,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 
 	// Protected routes (authenticated)
 	r.Group(func(r chi.Router) {
-		r.Use(middleware.Auth(sessionStore, userStore))
+		r.Use(middleware.Auth(authSessionStore, userStore))
 		r.Use(middleware.OrgContext)
 		r.Use(middleware.CSRF(cfg.CSRFSigningKey))
 
@@ -179,13 +177,13 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/priority-scores", priorityHandler.ListPriorityScores)
 			r.Get("/api/v1/review-patterns/*", reviewPatternHandler.ListByRepo)
 			r.Get("/api/v1/review-comments", reviewPatternHandler.ListComments)
-			r.Get("/api/v1/runs", runHandler.List)
-			r.Get("/api/v1/runs/{id}", runHandler.Get)
-			r.Get("/api/v1/runs/{id}/logs", runHandler.GetLogs)
-			r.Get("/api/v1/runs/{id}/logs/stream", runHandler.StreamLogs)
-			r.Get("/api/v1/runs/{id}/validation", runHandler.GetValidation)
-			r.Get("/api/v1/runs/{id}/pr", runHandler.GetPullRequest)
-			r.Get("/api/v1/runs/{id}/questions", runHandler.ListQuestions)
+			r.Get("/api/v1/sessions", sessionHandler.List)
+			r.Get("/api/v1/sessions/{id}", sessionHandler.Get)
+			r.Get("/api/v1/sessions/{id}/logs", sessionHandler.GetLogs)
+			r.Get("/api/v1/sessions/{id}/logs/stream", sessionHandler.StreamLogs)
+			r.Get("/api/v1/sessions/{id}/validation", sessionHandler.GetValidation)
+			r.Get("/api/v1/sessions/{id}/pr", sessionHandler.GetPullRequest)
+			r.Get("/api/v1/sessions/{id}/questions", sessionHandler.ListQuestions)
 			r.Get("/api/v1/settings", settingsHandler.Get)
 			r.Get("/api/v1/settings/agent-defaults", settingsHandler.GetAgentDefaults)
 			r.Get("/api/v1/settings/llm-defaults", settingsHandler.GetLLMDefaults)
@@ -195,8 +193,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/pm/plans/latest", pmHandler.Latest)
 			r.Get("/api/v1/pm/decisions", pmHandler.Decisions)
 			r.Get("/api/v1/pm/status", pmHandler.Status)
-			r.Get("/api/v1/sessions", sessionHandler.List)
-			r.Get("/api/v1/sessions/{id}", sessionHandler.Get)
 			r.Get("/api/v1/projects", projectHandler.List)
 			r.Get("/api/v1/projects/{id}", projectHandler.Get)
 			r.Get("/api/v1/projects/{id}/cycles", projectHandler.ListCycles)
@@ -220,9 +216,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/integrations/github/login", integrationHandler.StartGitHubOAuth)
 			r.Get("/api/v1/integrations/github/callback", integrationHandler.HandleGitHubOAuthCallback)
 			r.Post("/api/v1/integrations/github/connect", integrationHandler.ConnectGitHub)
-			r.Post("/api/v1/issues/{id}/fix", runHandler.TriggerFix)
+			r.Post("/api/v1/issues/{id}/fix", sessionHandler.TriggerFix)
 			r.Post("/api/v1/sessions/manual", sessionHandler.CreateManual)
-			r.Post("/api/v1/runs/{id}/questions/{qid}/answer", runHandler.AnswerQuestion)
+			r.Post("/api/v1/sessions/{id}/questions/{qid}/answer", sessionHandler.AnswerQuestion)
 			r.Post("/api/v1/projects", projectHandler.Create)
 			r.Patch("/api/v1/projects/{id}", projectHandler.Update)
 			r.Delete("/api/v1/projects/{id}", projectHandler.Delete)

@@ -79,7 +79,7 @@ export interface Issue {
   updated_at: string;
 }
 
-export interface AgentRun {
+export interface Session {
   id: string;
   issue_id: string;
   org_id: string;
@@ -98,10 +98,12 @@ export interface AgentRun {
   failure_category?: string;
   failure_next_steps?: string[];
   failure_retry_advised?: boolean;
-  parent_run_id?: string;
+  parent_session_id?: string;
   pm_plan_id?: string;
   pm_approach?: string;
   pm_reasoning?: string;
+  project_task_id?: string;
+  model_override?: string;
   error?: string;
   result_summary?: string;
   diff?: string;
@@ -110,7 +112,7 @@ export interface AgentRun {
 
 export interface Validation {
   id: string;
-  agent_run_id: string;
+  session_id: string;
   org_id: string;
   status: string;
   direction_check: string | null;
@@ -129,18 +131,18 @@ export interface Validation {
   updated_at: string;
 }
 
-export interface AgentRunLog {
+export interface SessionLog {
   id: number;
-  agent_run_id: string;
+  session_id: string;
   level: string;
   message: string;
   metadata: Record<string, unknown> | null;
   created_at: string;
 }
 
-export interface AgentRunQuestion {
+export interface SessionQuestion {
   id: string;
-  agent_run_id: string;
+  session_id: string;
   org_id: string;
   question_text: string;
   options: string[] | null;
@@ -155,7 +157,7 @@ export interface AgentRunQuestion {
 
 export interface PullRequest {
   id: string;
-  agent_run_id: string;
+  session_id: string;
   org_id: string;
   github_pr_number: number;
   github_pr_url: string;
@@ -259,7 +261,7 @@ export interface PMTask {
   risk: string;
   complexity: string;
   confidence: string;
-  agent_run_id?: string;
+  session_id?: string;
   status?: string;
 }
 
@@ -291,59 +293,10 @@ export interface PMPlan {
   completed_at?: string;
 }
 
-export type AgentSessionType = 'plan' | 'manual';
-export type AgentSessionStatus = 'active' | 'completed' | 'failed';
-export type AgentSessionTriggeredBy = 'scheduled' | 'manual' | 'fix_this';
-export type AgentRunStatus = 'pending' | 'running' | 'awaiting_input' | 'needs_human_guidance' | 'completed' | 'pr_created' | 'failed' | 'cancelled' | 'skipped';
+export type SessionStatus = 'pending' | 'running' | 'awaiting_input' | 'needs_human_guidance' | 'completed' | 'pr_created' | 'failed' | 'cancelled' | 'skipped';
 export type PMTaskComplexity = 'trivial' | 'simple' | 'moderate' | 'complex';
 export type PMTaskConfidence = 'high' | 'medium' | 'low';
 export type PMTaskStatus = 'pending' | 'delegated' | 'skipped_capacity';
-
-export interface AgentSessionTask {
-  rank: number;
-  title: string;
-  issue_ids: string[];
-  complexity?: PMTaskComplexity;
-  confidence?: PMTaskConfidence;
-  reasoning?: string;
-  approach?: string;
-  risk?: string;
-  status?: PMTaskStatus;
-  agent_run_id?: string;
-  run_status?: AgentRunStatus;
-  run_result_summary?: string;
-  run_confidence_score?: number;
-  run_started_at?: string;
-  run_completed_at?: string;
-}
-
-export interface AgentSession {
-  id: string;
-  type: AgentSessionType;
-  status: AgentSessionStatus;
-  triggered_by: AgentSessionTriggeredBy;
-  title: string;
-  analysis?: string;
-  tasks: AgentSessionTask[];
-  clusters?: PMCluster[];
-  skipped_issues?: PMSkipEntry[];
-  issues_reviewed?: number;
-  task_count: number;
-  active_run_count: number;
-  completed_run_count: number;
-  failed_run_count: number;
-  created_at: string;
-  completed_at?: string;
-  // Project grouping
-  project_id?: string;
-  project_title?: string;
-  // Context counts (plan sessions only)
-  in_flight_runs_checked?: number;
-  past_outcomes_reviewed?: number;
-  recent_prs_checked?: number;
-  past_decisions_reviewed?: number;
-  commits_analyzed?: number;
-}
 
 // PM Decision types for the decisions view
 export type PMDecisionType = 'delegate' | 'skip' | 'cluster';
@@ -387,8 +340,7 @@ export interface PMStatus {
 }
 
 export interface SessionsListResponse {
-  data: AgentSession[];
-  projects: Project[];
+  data: Session[];
   meta: { next_cursor?: string };
 }
 
@@ -534,7 +486,7 @@ export interface ProjectTask {
   status: ProjectTaskStatus;
   complexity?: string;
   confidence?: string;
-  agent_run_id?: string;
+  session_id?: string;
   issue_id?: string;
   branch_name?: string;
   pr_url?: string;

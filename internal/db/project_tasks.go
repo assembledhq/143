@@ -24,7 +24,7 @@ type ProjectTaskFilters struct {
 
 const projectTaskColumns = `id, project_id, org_id, title, description, approach, reasoning,
 	sort_order, depends_on, batch_number, status, complexity, confidence,
-	agent_run_id, issue_id, branch_name, pr_url, outcome_notes,
+	session_id, issue_id, branch_name, pr_url, outcome_notes,
 	retry_count, max_retries, created_at, updated_at, completed_at`
 
 func scanProjectTask(row pgx.Row) (models.ProjectTask, error) {
@@ -34,7 +34,7 @@ func scanProjectTask(row pgx.Row) (models.ProjectTask, error) {
 	err := row.Scan(
 		&t.ID, &t.ProjectID, &t.OrgID, &t.Title, &t.Description, &t.Approach, &t.Reasoning,
 		&t.SortOrder, &dependsOn, &t.BatchNumber, &t.Status, &t.Complexity, &t.Confidence,
-		&t.AgentRunID, &t.IssueID, &t.BranchName, &t.PRURL, &t.OutcomeNotes,
+		&t.SessionID, &t.IssueID, &t.BranchName, &t.PRURL, &t.OutcomeNotes,
 		&t.RetryCount, &t.MaxRetries, &t.CreatedAt, &t.UpdatedAt, &t.CompletedAt,
 	)
 	if err != nil {
@@ -53,7 +53,7 @@ func scanProjectTasks(rows pgx.Rows) ([]models.ProjectTask, error) {
 		err := rows.Scan(
 			&t.ID, &t.ProjectID, &t.OrgID, &t.Title, &t.Description, &t.Approach, &t.Reasoning,
 			&t.SortOrder, &dependsOn, &t.BatchNumber, &t.Status, &t.Complexity, &t.Confidence,
-			&t.AgentRunID, &t.IssueID, &t.BranchName, &t.PRURL, &t.OutcomeNotes,
+			&t.SessionID, &t.IssueID, &t.BranchName, &t.PRURL, &t.OutcomeNotes,
 			&t.RetryCount, &t.MaxRetries, &t.CreatedAt, &t.UpdatedAt, &t.CompletedAt,
 		)
 		if err != nil {
@@ -73,12 +73,12 @@ func (s *ProjectTaskStore) Create(ctx context.Context, t *models.ProjectTask) er
 		INSERT INTO project_tasks (
 			project_id, org_id, title, description, approach, reasoning,
 			sort_order, depends_on, batch_number, status, complexity, confidence,
-			agent_run_id, issue_id, branch_name, pr_url
+			session_id, issue_id, branch_name, pr_url
 		)
 		VALUES (
 			@project_id, @org_id, @title, @description, @approach, @reasoning,
 			@sort_order, @depends_on, @batch_number, @status, @complexity, @confidence,
-			@agent_run_id, @issue_id, @branch_name, @pr_url
+			@session_id, @issue_id, @branch_name, @pr_url
 		)
 		RETURNING id, created_at, updated_at`
 
@@ -95,7 +95,7 @@ func (s *ProjectTaskStore) Create(ctx context.Context, t *models.ProjectTask) er
 		"status":       t.Status,
 		"complexity":   t.Complexity,
 		"confidence":   t.Confidence,
-		"agent_run_id": t.AgentRunID,
+		"session_id": t.SessionID,
 		"issue_id":     t.IssueID,
 		"branch_name":  t.BranchName,
 		"pr_url":       t.PRURL,
@@ -142,7 +142,7 @@ func (s *ProjectTaskStore) Update(ctx context.Context, t *models.ProjectTask) er
 			title = @title, description = @description, approach = @approach, reasoning = @reasoning,
 			sort_order = @sort_order, depends_on = @depends_on, status = @status,
 			complexity = @complexity, confidence = @confidence,
-			agent_run_id = @agent_run_id, issue_id = @issue_id,
+			session_id = @session_id, issue_id = @issue_id,
 			branch_name = @branch_name, pr_url = @pr_url,
 			outcome_notes = @outcome_notes, retry_count = @retry_count,
 			completed_at = @completed_at, updated_at = now()
@@ -160,7 +160,7 @@ func (s *ProjectTaskStore) Update(ctx context.Context, t *models.ProjectTask) er
 		"status":        t.Status,
 		"complexity":    t.Complexity,
 		"confidence":    t.Confidence,
-		"agent_run_id":  t.AgentRunID,
+		"session_id":  t.SessionID,
 		"issue_id":      t.IssueID,
 		"branch_name":   t.BranchName,
 		"pr_url":        t.PRURL,

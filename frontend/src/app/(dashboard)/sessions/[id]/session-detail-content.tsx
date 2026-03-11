@@ -1,22 +1,26 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Layers, Wrench, FileCode2 } from "lucide-react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  ArrowLeft,
+  ExternalLink,
+  RefreshCw,
+  CheckCircle2,
+  XCircle,
+  MinusCircle,
+  AlertTriangle,
+} from "lucide-react";
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Separator } from "@/components/ui/separator";
-import { ContextStats } from "@/components/pm/context-stats";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { LogViewer } from "@/components/log-viewer";
+import { DiffViewer } from "@/components/diff-viewer";
 import { api } from "@/lib/api";
-import type { AgentSession, AgentSessionTask } from "@/lib/types";
+import type { Session, Validation } from "@/lib/types";
 
-const sessionStatusConfig: Record<string, { color: string; label: string }> = {
-  active: { color: "bg-blue-100 text-blue-800", label: "Active" },
-  completed: { color: "bg-green-100 text-green-800", label: "Completed" },
-  failed: { color: "bg-red-100 text-red-800", label: "Failed" },
-};
-
-const runStatusConfig: Record<string, { color: string; label: string }> = {
+const statusConfig: Record<string, { color: string; label: string }> = {
   pending: { color: "bg-gray-100 text-gray-800", label: "Pending" },
   running: { color: "bg-blue-100 text-blue-800", label: "Running" },
   awaiting_input: { color: "bg-yellow-100 text-yellow-800", label: "Awaiting Input" },
@@ -28,10 +32,11 @@ const runStatusConfig: Record<string, { color: string; label: string }> = {
   skipped: { color: "bg-gray-100 text-gray-700", label: "Skipped" },
 };
 
-const triggeredByLabels: Record<string, string> = {
-  scheduled: "Scheduled",
-  manual: "Manual",
-  fix_this: "Fix This",
+const agentTypeLabels: Record<string, string> = {
+  claude_code: "Claude Code",
+  codex: "Codex",
+  gemini_cli: "Gemini CLI",
+  custom: "Custom",
 };
 
 function formatDuration(startedAt?: string, completedAt?: string): string {
@@ -57,235 +62,298 @@ function confidenceColor(score: number): string {
   return "text-red-700";
 }
 
-/** Parse `path:line` or `path` references from approach text. */
-function parseFileRefs(text: string): { path: string; line?: number }[] {
-  // Match patterns like `src/auth/token.go:142` or `auth/token_test.go`
-  const regex = /(?:^|\s|`)([a-zA-Z0-9_\-./]+\.[a-zA-Z0-9]+(?::\d+)?)(?:`|\s|$|,|;)/g;
-  const refs: { path: string; line?: number }[] = [];
-  const seen = new Set<string>();
-  let match;
-  while ((match = regex.exec(text)) !== null) {
-    const raw = match[1];
-    // Filter out things that don't look like file paths
-    if (!raw.includes("/") && !raw.includes(".go") && !raw.includes(".ts") && !raw.includes(".js") && !raw.includes(".py")) continue;
-    if (seen.has(raw)) continue;
-    seen.add(raw);
-    const parts = raw.split(":");
-    const path = parts[0];
-    const line = parts[1] ? parseInt(parts[1], 10) : undefined;
-    refs.push({ path, line: line && !isNaN(line) ? line : undefined });
-  }
-  return refs;
+const validationChecks: { key: string; label: string }[] = [
+  { key: "direction_check", label: "Direction Check" },
+  { key: "correctness_check", label: "Correctness Check" },
+  { key: "quality_check", label: "Quality Check" },
+  { key: "security_scan", label: "Security Scan" },
+  { key: "regression_test_check", label: "Regression Test Check" },
+  { key: "ci_check", label: "CI Check" },
+];
+
+function checkResultBadge(result: string | null) {
+  if (!result) return <Badge variant="secondary" className="bg-gray-100 text-gray-600 text-[11px]">skipped</Badge>;
+  if (result === "pass") return <Badge variant="secondary" className="bg-green-100 text-green-800 text-[11px]">pass</Badge>;
+  if (result === "fail") return <Badge variant="secondary" className="bg-red-100 text-red-800 text-[11px]">fail</Badge>;
+  return <Badge variant="secondary" className="text-[11px]">{result}</Badge>;
 }
 
-function FileRefs({ text }: { text: string }) {
-  const refs = parseFileRefs(text);
-  if (refs.length === 0) return null;
+function OverviewTab({ session }: { session: Session }) {
+  const queryClient = useQueryClient();
+  const retryMutation = useMutation({
+    mutationFn: () => api.issues.triggerFix(session.issue_id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["session", session.id] });
+    },
+  });
 
-  return (
-    <div className="flex items-center gap-1.5 flex-wrap">
-      <FileCode2 className="h-3 w-3 text-muted-foreground shrink-0" />
-      <span className="text-[11px] text-muted-foreground">Files:</span>
-      {refs.map((ref) => (
-        <code
-          key={ref.path + (ref.line ?? "")}
-          className="text-[11px] bg-muted px-1.5 py-0.5 rounded font-mono text-muted-foreground"
-        >
-          {ref.path}{ref.line ? `:${ref.line}` : ""}
-        </code>
-      ))}
-    </div>
-  );
-}
-
-function TaskRow({ task }: { task: AgentSessionTask }) {
-  const taskStatus = task.status ?? "pending";
-  const runStatus = task.run_status ? runStatusConfig[task.run_status] : null;
-  const isActive = task.run_status === "running" || task.run_status === "awaiting_input";
-
-  return (
-    <Card>
-      <CardHeader className="space-y-2">
-        <div className="flex items-center justify-between">
-          <CardTitle className="text-sm">
-            #{task.rank} · {task.title}
-          </CardTitle>
-          <div className="flex items-center gap-2">
-            {runStatus && (
-              <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${runStatus.color}`}>
-                {isActive && (
-                  <span className="relative mr-1.5 flex h-2 w-2">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                    <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
-                  </span>
-                )}
-                {runStatus.label}
-              </span>
-            )}
-            {!runStatus && (
-              <Badge className={taskStatus === "delegated" ? "bg-green-100 text-green-800" : "bg-gray-100 text-gray-700"}>
-                {taskStatus.replace("_", " ")}
-              </Badge>
-            )}
-          </div>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {task.complexity && (
-            <Badge variant="outline" className="text-[11px]">{task.complexity}</Badge>
-          )}
-          {task.confidence && (
-            <Badge variant="outline" className="text-[11px]">{task.confidence} confidence</Badge>
-          )}
-          {task.run_confidence_score != null && (
-            <span className={`text-xs font-medium ${confidenceColor(task.run_confidence_score)}`}>
-              {(task.run_confidence_score * 100).toFixed(0)}% confidence
-            </span>
-          )}
-          {task.issue_ids.map((id) => (
-            <Badge key={id} variant="secondary" className="text-[11px]">
-              {id.slice(0, 8)}
-            </Badge>
-          ))}
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-3 text-sm">
-        {task.run_result_summary && (
-          <div>
-            <p className="text-xs font-medium text-muted-foreground">Result</p>
-            <p>{task.run_result_summary}</p>
-          </div>
-        )}
-        {task.reasoning && (
-          <div>
-            <p className="text-xs font-medium text-muted-foreground">Reasoning</p>
-            <p>{task.reasoning}</p>
-          </div>
-        )}
-        {task.approach && (
-          <div>
-            <p className="text-xs font-medium text-muted-foreground">Approach</p>
-            <p>{task.approach}</p>
-            <div className="mt-1.5">
-              <FileRefs text={task.approach} />
-            </div>
-          </div>
-        )}
-        {task.risk && (
-          <div>
-            <p className="text-xs font-medium text-muted-foreground">Risk</p>
-            <p>{task.risk}</p>
-          </div>
-        )}
-        <div className="flex items-center gap-3 text-xs text-muted-foreground">
-          {task.run_started_at && (
-            <span>Duration: {formatDuration(task.run_started_at, task.run_completed_at)}</span>
-          )}
-          {task.agent_run_id && (
-            <Link href={`/runs/${task.agent_run_id}`} className="text-primary underline">
-              View run details
-            </Link>
-          )}
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-function PlanSessionDetail({ session }: { session: AgentSession }) {
-  return (
-    <div className="space-y-6">
-      {session.type === "plan" && <ContextStats session={session} />}
-
-      {session.analysis && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-sm">Situation Analysis</CardTitle>
-          </CardHeader>
-          <CardContent className="text-sm text-muted-foreground">
-            {session.analysis}
-          </CardContent>
-        </Card>
-      )}
-
-      {session.tasks.length > 0 && (
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-semibold">Tasks</h3>
-            <Badge variant="secondary" className="text-[11px]">
-              {session.tasks.length} task{session.tasks.length !== 1 ? "s" : ""}
-            </Badge>
-          </div>
-          <div className="space-y-4">
-            {session.tasks.map((task) => (
-              <TaskRow key={`${task.rank}-${task.title}`} task={task} />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {session.clusters && session.clusters.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-sm">Issue Clusters</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4 text-sm">
-            {session.clusters.map((cluster, index) => (
-              <div key={`${cluster.root_cause}-${index}`} className="space-y-2">
-                <div className="flex flex-wrap gap-2">
-                  {cluster.issue_ids.map((id) => (
-                    <Badge key={id} variant="secondary" className="text-[11px]">
-                      {id.slice(0, 8)}
-                    </Badge>
-                  ))}
-                </div>
-                <p>
-                  <span className="font-medium">Root cause:</span> {cluster.root_cause}
-                </p>
-                <p>
-                  <span className="font-medium">Strategy:</span> {cluster.strategy}
-                </p>
-                {index < session.clusters!.length - 1 && <Separator />}
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-      )}
-
-      {session.skipped_issues && session.skipped_issues.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-sm">Skipped Issues</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4 text-sm">
-            {session.skipped_issues.map((skip, index) => (
-              <div key={`${skip.issue_id}-${index}`} className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <Badge variant="outline" className="text-[11px]">
-                    {skip.issue_id.slice(0, 8)}
-                  </Badge>
-                  <Badge variant="secondary" className="text-[11px]">
-                    {skip.reason.replace("_", " ")}
-                  </Badge>
-                </div>
-                <p>{skip.detail}</p>
-                {index < session.skipped_issues!.length - 1 && <Separator />}
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-      )}
-    </div>
-  );
-}
-
-function ManualSessionDetail({ session }: { session: AgentSession }) {
-  const task = session.tasks[0];
-  if (!task) return null;
+  const status = statusConfig[session.status] || statusConfig.pending;
+  const isActive = session.status === "running" || session.status === "awaiting_input";
 
   return (
     <div className="space-y-4">
-      <TaskRow task={task} />
+      <Card>
+        <CardContent className="pt-6">
+          <div className="grid grid-cols-2 gap-4 text-sm">
+            <div>
+              <span className="text-muted-foreground">Status</span>
+              <div className="mt-1">
+                <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${status.color}`}>
+                  {isActive && (
+                    <span className="relative mr-1.5 flex h-2 w-2">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+                    </span>
+                  )}
+                  {status.label}
+                </span>
+              </div>
+            </div>
+            <div>
+              <span className="text-muted-foreground">Agent Type</span>
+              <p className="mt-1 font-medium">{agentTypeLabels[session.agent_type] || session.agent_type}</p>
+            </div>
+            {session.confidence_score != null && (
+              <div>
+                <span className="text-muted-foreground">Confidence</span>
+                <p className={`mt-1 font-medium ${confidenceColor(session.confidence_score)}`}>
+                  {(session.confidence_score * 100).toFixed(0)}%
+                </p>
+              </div>
+            )}
+            <div>
+              <span className="text-muted-foreground">Duration</span>
+              <p className="mt-1 font-medium">{formatDuration(session.started_at, session.completed_at)}</p>
+            </div>
+            <div>
+              <span className="text-muted-foreground">Started</span>
+              <p className="mt-1">{formatTimestamp(session.started_at)}</p>
+            </div>
+            <div>
+              <span className="text-muted-foreground">Completed</span>
+              <p className="mt-1">{formatTimestamp(session.completed_at)}</p>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {session.result_summary && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm">Result</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-sm">{session.result_summary}</p>
+          </CardContent>
+        </Card>
+      )}
+
+      {(session.pm_plan_id || session.pm_reasoning || session.pm_approach) && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm">PM Context</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            {session.pm_reasoning && (
+              <div>
+                <p className="text-xs font-medium text-muted-foreground">Why this was prioritized</p>
+                <p>{session.pm_reasoning}</p>
+              </div>
+            )}
+            {session.pm_approach && (
+              <div>
+                <p className="text-xs font-medium text-muted-foreground">Suggested approach</p>
+                <p>{session.pm_approach}</p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {session.status === "failed" && session.failure_explanation && (
+        <Card className="border-red-200">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm text-red-800 flex items-center gap-2">
+              <XCircle className="h-4 w-4" />
+              Failure Details
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {session.failure_category && (
+              <Badge variant="secondary" className="bg-red-100 text-red-800 text-[11px]">
+                {session.failure_category}
+              </Badge>
+            )}
+            <p className="text-sm">{session.failure_explanation}</p>
+            {session.failure_next_steps && session.failure_next_steps.length > 0 && (
+              <div>
+                <p className="text-xs font-medium text-muted-foreground mb-1">Next Steps</p>
+                <ul className="list-disc list-inside text-sm space-y-1">
+                  {session.failure_next_steps.map((step, i) => (
+                    <li key={i}>{step}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {session.failure_retry_advised && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => retryMutation.mutate()}
+                disabled={retryMutation.isPending}
+              >
+                <RefreshCw className={`mr-1.5 h-3 w-3 ${retryMutation.isPending ? "animate-spin" : ""}`} />
+                {retryMutation.isPending ? "Retrying..." : "Retry"}
+              </Button>
+            )}
+          </CardContent>
+        </Card>
+      )}
     </div>
+  );
+}
+
+function ValidationTab({ sessionId }: { sessionId: string }) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["session", sessionId, "validation"],
+    queryFn: () => api.sessions.getValidation(sessionId),
+  });
+
+  if (isLoading) {
+    return <div className="py-8 text-center text-sm text-muted-foreground">Loading validation...</div>;
+  }
+
+  if (error) {
+    return <div className="py-8 text-center text-sm text-muted-foreground">No validation data available.</div>;
+  }
+
+  const validation = data?.data;
+  if (!validation) {
+    return <div className="py-8 text-center text-sm text-muted-foreground">No validation data available.</div>;
+  }
+
+  const overallStatus = validation.status;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2">
+        <span className="text-sm font-medium">Overall:</span>
+        {overallStatus === "passed" && (
+          <Badge variant="secondary" className="bg-green-100 text-green-800">
+            <CheckCircle2 className="mr-1 h-3 w-3" /> Passed
+          </Badge>
+        )}
+        {overallStatus === "failed" && (
+          <Badge variant="secondary" className="bg-red-100 text-red-800">
+            <XCircle className="mr-1 h-3 w-3" /> Failed
+          </Badge>
+        )}
+        {overallStatus !== "passed" && overallStatus !== "failed" && (
+          <Badge variant="secondary" className="bg-gray-100 text-gray-800">
+            <MinusCircle className="mr-1 h-3 w-3" /> {overallStatus}
+          </Badge>
+        )}
+      </div>
+
+      <Card>
+        <CardContent className="p-0">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-border bg-muted/30">
+                <th className="text-left px-4 py-2 text-xs font-medium text-muted-foreground uppercase">Check</th>
+                <th className="text-left px-4 py-2 text-xs font-medium text-muted-foreground uppercase">Result</th>
+                <th className="text-left px-4 py-2 text-xs font-medium text-muted-foreground uppercase">Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              {validationChecks.map(({ key, label }) => {
+                const result = validation[key as keyof Validation] as string | null;
+                const details = validation[`${key}_details` as keyof Validation] as string | null;
+                return (
+                  <tr key={key} className="border-b border-border last:border-b-0">
+                    <td className="px-4 py-2 font-medium">{label}</td>
+                    <td className="px-4 py-2">{checkResultBadge(result)}</td>
+                    <td className="px-4 py-2 text-muted-foreground">{details || "-"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function PRTab({ sessionId }: { sessionId: string }) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["session", sessionId, "pr"],
+    queryFn: () => api.sessions.getPR(sessionId),
+  });
+
+  if (isLoading) {
+    return <div className="py-8 text-center text-sm text-muted-foreground">Loading PR details...</div>;
+  }
+
+  if (error || !data?.data) {
+    return (
+      <div className="py-8 text-center text-sm text-muted-foreground">
+        <AlertTriangle className="mx-auto h-8 w-8 text-muted-foreground/50 mb-2" />
+        PR not yet created
+      </div>
+    );
+  }
+
+  const pr = data.data;
+
+  const prStatusColor: Record<string, string> = {
+    open: "bg-green-100 text-green-800",
+    merged: "bg-purple-100 text-purple-800",
+    closed: "bg-red-100 text-red-800",
+  };
+
+  return (
+    <Card>
+      <CardContent className="pt-6 space-y-4">
+        <div className="flex items-start justify-between">
+          <div>
+            <h3 className="text-sm font-medium">{pr.title}</h3>
+            <p className="text-xs text-muted-foreground mt-1">{pr.github_repo} #{pr.github_pr_number}</p>
+          </div>
+          <a href={pr.github_pr_url} target="_blank" rel="noopener noreferrer">
+            <Button variant="outline" size="sm">
+              <ExternalLink className="mr-1.5 h-3 w-3" />
+              View on GitHub
+            </Button>
+          </a>
+        </div>
+
+        <div className="flex items-center gap-3 text-sm">
+          <div>
+            <span className="text-muted-foreground">Status: </span>
+            <Badge variant="secondary" className={`text-[11px] ${prStatusColor[pr.status] || "bg-gray-100 text-gray-800"}`}>
+              {pr.status}
+            </Badge>
+          </div>
+          {pr.review_status && (
+            <div>
+              <span className="text-muted-foreground">Review: </span>
+              <Badge variant="secondary" className="text-[11px]">{pr.review_status}</Badge>
+            </div>
+          )}
+          <div>
+            <span className="text-muted-foreground">Branch: </span>
+            <code className="text-xs bg-muted px-1 py-0.5 rounded">{pr.branch_name}</code>
+          </div>
+        </div>
+
+        {pr.body && (
+          <div className="text-sm text-muted-foreground border-t border-border pt-3">
+            <p className="whitespace-pre-wrap">{pr.body}</p>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -295,7 +363,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     queryFn: () => api.sessions.get(id),
     refetchInterval: (query) => {
       const session = query.state.data?.data;
-      if (session && session.status === "active") {
+      if (session && (session.status === "running" || session.status === "awaiting_input")) {
         return 5000;
       }
       return false;
@@ -303,6 +371,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   });
 
   const session = data?.data;
+  const isActive = session?.status === "running" || session?.status === "awaiting_input";
 
   if (isLoading) {
     return (
@@ -334,8 +403,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     );
   }
 
-  const status = sessionStatusConfig[session.status] || sessionStatusConfig.active;
-
   return (
     <div className="space-y-6">
       <Link href="/sessions" className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
@@ -343,45 +410,49 @@ export function SessionDetailContent({ id }: { id: string }) {
       </Link>
 
       <div>
-        <div className="flex items-center gap-3">
-          <h1 className="text-sm font-semibold text-foreground">
-            {session.title}
-          </h1>
-          <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${status.color}`}>
-            {status.label}
-          </span>
-          {session.project_title && (
-            <Link
-              href={`/projects/${session.project_id}`}
-              className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
-            >
-              <Badge variant="outline" className="text-[11px] px-1.5 py-0">
-                {session.project_title}
-              </Badge>
-            </Link>
-          )}
-        </div>
-        <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
-          <Badge variant="outline" className="text-[11px] px-1.5 py-0">
-            {session.type === "plan" ? (
-              <><Layers className="mr-1 h-3 w-3 inline" />PM Analysis</>
-            ) : (
-              <><Wrench className="mr-1 h-3 w-3 inline" />Manual</>
-            )}
-          </Badge>
-          <span>{triggeredByLabels[session.triggered_by]}</span>
-          <span>{formatTimestamp(session.created_at)}</span>
-          {session.issues_reviewed != null && (
-            <span>{session.issues_reviewed} issues reviewed</span>
-          )}
-        </div>
+        <h1 className="text-sm font-semibold text-foreground">
+          {session.result_summary || `Session ${session.id.slice(0, 8)}`}
+        </h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          {agentTypeLabels[session.agent_type] || session.agent_type} session
+        </p>
       </div>
 
-      {session.type === "plan" ? (
-        <PlanSessionDetail session={session} />
-      ) : (
-        <ManualSessionDetail session={session} />
-      )}
+      <Tabs defaultValue="overview">
+        <TabsList>
+          <TabsTrigger value="overview">Overview</TabsTrigger>
+          <TabsTrigger value="logs">Logs</TabsTrigger>
+          <TabsTrigger value="diff">Diff</TabsTrigger>
+          <TabsTrigger value="validation">Validation</TabsTrigger>
+          <TabsTrigger value="pr">PR</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="overview">
+          <OverviewTab session={session} />
+        </TabsContent>
+
+        <TabsContent value="logs">
+          <LogViewer runId={id} isActive={isActive} />
+        </TabsContent>
+
+        <TabsContent value="diff">
+          {session.diff ? (
+            <DiffViewer diff={session.diff} />
+          ) : (
+            <div className="py-8 text-center text-sm text-muted-foreground">
+              No diff available for this session.
+            </div>
+          )}
+        </TabsContent>
+
+        <TabsContent value="validation">
+          <ValidationTab sessionId={id} />
+        </TabsContent>
+
+        <TabsContent value="pr">
+          <PRTab sessionId={id} />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

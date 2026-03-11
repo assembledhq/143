@@ -164,7 +164,7 @@ func TestAuth(t *testing.T) {
 						now.Add(24*time.Hour),
 						now,
 					)
-				mock.ExpectQuery("SELECT .+ FROM sessions").
+				mock.ExpectQuery("SELECT .+ FROM auth_sessions").
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(sessionRows)
 
@@ -209,7 +209,7 @@ func TestAuth(t *testing.T) {
 						now.Add(24*time.Hour),
 						now,
 					)
-				mock.ExpectQuery("SELECT .+ FROM sessions").
+				mock.ExpectQuery("SELECT .+ FROM auth_sessions").
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(sessionRows)
 
@@ -254,7 +254,7 @@ func TestAuth(t *testing.T) {
 			name: "returns 401 and clears cookie when session cookie is invalid",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				sessionRows := pgxmock.NewRows([]string{"id", "user_id", "org_id", "token", "expires_at", "created_at"})
-				mock.ExpectQuery("SELECT .+ FROM sessions").
+				mock.ExpectQuery("SELECT .+ FROM auth_sessions").
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(sessionRows)
 			},
@@ -293,7 +293,7 @@ func TestAuth(t *testing.T) {
 						now.Add(24*time.Hour),
 						now,
 					)
-				mock.ExpectQuery("SELECT .+ FROM sessions").
+				mock.ExpectQuery("SELECT .+ FROM auth_sessions").
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(sessionRows)
 
@@ -320,7 +320,7 @@ func TestAuth(t *testing.T) {
 			require.NoError(t, err, "should create pgxmock pool without error")
 			defer mock.Close()
 
-			sessionStore := db.NewSessionStore(mock)
+			sessionStore := db.NewAuthSessionStore(mock)
 			userStore := db.NewUserStore(mock)
 			tt.setupMock(mock)
 

@@ -17,7 +17,7 @@ func newTestFailureService(t *testing.T) (*FailureService, pgxmock.PgxPoolIface)
 	t.Helper()
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "should create pgxmock pool without error")
-	store := db.NewAgentRunStore(mock)
+	store := db.NewSessionStore(mock)
 	svc := NewFailureService(store, zerolog.Nop())
 	return svc, mock
 }
@@ -27,14 +27,14 @@ func TestClassifyFailure(t *testing.T) {
 
 	tests := []struct {
 		name             string
-		run              models.AgentRun
+		run              models.Session
 		wantCategory     string
 		wantSubType      string
 		wantRetryAdvised bool
 	}{
 		{
 			name: "timeout error",
-			run: models.AgentRun{
+			run: models.Session{
 				Error: strPtr("operation timeout after 5m"),
 			},
 			wantCategory:     "tooling",
@@ -43,7 +43,7 @@ func TestClassifyFailure(t *testing.T) {
 		},
 		{
 			name: "deadline exceeded",
-			run: models.AgentRun{
+			run: models.Session{
 				Error: strPtr("context deadline exceeded"),
 			},
 			wantCategory:     "tooling",
@@ -52,7 +52,7 @@ func TestClassifyFailure(t *testing.T) {
 		},
 		{
 			name: "OOM crash",
-			run: models.AgentRun{
+			run: models.Session{
 				Error: strPtr("process killed: OOM"),
 			},
 			wantCategory:     "tooling",
@@ -61,7 +61,7 @@ func TestClassifyFailure(t *testing.T) {
 		},
 		{
 			name: "signal crash",
-			run: models.AgentRun{
+			run: models.Session{
 				Error: strPtr("process received signal: SIGKILL"),
 			},
 			wantCategory:     "tooling",
@@ -70,7 +70,7 @@ func TestClassifyFailure(t *testing.T) {
 		},
 		{
 			name: "out of memory",
-			run: models.AgentRun{
+			run: models.Session{
 				Error: strPtr("container out of memory"),
 			},
 			wantCategory:     "tooling",
@@ -79,7 +79,7 @@ func TestClassifyFailure(t *testing.T) {
 		},
 		{
 			name: "rate limit API error",
-			run: models.AgentRun{
+			run: models.Session{
 				Error: strPtr("API error: rate limit exceeded"),
 			},
 			wantCategory:     "tooling",
@@ -88,7 +88,7 @@ func TestClassifyFailure(t *testing.T) {
 		},
 		{
 			name: "429 status code",
-			run: models.AgentRun{
+			run: models.Session{
 				Error: strPtr("HTTP 429 Too Many Requests"),
 			},
 			wantCategory:     "tooling",
@@ -97,7 +97,7 @@ func TestClassifyFailure(t *testing.T) {
 		},
 		{
 			name: "503 service unavailable",
-			run: models.AgentRun{
+			run: models.Session{
 				Error: strPtr("upstream returned 503"),
 			},
 			wantCategory:     "tooling",
@@ -106,7 +106,7 @@ func TestClassifyFailure(t *testing.T) {
 		},
 		{
 			name: "build failure",
-			run: models.AgentRun{
+			run: models.Session{
 				Error: strPtr("build failed: exit code 1"),
 			},
 			wantCategory:     "tooling",
@@ -115,7 +115,7 @@ func TestClassifyFailure(t *testing.T) {
 		},
 		{
 			name: "compilation error",
-			run: models.AgentRun{
+			run: models.Session{
 				Error: strPtr("compilation error in main.go:42"),
 			},
 			wantCategory:     "tooling",
@@ -124,7 +124,7 @@ func TestClassifyFailure(t *testing.T) {
 		},
 		{
 			name: "syntax error",
-			run: models.AgentRun{
+			run: models.Session{
 				Error: strPtr("syntax error: unexpected token"),
 			},
 			wantCategory:     "tooling",
@@ -133,7 +133,7 @@ func TestClassifyFailure(t *testing.T) {
 		},
 		{
 			name: "empty diff no error",
-			run: models.AgentRun{
+			run: models.Session{
 				// No error, no diff
 			},
 			wantCategory:     "context",
@@ -142,7 +142,7 @@ func TestClassifyFailure(t *testing.T) {
 		},
 		{
 			name: "test regression in error",
-			run: models.AgentRun{
+			run: models.Session{
 				Error: strPtr("test failed: TestFoo"),
 				Diff:  strPtr("some diff content"),
 			},
@@ -152,7 +152,7 @@ func TestClassifyFailure(t *testing.T) {
 		},
 		{
 			name: "test regression in result summary",
-			run: models.AgentRun{
+			run: models.Session{
 				ResultSummary: strPtr("Fix applied but tests failed"),
 				Diff:          strPtr("some diff content"),
 			},
@@ -162,7 +162,7 @@ func TestClassifyFailure(t *testing.T) {
 		},
 		{
 			name: "security violation in error",
-			run: models.AgentRun{
+			run: models.Session{
 				Error: strPtr("security violation detected in generated code"),
 				Diff:  strPtr("some diff content"),
 			},
@@ -172,7 +172,7 @@ func TestClassifyFailure(t *testing.T) {
 		},
 		{
 			name: "security violation in result summary",
-			run: models.AgentRun{
+			run: models.Session{
 				ResultSummary: strPtr("Security scan flagged vulnerability"),
 				Diff:          strPtr("some diff content"),
 			},
@@ -182,7 +182,7 @@ func TestClassifyFailure(t *testing.T) {
 		},
 		{
 			name: "large diff over 500 lines",
-			run: models.AgentRun{
+			run: models.Session{
 				Diff: strPtr(strings.Repeat("line\n", 501)),
 			},
 			wantCategory:     "complexity",
@@ -191,7 +191,7 @@ func TestClassifyFailure(t *testing.T) {
 		},
 		{
 			name: "default classification with error and small diff",
-			run: models.AgentRun{
+			run: models.Session{
 				Error: strPtr("something unknown happened"),
 				Diff:  strPtr("a small change"),
 			},
@@ -250,7 +250,7 @@ func TestUpdateRunWithFailure(t *testing.T) {
 		RetryAdvised: true,
 	}
 
-	mock.ExpectExec("UPDATE agent_runs").
+	mock.ExpectExec("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
@@ -273,7 +273,7 @@ func TestRetryAdvised_ToolingCategoriesAreRetryable(t *testing.T) {
 	defer mock.Close()
 
 	for _, errMsg := range toolingErrors {
-		run := &models.AgentRun{Error: strPtr(errMsg)}
+		run := &models.Session{Error: strPtr(errMsg)}
 		summary, err := svc.AnalyzeFailure(context.Background(), run)
 		require.NoError(t, err, "AnalyzeFailure should not return an error for: %s", errMsg)
 		require.Equal(t, "tooling", summary.Category, "error: %s", errMsg)
@@ -287,7 +287,7 @@ func TestRetryAdvised_SecurityNeverRetryable(t *testing.T) {
 	svc, mock := newTestFailureService(t)
 	defer mock.Close()
 
-	run := &models.AgentRun{
+	run := &models.Session{
 		Error: strPtr("security violation: SQL injection detected"),
 		Diff:  strPtr("some changes"),
 	}

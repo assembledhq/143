@@ -38,7 +38,7 @@ type Task struct {
 	Complexity models.PMTaskComplexity `json:"complexity"`
 	Confidence models.PMTaskConfidence `json:"confidence"`
 
-	AgentRunID *uuid.UUID         `json:"agent_run_id,omitempty"`
+	SessionID *uuid.UUID         `json:"session_id,omitempty"`
 	Status     models.PMTaskStatus `json:"status"`
 }
 
@@ -101,7 +101,7 @@ type OutcomeSummary struct {
 
 type PRSummary struct {
 	ID           uuid.UUID  `json:"id"`
-	AgentRunID   uuid.UUID  `json:"agent_run_id"`
+	SessionID   uuid.UUID  `json:"session_id"`
 	Title        string     `json:"title"`
 	Status       string     `json:"status"`
 	ReviewStatus string     `json:"review_status"`

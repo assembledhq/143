@@ -112,8 +112,8 @@ func (m *mockCredentialProvider) Get(ctx context.Context, orgID uuid.UUID, provi
 	return m.byProvider[provider], nil
 }
 
-// mockAgentRunStore implements agent.AgentRunStore.
-type mockAgentRunStore struct {
+// mockSessionStore implements agent.SessionStore.
+type mockSessionStore struct {
 	mu              sync.Mutex
 	countRunning    int
 	statusUpdates   []string
@@ -123,30 +123,30 @@ type mockAgentRunStore struct {
 
 type resultUpdate struct {
 	status string
-	result *models.AgentRunResult
+	result *models.SessionResult
 }
 
-func (m *mockAgentRunStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string) error {
+func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.statusUpdates = append(m.statusUpdates, status)
 	return nil
 }
 
-func (m *mockAgentRunStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.AgentRunResult) error {
+func (m *mockSessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.SessionResult) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.resultUpdates = append(m.resultUpdates, resultUpdate{status: status, result: result})
 	return nil
 }
 
-func (m *mockAgentRunStore) CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error) {
+func (m *mockSessionStore) CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.countRunning, m.countRunningErr
 }
 
-func (m *mockAgentRunStore) getStatusUpdates() []string {
+func (m *mockSessionStore) getStatusUpdates() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]string, len(m.statusUpdates))
@@ -154,7 +154,7 @@ func (m *mockAgentRunStore) getStatusUpdates() []string {
 	return out
 }
 
-func (m *mockAgentRunStore) getResultUpdates() []resultUpdate {
+func (m *mockSessionStore) getResultUpdates() []resultUpdate {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]resultUpdate, len(m.resultUpdates))
@@ -162,14 +162,14 @@ func (m *mockAgentRunStore) getResultUpdates() []resultUpdate {
 	return out
 }
 
-// mockAgentRunLogStore implements agent.AgentRunLogStore.
-type mockAgentRunLogStore struct {
+// mockSessionLogStore implements agent.SessionLogStore.
+type mockSessionLogStore struct {
 	mu    sync.Mutex
-	logs  []models.AgentRunLog
+	logs  []models.SessionLog
 	count int
 }
 
-func (m *mockAgentRunLogStore) Create(ctx context.Context, log *models.AgentRunLog) error {
+func (m *mockSessionLogStore) Create(ctx context.Context, log *models.SessionLog) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.logs = append(m.logs, *log)
@@ -177,29 +177,29 @@ func (m *mockAgentRunLogStore) Create(ctx context.Context, log *models.AgentRunL
 	return nil
 }
 
-func (m *mockAgentRunLogStore) getCount() int {
+func (m *mockSessionLogStore) getCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.count
 }
 
-// mockAgentRunQuestionStore implements agent.AgentRunQuestionStore.
-type mockAgentRunQuestionStore struct {
+// mockSessionQuestionStore implements agent.SessionQuestionStore.
+type mockSessionQuestionStore struct {
 	mu        sync.Mutex
-	questions []models.AgentRunQuestion
+	questions []models.SessionQuestion
 }
 
-func (m *mockAgentRunQuestionStore) Create(ctx context.Context, q *models.AgentRunQuestion) error {
+func (m *mockSessionQuestionStore) Create(ctx context.Context, q *models.SessionQuestion) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.questions = append(m.questions, *q)
 	return nil
 }
 
-func (m *mockAgentRunQuestionStore) getQuestions() []models.AgentRunQuestion {
+func (m *mockSessionQuestionStore) getQuestions() []models.SessionQuestion {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]models.AgentRunQuestion, len(m.questions))
+	out := make([]models.SessionQuestion, len(m.questions))
 	copy(out, m.questions)
 	return out
 }
@@ -222,7 +222,7 @@ type mockProjectTaskUpdater struct {
 	statuses []string
 }
 
-func (m *mockProjectTaskUpdater) OnAgentRunComplete(ctx context.Context, run *models.AgentRun, status string) error {
+func (m *mockProjectTaskUpdater) OnSessionComplete(ctx context.Context, run *models.Session, status string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.statuses = append(m.statuses, status)
@@ -345,8 +345,8 @@ func testRepo(orgID uuid.UUID) models.Repository {
 	}
 }
 
-func testRun(orgID, issueID uuid.UUID) *models.AgentRun {
-	return &models.AgentRun{
+func testRun(orgID, issueID uuid.UUID) *models.Session {
+	return &models.Session{
 		ID:        uuid.MustParse("00000000-0000-0000-0000-000000000003"),
 		IssueID:   issueID,
 		OrgID:     orgID,
@@ -359,12 +359,12 @@ func testRun(orgID, issueID uuid.UUID) *models.AgentRun {
 type testDeps struct {
 	provider  *testutil.MockSandboxProvider
 	adapter   *mockAgentAdapter
-	agentRuns *mockAgentRunStore
+	sessions *mockSessionStore
 	projects  *mockProjectTaskUpdater
 	issues    *mockIssueStore
 	repos     *mockRepositoryStore
-	logs      *mockAgentRunLogStore
-	questions *mockAgentRunQuestionStore
+	logs      *mockSessionLogStore
+	questions *mockSessionQuestionStore
 	decisions *mockDecisionLogStore
 	jobs      *mockJobStore
 	github    *mockGitHubTokenProvider
@@ -377,12 +377,12 @@ func defaultDeps() testDeps {
 	return testDeps{
 		provider:  testutil.NewMockSandboxProvider(),
 		adapter:   &mockAgentAdapter{name: "claude_code"},
-		agentRuns: &mockAgentRunStore{countRunning: 0},
+		sessions: &mockSessionStore{countRunning: 0},
 		projects:  &mockProjectTaskUpdater{},
 		issues:    &mockIssueStore{issue: testIssue(orgID)},
 		repos:     &mockRepositoryStore{repo: testRepo(orgID)},
-		logs:      &mockAgentRunLogStore{},
-		questions: &mockAgentRunQuestionStore{},
+		logs:      &mockSessionLogStore{},
+		questions: &mockSessionQuestionStore{},
 		decisions: &mockDecisionLogStore{},
 		jobs:      &mockJobStore{},
 		github:    &mockGitHubTokenProvider{token: "ghp_test123"},
@@ -395,9 +395,9 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 	return agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:          d.provider,
 		Adapters:          map[string]agent.AgentAdapter{d.adapter.Name(): d.adapter},
-		AgentRuns:         d.agentRuns,
-		AgentRunLogs:      d.logs,
-		AgentRunQuestions: d.questions,
+		Sessions:         d.sessions,
+		SessionLogs:      d.logs,
+		SessionQuestions: d.questions,
 		DecisionLog:       d.decisions,
 		ProjectTasks:      d.projects,
 		Issues:            d.issues,
@@ -438,11 +438,11 @@ func TestRunAgent_SuccessfulRun(t *testing.T) {
 	require.NoError(t, err)
 
 	// Status should have been set to "running".
-	statuses := d.agentRuns.getStatusUpdates()
+	statuses := d.sessions.getStatusUpdates()
 	require.Contains(t, statuses, "running")
 
 	// Result should be "completed" with high confidence.
-	results := d.agentRuns.getResultUpdates()
+	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1)
 	require.Equal(t, "completed", results[0].status)
 	require.NotNil(t, results[0].result.ConfidenceScore)
@@ -452,7 +452,7 @@ func TestRunAgent_SuccessfulRun(t *testing.T) {
 	require.Contains(t, d.jobs.getEnqueued(), "validate")
 	validatePayload, ok := d.jobs.getPayload("validate").(map[string]interface{})
 	require.True(t, ok, "validate job payload should be a map")
-	require.Equal(t, run.ID.String(), validatePayload["agent_run_id"], "validate payload should include agent run ID")
+	require.Equal(t, run.ID.String(), validatePayload["session_id"], "validate payload should include agent run ID")
 	require.Equal(t, run.OrgID.String(), validatePayload["org_id"], "validate payload should include org ID")
 
 	// Logs should be persisted.
@@ -494,7 +494,7 @@ func TestRunAgent_PopulatesPMContext(t *testing.T) {
 	pmApproach := "Check handlers/billing.go:42"
 	pmReasoning := "High impact"
 
-	run := &models.AgentRun{
+	run := &models.Session{
 		ID:          runID,
 		IssueID:     issueID,
 		OrgID:       orgID,
@@ -505,7 +505,7 @@ func TestRunAgent_PopulatesPMContext(t *testing.T) {
 		PMReasoning: &pmReasoning,
 	}
 
-	mockRuns := &mockAgentRunStore{}
+	mockRuns := &mockSessionStore{}
 	mockIssues := &mockIssueStore{issue: models.Issue{ID: issueID, OrgID: orgID, RepositoryID: &repoID, Title: "Issue"}}
 	mockRepos := &mockRepositoryStore{repo: models.Repository{
 		ID:             repoID,
@@ -516,8 +516,8 @@ func TestRunAgent_PopulatesPMContext(t *testing.T) {
 	}}
 	mockOrgs := &mockOrgStore{org: models.Organization{ID: orgID}}
 	mockJobs := &mockJobStore{}
-	mockLogs := &mockAgentRunLogStore{}
-	mockQuestions := &mockAgentRunQuestionStore{}
+	mockLogs := &mockSessionLogStore{}
+	mockQuestions := &mockSessionQuestionStore{}
 	mockDecisions := &mockDecisionLogStore{}
 	mockGH := &mockGitHubTokenProvider{token: "token"}
 	sandboxProvider := testutil.NewMockSandboxProvider()
@@ -527,9 +527,9 @@ func TestRunAgent_PopulatesPMContext(t *testing.T) {
 	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:          sandboxProvider,
 		Adapters:          map[string]agent.AgentAdapter{"claude_code": capAdapter},
-		AgentRuns:         mockRuns,
-		AgentRunLogs:      mockLogs,
-		AgentRunQuestions: mockQuestions,
+		Sessions:         mockRuns,
+		SessionLogs:      mockLogs,
+		SessionQuestions: mockQuestions,
 		DecisionLog:       mockDecisions,
 		Issues:            mockIssues,
 		Repositories:      mockRepos,
@@ -566,7 +566,7 @@ func TestRunAgent_FailedExecution(t *testing.T) {
 	require.Contains(t, err.Error(), "execute agent")
 
 	// Run should be marked as failed.
-	results := d.agentRuns.getResultUpdates()
+	results := d.sessions.getResultUpdates()
 	require.GreaterOrEqual(t, len(results), 1)
 	// The last result update should be from failRun (before enqueue).
 	// The first result update is from failRun, setting status to "failed".
@@ -582,7 +582,7 @@ func TestRunAgent_FailedExecution(t *testing.T) {
 	require.Contains(t, d.jobs.getEnqueued(), "analyze_failure")
 	analyzePayload, ok := d.jobs.getPayload("analyze_failure").(map[string]interface{})
 	require.True(t, ok, "analyze_failure payload should be a map")
-	require.Equal(t, run.ID.String(), analyzePayload["agent_run_id"], "analyze_failure payload should include agent run ID")
+	require.Equal(t, run.ID.String(), analyzePayload["session_id"], "analyze_failure payload should include agent run ID")
 	require.Equal(t, run.OrgID.String(), analyzePayload["org_id"], "analyze_failure payload should include org ID")
 
 	// Sandbox should be destroyed.
@@ -611,7 +611,7 @@ func TestRunAgent_LowConfidence(t *testing.T) {
 	require.NoError(t, err)
 
 	// Result should be "needs_human_guidance".
-	results := d.agentRuns.getResultUpdates()
+	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1)
 	require.Equal(t, "needs_human_guidance", results[0].status)
 
@@ -643,7 +643,7 @@ func TestRunAgent_MediumConfidence(t *testing.T) {
 	require.NoError(t, err)
 
 	// Medium confidence (0.65 >= default aggressive auto_proceed 0.4) proceeds as completed.
-	results := d.agentRuns.getResultUpdates()
+	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1)
 	require.Equal(t, "completed", results[0].status)
 
@@ -659,7 +659,7 @@ func TestRunAgent_ConcurrencyLimit(t *testing.T) {
 	run := testRun(orgID, issue.ID)
 
 	d := defaultDeps()
-	d.agentRuns.countRunning = 3 // At the limit.
+	d.sessions.countRunning = 3 // At the limit.
 
 	orch := buildOrchestrator(d)
 	err := orch.RunAgent(context.Background(), run)
@@ -667,7 +667,7 @@ func TestRunAgent_ConcurrencyLimit(t *testing.T) {
 	require.Contains(t, err.Error(), "concurrency limit reached")
 
 	// Status should NOT have been updated to "running".
-	statuses := d.agentRuns.getStatusUpdates()
+	statuses := d.sessions.getStatusUpdates()
 	for _, s := range statuses {
 		require.NotEqual(t, "running", s)
 	}
@@ -697,7 +697,7 @@ func TestRunAgent_SandboxCleanupOnCreateFailure(t *testing.T) {
 	require.Equal(t, 0, d.provider.GetDestroyCalls())
 
 	// Run should be marked as failed.
-	results := d.agentRuns.getResultUpdates()
+	results := d.sessions.getResultUpdates()
 	foundFailed := false
 	for _, r := range results {
 		if r.status == "failed" {
@@ -778,7 +778,7 @@ func TestRunAgent_LogStreamingWithQuestion(t *testing.T) {
 	require.Equal(t, "pending", questions[0].Status)
 
 	// Status should have been set to "awaiting_input" for the question.
-	statuses := d.agentRuns.getStatusUpdates()
+	statuses := d.sessions.getStatusUpdates()
 	require.Contains(t, statuses, "awaiting_input")
 }
 
@@ -798,7 +798,7 @@ func TestRunAgent_UnknownAgentType(t *testing.T) {
 	require.Contains(t, err.Error(), "unknown agent type")
 
 	// Should be marked as failed.
-	results := d.agentRuns.getResultUpdates()
+	results := d.sessions.getResultUpdates()
 	foundFailed := false
 	for _, r := range results {
 		if r.status == "failed" {
@@ -830,7 +830,7 @@ func TestRunAgent_ExactConfidenceThreshold(t *testing.T) {
 	require.NoError(t, err)
 
 	// Score == 0.4 should proceed (>= aggressive auto_proceed threshold).
-	results := d.agentRuns.getResultUpdates()
+	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1)
 	require.Equal(t, "completed", results[0].status)
 	require.Contains(t, d.jobs.getEnqueued(), "validate")
@@ -866,9 +866,9 @@ func TestRunAgent_AgentCredentialsInjected(t *testing.T) {
 	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:          d.provider,
 		Adapters:          map[string]agent.AgentAdapter{d.adapter.Name(): d.adapter},
-		AgentRuns:         d.agentRuns,
-		AgentRunLogs:      d.logs,
-		AgentRunQuestions: d.questions,
+		Sessions:         d.sessions,
+		SessionLogs:      d.logs,
+		SessionQuestions: d.questions,
 		DecisionLog:       d.decisions,
 		Issues:            d.issues,
 		Repositories:      d.repos,
@@ -906,9 +906,9 @@ func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
 	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:          d.provider,
 		Adapters:          map[string]agent.AgentAdapter{d.adapter.Name(): d.adapter},
-		AgentRuns:         d.agentRuns,
-		AgentRunLogs:      d.logs,
-		AgentRunQuestions: d.questions,
+		Sessions:         d.sessions,
+		SessionLogs:      d.logs,
+		SessionQuestions: d.questions,
 		DecisionLog:       d.decisions,
 		Issues:            d.issues,
 		Repositories:      d.repos,
@@ -1018,10 +1018,10 @@ func TestRunAgent_CodexNoCredentialsFails(t *testing.T) {
 	require.Contains(t, err.Error(), "no credentials", "error should mention missing credentials")
 
 	// Verify the run was marked as failed via UpdateResult.
-	d.agentRuns.mu.Lock()
-	defer d.agentRuns.mu.Unlock()
-	require.NotEmpty(t, d.agentRuns.resultUpdates, "run should have a result update")
-	lastResult := d.agentRuns.resultUpdates[len(d.agentRuns.resultUpdates)-1]
+	d.sessions.mu.Lock()
+	defer d.sessions.mu.Unlock()
+	require.NotEmpty(t, d.sessions.resultUpdates, "run should have a result update")
+	lastResult := d.sessions.resultUpdates[len(d.sessions.resultUpdates)-1]
 	require.Equal(t, "failed", lastResult.status, "run should be marked as failed")
 }
 
@@ -1075,7 +1075,7 @@ func TestRunAgent_IssueWithoutRepository(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should complete without cloning.
-	results := d.agentRuns.getResultUpdates()
+	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1)
 	require.Equal(t, "completed", results[0].status)
 }

@@ -171,11 +171,11 @@ func (s *Service) dispatchProjectTasks(ctx context.Context, orgID uuid.UUID, pro
 			reasoning = *task.Reasoning
 		}
 
-		run := &models.AgentRun{
+		run := &models.Session{
 			OrgID:         orgID,
 			IssueID:       placeholderIssueID(task),
 			AgentType:     agentType,
-			Status:        string(models.AgentRunStatusPending),
+			Status:        string(models.SessionStatusPending),
 			AutonomyLevel: settings.AutonomyLevel,
 			TokenMode:     tokenModeFromTaskComplexity(task.Complexity),
 			PMPlanID:      &planID,
@@ -184,14 +184,14 @@ func (s *Service) dispatchProjectTasks(ctx context.Context, orgID uuid.UUID, pro
 			ProjectTaskID: &task.ID,
 			ModelOverride: project.ModelOverride,
 		}
-		if err := s.agentRuns.Create(ctx, run); err != nil {
+		if err := s.sessions.Create(ctx, run); err != nil {
 			s.logger.Error().Err(err).Str("task_id", task.ID.String()).Msg("failed to create agent run for project task")
 			continue
 		}
 
 		// Update task with agent run reference and branch name.
 		task.Status = models.ProjectTaskStatusDelegated
-		task.AgentRunID = &run.ID
+		task.SessionID = &run.ID
 		task.BranchName = &branchName
 		if err := s.projectTasks.Update(ctx, task); err != nil {
 			s.logger.Error().Err(err).Str("task_id", task.ID.String()).Msg("failed to update project task status")
@@ -200,11 +200,11 @@ func (s *Service) dispatchProjectTasks(ctx context.Context, orgID uuid.UUID, pro
 
 		// Enqueue the agent run job.
 		payload := map[string]string{
-			"agent_run_id": run.ID.String(),
+			"session_id": run.ID.String(),
 			"org_id":       orgID.String(),
 		}
 		if _, err := s.jobs.Enqueue(ctx, orgID, "agent", "run_agent", payload, 5, nil); err != nil {
-			s.logger.Error().Err(err).Str("agent_run_id", run.ID.String()).Msg("failed to enqueue project agent run")
+			s.logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to enqueue project agent run")
 			continue
 		}
 
@@ -334,7 +334,7 @@ func slugifyTitle(title string, maxLen int) string {
 }
 
 // placeholderIssueID returns the task's associated issue ID if it has one,
-// otherwise returns uuid.Nil. The agent_runs store maps uuid.Nil to SQL NULL.
+// otherwise returns uuid.Nil. The sessions store maps uuid.Nil to SQL NULL.
 func placeholderIssueID(task *models.ProjectTask) uuid.UUID {
 	if task.IssueID != nil {
 		return *task.IssueID
