@@ -19,7 +19,7 @@ describe('ManualSessionCreatePage', () => {
     expect(screen.getByPlaceholderText('Tell the agent what to do...')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Add files or photos' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Dictate' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Start Session' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Start session' })).toBeDisabled();
   });
 
   it('creates manual session and redirects to the session detail page', async () => {
@@ -68,10 +68,10 @@ describe('ManualSessionCreatePage', () => {
     await user.click(screen.getByRole('button', { name: 'Add files or photos' }));
     await user.click(screen.getByRole('menuitem', { name: 'Add image URL' }));
     await user.type(screen.getByPlaceholderText('https://example.com/screenshot.png'), 'https://example.com/checkout-timeout.png');
-    await user.click(screen.getByRole('button', { name: 'Add Image' }));
+    await user.click(screen.getByRole('button', { name: 'Add' }));
 
     await user.type(screen.getByPlaceholderText('Tell the agent what to do...'), 'Investigate checkout timeout and propose a fix.');
-    await user.click(screen.getByRole('button', { name: 'Start Session' }));
+    await user.click(screen.getByRole('button', { name: 'Start session' }));
 
     await waitFor(() => {
       expect(pushMock).toHaveBeenCalledWith('/sessions/session-manual-chat-1');
@@ -129,7 +129,7 @@ describe('ManualSessionCreatePage', () => {
     await user.click(screen.getByRole('button', { name: 'Add files or photos' }));
     await user.click(screen.getByRole('menuitem', { name: 'Add image URL' }));
     await user.type(screen.getByPlaceholderText('https://example.com/screenshot.png'), 'https://example.com/test.png');
-    await user.click(screen.getByRole('button', { name: 'Add Image' }));
+    await user.click(screen.getByRole('button', { name: 'Add' }));
 
     expect(screen.getByText('https://example.com/test.png')).toBeInTheDocument();
 
@@ -144,7 +144,7 @@ describe('ManualSessionCreatePage', () => {
 
     await user.click(screen.getByRole('button', { name: 'Add files or photos' }));
     await user.click(screen.getByRole('menuitem', { name: 'Add image URL' }));
-    await user.click(screen.getByRole('button', { name: 'Add Image' }));
+    await user.click(screen.getByRole('button', { name: 'Add' }));
 
     // The image URL input area should still be visible (not dismissed)
     // and no attachment badges should appear
@@ -166,14 +166,14 @@ describe('ManualSessionCreatePage', () => {
     renderWithProviders(<ManualSessionCreatePageContent />);
 
     await user.type(screen.getByPlaceholderText('Tell the agent what to do...'), 'Test message');
-    await user.click(screen.getByRole('button', { name: 'Start Session' }));
+    await user.click(screen.getByRole('button', { name: 'Start session' }));
 
     await waitFor(() => {
       expect(screen.getByText('Could not start session. Please try again.')).toBeInTheDocument();
     });
   });
 
-  it('shows Starting... text while pending', async () => {
+  it('disables send button while pending', async () => {
     const user = userEvent.setup();
 
     server.use(
@@ -185,8 +185,8 @@ describe('ManualSessionCreatePage', () => {
     renderWithProviders(<ManualSessionCreatePageContent />);
 
     await user.type(screen.getByPlaceholderText('Tell the agent what to do...'), 'Test message');
-    await user.click(screen.getByRole('button', { name: 'Start Session' }));
+    await user.click(screen.getByRole('button', { name: 'Start session' }));
 
-    expect(screen.getByText('Starting...')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start session' })).toBeDisabled();
   });
 });
