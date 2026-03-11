@@ -190,7 +190,7 @@ export function ManualSessionCreatePageContent() {
         <div className="pointer-events-none absolute inset-x-0 bottom-0 h-40 bg-gradient-to-t from-background via-background/80 to-transparent" />
 
         <Card className="relative w-full border-border/80 bg-card/95 shadow-lg rounded-3xl">
-          <CardContent className="space-y-4 p-4 md:p-5">
+          <CardContent className="space-y-3 p-4 md:p-5">
             <Textarea
               ref={messageInputRef}
               value={message}
@@ -198,9 +198,17 @@ export function ManualSessionCreatePageContent() {
                 setMessage(event.target.value);
                 resizeMessageInput();
               }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  if (message.trim().length > 0 && !createManualSessionMutation.isPending) {
+                    createManualSessionMutation.mutate();
+                  }
+                }
+              }}
               placeholder="Tell the agent what to do..."
               rows={1}
-              className="min-h-14 resize-none border-none bg-transparent px-1 py-2 text-base shadow-none focus-visible:ring-0"
+              className="min-h-[40px] resize-none border-none bg-transparent px-1 py-1.5 text-sm shadow-none focus-visible:ring-0"
               aria-label="Manual session prompt"
             />
 
@@ -238,7 +246,7 @@ export function ManualSessionCreatePageContent() {
               </div>
             )}
 
-            <div className="flex items-center justify-between border-t border-border/70 pt-3">
+            <div className="flex items-center justify-between border-t border-border/70 pt-2">
               <div className="flex items-center gap-2">
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
@@ -265,7 +273,7 @@ export function ManualSessionCreatePageContent() {
                   className="hidden"
                   onChange={onUploadChange}
                 />
-                <p className="text-xs text-muted-foreground">Attach files or screenshots</p>
+                <p className="text-[13px] text-muted-foreground">Attach files or screenshots</p>
               </div>
 
               <div className="flex items-center gap-2">
