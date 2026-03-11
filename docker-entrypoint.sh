@@ -13,9 +13,13 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f .env.production.enc ]; then
   # environment variable, then runs the given command.  This avoids writing
   # plaintext secrets to disk and sidesteps shell-quoting issues with values
   # that contain spaces or newlines (e.g. RSA private keys).
+  #
+  # exec-env doesn't support --input-type, so we symlink to a .env extension
+  # that sops auto-detects as dotenv format.
+  ln -sf "$(realpath .env.production.enc)" /tmp/.env.production.sops.env
   CMD=$(printf '%q ' "$@")
-  exec sops exec-env --input-type dotenv .env.production.enc \
-    "unset SOPS_AGE_KEY SOPS_AGE_KEY_FILE && rm -f '$SOPS_AGE_KEY_FILE' && exec $CMD"
+  exec sops exec-env /tmp/.env.production.sops.env \
+    "unset SOPS_AGE_KEY SOPS_AGE_KEY_FILE && rm -f '$SOPS_AGE_KEY_FILE' /tmp/.env.production.sops.env && exec $CMD"
 fi
 
 exec "$@"
