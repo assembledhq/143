@@ -87,6 +87,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		cfg.LinearOAuthClientSecret,
 		cfg.BaseURL,
 		cfg.FrontendURL,
+		handlers.WithSentryOAuth(cfg.SentryOAuthClientID, cfg.SentryOAuthClientSecret),
+		handlers.WithGitHubIntegrationOAuth(cfg.GitHubOAuthClientID, cfg.GitHubOAuthClientSecret),
 	)
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, repoStore, integrationStore, prService)
 	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeAgentEnv())
@@ -207,6 +209,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/integrations/linear/login", integrationHandler.StartLinearOAuth)
 			r.Get("/api/v1/integrations/linear/callback", integrationHandler.HandleLinearOAuthCallback)
 			r.Post("/api/v1/integrations/linear/connect", integrationHandler.ConnectLinear)
+			r.Get("/api/v1/integrations/sentry/login", integrationHandler.StartSentryOAuth)
+			r.Get("/api/v1/integrations/sentry/callback", integrationHandler.HandleSentryOAuthCallback)
+			r.Post("/api/v1/integrations/sentry/connect", integrationHandler.ConnectSentry)
+			r.Get("/api/v1/integrations/github/login", integrationHandler.StartGitHubOAuth)
+			r.Get("/api/v1/integrations/github/callback", integrationHandler.HandleGitHubOAuthCallback)
+			r.Post("/api/v1/integrations/github/connect", integrationHandler.ConnectGitHub)
 			r.Post("/api/v1/issues/{id}/fix", runHandler.TriggerFix)
 			r.Post("/api/v1/sessions/manual", sessionHandler.CreateManual)
 			r.Post("/api/v1/runs/{id}/questions/{qid}/answer", runHandler.AnswerQuestion)

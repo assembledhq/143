@@ -33,6 +33,10 @@ type Config struct {
 	LinearOAuthClientID     string `env:"LINEAR_OAUTH_CLIENT_ID"`
 	LinearOAuthClientSecret string `env:"LINEAR_OAUTH_CLIENT_SECRET"`
 
+	// Sentry OAuth
+	SentryOAuthClientID     string `env:"SENTRY_OAUTH_CLIENT_ID"`
+	SentryOAuthClientSecret string `env:"SENTRY_OAUTH_CLIENT_SECRET"`
+
 	// GitHub App
 	GitHubAppID         int64  `env:"GITHUB_APP_ID"`
 	GitHubAppPrivateKey string `env:"GITHUB_APP_PRIVATE_KEY"`
@@ -216,6 +220,7 @@ func (c *Config) LogStatus(logger zerolog.Logger) {
 		{"GitHub OAuth", c.GitHubOAuthClientID != "" && c.GitHubOAuthClientSecret != "", "login"},
 		{"Google OAuth", c.GoogleOAuthClientID != "" && c.GoogleOAuthClientSecret != "", "login"},
 		{"Linear OAuth", c.LinearOAuthClientID != "" && c.LinearOAuthClientSecret != "", "integration auth"},
+		{"Sentry OAuth", c.SentryOAuthClientID != "" && c.SentryOAuthClientSecret != "", "integration auth"},
 		{"GitHub App", c.GitHubAppID != 0 && c.GitHubAppPrivateKey != "", "webhooks, PRs"},
 		{"Credential encryption", c.EncryptionMasterKey != "", "encrypted credential storage"},
 	}
