@@ -5,10 +5,12 @@ import { IntegrationsCard } from "@/components/integrations-card";
 import { getIntegrationByKey } from "@/lib/integrations";
 
 type SourceControlIntegrationCardProps = {
+  githubConnected: boolean;
   onConnectGitHub: () => void;
 };
 
 type AdditionalIntegrationCardsProps = {
+  sentryConnected: boolean;
   linearConnected: boolean;
   linearLoading: boolean;
   onConnectSentry: () => void;
@@ -32,7 +34,7 @@ function IntegrationLogo({ name, src }: { name: string; src: string }) {
   );
 }
 
-export function SourceControlIntegrationCard({ onConnectGitHub }: SourceControlIntegrationCardProps) {
+export function SourceControlIntegrationCard({ githubConnected, onConnectGitHub }: SourceControlIntegrationCardProps) {
   const github = getIntegrationByKey("github");
 
   return (
@@ -45,8 +47,13 @@ export function SourceControlIntegrationCard({ onConnectGitHub }: SourceControlI
           logo: <IntegrationLogo name={github.name} src={github.logoSrc} />,
           badge: <Badge variant="outline" className="text-xs">Required</Badge>,
           action: (
-            <Button size="sm" onClick={onConnectGitHub} aria-label="Connect GitHub">
-              Connect
+            <Button
+              size="sm"
+              disabled={githubConnected}
+              onClick={onConnectGitHub}
+              aria-label={githubConnected ? "GitHub Connected" : "Connect GitHub"}
+            >
+              {githubConnected ? "Connected" : "Connect"}
             </Button>
           ),
         },
@@ -56,6 +63,7 @@ export function SourceControlIntegrationCard({ onConnectGitHub }: SourceControlI
 }
 
 export function AdditionalIntegrationCards({
+  sentryConnected,
   linearConnected,
   linearLoading,
   onConnectSentry,
@@ -76,10 +84,11 @@ export function AdditionalIntegrationCards({
           action: (
             <Button
               size="sm"
+              disabled={sentryConnected}
               onClick={onConnectSentry}
-              aria-label="Connect Sentry"
+              aria-label={sentryConnected ? "Sentry Connected" : "Connect Sentry"}
             >
-              Connect
+              {sentryConnected ? "Connected" : "Connect"}
             </Button>
           ),
         },
@@ -110,6 +119,8 @@ export function AllIntegrationCards({
   onConnectGitHub,
   onConnectSentry,
   onConnectLinear,
+  githubConnected,
+  sentryConnected,
   linearConnected,
   linearLoading,
 }: AllIntegrationCardsProps) {
@@ -127,8 +138,13 @@ export function AllIntegrationCards({
           logo: <IntegrationLogo name={github.name} src={github.logoSrc} />,
           badge: <Badge variant="outline" className="text-xs">Required</Badge>,
           action: (
-            <Button size="sm" onClick={onConnectGitHub} aria-label="Connect GitHub">
-              Connect
+            <Button
+              size="sm"
+              disabled={githubConnected}
+              onClick={onConnectGitHub}
+              aria-label={githubConnected ? "GitHub Connected" : "Connect GitHub"}
+            >
+              {githubConnected ? "Connected" : "Connect"}
             </Button>
           ),
         },
@@ -141,10 +157,11 @@ export function AllIntegrationCards({
           action: (
             <Button
               size="sm"
+              disabled={sentryConnected}
               onClick={onConnectSentry}
-              aria-label="Connect Sentry"
+              aria-label={sentryConnected ? "Sentry Connected" : "Connect Sentry"}
             >
-              Connect
+              {sentryConnected ? "Connected" : "Connect"}
             </Button>
           ),
         },
