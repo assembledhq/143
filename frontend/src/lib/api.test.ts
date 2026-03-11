@@ -933,7 +933,7 @@ describe('api client', () => {
     });
 
     it('login redirects to GitHub OAuth', () => {
-      const loc = { href: '' };
+      const loc = { href: '', pathname: '/overview' };
       Object.defineProperty(window, 'location', {
         value: loc,
         writable: true,
@@ -941,11 +941,11 @@ describe('api client', () => {
       });
 
       api.auth.login();
-      expect(loc.href).toBe('/api/v1/auth/github/login');
+      expect(loc.href).toBe('/api/v1/auth/github/login?return_to=%2Foverview');
     });
 
     it('login passes invitation param', () => {
-      const loc = { href: '' };
+      const loc = { href: '', pathname: '/integrations' };
       Object.defineProperty(window, 'location', {
         value: loc,
         writable: true,
@@ -953,11 +953,11 @@ describe('api client', () => {
       });
 
       api.auth.login('invite-123');
-      expect(loc.href).toBe('/api/v1/auth/github/login?invitation=invite-123');
+      expect(loc.href).toBe('/api/v1/auth/github/login?invitation=invite-123&return_to=%2Fintegrations');
     });
 
     it('loginGoogle redirects to Google OAuth', () => {
-      const loc = { href: '' };
+      const loc = { href: '', pathname: '/overview' };
       Object.defineProperty(window, 'location', {
         value: loc,
         writable: true,
@@ -965,11 +965,11 @@ describe('api client', () => {
       });
 
       api.auth.loginGoogle();
-      expect(loc.href).toBe('/api/v1/auth/google/login');
+      expect(loc.href).toBe('/api/v1/auth/google/login?return_to=%2Foverview');
     });
 
     it('loginGoogle passes invitation param', () => {
-      const loc = { href: '' };
+      const loc = { href: '', pathname: '/integrations' };
       Object.defineProperty(window, 'location', {
         value: loc,
         writable: true,
@@ -977,7 +977,7 @@ describe('api client', () => {
       });
 
       api.auth.loginGoogle('inv-456');
-      expect(loc.href).toBe('/api/v1/auth/google/login?invitation=inv-456');
+      expect(loc.href).toBe('/api/v1/auth/google/login?invitation=inv-456&return_to=%2Fintegrations');
     });
 
     it('loginSentry redirects to Sentry OAuth', () => {
