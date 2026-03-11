@@ -457,6 +457,24 @@ func TestRegisterHandlers_AllRegistered(t *testing.T) {
 		require.True(t, ok, "%s handler should be registered", name)
 	}
 
+	// pm_analyze and project_cycle should not be registered without PM service
+	unexpectedWithoutPM := []string{
+		"pm_analyze",
+		"project_cycle",
+	}
+	for _, name := range unexpectedWithoutPM {
+		_, ok := w.handlers[name]
+		require.False(t, ok, "%s handler should not be registered without PM service", name)
+	}
+
+	// Now test with PM service — pm_analyze and project_cycle should be registered
+	w2 := New(nil, logger, "test-node")
+	RegisterHandlers(w2, stores, &Services{PM: &mockPMService{}}, logger)
+	for _, name := range []string{"pm_analyze", "project_cycle"} {
+		_, ok := w2.handlers[name]
+		require.True(t, ok, "%s handler should be registered with PM service", name)
+	}
+
 	unexpectedHandlers := []string{
 		"prioritize",
 		"run_agent",

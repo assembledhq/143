@@ -9,6 +9,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 )
 
@@ -103,6 +104,45 @@ func TestParseProjectPlan_EmptyTasks(t *testing.T) {
 	require.Equal(t, projectID, pp.ProjectID)
 	require.Equal(t, 100, pp.ProgressPct)
 	require.Empty(t, pp.NewTasks)
+}
+
+func TestAnalyzeProject_ProjectNotFound(t *testing.T) {
+	t.Parallel()
+
+	projectID := uuid.New()
+	svc := &Service{
+		adapter:       &mockAdapter{},
+		sandbox:       &mockSandbox{},
+		projects:      newMockProjectStore(), // empty store
+		projectTasks:  &mockProjectTaskStore{},
+		projectCycles: &mockProjectCycleStore{},
+		logger:        zerolog.Nop(),
+	}
+	err := svc.AnalyzeProject(context.Background(), uuid.New(), projectID)
+	require.Error(t, err, "AnalyzeProject should fail when project not found")
+	require.Contains(t, err.Error(), "get project")
+}
+
+func TestAnalyzeProject_ProjectNotActive(t *testing.T) {
+	t.Parallel()
+
+	projectID := uuid.New()
+	orgID := uuid.New()
+	project := models.Project{
+		ID:     projectID,
+		OrgID:  orgID,
+		Status: models.ProjectStatusDraft,
+	}
+	svc := &Service{
+		adapter:       &mockAdapter{},
+		sandbox:       &mockSandbox{},
+		projects:      newMockProjectStore(project),
+		projectTasks:  &mockProjectTaskStore{},
+		projectCycles: &mockProjectCycleStore{},
+		logger:        zerolog.Nop(),
+	}
+	err := svc.AnalyzeProject(context.Background(), orgID, projectID)
+	require.NoError(t, err, "AnalyzeProject should succeed but skip non-active project")
 }
 
 func TestAnalyzeProject_NilAdapter(t *testing.T) {
