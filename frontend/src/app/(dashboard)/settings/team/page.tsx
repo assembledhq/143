@@ -25,6 +25,8 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { PageHeader } from "@/components/page-header";
+import { PageContainer } from "@/components/page-container";
 import { useAuth } from "@/hooks/use-auth";
 import type { User, InvitationResponse, ListResponse } from "@/lib/types";
 
@@ -122,7 +124,12 @@ export default function TeamSettingsPage() {
   };
 
   return (
-    <div className="space-y-6">
+    <PageContainer size="default">
+      <div className="space-y-6">
+        <PageHeader
+          title="Team"
+          description="Manage your team members and roles."
+        />
       {actionError && (
         <div className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
           {actionError}
@@ -396,6 +403,7 @@ export default function TeamSettingsPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </div>
+      </div>
+    </PageContainer>
   );
 }
