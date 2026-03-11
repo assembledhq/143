@@ -352,6 +352,11 @@ func (m *mockPMService) Analyze(ctx context.Context, orgID uuid.UUID, trigger mo
 	return &pm.Plan{}, nil
 }
 
+func (m *mockPMService) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID) error {
+	m.calledOrgID = orgID
+	return nil
+}
+
 func TestPMAnalyzeHandler_InvalidJSON(t *testing.T) {
 	t.Parallel()
 
