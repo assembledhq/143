@@ -33,6 +33,7 @@ vi.mock("lucide-react", () => {
     X: icon("X"),
     Loader2: icon("Loader2"),
     ChevronDown: icon("ChevronDown"),
+    ChevronDownIcon: icon("ChevronDownIcon"),
     ChevronRight: icon("ChevronRight"),
     AlertCircle: icon("AlertCircle"),
     CheckCircle2: icon("CheckCircle2"),
