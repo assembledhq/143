@@ -9,7 +9,7 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f .env.production.enc ]; then
   echo "$SOPS_AGE_KEY" > "$SOPS_AGE_KEY_FILE"
   chmod 600 "$SOPS_AGE_KEY_FILE"
 
-  sops --decrypt .env.production.enc > /tmp/.env.production
+  sops --decrypt --input-type dotenv --output-type dotenv .env.production.enc > /tmp/.env.production
   set -a
   # shellcheck disable=SC1091
   source /tmp/.env.production
