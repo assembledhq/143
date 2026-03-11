@@ -48,6 +48,13 @@ export const PM_MODELS_BY_PROVIDER: Record<string, { label: string; models: read
 
 export const DEFAULT_PM_MODEL = CLAUDE_CODE_MODEL_SONNET;
 
+// Agent types with their labels and available models, for use in session/project creation forms.
+export const AGENT_TYPE_OPTIONS: { key: string; label: string; models: readonly string[] }[] = [
+  { key: "codex", label: "Codex", models: AVAILABLE_CODEX_MODELS },
+  { key: "claude_code", label: "Claude Code", models: AVAILABLE_CLAUDE_CODE_MODELS },
+  { key: "gemini_cli", label: "Gemini CLI", models: AVAILABLE_GEMINI_CLI_MODELS },
+];
+
 // All PM models across every provider (for validation / backward compat).
 export const AVAILABLE_PM_MODELS = [
   ...LEGACY_PM_ALIASES,

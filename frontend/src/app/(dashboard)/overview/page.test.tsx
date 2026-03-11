@@ -229,7 +229,7 @@ describe('OverviewPage', () => {
 
     await user.click(screen.getByRole('radio', { name: 'Use API key' }));
 
-    await user.click(screen.getByRole('combobox', { name: 'Model' }));
+    await user.click(screen.getByRole('combobox', { name: 'Default model' }));
     await user.click(await screen.findByRole('option', { name: 'gpt-5.2-codex' }));
     await user.click(screen.getByRole('button', { name: 'Save changes' }));
 
@@ -256,12 +256,12 @@ describe('OverviewPage', () => {
 
     // Claude Code should be pre-selected, showing its env var fields
     await waitFor(() => {
-      expect(screen.getByRole('combobox', { name: 'Model' })).toBeInTheDocument();
+      expect(screen.getByRole('combobox', { name: 'Default model' })).toBeInTheDocument();
     });
 
     expect(screen.queryByLabelText('Base URL')).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole('combobox', { name: 'Model' }));
+    await user.click(screen.getByRole('combobox', { name: 'Default model' }));
     await user.click(await screen.findByRole('option', { name: 'claude-sonnet-4-5' }));
     await user.click(screen.getByRole('button', { name: 'Save changes' }));
 

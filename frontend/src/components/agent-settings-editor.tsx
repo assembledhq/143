@@ -36,7 +36,7 @@ const AGENT_TYPES: { key: string; label: string; envVars: AgentEnvVar[] }[] = [
     label: "Codex",
     envVars: [
       { name: "OPENAI_API_KEY", label: "API Key", sensitive: true },
-      { name: "OPENAI_MODEL", label: "Model", options: [...AVAILABLE_CODEX_MODELS] },
+      { name: "OPENAI_MODEL", label: "Default model", options: [...AVAILABLE_CODEX_MODELS] },
       { name: "OPENAI_BASE_URL", label: "Base URL", placeholder: "Custom API endpoint (optional)" },
     ],
   },
@@ -47,7 +47,7 @@ const AGENT_TYPES: { key: string; label: string; envVars: AgentEnvVar[] }[] = [
       { name: "ANTHROPIC_API_KEY", label: "API Key", sensitive: true },
       {
         name: "ANTHROPIC_MODEL",
-        label: "Model",
+        label: "Default model",
         options: [...AVAILABLE_CLAUDE_CODE_MODELS],
       },
       {
@@ -66,7 +66,7 @@ const AGENT_TYPES: { key: string; label: string; envVars: AgentEnvVar[] }[] = [
       { name: "GEMINI_API_KEY", label: "API Key", sensitive: true },
       {
         name: "GEMINI_MODEL",
-        label: "Model",
+        label: "Default model",
         options: [...AVAILABLE_GEMINI_CLI_MODELS],
       },
     ],

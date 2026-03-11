@@ -92,11 +92,13 @@ func (s *AgentRunStore) Create(ctx context.Context, run *models.AgentRun) error 
 	query := `
 		INSERT INTO agent_runs (
 			issue_id, org_id, agent_type, status, autonomy_level, token_mode, complexity_tier,
-			parent_run_id, revision_context, pm_plan_id, pm_approach, pm_reasoning, project_task_id
+			parent_run_id, revision_context, pm_plan_id, pm_approach, pm_reasoning, project_task_id,
+			model_override
 		)
 		VALUES (
 			@issue_id, @org_id, @agent_type, @status, @autonomy_level, @token_mode, @complexity_tier,
-			@parent_run_id, @revision_context, @pm_plan_id, @pm_approach, @pm_reasoning, @project_task_id
+			@parent_run_id, @revision_context, @pm_plan_id, @pm_approach, @pm_reasoning, @project_task_id,
+			@model_override
 		)
 		RETURNING id, created_at`
 
@@ -119,6 +121,7 @@ func (s *AgentRunStore) Create(ctx context.Context, run *models.AgentRun) error 
 		"pm_approach":      run.PMApproach,
 		"pm_reasoning":     run.PMReasoning,
 		"project_task_id":  run.ProjectTaskID,
+		"model_override":   run.ModelOverride,
 	}
 
 	row := s.db.QueryRow(ctx, query, args)

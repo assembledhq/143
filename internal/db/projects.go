@@ -31,6 +31,7 @@ const projectColumns = `id, org_id, repository_id, title, goal, scope, completio
 	current_phase, lessons_learned, approach_history,
 	total_tasks, completed_tasks, failed_tasks,
 	proposed_by_pm, source_issue_ids, proposal_reasoning,
+	agent_type, model_override,
 	created_by, created_at, updated_at, completed_at`
 
 func scanProject(row pgx.Row) (models.Project, error) {
@@ -44,6 +45,7 @@ func scanProject(row pgx.Row) (models.Project, error) {
 		&p.CurrentPhase, &lessonsRaw, &approachRaw,
 		&p.TotalTasks, &p.CompletedTasks, &p.FailedTasks,
 		&p.ProposedByPM, &sourceIssueIDs, &p.ProposalReasoning,
+		&p.AgentType, &p.ModelOverride,
 		&p.CreatedBy, &p.CreatedAt, &p.UpdatedAt, &p.CompletedAt,
 	)
 	if err != nil {
@@ -74,6 +76,7 @@ func scanProjects(rows pgx.Rows) ([]models.Project, error) {
 			&p.CurrentPhase, &lessonsRaw, &approachRaw,
 			&p.TotalTasks, &p.CompletedTasks, &p.FailedTasks,
 			&p.ProposedByPM, &sourceIssueIDs, &p.ProposalReasoning,
+			&p.AgentType, &p.ModelOverride,
 			&p.CreatedBy, &p.CreatedAt, &p.UpdatedAt, &p.CompletedAt,
 		)
 		if err != nil {
@@ -111,13 +114,15 @@ func (s *ProjectStore) Create(ctx context.Context, p *models.Project) error {
 			org_id, repository_id, title, goal, scope, completion_criteria,
 			status, priority, execution_mode, max_concurrent, auto_merge, base_branch,
 			current_phase, lessons_learned, approach_history,
-			proposed_by_pm, source_issue_ids, proposal_reasoning, created_by
+			proposed_by_pm, source_issue_ids, proposal_reasoning, created_by,
+			agent_type, model_override
 		)
 		VALUES (
 			@org_id, @repository_id, @title, @goal, @scope, @completion_criteria,
 			@status, @priority, @execution_mode, @max_concurrent, @auto_merge, @base_branch,
 			@current_phase, @lessons_learned, @approach_history,
-			@proposed_by_pm, @source_issue_ids, @proposal_reasoning, @created_by
+			@proposed_by_pm, @source_issue_ids, @proposal_reasoning, @created_by,
+			@agent_type, @model_override
 		)
 		RETURNING id, created_at, updated_at`
 
@@ -141,6 +146,8 @@ func (s *ProjectStore) Create(ctx context.Context, p *models.Project) error {
 		"source_issue_ids":    p.SourceIssueIDs,
 		"proposal_reasoning":  p.ProposalReasoning,
 		"created_by":          p.CreatedBy,
+		"agent_type":          p.AgentType,
+		"model_override":      p.ModelOverride,
 	})
 	return row.Scan(&p.ID, &p.CreatedAt, &p.UpdatedAt)
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ArrowLeft } from "lucide-react";
 import Link from "next/link";
@@ -20,6 +20,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { api } from "@/lib/api";
+import { AGENT_TYPE_OPTIONS } from "@/lib/model-constants";
+import type { OrgSettings, Organization, SingleResponse } from "@/lib/types";
 
 export default function NewProjectPage() {
   const router = useRouter();
@@ -33,6 +35,22 @@ export default function NewProjectPage() {
   const [maxConcurrent, setMaxConcurrent] = useState(2);
   const [priority, setPriority] = useState(50);
   const [baseBranch, setBaseBranch] = useState("main");
+  const [agentType, setAgentType] = useState("");
+  const [selectedModel, setSelectedModel] = useState("");
+
+  const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
+    queryKey: ["settings"],
+    queryFn: () => api.settings.get(),
+  });
+
+  const settings = settingsResponse?.data?.settings as OrgSettings | undefined;
+  const defaultAgentType = settings?.default_agent_type ?? "codex";
+  const effectiveAgentType = agentType || defaultAgentType;
+
+  const availableModels = useMemo(() => {
+    const agent = AGENT_TYPE_OPTIONS.find((a) => a.key === effectiveAgentType);
+    return agent?.models ?? [];
+  }, [effectiveAgentType]);
 
   const { data: reposData } = useQuery({
     queryKey: ["repositories"],
@@ -53,6 +71,8 @@ export default function NewProjectPage() {
         max_concurrent: executionMode === "parallel" ? maxConcurrent : undefined,
         priority,
         base_branch: baseBranch.trim() || undefined,
+        agent_type: agentType || undefined,
+        model: selectedModel || undefined,
       }),
     onSuccess: (response) => {
       router.push(`/projects/${response.data.id}`);
@@ -135,6 +155,46 @@ export default function NewProjectPage() {
                 ))}
               </SelectContent>
             </Select>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label>Agent</Label>
+              <Select
+                value={agentType}
+                onValueChange={(value) => {
+                  setAgentType(value);
+                  setSelectedModel("");
+                }}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder={`Default (${AGENT_TYPE_OPTIONS.find((a) => a.key === defaultAgentType)?.label ?? defaultAgentType})`} />
+                </SelectTrigger>
+                <SelectContent>
+                  {AGENT_TYPE_OPTIONS.map((agent) => (
+                    <SelectItem key={agent.key} value={agent.key}>
+                      {agent.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Model</Label>
+              <Select value={selectedModel} onValueChange={setSelectedModel}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Default model" />
+                </SelectTrigger>
+                <SelectContent>
+                  {availableModels.map((model) => (
+                    <SelectItem key={model} value={model}>
+                      {model}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
           </div>
 
           <div className="space-y-2">
