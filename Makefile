@@ -104,7 +104,7 @@ lint-bootstrap:
 #
 # See docs/secrets/README.md for the full guide.
 
-SOPS_AGE_KEY_FILE ?= $(HOME)/.config/sops/age/keys.txt
+export SOPS_AGE_KEY_FILE ?= $(HOME)/.config/sops/age/keys.txt
 ENV ?=
 
 # Resolve file names from ENV. "" → .env / .env.enc, "staging" → .env.staging / .env.staging.enc
@@ -137,17 +137,17 @@ secrets-setup:
 secrets-encrypt:
 	@test -f $(_ENV_FILE) || { echo "No $(_ENV_FILE) to encrypt. Copy .env.example to $(_ENV_FILE) first."; exit 1; }
 	@test -f .sops.yaml || { echo "No .sops.yaml found. Run make secrets-setup first."; exit 1; }
-	sops --encrypt $(_ENV_FILE) > $(_ENV_ENC_FILE)
+	sops --encrypt --input-type dotenv --output-type dotenv $(_ENV_FILE) > $(_ENV_ENC_FILE)
 	@echo "Encrypted $(_ENV_FILE) → $(_ENV_ENC_FILE) (safe to commit)"
 
 secrets-decrypt:
 	@test -f $(_ENV_ENC_FILE) || { echo "No $(_ENV_ENC_FILE) found."; exit 1; }
-	sops --decrypt $(_ENV_ENC_FILE) > $(_ENV_FILE)
+	sops --decrypt --input-type dotenv --output-type dotenv $(_ENV_ENC_FILE) > $(_ENV_FILE)
 	@echo "Decrypted $(_ENV_ENC_FILE) → $(_ENV_FILE)"
 
 secrets-edit:
 	@test -f $(_ENV_ENC_FILE) || { echo "No $(_ENV_ENC_FILE) found."; exit 1; }
-	sops $(_ENV_ENC_FILE)
+	sops --input-type dotenv --output-type dotenv $(_ENV_ENC_FILE)
 
 # Re-encrypt all .enc files with the current .sops.yaml keys.
 # Run this after adding a new team member's public key to .sops.yaml.
