@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -61,14 +61,14 @@ export default function LLMPage() {
     queryKey: ["credentials"],
     queryFn: () => api.credentials.list(),
   });
-  const credentials = credentialsResp?.data ?? [];
+  const credentials = useMemo(() => credentialsResp?.data ?? [], [credentialsResp?.data]);
 
   // Fetch platform-level LLM defaults (to show fallback availability)
   const { data: llmDefaultsResp } = useQuery<{ data: Record<string, string> }>({
     queryKey: ["llm-defaults"],
     queryFn: () => api.settings.getLLMDefaults(),
   });
-  const platformProviders = llmDefaultsResp?.data ?? {};
+  const platformProviders = useMemo(() => llmDefaultsResp?.data ?? {}, [llmDefaultsResp?.data]);
 
   // Fetch available models from backend (source of truth)
   const { data: llmModelsResp } = useQuery<{ data: Record<string, string[]> }>({
@@ -101,12 +101,13 @@ export default function LLMPage() {
   const [keySaveStatus, setKeySaveStatus] = useState<Record<string, "idle" | "saving" | "success" | "error">>({});
   const [removingProvider, setRemovingProvider] = useState<string | null>(null);
 
-  // Sync server data into form state
-  useEffect(() => {
-    if (orgSettings.llm_model) {
-      setLlmModel(orgSettings.llm_model);
-    }
-  }, [orgSettings.llm_model]);
+  // Sync server data into form state.
+  const [prevSettingsRef, setPrevSettingsRef] = useState<unknown>(undefined);
+  const settingsData = settings?.data?.settings;
+  if (settingsData && settingsData !== prevSettingsRef) {
+    setPrevSettingsRef(settingsData);
+    setLlmModel(orgSettings.llm_model || DEFAULT_LLM_MODEL);
+  }
 
   // Determine which providers are configured (org-level or platform-level)
   const providerStatus = useMemo(() => {
