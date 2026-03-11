@@ -131,13 +131,13 @@ export default function TeamSettingsPage() {
           description="Manage your team members and roles."
         />
       {actionError && (
-        <div className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <div className="rounded-md bg-destructive/10 px-3 py-2 text-[13px] text-destructive">
           {actionError}
         </div>
       )}
 
       {!canManageTeam && (
-        <div className="rounded-md bg-muted px-3 py-2 text-sm text-muted-foreground">
+        <div className="rounded-md bg-muted px-3 py-2 text-[13px] text-muted-foreground">
           Only admins can manage member roles, invitations, and removals.
         </div>
       )}
@@ -161,11 +161,11 @@ export default function TeamSettingsPage() {
         <Card>
           <CardContent className="p-0">
             {membersLoading ? (
-              <div className="p-6 text-center text-sm text-muted-foreground">
+              <div className="p-6 text-center text-[13px] text-muted-foreground">
                 Loading...
               </div>
             ) : members.length === 0 ? (
-              <div className="p-6 text-center text-sm text-muted-foreground">
+              <div className="p-6 text-center text-[13px] text-muted-foreground">
                 No members found.
               </div>
             ) : (
@@ -198,7 +198,7 @@ export default function TeamSettingsPage() {
                         )}
                         <div className="min-w-0">
                           <div className="flex items-center gap-2">
-                            <span className="text-sm font-medium truncate">
+                            <span className="text-[13px] font-medium truncate">
                               {member.name}
                             </span>
                             {isSelf && (
@@ -209,7 +209,7 @@ export default function TeamSettingsPage() {
                           </div>
                         </div>
                       </div>
-                      <div className="min-w-0 text-sm text-muted-foreground truncate">
+                      <div className="min-w-0 text-[13px] text-muted-foreground truncate">
                         {member.email}
                       </div>
                       <div className="flex items-center">
@@ -256,11 +256,11 @@ export default function TeamSettingsPage() {
                             Remove
                           </Button>
                         ) : isSelf ? (
-                          <span className="text-sm text-muted-foreground">
+                          <span className="text-[13px] text-muted-foreground">
                             Current user
                           </span>
                         ) : (
-                          <span className="text-sm text-muted-foreground">
+                          <span className="text-[13px] text-muted-foreground">
                             No access
                           </span>
                         )}
@@ -289,7 +289,7 @@ export default function TeamSettingsPage() {
                     className="flex items-center justify-between px-4 py-3"
                   >
                     <div className="min-w-0">
-                      <div className="text-sm font-medium truncate">
+                      <div className="text-[13px] font-medium truncate">
                         {inv.email}
                       </div>
                       <div className="text-xs text-muted-foreground">
@@ -343,14 +343,14 @@ export default function TeamSettingsPage() {
                   placeholder="colleague@company.com"
                   value={inviteEmail}
                   onChange={(e) => setInviteEmail(e.target.value)}
-                  className="h-9 text-sm"
+                  className="h-9"
                   required
                 />
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor="invite-role">Role</Label>
                 <Select value={inviteRole} onValueChange={setInviteRole}>
-                  <SelectTrigger id="invite-role" className="h-9 w-full text-sm">
+                  <SelectTrigger id="invite-role" className="h-9 w-full">
                     <SelectValue>{capitalize(inviteRole)}</SelectValue>
                   </SelectTrigger>
                   <SelectContent>
@@ -361,7 +361,7 @@ export default function TeamSettingsPage() {
                 </Select>
               </div>
               {inviteError && (
-                <p className="text-sm text-destructive">{inviteError}</p>
+                <p className="text-[13px] text-destructive">{inviteError}</p>
               )}
               <AlertDialogFooter>
                 <AlertDialogCancel type="button">Cancel</AlertDialogCancel>

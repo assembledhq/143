@@ -9,7 +9,7 @@ export default function ProjectsPage() {
       <Suspense
         fallback={
           <Card>
-            <CardContent className="py-12 text-center text-sm text-muted-foreground">
+            <CardContent className="py-12 text-center text-[13px] text-muted-foreground">
               Loading projects...
             </CardContent>
           </Card>
