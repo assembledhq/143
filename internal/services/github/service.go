@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,6 +28,9 @@ type cachedToken struct {
 }
 
 func NewService(appID int64, privateKeyPEM string) (*Service, error) {
+	// Env vars often encode newlines as literal "\n"; convert to real newlines
+	// so PEM parsing succeeds.
+	privateKeyPEM = strings.ReplaceAll(privateKeyPEM, `\n`, "\n")
 	key, err := jwt.ParseRSAPrivateKeyFromPEM([]byte(privateKeyPEM))
 	if err != nil {
 		return nil, fmt.Errorf("parse private key: %w", err)
