@@ -1,0 +1,92 @@
+package handlers
+
+import (
+	"encoding/json"
+	"net/http"
+	"strings"
+
+	"github.com/assembledhq/143/internal/llm"
+)
+
+// ProjectGenerateHandler uses an LLM to convert a natural-language description
+// into structured project fields.
+type ProjectGenerateHandler struct {
+	llmClient llm.Client
+}
+
+func NewProjectGenerateHandler(llmClient llm.Client) *ProjectGenerateHandler {
+	return &ProjectGenerateHandler{llmClient: llmClient}
+}
+
+type GenerateProjectRequest struct {
+	Description string `json:"description"`
+}
+
+type GenerateProjectResponse struct {
+	Title              string `json:"title"`
+	Goal               string `json:"goal"`
+	Scope              string `json:"scope,omitempty"`
+	CompletionCriteria string `json:"completion_criteria,omitempty"`
+	ExecutionMode      string `json:"execution_mode"`
+}
+
+const generateProjectSystemPrompt = `You are an expert project planner. Given a user's natural-language description of a software project, extract structured project fields.
+
+Return ONLY a JSON object with these fields:
+- "title": A concise project title (max 80 chars)
+- "goal": A clear description of what the project should accomplish (1-3 sentences)
+- "scope": Files, areas, or components that are in scope (optional, leave empty string if unclear)
+- "completion_criteria": How to know the project is done (1-2 sentences)
+- "execution_mode": Either "sequential" or "parallel" based on whether tasks seem independent
+
+Do NOT include any text outside the JSON object. Do NOT use markdown code fences.`
+
+func (h *ProjectGenerateHandler) Generate(w http.ResponseWriter, r *http.Request) {
+	if h.llmClient == nil {
+		writeError(w, http.StatusServiceUnavailable, "LLM_NOT_CONFIGURED", "AI project generation is not available — no LLM provider configured")
+		return
+	}
+
+	var req GenerateProjectRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+
+	desc := strings.TrimSpace(req.Description)
+	if desc == "" {
+		writeError(w, http.StatusBadRequest, "MISSING_FIELD", "description is required")
+		return
+	}
+
+	response, err := h.llmClient.Complete(r.Context(), generateProjectSystemPrompt, desc)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "LLM_ERROR", "failed to generate project: "+err.Error())
+		return
+	}
+
+	// Strip markdown code fences if the LLM included them.
+	cleaned := strings.TrimSpace(response)
+	if strings.HasPrefix(cleaned, "```") {
+		if idx := strings.Index(cleaned[3:], "\n"); idx >= 0 {
+			cleaned = cleaned[3+idx+1:]
+		}
+		if strings.HasSuffix(cleaned, "```") {
+			cleaned = cleaned[:len(cleaned)-3]
+		}
+		cleaned = strings.TrimSpace(cleaned)
+	}
+
+	var result GenerateProjectResponse
+	if err := json.Unmarshal([]byte(cleaned), &result); err != nil {
+		writeError(w, http.StatusInternalServerError, "PARSE_ERROR", "failed to parse AI response")
+		return
+	}
+
+	// Default execution mode if not set.
+	if result.ExecutionMode == "" {
+		result.ExecutionMode = "sequential"
+	}
+
+	writeJSON(w, http.StatusOK, map[string]GenerateProjectResponse{"data": result})
+}

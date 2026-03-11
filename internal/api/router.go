@@ -12,12 +12,13 @@ import (
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/services/codexauth"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
 )
 
-func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, codexAuthSvc *codexauth.Service) (*chi.Mux, error) {
+func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, codexAuthSvc *codexauth.Service, llmClient llm.Client) (*chi.Mux, error) {
 	// Create stores
 	orgStore := db.NewOrganizationStore(pool)
 	userStore := db.NewUserStore(pool)
@@ -116,6 +117,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	projectAttachmentHandler := handlers.NewProjectAttachmentHandler(projectAttachmentStore, projectStore)
 	projectSpecHandler := handlers.NewProjectSpecHandler(projectSpecStore, projectStore)
 	projectAnalysisHandler := handlers.NewProjectAnalysisHandler(projectStore, projectSpecStore, projectAttachmentStore, projectTaskStore)
+	projectGenerateHandler := handlers.NewProjectGenerateHandler(llmClient)
 	codexAuthHandler := handlers.NewCodexAuthHandler(codexAuthSvc, logger)
 
 	r := chi.NewRouter()
@@ -236,6 +238,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Post("/api/v1/projects/{id}/specs", projectSpecHandler.Create)
 			r.Patch("/api/v1/projects/{id}/specs/{specId}", projectSpecHandler.Update)
 			r.Delete("/api/v1/projects/{id}/specs/{specId}", projectSpecHandler.Delete)
+			r.Post("/api/v1/projects/ai/generate", projectGenerateHandler.Generate)
 			r.Post("/api/v1/projects/{id}/ai/improve", projectAnalysisHandler.Improve)
 		})
 
