@@ -56,7 +56,13 @@ func main() {
 	credentialStore := db.NewOrgCredentialStore(pool, cryptoSvc)
 	codexAuthSvc := codexauth.NewService(credentialStore, logger)
 
-	router, err := api.NewRouter(cfg, pool, logger, codexAuthSvc)
+	// LLM client (shared between router and worker services).
+	llmClient, err := llm.NewClient(cfg.LLMConfig(), logger)
+	if err != nil {
+		logger.Warn().Err(err).Msg("LLM client initialization failed — LLM-dependent features will be unavailable")
+	}
+
+	router, err := api.NewRouter(cfg, pool, logger, codexAuthSvc, llmClient)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}

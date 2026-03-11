@@ -8,20 +8,13 @@ import (
 	"strings"
 	"time"
 
-	_ "embed"
-
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
 	llmpkg "github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/prompts"
 )
-
-//go:embed direction_alignment_prompt.template
-var directionAlignmentPrompt string
-
-//go:embed complexity_estimate_prompt.template
-var complexityEstimatePrompt string
 
 // issueStore is the subset of db.IssueStore used by the service.
 type issueStore interface {
@@ -398,7 +391,7 @@ func computeRecency(lastSeenAt time.Time) float64 {
 // computeDirectionAlignment calls the LLM to assess how well an issue aligns
 // with the organization's product direction. Returns a value in [-1, 1].
 func (s *Service) computeDirectionAlignment(ctx context.Context, issue *models.Issue, productDirection string) (float64, error) {
-	systemPrompt := directionAlignmentPrompt
+	systemPrompt := prompts.DirectionAlignmentPrompt()
 
 	desc := ""
 	if issue.Description != nil {
@@ -439,7 +432,7 @@ Occurrences: %d`,
 
 // estimateComplexityViaLLM calls the LLM to estimate issue complexity.
 func (s *Service) estimateComplexityViaLLM(ctx context.Context, issue *models.Issue) (int, string, float64, string, error) {
-	systemPrompt := complexityEstimatePrompt
+	systemPrompt := prompts.ComplexityEstimatePrompt()
 
 	desc := ""
 	if issue.Description != nil {

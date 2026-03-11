@@ -80,7 +80,7 @@ function ProjectRow({ project }: { project: Project }) {
           <span className="truncate max-w-[300px]">{project.goal}</span>
           <ProgressBar completed={project.completed_tasks} total={project.total_tasks} />
           <Badge variant="outline" className="text-[11px] px-1.5 py-0">
-            P{project.priority}
+            {project.priority <= 12 ? "Critical" : project.priority <= 37 ? "High" : project.priority <= 62 ? "Medium" : "Low"}
           </Badge>
           <Badge variant="outline" className="text-[11px] px-1.5 py-0">
             {project.execution_mode}
