@@ -18,15 +18,17 @@ import (
 type WebhookHandler struct {
 	cfg              *config.Config
 	orgStore         *db.OrganizationStore
+	userStore        *db.UserStore
 	repoStore        *db.RepositoryStore
 	integrationStore *db.IntegrationStore
 	prService        *ghservice.PRService
 }
 
-func NewWebhookHandler(cfg *config.Config, orgStore *db.OrganizationStore, repoStore *db.RepositoryStore, integrationStore *db.IntegrationStore, prService *ghservice.PRService) *WebhookHandler {
+func NewWebhookHandler(cfg *config.Config, orgStore *db.OrganizationStore, userStore *db.UserStore, repoStore *db.RepositoryStore, integrationStore *db.IntegrationStore, prService *ghservice.PRService) *WebhookHandler {
 	return &WebhookHandler{
 		cfg:              cfg,
 		orgStore:         orgStore,
+		userStore:        userStore,
 		repoStore:        repoStore,
 		integrationStore: integrationStore,
 		prService:        prService,
@@ -121,20 +123,28 @@ func (h *WebhookHandler) handleInstallation(w http.ResponseWriter, r *http.Reque
 
 	switch event.Action {
 	case "created":
-		// Create a default org for the installation (or find existing)
-		org := &models.Organization{
-			Name:     event.Installation.Account.Login,
-			Settings: json.RawMessage(`{}`),
-		}
-		// Try to get existing org by name first
-		existingOrg, err := h.orgStore.GetByName(ctx, org.Name)
+		// Find the org for this installation. The GitHub account ID from the
+		// webhook matches the github_id on the user who installed the app,
+		// so look up the user first, then resolve their org.
+		var org *models.Organization
+		user, err := h.userStore.GetByGitHubID(ctx, event.Installation.Account.ID)
 		if err == nil {
-			org = &existingOrg
-		} else {
-			if createErr := h.orgStore.Create(ctx, org); createErr != nil {
+			existingOrg, orgErr := h.orgStore.GetByID(ctx, user.OrgID)
+			if orgErr == nil {
+				org = &existingOrg
+			}
+		}
+		if org == nil {
+			// No matching user found — create a new org as a fallback.
+			newOrg := &models.Organization{
+				Name:     event.Installation.Account.Login + "'s Org",
+				Settings: json.RawMessage(`{}`),
+			}
+			if createErr := h.orgStore.Create(ctx, newOrg); createErr != nil {
 				writeError(w, http.StatusInternalServerError, "ORG_CREATE_FAILED", "failed to create organization")
 				return
 			}
+			org = newOrg
 		}
 
 		// Create integration

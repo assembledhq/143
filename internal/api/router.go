@@ -92,7 +92,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		handlers.WithGitHubIntegrationOAuth(cfg.GitHubOAuthClientID, cfg.GitHubOAuthClientSecret),
 		handlers.WithGitHubAppSlug(cfg.GitHubAppSlug),
 	)
-	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, repoStore, integrationStore, prService)
+	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, userStore, repoStore, integrationStore, prService)
 	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeAgentEnv(), cfg.SafeLLMEnv())
 	issueHandler := handlers.NewIssueHandler(issueStore)
 	runHandler := handlers.NewRunHandler(
