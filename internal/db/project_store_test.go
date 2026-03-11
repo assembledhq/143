@@ -20,6 +20,7 @@ var projectTestColumns = []string{
 	"total_tasks", "completed_tasks", "failed_tasks",
 	"proposed_by_pm", "source_issue_ids", "proposal_reasoning",
 	"agent_type", "model_override",
+	"schedule_enabled", "schedule_interval", "schedule_unit", "next_run_at",
 	"created_by", "created_at", "updated_at", "completed_at",
 }
 
@@ -31,6 +32,7 @@ func newProjectRow(projectID, orgID, repoID uuid.UUID, now time.Time) []interfac
 		0, 0, 0,
 		false, []uuid.UUID{}, nil,
 		nil, nil,
+		false, 1, "days", nil,
 		nil, now, now, nil,
 	}
 }
@@ -55,9 +57,9 @@ func TestProjectStore_Create(t *testing.T) {
 	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
-	// Create has 21 named args (including agent_type and model_override)
+	// Create has 25 named args (including agent_type, model_override, and schedule fields)
 	mock.ExpectQuery("INSERT INTO projects").
-		WithArgs(anyArgs(21)...).
+		WithArgs(anyArgs(25)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(projectID, now, now))
 
 	store := NewProjectStore(mock)
@@ -268,9 +270,9 @@ func TestProjectStore_Update(t *testing.T) {
 	orgID := uuid.New()
 	projectID := uuid.New()
 
-	// Update has 19 named args
+	// Update has 23 named args (including schedule fields)
 	mock.ExpectExec("UPDATE projects SET").
-		WithArgs(anyArgs(19)...).
+		WithArgs(anyArgs(23)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	project := &models.Project{
