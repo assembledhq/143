@@ -33,6 +33,9 @@ vi.mock("lucide-react", () => {
     X: icon("X"),
     Loader2: icon("Loader2"),
     ChevronDown: icon("ChevronDown"),
+    ChevronDownIcon: icon("ChevronDownIcon"),
+    ChevronUpIcon: icon("ChevronUpIcon"),
+    CheckIcon: icon("CheckIcon"),
     ChevronRight: icon("ChevronRight"),
     AlertCircle: icon("AlertCircle"),
     CheckCircle2: icon("CheckCircle2"),
@@ -286,7 +289,7 @@ describe("ProjectDetailContent", () => {
     expect(screen.getByText("Execution Mode")).toBeInTheDocument();
     expect(screen.getByLabelText("Sequential")).toBeInTheDocument();
     expect(screen.getByLabelText("Parallel")).toBeInTheDocument();
-    expect(screen.getByLabelText("Priority (0-100)")).toBeInTheDocument();
+    expect(screen.getByText("Priority")).toBeInTheDocument();
     expect(screen.getByLabelText("Base Branch")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save Changes" })).toBeInTheDocument();
   });

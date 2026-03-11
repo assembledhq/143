@@ -17,11 +17,38 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { api } from "@/lib/api";
 import { projectStatusConfig } from "@/lib/types";
 import { ProgressBar } from "./shared";
 import { PlanTab } from "./plan-tab";
 import { WorkTab } from "./work-tab";
+
+const PRIORITY_OPTIONS = [
+  { value: "low", label: "Low", numeric: 75 },
+  { value: "medium", label: "Medium", numeric: 50 },
+  { value: "high", label: "High", numeric: 25 },
+  { value: "critical", label: "Critical", numeric: 0 },
+] as const;
+
+type PriorityLevel = (typeof PRIORITY_OPTIONS)[number]["value"];
+
+function numericToPriorityLevel(n: number): PriorityLevel {
+  if (n <= 12) return "critical";
+  if (n <= 37) return "high";
+  if (n <= 62) return "medium";
+  return "low";
+}
+
+function priorityLevelToNumeric(level: PriorityLevel): number {
+  return PRIORITY_OPTIONS.find((o) => o.value === level)!.numeric;
+}
 
 // ─── Settings Tab ────────────────────────────────────────────────────────────
 
@@ -32,7 +59,7 @@ function SettingsTab({ project }: { project: import("@/lib/types").Project }) {
   const [completionCriteria, setCompletionCriteria] = useState(project.completion_criteria ?? "");
   const [executionMode, setExecutionMode] = useState(project.execution_mode);
   const [maxConcurrent, setMaxConcurrent] = useState(project.max_concurrent);
-  const [priority, setPriority] = useState(project.priority);
+  const [priorityLevel, setPriorityLevel] = useState<PriorityLevel>(numericToPriorityLevel(project.priority));
   const [baseBranch, setBaseBranch] = useState(project.base_branch);
 
   const updateMutation = useMutation({
@@ -107,8 +134,19 @@ function SettingsTab({ project }: { project: import("@/lib/types").Project }) {
             </div>
           )}
           <div className="space-y-2">
-            <Label htmlFor="s-priority">Priority (0-100)</Label>
-            <Input id="s-priority" type="number" min={0} max={100} value={priority} onChange={(e) => setPriority(Number(e.target.value))} />
+            <Label>Priority</Label>
+            <Select value={priorityLevel} onValueChange={(v) => setPriorityLevel(v as PriorityLevel)}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {PRIORITY_OPTIONS.map((opt) => (
+                  <SelectItem key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
           <div className="space-y-2">
             <Label htmlFor="s-branch">Base Branch</Label>
@@ -117,7 +155,7 @@ function SettingsTab({ project }: { project: import("@/lib/types").Project }) {
           <div className="flex items-center gap-3 pt-2">
             <Button size="sm" onClick={() => updateMutation.mutate({
               goal: goal.trim(), scope: scope.trim() || null, completion_criteria: completionCriteria.trim() || null,
-              execution_mode: executionMode, max_concurrent: maxConcurrent, priority, base_branch: baseBranch.trim(),
+              execution_mode: executionMode, max_concurrent: maxConcurrent, priority: priorityLevelToNumeric(priorityLevel), base_branch: baseBranch.trim(),
             })} disabled={updateMutation.isPending}>
               {updateMutation.isPending ? "Saving..." : "Save Changes"}
             </Button>

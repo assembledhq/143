@@ -11,15 +11,11 @@ import (
 	"strings"
 	"time"
 
-	_ "embed"
-
 	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/services/agent"
 )
-
-//go:embed agent_system_prompt_base.template
-var agentSystemPromptBase string
 
 const (
 	lowTokenMax  = 50_000
@@ -158,8 +154,9 @@ func WithSandboxProvider(ctx context.Context, p agent.SandboxProvider) context.C
 func buildSystemPrompt(input *agent.AgentInput) string {
 	var b strings.Builder
 
-	b.WriteString(agentSystemPromptBase)
-	if !strings.HasSuffix(agentSystemPromptBase, "\n\n") {
+	base := prompts.AgentSystemPromptBase()
+	b.WriteString(base)
+	if !strings.HasSuffix(base, "\n\n") {
 		b.WriteString("\n\n")
 	}
 

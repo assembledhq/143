@@ -11,16 +11,12 @@ import (
 	"strings"
 	"unicode"
 
-	_ "embed"
-
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/prompts"
 )
-
-//go:embed review_comment_prompt.template
-var reviewCommentPrompt string
 
 // LLMClient abstracts the LLM call for classification.
 type LLMClient interface {
@@ -147,7 +143,7 @@ func (s *Service) classifyComment(ctx context.Context, comment *models.ReviewCom
 		}, nil
 	}
 
-	systemPrompt := reviewCommentPrompt
+	systemPrompt := prompts.ReviewCommentPrompt()
 
 	diffContext := ""
 	if comment.DiffPath != nil {
