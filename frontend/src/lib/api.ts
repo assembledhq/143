@@ -192,6 +192,9 @@ export const api = {
   },
   integrations: {
     list: () => get<import('./types').ListResponse<import('./types').Integration>>('/api/v1/integrations'),
+    loginGitHub: () => {
+      window.location.href = `${API_BASE}/api/v1/integrations/github/login`;
+    },
     loginLinear: () => {
       window.location.href = `${API_BASE}/api/v1/integrations/linear/login`;
     },

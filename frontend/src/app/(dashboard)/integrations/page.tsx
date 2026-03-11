@@ -25,7 +25,7 @@ export default function IntegrationsPage() {
       <AllIntegrationCards
         linearConnected={Boolean(linearIntegration)}
         linearLoading={false}
-        onConnectGitHub={() => api.auth.login()}
+        onConnectGitHub={() => api.integrations.loginGitHub()}
         onConnectSentry={() => api.auth.loginSentry()}
         onConnectLinear={() => api.integrations.loginLinear()}
       />
