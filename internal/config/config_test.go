@@ -216,6 +216,45 @@ func TestLogStatus_LLMModelWithoutProviders(t *testing.T) {
 	})
 }
 
+func TestSafeLLMEnv_MasksAPIKeys(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-api3-abcdef1234567890")
+	t.Setenv("OPENAI_API_KEY", "sk-proj-abcdefgh1234")
+	t.Setenv("OPENROUTER_API_KEY", "sk-or-v1-abcdefgh5678")
+
+	cfg := Load()
+	safe := cfg.SafeLLMEnv()
+
+	require.Len(t, safe, 3, "should include all three providers")
+	require.Equal(t, "sk-a••••7890", safe["anthropic"])
+	require.Equal(t, "sk-p••••1234", safe["openai"])
+	require.Equal(t, "sk-o••••5678", safe["openrouter"])
+}
+
+func TestSafeLLMEnv_Empty(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("OPENROUTER_API_KEY", "")
+
+	cfg := Load()
+	safe := cfg.SafeLLMEnv()
+
+	require.Empty(t, safe, "should return empty map when no keys configured")
+}
+
+func TestSafeLLMEnv_PartialKeys(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-api3-abcdef1234567890")
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("OPENROUTER_API_KEY", "")
+
+	cfg := Load()
+	safe := cfg.SafeLLMEnv()
+
+	require.Len(t, safe, 1, "should only include configured providers")
+	require.Contains(t, safe, "anthropic")
+	require.NotContains(t, safe, "openai")
+	require.NotContains(t, safe, "openrouter")
+}
+
 func TestAgentEnv_OnlyAnthropicKey(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-only")
 	t.Setenv("ANTHROPIC_BASE_URL", "")
