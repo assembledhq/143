@@ -65,7 +65,7 @@ func TestSettingsHandler_Get(t *testing.T) {
 
 			orgID := uuid.New()
 			store := db.NewOrganizationStore(mock)
-			handler := NewSettingsHandler(store, nil)
+			handler := NewSettingsHandler(store, nil, nil)
 
 			tt.setupMock(mock, orgID)
 
@@ -88,7 +88,7 @@ func TestSettingsHandler_GetAgentDefaults(t *testing.T) {
 	defaults := map[string]map[string]string{
 		"claude_code": {"ANTHROPIC_API_KEY": "sk-a••••test"},
 	}
-	handler := NewSettingsHandler(nil, defaults)
+	handler := NewSettingsHandler(nil, defaults, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/agent-defaults", nil)
 	w := httptest.NewRecorder()
@@ -96,6 +96,55 @@ func TestSettingsHandler_GetAgentDefaults(t *testing.T) {
 	handler.GetAgentDefaults(w, req)
 	require.Equal(t, http.StatusOK, w.Code, "should return 200 OK")
 	require.Contains(t, w.Body.String(), "claude_code", "response should contain agent type")
+}
+
+func TestSettingsHandler_GetLLMDefaults(t *testing.T) {
+	t.Parallel()
+
+	defaults := map[string]string{
+		"anthropic": "sk-a••••test",
+	}
+	handler := NewSettingsHandler(nil, nil, defaults)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/llm-defaults", nil)
+	w := httptest.NewRecorder()
+
+	handler.GetLLMDefaults(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "should return 200 OK")
+	require.Contains(t, w.Body.String(), "anthropic", "response should contain provider name")
+	require.Contains(t, w.Body.String(), "sk-a", "response should contain masked key prefix")
+}
+
+func TestSettingsHandler_GetLLMDefaults_Empty(t *testing.T) {
+	t.Parallel()
+
+	handler := NewSettingsHandler(nil, nil, map[string]string{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/llm-defaults", nil)
+	w := httptest.NewRecorder()
+
+	handler.GetLLMDefaults(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "should return 200 OK")
+
+	var resp map[string]map[string]string
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Empty(t, resp["data"], "should return empty map when no providers configured")
+}
+
+func TestSettingsHandler_GetLLMModels(t *testing.T) {
+	t.Parallel()
+
+	handler := NewSettingsHandler(nil, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/llm-models", nil)
+	w := httptest.NewRecorder()
+
+	handler.GetLLMModels(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "should return 200 OK")
+	require.Contains(t, w.Body.String(), "anthropic", "response should contain anthropic provider")
+	require.Contains(t, w.Body.String(), "openai", "response should contain openai provider")
+	require.Contains(t, w.Body.String(), "claude-sonnet-4-5", "response should contain Claude model")
+	require.Contains(t, w.Body.String(), "gpt-4o", "response should contain OpenAI model")
 }
 
 func TestSettingsHandler_Update(t *testing.T) {
@@ -148,6 +197,36 @@ func TestSettingsHandler_Update(t *testing.T) {
 			},
 			expectedCode: http.StatusBadRequest,
 			expectedBody: "INVALID_SETTINGS",
+		},
+		{
+			name: "returns bad request for invalid llm_model",
+			body: `{"settings":{"llm_model":"bad-model"}}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				// no DB calls expected
+			},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_SETTINGS",
+		},
+		{
+			name: "accepts valid llm_model",
+			body: `{"settings":{"llm_model":"gpt-4o"}}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(orgColumns()).AddRow(
+							orgID, "Test Org", json.RawMessage(`{}`), now, now,
+						),
+					)
+				mock.ExpectQuery("UPDATE organizations").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"updated_at"}).AddRow(now),
+					)
+			},
+			expectedCode: http.StatusOK,
+			expectedBody: "gpt-4o",
 		},
 		{
 			name: "returns bad request for invalid codex model in agent_config",
@@ -212,7 +291,7 @@ func TestSettingsHandler_Update(t *testing.T) {
 
 			orgID := uuid.New()
 			store := db.NewOrganizationStore(mock)
-			handler := NewSettingsHandler(store, nil)
+			handler := NewSettingsHandler(store, nil, nil)
 
 			tt.setupMock(mock, orgID)
 
