@@ -342,8 +342,9 @@ func TestAnalyzeFailureHandler_UsesJobOrgIDWhenPayloadMissingOrgID(t *testing.T)
 }
 
 type mockPMService struct {
-	calledOrgID uuid.UUID
-	trigger     models.PMTrigger
+	calledOrgID     uuid.UUID
+	calledProjectID uuid.UUID
+	trigger         models.PMTrigger
 }
 
 func (m *mockPMService) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID) (*pm.Plan, error) {
@@ -354,6 +355,7 @@ func (m *mockPMService) Analyze(ctx context.Context, orgID uuid.UUID, trigger mo
 
 func (m *mockPMService) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID) error {
 	m.calledOrgID = orgID
+	m.calledProjectID = projectID
 	return nil
 }
 
@@ -389,6 +391,51 @@ func TestPMAnalyzeHandler_UsesJobOrgID(t *testing.T) {
 	require.NoError(t, err, "pm_analyze handler should succeed")
 	require.Equal(t, orgID, pmSvc.calledOrgID, "should use org ID from job context")
 	require.Equal(t, models.PMTriggerCron, pmSvc.trigger, "should pass trigger through")
+}
+
+func TestProjectCycleHandler_InvalidJSON(t *testing.T) {
+	t.Parallel()
+
+	logger := zerolog.Nop()
+	services := &Services{PM: &mockPMService{}}
+	handler := newProjectCycleHandler(services, logger)
+
+	err := handler(context.Background(), "project_cycle", json.RawMessage(`{bad`))
+	require.Error(t, err, "project_cycle handler should return error for invalid JSON")
+	require.Contains(t, err.Error(), "unmarshal")
+}
+
+func TestProjectCycleHandler_InvalidProjectID(t *testing.T) {
+	t.Parallel()
+
+	logger := zerolog.Nop()
+	services := &Services{PM: &mockPMService{}}
+	handler := newProjectCycleHandler(services, logger)
+
+	orgID := uuid.New()
+	ctx := withJobOrgID(context.Background(), orgID)
+	err := handler(ctx, "project_cycle", json.RawMessage(`{"org_id":"`+orgID.String()+`","project_id":"not-a-uuid"}`))
+	require.Error(t, err, "project_cycle handler should return error for invalid project ID")
+	require.Contains(t, err.Error(), "parse project ID")
+}
+
+func TestProjectCycleHandler_Success(t *testing.T) {
+	t.Parallel()
+
+	logger := zerolog.Nop()
+	pmSvc := &mockPMService{}
+	services := &Services{PM: pmSvc}
+	handler := newProjectCycleHandler(services, logger)
+
+	orgID := uuid.New()
+	projectID := uuid.New()
+	ctx := withJobOrgID(context.Background(), orgID)
+	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","project_id":"` + projectID.String() + `"}`)
+
+	err := handler(ctx, "project_cycle", payload)
+	require.NoError(t, err, "project_cycle handler should succeed")
+	require.Equal(t, orgID, pmSvc.calledOrgID, "should pass org ID to AnalyzeProject")
+	require.Equal(t, projectID, pmSvc.calledProjectID, "should pass project ID to AnalyzeProject")
 }
 
 func TestRegisterHandlers_AllRegistered(t *testing.T) {

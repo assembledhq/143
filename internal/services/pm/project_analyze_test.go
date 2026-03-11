@@ -1,11 +1,51 @@
 package pm
 
 import (
+	"context"
+	"io"
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
+
+	"github.com/assembledhq/143/internal/services/agent"
 )
+
+// mockAdapter is a minimal stub for agent.AgentAdapter.
+type mockAdapter struct{}
+
+func (m *mockAdapter) Name() string { return "mock" }
+func (m *mockAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
+	return nil, nil
+}
+func (m *mockAdapter) Execute(ctx context.Context, sb *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+	return &agent.AgentResult{}, nil
+}
+
+// mockSandbox is a minimal stub for agent.SandboxProvider.
+type mockSandbox struct{}
+
+func (m *mockSandbox) Name() string                      { return "mock" }
+func (m *mockSandbox) Create(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+	return &agent.Sandbox{}, nil
+}
+func (m *mockSandbox) CloneRepo(ctx context.Context, sb *agent.Sandbox, repoURL, branch, token string) error {
+	return nil
+}
+func (m *mockSandbox) Exec(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+	return 0, nil
+}
+func (m *mockSandbox) ReadFile(ctx context.Context, sb *agent.Sandbox, path string) ([]byte, error) {
+	return nil, nil
+}
+func (m *mockSandbox) WriteFile(ctx context.Context, sb *agent.Sandbox, path string, data []byte) error {
+	return nil
+}
+func (m *mockSandbox) Destroy(ctx context.Context, sb *agent.Sandbox) error { return nil }
+func (m *mockSandbox) ConnectionInfo(ctx context.Context, sb *agent.Sandbox) (*agent.SandboxConnectionInfo, error) {
+	return nil, nil
+}
 
 func TestParseProjectPlan_ValidJSON(t *testing.T) {
 	t.Parallel()
@@ -63,6 +103,40 @@ func TestParseProjectPlan_EmptyTasks(t *testing.T) {
 	require.Equal(t, projectID, pp.ProjectID)
 	require.Equal(t, 100, pp.ProgressPct)
 	require.Empty(t, pp.NewTasks)
+}
+
+func TestAnalyzeProject_NilAdapter(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{logger: zerolog.Nop()}
+	err := svc.AnalyzeProject(context.Background(), uuid.New(), uuid.New())
+	require.Error(t, err, "AnalyzeProject should fail when adapter is nil")
+	require.Contains(t, err.Error(), "not configured")
+}
+
+func TestAnalyzeProject_NilProjectStores(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{
+		adapter: &mockAdapter{},
+		sandbox: &mockSandbox{},
+		logger:  zerolog.Nop(),
+	}
+	err := svc.AnalyzeProject(context.Background(), uuid.New(), uuid.New())
+	require.Error(t, err, "AnalyzeProject should fail when project stores are nil")
+	require.Contains(t, err.Error(), "project stores not configured")
+}
+
+func TestSetProjectStores(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{logger: zerolog.Nop()}
+	require.Nil(t, svc.projects, "projects should be nil before SetProjectStores")
+
+	svc.SetProjectStores(&mockProjectStore{}, &mockProjectTaskStore{}, &mockProjectCycleStore{})
+	require.NotNil(t, svc.projects, "projects should be set after SetProjectStores")
+	require.NotNil(t, svc.projectTasks, "projectTasks should be set after SetProjectStores")
+	require.NotNil(t, svc.projectCycles, "projectCycles should be set after SetProjectStores")
 }
 
 func TestBuildProjectCycleSystemPrompt(t *testing.T) {
