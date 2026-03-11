@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Mic, Plus, X, ImagePlus, Paperclip, ArrowLeft } from "lucide-react";
+import { ArrowUp, Mic, Plus, X, ImagePlus, Paperclip, ArrowLeft } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { PageHeader } from "@/components/page-header";
@@ -217,8 +217,8 @@ export function ManualSessionCreatePageContent() {
 
         <div className="pointer-events-none absolute inset-x-0 bottom-0 h-40 bg-gradient-to-t from-background via-background/80 to-transparent" />
 
-        <Card className="relative w-full border-border/80 bg-card/95 shadow-lg rounded-3xl">
-          <CardContent className="space-y-3 p-4 md:p-5">
+        <Card className="relative w-full border-border/60 bg-card shadow-lg rounded-2xl">
+          <CardContent className="space-y-0 p-5 md:p-6">
             <Textarea
               ref={messageInputRef}
               value={message}
@@ -236,12 +236,12 @@ export function ManualSessionCreatePageContent() {
               }}
               placeholder="Tell the agent what to do..."
               rows={1}
-              className="min-h-[40px] resize-none border-none bg-transparent px-1 py-1.5 text-sm shadow-none focus-visible:ring-0"
+              className="min-h-[44px] resize-none border-none bg-transparent px-0 py-2 text-[15px] shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0"
               aria-label="Manual session prompt"
             />
 
             {attachments.length > 0 && (
-              <div className="flex flex-wrap items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2 pb-3">
                 {attachments.map((attachment) => (
                   <Badge key={attachment} variant="secondary" className="gap-1 text-xs">
                     {attachment.startsWith("data:") ? "photo" : attachment}
@@ -261,7 +261,7 @@ export function ManualSessionCreatePageContent() {
             )}
 
             {showImageInput && (
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 pb-3">
                 <Input
                   value={imageURL}
                   onChange={(event) => setImageURL(event.target.value)}
@@ -269,82 +269,80 @@ export function ManualSessionCreatePageContent() {
                   aria-label="Image URL"
                 />
                 <Button type="button" variant="outline" onClick={addImageURL}>
-                  Add Image
+                  Add
                 </Button>
               </div>
             )}
 
-            <div className="flex items-center justify-between border-t border-border/70 pt-2">
-              <div className="flex items-center gap-2">
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="ghost" size="icon" aria-label="Add files or photos" className="rounded-full">
-                      <Plus className="h-5 w-5" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="start">
-                    <DropdownMenuItem onClick={() => uploadInputRef.current?.click()}>
-                      <Paperclip className="mr-2 h-4 w-4" />
-                      Upload files or photos
-                    </DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => setShowImageInput(true)}>
-                      <ImagePlus className="mr-2 h-4 w-4" />
-                      Add image URL
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-                <Input
-                  ref={uploadInputRef}
-                  type="file"
-                  accept="image/*,.pdf,.txt,.md,.json,.csv"
-                  multiple
-                  className="hidden"
-                  onChange={onUploadChange}
-                />
-                <p className="text-[13px] text-muted-foreground">Attach files or screenshots</p>
-              </div>
+            <div className="flex items-center gap-1 pt-3">
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" size="icon" aria-label="Add files or photos" className="h-8 w-8 rounded-full text-muted-foreground hover:text-foreground">
+                    <Plus className="h-5 w-5" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start">
+                  <DropdownMenuItem onClick={() => uploadInputRef.current?.click()}>
+                    <Paperclip className="mr-2 h-4 w-4" />
+                    Upload files or photos
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => setShowImageInput(true)}>
+                    <ImagePlus className="mr-2 h-4 w-4" />
+                    Add image URL
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+              <Input
+                ref={uploadInputRef}
+                type="file"
+                accept="image/*,.pdf,.txt,.md,.json,.csv"
+                multiple
+                className="hidden"
+                onChange={onUploadChange}
+              />
 
-              <div className="flex items-center gap-2">
-                <Select value={selectedModel} onValueChange={setSelectedModel}>
-                  <SelectTrigger className="h-8 w-[180px] text-xs" aria-label="Model override">
-                    <SelectValue placeholder="Default model" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {availableModels.map((model) => (
-                      <SelectItem key={model} value={model}>
-                        {model}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
+              <Select value={selectedModel} onValueChange={setSelectedModel}>
+                <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-[13px] text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
+                  <SelectValue placeholder="Default model" />
+                </SelectTrigger>
+                <SelectContent>
+                  {availableModels.map((model) => (
+                    <SelectItem key={model} value={model}>
+                      {model}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
 
-              <div className="flex items-center gap-2">
+              <div className="ml-auto flex items-center gap-1">
                 <Button
                   type="button"
                   variant="ghost"
                   size="icon"
                   onClick={toggleDictation}
-                  className="rounded-full"
+                  className="h-8 w-8 rounded-full text-muted-foreground hover:text-foreground"
                   aria-label="Dictate"
                 >
-                  <Mic className={`h-4 w-4 ${isDictating ? "text-primary" : ""}`} />
+                  <Mic className={`h-[18px] w-[18px] ${isDictating ? "text-primary" : ""}`} />
                 </Button>
                 <Button
                   type="button"
+                  size="icon"
                   onClick={() => createManualSessionMutation.mutate()}
                   disabled={message.trim().length === 0 || createManualSessionMutation.isPending}
+                  className="h-8 w-8 rounded-full"
+                  aria-label="Start session"
                 >
-                  {createManualSessionMutation.isPending ? "Starting..." : "Start Session"}
+                  <ArrowUp className="h-4 w-4" />
                 </Button>
               </div>
             </div>
 
             {dictationError && (
-              <p className="text-xs text-destructive">{dictationError}</p>
+              <p className="pt-2 text-xs text-destructive">{dictationError}</p>
             )}
             {createManualSessionMutation.isError && (
-              <p className="text-xs text-destructive">Could not start session. Please try again.</p>
+              <p className="pt-2 text-xs text-destructive">Could not start session. Please try again.</p>
             )}
           </CardContent>
         </Card>
