@@ -96,11 +96,19 @@ type GitHubAppConfig struct {
 
 type GitHubOAuthConfig struct {
 	ClientID     string `json:"client_id"`
-	ClientSecret string `json:"client_secret"` // #nosec G117 -- JSON config field
+	ClientSecret string `json:"client_secret,omitempty"` // #nosec G117 -- JSON config field
+	AccessToken  string `json:"access_token,omitempty"`  // #nosec G117 -- JSON config field
+	TokenType    string `json:"token_type,omitempty"`
+	Scope        string `json:"scope,omitempty"`
 }
 
 type SentryConfig struct {
-	WebhookSecret string `json:"webhook_secret"`
+	WebhookSecret string `json:"webhook_secret,omitempty"`
+	AccessToken   string `json:"access_token,omitempty"`  // #nosec G117 -- JSON config field
+	RefreshToken  string `json:"refresh_token,omitempty"` // #nosec G117 -- JSON config field
+	TokenType     string `json:"token_type,omitempty"`
+	OrgSlug       string `json:"org_slug,omitempty"`
+	OrgName       string `json:"org_name,omitempty"`
 }
 
 type LinearConfig struct {
@@ -189,8 +197,11 @@ func (c GitHubAppConfig) Validate() error {
 }
 
 func (c GitHubOAuthConfig) Validate() error {
+	if c.AccessToken != "" {
+		return nil
+	}
 	if c.ClientID == "" {
-		return errors.New("client_id is required")
+		return errors.New("client_id or access_token is required")
 	}
 	if c.ClientSecret == "" {
 		return errors.New("client_secret is required")
@@ -199,8 +210,8 @@ func (c GitHubOAuthConfig) Validate() error {
 }
 
 func (c SentryConfig) Validate() error {
-	if c.WebhookSecret == "" {
-		return errors.New("webhook_secret is required")
+	if c.WebhookSecret == "" && c.AccessToken == "" {
+		return errors.New("access_token or webhook_secret is required")
 	}
 	return nil
 }

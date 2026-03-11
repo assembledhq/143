@@ -16,14 +16,27 @@ import (
 )
 
 const (
+	// Linear OAuth endpoints
 	linearAuthorizeURL = "https://linear.app/oauth/authorize"
 	linearTokenURL     = "https://api.linear.app/oauth/token" // #nosec G101 -- OAuth endpoint URL, not credentials
 	linearGraphQLURL   = "https://api.linear.app/graphql"
+
+	// Sentry OAuth endpoints
+	sentryAuthorizeURL = "https://sentry.io/oauth/authorize/"
+	sentryTokenURL     = "https://sentry.io/oauth/token/" // #nosec G101 -- OAuth endpoint URL, not credentials
+	sentryAPIURL       = "https://sentry.io/api/0"
+
+	// GitHub OAuth endpoints (for integration, not user auth)
+	githubAuthorizeURL = "https://github.com/login/oauth/authorize"
+	githubTokenURL     = "https://github.com/login/oauth/access_token" // #nosec G101 -- OAuth endpoint URL, not credentials
+	githubAPIURL       = "https://api.github.com"
 )
 
-type linearCredentialStore interface {
+type integrationCredentialStore interface {
 	Upsert(ctx context.Context, orgID uuid.UUID, cfg models.ProviderConfig) error
 }
+
+// --- Linear types ---
 
 type linearTokenResponse struct {
 	AccessToken string `json:"access_token"`
@@ -48,22 +61,66 @@ type linearViewerResponse struct {
 	Data linearViewerData `json:"data"`
 }
 
+// --- Sentry types ---
+
+type sentryTokenResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	TokenType    string `json:"token_type"`
+	Scope        string `json:"scope"`
+}
+
+type sentryOrganization struct {
+	Slug string `json:"slug"`
+	Name string `json:"name"`
+}
+
+// --- GitHub types ---
+
+type githubIntegrationTokenResponse struct {
+	AccessToken string `json:"access_token"`
+	TokenType   string `json:"token_type"`
+	Scope       string `json:"scope"`
+}
+
+// IntegrationHandler manages OAuth flows for Linear, Sentry, and GitHub integrations.
 type IntegrationHandler struct {
 	integrationStore *db.IntegrationStore
-	credentialStore  linearCredentialStore
-	linearClientID   string
-	linearSecret     string
+	credentialStore  integrationCredentialStore
 	baseURL          string
 	frontendURL      string
 	client           *http.Client
+
+	// Linear OAuth
+	linearClientID string
+	linearSecret   string
+
+	// Sentry OAuth
+	sentryClientID string
+	sentrySecret   string
+
+	// GitHub integration OAuth
+	githubClientID string
+	githubSecret   string
+}
+
+// IntegrationOAuthConfig holds all integration OAuth credentials.
+type IntegrationOAuthConfig struct {
+	LinearClientID string
+	LinearSecret   string
+	SentryClientID string
+	SentrySecret   string
+	GitHubClientID string
+	GitHubSecret   string
 }
 
 func NewIntegrationHandler(
 	integrationStore *db.IntegrationStore,
-	credentialStore linearCredentialStore,
+	credentialStore integrationCredentialStore,
 	linearClientID, linearSecret, baseURL, frontendURL string,
+	opts ...IntegrationHandlerOption,
 ) *IntegrationHandler {
-	return &IntegrationHandler{
+	h := &IntegrationHandler{
 		integrationStore: integrationStore,
 		credentialStore:  credentialStore,
 		linearClientID:   linearClientID,
@@ -72,7 +129,51 @@ func NewIntegrationHandler(
 		frontendURL:      frontendURL,
 		client:           http.DefaultClient,
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
+
+// IntegrationHandlerOption configures optional IntegrationHandler fields.
+type IntegrationHandlerOption func(*IntegrationHandler)
+
+// WithSentryOAuth configures Sentry OAuth credentials.
+func WithSentryOAuth(clientID, secret string) IntegrationHandlerOption {
+	return func(h *IntegrationHandler) {
+		h.sentryClientID = clientID
+		h.sentrySecret = secret
+	}
+}
+
+// WithGitHubIntegrationOAuth configures GitHub integration OAuth credentials.
+func WithGitHubIntegrationOAuth(clientID, secret string) IntegrationHandlerOption {
+	return func(h *IntegrationHandler) {
+		h.githubClientID = clientID
+		h.githubSecret = secret
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// List integrations
+// ──────────────────────────────────────────────────────────────────────────────
+
+func (h *IntegrationHandler) ListIntegrations(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	integrations, err := h.integrationStore.ListByOrg(r.Context(), orgID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list integrations")
+		return
+	}
+	if integrations == nil {
+		integrations = []models.Integration{}
+	}
+	writeJSON(w, http.StatusOK, models.ListResponse[models.Integration]{Data: integrations})
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Linear OAuth
+// ──────────────────────────────────────────────────────────────────────────────
 
 func (h *IntegrationHandler) StartLinearOAuth(w http.ResponseWriter, r *http.Request) {
 	if h.linearClientID == "" || h.linearSecret == "" {
@@ -159,7 +260,7 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 		return
 	}
 
-	if _, _, err := h.ensureLinearIntegration(r.Context(), orgID); err != nil {
+	if _, _, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderLinear); err != nil {
 		writeError(w, http.StatusInternalServerError, "CONNECT_LINEAR_FAILED", "failed to connect linear integration")
 		return
 	}
@@ -167,22 +268,9 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 	http.Redirect(w, r, h.frontendURL+"/integrations?linear=connected", http.StatusTemporaryRedirect)
 }
 
-func (h *IntegrationHandler) ListIntegrations(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
-	integrations, err := h.integrationStore.ListByOrg(r.Context(), orgID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list integrations")
-		return
-	}
-	if integrations == nil {
-		integrations = []models.Integration{}
-	}
-	writeJSON(w, http.StatusOK, models.ListResponse[models.Integration]{Data: integrations})
-}
-
 func (h *IntegrationHandler) ConnectLinear(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
-	integration, created, err := h.ensureLinearIntegration(r.Context(), orgID)
+	integration, created, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderLinear)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "CONNECT_LINEAR_FAILED", "failed to connect linear integration")
 		return
@@ -194,8 +282,225 @@ func (h *IntegrationHandler) ConnectLinear(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Integration]{Data: integration})
 }
 
-func (h *IntegrationHandler) ensureLinearIntegration(ctx context.Context, orgID uuid.UUID) (models.Integration, bool, error) {
-	activeIntegrations, err := h.integrationStore.ListByOrgAndProvider(ctx, orgID, string(models.IntegrationProviderLinear))
+// ──────────────────────────────────────────────────────────────────────────────
+// Sentry OAuth
+// ──────────────────────────────────────────────────────────────────────────────
+
+func (h *IntegrationHandler) StartSentryOAuth(w http.ResponseWriter, r *http.Request) {
+	if h.sentryClientID == "" || h.sentrySecret == "" {
+		writeError(w, http.StatusServiceUnavailable, "SENTRY_OAUTH_NOT_CONFIGURED", "sentry oauth is not configured")
+		return
+	}
+
+	state, err := generateRandomString(32)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate oauth state")
+		return
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "sentry_oauth_state",
+		Value:    state,
+		Path:     "/",
+		MaxAge:   600,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+
+	params := url.Values{
+		"client_id":     {h.sentryClientID},
+		"redirect_uri":  {h.sentryRedirectURL()},
+		"response_type": {"code"},
+		"scope":         {"org:read project:read event:read"},
+		"state":         {state},
+	}
+
+	http.Redirect(w, r, sentryAuthorizeURL+"?"+params.Encode(), http.StatusTemporaryRedirect)
+}
+
+func (h *IntegrationHandler) HandleSentryOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	stateCookie, err := r.Cookie("sentry_oauth_state")
+	if err != nil || stateCookie.Value != r.URL.Query().Get("state") {
+		writeError(w, http.StatusBadRequest, "INVALID_STATE", "OAuth state mismatch")
+		return
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "sentry_oauth_state",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		writeError(w, http.StatusBadRequest, "MISSING_CODE", "missing authorization code")
+		return
+	}
+
+	token, err := h.exchangeSentryCode(r.Context(), code)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "TOKEN_EXCHANGE_FAILED", "failed to exchange code")
+		return
+	}
+
+	orgSlug, orgName, err := h.fetchSentryOrganization(r.Context(), token.AccessToken)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "SENTRY_API_FAILED", "failed to fetch sentry organization")
+		return
+	}
+
+	orgID := middleware.OrgIDFromContext(r.Context())
+
+	if h.credentialStore == nil {
+		writeError(w, http.StatusInternalServerError, "CREDENTIAL_STORE_UNAVAILABLE", "credential store unavailable")
+		return
+	}
+
+	sentryConfig := models.SentryConfig{
+		AccessToken:  token.AccessToken,
+		RefreshToken: token.RefreshToken,
+		TokenType:    token.TokenType,
+		OrgSlug:      orgSlug,
+		OrgName:      orgName,
+	}
+	if err := h.credentialStore.Upsert(r.Context(), orgID, sentryConfig); err != nil {
+		writeError(w, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to store sentry credential")
+		return
+	}
+
+	if _, _, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderSentry); err != nil {
+		writeError(w, http.StatusInternalServerError, "CONNECT_SENTRY_FAILED", "failed to connect sentry integration")
+		return
+	}
+
+	http.Redirect(w, r, h.frontendURL+"/integrations?sentry=connected", http.StatusTemporaryRedirect)
+}
+
+func (h *IntegrationHandler) ConnectSentry(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	integration, created, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderSentry)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "CONNECT_SENTRY_FAILED", "failed to connect sentry integration")
+		return
+	}
+	if created {
+		writeJSON(w, http.StatusCreated, models.SingleResponse[models.Integration]{Data: integration})
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.Integration]{Data: integration})
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// GitHub Integration OAuth
+// ──────────────────────────────────────────────────────────────────────────────
+
+func (h *IntegrationHandler) StartGitHubOAuth(w http.ResponseWriter, r *http.Request) {
+	if h.githubClientID == "" || h.githubSecret == "" {
+		writeError(w, http.StatusServiceUnavailable, "GITHUB_OAUTH_NOT_CONFIGURED", "github integration oauth is not configured")
+		return
+	}
+
+	state, err := generateRandomString(32)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate oauth state")
+		return
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "github_integration_oauth_state",
+		Value:    state,
+		Path:     "/",
+		MaxAge:   600,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+
+	params := url.Values{
+		"client_id":    {h.githubClientID},
+		"redirect_uri": {h.githubRedirectURL()},
+		"scope":        {"repo read:org"},
+		"state":        {state},
+	}
+
+	http.Redirect(w, r, githubAuthorizeURL+"?"+params.Encode(), http.StatusTemporaryRedirect)
+}
+
+func (h *IntegrationHandler) HandleGitHubOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	stateCookie, err := r.Cookie("github_integration_oauth_state")
+	if err != nil || stateCookie.Value != r.URL.Query().Get("state") {
+		writeError(w, http.StatusBadRequest, "INVALID_STATE", "OAuth state mismatch")
+		return
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "github_integration_oauth_state",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		writeError(w, http.StatusBadRequest, "MISSING_CODE", "missing authorization code")
+		return
+	}
+
+	token, err := h.exchangeGitHubCode(r.Context(), code)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "TOKEN_EXCHANGE_FAILED", "failed to exchange code")
+		return
+	}
+
+	orgID := middleware.OrgIDFromContext(r.Context())
+
+	if h.credentialStore == nil {
+		writeError(w, http.StatusInternalServerError, "CREDENTIAL_STORE_UNAVAILABLE", "credential store unavailable")
+		return
+	}
+
+	ghConfig := models.GitHubOAuthConfig{
+		AccessToken: token.AccessToken,
+		TokenType:   token.TokenType,
+		Scope:       token.Scope,
+	}
+	if err := h.credentialStore.Upsert(r.Context(), orgID, ghConfig); err != nil {
+		writeError(w, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to store github credential")
+		return
+	}
+
+	if _, _, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderGitHub); err != nil {
+		writeError(w, http.StatusInternalServerError, "CONNECT_GITHUB_FAILED", "failed to connect github integration")
+		return
+	}
+
+	http.Redirect(w, r, h.frontendURL+"/integrations?github=connected", http.StatusTemporaryRedirect)
+}
+
+func (h *IntegrationHandler) ConnectGitHub(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	integration, created, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderGitHub)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "CONNECT_GITHUB_FAILED", "failed to connect github integration")
+		return
+	}
+	if created {
+		writeJSON(w, http.StatusCreated, models.SingleResponse[models.Integration]{Data: integration})
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.Integration]{Data: integration})
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Shared helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+func (h *IntegrationHandler) ensureIntegration(ctx context.Context, orgID uuid.UUID, provider models.IntegrationProvider) (models.Integration, bool, error) {
+	activeIntegrations, err := h.integrationStore.ListByOrgAndProvider(ctx, orgID, string(provider))
 	if err != nil {
 		return models.Integration{}, false, err
 	}
@@ -206,7 +511,7 @@ func (h *IntegrationHandler) ensureLinearIntegration(ctx context.Context, orgID 
 
 	integration := &models.Integration{
 		OrgID:    orgID,
-		Provider: models.IntegrationProviderLinear,
+		Provider: provider,
 		Status:   models.IntegrationStatusActive,
 	}
 	if err := h.integrationStore.Create(ctx, integration); err != nil {
@@ -216,9 +521,21 @@ func (h *IntegrationHandler) ensureLinearIntegration(ctx context.Context, orgID 
 	return *integration, true, nil
 }
 
+// --- Redirect URLs ---
+
 func (h *IntegrationHandler) linearRedirectURL() string {
 	return h.baseURL + "/api/v1/integrations/linear/callback"
 }
+
+func (h *IntegrationHandler) sentryRedirectURL() string {
+	return h.baseURL + "/api/v1/integrations/sentry/callback"
+}
+
+func (h *IntegrationHandler) githubRedirectURL() string {
+	return h.baseURL + "/api/v1/integrations/github/callback"
+}
+
+// --- Linear token exchange ---
 
 func (h *IntegrationHandler) exchangeLinearCode(ctx context.Context, code string) (*linearTokenResponse, error) {
 	body, err := json.Marshal(map[string]string{
@@ -297,4 +614,114 @@ func (h *IntegrationHandler) fetchLinearWorkspace(ctx context.Context, accessTok
 	}
 
 	return workspaceID, workspaceName, nil
+}
+
+// --- Sentry token exchange ---
+
+func (h *IntegrationHandler) exchangeSentryCode(ctx context.Context, code string) (*sentryTokenResponse, error) {
+	data := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"redirect_uri":  {h.sentryRedirectURL()},
+		"client_id":     {h.sentryClientID},
+		"client_secret": {h.sentrySecret},
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sentryTokenURL, bytes.NewBufferString(data.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("create sentry oauth request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("sentry oauth token request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("sentry oauth token request failed: status=%d body=%s", resp.StatusCode, string(responseBody))
+	}
+
+	var token sentryTokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&token); err != nil {
+		return nil, fmt.Errorf("decode sentry token response: %w", err)
+	}
+	if token.AccessToken == "" {
+		return nil, fmt.Errorf("sentry token response missing access_token")
+	}
+
+	return &token, nil
+}
+
+func (h *IntegrationHandler) fetchSentryOrganization(ctx context.Context, accessToken string) (string, string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sentryAPIURL+"/organizations/", nil)
+	if err != nil {
+		return "", "", fmt.Errorf("create sentry org request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("sentry org request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", "", fmt.Errorf("sentry org request failed: status=%d body=%s", resp.StatusCode, string(responseBody))
+	}
+
+	var orgs []sentryOrganization
+	if err := json.NewDecoder(resp.Body).Decode(&orgs); err != nil {
+		return "", "", fmt.Errorf("decode sentry org response: %w", err)
+	}
+	if len(orgs) == 0 {
+		return "", "", fmt.Errorf("sentry org response returned no organizations")
+	}
+
+	return orgs[0].Slug, orgs[0].Name, nil
+}
+
+// --- GitHub token exchange ---
+
+func (h *IntegrationHandler) exchangeGitHubCode(ctx context.Context, code string) (*githubIntegrationTokenResponse, error) {
+	body, err := json.Marshal(map[string]string{
+		"client_id":     h.githubClientID,
+		"client_secret": h.githubSecret,
+		"code":          code,
+		"redirect_uri":  h.githubRedirectURL(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal github oauth request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, githubTokenURL, bytes.NewBuffer(body))
+	if err != nil {
+		return nil, fmt.Errorf("create github oauth request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("github oauth token request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("github oauth token request failed: status=%d body=%s", resp.StatusCode, string(responseBody))
+	}
+
+	var token githubIntegrationTokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&token); err != nil {
+		return nil, fmt.Errorf("decode github token response: %w", err)
+	}
+	if token.AccessToken == "" {
+		return nil, fmt.Errorf("github token response missing access_token")
+	}
+
+	return &token, nil
 }
