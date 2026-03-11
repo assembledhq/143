@@ -6,6 +6,7 @@ const {
   loginMock,
   sentryLoginMock,
   integrationsListMock,
+  loginGitHubMock,
   loginLinearMock,
   codexStatusMock,
   codexInitiateMock,
@@ -16,6 +17,7 @@ const {
   loginMock: vi.fn(),
   sentryLoginMock: vi.fn(),
   integrationsListMock: vi.fn().mockResolvedValue({ data: [] }),
+  loginGitHubMock: vi.fn(),
   loginLinearMock: vi.fn(),
   codexStatusMock: vi.fn().mockResolvedValue({ data: { status: 'pending' } }),
   codexInitiateMock: vi.fn().mockResolvedValue({
@@ -46,6 +48,7 @@ vi.mock('@/lib/api', () => ({
     },
     integrations: {
       list: integrationsListMock,
+      loginGitHub: loginGitHubMock,
       loginLinear: loginLinearMock,
     },
     codexAuth: {
@@ -66,6 +69,7 @@ describe('OverviewPage', () => {
     sentryLoginMock.mockReset();
     integrationsListMock.mockReset();
     integrationsListMock.mockResolvedValue({ data: [] });
+    loginGitHubMock.mockReset();
     loginLinearMock.mockReset();
     codexStatusMock.mockClear();
     codexStatusMock.mockResolvedValue({ data: { status: 'pending' } });
@@ -140,7 +144,7 @@ describe('OverviewPage', () => {
 
     await user.click(screen.getByRole('button', { name: 'Connect GitHub' }));
 
-    expect(loginMock).toHaveBeenCalledTimes(1);
+    expect(loginGitHubMock).toHaveBeenCalledTimes(1);
   });
 
   it('starts Sentry onboarding from the additional integrations section', async () => {
