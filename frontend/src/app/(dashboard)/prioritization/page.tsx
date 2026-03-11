@@ -438,10 +438,10 @@ export default function PrioritizationPage() {
           {mutation.isPending ? "Saving..." : "Save Settings"}
         </Button>
         {saveStatus === "success" && (
-          <span className="text-sm text-green-600">Settings saved.</span>
+          <span className="text-[13px] text-green-600">Settings saved.</span>
         )}
         {saveStatus === "error" && (
-          <span className="text-sm text-destructive">Failed to save settings.</span>
+          <span className="text-[13px] text-destructive">Failed to save settings.</span>
         )}
       </div>
       </div>

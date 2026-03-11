@@ -72,7 +72,7 @@ function ProjectRow({ project }: { project: Project }) {
             )}
             {status.label}
           </span>
-          <span className="text-sm font-medium text-foreground truncate">
+          <span className="text-[13px] font-medium text-foreground truncate">
             {project.title}
           </span>
         </div>
@@ -143,7 +143,7 @@ export function ProjectsPageContent() {
 
       {isLoading && (
         <Card>
-          <CardContent className="py-12 text-center text-sm text-muted-foreground">
+          <CardContent className="py-12 text-center text-[13px] text-muted-foreground">
             Loading projects...
           </CardContent>
         </Card>
@@ -151,7 +151,7 @@ export function ProjectsPageContent() {
 
       {error && (
         <Card>
-          <CardContent className="py-12 text-center text-sm text-muted-foreground">
+          <CardContent className="py-12 text-center text-[13px] text-muted-foreground">
             Failed to load projects. Make sure the backend is running.
           </CardContent>
         </Card>
@@ -175,7 +175,7 @@ export function ProjectsPageContent() {
               </span>
             </div>
             {projects.length === 0 ? (
-              <div className="py-8 text-center text-sm text-muted-foreground">
+              <div className="py-8 text-center text-[13px] text-muted-foreground">
                 No projects match this filter.
               </div>
             ) : (

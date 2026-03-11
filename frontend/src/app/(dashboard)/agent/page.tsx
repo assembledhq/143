@@ -120,7 +120,7 @@ export default function AgentPage() {
                     >
                       <div className="flex items-center gap-2">
                         <RadioGroupItem value={option.value} />
-                        <span className="text-sm font-medium">{option.label}</span>
+                        <span className="text-[13px] font-medium">{option.label}</span>
                       </div>
                       <span className="mt-1 pl-6 text-xs text-muted-foreground">
                         {option.description}
@@ -153,7 +153,7 @@ export default function AgentPage() {
                     >
                       <div className="flex items-center gap-2">
                         <RadioGroupItem value={option.value} />
-                        <span className="text-sm font-medium">{option.label}</span>
+                        <span className="text-[13px] font-medium">{option.label}</span>
                       </div>
                       <span className="mt-1 pl-6 text-xs text-muted-foreground">
                         {option.description}
@@ -184,10 +184,10 @@ export default function AgentPage() {
           {mutation.isPending ? "Saving..." : "Save Settings"}
         </Button>
         {saveStatus === "success" && (
-          <span className="text-sm text-green-600">Settings saved.</span>
+          <span className="text-[13px] text-green-600">Settings saved.</span>
         )}
         {saveStatus === "error" && (
-          <span className="text-sm text-destructive">Failed to save settings.</span>
+          <span className="text-[13px] text-destructive">Failed to save settings.</span>
         )}
       </div>
       </div>
