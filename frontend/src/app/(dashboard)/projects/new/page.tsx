@@ -6,6 +6,7 @@ import { ArrowLeft, Sparkles, PenLine } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { PageHeader } from "@/components/page-header";
+import { PageContainer } from "@/components/page-container";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -125,6 +126,7 @@ export default function NewProjectPage() {
     title.trim().length > 0 && goal.trim().length > 0 && repositoryId.length > 0;
 
   return (
+    <PageContainer size="default">
     <div className="space-y-6">
       <PageHeader
         title="New Project"
@@ -144,7 +146,7 @@ export default function NewProjectPage() {
         <button
           type="button"
           onClick={() => setMode("describe")}
-          className={`flex items-center gap-2 rounded-lg border px-4 py-3 text-sm font-medium transition-colors ${
+          className={`flex items-center gap-2 rounded-lg border px-4 py-3 text-[13px] font-medium transition-colors ${
             mode === "describe"
               ? "border-primary bg-primary/5 text-primary"
               : "border-border bg-background text-muted-foreground hover:border-primary/40 hover:text-foreground"
@@ -156,7 +158,7 @@ export default function NewProjectPage() {
         <button
           type="button"
           onClick={() => setMode("form")}
-          className={`flex items-center gap-2 rounded-lg border px-4 py-3 text-sm font-medium transition-colors ${
+          className={`flex items-center gap-2 rounded-lg border px-4 py-3 text-[13px] font-medium transition-colors ${
             mode === "form"
               ? "border-primary bg-primary/5 text-primary"
               : "border-border bg-background text-muted-foreground hover:border-primary/40 hover:text-foreground"
@@ -208,7 +210,7 @@ export default function NewProjectPage() {
         <Card>
           <CardContent className="space-y-5 pt-6">
             {hasGenerated && (
-              <div className="rounded-md border border-primary/20 bg-primary/5 px-4 py-3 text-sm text-primary">
+              <div className="rounded-md border border-primary/20 bg-primary/5 px-4 py-3 text-[13px] text-primary">
                 Project details generated from your description. Review and edit as needed, then select a repository and create.
               </div>
             )}
@@ -274,7 +276,7 @@ export default function NewProjectPage() {
               </Select>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
                 <Label>Agent</Label>
                 <Select
@@ -396,5 +398,6 @@ export default function NewProjectPage() {
         </Card>
       )}
     </div>
+    </PageContainer>
   );
 }

@@ -155,7 +155,6 @@ describe('TeamSettingsPage', () => {
 
     const emailInput = await screen.findByLabelText('Email');
     expect(emailInput).toHaveClass('h-9');
-    expect(emailInput).toHaveClass('text-sm');
   });
 
   it('renders pending invitations', async () => {

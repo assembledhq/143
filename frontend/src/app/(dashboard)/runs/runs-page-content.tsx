@@ -111,7 +111,7 @@ function RunRow({ run }: { run: AgentRun }) {
             )}
             {status.label}
           </span>
-          <span className="text-sm font-medium text-foreground truncate">
+          <span className="text-[13px] font-medium text-foreground truncate">
             {run.result_summary || `Run ${run.id.slice(0, 8)}`}
           </span>
         </div>
@@ -206,7 +206,7 @@ export function RunsPageContent() {
 
       {isLoading && (
         <Card>
-          <CardContent className="py-12 text-center text-sm text-muted-foreground">
+          <CardContent className="py-12 text-center text-[13px] text-muted-foreground">
             Loading runs...
           </CardContent>
         </Card>
@@ -214,7 +214,7 @@ export function RunsPageContent() {
 
       {error && (
         <Card>
-          <CardContent className="py-12 text-center text-sm text-muted-foreground">
+          <CardContent className="py-12 text-center text-[13px] text-muted-foreground">
             Failed to load runs. Make sure the backend is running.
           </CardContent>
         </Card>
@@ -261,7 +261,7 @@ export function RunsPageContent() {
               </span>
             </div>
             {runs.length === 0 ? (
-              <div className="py-8 text-center text-sm text-muted-foreground">
+              <div className="py-8 text-center text-[13px] text-muted-foreground">
                 No runs match this filter.
               </div>
             ) : (
