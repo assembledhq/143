@@ -37,9 +37,9 @@ services:
       PORT: "8080"
       LOG_LEVEL: debug
       MODE: all
-      BASE_URL: http://localhost:8080
-      FRONTEND_URL: http://localhost:${FRONTEND_PORT:-3000}
-      CORS_ALLOWED_ORIGINS: http://localhost:${FRONTEND_PORT:-3000}
+      BASE_URL: ${BASE_URL:-http://localhost:8080}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:${FRONTEND_PORT:-3000}}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:${FRONTEND_PORT:-3000}}
     ports:
       - "8080:8080"
     volumes:
