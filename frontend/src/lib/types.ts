@@ -586,6 +586,14 @@ export interface AISuggestion {
   priority: string;
 }
 
+export interface GeneratedProject {
+  title: string;
+  goal: string;
+  scope?: string;
+  completion_criteria?: string;
+  execution_mode: string;
+}
+
 export interface AIImprovementResponse {
   suggestions: AISuggestion[];
   summary: string;

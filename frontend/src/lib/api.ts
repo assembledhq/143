@@ -300,6 +300,8 @@ export const api = {
     // AI
     aiImprove: (projectId: string, body: { target: string; spec_id?: string; prompt?: string }) =>
       post<import('./types').SingleResponse<import('./types').AIImprovementResponse>>(`/api/v1/projects/${projectId}/ai/improve`, body),
+    aiGenerate: (body: { description: string }) =>
+      post<{ data: import('./types').GeneratedProject }>('/api/v1/projects/ai/generate', body),
   },
   reviewComments: {
     list: (params?: { pull_request_id?: string; filter_status?: string; cursor?: string }) => {

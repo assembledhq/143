@@ -8,25 +8,14 @@ import (
 	"regexp"
 	"strings"
 
-	_ "embed"
-
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
 	llmpkg "github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/services/agent"
 )
-
-
-//go:embed direction_check_prompt.template
-var directionCheckPrompt string
-
-//go:embed correctness_check_prompt.template
-var correctnessCheckPrompt string
-
-//go:embed regression_check_prompt.template
-var regressionCheckPrompt string
 
 // validationStore is the subset of db.ValidationStore used by the service.
 type validationStore interface {
@@ -232,7 +221,7 @@ func (s *Service) checkDirection(ctx context.Context, diff string, issue *models
 		return "skipped", "LLM client not configured", nil
 	}
 
-	systemPrompt := directionCheckPrompt
+	systemPrompt := prompts.DirectionCheckPrompt()
 
 	var issueContext string
 	if issue != nil {
@@ -270,7 +259,7 @@ func (s *Service) checkCorrectness(ctx context.Context, diff string, issue *mode
 		return "skipped", "LLM client not configured", nil
 	}
 
-	systemPrompt := correctnessCheckPrompt
+	systemPrompt := prompts.CorrectnessCheckPrompt()
 
 	var issueContext string
 	if issue != nil {
@@ -304,7 +293,7 @@ func (s *Service) checkRegressionTest(ctx context.Context, diff string, issue *m
 		return "skipped", "LLM client not configured", nil
 	}
 
-	systemPrompt := regressionCheckPrompt
+	systemPrompt := prompts.RegressionCheckPrompt()
 
 	var issueContext string
 	if issue != nil {

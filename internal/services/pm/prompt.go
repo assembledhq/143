@@ -1,13 +1,11 @@
 package pm
 
-import (
-	_ "embed"
-	"fmt"
-)
-
-//go:embed pm_system_prompt.template
-var pmSystemPromptTemplate string
+import "github.com/assembledhq/143/internal/prompts"
 
 func buildPMSystemPrompt(availableSlots, maxConcurrent, activeProjectCount int) string {
-	return fmt.Sprintf(pmSystemPromptTemplate, availableSlots, maxConcurrent, activeProjectCount)
+	return prompts.PMSystemPrompt(prompts.PMSystemPromptData{
+		AvailableSlots:     availableSlots,
+		MaxConcurrent:      maxConcurrent,
+		ActiveProjectCount: activeProjectCount,
+	})
 }
