@@ -276,8 +276,9 @@ export default function Overview() {
       {/* Step 2: Connect Integrations (consolidated) */}
       <StepSection step={2} title="Connect integrations" completed={Boolean(githubIntegration)}>
         <div className="space-y-3">
-          <SourceControlIntegrationCard onConnectGitHub={() => api.integrations.loginGitHub()} />
+          <SourceControlIntegrationCard githubConnected={Boolean(githubIntegration)} onConnectGitHub={() => api.integrations.loginGitHub()} />
           <AdditionalIntegrationCards
+            sentryConnected={Boolean(sentryIntegration)}
             linearConnected={Boolean(linearIntegration)}
             linearLoading={false}
             onConnectSentry={() => api.auth.loginSentry()}

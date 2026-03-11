@@ -11,7 +11,7 @@ describe("integration connection cards", () => {
     const user = userEvent.setup();
     const onConnectGitHub = vi.fn();
 
-    renderWithProviders(<SourceControlIntegrationCard onConnectGitHub={onConnectGitHub} />);
+    renderWithProviders(<SourceControlIntegrationCard githubConnected={false} onConnectGitHub={onConnectGitHub} />);
 
     expect(screen.getByText("GitHub")).toBeInTheDocument();
     expect(screen.getByAltText("GitHub logo")).toBeInTheDocument();
@@ -28,6 +28,7 @@ describe("integration connection cards", () => {
 
     renderWithProviders(
       <AdditionalIntegrationCards
+        sentryConnected={false}
         linearConnected={false}
         linearLoading={false}
         onConnectSentry={onConnectSentry}
@@ -50,6 +51,8 @@ describe("integration connection cards", () => {
   it("disables Linear connect when already connected", () => {
     renderWithProviders(
       <AllIntegrationCards
+        githubConnected={false}
+        sentryConnected={false}
         linearConnected
         linearLoading={false}
         onConnectGitHub={vi.fn()}

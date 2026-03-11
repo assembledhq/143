@@ -11,6 +11,12 @@ export default function IntegrationsPage() {
     queryKey: ["integrations"],
     queryFn: () => api.integrations.list(),
   });
+  const githubIntegration = integrationsResp?.data?.find(
+    (integration) => integration.provider === "github" && integration.status === "active"
+  );
+  const sentryIntegration = integrationsResp?.data?.find(
+    (integration) => integration.provider === "sentry" && integration.status === "active"
+  );
   const linearIntegration = integrationsResp?.data?.find(
     (integration) => integration.provider === "linear" && integration.status === "active"
   );
@@ -23,6 +29,8 @@ export default function IntegrationsPage() {
           description="Connect external services to your organization."
         />
       <AllIntegrationCards
+        githubConnected={Boolean(githubIntegration)}
+        sentryConnected={Boolean(sentryIntegration)}
         linearConnected={Boolean(linearIntegration)}
         linearLoading={false}
         onConnectGitHub={() => api.integrations.loginGitHub()}
