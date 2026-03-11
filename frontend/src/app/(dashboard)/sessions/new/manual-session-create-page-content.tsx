@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Mic, Plus, X, ImagePlus, Paperclip, ArrowLeft } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -16,8 +16,17 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
+import { AGENT_TYPE_OPTIONS } from "@/lib/model-constants";
+import type { OrgSettings, Organization, SingleResponse } from "@/lib/types";
 
 type DictationResult = {
   transcript: string;
@@ -61,9 +70,28 @@ export function ManualSessionCreatePageContent() {
   const [imageURL, setImageURL] = useState("");
   const [isDictating, setIsDictating] = useState(false);
   const [dictationError, setDictationError] = useState<string | null>(null);
+  const [selectedModel, setSelectedModel] = useState("");
+
+  const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
+    queryKey: ["settings"],
+    queryFn: () => api.settings.get(),
+  });
+
+  const settings = settingsResponse?.data?.settings as OrgSettings | undefined;
+  const defaultAgentType = settings?.default_agent_type ?? "codex";
+
+  const availableModels = useMemo(() => {
+    const agentType = AGENT_TYPE_OPTIONS.find((a) => a.key === defaultAgentType);
+    return agentType?.models ?? [];
+  }, [defaultAgentType]);
 
   const createManualSessionMutation = useMutation({
-    mutationFn: () => api.sessions.createManual({ message: message.trim(), images: attachments }),
+    mutationFn: () =>
+      api.sessions.createManual({
+        message: message.trim(),
+        images: attachments,
+        ...(selectedModel ? { model: selectedModel } : {}),
+      }),
     onSuccess: (response) => {
       router.push(`/sessions/${response.data.id}`);
     },
@@ -274,6 +302,21 @@ export function ManualSessionCreatePageContent() {
                   onChange={onUploadChange}
                 />
                 <p className="text-[13px] text-muted-foreground">Attach files or screenshots</p>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <Select value={selectedModel} onValueChange={setSelectedModel}>
+                  <SelectTrigger className="h-8 w-[180px] text-xs" aria-label="Model override">
+                    <SelectValue placeholder="Default model" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {availableModels.map((model) => (
+                      <SelectItem key={model} value={model}>
+                        {model}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
 
               <div className="flex items-center gap-2">

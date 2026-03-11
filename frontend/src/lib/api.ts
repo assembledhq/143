@@ -182,7 +182,7 @@ export const api = {
       return get<import('./types').SessionsListResponse>(`/api/v1/sessions${qs ? `?${qs}` : ''}`);
     },
     get: (id: string) => get<import('./types').SingleResponse<import('./types').AgentSession>>(`/api/v1/sessions/${id}`),
-    createManual: (body: { message: string; images?: string[]; agent_type?: string; autonomy_level?: string; token_mode?: string }) =>
+    createManual: (body: { message: string; images?: string[]; agent_type?: string; model?: string; autonomy_level?: string; token_mode?: string }) =>
       post<import('./types').SingleResponse<import('./types').AgentSession>>('/api/v1/sessions/manual', body),
   },
   settings: {
@@ -252,7 +252,7 @@ export const api = {
       return get<import('./types').ListResponse<import('./types').Project>>(`/api/v1/projects${qs ? `?${qs}` : ''}`);
     },
     get: (id: string) => get<import('./types').SingleResponse<import('./types').ProjectDetail>>(`/api/v1/projects/${id}`),
-    create: (body: { title: string; goal: string; repository_id: string; scope?: string; completion_criteria?: string; execution_mode?: string; max_concurrent?: number; priority?: number; base_branch?: string }) =>
+    create: (body: { title: string; goal: string; repository_id: string; scope?: string; completion_criteria?: string; execution_mode?: string; max_concurrent?: number; priority?: number; base_branch?: string; agent_type?: string; model?: string }) =>
       post<import('./types').SingleResponse<import('./types').Project>>('/api/v1/projects', body),
     update: (id: string, body: Record<string, unknown>) =>
       patch<import('./types').SingleResponse<import('./types').Project>>(`/api/v1/projects/${id}`, body),
