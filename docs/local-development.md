@@ -166,6 +166,23 @@ All config is in `.env` (shared defaults) and `.env.local` (personal overrides).
 
 See [.env.example](../.env.example) for the full list with comments. The server logs which features are configured at startup so you can immediately see what's working.
 
+### Encrypted secrets (SOPS + age)
+
+If you're setting up secrets for the first time or on a new machine:
+
+```bash
+make secrets-setup        # generates your age keypair (one-time)
+
+# Add this to your ~/.bash_profile (or ~/.zshrc):
+export SOPS_AGE_KEY_FILE="$HOME/.config/sops/age/keys.txt"
+source ~/.bash_profile
+
+# If .env.enc already exists in the repo, just decrypt it:
+make secrets-decrypt
+```
+
+See the [secrets management guide](secrets/README.md) for the full walkthrough including production secrets, adding team members, and Render deploy setup.
+
 ## Testing Webhooks
 
 Once your GitHub App is installed and the tunnel is running:

@@ -41,25 +41,44 @@ brew install sops age    # macOS
 # 2. Generate your age keypair
 make secrets-setup
 
-# 3. Copy the public key from the output and paste it into .sops.yaml
-#    (replace the age1TODO_REPLACE_WITH_YOUR_PUBLIC_KEY placeholder)
+# 3. Add the SOPS key file to your shell profile so decryption works
+#    automatically in every terminal session:
+echo 'export SOPS_AGE_KEY_FILE="$HOME/.config/sops/age/keys.txt"' >> ~/.bash_profile
+source ~/.bash_profile
+#    (Use ~/.zshrc instead if you use zsh)
 
-# 4. Fill in .env with your real secrets, then encrypt
+# 4. Copy the public key from the output and paste it into .sops.yaml
+#    (replace the age1TODO... placeholder, or add it comma-separated
+#    with existing keys on the age: line)
+
+# 5. Fill in .env with your real secrets, then encrypt
 make secrets-encrypt
 
-# 5. Commit the encrypted file
+# 6. Commit the encrypted file
 git add .env.enc .sops.yaml
 git commit -m "Add encrypted dev secrets"
 ```
 
 This creates a keypair at `~/.config/sops/age/keys.txt`. The private key stays on your machine. The public key goes into `.sops.yaml` so SOPS knows who can decrypt.
 
+> **Important**: Without the `SOPS_AGE_KEY_FILE` export in your shell profile, SOPS won't find your private key and decryption will fail with "no master key was able to decrypt the file".
+
 ### New machine setup
 
 If `.env.enc` is already committed and you have the age private key on the new machine:
 
 ```bash
-# setup.sh auto-detects .env.enc and decrypts it
+# 1. Copy your age private key to the new machine
+#    (from ~/.config/sops/age/keys.txt on your old machine)
+mkdir -p ~/.config/sops/age
+cp /path/to/keys.txt ~/.config/sops/age/keys.txt
+chmod 600 ~/.config/sops/age/keys.txt
+
+# 2. Add the export to your shell profile
+echo 'export SOPS_AGE_KEY_FILE="$HOME/.config/sops/age/keys.txt"' >> ~/.bash_profile
+source ~/.bash_profile
+
+# 3. setup.sh auto-detects .env.enc and decrypts it
 ./setup.sh
 
 # Or decrypt manually
@@ -141,6 +160,8 @@ git add .env.enc && git commit -m "Update secrets"
 .env.enc                # encrypted dev secrets (committed, safe)
 .env.staging            # staging secrets (gitignored)
 .env.staging.enc        # encrypted staging secrets (committed, safe)
+.env.production         # production secrets (gitignored)
+.env.production.enc     # encrypted production secrets (committed, safe)
 .env.local              # personal overrides (gitignored, never encrypted)
 ```
 
@@ -164,7 +185,87 @@ decrypted at runtime
 
 **Forgot to update .sops.yaml** — The TODO placeholder key causes encryption to fail. Run `make secrets-setup`, copy your public key into `.sops.yaml`, then retry.
 
-## Tier 3: Cloud secret managers
+**"no master key was able to decrypt the file"** — SOPS can't find your age private key. Make sure `SOPS_AGE_KEY_FILE` is exported in your shell profile and points to `~/.config/sops/age/keys.txt`. Run `source ~/.bash_profile` (or `~/.zshrc`) to pick it up in the current session.
+
+## Tier 3: Production via SOPS + Render
+
+Production secrets are encrypted in `.env.production.enc` using the same SOPS + age workflow. This lets you version-control production config and deploy it through your CI/CD pipeline instead of manually editing secrets in the Render dashboard.
+
+### How it works
+
+1. Production secrets live in `.env.production.enc` (committed to git)
+2. At deploy time, Render's start command decrypts the file using an age private key stored as a single Render env var
+3. The decrypted values are exported as environment variables before the server starts
+
+### Setup (one-time)
+
+```bash
+# 1. Generate a dedicated deploy key (separate from your personal key)
+age-keygen -o /tmp/deploy-key.txt
+# Note the public key from the output (age1...)
+
+# 2. Add the deploy public key to .sops.yaml alongside your personal key
+#    on the production rule's age: line (comma-separated):
+#    age: >-
+#      age1YOUR_KEY,age1DEPLOY_KEY
+
+# 3. Re-encrypt production secrets so the deploy key can decrypt
+make secrets-rotate
+
+# 4. In Render, set a single env var:
+#    SOPS_AGE_KEY = <paste the full contents of /tmp/deploy-key.txt>
+#    (includes the private key line starting with AGE-SECRET-KEY-...)
+
+# 5. Delete /tmp/deploy-key.txt from your local machine
+rm /tmp/deploy-key.txt
+
+# 6. Commit .sops.yaml and .env.production.enc
+git add .sops.yaml .env.production.enc
+git commit -m "Add deploy key for Render production"
+```
+
+### Deploy command
+
+Update your Render start command (or Dockerfile entrypoint) to decrypt at boot:
+
+```bash
+# Install sops + age in your Docker image, then:
+export SOPS_AGE_KEY_FILE=/tmp/age-key.txt
+echo "$SOPS_AGE_KEY" > "$SOPS_AGE_KEY_FILE"
+sops --decrypt .env.production.enc > .env.production
+set -a && source .env.production && set +a
+exec ./server   # or whatever your start command is
+```
+
+This means the only secret stored in Render is the age private key (`SOPS_AGE_KEY`). All other secrets are managed in git via `.env.production.enc`.
+
+### Updating production secrets
+
+```bash
+# Decrypt, edit, re-encrypt, commit
+make secrets-decrypt ENV=production
+# edit .env.production
+make secrets-encrypt ENV=production
+git add .env.production.enc && git commit -m "Update production secrets"
+git push    # Render redeploys automatically
+```
+
+Or use the in-place editor:
+
+```bash
+make secrets-edit ENV=production    # opens $EDITOR, re-encrypts on save
+git add .env.production.enc && git commit -m "Update production secrets"
+```
+
+### Why this is better than Render's env var UI
+
+- **Version controlled**: every secret change is a git commit with full history
+- **Reviewable**: secret changes can go through PRs like code changes
+- **Reproducible**: `git clone && decrypt` gives you the full production config
+- **Single source of truth**: no drift between what's in git and what's in Render
+- **Easy rollback**: `git revert` rolls back secret changes instantly
+
+## Tier 3 (alternative): Cloud secret managers
 
 For production deployments that need automatic rotation, use your cloud provider's secret manager and inject values as environment variables at deploy time:
 
