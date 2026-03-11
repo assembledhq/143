@@ -501,6 +501,18 @@ func (h *IntegrationHandler) HandleGitHubOAuthCallback(w http.ResponseWriter, r 
 	http.Redirect(w, r, h.frontendURL+"/integrations?github=connected", http.StatusTemporaryRedirect)
 }
 
+// HandleGitHubAppInstalled is called after a user installs the GitHub App.
+// It creates the integration record for the authenticated user's org and
+// redirects to the frontend integrations page.
+func (h *IntegrationHandler) HandleGitHubAppInstalled(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	if _, _, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderGitHub); err != nil {
+		writeError(w, http.StatusInternalServerError, "CONNECT_GITHUB_FAILED", "failed to connect github integration")
+		return
+	}
+	http.Redirect(w, r, h.frontendURL+"/integrations?github=connected", http.StatusTemporaryRedirect)
+}
+
 func (h *IntegrationHandler) ConnectGitHub(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	integration, created, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderGitHub)
