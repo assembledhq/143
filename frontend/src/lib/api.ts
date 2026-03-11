@@ -189,6 +189,17 @@ export const api = {
     get: () => get<import('./types').SingleResponse<import('./types').Organization>>('/api/v1/settings'),
     update: (data: Record<string, unknown>) => patch<import('./types').SingleResponse<import('./types').Organization>>('/api/v1/settings', data),
     getAgentDefaults: () => get<{ data: Record<string, Record<string, string>> }>('/api/v1/settings/agent-defaults'),
+    getLLMDefaults: () => get<{ data: Record<string, string> }>('/api/v1/settings/llm-defaults'),
+    getLLMModels: () => get<{ data: Record<string, string[]> }>('/api/v1/settings/llm-models'),
+  },
+  credentials: {
+    list: () => get<import('./types').ListResponse<import('./types').CredentialSummary>>('/api/v1/settings/credentials'),
+    update: (provider: string, config: Record<string, unknown>) =>
+      request<import('./types').SingleResponse<import('./types').CredentialSummary>>(`/api/v1/settings/credentials/${provider}`, {
+        method: 'PUT',
+        body: JSON.stringify(config),
+      }),
+    delete: (provider: string) => del(`/api/v1/settings/credentials/${provider}`),
   },
   integrations: {
     list: () => get<import('./types').ListResponse<import('./types').Integration>>('/api/v1/integrations'),

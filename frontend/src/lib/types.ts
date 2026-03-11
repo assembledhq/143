@@ -219,6 +219,7 @@ export interface OrgSettings {
   min_priority_threshold?: number;
   product_direction?: string;
   product_context?: ProductContext;
+  llm_model?: string;
   agent_config?: Record<string, Record<string, string>>;
   default_agent_type?: 'codex' | 'claude_code' | 'gemini_cli';
 }
@@ -414,6 +415,18 @@ export interface InvitationResponse {
   };
   expires_at: string;
   created_at: string;
+}
+
+export interface CredentialSummary {
+  provider: string;
+  configured: boolean;
+  status?: string;
+  masked_key?: string;
+  last_verified_at?: string;
+  api_type?: string;
+  app_name?: string;
+  app_id?: number;
+  account_type?: string;
 }
 
 export interface ListResponse<T> {

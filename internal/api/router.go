@@ -93,7 +93,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		handlers.WithGitHubAppSlug(cfg.GitHubAppSlug),
 	)
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, repoStore, integrationStore, prService)
-	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeAgentEnv())
+	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeAgentEnv(), cfg.SafeLLMEnv())
 	issueHandler := handlers.NewIssueHandler(issueStore)
 	runHandler := handlers.NewRunHandler(
 		agentRunStore,
@@ -188,6 +188,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/runs/{id}/questions", runHandler.ListQuestions)
 			r.Get("/api/v1/settings", settingsHandler.Get)
 			r.Get("/api/v1/settings/agent-defaults", settingsHandler.GetAgentDefaults)
+			r.Get("/api/v1/settings/llm-defaults", settingsHandler.GetLLMDefaults)
+		r.Get("/api/v1/settings/llm-models", settingsHandler.GetLLMModels)
 			r.Get("/api/v1/pm/plans", pmHandler.List)
 			r.Get("/api/v1/pm/plans/{id}", pmHandler.Get)
 			r.Get("/api/v1/pm/plans/latest", pmHandler.Latest)
