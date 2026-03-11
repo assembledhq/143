@@ -136,7 +136,41 @@ func ModelEnvVarForAgentType(agentType string) string {
 	}
 }
 
+// AvailableLLMModels lists all models supported by the general-purpose LLM system.
+// Keep in sync with frontend/src/lib/model-constants.ts (LLM_MODELS_BY_PROVIDER).
+var AvailableLLMModels = []string{
+	"claude-opus-4-6",
+	"claude-sonnet-4-5",
+	"claude-haiku-4-5",
+	"gpt-4o",
+	"gpt-4o-mini",
+	"o3-mini",
+}
+
+// LLMModelsByProvider returns general-purpose LLM models grouped by provider.
+// This is the canonical source of truth; the frontend fetches this via the
+// GET /api/v1/settings/llm-models endpoint.
+func LLMModelsByProvider() map[string][]string {
+	return map[string][]string{
+		"anthropic":  {"claude-opus-4-6", "claude-sonnet-4-5", "claude-haiku-4-5"},
+		"openai":     {"gpt-4o", "gpt-4o-mini", "o3-mini"},
+		"openrouter": {"claude-opus-4-6", "claude-sonnet-4-5", "claude-haiku-4-5", "gpt-4o", "gpt-4o-mini", "o3-mini"},
+	}
+}
+
+func IsSupportedLLMModel(model string) bool {
+	for _, m := range AvailableLLMModels {
+		if model == m {
+			return true
+		}
+	}
+	return false
+}
+
 func ValidateSettingsModels(settings OrgSettings) error {
+	if settings.LLMModel != "" && !IsSupportedLLMModel(settings.LLMModel) {
+		return fmt.Errorf("llm_model must be one of: %v", AvailableLLMModels)
+	}
 	if settings.PMModel != "" && !IsSupportedPMModel(settings.PMModel) {
 		return fmt.Errorf("pm_model must be one of: %v", AvailablePMModels)
 	}

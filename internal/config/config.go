@@ -209,6 +209,23 @@ func maskSecret(s string) string {
 	return s[:4] + "••••" + s[len(s)-4:]
 }
 
+// SafeLLMEnv returns a map of LLM provider names to masked API keys for
+// providers that have server-level keys configured. This lets the frontend
+// show whether platform fallback is available without leaking secrets.
+func (c *Config) SafeLLMEnv() map[string]string {
+	result := make(map[string]string)
+	if c.AnthropicAPIKey != "" {
+		result["anthropic"] = maskSecret(c.AnthropicAPIKey)
+	}
+	if c.OpenAIAPIKey != "" {
+		result["openai"] = maskSecret(c.OpenAIAPIKey)
+	}
+	if c.OpenRouterAPIKey != "" {
+		result["openrouter"] = maskSecret(c.OpenRouterAPIKey)
+	}
+	return result
+}
+
 // LogStatus logs which features are configured and which are missing.
 // Call this at startup so contributors immediately see what's working.
 func (c *Config) LogStatus(logger zerolog.Logger) {

@@ -12,10 +12,11 @@ import (
 type SettingsHandler struct {
 	orgStore      *db.OrganizationStore
 	agentDefaults map[string]map[string]string
+	llmDefaults   map[string]string // provider name → masked key (from server env)
 }
 
-func NewSettingsHandler(orgStore *db.OrganizationStore, agentDefaults map[string]map[string]string) *SettingsHandler {
-	return &SettingsHandler{orgStore: orgStore, agentDefaults: agentDefaults}
+func NewSettingsHandler(orgStore *db.OrganizationStore, agentDefaults map[string]map[string]string, llmDefaults map[string]string) *SettingsHandler {
+	return &SettingsHandler{orgStore: orgStore, agentDefaults: agentDefaults, llmDefaults: llmDefaults}
 }
 
 func (h *SettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
@@ -32,6 +33,20 @@ func (h *SettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
 // with API keys masked. Allows the frontend to show what's configured.
 func (h *SettingsHandler) GetAgentDefaults(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"data": h.agentDefaults})
+}
+
+// GetLLMDefaults returns which LLM providers have platform-level API keys
+// configured, with keys masked. This lets the frontend show whether a platform
+// fallback is available when the org hasn't configured their own key.
+func (h *SettingsHandler) GetLLMDefaults(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"data": h.llmDefaults})
+}
+
+// GetLLMModels returns the available LLM models grouped by provider.
+// This is the source of truth — the frontend should use this instead of
+// maintaining its own hardcoded list.
+func (h *SettingsHandler) GetLLMModels(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"data": models.LLMModelsByProvider()})
 }
 
 func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {

@@ -62,3 +62,24 @@ export const AVAILABLE_PM_MODELS = [
   ...AVAILABLE_GEMINI_CLI_MODELS,
   ...AVAILABLE_CODEX_MODELS,
 ] as const;
+
+// General-purpose LLM models (used by validation, prioritization, PM services).
+// NOTE: This is a static fallback. The frontend should prefer fetching models
+// from GET /api/v1/settings/llm-models (served by models.LLMModelsByProvider()
+// in internal/models/agent_model_constants.go). Keep both in sync.
+export const LLM_MODELS_BY_PROVIDER: Record<string, { label: string; models: readonly string[] }> = {
+  anthropic: { label: "Anthropic", models: ["claude-opus-4-6", "claude-sonnet-4-5", "claude-haiku-4-5"] },
+  openai: { label: "OpenAI", models: ["gpt-4o", "gpt-4o-mini", "o3-mini"] },
+  openrouter: { label: "OpenRouter", models: ["claude-opus-4-6", "claude-sonnet-4-5", "claude-haiku-4-5", "gpt-4o", "gpt-4o-mini", "o3-mini"] },
+};
+
+export const DEFAULT_LLM_MODEL = "claude-sonnet-4-5";
+
+// OpenAI credential api_type value.
+export const OPENAI_API_TYPE_CHAT = "chat";
+
+export const LLM_PROVIDER_INFO: Record<string, { name: string; description: string; keyPlaceholder: string }> = {
+  anthropic: { name: "Anthropic", description: "Claude models (Opus, Sonnet, Haiku)", keyPlaceholder: "sk-ant-..." },
+  openai: { name: "OpenAI", description: "GPT-4o and O3 models", keyPlaceholder: "sk-..." },
+  openrouter: { name: "OpenRouter", description: "Access all models with a single key", keyPlaceholder: "sk-or-..." },
+};
