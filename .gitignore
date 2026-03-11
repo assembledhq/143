@@ -27,6 +27,7 @@ go.work.sum
 # env files (never commit plaintext secrets)
 .env
 .env.local
+.env.pre-ngrok
 .env.staging
 .env.production
 .env.*.local

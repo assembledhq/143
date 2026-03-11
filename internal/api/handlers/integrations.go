@@ -102,6 +102,9 @@ type IntegrationHandler struct {
 	// GitHub integration OAuth
 	githubClientID string
 	githubSecret   string
+
+	// GitHub App slug (for installation flow)
+	githubAppSlug string
 }
 
 // IntegrationOAuthConfig holds all integration OAuth credentials.
@@ -151,6 +154,14 @@ func WithGitHubIntegrationOAuth(clientID, secret string) IntegrationHandlerOptio
 	return func(h *IntegrationHandler) {
 		h.githubClientID = clientID
 		h.githubSecret = secret
+	}
+}
+
+// WithGitHubAppSlug configures the GitHub App slug for the installation flow.
+// When set, StartGitHubOAuth redirects to the App installation page instead of OAuth.
+func WithGitHubAppSlug(slug string) IntegrationHandlerOption {
+	return func(h *IntegrationHandler) {
+		h.githubAppSlug = slug
 	}
 }
 
@@ -398,6 +409,15 @@ func (h *IntegrationHandler) ConnectSentry(w http.ResponseWriter, r *http.Reques
 // ──────────────────────────────────────────────────────────────────────────────
 
 func (h *IntegrationHandler) StartGitHubOAuth(w http.ResponseWriter, r *http.Request) {
+	// If a GitHub App slug is configured, redirect to the App installation page
+	// instead of the OAuth flow. The App installation triggers a webhook that
+	// registers repos automatically.
+	if h.githubAppSlug != "" {
+		installURL := fmt.Sprintf("https://github.com/apps/%s/installations/new", h.githubAppSlug)
+		http.Redirect(w, r, installURL, http.StatusTemporaryRedirect)
+		return
+	}
+
 	if h.githubClientID == "" || h.githubSecret == "" {
 		writeError(w, http.StatusServiceUnavailable, "GITHUB_OAUTH_NOT_CONFIGURED", "github integration oauth is not configured")
 		return
