@@ -62,7 +62,7 @@ function StepSection({
         >
           {completed ? <Check className="h-4 w-4" /> : step}
         </div>
-        <h2 className="text-sm font-medium text-foreground">{title}</h2>
+        <h2 className="text-[13px] font-medium text-foreground">{title}</h2>
       </div>
       <div className="ml-10">{children}</div>
     </div>
@@ -173,7 +173,7 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
                   </SelectContent>
                 </Select>
               </div>
-              <p className="text-sm text-muted-foreground">
+              <p className="text-[13px] text-muted-foreground">
                 {selectedAgent.description}
               </p>
             </div>
@@ -248,8 +248,8 @@ export default function Overview() {
       {/* Hero header */}
       <div className="space-y-3">
         <div>
-          <h1 className="text-lg font-semibold text-foreground">Get started</h1>
-          <p className="text-sm text-muted-foreground">
+          <h1 className="text-[15px] font-semibold leading-5 text-foreground">Get started</h1>
+          <p className="mt-0.5 text-[13px] text-muted-foreground">
             Connect your tools and start fixing issues automatically.
           </p>
         </div>
@@ -292,7 +292,7 @@ export default function Overview() {
           <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-400">
             <Check className="h-3.5 w-3.5" />
           </div>
-          <p className="text-sm text-green-800 dark:text-green-300">
+          <p className="text-[13px] text-green-800 dark:text-green-300">
             You&apos;re all set! 143 will pick up issues and open PRs automatically.
           </p>
         </div>

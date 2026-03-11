@@ -26,7 +26,7 @@ function PlanHistory({ plans }: { plans: PMPlan[] }) {
         <Card key={plan.id}>
           <CardHeader className="pb-2">
             <div className="flex items-center justify-between">
-              <CardTitle className="text-sm">
+              <CardTitle className="text-[13px]">
                 {formatDate(plan.created_at)}
               </CardTitle>
               <Badge variant="secondary" className="text-[11px]">
@@ -34,7 +34,7 @@ function PlanHistory({ plans }: { plans: PMPlan[] }) {
               </Badge>
             </div>
           </CardHeader>
-          <CardContent className="text-sm text-muted-foreground space-y-1">
+          <CardContent className="text-[13px] text-muted-foreground space-y-1">
             <p>{plan.analysis || "No analysis summary available."}</p>
             <div className="flex flex-wrap gap-2">
               <Badge variant="outline" className="text-[11px]">
@@ -96,7 +96,7 @@ export default function PlansPage() {
         <Card className="border-blue-200 bg-blue-50 dark:border-blue-800 dark:bg-blue-950/30">
           <CardContent className="flex items-center gap-3 py-3">
             <RefreshCw className="h-4 w-4 animate-spin text-blue-600 dark:text-blue-400" />
-            <p className="text-sm text-blue-800 dark:text-blue-300">
+            <p className="text-[13px] text-blue-800 dark:text-blue-300">
               Analysis in progress — reviewing issues and generating a plan. This may take a minute...
             </p>
           </CardContent>
@@ -107,7 +107,7 @@ export default function PlansPage() {
         <Card className="border-red-200 bg-red-50 dark:border-red-800 dark:bg-red-950/30">
           <CardContent className="flex items-center gap-3 py-3">
             <AlertCircle className="h-4 w-4 shrink-0 text-red-600 dark:text-red-400" />
-            <p className="text-sm text-red-800 dark:text-red-300 flex-1">{analyzeError}</p>
+            <p className="text-[13px] text-red-800 dark:text-red-300 flex-1">{analyzeError}</p>
             <Button size="sm" variant="ghost" className="shrink-0 h-6 px-2" onClick={dismissError}>
               <X className="h-3 w-3" />
             </Button>
@@ -131,7 +131,7 @@ export default function PlansPage() {
           </TabsList>
           <TabsContent value="latest" className="space-y-4">
             <Card>
-              <CardContent className="py-4 flex flex-wrap gap-3 text-sm text-muted-foreground">
+              <CardContent className="py-4 flex flex-wrap gap-3 text-[13px] text-muted-foreground">
                 <span>Created: {formatDate(latest.created_at)}</span>
                 <span>Issues reviewed: {latest.issues_reviewed}</span>
                 <span>Triggered by: {latest.triggered_by}</span>
