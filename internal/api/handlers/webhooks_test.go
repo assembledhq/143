@@ -30,9 +30,10 @@ func setupWebhookHandler(t *testing.T, mock pgxmock.PgxPoolIface, secret string)
 		GitHubWebhookSecret: secret,
 	}
 	orgStore := db.NewOrganizationStore(mock)
+	userStore := db.NewUserStore(mock)
 	repoStore := db.NewRepositoryStore(mock)
 	integrationStore := db.NewIntegrationStore(mock)
-	return NewWebhookHandler(cfg, orgStore, repoStore, integrationStore, nil)
+	return NewWebhookHandler(cfg, orgStore, userStore, repoStore, integrationStore, nil)
 }
 
 func TestWebhook_HandleGitHub(t *testing.T) {
@@ -70,11 +71,11 @@ func TestWebhook_HandleGitHub(t *testing.T) {
 				orgID := uuid.New()
 				integrationID := uuid.New()
 
-				// 1. GetByName -> empty rows (no existing org)
-				mock.ExpectQuery("SELECT .+ FROM organizations WHERE name").
+				// 1. GetByGitHubID -> no user found (empty rows)
+				mock.ExpectQuery("SELECT .+ FROM users WHERE github_id").
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}),
+						pgxmock.NewRows([]string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}),
 					)
 
 				// 2. Create org (2 named args)
