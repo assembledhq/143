@@ -29,6 +29,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
     - The system determines how many customers were affected, regression severity, and optionally (if you integrate Salesforce or some other CRM) the revenue risk.
     - The admins can specify product context (philosophy + direction + focus/avoid areas) to steer prioritization.
     - A **PM agent** now runs on a batch cadence, clusters related issues, and produces a prioritized plan that delegates work to coding agents (replacing per-issue auto-triggering for automation).
+    - **Projects** are the primary long-term control surface. Each project can be `finite` (completes) or `evergreen` (continuous maintenance) with optional cadence-based execution and project-scoped quick actions.
 - Step 3: Execute a coding agent
     - Admins set a **confidence threshold** that controls which issues the system will auto-attempt. Issues below the threshold require manual triggering.
     - The Sessions area supports **one-off manual sessions** through a dedicated `/sessions/new` creation page with a chat-style composer. Users can start a manual run from free-form instructions, file/photo attachments, optional image URLs, and voice dictation without waiting for PM planning cadence.
@@ -304,6 +305,10 @@ Single system of record. Bundled in Docker Compose for local dev, swappable to m
 | 23 | [Auto-Closing Feedback Loops](23-auto-closing-feedback-loops.md) | Self-tuning loops for complexity calibration, agent defaults, context, conventions | Draft |
 | 24 | [Design Resolutions](24-design-resolutions.md) | Cross-document clarifications, conflict resolutions, decision flowcharts | Draft |
 | 28 | [AI Product Manager Agent](28-agent-ticket-prioritization.md) | Batch PM agent that analyzes all issues, produces prioritized work plans, and delegates to coding agents | Draft |
+| 29 | [Projects](29-projects.md) | Project containers and PM-aware multi-task planning/execution across cycles | Draft |
+| 30 | [PM Agent UX Elevation](30-pm-agent-ux-elevation.md) | Surface PM context, decisions, and project grouping in Sessions UX | Draft |
+| 31 | [Automations Tab](31-automations-tab.md) | On-demand reusable automation workflows layered on top of PM/manual-session primitives | Draft |
+| 32 | [Project Cadence and Lifecycle](32-project-cadence-and-lifecycle.md) | Project-centric model for finite vs evergreen work with cron cadence and project-scoped quick actions | Proposal |
 
 # Build Order
 

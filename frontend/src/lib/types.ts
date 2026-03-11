@@ -466,6 +466,10 @@ export interface Project {
   proposed_by_pm: boolean;
   source_issue_ids?: string[];
   proposal_reasoning?: string;
+  schedule_enabled: boolean;
+  schedule_interval: number;
+  schedule_unit: 'hours' | 'days' | 'weeks';
+  next_run_at?: string;
   created_by?: string;
   created_at: string;
   updated_at: string;

@@ -31,6 +31,16 @@ vi.mock("@/hooks/use-auth", () => ({
 }));
 
 describe("AuthenticatedLayout", () => {
+  it("shows automations in the primary navigation", () => {
+    renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
+
+    expect(screen.getByRole("link", { name: "Automations" })).toHaveAttribute("href", "/automations");
+  });
+
   it("uses a dense full-width content area", () => {
     const { container } = renderWithProviders(
       <AuthenticatedLayout>
