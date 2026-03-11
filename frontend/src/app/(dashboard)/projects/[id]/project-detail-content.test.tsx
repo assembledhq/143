@@ -289,7 +289,7 @@ describe("ProjectDetailContent", () => {
     expect(screen.getByText("Execution Mode")).toBeInTheDocument();
     expect(screen.getByLabelText("Sequential")).toBeInTheDocument();
     expect(screen.getByLabelText("Parallel")).toBeInTheDocument();
-    expect(screen.getByLabelText("Priority (0-100)")).toBeInTheDocument();
+    expect(screen.getByText("Priority")).toBeInTheDocument();
     expect(screen.getByLabelText("Base Branch")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save Changes" })).toBeInTheDocument();
   });
