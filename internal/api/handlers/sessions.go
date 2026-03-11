@@ -148,6 +148,7 @@ type createManualSessionRequest struct {
 	Message       string   `json:"message"`
 	Images        []string `json:"images"`
 	AgentType     string   `json:"agent_type"`
+	Model         string   `json:"model"`
 	AutonomyLevel string   `json:"autonomy_level"`
 	TokenMode     string   `json:"token_mode"`
 }
@@ -183,6 +184,15 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	if !validAgentTypes[agentType] {
 		writeError(w, http.StatusBadRequest, "INVALID_AGENT_TYPE", "agent_type must be one of: claude_code, gemini_cli, codex")
 		return
+	}
+
+	var modelOverride *string
+	if body.Model != "" {
+		if err := models.ValidateModelForAgentType(agentType, body.Model); err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_MODEL", err.Error())
+			return
+		}
+		modelOverride = &body.Model
 	}
 
 	autonomyLevel := body.AutonomyLevel
@@ -245,6 +255,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		Status:        "pending",
 		AutonomyLevel: autonomyLevel,
 		TokenMode:     tokenMode,
+		ModelOverride: modelOverride,
 	}
 	if err := h.agentRunStore.Create(r.Context(), run); err != nil {
 		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create manual run")

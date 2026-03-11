@@ -19,6 +19,7 @@ var projectTestColumns = []string{
 	"current_phase", "lessons_learned", "approach_history",
 	"total_tasks", "completed_tasks", "failed_tasks",
 	"proposed_by_pm", "source_issue_ids", "proposal_reasoning",
+	"agent_type", "model_override",
 	"created_by", "created_at", "updated_at", "completed_at",
 }
 
@@ -29,6 +30,7 @@ func newProjectRow(projectID, orgID, repoID uuid.UUID, now time.Time) []interfac
 		nil, json.RawMessage(`[]`), json.RawMessage(`[]`),
 		0, 0, 0,
 		false, []uuid.UUID{}, nil,
+		nil, nil,
 		nil, now, now, nil,
 	}
 }
@@ -53,9 +55,9 @@ func TestProjectStore_Create(t *testing.T) {
 	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
-	// Create has 19 named args
+	// Create has 21 named args (including agent_type and model_override)
 	mock.ExpectQuery("INSERT INTO projects").
-		WithArgs(anyArgs(19)...).
+		WithArgs(anyArgs(21)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(projectID, now, now))
 
 	store := NewProjectStore(mock)

@@ -173,6 +173,8 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 		MaxConcurrent      *int    `json:"max_concurrent"`
 		Priority           *int    `json:"priority"`
 		BaseBranch         *string `json:"base_branch"`
+		AgentType          *string `json:"agent_type"`
+		Model              *string `json:"model"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -215,6 +217,23 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 		baseBranch = *req.BaseBranch
 	}
 
+	validAgentTypes := map[string]bool{"claude_code": true, "gemini_cli": true, "codex": true}
+	if req.AgentType != nil && *req.AgentType != "" && !validAgentTypes[*req.AgentType] {
+		writeError(w, http.StatusBadRequest, "INVALID_AGENT_TYPE", "agent_type must be one of: claude_code, gemini_cli, codex")
+		return
+	}
+
+	if req.Model != nil && *req.Model != "" {
+		agentType := "claude_code"
+		if req.AgentType != nil && *req.AgentType != "" {
+			agentType = *req.AgentType
+		}
+		if err := models.ValidateModelForAgentType(agentType, *req.Model); err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_MODEL", err.Error())
+			return
+		}
+	}
+
 	project := models.Project{
 		OrgID:              orgID,
 		RepositoryID:       repoID,
@@ -228,6 +247,8 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 		MaxConcurrent:      maxConcurrent,
 		AutoMerge:          false,
 		BaseBranch:         baseBranch,
+		AgentType:          req.AgentType,
+		ModelOverride:      req.Model,
 		CreatedBy:          &user.ID,
 	}
 

@@ -41,7 +41,7 @@ var agentRunColumns = []string{
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_run_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "pm_approach", "pm_reasoning",
-	"project_task_id",
+	"project_task_id", "model_override",
 	"created_at",
 }
 
@@ -71,6 +71,7 @@ func TestRunHandler_List(t *testing.T) {
 							nil, nil, nil, nil, nil,
 							nil, nil, nil,
 							nil, // project_task_id
+							nil, // model_override
 							now,
 						),
 					)
@@ -148,6 +149,7 @@ func TestRunHandler_Get(t *testing.T) {
 							nil, nil, nil, nil, nil,
 							nil, nil, nil,
 							nil, // project_task_id
+							nil, // model_override
 							now,
 						),
 					)
@@ -221,13 +223,13 @@ func triggerFixIssueMock(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
 			),
 		)
 
-	// Mock agent run create (13 named args)
+	// Mock agent run create (14 named args)
 	runID := uuid.New()
 	mock.ExpectQuery("INSERT INTO agent_runs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
 
 	// Mock job enqueue (6 named args)
@@ -268,13 +270,13 @@ func triggerFixIssueAndOrgDefaultMock(mock pgxmock.PgxPoolIface, orgID uuid.UUID
 				AddRow(orgID, "Acme", []byte(settings), now, now),
 		)
 
-	// Mock agent run create (13 named args)
+	// Mock agent run create (14 named args)
 	runID := uuid.New()
 	mock.ExpectQuery("INSERT INTO agent_runs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
 
 	// Mock job enqueue (6 named args)
