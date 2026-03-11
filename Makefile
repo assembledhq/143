@@ -1,4 +1,4 @@
-.PHONY: dev dev-local dev-frontend-only setup test test-coverage migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-coverage migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -12,6 +12,60 @@ dev:
 		exit 1; \
 	fi; \
 	docker compose up --build
+
+# Run the full Docker stack with an ngrok tunnel for external access.
+# The NGROK_DOMAIN is required (your reserved ngrok domain).
+# This patches .env with the ngrok URL, starts ngrok + docker compose,
+# and restores .env on exit.
+#
+# Usage:
+#   make dev-ngrok NGROK_DOMAIN=assembled.ngrok.dev
+dev-ngrok:
+	@command -v ngrok >/dev/null 2>&1 || { echo "Install ngrok: brew install ngrok"; exit 1; }
+	@if [ -z "$(NGROK_DOMAIN)" ]; then \
+		echo "Error: NGROK_DOMAIN is required."; \
+		echo ""; \
+		echo "Usage: make dev-ngrok NGROK_DOMAIN=assembled.ngrok.dev"; \
+		exit 1; \
+	fi
+	@FRONTEND_PORT=$${FRONTEND_PORT:-3000}; \
+	if lsof -nP -iTCP:$$FRONTEND_PORT -sTCP:LISTEN >/dev/null 2>&1; then \
+		echo "Port $$FRONTEND_PORT is already in use."; \
+		echo "Stop the process on that port, or run: FRONTEND_PORT=3001 make dev-ngrok NGROK_DOMAIN=$(NGROK_DOMAIN)"; \
+		exit 1; \
+	fi; \
+	NGROK_URL="https://$(NGROK_DOMAIN)"; \
+	echo "Setting up ngrok tunnel: $$NGROK_URL → localhost:$$FRONTEND_PORT"; \
+	cp .env .env.pre-ngrok; \
+	sed -i '' \
+		-e "s|^BASE_URL=.*|BASE_URL=$$NGROK_URL|" \
+		-e "s|^FRONTEND_URL=.*|FRONTEND_URL=$$NGROK_URL|" \
+		-e "s|^CORS_ALLOWED_ORIGINS=.*|CORS_ALLOWED_ORIGINS=$$NGROK_URL|" \
+		.env; \
+	echo "Patched .env with $$NGROK_URL"; \
+	cleanup() { \
+		echo ""; \
+		echo "Restoring .env ..."; \
+		mv .env.pre-ngrok .env; \
+		echo "Done."; \
+	}; \
+	trap cleanup EXIT INT TERM; \
+	ngrok http $$FRONTEND_PORT --url=$(NGROK_DOMAIN) > /tmp/ngrok-dev.log 2>&1 & \
+	NGROK_PID=$$!; \
+	sleep 3; \
+	if ! kill -0 $$NGROK_PID 2>/dev/null; then \
+		echo ""; \
+		echo "ERROR: ngrok failed to start. Output:"; \
+		cat /tmp/ngrok-dev.log; \
+		exit 1; \
+	fi; \
+	echo "ngrok tunnel running (pid $$NGROK_PID)"; \
+	BASE_URL=$$NGROK_URL \
+	FRONTEND_URL=$$NGROK_URL \
+	CORS_ALLOWED_ORIGINS=$$NGROK_URL \
+	docker compose up --build; \
+	kill $$NGROK_PID 2>/dev/null; \
+	wait $$NGROK_PID 2>/dev/null
 
 # Run the full stack natively without Docker — lowest resource footprint.
 # Requires Go, Node.js, and PostgreSQL installed locally (run: make setup first).

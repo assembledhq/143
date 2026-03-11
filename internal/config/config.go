@@ -41,6 +41,7 @@ type Config struct {
 	GitHubAppID         int64  `env:"GITHUB_APP_ID"`
 	GitHubAppPrivateKey string `env:"GITHUB_APP_PRIVATE_KEY"`
 	GitHubWebhookSecret string `env:"GITHUB_WEBHOOK_SECRET"`
+	GitHubAppSlug       string `env:"GITHUB_APP_SLUG"`
 
 	// CSRF
 	CSRFSigningKey string `env:"CSRF_SIGNING_KEY"`
