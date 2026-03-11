@@ -9,15 +9,13 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f .env.production.enc ]; then
   echo "$SOPS_AGE_KEY" > "$SOPS_AGE_KEY_FILE"
   chmod 600 "$SOPS_AGE_KEY_FILE"
 
-  sops --decrypt --input-type dotenv --output-type dotenv .env.production.enc > /tmp/.env.production
-  set -a
-  # shellcheck disable=SC1091
-  source /tmp/.env.production
-  set +a
-
-  # Clean up plaintext secrets from disk
-  rm -f /tmp/.env.production "$SOPS_AGE_KEY_FILE"
-  unset SOPS_AGE_KEY SOPS_AGE_KEY_FILE
+  # sops exec-env decrypts the file and sets each key=value pair as an
+  # environment variable, then runs the given command.  This avoids writing
+  # plaintext secrets to disk and sidesteps shell-quoting issues with values
+  # that contain spaces or newlines (e.g. RSA private keys).
+  CMD=$(printf '%q ' "$@")
+  exec sops exec-env --input-type dotenv .env.production.enc \
+    "unset SOPS_AGE_KEY SOPS_AGE_KEY_FILE && rm -f '$SOPS_AGE_KEY_FILE' && exec $CMD"
 fi
 
 exec "$@"
