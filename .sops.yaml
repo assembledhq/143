@@ -23,14 +23,14 @@
 
 creation_rules:
   # Per-environment rules (matched first → last, first match wins)
-  # Note: path_regex matches the INPUT file path, not the output.
-  - path_regex: \.env\.staging$
+  # Matches both plaintext (.env.staging) and encrypted (.env.staging.enc)
+  - path_regex: \.env\.staging(\.enc)?$
     age: >-
       age1xyvl6ral4fq757tpnz30cuzefrpngnuv6zutjsg7wtnmza4uyqlshc2ucl
-  - path_regex: \.env\.production$
+  - path_regex: \.env\.production(\.enc)?$
     age: >-
       age1xyvl6ral4fq757tpnz30cuzefrpngnuv6zutjsg7wtnmza4uyqlshc2ucl,age1javfprksts8jt07rga3ltdnhllstv7rkt09s9lvgz8twy9sgps7q3xtgs5
-  # Default: catches .env and any other .env.* files
+  # Default: catches .env, .env.enc, and any other .env* files
   - path_regex: \.env(\..*)?$
     age: >-
       age1xyvl6ral4fq757tpnz30cuzefrpngnuv6zutjsg7wtnmza4uyqlshc2ucl
