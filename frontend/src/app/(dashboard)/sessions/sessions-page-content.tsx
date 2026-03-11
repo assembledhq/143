@@ -6,18 +6,15 @@ import Link from "next/link";
 import { useQueryState, parseAsString } from "nuqs";
 import { PageHeader } from "@/components/page-header";
 import { EmptyState } from "@/components/empty-state";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import { PMStatusBanner } from "@/components/pm/pm-status-banner";
 import { DecisionsView } from "@/components/pm/decisions-view";
 import { api } from "@/lib/api";
 import type { AgentSession, Project } from "@/lib/types";
 
-const sessionStatusConfig: Record<string, { color: string; label: string }> = {
-  active: { color: "bg-blue-100 text-blue-800", label: "Active" },
-  completed: { color: "bg-green-100 text-green-800", label: "Completed" },
-  failed: { color: "bg-red-100 text-red-800", label: "Failed" },
+const sessionStatusConfig: Record<string, { dot: string; text: string; bg: string; label: string }> = {
+  active: { dot: "bg-blue-500", text: "text-blue-700", bg: "bg-blue-50", label: "Active" },
+  completed: { dot: "bg-emerald-500", text: "text-emerald-700", bg: "bg-emerald-50", label: "Completed" },
+  failed: { dot: "bg-red-500", text: "text-red-700", bg: "bg-red-50", label: "Failed" },
 };
 
 const triggeredByLabels: Record<string, string> = {
@@ -60,111 +57,121 @@ function SessionRow({ session }: { session: AgentSession }) {
   return (
     <Link
       href={`/sessions/${session.id}`}
-      className="flex items-center justify-between py-3 px-4 border-b border-border last:border-b-0 hover:bg-muted/50 transition-colors cursor-pointer"
+      className="group flex items-center gap-4 py-3 px-5 hover:bg-gray-50 transition-colors cursor-pointer"
     >
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${status.color}`}>
-            {isActive && (
-              <span className="relative mr-1.5 flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
-              </span>
-            )}
-            {status.label}
+      {/* Status dot */}
+      <div className="flex-shrink-0">
+        {isActive ? (
+          <span className="relative flex h-2 w-2">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+            <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
           </span>
-          <span className="text-sm font-medium text-foreground truncate">
-            {session.title}
-          </span>
-        </div>
-        <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
-          <Badge variant="outline" className="text-[11px] px-1.5 py-0">
-            {session.type === "plan" ? (
-              <><Layers className="mr-1 h-3 w-3 inline" />PM Analysis</>
-            ) : (
-              <><Wrench className="mr-1 h-3 w-3 inline" />Manual</>
-            )}
-          </Badge>
-          <span>{triggeredByLabels[session.triggered_by] || session.triggered_by}</span>
-          <span>{session.task_count} task{session.task_count !== 1 ? "s" : ""}</span>
-          {session.active_run_count > 0 && (
-            <span className="text-blue-600">{session.active_run_count} running</span>
-          )}
-          {session.completed_run_count > 0 && (
-            <span className="text-green-600">{session.completed_run_count} done</span>
-          )}
-          {session.failed_run_count > 0 && (
-            <span className="text-red-600">{session.failed_run_count} failed</span>
-          )}
-          <span>{formatTimeAgo(session.created_at)}</span>
-        </div>
+        ) : (
+          <span className={`inline-flex rounded-full h-2 w-2 ${status.dot}`} />
+        )}
       </div>
+
+      {/* Main content */}
+      <div className="flex-1 min-w-0">
+        <span className="text-[13px] font-medium text-gray-900 truncate block">
+          {session.title}
+        </span>
+      </div>
+
+      {/* Metadata pills */}
+      <div className="flex items-center gap-2 flex-shrink-0">
+        <span className="inline-flex items-center gap-1 text-[11px] text-gray-500 bg-gray-100 rounded-md px-2 py-0.5">
+          {session.type === "plan" ? (
+            <><Layers className="h-3 w-3" />PM Analysis</>
+          ) : (
+            <><Wrench className="h-3 w-3" />Manual</>
+          )}
+        </span>
+        <span className="text-[11px] text-gray-400">
+          {triggeredByLabels[session.triggered_by] || session.triggered_by}
+        </span>
+      </div>
+
+      {/* Stats */}
+      <div className="flex items-center gap-3 flex-shrink-0 text-[11px] tabular-nums">
+        <span className="text-gray-500">{session.task_count} task{session.task_count !== 1 ? "s" : ""}</span>
+        {session.active_run_count > 0 && (
+          <span className="text-blue-600 font-medium">{session.active_run_count} running</span>
+        )}
+        {session.completed_run_count > 0 && (
+          <span className="text-emerald-600">{session.completed_run_count} done</span>
+        )}
+        {session.failed_run_count > 0 && (
+          <span className="text-red-500">{session.failed_run_count} failed</span>
+        )}
+      </div>
+
+      {/* Timestamp */}
+      <span className="text-[11px] text-gray-400 flex-shrink-0 w-16 text-right">
+        {formatTimeAgo(session.created_at)}
+      </span>
     </Link>
   );
 }
 
-function SessionSection({ title, sessions, badge, icon }: {
+function SessionSection({ title, sessions, badge }: {
   title: string;
   sessions: AgentSession[];
   badge?: React.ReactNode;
-  icon?: React.ReactNode;
 }) {
   if (sessions.length === 0) return null;
   return (
-    <Card>
-      <CardContent className="p-0">
-        <div className="flex items-center gap-2 px-4 py-3 border-b border-border bg-muted/30">
-          {icon}
-          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-            {title}
-          </span>
-          {badge}
-          <span className="text-xs text-muted-foreground">({sessions.length})</span>
-        </div>
+    <div>
+      <div className="flex items-center gap-2 px-5 py-2">
+        <span className="text-[11px] font-medium text-gray-400 uppercase tracking-wider">
+          {title}
+        </span>
+        {badge}
+        <span className="text-[11px] text-gray-300">{sessions.length}</span>
+      </div>
+      <div className="rounded-lg border border-gray-200 bg-white divide-y divide-gray-100 overflow-hidden">
         {sessions.map((session) => (
           <SessionRow key={session.id} session={session} />
         ))}
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }
 
 function ProjectGroup({ project, sessions }: { project: Project; sessions: AgentSession[] }) {
   if (sessions.length === 0) return null;
 
-  const statusColor = project.status === "active" ? "bg-blue-100 text-blue-800"
-    : project.status === "completed" ? "bg-green-100 text-green-800"
-    : "bg-gray-100 text-gray-700";
+  const statusDot = project.status === "active" ? "bg-blue-500"
+    : project.status === "completed" ? "bg-emerald-500"
+    : "bg-gray-400";
 
   return (
-    <Card>
-      <CardContent className="p-0">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-muted/30">
-          <div className="flex items-center gap-2">
-            <FolderKanban className="h-3.5 w-3.5 text-muted-foreground" />
-            <Link
-              href={`/projects/${project.id}`}
-              className="text-xs font-semibold text-foreground hover:underline"
-            >
-              {project.title}
-            </Link>
-            <span className={`inline-flex items-center rounded-full px-1.5 py-0 text-[10px] font-medium ${statusColor}`}>
-              {project.status}
-            </span>
-          </div>
-          <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
-            <span>{project.total_tasks} task{project.total_tasks !== 1 ? "s" : ""}</span>
-            {project.completed_tasks > 0 && (
-              <span className="text-green-600">{project.completed_tasks} completed</span>
-            )}
-            <span>{sessions.length} session{sessions.length !== 1 ? "s" : ""}</span>
-          </div>
+    <div>
+      <div className="flex items-center justify-between px-5 py-2">
+        <div className="flex items-center gap-2">
+          <FolderKanban className="h-3.5 w-3.5 text-gray-400" />
+          <Link
+            href={`/projects/${project.id}`}
+            className="text-[11px] font-semibold text-gray-600 hover:text-gray-900 transition-colors"
+          >
+            {project.title}
+          </Link>
+          <span className={`inline-flex rounded-full h-1.5 w-1.5 ${statusDot}`} />
         </div>
+        <div className="flex items-center gap-3 text-[11px] text-gray-400">
+          <span>{project.total_tasks} task{project.total_tasks !== 1 ? "s" : ""}</span>
+          {project.completed_tasks > 0 && (
+            <span className="text-emerald-500">{project.completed_tasks} done</span>
+          )}
+          <span>{sessions.length} session{sessions.length !== 1 ? "s" : ""}</span>
+        </div>
+      </div>
+      <div className="rounded-lg border border-gray-200 bg-white divide-y divide-gray-100 overflow-hidden">
         {sessions.map((session) => (
           <SessionRow key={session.id} session={session} />
         ))}
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }
 
@@ -239,42 +246,48 @@ export function SessionsPageContent() {
 
       <PMStatusBanner hasActivePlanSession={hasActivePlanSession} />
 
-      <div className="flex items-center gap-1">
-        {filterTabs.map((tab) => (
-          <Button
-            key={tab.value}
-            variant={currentFilter === tab.value ? "default" : "ghost"}
-            size="sm"
-            className="text-xs"
-            onClick={() => setActiveFilter(tab.value === "all" ? null : tab.value)}
-          >
-            {tab.label}
-            {tab.value === "active" && activeSessions.length > 0 && (
-              <span className="ml-1.5 rounded-full bg-blue-500 text-white text-[10px] px-1.5 py-0">{activeSessions.length}</span>
-            )}
-            {tab.value === "failed" && failedSessions.length > 0 && (
-              <span className="ml-1.5 rounded-full bg-red-500 text-white text-[10px] px-1.5 py-0">{failedSessions.length}</span>
-            )}
-          </Button>
-        ))}
+      <div className="flex items-center gap-0 border-b border-gray-200">
+        {filterTabs.map((tab) => {
+          const isSelected = currentFilter === tab.value;
+          return (
+            <button
+              key={tab.value}
+              className={`relative px-3 py-2 text-[13px] font-medium transition-colors ${
+                isSelected
+                  ? "text-gray-900"
+                  : "text-gray-400 hover:text-gray-600"
+              }`}
+              onClick={() => setActiveFilter(tab.value === "all" ? null : tab.value)}
+            >
+              <span className="flex items-center gap-1.5">
+                {tab.label}
+                {tab.value === "active" && activeSessions.length > 0 && (
+                  <span className="rounded-full bg-blue-500 text-white text-[10px] leading-none px-1.5 py-0.5 font-normal">{activeSessions.length}</span>
+                )}
+                {tab.value === "failed" && failedSessions.length > 0 && (
+                  <span className="rounded-full bg-red-500 text-white text-[10px] leading-none px-1.5 py-0.5 font-normal">{failedSessions.length}</span>
+                )}
+              </span>
+              {isSelected && (
+                <span className="absolute bottom-0 left-3 right-3 h-0.5 bg-gray-900 rounded-full" />
+              )}
+            </button>
+          );
+        })}
       </div>
 
       {showDecisions && <DecisionsView />}
 
       {!showDecisions && isLoading && (
-        <Card>
-          <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            Loading sessions...
-          </CardContent>
-        </Card>
+        <div className="py-16 text-center text-[13px] text-gray-400">
+          Loading sessions...
+        </div>
       )}
 
       {!showDecisions && error && (
-        <Card>
-          <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            Failed to load sessions. Make sure the backend is running.
-          </CardContent>
-        </Card>
+        <div className="py-16 text-center text-[13px] text-gray-400">
+          Failed to load sessions. Make sure the backend is running.
+        </div>
       )}
 
       {!showDecisions && !isLoading && !error && allSessions.length === 0 && (
@@ -323,24 +336,24 @@ export function SessionsPageContent() {
       )}
 
       {!showDecisions && !isLoading && !error && allSessions.length > 0 && !showGrouped && (
-        <Card>
-          <CardContent className="p-0">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-muted/30">
-              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                {filteredSessions.length} session{filteredSessions.length !== 1 ? "s" : ""}
-              </span>
+        <div>
+          <div className="px-5 py-2">
+            <span className="text-[11px] font-medium text-gray-400 uppercase tracking-wider">
+              {filteredSessions.length} session{filteredSessions.length !== 1 ? "s" : ""}
+            </span>
+          </div>
+          {filteredSessions.length === 0 ? (
+            <div className="py-12 text-center text-[13px] text-gray-400">
+              No sessions match this filter.
             </div>
-            {filteredSessions.length === 0 ? (
-              <div className="py-8 text-center text-sm text-muted-foreground">
-                No sessions match this filter.
-              </div>
-            ) : (
-              filteredSessions.map((session) => (
+          ) : (
+            <div className="rounded-lg border border-gray-200 bg-white divide-y divide-gray-100 overflow-hidden">
+              {filteredSessions.map((session) => (
                 <SessionRow key={session.id} session={session} />
-              ))
-            )}
-          </CardContent>
-        </Card>
+              ))}
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
