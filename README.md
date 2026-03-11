@@ -63,14 +63,21 @@ See the [local development guide](docs/local-development.md) for step-by-step se
 
 ### Secrets & API Keys
 
-For local dev, just copy `.env.example` into `.env` and edit it directly — it's gitignored. For syncing secrets across machines or environments, we use [SOPS](https://github.com/getsops/sops) + [age](https://github.com/FiloSottile/age) to encrypt secrets into `.env.enc` (safe to commit). See the [secrets management guide](docs/secrets/README.md) for full setup.
+For local dev, just copy `.env.example` into `.env` and edit it directly — it's gitignored. For syncing secrets across machines or environments, we use [SOPS](https://github.com/getsops/sops) + [age](https://github.com/FiloSottile/age) to encrypt secrets into `.env.enc` (safe to commit). Production secrets are stored in `.env.production.enc`. See the [secrets management guide](docs/secrets/README.md) for full setup.
 
 ```bash
 make secrets-setup                   # one-time: generate age keypair
 make secrets-encrypt                 # encrypt .env → .env.enc
 make secrets-decrypt                 # decrypt .env.enc → .env
-make secrets-encrypt ENV=staging     # per-environment support
+make secrets-encrypt ENV=production  # encrypt production secrets
+make secrets-decrypt ENV=production  # decrypt production secrets
 make secrets-rotate                  # re-encrypt after adding a team member's key
+```
+
+After running `make secrets-setup`, add this to your shell profile (`~/.bash_profile` or `~/.zshrc`):
+
+```bash
+export SOPS_AGE_KEY_FILE="$HOME/.config/sops/age/keys.txt"
 ```
 
 ## How it works
