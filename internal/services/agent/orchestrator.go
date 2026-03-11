@@ -242,6 +242,12 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error
 	if sandboxCfg.Env == nil {
 		sandboxCfg.Env = make(map[string]string)
 	}
+	// Apply per-run model override if set.
+	if run.ModelOverride != nil && *run.ModelOverride != "" {
+		if envVar := models.ModelEnvVarForAgentType(run.AgentType); envVar != "" {
+			sandboxCfg.Env[envVar] = *run.ModelOverride
+		}
+	}
 	if _, ok := sandboxCfg.Env["HOME"]; !ok {
 		sandboxCfg.Env["HOME"] = sandboxCfg.WorkDir
 	}

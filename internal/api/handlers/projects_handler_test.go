@@ -28,6 +28,7 @@ func projectColumns() []string {
 		"current_phase", "lessons_learned", "approach_history",
 		"total_tasks", "completed_tasks", "failed_tasks",
 		"proposed_by_pm", "source_issue_ids", "proposal_reasoning",
+		"agent_type", "model_override",
 		"created_by", "created_at", "updated_at", "completed_at",
 	}
 }
@@ -40,6 +41,7 @@ func newProjectRow(id, orgID, repoID uuid.UUID, status models.ProjectStatus, now
 		nil, []byte("[]"), []byte("[]"),
 		0, 0, 0,
 		false, []uuid.UUID{}, nil,
+		nil, nil, // agent_type, model_override
 		&createdBy, now, now, nil,
 	}
 }
@@ -505,7 +507,8 @@ func TestProjectHandler_Create(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
 
 	body, _ := json.Marshal(map[string]string{

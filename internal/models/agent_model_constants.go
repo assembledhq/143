@@ -100,6 +100,42 @@ func IsSupportedCodexModel(model string) bool {
 	return false
 }
 
+// ValidateModelForAgentType checks whether the given model is valid for the given agent type.
+func ValidateModelForAgentType(agentType, model string) error {
+	switch agentType {
+	case "codex":
+		if !IsSupportedCodexModel(model) {
+			return fmt.Errorf("model must be one of: %v", AvailableCodexModels)
+		}
+	case "claude_code":
+		if !IsSupportedClaudeCodeModel(model) {
+			return fmt.Errorf("model must be one of: %v", AvailableClaudeCodeModels)
+		}
+	case "gemini_cli":
+		if !IsSupportedGeminiCLIModel(model) {
+			return fmt.Errorf("model must be one of: %v", AvailableGeminiCLIModels)
+		}
+	default:
+		return fmt.Errorf("unknown agent type: %s", agentType)
+	}
+	return nil
+}
+
+// ModelEnvVarForAgentType returns the environment variable name used to set the model
+// for the given agent type.
+func ModelEnvVarForAgentType(agentType string) string {
+	switch agentType {
+	case "codex":
+		return "OPENAI_MODEL"
+	case "claude_code":
+		return "ANTHROPIC_MODEL"
+	case "gemini_cli":
+		return "GEMINI_MODEL"
+	default:
+		return ""
+	}
+}
+
 func ValidateSettingsModels(settings OrgSettings) error {
 	if settings.PMModel != "" && !IsSupportedPMModel(settings.PMModel) {
 		return fmt.Errorf("pm_model must be one of: %v", AvailablePMModels)

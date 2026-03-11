@@ -140,6 +140,9 @@ func (s *Service) dispatchProjectTasks(ctx context.Context, orgID uuid.UUID, pro
 	}
 
 	agentType := settings.DefaultAgentType
+	if project.AgentType != nil && *project.AgentType != "" {
+		agentType = *project.AgentType
+	}
 	if agentType == "" {
 		agentType = models.DefaultDefaultAgentType
 	}
@@ -179,6 +182,7 @@ func (s *Service) dispatchProjectTasks(ctx context.Context, orgID uuid.UUID, pro
 			PMApproach:    &approach,
 			PMReasoning:   &reasoning,
 			ProjectTaskID: &task.ID,
+			ModelOverride: project.ModelOverride,
 		}
 		if err := s.agentRuns.Create(ctx, run); err != nil {
 			s.logger.Error().Err(err).Str("task_id", task.ID.String()).Msg("failed to create agent run for project task")

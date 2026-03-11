@@ -31,6 +31,8 @@ type Project struct {
 	ProposedByPM       bool             `db:"proposed_by_pm" json:"proposed_by_pm"`
 	SourceIssueIDs     []uuid.UUID      `json:"source_issue_ids,omitempty"`
 	ProposalReasoning  *string          `db:"proposal_reasoning" json:"proposal_reasoning,omitempty"`
+	AgentType          *string          `db:"agent_type" json:"agent_type,omitempty"`
+	ModelOverride      *string          `db:"model_override" json:"model_override,omitempty"`
 	CreatedBy          *uuid.UUID       `db:"created_by" json:"created_by,omitempty"`
 	CreatedAt          time.Time        `db:"created_at" json:"created_at"`
 	UpdatedAt          time.Time        `db:"updated_at" json:"updated_at"`
