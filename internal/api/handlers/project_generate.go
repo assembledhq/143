@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/assembledhq/143/internal/llm"
+	"github.com/assembledhq/143/internal/prompts"
 )
 
 // ProjectGenerateHandler uses an LLM to convert a natural-language description
@@ -30,17 +31,6 @@ type GenerateProjectResponse struct {
 	ExecutionMode      string `json:"execution_mode"`
 }
 
-const generateProjectSystemPrompt = `You are an expert project planner. Given a user's natural-language description of a software project, extract structured project fields.
-
-Return ONLY a JSON object with these fields:
-- "title": A concise project title (max 80 chars)
-- "goal": A clear description of what the project should accomplish (1-3 sentences)
-- "scope": Files, areas, or components that are in scope (optional, leave empty string if unclear)
-- "completion_criteria": How to know the project is done (1-2 sentences)
-- "execution_mode": Either "sequential" or "parallel" based on whether tasks seem independent
-
-Do NOT include any text outside the JSON object. Do NOT use markdown code fences.`
-
 func (h *ProjectGenerateHandler) Generate(w http.ResponseWriter, r *http.Request) {
 	if h.llmClient == nil {
 		writeError(w, http.StatusServiceUnavailable, "LLM_NOT_CONFIGURED", "AI project generation is not available — no LLM provider configured")
@@ -59,7 +49,7 @@ func (h *ProjectGenerateHandler) Generate(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	response, err := h.llmClient.Complete(r.Context(), generateProjectSystemPrompt, desc)
+	response, err := h.llmClient.Complete(r.Context(), prompts.ProjectGeneratePrompt(), desc)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "LLM_ERROR", "failed to generate project: "+err.Error())
 		return
