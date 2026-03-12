@@ -33,6 +33,10 @@ type Project struct {
 	ProposalReasoning  *string          `db:"proposal_reasoning" json:"proposal_reasoning,omitempty"`
 	AgentType          *string          `db:"agent_type" json:"agent_type,omitempty"`
 	ModelOverride      *string          `db:"model_override" json:"model_override,omitempty"`
+	ScheduleEnabled    bool             `db:"schedule_enabled" json:"schedule_enabled"`
+	ScheduleInterval   int              `db:"schedule_interval" json:"schedule_interval"`
+	ScheduleUnit       string           `db:"schedule_unit" json:"schedule_unit"`
+	NextRunAt          *time.Time       `db:"next_run_at" json:"next_run_at,omitempty"`
 	CreatedBy          *uuid.UUID       `db:"created_by" json:"created_by,omitempty"`
 	CreatedAt          time.Time        `db:"created_at" json:"created_at"`
 	UpdatedAt          time.Time        `db:"updated_at" json:"updated_at"`
