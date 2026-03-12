@@ -228,16 +228,17 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 		baseBranch = *req.BaseBranch
 	}
 
-	validAgentTypes := map[string]bool{"claude_code": true, "gemini_cli": true, "codex": true}
-	if req.AgentType != nil && *req.AgentType != "" && !validAgentTypes[*req.AgentType] {
-		writeError(w, http.StatusBadRequest, "INVALID_AGENT_TYPE", "agent_type must be one of: claude_code, gemini_cli, codex")
-		return
+	if req.AgentType != nil && *req.AgentType != "" {
+		if err := models.AgentType(*req.AgentType).Validate(); err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_AGENT_TYPE", err.Error())
+			return
+		}
 	}
 
 	if req.Model != nil && *req.Model != "" {
-		agentType := "claude_code"
+		agentType := models.AgentTypeClaudeCode
 		if req.AgentType != nil && *req.AgentType != "" {
-			agentType = *req.AgentType
+			agentType = models.AgentType(*req.AgentType)
 		}
 		if err := models.ValidateModelForAgentType(agentType, *req.Model); err != nil {
 			writeError(w, http.StatusBadRequest, "INVALID_MODEL", err.Error())

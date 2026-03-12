@@ -123,7 +123,7 @@ func (s *Service) executeProjectPlan(ctx context.Context, orgID uuid.UUID, pp *P
 // dispatchProjectTasks dispatches eligible pending tasks for a project,
 // respecting the execution mode constraints. Returns the count of dispatched tasks.
 func (s *Service) dispatchProjectTasks(ctx context.Context, orgID uuid.UUID, project *models.Project, settings models.OrgSettings, planID uuid.UUID) int {
-	if settings.AutonomyLevel == "manual" {
+	if settings.AutonomyLevel == models.AutonomyLevelManual {
 		return 0
 	}
 
@@ -141,7 +141,7 @@ func (s *Service) dispatchProjectTasks(ctx context.Context, orgID uuid.UUID, pro
 
 	agentType := settings.DefaultAgentType
 	if project.AgentType != nil && *project.AgentType != "" {
-		agentType = *project.AgentType
+		agentType = models.AgentType(*project.AgentType)
 	}
 	if agentType == "" {
 		agentType = models.DefaultDefaultAgentType
@@ -156,7 +156,7 @@ func (s *Service) dispatchProjectTasks(ctx context.Context, orgID uuid.UUID, pro
 		task := &pending[i]
 
 		// Skip low-confidence tasks unless autonomy is auto_all.
-		if task.Confidence != nil && *task.Confidence == "low" && settings.AutonomyLevel != "auto_all" {
+		if task.Confidence != nil && *task.Confidence == "low" && settings.AutonomyLevel != models.AutonomyLevelAutoAll {
 			continue
 		}
 
@@ -176,7 +176,7 @@ func (s *Service) dispatchProjectTasks(ctx context.Context, orgID uuid.UUID, pro
 			IssueID:       placeholderIssueID(task),
 			AgentType:     agentType,
 			Status:        string(models.SessionStatusPending),
-			AutonomyLevel: settings.AutonomyLevel,
+			AutonomyLevel: string(settings.AutonomyLevel),
 			TokenMode:     tokenModeFromTaskComplexity(task.Complexity),
 			PMPlanID:      &planID,
 			PMApproach:    &approach,

@@ -101,17 +101,17 @@ func IsSupportedCodexModel(model string) bool {
 }
 
 // ValidateModelForAgentType checks whether the given model is valid for the given agent type.
-func ValidateModelForAgentType(agentType, model string) error {
+func ValidateModelForAgentType(agentType AgentType, model string) error {
 	switch agentType {
-	case "codex":
+	case AgentTypeCodex:
 		if !IsSupportedCodexModel(model) {
 			return fmt.Errorf("model must be one of: %v", AvailableCodexModels)
 		}
-	case "claude_code":
+	case AgentTypeClaudeCode:
 		if !IsSupportedClaudeCodeModel(model) {
 			return fmt.Errorf("model must be one of: %v", AvailableClaudeCodeModels)
 		}
-	case "gemini_cli":
+	case AgentTypeGeminiCLI:
 		if !IsSupportedGeminiCLIModel(model) {
 			return fmt.Errorf("model must be one of: %v", AvailableGeminiCLIModels)
 		}
@@ -123,13 +123,13 @@ func ValidateModelForAgentType(agentType, model string) error {
 
 // ModelEnvVarForAgentType returns the environment variable name used to set the model
 // for the given agent type.
-func ModelEnvVarForAgentType(agentType string) string {
+func ModelEnvVarForAgentType(agentType AgentType) string {
 	switch agentType {
-	case "codex":
+	case AgentTypeCodex:
 		return "OPENAI_MODEL"
-	case "claude_code":
+	case AgentTypeClaudeCode:
 		return "ANTHROPIC_MODEL"
-	case "gemini_cli":
+	case AgentTypeGeminiCLI:
 		return "GEMINI_MODEL"
 	default:
 		return ""
@@ -175,19 +175,19 @@ func ValidateSettingsModels(settings OrgSettings) error {
 		return fmt.Errorf("pm_model must be one of: %v", AvailablePMModels)
 	}
 
-	for agentType, envVars := range settings.AgentConfig {
-		switch agentType {
-		case "codex":
+	for agentTypeStr, envVars := range settings.AgentConfig {
+		switch AgentType(agentTypeStr) {
+		case AgentTypeCodex:
 			model := envVars["OPENAI_MODEL"]
 			if model != "" && !IsSupportedCodexModel(model) {
 				return fmt.Errorf("agent_config.codex.OPENAI_MODEL must be one of: %v", AvailableCodexModels)
 			}
-		case "claude_code":
+		case AgentTypeClaudeCode:
 			model := envVars["ANTHROPIC_MODEL"]
 			if model != "" && !IsSupportedClaudeCodeModel(model) {
 				return fmt.Errorf("agent_config.claude_code.ANTHROPIC_MODEL must be one of: %v or %v", legacyPMAliases, AvailableClaudeCodeModels)
 			}
-		case "gemini_cli":
+		case AgentTypeGeminiCLI:
 			model := envVars["GEMINI_MODEL"]
 			if model != "" && !IsSupportedGeminiCLIModel(model) {
 				return fmt.Errorf("agent_config.gemini_cli.GEMINI_MODEL must be one of: %v", AvailableGeminiCLIModels)

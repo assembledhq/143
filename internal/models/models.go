@@ -96,7 +96,7 @@ type Session struct {
 	ID                   uuid.UUID       `db:"id" json:"id"`
 	IssueID              uuid.UUID       `db:"issue_id" json:"issue_id"`
 	OrgID                uuid.UUID       `db:"org_id" json:"org_id"`
-	AgentType            string          `db:"agent_type" json:"agent_type"`
+	AgentType            AgentType       `db:"agent_type" json:"agent_type"`
 	Status               string          `db:"status" json:"status"`
 	AutonomyLevel        string          `db:"autonomy_level" json:"autonomy_level"`
 	TokenMode            string          `db:"token_mode" json:"token_mode"`

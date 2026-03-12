@@ -1,6 +1,48 @@
 package models
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
+
+// AutonomyLevel controls when the system auto-triggers agent runs.
+type AutonomyLevel string
+
+const (
+	AutonomyLevelManual     AutonomyLevel = "manual"
+	AutonomyLevelAutoSimple AutonomyLevel = "auto_simple"
+	AutonomyLevelAutoAll    AutonomyLevel = "auto_all"
+)
+
+// Validate returns an error if the autonomy level is not a recognized value.
+func (a AutonomyLevel) Validate() error {
+	switch a {
+	case AutonomyLevelManual, AutonomyLevelAutoSimple, AutonomyLevelAutoAll:
+		return nil
+	default:
+		return fmt.Errorf("invalid autonomy level: %q", a)
+	}
+}
+
+// AgentType identifies a coding agent backend.
+type AgentType string
+
+const (
+	AgentTypeClaudeCode AgentType = "claude_code"
+	AgentTypeGeminiCLI  AgentType = "gemini_cli"
+	AgentTypeCodex      AgentType = "codex"
+	AgentTypePMAgent    AgentType = "pm_agent"
+)
+
+// Validate returns an error if the agent type is not a recognized value.
+func (a AgentType) Validate() error {
+	switch a {
+	case AgentTypeClaudeCode, AgentTypeGeminiCLI, AgentTypeCodex:
+		return nil
+	default:
+		return fmt.Errorf("invalid agent type: %q", a)
+	}
+}
 
 // AgentEnvConfig holds per-agent environment variable overrides.
 // Keys are agent type names (e.g. "claude_code", "gemini_cli", "codex"),
@@ -9,7 +51,7 @@ type AgentEnvConfig map[string]map[string]string
 
 // OrgSettings is the strongly-typed representation of organizations.settings JSONB.
 type OrgSettings struct {
-	AutonomyLevel        string               `json:"autonomy_level"`
+	AutonomyLevel        AutonomyLevel        `json:"autonomy_level"`
 	Aggressiveness       int                  `json:"execution_aggressiveness"`
 	MaxConcurrentRuns    int                  `json:"max_concurrent_runs"`
 	AgentAutonomy        string               `json:"agent_autonomy"`
@@ -22,7 +64,7 @@ type OrgSettings struct {
 	PMModel              string               `json:"pm_model"`
 	LLMModel             string               `json:"llm_model"`
 	AgentConfig          AgentEnvConfig       `json:"agent_config,omitempty"`
-	DefaultAgentType     string               `json:"default_agent_type,omitempty"`
+	DefaultAgentType     AgentType            `json:"default_agent_type,omitempty"`
 }
 
 // Agent autonomy mode constants.
@@ -61,12 +103,12 @@ type PriorityWeights struct {
 
 // Default values for org settings.
 const (
-	DefaultAutonomyLevel        = "manual"
-	DefaultAggressiveness       = 5
-	DefaultMaxConcurrentRuns    = 3
-	DefaultAgentAutonomy        = AgentAutonomyAggressive
-	DefaultMinPriorityThreshold = 30.0
-	DefaultDefaultAgentType     = "codex"
+	DefaultAutonomyLevel        AutonomyLevel = AutonomyLevelAutoSimple
+	DefaultAggressiveness                     = 5
+	DefaultMaxConcurrentRuns                  = 5
+	DefaultAgentAutonomy                      = AgentAutonomyAggressive
+	DefaultMinPriorityThreshold               = 30.0
+	DefaultDefaultAgentType     AgentType     = AgentTypeCodex
 	DefaultPMScheduleHours      = 4
 	DefaultPMModel              = PMModelSonnet
 
