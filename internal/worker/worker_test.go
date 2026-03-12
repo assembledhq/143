@@ -427,6 +427,9 @@ func TestWorker_RetryJob_BackoffCalculation(t *testing.T) {
 		{name: "2^2 = 4 seconds", attempt: 2, expectedSec: 4},
 		{name: "2^3 = 8 seconds", attempt: 3, expectedSec: 8},
 		{name: "2^5 = 32 seconds", attempt: 5, expectedSec: 32},
+		{name: "2^10 = 1024 seconds (cap)", attempt: 10, expectedSec: 1024},
+		{name: "attempt 11 capped at 2^10 = 1024 seconds", attempt: 11, expectedSec: 1024},
+		{name: "attempt 20 capped at 2^10 = 1024 seconds", attempt: 20, expectedSec: 1024},
 	}
 
 	for _, tt := range tests {
@@ -437,7 +440,11 @@ func TestWorker_RetryJob_BackoffCalculation(t *testing.T) {
 			defer mock.Close()
 
 			jobID := uuid.New()
-			expectedBackoff := time.Duration(1<<uint(tt.attempt)) * time.Second
+			exp := tt.attempt
+			if exp > 10 {
+				exp = 10
+			}
+			expectedBackoff := time.Duration(1<<uint(exp)) * time.Second
 			require.Equal(t, tt.expectedSec, int(expectedBackoff.Seconds()), "backoff formula should produce expected seconds")
 
 			intervalStr := fmt.Sprintf("%d seconds", tt.expectedSec)
