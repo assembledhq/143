@@ -67,7 +67,7 @@ describe("AuthenticatedLayout", () => {
 
     expect(await screen.findByRole("menuitem", { name: "General" })).toBeInTheDocument();
     expect(await screen.findByRole("menuitem", { name: "Integrations" })).toBeInTheDocument();
-    expect(await screen.findByRole("menuitem", { name: "Agent" })).toBeInTheDocument();
+    expect(await screen.findByRole("menuitem", { name: "Coding Agent" })).toBeInTheDocument();
     expect(await screen.findByRole("menuitem", { name: "Prioritization" })).toBeInTheDocument();
     expect(await screen.findByRole("menuitem", { name: "Team" })).toBeInTheDocument();
   });
@@ -92,7 +92,7 @@ describe("AuthenticatedLayout", () => {
     expect(pushMock).toHaveBeenCalledWith("/settings");
 
     await user.click(screen.getByRole("button", { name: /Alex Doe/ }));
-    await user.click(await screen.findByRole("menuitem", { name: "Agent" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Coding Agent" }));
 
     expect(pushMock).toHaveBeenCalledWith("/agent");
   });

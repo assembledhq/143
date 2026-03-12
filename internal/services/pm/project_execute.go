@@ -123,7 +123,7 @@ func (s *Service) executeProjectPlan(ctx context.Context, orgID uuid.UUID, pp *P
 // dispatchProjectTasks dispatches eligible pending tasks for a project,
 // respecting the execution mode constraints. Returns the count of dispatched tasks.
 func (s *Service) dispatchProjectTasks(ctx context.Context, orgID uuid.UUID, project *models.Project, settings models.OrgSettings, planID uuid.UUID) int {
-	if settings.AutonomyLevel == "manual" {
+	if settings.AutonomyLevel == models.AutonomyLevelManual {
 		return 0
 	}
 

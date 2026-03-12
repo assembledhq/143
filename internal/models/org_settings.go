@@ -36,17 +36,12 @@ const (
 
 // Validate returns an error if the agent type is not a recognized value.
 func (a AgentType) Validate() error {
-	if ValidAgentTypes[a] {
+	switch a {
+	case AgentTypeClaudeCode, AgentTypeGeminiCLI, AgentTypeCodex:
 		return nil
+	default:
+		return fmt.Errorf("invalid agent type: %q", a)
 	}
-	return fmt.Errorf("invalid agent type: %q", a)
-}
-
-// ValidAgentTypes is the set of supported agent types.
-var ValidAgentTypes = map[AgentType]bool{
-	AgentTypeClaudeCode: true,
-	AgentTypeGeminiCLI:  true,
-	AgentTypeCodex:      true,
 }
 
 // AgentEnvConfig holds per-agent environment variable overrides.
