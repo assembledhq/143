@@ -22,7 +22,7 @@ import (
 func TestClaudeCodeAdapter_Name(t *testing.T) {
 	t.Parallel()
 	a := NewClaudeCodeAdapter(zerolog.Nop())
-	require.Equal(t, "claude_code", a.Name())
+	require.Equal(t, models.AgentTypeClaudeCode, a.Name())
 }
 
 func TestClaudeCodeAdapter_PreparePrompt(t *testing.T) {

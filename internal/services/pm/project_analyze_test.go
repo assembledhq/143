@@ -17,7 +17,7 @@ import (
 // mockAdapter is a minimal stub for agent.AgentAdapter.
 type mockAdapter struct{}
 
-func (m *mockAdapter) Name() string { return "mock" }
+func (m *mockAdapter) Name() models.AgentType { return "mock" }
 func (m *mockAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
 	return nil, nil
 }

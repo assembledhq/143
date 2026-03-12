@@ -1036,6 +1036,10 @@ func (m *mockPMServiceError) Analyze(ctx context.Context, orgID uuid.UUID, trigg
 	return nil, errors.New("pm analysis failed")
 }
 
+func (m *mockPMServiceError) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID) error {
+	return errors.New("project analysis failed")
+}
+
 func TestPMAnalyzeHandler_ServiceError(t *testing.T) {
 	t.Parallel()
 

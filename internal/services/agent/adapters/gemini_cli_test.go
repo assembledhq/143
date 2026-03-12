@@ -17,7 +17,7 @@ import (
 func TestGeminiCLIAdapter_Name(t *testing.T) {
 	t.Parallel()
 	adapter := NewGeminiCLIAdapter(zerolog.Nop())
-	require.Equal(t, "gemini_cli", adapter.Name(), "adapter name should be gemini_cli")
+	require.Equal(t, models.AgentTypeGeminiCLI, adapter.Name(), "adapter name should be gemini_cli")
 }
 
 func TestGeminiCLIAdapter_PreparePrompt(t *testing.T) {
