@@ -13,6 +13,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/services/agent"
 )
@@ -35,8 +36,8 @@ func NewClaudeCodeAdapter(logger zerolog.Logger) *ClaudeCodeAdapter {
 }
 
 // Name returns the agent identifier.
-func (a *ClaudeCodeAdapter) Name() string {
-	return "claude_code"
+func (a *ClaudeCodeAdapter) Name() models.AgentType {
+	return models.AgentTypeClaudeCode
 }
 
 // PreparePrompt constructs the system and user prompts for Claude Code

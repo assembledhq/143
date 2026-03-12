@@ -84,16 +84,16 @@ func TestValidateModelForAgentType(t *testing.T) {
 
 	tests := []struct {
 		name      string
-		agentType string
+		agentType AgentType
 		model     string
 		wantErr   bool
 	}{
-		{name: "valid codex model", agentType: "codex", model: CodexModelGPT53Codex},
-		{name: "valid claude model", agentType: "claude_code", model: ClaudeCodeModelSonnet},
-		{name: "valid gemini model", agentType: "gemini_cli", model: GeminiCLIModelGemini3ProPreview},
-		{name: "invalid codex model", agentType: "codex", model: "bad", wantErr: true},
-		{name: "invalid claude model", agentType: "claude_code", model: "bad", wantErr: true},
-		{name: "invalid gemini model", agentType: "gemini_cli", model: "bad", wantErr: true},
+		{name: "valid codex model", agentType: AgentTypeCodex, model: CodexModelGPT53Codex},
+		{name: "valid claude model", agentType: AgentTypeClaudeCode, model: ClaudeCodeModelSonnet},
+		{name: "valid gemini model", agentType: AgentTypeGeminiCLI, model: GeminiCLIModelGemini3ProPreview},
+		{name: "invalid codex model", agentType: AgentTypeCodex, model: "bad", wantErr: true},
+		{name: "invalid claude model", agentType: AgentTypeClaudeCode, model: "bad", wantErr: true},
+		{name: "invalid gemini model", agentType: AgentTypeGeminiCLI, model: "bad", wantErr: true},
 		{name: "unknown agent type", agentType: "unknown", model: "any", wantErr: true},
 	}
 
@@ -113,9 +113,9 @@ func TestValidateModelForAgentType(t *testing.T) {
 func TestModelEnvVarForAgentType(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, "OPENAI_MODEL", ModelEnvVarForAgentType("codex"))
-	require.Equal(t, "ANTHROPIC_MODEL", ModelEnvVarForAgentType("claude_code"))
-	require.Equal(t, "GEMINI_MODEL", ModelEnvVarForAgentType("gemini_cli"))
+	require.Equal(t, "OPENAI_MODEL", ModelEnvVarForAgentType(AgentTypeCodex))
+	require.Equal(t, "ANTHROPIC_MODEL", ModelEnvVarForAgentType(AgentTypeClaudeCode))
+	require.Equal(t, "GEMINI_MODEL", ModelEnvVarForAgentType(AgentTypeGeminiCLI))
 	require.Equal(t, "", ModelEnvVarForAgentType("unknown"))
 }
 

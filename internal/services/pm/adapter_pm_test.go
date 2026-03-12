@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/stretchr/testify/require"
 )
@@ -16,7 +17,7 @@ type pmInnerAdapterMock struct {
 	calledPrompt  *agent.AgentPrompt
 }
 
-func (m *pmInnerAdapterMock) Name() string {
+func (m *pmInnerAdapterMock) Name() models.AgentType {
 	return "inner"
 }
 
@@ -86,5 +87,5 @@ func TestPMAdapterExecuteAndName(t *testing.T) {
 	require.NoError(t, err, "Execute should delegate to inner adapter without error")
 	require.Equal(t, expected, result, "Execute should return inner adapter result")
 	require.Equal(t, "ctx", inner.calledPrompt.UserPrompt, "Execute should pass prompt through to inner adapter")
-	require.Equal(t, "pm_agent", adapter.Name(), "Name should return pm_agent")
+	require.Equal(t, models.AgentTypePMAgent, adapter.Name(), "Name should return pm_agent")
 }

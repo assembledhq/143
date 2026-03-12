@@ -16,7 +16,7 @@ import (
 // (e.g., Claude Code, Codex) inside a sandbox.
 type AgentAdapter interface {
 	// Name returns the agent identifier (e.g., "claude_code").
-	Name() string
+	Name() models.AgentType
 
 	// PreparePrompt constructs the prompt and instructions for the agent
 	// based on the issue context and org settings.

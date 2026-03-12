@@ -19,6 +19,7 @@ import (
 	"github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/llm"
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/logging"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/agent/adapters"
@@ -210,10 +211,10 @@ func buildServices(
 	}
 
 	// Agent adapters.
-	agentAdapters := map[string]agent.AgentAdapter{
-		"claude_code": adapters.NewClaudeCodeAdapter(logger),
-		"gemini_cli":  adapters.NewGeminiCLIAdapter(logger),
-		"codex":       adapters.NewCodexAdapter(logger),
+	agentAdapters := map[models.AgentType]agent.AgentAdapter{
+		models.AgentTypeClaudeCode: adapters.NewClaudeCodeAdapter(logger),
+		models.AgentTypeGeminiCLI:  adapters.NewGeminiCLIAdapter(logger),
+		models.AgentTypeCodex:      adapters.NewCodexAdapter(logger),
 	}
 
 	// Orchestrator.

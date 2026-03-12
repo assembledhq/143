@@ -21,11 +21,11 @@ import (
 
 // mockAgentAdapter implements agent.AgentAdapter.
 type mockAgentAdapter struct {
-	name      string
+	name      models.AgentType
 	executeFn func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error)
 }
 
-func (m *mockAgentAdapter) Name() string { return m.name }
+func (m *mockAgentAdapter) Name() models.AgentType { return m.name }
 
 func (m *mockAgentAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
 	return &agent.AgentPrompt{
@@ -48,11 +48,11 @@ func (m *mockAgentAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, 
 }
 
 type capturingAdapter struct {
-	name     string
+	name     models.AgentType
 	captured *agent.AgentInput
 }
 
-func (c *capturingAdapter) Name() string { return c.name }
+func (c *capturingAdapter) Name() models.AgentType { return c.name }
 
 func (c *capturingAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
 	c.captured = input
@@ -350,7 +350,7 @@ func testRun(orgID, issueID uuid.UUID) *models.Session {
 		ID:        uuid.MustParse("00000000-0000-0000-0000-000000000003"),
 		IssueID:   issueID,
 		OrgID:     orgID,
-		AgentType: "claude_code",
+		AgentType: models.AgentTypeClaudeCode,
 		Status:    "pending",
 		TokenMode: "low",
 	}
@@ -376,7 +376,7 @@ func defaultDeps() testDeps {
 	orgID := testOrg()
 	return testDeps{
 		provider:  testutil.NewMockSandboxProvider(),
-		adapter:   &mockAgentAdapter{name: "claude_code"},
+		adapter:   &mockAgentAdapter{name: models.AgentTypeClaudeCode},
 		sessions: &mockSessionStore{countRunning: 0},
 		projects:  &mockProjectTaskUpdater{},
 		issues:    &mockIssueStore{issue: testIssue(orgID)},
@@ -394,7 +394,7 @@ func defaultDeps() testDeps {
 func buildOrchestrator(d testDeps) *agent.Orchestrator {
 	return agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:          d.provider,
-		Adapters:          map[string]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		Adapters:          map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
 		Sessions:         d.sessions,
 		SessionLogs:      d.logs,
 		SessionQuestions: d.questions,
@@ -522,11 +522,11 @@ func TestRunAgent_PopulatesPMContext(t *testing.T) {
 	mockGH := &mockGitHubTokenProvider{token: "token"}
 	sandboxProvider := testutil.NewMockSandboxProvider()
 
-	capAdapter := &capturingAdapter{name: "claude_code"}
+	capAdapter := &capturingAdapter{name: models.AgentTypeClaudeCode}
 
 	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:          sandboxProvider,
-		Adapters:          map[string]agent.AgentAdapter{"claude_code": capAdapter},
+		Adapters:          map[models.AgentType]agent.AgentAdapter{models.AgentTypeClaudeCode: capAdapter},
 		Sessions:         mockRuns,
 		SessionLogs:      mockLogs,
 		SessionQuestions: mockQuestions,
@@ -865,7 +865,7 @@ func TestRunAgent_AgentCredentialsInjected(t *testing.T) {
 
 	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:          d.provider,
-		Adapters:          map[string]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		Adapters:          map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
 		Sessions:         d.sessions,
 		SessionLogs:      d.logs,
 		SessionQuestions: d.questions,
@@ -905,7 +905,7 @@ func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
 	// No credential configured for "claude_code".
 	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:          d.provider,
-		Adapters:          map[string]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		Adapters:          map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
 		Sessions:         d.sessions,
 		SessionLogs:      d.logs,
 		SessionQuestions: d.questions,
@@ -934,10 +934,10 @@ func TestRunAgent_CodexUsesOpenAICredentialFallback(t *testing.T) {
 	orgID := testOrg()
 	issue := testIssue(orgID)
 	run := testRun(orgID, issue.ID)
-	run.AgentType = "codex"
+	run.AgentType = models.AgentTypeCodex
 
 	d := defaultDeps()
-	d.adapter.name = "codex"
+	d.adapter.name = models.AgentTypeCodex
 	d.codexAuth = nil
 	d.creds = &mockCredentialProvider{
 		byProvider: map[models.ProviderName]*models.DecryptedCredential{
@@ -966,10 +966,10 @@ func TestRunAgent_CodexAuthWritesToSandboxWorkdir(t *testing.T) {
 	orgID := testOrg()
 	issue := testIssue(orgID)
 	run := testRun(orgID, issue.ID)
-	run.AgentType = "codex"
+	run.AgentType = models.AgentTypeCodex
 
 	d := defaultDeps()
-	d.adapter.name = "codex"
+	d.adapter.name = models.AgentTypeCodex
 	d.codexAuth = &mockCodexAuthProvider{
 		cfg: &models.OpenAIChatGPTConfig{
 			AccessToken:  "test-access-token",
@@ -1005,10 +1005,10 @@ func TestRunAgent_CodexNoCredentialsFails(t *testing.T) {
 	orgID := testOrg()
 	issue := testIssue(orgID)
 	run := testRun(orgID, issue.ID)
-	run.AgentType = "codex"
+	run.AgentType = models.AgentTypeCodex
 
 	d := defaultDeps()
-	d.adapter.name = "codex"
+	d.adapter.name = models.AgentTypeCodex
 	// No codexAuth provider and no OPENAI_API_KEY in env.
 	d.codexAuth = nil
 
@@ -1031,10 +1031,10 @@ func TestRunAgent_CodexSandboxHasHomeEnv(t *testing.T) {
 	orgID := testOrg()
 	issue := testIssue(orgID)
 	run := testRun(orgID, issue.ID)
-	run.AgentType = "codex"
+	run.AgentType = models.AgentTypeCodex
 
 	d := defaultDeps()
-	d.adapter.name = "codex"
+	d.adapter.name = models.AgentTypeCodex
 	d.codexAuth = &mockCodexAuthProvider{
 		cfg: &models.OpenAIChatGPTConfig{
 			AccessToken:  "test-token",

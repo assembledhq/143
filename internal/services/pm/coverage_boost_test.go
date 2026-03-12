@@ -15,22 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// --- SetProjectStores ---
-
-func TestSetProjectStores(t *testing.T) {
-	t.Parallel()
-
-	svc := &Service{}
-	ps := newMockProjectStore()
-	pts := &mockProjectTaskStore{}
-	pcs := &mockProjectCycleStore{}
-
-	svc.SetProjectStores(ps, pts, pcs)
-	require.Equal(t, ps, svc.projects)
-	require.Equal(t, pts, svc.projectTasks)
-	require.Equal(t, pcs, svc.projectCycles)
-}
-
 // --- buildProjectSummaries and buildProjectSummary ---
 
 func TestBuildProjectSummaries_Success(t *testing.T) {
@@ -799,7 +783,7 @@ func TestDispatchProjectTasks_UsesProjectAgentType(t *testing.T) {
 	dispatched := svc.dispatchProjectTasks(context.Background(), orgID, project, settings, uuid.New())
 	require.Equal(t, 1, dispatched)
 	require.Len(t, sessions.created, 1)
-	require.Equal(t, "custom-agent", sessions.created[0].AgentType, "should use project's agent type over default")
+	require.Equal(t, models.AgentType("custom-agent"), sessions.created[0].AgentType, "should use project's agent type over default")
 }
 
 func TestDispatchProjectTasks_FallbackAgentType(t *testing.T) {
@@ -964,6 +948,16 @@ func (m *mockRepoStore) ListByOrg(_ context.Context, _ uuid.UUID) ([]models.Repo
 		return nil, m.err
 	}
 	return m.repos, nil
+}
+
+func (m *mockRepoStore) GetByID(_ context.Context, _, _ uuid.UUID) (models.Repository, error) {
+	if m.err != nil {
+		return models.Repository{}, m.err
+	}
+	if len(m.repos) > 0 {
+		return m.repos[0], nil
+	}
+	return models.Repository{}, fmt.Errorf("not found")
 }
 
 func TestAnalyze_NoRepositories(t *testing.T) {

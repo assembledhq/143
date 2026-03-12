@@ -171,7 +171,7 @@ func TestSessionStore_GetByID(t *testing.T) {
 			require.NoError(t, err, "GetByID should not return an error")
 			require.Equal(t, runID, run.ID, "should return the correct agent run ID")
 			require.Equal(t, issueID, run.IssueID, "should return the correct issue ID")
-			require.Equal(t, "fixer", run.AgentType, "should return the correct agent type")
+			require.Equal(t, models.AgentType("fixer"), run.AgentType, "should return the correct agent type")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}

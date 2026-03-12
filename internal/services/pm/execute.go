@@ -37,12 +37,12 @@ func (s *Service) executePlan(ctx context.Context, orgID uuid.UUID, plan *Plan, 
 			continue
 		}
 
-		if settings.AutonomyLevel == "manual" {
+		if settings.AutonomyLevel == models.AutonomyLevelManual {
 			task.Status = models.PMTaskStatusSkippedCapacity
 			continue
 		}
 
-		if task.Confidence == models.PMTaskConfidenceLow && settings.AutonomyLevel != "auto_all" {
+		if task.Confidence == models.PMTaskConfidenceLow && settings.AutonomyLevel != models.AutonomyLevelAutoAll {
 			task.Status = models.PMTaskStatusSkippedCapacity
 			continue
 		}
@@ -58,7 +58,7 @@ func (s *Service) executePlan(ctx context.Context, orgID uuid.UUID, plan *Plan, 
 			OrgID:         orgID,
 			AgentType:     agentType,
 			Status:        "pending",
-			AutonomyLevel: settings.AutonomyLevel,
+			AutonomyLevel: string(settings.AutonomyLevel),
 			TokenMode:     tokenModeFromComplexity(task.Complexity),
 			PMPlanID:      &plan.ID,
 			PMApproach:    &task.Approach,

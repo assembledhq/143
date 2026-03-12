@@ -11,6 +11,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 )
 
@@ -27,8 +28,8 @@ func NewCodexAdapter(logger zerolog.Logger) *CodexAdapter {
 }
 
 // Name returns the agent identifier.
-func (a *CodexAdapter) Name() string {
-	return "codex"
+func (a *CodexAdapter) Name() models.AgentType {
+	return models.AgentTypeCodex
 }
 
 // PreparePrompt constructs the prompts for Codex CLI based on the issue context.
