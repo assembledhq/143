@@ -548,6 +548,18 @@ export interface ProjectSpec {
   updated_at: string;
 }
 
+export interface PMDocument {
+  id: string;
+  org_id: string;
+  title: string;
+  content: string;
+  doc_type: string;
+  sort_order: number;
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface AISuggestion {
   type: string;
   title: string;

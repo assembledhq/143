@@ -16,6 +16,7 @@ type gatheredContext struct {
 	pmContext      *PMContext
 	productContext *models.ProductContext
 	settings       models.OrgSettings
+	pmDocuments    []models.PMDocument
 }
 
 // gatherContext collects the context needed for PM analysis. When repo is
@@ -152,10 +153,22 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 		}
 	}
 
+	// Gather PM documents if store is configured.
+	var pmDocs []models.PMDocument
+	if s.pmDocuments != nil {
+		docs, err := s.pmDocuments.ListByOrg(ctx, orgID)
+		if err != nil {
+			s.logger.Warn().Err(err).Msg("failed to load PM documents for context")
+		} else {
+			pmDocs = docs
+		}
+	}
+
 	return &gatheredContext{
 		pmContext:      pmCtx,
 		productContext: settings.ProductContext,
 		settings:       settings,
+		pmDocuments:    pmDocs,
 	}, nil
 }
 

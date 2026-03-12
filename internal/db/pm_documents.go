@@ -1,0 +1,114 @@
+package db
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/assembledhq/143/internal/models"
+)
+
+type PMDocumentStore struct {
+	db DBTX
+}
+
+func NewPMDocumentStore(db DBTX) *PMDocumentStore {
+	return &PMDocumentStore{db: db}
+}
+
+const pmDocColumns = `id, org_id, title, content, doc_type, sort_order, created_by, created_at, updated_at`
+
+func scanPMDoc(row pgx.Row) (models.PMDocument, error) {
+	var d models.PMDocument
+	err := row.Scan(
+		&d.ID, &d.OrgID, &d.Title, &d.Content, &d.DocType,
+		&d.SortOrder, &d.CreatedBy, &d.CreatedAt, &d.UpdatedAt,
+	)
+	return d, err
+}
+
+func scanPMDocs(rows pgx.Rows) ([]models.PMDocument, error) {
+	var docs []models.PMDocument
+	for rows.Next() {
+		var d models.PMDocument
+		err := rows.Scan(
+			&d.ID, &d.OrgID, &d.Title, &d.Content, &d.DocType,
+			&d.SortOrder, &d.CreatedBy, &d.CreatedAt, &d.UpdatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		docs = append(docs, d)
+	}
+	return docs, rows.Err()
+}
+
+func (s *PMDocumentStore) Create(ctx context.Context, doc *models.PMDocument) error {
+	query := `
+		INSERT INTO pm_documents (
+			org_id, title, content, doc_type, sort_order, created_by
+		) VALUES (
+			@org_id, @title, @content, @doc_type, @sort_order, @created_by
+		) RETURNING id, created_at, updated_at`
+
+	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"org_id":     doc.OrgID,
+		"title":      doc.Title,
+		"content":    doc.Content,
+		"doc_type":   doc.DocType,
+		"sort_order": doc.SortOrder,
+		"created_by": doc.CreatedBy,
+	})
+	return row.Scan(&doc.ID, &doc.CreatedAt, &doc.UpdatedAt)
+}
+
+func (s *PMDocumentStore) ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.PMDocument, error) {
+	query := fmt.Sprintf(`SELECT %s FROM pm_documents
+		WHERE org_id = @org_id
+		ORDER BY sort_order ASC, created_at ASC`, pmDocColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id": orgID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query pm documents: %w", err)
+	}
+	defer rows.Close()
+	return scanPMDocs(rows)
+}
+
+func (s *PMDocumentStore) GetByID(ctx context.Context, orgID, docID uuid.UUID) (models.PMDocument, error) {
+	query := fmt.Sprintf(`SELECT %s FROM pm_documents WHERE id = @id AND org_id = @org_id`, pmDocColumns)
+	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"id":     docID,
+		"org_id": orgID,
+	})
+	return scanPMDoc(row)
+}
+
+func (s *PMDocumentStore) Update(ctx context.Context, doc *models.PMDocument) error {
+	query := `UPDATE pm_documents SET
+		title = @title, content = @content, doc_type = @doc_type,
+		sort_order = @sort_order, updated_at = now()
+		WHERE id = @id AND org_id = @org_id
+		RETURNING updated_at`
+	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"id":         doc.ID,
+		"org_id":     doc.OrgID,
+		"title":      doc.Title,
+		"content":    doc.Content,
+		"doc_type":   doc.DocType,
+		"sort_order": doc.SortOrder,
+	})
+	return row.Scan(&doc.UpdatedAt)
+}
+
+func (s *PMDocumentStore) Delete(ctx context.Context, orgID, docID uuid.UUID) error {
+	_, err := s.db.Exec(ctx,
+		`DELETE FROM pm_documents WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": docID, "org_id": orgID},
+	)
+	return err
+}

@@ -89,6 +89,7 @@ func main() {
 		projectStore := db.NewProjectStore(pool)
 		projectTaskStore := db.NewProjectTaskStore(pool)
 		projectCycleStore := db.NewProjectCycleStore(pool)
+		pmDocumentStore := db.NewPMDocumentStore(pool)
 
 		stores := &worker.Stores{
 			Issues:              issueStore,
@@ -275,6 +276,7 @@ func buildServices(
 		logger,
 	)
 	pmSvc.SetProjectStores(projectStore, projectTaskStore, projectCycleStore)
+	pmSvc.SetPMDocumentStore(pmDocumentStore)
 
 	logger.Info().
 		Int("adapters", len(agentAdapters)).
