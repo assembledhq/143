@@ -7,18 +7,18 @@ describe("PageContainer", () => {
     render(<PageContainer>Default container</PageContainer>);
 
     const container = screen.getByText("Default container");
-    expect(container).toHaveClass("max-w-[1200px]");
+    expect(container).toHaveClass("max-w-5xl");
     expect(container).toHaveClass("mx-auto");
   });
 
-  it("keeps narrow and wide aligned to the global width", () => {
+  it("applies narrow width for narrow size and same default for wide", () => {
     const { rerender } = render(<PageContainer size="narrow">Sized container</PageContainer>);
 
     let container = screen.getByText("Sized container");
-    expect(container).toHaveClass("max-w-[1200px]");
+    expect(container).toHaveClass("max-w-3xl");
 
     rerender(<PageContainer size="wide">Sized container</PageContainer>);
     container = screen.getByText("Sized container");
-    expect(container).toHaveClass("max-w-[1200px]");
+    expect(container).toHaveClass("max-w-5xl");
   });
 });

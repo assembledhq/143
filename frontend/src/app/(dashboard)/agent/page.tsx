@@ -81,7 +81,7 @@ export default function AgentPage() {
 
       {/* Agent Setup / Credentials */}
       <section className="space-y-3">
-        <h2 className="text-[13px] font-medium text-foreground">Setup</h2>
+        <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Setup</h2>
         <Card>
           <CardContent>
             <AgentSettingsEditor
@@ -94,7 +94,7 @@ export default function AgentPage() {
 
       {/* Execution Behavior */}
       <section className="space-y-3">
-        <h2 className="text-[13px] font-medium text-foreground">Execution</h2>
+        <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Execution</h2>
         <Card>
           <CardContent>
             <div className="space-y-6">
@@ -112,10 +112,10 @@ export default function AgentPage() {
                   ].map((option) => (
                     <label
                       key={option.value}
-                      className={`relative flex cursor-pointer flex-col rounded-lg border p-3 transition-colors ${
+                      className={`relative flex cursor-pointer flex-col rounded-lg border p-3 shadow-sm transition-all duration-150 ${
                         autonomyLevel === option.value
-                          ? "border-primary bg-primary/5"
-                          : "border-input hover:bg-muted/50"
+                          ? "border-primary bg-primary/5 ring-1 ring-primary/20"
+                          : "border-input hover:bg-muted/40 hover:border-border"
                       }`}
                     >
                       <div className="flex items-center gap-2">
@@ -145,10 +145,10 @@ export default function AgentPage() {
                   ].map((option) => (
                     <label
                       key={option.value}
-                      className={`relative flex cursor-pointer flex-col rounded-lg border p-3 transition-colors ${
+                      className={`relative flex cursor-pointer flex-col rounded-lg border p-3 shadow-sm transition-all duration-150 ${
                         aggressiveness === option.value
-                          ? "border-primary bg-primary/5"
-                          : "border-input hover:bg-muted/50"
+                          ? "border-primary bg-primary/5 ring-1 ring-primary/20"
+                          : "border-input hover:bg-muted/40 hover:border-border"
                       }`}
                     >
                       <div className="flex items-center gap-2">
@@ -179,7 +179,7 @@ export default function AgentPage() {
         </Card>
       </section>
 
-      <div className="flex items-center gap-3">
+      <div className="flex items-center justify-end gap-3">
         <Button onClick={handleSave} disabled={mutation.isPending}>
           {mutation.isPending ? "Saving..." : "Save Settings"}
         </Button>

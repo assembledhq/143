@@ -13,16 +13,16 @@ import { Card, CardContent } from "@/components/ui/card";
 import { api } from "@/lib/api";
 import type { Session } from "@/lib/types";
 
-const statusConfig: Record<string, { dot: string; label: string }> = {
-  pending: { dot: "bg-gray-400", label: "Pending" },
-  running: { dot: "bg-blue-500", label: "Running" },
-  awaiting_input: { dot: "bg-yellow-500", label: "Awaiting Input" },
-  needs_human_guidance: { dot: "bg-orange-500", label: "Needs Guidance" },
-  completed: { dot: "bg-emerald-500", label: "Completed" },
-  pr_created: { dot: "bg-purple-500", label: "PR Created" },
-  failed: { dot: "bg-red-500", label: "Failed" },
-  cancelled: { dot: "bg-gray-400", label: "Cancelled" },
-  skipped: { dot: "bg-gray-300", label: "Skipped" },
+const statusConfig: Record<string, { dot: string; text: string; bg: string; label: string }> = {
+  pending: { dot: "bg-muted-foreground/50", text: "text-muted-foreground", bg: "bg-muted", label: "Pending" },
+  running: { dot: "bg-primary", text: "text-primary", bg: "bg-primary/10", label: "Running" },
+  awaiting_input: { dot: "bg-amber-500", text: "text-amber-700 dark:text-amber-400", bg: "bg-amber-50 dark:bg-amber-950/30", label: "Awaiting Input" },
+  needs_human_guidance: { dot: "bg-orange-500", text: "text-orange-700 dark:text-orange-400", bg: "bg-orange-50 dark:bg-orange-950/30", label: "Needs Guidance" },
+  completed: { dot: "bg-emerald-500", text: "text-emerald-700 dark:text-emerald-400", bg: "bg-emerald-50 dark:bg-emerald-950/30", label: "Completed" },
+  pr_created: { dot: "bg-violet-500", text: "text-violet-700 dark:text-violet-400", bg: "bg-violet-50 dark:bg-violet-950/30", label: "PR Created" },
+  failed: { dot: "bg-destructive", text: "text-destructive", bg: "bg-destructive/10", label: "Failed" },
+  cancelled: { dot: "bg-muted-foreground/50", text: "text-muted-foreground", bg: "bg-muted", label: "Cancelled" },
+  skipped: { dot: "bg-muted-foreground/30", text: "text-muted-foreground", bg: "bg-muted", label: "Skipped" },
 };
 
 const filterTabs = [
@@ -75,14 +75,14 @@ function SessionRow({ session }: { session: Session }) {
   return (
     <Link
       href={`/sessions/${session.id}`}
-      className="group flex items-center gap-4 py-3 px-4 hover:bg-muted/50 transition-colors cursor-pointer"
+      className="group flex items-center gap-4 py-3.5 px-4 hover:bg-muted/40 transition-colors duration-150 cursor-pointer"
     >
       {/* Status dot */}
       <div className="flex-shrink-0">
         {active ? (
           <span className="relative flex h-2 w-2">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-            <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary/60 opacity-75" />
+            <span className="relative inline-flex rounded-full h-2 w-2 bg-primary" />
           </span>
         ) : (
           <span className={`inline-flex rounded-full h-2 w-2 ${cfg.dot}`} />
@@ -91,21 +91,21 @@ function SessionRow({ session }: { session: Session }) {
 
       {/* Main content */}
       <div className="flex-1 min-w-0">
-        <span className="text-[13px] font-medium text-gray-900 truncate block">
+        <span className="text-[13px] font-medium text-foreground truncate block">
           {sessionTitle(session)}
         </span>
       </div>
 
       {/* Metadata */}
       <div className="flex items-center gap-2 flex-shrink-0">
-        <span className="inline-flex items-center text-[11px] text-gray-500 bg-gray-100 rounded-md px-2 py-0.5">
+        <span className="inline-flex items-center text-[11px] text-muted-foreground bg-muted rounded-md px-2 py-0.5">
           {session.agent_type.replace(/_/g, " ")}
         </span>
-        <span className={`inline-flex items-center text-[11px] rounded-md px-2 py-0.5 ${cfg.dot.replace("bg-", "text-").replace("500", "700").replace("400", "600").replace("300", "500")} bg-opacity-10`}>
+        <span className={`inline-flex items-center text-[11px] rounded-md px-2 py-0.5 ${cfg.text} ${cfg.bg}`}>
           {cfg.label}
         </span>
         {session.confidence_score != null && (
-          <span className="text-[11px] text-gray-400">
+          <span className="text-[11px] text-muted-foreground">
             {Math.round(session.confidence_score * 100)}%
           </span>
         )}
@@ -175,7 +175,7 @@ export function SessionsPageContent() {
 
       <PMStatusBanner hasActivePlanSession={activeSessions.length > 0} />
 
-      <div className="flex items-center gap-0 border-b border-gray-200">
+      <div className="flex items-center gap-0 border-b border-border">
         {filterTabs.map((tab) => {
           const isSelected = currentFilter === tab.value;
           const count = tab.value === "active" ? activeSessions.length
@@ -185,10 +185,10 @@ export function SessionsPageContent() {
           return (
             <button
               key={tab.value}
-              className={`relative px-3 py-2 text-[13px] font-medium transition-colors ${
+              className={`relative px-3 py-2.5 text-[13px] font-medium transition-colors duration-150 ${
                 isSelected
-                  ? "text-gray-900"
-                  : "text-gray-400 hover:text-gray-600"
+                  ? "text-foreground"
+                  : "text-muted-foreground hover:text-foreground/80"
               }`}
               onClick={() => setActiveFilter(tab.value === "all" ? null : tab.value)}
             >
@@ -196,14 +196,14 @@ export function SessionsPageContent() {
                 {tab.label}
                 {count > 0 && (
                   <span className={`rounded-full text-white text-[10px] leading-none px-1.5 py-0.5 font-normal ${
-                    tab.value === "failed" ? "bg-red-500"
+                    tab.value === "failed" ? "bg-destructive"
                     : tab.value === "needs_human_guidance" ? "bg-orange-500"
-                    : "bg-blue-500"
+                    : "bg-primary"
                   }`}>{count}</span>
                 )}
               </span>
               {isSelected && (
-                <span className="absolute bottom-0 left-3 right-3 h-0.5 bg-gray-900 rounded-full" />
+                <span className="absolute bottom-0 left-3 right-3 h-0.5 bg-foreground rounded-full" />
               )}
             </button>
           );

@@ -192,10 +192,10 @@ export function AgentSettingsEditor({
           {AGENT_TYPES.map((agent) => (
             <label
               key={agent.key}
-              className={`relative flex cursor-pointer flex-col rounded-lg border p-3 transition-colors ${
+              className={`relative flex cursor-pointer flex-col rounded-lg border p-3 shadow-sm transition-all duration-150 ${
                 defaultAgentType === agent.key
-                  ? "border-primary bg-primary/5"
-                  : "border-input hover:bg-muted/50"
+                  ? "border-primary bg-primary/5 ring-1 ring-primary/20"
+                  : "border-input hover:bg-muted/40 hover:border-border"
               }`}
             >
               <div className="flex items-center gap-2">
@@ -219,8 +219,8 @@ export function AgentSettingsEditor({
               className="grid gap-3 md:grid-cols-2"
             >
               <label
-                className={`flex cursor-pointer items-start gap-3 rounded-md border p-3 transition-colors ${
-                  codexCredentialMethod === "chatgpt" ? "border-primary bg-primary/5" : "border-input hover:bg-muted/40"
+                className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 shadow-sm transition-all duration-150 ${
+                  codexCredentialMethod === "chatgpt" ? "border-primary bg-primary/5 ring-1 ring-primary/20" : "border-input hover:bg-muted/40 hover:border-border"
                 }`}
               >
                 <RadioGroupItem value="chatgpt" aria-label="Sign in with ChatGPT" />
@@ -234,8 +234,8 @@ export function AgentSettingsEditor({
               </label>
 
               <label
-                className={`flex cursor-pointer items-start gap-3 rounded-md border p-3 transition-colors ${
-                  codexCredentialMethod === "api_key" ? "border-primary bg-primary/5" : "border-input hover:bg-muted/40"
+                className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 shadow-sm transition-all duration-150 ${
+                  codexCredentialMethod === "api_key" ? "border-primary bg-primary/5 ring-1 ring-primary/20" : "border-input hover:bg-muted/40 hover:border-border"
                 }`}
               >
                 <RadioGroupItem value="api_key" aria-label="Use API key" />

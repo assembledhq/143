@@ -39,16 +39,14 @@ The base font size is `text-[13px]` (set globally). Use these specific sizes:
 
 | Element | Classes |
 |---------|---------|
-| Page title | `text-[15px] font-semibold leading-5 text-foreground` |
-| Page description | `text-[13px] text-muted-foreground` (with `mt-0.5`) |
-| Section header | `text-[13px] font-medium text-foreground` |
-| Card title | `text-[13px] font-semibold` |
+| Page title | `text-xl font-semibold tracking-tight text-foreground` (via `PageHeader`) |
+| Page description | `text-sm text-muted-foreground` (via `PageHeader`) |
+| Section label | `text-xs font-semibold uppercase tracking-wider text-muted-foreground` |
+| Card title | `text-sm font-semibold` (via `CardTitle`) |
 | Body text | `text-[13px]` (default) |
 | Small metadata | `text-[11px]` (badges, timestamps, counts) |
 | Helper/hint text | `text-xs text-muted-foreground` |
 | Labels | `text-[13px]` (via `<Label>` component) |
-
-**NEVER use `text-sm` or `text-lg`** in dashboard pages. Use `text-[13px]` or `text-[15px]` for precise control.
 
 ### Spacing System
 
@@ -63,7 +61,11 @@ The base font size is `text-[13px]` (set globally). Use these specific sizes:
 
 ### Border Radius
 
-Use the design system's radius tokens: `rounded-md` (6px), `rounded-lg` (8px), `rounded-full` for pills/dots.
+Use the design system's radius tokens: `rounded-lg` (8px) for buttons/inputs, `rounded-xl` (12px) for cards, `rounded-full` for pills/dots.
+
+### Depth & Shadows
+
+Cards use `shadow-sm` by default. Buttons (default/outline/destructive variants) use `shadow-sm`. Inputs use `shadow-sm`. Interactive elements should have smooth transitions (`transition-all duration-150`).
 
 ## Page Layout Patterns
 
@@ -80,9 +82,14 @@ Use `PageContainer` (`src/components/page-container.tsx`) for ALL dashboard page
 </PageContainer>
 ```
 
-- Sizes `narrow`, `default`, and `wide` all map to `max-w-[1200px]`
-- Use `full` only for true full-bleed layouts
-- The outer `<div className="space-y-6">` is mandatory for consistent vertical rhythm
+**All pages MUST use the same `size="default"` (max-w-5xl)** to ensure consistent margins across the app. This is critical — using different sizes creates jarring layout shifts when navigating between pages.
+
+- `narrow` (max-w-3xl): Only for focused single-column forms/modals
+- `default` (max-w-5xl): **Standard for all dashboard pages** — use this
+- `wide` (max-w-5xl): Alias for default (kept for backwards compat)
+- `full` (max-w-none): Only for true full-bleed layouts
+
+**NEVER use `size="wide"` or `size="narrow"` for regular dashboard pages.** The outer `<div className="space-y-6">` is mandatory for consistent vertical rhythm.
 
 ### Page Header
 
@@ -114,7 +121,7 @@ For sub-sections within a page (e.g., "Setup", "Execution", "Product Context"):
 
 ```tsx
 <section className="space-y-3">
-  <h2 className="text-[13px] font-medium text-foreground">Section Title</h2>
+  <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Section Title</h2>
   <Card>
     <CardContent>
       {/* section content */}
@@ -249,10 +256,10 @@ For radio groups displayed as selectable cards:
   {options.map((option) => (
     <label
       key={option.value}
-      className={`relative flex cursor-pointer flex-col rounded-lg border p-3 transition-colors ${
+      className={`relative flex cursor-pointer flex-col rounded-lg border p-3 shadow-sm transition-all duration-150 ${
         selected === option.value
-          ? "border-primary bg-primary/5"
-          : "border-input hover:bg-muted/50"
+          ? "border-primary bg-primary/5 ring-1 ring-primary/20"
+          : "border-input hover:bg-muted/40 hover:border-border"
       }`}
     >
       <div className="flex items-center gap-2">
@@ -365,8 +372,10 @@ Always include `dark:` variants for colored banners.
 1. **Hardcoded colors** — Never `text-gray-*`, `bg-white`, `border-gray-*` in dashboard. Use tokens.
 2. **Custom tab implementations** — Never build underline tabs manually. Use `Button` variant toggling.
 3. **Ad-hoc page headers** — Never use `<h1>` directly. Use `PageHeader` component.
-4. **`text-sm` / `text-lg`** — Never use these in dashboard pages. Use `text-[13px]` or `text-[15px]`.
-5. **Non-responsive grids** — Never `grid grid-cols-2` without `md:` breakpoint.
-6. **Missing PageContainer** — Every dashboard page must be wrapped in `PageContainer`.
-7. **Inconsistent row padding** — Always `py-3 px-4` for list rows.
+4. **Non-responsive grids** — Never `grid grid-cols-2` without `md:` breakpoint.
+5. **Missing PageContainer** — Every dashboard page must be wrapped in `PageContainer`.
+6. **Inconsistent container sizes** — All dashboard pages MUST use `size="default"`. Never use `size="wide"` or `size="narrow"` for regular pages — this creates different margins between pages.
+7. **Inconsistent row padding** — Always `py-3.5 px-4` for list rows.
 8. **Missing dark mode** — All colored banners/alerts need `dark:` variant classes.
+9. **Flat cards** — Cards should always have `shadow-sm` (provided by the Card component). Don't override with `shadow-none`.
+10. **Missing transitions** — Interactive elements (radio cards, buttons, rows) need `transition-all duration-150`.

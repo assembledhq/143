@@ -4,9 +4,9 @@ import { cn } from "@/lib/utils";
 type PageContainerSize = "narrow" | "default" | "wide" | "full";
 
 const sizeClassMap: Record<PageContainerSize, string> = {
-  narrow: "max-w-[1200px]",
-  default: "max-w-[1200px]",
-  wide: "max-w-[1200px]",
+  narrow: "max-w-3xl",
+  default: "max-w-5xl",
+  wide: "max-w-5xl",
   full: "max-w-none",
 };
 
