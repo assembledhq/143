@@ -26,8 +26,8 @@ function StatusDot({ status }: { status: "running" | "completed" | "failed" | "i
   if (status === "running") {
     return (
       <span className="relative flex h-2.5 w-2.5">
-        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-        <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-blue-500" />
+        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary/60 opacity-75" />
+        <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-primary" />
       </span>
     );
   }
@@ -37,7 +37,7 @@ function StatusDot({ status }: { status: "running" | "completed" | "failed" | "i
   if (status === "failed") {
     return <span className="inline-flex rounded-full h-2.5 w-2.5 bg-red-500" />;
   }
-  return <span className="inline-flex rounded-full h-2.5 w-2.5 bg-gray-300" />;
+  return <span className="inline-flex rounded-full h-2.5 w-2.5 bg-muted-foreground/30" />;
 }
 
 function deriveAgentStatus(pmStatus: PMStatus | undefined, isAnalyzing: boolean): "running" | "completed" | "failed" | "idle" {
@@ -69,7 +69,7 @@ export function PMStatusBanner({ hasActivePlanSession }: PMStatusBannerProps) {
     : "Idle";
 
   return (
-    <Card className={agentStatus === "running" ? "border-blue-200 dark:border-blue-800" : ""}>
+    <Card className={agentStatus === "running" ? "border-primary/20 border-l-4 border-l-primary" : ""}>
       <CardContent className="py-4">
         <div className="flex items-start justify-between">
           <div className="space-y-2">
@@ -77,10 +77,10 @@ export function PMStatusBanner({ hasActivePlanSession }: PMStatusBannerProps) {
               <StatusDot status={agentStatus} />
               <span className="text-sm font-semibold text-foreground">PM Agent</span>
               <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
-                agentStatus === "running" ? "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300"
+                agentStatus === "running" ? "bg-primary/10 text-primary"
                 : agentStatus === "completed" ? "bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300"
-                : agentStatus === "failed" ? "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300"
-                : "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400"
+                : agentStatus === "failed" ? "bg-destructive/10 text-destructive"
+                : "bg-muted text-muted-foreground"
               }`}>
                 {statusLabel}
               </span>
