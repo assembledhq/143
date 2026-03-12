@@ -6,6 +6,7 @@ import { getIntegrationByKey } from "@/lib/integrations";
 
 type SourceControlIntegrationCardProps = {
   githubConnected: boolean;
+  githubRepoNames?: string[];
   onConnectGitHub: () => void;
 };
 
@@ -18,6 +19,22 @@ type AdditionalIntegrationCardsProps = {
 };
 
 type AllIntegrationCardsProps = SourceControlIntegrationCardProps & AdditionalIntegrationCardsProps;
+
+function ConnectedReposList({ repoNames }: { repoNames: string[] }) {
+  if (repoNames.length === 0) return null;
+  return (
+    <div className="mt-1.5 flex flex-wrap gap-1.5">
+      {repoNames.map((name) => (
+        <span
+          key={name}
+          className="inline-flex items-center rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground"
+        >
+          {name}
+        </span>
+      ))}
+    </div>
+  );
+}
 
 function IntegrationLogo({ name, src }: { name: string; src: string }) {
   return (
@@ -34,7 +51,7 @@ function IntegrationLogo({ name, src }: { name: string; src: string }) {
   );
 }
 
-export function SourceControlIntegrationCard({ githubConnected, onConnectGitHub }: SourceControlIntegrationCardProps) {
+export function SourceControlIntegrationCard({ githubConnected, githubRepoNames = [], onConnectGitHub }: SourceControlIntegrationCardProps) {
   const github = getIntegrationByKey("github");
 
   return (
@@ -46,6 +63,7 @@ export function SourceControlIntegrationCard({ githubConnected, onConnectGitHub 
           description: github.description,
           logo: <IntegrationLogo name={github.name} src={github.logoSrc} />,
           badge: <Badge variant="outline" className="text-xs">Required</Badge>,
+          extra: githubConnected ? <ConnectedReposList repoNames={githubRepoNames} /> : undefined,
           action: (
             <Button
               size="sm"
@@ -120,6 +138,7 @@ export function AllIntegrationCards({
   onConnectSentry,
   onConnectLinear,
   githubConnected,
+  githubRepoNames = [],
   sentryConnected,
   linearConnected,
   linearLoading,
@@ -137,6 +156,7 @@ export function AllIntegrationCards({
           description: github.description,
           logo: <IntegrationLogo name={github.name} src={github.logoSrc} />,
           badge: <Badge variant="outline" className="text-xs">Required</Badge>,
+          extra: githubConnected ? <ConnectedReposList repoNames={githubRepoNames} /> : undefined,
           action: (
             <Button
               size="sm"

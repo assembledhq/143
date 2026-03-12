@@ -48,6 +48,31 @@ describe("integration connection cards", () => {
     expect(onConnectLinear).toHaveBeenCalledTimes(1);
   });
 
+  it("shows connected repo names when GitHub is connected", () => {
+    renderWithProviders(
+      <SourceControlIntegrationCard
+        githubConnected
+        githubRepoNames={["acme/api", "acme/web"]}
+        onConnectGitHub={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText("acme/api")).toBeInTheDocument();
+    expect(screen.getByText("acme/web")).toBeInTheDocument();
+  });
+
+  it("does not show repo names when GitHub is not connected", () => {
+    renderWithProviders(
+      <SourceControlIntegrationCard
+        githubConnected={false}
+        githubRepoNames={["acme/api"]}
+        onConnectGitHub={vi.fn()}
+      />
+    );
+
+    expect(screen.queryByText("acme/api")).not.toBeInTheDocument();
+  });
+
   it("disables Linear connect when already connected", () => {
     renderWithProviders(
       <AllIntegrationCards
