@@ -1,6 +1,9 @@
 package models
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // AutonomyLevel controls when the system auto-triggers agent runs.
 type AutonomyLevel string
@@ -11,6 +14,16 @@ const (
 	AutonomyLevelAutoAll    AutonomyLevel = "auto_all"
 )
 
+// Validate returns an error if the autonomy level is not a recognized value.
+func (a AutonomyLevel) Validate() error {
+	switch a {
+	case AutonomyLevelManual, AutonomyLevelAutoSimple, AutonomyLevelAutoAll:
+		return nil
+	default:
+		return fmt.Errorf("invalid autonomy level: %q", a)
+	}
+}
+
 // AgentType identifies a coding agent backend.
 type AgentType string
 
@@ -20,6 +33,14 @@ const (
 	AgentTypeCodex      AgentType = "codex"
 	AgentTypePMAgent    AgentType = "pm_agent"
 )
+
+// Validate returns an error if the agent type is not a recognized value.
+func (a AgentType) Validate() error {
+	if ValidAgentTypes[a] {
+		return nil
+	}
+	return fmt.Errorf("invalid agent type: %q", a)
+}
 
 // ValidAgentTypes is the set of supported agent types.
 var ValidAgentTypes = map[AgentType]bool{

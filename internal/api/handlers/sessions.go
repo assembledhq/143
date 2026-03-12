@@ -131,7 +131,7 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 			agentType = models.DefaultDefaultAgentType
 		}
 	}
-	if !models.ValidAgentTypes[agentType] {
+	if err := agentType.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_AGENT_TYPE", "agent_type must be one of: claude_code, gemini_cli, codex")
 		return
 	}
@@ -438,7 +438,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 			agentType = models.DefaultDefaultAgentType
 		}
 	}
-	if !models.ValidAgentTypes[agentType] {
+	if err := agentType.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_AGENT_TYPE", "agent_type must be one of: claude_code, gemini_cli, codex")
 		return
 	}
