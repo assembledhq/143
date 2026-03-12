@@ -75,8 +75,8 @@ export default function AgentPage() {
     <PageContainer size="default">
       <div className="space-y-6">
       <PageHeader
-        title="Agent"
-        description="Configure how the AI agent runs and behaves."
+        title="Coding Agent"
+        description="Configure how the coding agent runs and behaves."
       />
 
       {/* Agent Setup / Credentials */}
@@ -85,8 +85,8 @@ export default function AgentPage() {
         <Card>
           <CardContent>
             <AgentSettingsEditor
-              title="Agent provider & credentials"
-              description="Choose your default agent and configure provider API keys."
+              title="Coding agent provider & credentials"
+              description="Choose your default coding agent and configure provider API keys."
             />
           </CardContent>
         </Card>
