@@ -4,7 +4,6 @@ import {
   LayoutDashboard,
   Play,
   FolderKanban,
-  Workflow,
   Settings,
   Users,
   LogOut,
@@ -33,7 +32,6 @@ import { useEffect } from "react";
 const navItems = [
   { label: "Overview", icon: LayoutDashboard, href: "/overview" },
   { label: "Sessions", icon: Play, href: "/sessions", showStatusDot: true },
-  { label: "Automations", icon: Workflow, href: "/automations" },
   { label: "Projects", icon: FolderKanban, href: "/projects" },
 ];
 
