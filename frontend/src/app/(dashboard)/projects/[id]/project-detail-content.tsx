@@ -6,6 +6,7 @@ import {
   ArrowLeft,
   FileText,
   GitPullRequest,
+  Play,
   Settings,
 } from "lucide-react";
 import Link from "next/link";
@@ -61,9 +62,17 @@ function SettingsTab({ project }: { project: import("@/lib/types").Project }) {
   const [maxConcurrent, setMaxConcurrent] = useState(project.max_concurrent);
   const [priorityLevel, setPriorityLevel] = useState<PriorityLevel>(numericToPriorityLevel(project.priority));
   const [baseBranch, setBaseBranch] = useState(project.base_branch);
+  const [scheduleEnabled, setScheduleEnabled] = useState(project.schedule_enabled);
+  const [scheduleInterval, setScheduleInterval] = useState(project.schedule_interval);
+  const [scheduleUnit, setScheduleUnit] = useState(project.schedule_unit);
 
   const updateMutation = useMutation({
     mutationFn: (body: Record<string, unknown>) => api.projects.update(project.id, body),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["project", project.id] }),
+  });
+
+  const runNowMutation = useMutation({
+    mutationFn: () => api.projects.runNow(project.id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["project", project.id] }),
   });
 
@@ -160,6 +169,81 @@ function SettingsTab({ project }: { project: import("@/lib/types").Project }) {
               {updateMutation.isPending ? "Saving..." : "Save Changes"}
             </Button>
             {updateMutation.isError && <p className="text-xs text-destructive">Failed to save.</p>}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle className="text-sm">Recurring Schedule</CardTitle></CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center gap-3">
+            <Button
+              size="sm"
+              variant={scheduleEnabled ? "default" : "outline"}
+              onClick={() => setScheduleEnabled(!scheduleEnabled)}
+            >
+              {scheduleEnabled ? "Enabled" : "Disabled"}
+            </Button>
+            <span className="text-xs text-muted-foreground">
+              {scheduleEnabled ? "This project runs on a recurring schedule." : "Enable to run this project automatically."}
+            </span>
+          </div>
+
+          {scheduleEnabled && (
+            <div className="flex items-center gap-3">
+              <Label className="text-xs whitespace-nowrap">Run every</Label>
+              <Input
+                type="number"
+                min={1}
+                max={365}
+                value={scheduleInterval}
+                onChange={(e) => setScheduleInterval(Number(e.target.value))}
+                className="w-20"
+              />
+              <Select value={scheduleUnit} onValueChange={(v) => setScheduleUnit(v as "hours" | "days" | "weeks")}>
+                <SelectTrigger className="w-28">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="hours">hours</SelectItem>
+                  <SelectItem value="days">days</SelectItem>
+                  <SelectItem value="weeks">weeks</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+
+          {project.next_run_at && scheduleEnabled && (
+            <p className="text-xs text-muted-foreground">
+              Next run: {new Date(project.next_run_at).toLocaleString()}
+            </p>
+          )}
+
+          <div className="flex items-center gap-3 pt-2">
+            <Button
+              size="sm"
+              onClick={() => updateMutation.mutate({
+                schedule_enabled: scheduleEnabled,
+                schedule_interval: scheduleInterval,
+                schedule_unit: scheduleUnit,
+              })}
+              disabled={updateMutation.isPending}
+            >
+              {updateMutation.isPending ? "Saving..." : "Save Schedule"}
+            </Button>
+            {project.status === "active" && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => runNowMutation.mutate()}
+                disabled={runNowMutation.isPending}
+              >
+                <Play className="h-3 w-3 mr-1" />
+                {runNowMutation.isPending ? "Running..." : "Run Now"}
+              </Button>
+            )}
+            {updateMutation.isError && <p className="text-xs text-destructive">Failed to save schedule.</p>}
+            {runNowMutation.isError && <p className="text-xs text-destructive">Failed to trigger run.</p>}
           </div>
         </CardContent>
       </Card>

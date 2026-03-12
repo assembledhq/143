@@ -1,6 +1,9 @@
 package models
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // ProjectStatus represents the lifecycle state of a project.
 type ProjectStatus string
@@ -57,6 +60,36 @@ const (
 	ProjectTaskStatusSkipped   ProjectTaskStatus = "skipped"
 	ProjectTaskStatusCancelled ProjectTaskStatus = "cancelled"
 )
+
+// ScheduleUnit represents the time unit for project scheduling.
+type ScheduleUnit string
+
+const (
+	ScheduleUnitHours ScheduleUnit = "hours"
+	ScheduleUnitDays  ScheduleUnit = "days"
+	ScheduleUnitWeeks ScheduleUnit = "weeks"
+)
+
+func (u ScheduleUnit) Validate() error {
+	switch u {
+	case ScheduleUnitHours, ScheduleUnitDays, ScheduleUnitWeeks:
+		return nil
+	default:
+		return fmt.Errorf("invalid ScheduleUnit: %q (must be hours, days, or weeks)", u)
+	}
+}
+
+// NextRunTime computes the next scheduled run time from a given start time.
+func NextRunTime(from time.Time, interval int, unit string) time.Time {
+	switch ScheduleUnit(unit) {
+	case ScheduleUnitHours:
+		return from.Add(time.Duration(interval) * time.Hour)
+	case ScheduleUnitWeeks:
+		return from.AddDate(0, 0, interval*7)
+	default: // days
+		return from.AddDate(0, 0, interval)
+	}
+}
 
 func (s ProjectTaskStatus) Validate() error {
 	switch s {

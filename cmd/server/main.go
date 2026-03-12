@@ -122,6 +122,7 @@ func main() {
 			repoStore,
 			logger,
 		)
+		scheduler.SetProjectStore(projectStore)
 		go scheduler.Start(ctx, 10*time.Minute)
 	}
 

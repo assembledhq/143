@@ -2,6 +2,7 @@ package models
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -62,6 +63,64 @@ func TestProjectExecMode_Validate(t *testing.T) {
 			} else {
 				require.NoError(t, err, "Validate should not return an error for valid mode")
 			}
+		})
+	}
+}
+
+func TestScheduleUnit_Validate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		unit      ScheduleUnit
+		expectErr bool
+	}{
+		{name: "hours is valid", unit: ScheduleUnitHours, expectErr: false},
+		{name: "days is valid", unit: ScheduleUnitDays, expectErr: false},
+		{name: "weeks is valid", unit: ScheduleUnitWeeks, expectErr: false},
+		{name: "empty string is invalid", unit: "", expectErr: true},
+		{name: "months is invalid", unit: "months", expectErr: true},
+		{name: "minutes is invalid", unit: "minutes", expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := tt.unit.Validate()
+			if tt.expectErr {
+				require.Error(t, err, "Validate should return an error for invalid unit")
+			} else {
+				require.NoError(t, err, "Validate should not return an error for valid unit")
+			}
+		})
+	}
+}
+
+func TestNextRunTime(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name     string
+		interval int
+		unit     string
+		expected time.Time
+	}{
+		{name: "1 hour", interval: 1, unit: "hours", expected: base.Add(1 * time.Hour)},
+		{name: "6 hours", interval: 6, unit: "hours", expected: base.Add(6 * time.Hour)},
+		{name: "1 day", interval: 1, unit: "days", expected: base.AddDate(0, 0, 1)},
+		{name: "3 days", interval: 3, unit: "days", expected: base.AddDate(0, 0, 3)},
+		{name: "1 week", interval: 1, unit: "weeks", expected: base.AddDate(0, 0, 7)},
+		{name: "2 weeks", interval: 2, unit: "weeks", expected: base.AddDate(0, 0, 14)},
+		{name: "unknown unit defaults to days", interval: 1, unit: "unknown", expected: base.AddDate(0, 0, 1)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := NextRunTime(base, tt.interval, tt.unit)
+			require.Equal(t, tt.expected, result)
 		})
 	}
 }

@@ -29,6 +29,7 @@ func projectColumns() []string {
 		"total_tasks", "completed_tasks", "failed_tasks",
 		"proposed_by_pm", "source_issue_ids", "proposal_reasoning",
 		"agent_type", "model_override",
+		"schedule_enabled", "schedule_interval", "schedule_unit", "next_run_at",
 		"created_by", "created_at", "updated_at", "completed_at",
 	}
 }
@@ -42,6 +43,7 @@ func newProjectRow(id, orgID, repoID uuid.UUID, status models.ProjectStatus, now
 		0, 0, 0,
 		false, []uuid.UUID{}, nil,
 		nil, nil, // agent_type, model_override
+		false, 1, "days", nil, // schedule_enabled, schedule_interval, schedule_unit, next_run_at
 		&createdBy, now, now, nil,
 	}
 }
@@ -169,9 +171,10 @@ func TestProjectHandler_Update(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, repoID, models.ProjectStatusDraft, now)...))
 
-	// Update (19 named args)
+	// Update (23 named args: 19 original + 4 schedule fields)
 	mock.ExpectExec("UPDATE projects SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -504,6 +507,7 @@ func TestProjectHandler_Create(t *testing.T) {
 
 	mock.ExpectQuery("INSERT INTO projects").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -867,6 +871,117 @@ func TestProjectHandler_GetCycle_InvalidID(t *testing.T) {
 	rr := httptest.NewRecorder()
 
 	handler.GetCycle(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+	require.Contains(t, rr.Body.String(), "INVALID_ID")
+}
+
+// --- RunNow handler tests ---
+
+func TestProjectHandler_RunNow_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	handler.SetJobStore(db.NewJobStore(mock))
+	orgID := uuid.New()
+	projectID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+
+	// GetByID returns an active project
+	mock.ExpectQuery("SELECT .+ FROM projects WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, repoID, models.ProjectStatusActive, now)...))
+
+	// Enqueue job
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID.String()+"/run", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	req = req.WithContext(withProjectRouteParam(req.Context(), projectID))
+	rr := httptest.NewRecorder()
+
+	handler.RunNow(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Contains(t, rr.Body.String(), "job_id")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestProjectHandler_RunNow_NotActive(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	handler.SetJobStore(db.NewJobStore(mock))
+	orgID := uuid.New()
+	projectID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+
+	// GetByID returns a draft project (not active)
+	mock.ExpectQuery("SELECT .+ FROM projects WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, repoID, models.ProjectStatusDraft, now)...))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID.String()+"/run", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	req = req.WithContext(withProjectRouteParam(req.Context(), projectID))
+	rr := httptest.NewRecorder()
+
+	handler.RunNow(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+	require.Contains(t, rr.Body.String(), "INVALID_STATUS")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestProjectHandler_RunNow_NoJobStore(t *testing.T) {
+	t.Parallel()
+
+	handler := NewProjectHandler(nil, nil, nil, nil, nil)
+	// Do NOT call SetJobStore — leave it nil.
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+uuid.New().String()+"/run", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	req = req.WithContext(withProjectRouteParam(req.Context(), uuid.New()))
+	rr := httptest.NewRecorder()
+
+	handler.RunNow(rr, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, rr.Code)
+	require.Contains(t, rr.Body.String(), "NOT_CONFIGURED")
+}
+
+func TestProjectHandler_RunNow_InvalidID(t *testing.T) {
+	t.Parallel()
+
+	invalidMock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer invalidMock.Close()
+
+	handler := NewProjectHandler(nil, nil, nil, nil, nil)
+	handler.SetJobStore(db.NewJobStore(invalidMock))
+
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "not-a-uuid")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/not-a-uuid/run", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rr := httptest.NewRecorder()
+
+	handler.RunNow(rr, req)
 
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 	require.Contains(t, rr.Body.String(), "INVALID_ID")
