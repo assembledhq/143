@@ -31,10 +31,10 @@ type complexityEstimateStore interface {
 	Upsert(ctx context.Context, est *models.ComplexityEstimate) error
 }
 
-// agentRunStore is the subset of db.AgentRunStore used by the service.
-type agentRunStore interface {
+// sessionStore is the subset of db.SessionStore used by the service.
+type sessionStore interface {
 	CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error)
-	Create(ctx context.Context, run *models.AgentRun) error
+	Create(ctx context.Context, run *models.Session) error
 }
 
 // orgStore is the subset of db.OrganizationStore used by the service.
@@ -91,7 +91,7 @@ type Service struct {
 	issues     issueStore
 	priorities priorityScoreStore
 	complexity complexityEstimateStore
-	agentRuns  agentRunStore
+	sessions  sessionStore
 	orgs       orgStore
 	jobs       jobStore
 	llm        llmpkg.Client // can be nil
@@ -103,7 +103,7 @@ func NewService(
 	issues issueStore,
 	priorities priorityScoreStore,
 	complexity complexityEstimateStore,
-	agentRuns agentRunStore,
+	sessions sessionStore,
 	orgs orgStore,
 	jobs jobStore,
 	llmClient llmpkg.Client,
@@ -113,7 +113,7 @@ func NewService(
 		issues:     issues,
 		priorities: priorities,
 		complexity: complexity,
-		agentRuns:  agentRuns,
+		sessions:  sessions,
 		orgs:       orgs,
 		jobs:       jobs,
 		llm:        llmClient,
@@ -307,7 +307,7 @@ func (s *Service) CheckAutoTrigger(ctx context.Context, orgID uuid.UUID, score *
 	if maxConcurrent <= 0 {
 		maxConcurrent = defaultMaxConcurrentRuns
 	}
-	running, err := s.agentRuns.CountRunningByOrg(ctx, orgID)
+	running, err := s.sessions.CountRunningByOrg(ctx, orgID)
 	if err != nil {
 		return fmt.Errorf("count running agent runs: %w", err)
 	}
@@ -325,7 +325,7 @@ func (s *Service) CheckAutoTrigger(ctx context.Context, orgID uuid.UUID, score *
 	if agentType == "" {
 		agentType = "codex"
 	}
-	run := &models.AgentRun{
+	run := &models.Session{
 		IssueID:       issue.ID,
 		OrgID:         orgID,
 		AgentType:     agentType,
@@ -334,12 +334,12 @@ func (s *Service) CheckAutoTrigger(ctx context.Context, orgID uuid.UUID, score *
 		TokenMode:     "low",
 		ComplexityTier: &estimate.Tier,
 	}
-	if err := s.agentRuns.Create(ctx, run); err != nil {
+	if err := s.sessions.Create(ctx, run); err != nil {
 		return fmt.Errorf("create agent run: %w", err)
 	}
 
 	payload := map[string]string{
-		"agent_run_id": run.ID.String(),
+		"session_id": run.ID.String(),
 		"org_id":       orgID.String(),
 	}
 	dedupeKey := fmt.Sprintf("run_agent:%s", run.ID.String())
@@ -349,7 +349,7 @@ func (s *Service) CheckAutoTrigger(ctx context.Context, orgID uuid.UUID, score *
 
 	s.logger.Info().
 		Str("issue_id", issue.ID.String()).
-		Str("agent_run_id", run.ID.String()).
+		Str("session_id", run.ID.String()).
 		Float64("score", score.Score).
 		Int("tier", estimate.Tier).
 		Msg("auto-triggered agent run")

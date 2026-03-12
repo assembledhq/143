@@ -12,18 +12,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var agentRunColumns = []string{
+var sessionColumns = []string{
 	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
 	"container_id", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
-	"parent_run_id", "revision_context", "error", "result_summary", "diff",
+	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override",
 	"created_at",
 }
 
-func newAgentRunRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
+func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 	return []interface{}{
 		id, issueID, orgID, "fixer", "pending", "supervised", "standard",
 		nil, nil, nil, []string{},
@@ -37,7 +37,7 @@ func newAgentRunRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 	}
 }
 
-func TestAgentRunStore_ListByOrg(t *testing.T) {
+func TestSessionStore_ListByOrg(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
@@ -48,47 +48,47 @@ func TestAgentRunStore_ListByOrg(t *testing.T) {
 
 	tests := []struct {
 		name      string
-		filters   AgentRunFilters
+		filters   SessionFilters
 		setupMock func(mock pgxmock.PgxPoolIface)
 		expected  int
 		expectErr bool
 	}{
 		{
 			name:    "returns agent runs for org",
-			filters: AgentRunFilters{},
+			filters: SessionFilters{},
 			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery("SELECT .+ FROM agent_runs WHERE org_id").
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id").
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(agentRunColumns).
-							AddRow(newAgentRunRow(runID1, issueID, orgID, now)...).
-							AddRow(newAgentRunRow(runID2, issueID, orgID, now)...),
+						pgxmock.NewRows(sessionColumns).
+							AddRow(newSessionRow(runID1, issueID, orgID, now)...).
+							AddRow(newSessionRow(runID2, issueID, orgID, now)...),
 					)
 			},
 			expected: 2,
 		},
 		{
 			name:    "returns filtered agent runs by status",
-			filters: AgentRunFilters{Status: models.AgentRunStatusRunning},
+			filters: SessionFilters{Status: models.SessionStatusRunning},
 			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery("SELECT .+ FROM agent_runs WHERE org_id .+ AND status").
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id .+ AND status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(agentRunColumns).
-							AddRow(newAgentRunRow(runID1, issueID, orgID, now)...),
+						pgxmock.NewRows(sessionColumns).
+							AddRow(newSessionRow(runID1, issueID, orgID, now)...),
 					)
 			},
 			expected: 1,
 		},
 		{
 			name:    "returns only ad-hoc runs when AdHocOnly is true",
-			filters: AgentRunFilters{AdHocOnly: true},
+			filters: SessionFilters{AdHocOnly: true},
 			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery("SELECT .+ FROM agent_runs WHERE org_id .+ AND pm_plan_id IS NULL").
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id .+ AND pm_plan_id IS NULL").
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(agentRunColumns).
-							AddRow(newAgentRunRow(runID1, issueID, orgID, now)...),
+						pgxmock.NewRows(sessionColumns).
+							AddRow(newSessionRow(runID1, issueID, orgID, now)...),
 					)
 			},
 			expected: 1,
@@ -103,7 +103,7 @@ func TestAgentRunStore_ListByOrg(t *testing.T) {
 			require.NoError(t, err, "should create mock pool")
 			defer mock.Close()
 
-			store := NewAgentRunStore(mock)
+			store := NewSessionStore(mock)
 			tt.setupMock(mock)
 
 			runs, err := store.ListByOrg(context.Background(), orgID, tt.filters)
@@ -118,7 +118,7 @@ func TestAgentRunStore_ListByOrg(t *testing.T) {
 	}
 }
 
-func TestAgentRunStore_GetByID(t *testing.T) {
+func TestSessionStore_GetByID(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -129,20 +129,20 @@ func TestAgentRunStore_GetByID(t *testing.T) {
 		{
 			name: "returns agent run when found",
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, runID, issueID uuid.UUID, now time.Time) {
-				mock.ExpectQuery("SELECT .+ FROM agent_runs WHERE id").
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(agentRunColumns).
-							AddRow(newAgentRunRow(runID, issueID, orgID, now)...),
+						pgxmock.NewRows(sessionColumns).
+							AddRow(newSessionRow(runID, issueID, orgID, now)...),
 					)
 			},
 		},
 		{
 			name: "returns error when agent run not found",
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, runID, issueID uuid.UUID, now time.Time) {
-				mock.ExpectQuery("SELECT .+ FROM agent_runs WHERE id").
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows(agentRunColumns))
+					WillReturnRows(pgxmock.NewRows(sessionColumns))
 			},
 			expectErr: true,
 		},
@@ -156,7 +156,7 @@ func TestAgentRunStore_GetByID(t *testing.T) {
 			require.NoError(t, err, "should create mock pool")
 			defer mock.Close()
 
-			store := NewAgentRunStore(mock)
+			store := NewSessionStore(mock)
 			orgID := uuid.New()
 			runID := uuid.New()
 			issueID := uuid.New()
@@ -177,7 +177,7 @@ func TestAgentRunStore_GetByID(t *testing.T) {
 	}
 }
 
-func TestAgentRunStore_ListRecentByOrg(t *testing.T) {
+func TestSessionStore_ListRecentByOrg(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
@@ -189,32 +189,32 @@ func TestAgentRunStore_ListRecentByOrg(t *testing.T) {
 	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
-	mock.ExpectQuery("SELECT .+ FROM agent_runs WHERE org_id").
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(agentRunColumns).
-				AddRow(newAgentRunRow(runID, issueID, orgID, now)...),
+			pgxmock.NewRows(sessionColumns).
+				AddRow(newSessionRow(runID, issueID, orgID, now)...),
 		)
 
-	store := NewAgentRunStore(mock)
+	store := NewSessionStore(mock)
 	runs, err := store.ListRecentByOrg(context.Background(), orgID, []string{"completed", "failed"}, 20)
 	require.NoError(t, err, "ListRecentByOrg should succeed")
 	require.Len(t, runs, 1, "should return expected runs")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestAgentRunStore_Create(t *testing.T) {
+func TestSessionStore_Create(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
-	store := NewAgentRunStore(mock)
+	store := NewSessionStore(mock)
 	now := time.Now()
 	generatedID := uuid.New()
 
-	run := &models.AgentRun{
+	run := &models.Session{
 		IssueID:       uuid.New(),
 		OrgID:         uuid.New(),
 		AgentType:     "fixer",
@@ -223,7 +223,7 @@ func TestAgentRunStore_Create(t *testing.T) {
 		TokenMode:     "standard",
 	}
 
-	mock.ExpectQuery("INSERT INTO agent_runs").
+	mock.ExpectQuery("INSERT INTO sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -240,18 +240,18 @@ func TestAgentRunStore_Create(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestAgentRunStore_Create_AllowsNilIssueID(t *testing.T) {
+func TestSessionStore_Create_AllowsNilIssueID(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
-	store := NewAgentRunStore(mock)
+	store := NewSessionStore(mock)
 	now := time.Now()
 	generatedID := uuid.New()
 
-	run := &models.AgentRun{
+	run := &models.Session{
 		IssueID:       uuid.Nil,
 		OrgID:         uuid.New(),
 		AgentType:     "fixer",
@@ -260,7 +260,7 @@ func TestAgentRunStore_Create_AllowsNilIssueID(t *testing.T) {
 		TokenMode:     "standard",
 	}
 
-	mock.ExpectQuery("INSERT INTO agent_runs").
+	mock.ExpectQuery("INSERT INTO sessions").
 		WithArgs(nil, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -277,7 +277,7 @@ func TestAgentRunStore_Create_AllowsNilIssueID(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestAgentRunStore_UpdateStatus(t *testing.T) {
+func TestSessionStore_UpdateStatus(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -288,12 +288,12 @@ func TestAgentRunStore_UpdateStatus(t *testing.T) {
 		{
 			name:    "sets started_at when transitioning to running",
 			status:  "running",
-			queryRE: "UPDATE agent_runs SET status .+ started_at",
+			queryRE: "UPDATE sessions SET status .+ started_at",
 		},
 		{
 			name:    "sets completed_at when transitioning to completed",
 			status:  "completed",
-			queryRE: "UPDATE agent_runs SET status .+ completed_at",
+			queryRE: "UPDATE sessions SET status .+ completed_at",
 		},
 	}
 
@@ -305,7 +305,7 @@ func TestAgentRunStore_UpdateStatus(t *testing.T) {
 			require.NoError(t, err, "should create mock pool")
 			defer mock.Close()
 
-			store := NewAgentRunStore(mock)
+			store := NewSessionStore(mock)
 			orgID := uuid.New()
 			runID := uuid.New()
 
@@ -320,24 +320,24 @@ func TestAgentRunStore_UpdateStatus(t *testing.T) {
 	}
 }
 
-func TestAgentRunStore_ListByIssue(t *testing.T) {
+func TestSessionStore_ListByIssue(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
-	store := NewAgentRunStore(mock)
+	store := NewSessionStore(mock)
 	orgID := uuid.New()
 	issueID := uuid.New()
 	runID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery("SELECT .+ FROM agent_runs WHERE org_id .+ AND issue_id").
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id .+ AND issue_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(agentRunColumns).
-				AddRow(newAgentRunRow(runID, issueID, orgID, now)...),
+			pgxmock.NewRows(sessionColumns).
+				AddRow(newSessionRow(runID, issueID, orgID, now)...),
 		)
 
 	runs, err := store.ListByIssue(context.Background(), orgID, issueID)

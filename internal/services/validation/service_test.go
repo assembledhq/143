@@ -459,7 +459,7 @@ func TestValidate_AllPass_EnqueuesPR(t *testing.T) {
 	svc := NewService(stores.validations, stores.issues, stores.orgs, stores.jobs, nil, provider, zerolog.Nop())
 
 	diff := generateDiff(5, 3)
-	agentRun := &models.AgentRun{
+	agentRun := &models.Session{
 		ID:      uuid.New(),
 		IssueID: uuid.New(),
 		OrgID:   uuid.New(),
@@ -474,9 +474,9 @@ func TestValidate_AllPass_EnqueuesPR(t *testing.T) {
 	require.Equal(t, "passed", stores.validations.lastStatus, "validation status should be passed when all checks pass")
 	require.Equal(t, "open_pr", stores.jobs.lastJobType, "a passing validation should enqueue an open_pr job")
 	require.Equal(t, map[string]string{
-		"agent_run_id": agentRun.ID.String(),
+		"session_id": agentRun.ID.String(),
 		"org_id":       agentRun.OrgID.String(),
-	}, stores.jobs.lastPayload, "validation should enqueue open_pr with agent_run_id and org_id")
+	}, stores.jobs.lastPayload, "validation should enqueue open_pr with session_id and org_id")
 	require.Empty(t, stores.issues.lastStatus, "issue status should not be updated when validation passes")
 }
 
@@ -497,7 +497,7 @@ func TestValidate_SecurityFails_FailFast(t *testing.T) {
  package config
 +const awsKey = "AKIAIOSFODNN7EXAMPLE"
 `
-	agentRun := &models.AgentRun{
+	agentRun := &models.Session{
 		ID:      uuid.New(),
 		IssueID: uuid.New(),
 		OrgID:   uuid.New(),
@@ -530,7 +530,7 @@ func TestValidate_SkippedChecksRecorded(t *testing.T) {
 	svc := NewService(stores.validations, stores.issues, stores.orgs, stores.jobs, nil, provider, zerolog.Nop())
 
 	diff := generateDiff(5, 3)
-	agentRun := &models.AgentRun{
+	agentRun := &models.Session{
 		ID:      uuid.New(),
 		IssueID: uuid.New(),
 		OrgID:   uuid.New(),
@@ -557,7 +557,7 @@ func TestValidate_DiffTooLarge_Fails(t *testing.T) {
 	svc := NewService(stores.validations, stores.issues, stores.orgs, stores.jobs, nil, provider, zerolog.Nop())
 
 	diff := generateDiff(400, 150)
-	agentRun := &models.AgentRun{
+	agentRun := &models.Session{
 		ID:      uuid.New(),
 		IssueID: uuid.New(),
 		OrgID:   uuid.New(),
@@ -586,7 +586,7 @@ func TestValidate_NilDiff_PassesSecurity(t *testing.T) {
 	svc := NewService(stores.validations, stores.issues, stores.orgs, stores.jobs, nil, provider, zerolog.Nop())
 
 
-	agentRun := &models.AgentRun{
+	agentRun := &models.Session{
 		ID:      uuid.New(),
 		IssueID: uuid.New(),
 		OrgID:   uuid.New(),
@@ -743,7 +743,7 @@ func TestValidate_LLMChecksRunBeforeDeterministic(t *testing.T) {
 	svc := NewService(stores.validations, stores.issues, stores.orgs, stores.jobs, llm, provider, zerolog.Nop())
 
 	diff := generateDiff(5, 3)
-	agentRun := &models.AgentRun{
+	agentRun := &models.Session{
 		ID:      uuid.New(),
 		IssueID: uuid.New(),
 		OrgID:   uuid.New(),
@@ -774,7 +774,7 @@ func TestValidate_DirectionCheckFails_FailFast(t *testing.T) {
 	svc := NewService(stores.validations, stores.issues, stores.orgs, stores.jobs, llm, provider, zerolog.Nop())
 
 	diff := generateDiff(5, 3)
-	agentRun := &models.AgentRun{
+	agentRun := &models.Session{
 		ID:      uuid.New(),
 		IssueID: uuid.New(),
 		OrgID:   uuid.New(),

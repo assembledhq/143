@@ -20,11 +20,11 @@ type issueStore interface {
 	UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status string) error
 }
 
-type agentRunStore interface {
+type sessionStore interface {
 	CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error)
-	Create(ctx context.Context, run *models.AgentRun) error
-	ListByOrg(ctx context.Context, orgID uuid.UUID, filters db.AgentRunFilters) ([]models.AgentRun, error)
-	ListRecentByOrg(ctx context.Context, orgID uuid.UUID, statuses []string, limit int) ([]models.AgentRun, error)
+	Create(ctx context.Context, run *models.Session) error
+	ListByOrg(ctx context.Context, orgID uuid.UUID, filters db.SessionFilters) ([]models.Session, error)
+	ListRecentByOrg(ctx context.Context, orgID uuid.UUID, statuses []string, limit int) ([]models.Session, error)
 }
 
 type prStore interface {
@@ -79,7 +79,7 @@ type projectCycleStore interface {
 // Service is the AI Product Manager. It runs the PM agent and delegates work.
 type Service struct {
 	issues        issueStore
-	agentRuns     agentRunStore
+	sessions     sessionStore
 	pullRequests  prStore
 	orgs          orgStore
 	repos         repoStore
@@ -97,7 +97,7 @@ type Service struct {
 
 func NewService(
 	issues issueStore,
-	agentRuns agentRunStore,
+	sessions sessionStore,
 	pullRequests prStore,
 	orgs orgStore,
 	repos repoStore,
@@ -111,7 +111,7 @@ func NewService(
 ) *Service {
 	return &Service{
 		issues:       issues,
-		agentRuns:    agentRuns,
+		sessions:    sessions,
 		pullRequests: pullRequests,
 		orgs:         orgs,
 		repos:        repos,

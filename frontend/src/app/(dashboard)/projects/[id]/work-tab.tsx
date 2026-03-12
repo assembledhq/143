@@ -118,9 +118,9 @@ function BoardSection({
                                     PR <ExternalLink className="h-2.5 w-2.5" />
                                   </a>
                                 )}
-                                {task.agent_run_id && (
-                                  <Link href={`/runs/${task.agent_run_id}`} className="text-[10px] text-primary underline inline-flex items-center gap-0.5">
-                                    Run <ExternalLink className="h-2.5 w-2.5" />
+                                {task.session_id && (
+                                  <Link href={`/sessions/${task.session_id}`} className="text-[10px] text-primary underline inline-flex items-center gap-0.5">
+                                    Session <ExternalLink className="h-2.5 w-2.5" />
                                   </Link>
                                 )}
                               </div>
@@ -167,8 +167,8 @@ function PRsSection({ tasks }: { tasks: ProjectTask[] }) {
                 {task.branch_name && <span className="text-[10px] font-mono text-muted-foreground hidden md:inline">{task.branch_name}</span>}
               </div>
               <div className="flex items-center gap-2 flex-shrink-0">
-                {task.agent_run_id && (
-                  <Link href={`/runs/${task.agent_run_id}`} className="text-[10px] text-primary underline inline-flex items-center gap-0.5">
+                {task.session_id && (
+                  <Link href={`/sessions/${task.session_id}`} className="text-[10px] text-primary underline inline-flex items-center gap-0.5">
                     Run <ExternalLink className="h-2.5 w-2.5" />
                   </Link>
                 )}

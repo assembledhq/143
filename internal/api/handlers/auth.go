@@ -28,11 +28,11 @@ type AuthHandler struct {
 	cfg             *config.Config
 	orgStore        *db.OrganizationStore
 	userStore       *db.UserStore
-	sessionStore    *db.SessionStore
+	sessionStore    *db.AuthSessionStore
 	invitationStore *db.InvitationStore
 }
 
-func NewAuthHandler(cfg *config.Config, orgStore *db.OrganizationStore, userStore *db.UserStore, sessionStore *db.SessionStore, invitationStore *db.InvitationStore) *AuthHandler {
+func NewAuthHandler(cfg *config.Config, orgStore *db.OrganizationStore, userStore *db.UserStore, sessionStore *db.AuthSessionStore, invitationStore *db.InvitationStore) *AuthHandler {
 	return &AuthHandler{
 		cfg:             cfg,
 		orgStore:        orgStore,
@@ -594,7 +594,7 @@ func (h *AuthHandler) createSessionAndRedirect(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate session token")
 		return
 	}
-	session := &models.Session{
+	session := &models.AuthSession{
 		UserID:    user.ID,
 		OrgID:     user.OrgID,
 		Token:     sessionToken,
@@ -638,7 +638,7 @@ func (h *AuthHandler) createSessionAndRespond(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate session token")
 		return
 	}
-	session := &models.Session{
+	session := &models.AuthSession{
 		UserID:    user.ID,
 		OrgID:     user.OrgID,
 		Token:     sessionToken,

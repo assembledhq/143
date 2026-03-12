@@ -5,7 +5,7 @@ import { LogViewer } from './log-viewer';
 // Mock the api module.
 vi.mock('@/lib/api', () => ({
   api: {
-    runs: {
+    sessions: {
       getLogs: vi.fn(),
     },
   },
@@ -40,7 +40,7 @@ class MockEventSource {
 describe('LogViewer', () => {
   beforeEach(() => {
     vi.stubGlobal('EventSource', MockEventSource as unknown as typeof EventSource);
-    (api.runs.getLogs as ReturnType<typeof vi.fn>).mockResolvedValue({ data: [] });
+    (api.sessions.getLogs as ReturnType<typeof vi.fn>).mockResolvedValue({ data: [] });
   });
 
   afterEach(() => {
@@ -51,7 +51,7 @@ describe('LogViewer', () => {
   });
 
   it('shows loading state then "no log entries" for empty completed run', async () => {
-    (api.runs.getLogs as ReturnType<typeof vi.fn>).mockResolvedValue({ data: [] });
+    (api.sessions.getLogs as ReturnType<typeof vi.fn>).mockResolvedValue({ data: [] });
 
     render(<LogViewer runId="run-1" isActive={false} />);
     expect(screen.getByText('Loading logs...')).toBeInTheDocument();
@@ -62,7 +62,7 @@ describe('LogViewer', () => {
   });
 
   it('renders logs fetched via REST for completed runs', async () => {
-    (api.runs.getLogs as ReturnType<typeof vi.fn>).mockResolvedValue({
+    (api.sessions.getLogs as ReturnType<typeof vi.fn>).mockResolvedValue({
       data: [
         {
           id: 1,
@@ -85,7 +85,7 @@ describe('LogViewer', () => {
   });
 
   it('starts SSE streaming for active runs after REST fetch', async () => {
-    (api.runs.getLogs as ReturnType<typeof vi.fn>).mockResolvedValue({ data: [] });
+    (api.sessions.getLogs as ReturnType<typeof vi.fn>).mockResolvedValue({ data: [] });
 
     render(<LogViewer runId="run-3" isActive={true} />);
 
@@ -94,7 +94,7 @@ describe('LogViewer', () => {
     });
 
     const source = MockEventSource.instances[0];
-    expect(source.url).toContain('/api/v1/runs/run-3/logs/stream');
+    expect(source.url).toContain('/api/v1/sessions/run-3/logs/stream');
 
     act(() => {
       source.onopen?.();
@@ -117,7 +117,7 @@ describe('LogViewer', () => {
   });
 
   it('deduplicates logs between REST fetch and SSE stream', async () => {
-    (api.runs.getLogs as ReturnType<typeof vi.fn>).mockResolvedValue({
+    (api.sessions.getLogs as ReturnType<typeof vi.fn>).mockResolvedValue({
       data: [
         {
           id: 1,
@@ -158,7 +158,7 @@ describe('LogViewer', () => {
 
   it('reconnects with backoff when active and stream errors', async () => {
     vi.useFakeTimers();
-    (api.runs.getLogs as ReturnType<typeof vi.fn>).mockResolvedValue({ data: [] });
+    (api.sessions.getLogs as ReturnType<typeof vi.fn>).mockResolvedValue({ data: [] });
 
     render(<LogViewer runId="run-5" isActive={true} />);
 
@@ -180,7 +180,7 @@ describe('LogViewer', () => {
   });
 
   it('shows error state with retry button when REST fetch fails', async () => {
-    (api.runs.getLogs as ReturnType<typeof vi.fn>).mockRejectedValue(
+    (api.sessions.getLogs as ReturnType<typeof vi.fn>).mockRejectedValue(
       new Error('Network error')
     );
 
@@ -193,7 +193,7 @@ describe('LogViewer', () => {
   });
 
   it('retries fetch when retry button is clicked', async () => {
-    (api.runs.getLogs as ReturnType<typeof vi.fn>)
+    (api.sessions.getLogs as ReturnType<typeof vi.fn>)
       .mockRejectedValueOnce(new Error('Network error'))
       .mockResolvedValueOnce({
         data: [
@@ -216,7 +216,7 @@ describe('LogViewer', () => {
 
   it('shows stream error after all reconnect attempts are exhausted', async () => {
     vi.useFakeTimers();
-    (api.runs.getLogs as ReturnType<typeof vi.fn>).mockResolvedValue({
+    (api.sessions.getLogs as ReturnType<typeof vi.fn>).mockResolvedValue({
       data: [
         { id: 1, level: 'info', message: 'Existing log', created_at: '2026-02-18T10:15:30Z' },
       ],

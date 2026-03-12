@@ -13,7 +13,7 @@ func (s *Service) executePlan(ctx context.Context, orgID uuid.UUID, plan *Plan, 
 		maxConcurrent = models.DefaultMaxConcurrentRuns
 	}
 
-	running, err := s.agentRuns.CountRunningByOrg(ctx, orgID)
+	running, err := s.sessions.CountRunningByOrg(ctx, orgID)
 	if err != nil {
 		return err
 	}
@@ -53,7 +53,7 @@ func (s *Service) executePlan(ctx context.Context, orgID uuid.UUID, plan *Plan, 
 			agentType = models.DefaultDefaultAgentType
 		}
 
-		run := &models.AgentRun{
+		run := &models.Session{
 			IssueID:       primaryIssueID,
 			OrgID:         orgID,
 			AgentType:     agentType,
@@ -64,7 +64,7 @@ func (s *Service) executePlan(ctx context.Context, orgID uuid.UUID, plan *Plan, 
 			PMApproach:    &task.Approach,
 			PMReasoning:   &task.Reasoning,
 		}
-		if err := s.agentRuns.Create(ctx, run); err != nil {
+		if err := s.sessions.Create(ctx, run); err != nil {
 			s.logger.Error().Err(err).Msg("failed to create agent run from PM plan")
 			task.Status = models.PMTaskStatusSkippedCapacity
 			continue
@@ -77,16 +77,16 @@ func (s *Service) executePlan(ctx context.Context, orgID uuid.UUID, plan *Plan, 
 		}
 
 		payload := map[string]string{
-			"agent_run_id": run.ID.String(),
+			"session_id": run.ID.String(),
 			"org_id":       orgID.String(),
 		}
 		if _, err := s.jobs.Enqueue(ctx, orgID, "agent", "run_agent", payload, 5, nil); err != nil {
-			s.logger.Error().Err(err).Str("agent_run_id", run.ID.String()).Msg("failed to enqueue agent run job")
+			s.logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to enqueue agent run job")
 			task.Status = models.PMTaskStatusSkippedCapacity
 			continue
 		}
 
-		task.AgentRunID = &run.ID
+		task.SessionID = &run.ID
 		task.Status = models.PMTaskStatusDelegated
 		delegated++
 	}

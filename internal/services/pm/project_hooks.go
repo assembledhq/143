@@ -13,7 +13,7 @@ import (
 // ProjectTaskUpdater is called by the orchestrator when an agent run
 // completes, to update the associated project task's status.
 type ProjectTaskUpdater interface {
-	OnAgentRunComplete(ctx context.Context, run *models.AgentRun, status string) error
+	OnSessionComplete(ctx context.Context, run *models.Session, status string) error
 }
 
 // ProjectHooks implements ProjectTaskUpdater by updating project task
@@ -32,7 +32,7 @@ func NewProjectHooks(projectTasks projectTaskStore, projects projectStore, logge
 	}
 }
 
-func (h *ProjectHooks) OnAgentRunComplete(ctx context.Context, run *models.AgentRun, status string) error {
+func (h *ProjectHooks) OnSessionComplete(ctx context.Context, run *models.Session, status string) error {
 	if run.ProjectTaskID == nil {
 		return nil
 	}
@@ -59,7 +59,7 @@ func (h *ProjectHooks) OnAgentRunComplete(ctx context.Context, run *models.Agent
 		return nil
 	}
 
-	task.AgentRunID = &run.ID
+	task.SessionID = &run.ID
 	if err := h.projectTasks.Update(ctx, &task); err != nil {
 		return fmt.Errorf("update project task status: %w", err)
 	}

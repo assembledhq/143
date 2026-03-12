@@ -134,7 +134,7 @@ func (m *mockProjectCycleStore) ListByProject(_ context.Context, _, _ uuid.UUID,
 
 func newTestProjectService(ps *mockProjectStore, pts *mockProjectTaskStore, pcs *mockProjectCycleStore) *Service {
 	svc := &Service{
-		agentRuns:     &mockAgentRunStore{},
+		sessions:     &mockSessionStore{},
 		jobs:          &mockJobStore{},
 		projects:      ps,
 		projectTasks:  pts,
@@ -420,7 +420,7 @@ func TestExecuteProjectPlan_ManualAutonomyDoesNotDispatch(t *testing.T) {
 	require.Len(t, pts.created, 1)
 
 	// But no agent runs should be created (manual mode).
-	runStore := svc.agentRuns.(*mockAgentRunStore)
+	runStore := svc.sessions.(*mockSessionStore)
 	require.Len(t, runStore.created, 0)
 }
 

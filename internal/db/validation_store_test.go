@@ -13,15 +13,15 @@ import (
 )
 
 var validationColumns = []string{
-	"id", "agent_run_id", "org_id", "status",
+	"id", "session_id", "org_id", "status",
 	"direction_check", "correctness_check", "quality_check", "security_scan",
 	"regression_test_check", "coverage_delta", "ci_check", "details",
 	"started_at", "completed_at", "created_at",
 }
 
-func newValidationRow(id, agentRunID, orgID uuid.UUID, now time.Time) []any {
+func newValidationRow(id, sessionID, orgID uuid.UUID, now time.Time) []any {
 	return []any{
-		id, agentRunID, orgID, "pending",
+		id, sessionID, orgID, "pending",
 		"skip", "skip", "skip", "skip",
 		"skip", json.RawMessage(`{}`), "skip", json.RawMessage(`{}`),
 		nil, nil, now,
@@ -39,7 +39,7 @@ func TestValidationStore_Create_Success(t *testing.T) {
 	generatedID := uuid.New()
 
 	v := &models.Validation{
-		AgentRunID: uuid.New(),
+		SessionID: uuid.New(),
 		OrgID:      uuid.New(),
 		Status:     "pending",
 	}
@@ -67,20 +67,20 @@ func TestValidationStore_GetByID_Success(t *testing.T) {
 	store := NewValidationStore(mock)
 	orgID := uuid.New()
 	id := uuid.New()
-	agentRunID := uuid.New()
+	sessionID := uuid.New()
 	now := time.Now()
 
 	mock.ExpectQuery("SELECT .+ FROM validations WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(validationColumns).
-				AddRow(newValidationRow(id, agentRunID, orgID, now)...),
+				AddRow(newValidationRow(id, sessionID, orgID, now)...),
 		)
 
 	v, err := store.GetByID(context.Background(), orgID, id)
 	require.NoError(t, err, "should retrieve validation by ID without error")
 	require.Equal(t, id, v.ID, "should return the correct validation ID")
-	require.Equal(t, agentRunID, v.AgentRunID, "should return the correct agent run ID")
+	require.Equal(t, sessionID, v.SessionID, "should return the correct agent run ID")
 	require.Equal(t, orgID, v.OrgID, "should return the correct org ID")
 	require.Equal(t, "pending", v.Status, "should return the correct status")
 	require.Equal(t, "skip", v.DirectionCheck, "should return the correct direction check")
@@ -109,7 +109,7 @@ func TestValidationStore_GetByID_NotFound(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestValidationStore_GetByAgentRunID_Success(t *testing.T) {
+func TestValidationStore_GetBySessionID_Success(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "should create mock pool without error")
@@ -118,20 +118,20 @@ func TestValidationStore_GetByAgentRunID_Success(t *testing.T) {
 	store := NewValidationStore(mock)
 	orgID := uuid.New()
 	id := uuid.New()
-	agentRunID := uuid.New()
+	sessionID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery("SELECT .+ FROM validations WHERE agent_run_id").
+	mock.ExpectQuery("SELECT .+ FROM validations WHERE session_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(validationColumns).
-				AddRow(newValidationRow(id, agentRunID, orgID, now)...),
+				AddRow(newValidationRow(id, sessionID, orgID, now)...),
 		)
 
-	v, err := store.GetByAgentRunID(context.Background(), orgID, agentRunID)
+	v, err := store.GetBySessionID(context.Background(), orgID, sessionID)
 	require.NoError(t, err, "should retrieve validation by agent run ID without error")
 	require.Equal(t, id, v.ID, "should return the correct validation ID")
-	require.Equal(t, agentRunID, v.AgentRunID, "should return the correct agent run ID")
+	require.Equal(t, sessionID, v.SessionID, "should return the correct agent run ID")
 	require.Equal(t, orgID, v.OrgID, "should return the correct org ID")
 	require.Equal(t, "pending", v.Status, "should return the correct status")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")

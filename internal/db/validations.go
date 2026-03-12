@@ -20,12 +20,12 @@ func NewValidationStore(db DBTX) *ValidationStore {
 
 func (s *ValidationStore) Create(ctx context.Context, v *models.Validation) error {
 	query := `
-		INSERT INTO validations (agent_run_id, org_id, status)
-		VALUES (@agent_run_id, @org_id, @status)
+		INSERT INTO validations (session_id, org_id, status)
+		VALUES (@session_id, @org_id, @status)
 		RETURNING id, created_at`
 
 	args := pgx.NamedArgs{
-		"agent_run_id": v.AgentRunID,
+		"session_id": v.SessionID,
 		"org_id":       v.OrgID,
 		"status":       v.Status,
 	}
@@ -36,7 +36,7 @@ func (s *ValidationStore) Create(ctx context.Context, v *models.Validation) erro
 
 func (s *ValidationStore) GetByID(ctx context.Context, orgID, id uuid.UUID) (models.Validation, error) {
 	query := `
-		SELECT id, agent_run_id, org_id, status,
+		SELECT id, session_id, org_id, status,
 		       direction_check, correctness_check, quality_check, security_scan,
 		       regression_test_check, coverage_delta, ci_check, details,
 		       started_at, completed_at, created_at
@@ -53,21 +53,21 @@ func (s *ValidationStore) GetByID(ctx context.Context, orgID, id uuid.UUID) (mod
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Validation])
 }
 
-func (s *ValidationStore) GetByAgentRunID(ctx context.Context, orgID, agentRunID uuid.UUID) (models.Validation, error) {
+func (s *ValidationStore) GetBySessionID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Validation, error) {
 	query := `
-		SELECT id, agent_run_id, org_id, status,
+		SELECT id, session_id, org_id, status,
 		       direction_check, correctness_check, quality_check, security_scan,
 		       regression_test_check, coverage_delta, ci_check, details,
 		       started_at, completed_at, created_at
 		FROM validations
-		WHERE agent_run_id = @agent_run_id AND org_id = @org_id`
+		WHERE session_id = @session_id AND org_id = @org_id`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
-		"agent_run_id": agentRunID,
+		"session_id": sessionID,
 		"org_id":       orgID,
 	})
 	if err != nil {
-		return models.Validation{}, fmt.Errorf("query validation by agent run: %w", err)
+		return models.Validation{}, fmt.Errorf("query validation by session: %w", err)
 	}
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Validation])
 }

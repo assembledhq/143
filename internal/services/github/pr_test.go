@@ -213,7 +213,7 @@ func TestFormatPRBody(t *testing.T) {
 	svc := &PRService{logger: logger}
 
 	summary := "Fixed the null pointer dereference"
-	run := &models.AgentRun{
+	run := &models.Session{
 		ID:            uuid.New(),
 		OrgID:         uuid.New(),
 		AgentType:     "claude-code",
@@ -622,7 +622,7 @@ func TestFormatPRBody_WithValidation(t *testing.T) {
 	now := time.Now()
 	started := now.Add(-5 * time.Minute)
 	summary := "Fixed the bug"
-	run := &models.AgentRun{
+	run := &models.Session{
 		ID:            uuid.New(),
 		OrgID:         uuid.New(),
 		AgentType:     "claude-code",
@@ -653,7 +653,7 @@ func TestFormatPRBody_NilSummary(t *testing.T) {
 	logger := zerolog.Nop()
 	svc := &PRService{logger: logger}
 
-	run := &models.AgentRun{
+	run := &models.Session{
 		ID:        uuid.New(),
 		OrgID:     uuid.New(),
 		AgentType: "claude-code",

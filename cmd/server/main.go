@@ -73,7 +73,7 @@ func main() {
 		w := worker.New(pool, logger, hostname)
 
 		issueStore := db.NewIssueStore(pool)
-		agentRunStore := db.NewAgentRunStore(pool)
+		sessionStore := db.NewSessionStore(pool)
 		jobStore := db.NewJobStore(pool)
 		orgStore := db.NewOrganizationStore(pool)
 		repoStore := db.NewRepositoryStore(pool)
@@ -91,7 +91,7 @@ func main() {
 
 		stores := &worker.Stores{
 			Issues:              issueStore,
-			AgentRuns:           agentRunStore,
+			Sessions:           sessionStore,
 			Jobs:                jobStore,
 			Integrations:        integrationStore,
 			Webhooks:            db.NewWebhookDeliveryStore(pool),
@@ -104,7 +104,7 @@ func main() {
 		// Build Phase 3+ services if runtime dependencies are available.
 		var services *worker.Services
 		if canBuildServices(cfg, logger) {
-			services = buildServices(cfg, pool, logger, codexAuthSvc, credentialStore, issueStore, agentRunStore,
+			services = buildServices(cfg, pool, logger, codexAuthSvc, credentialStore, issueStore, sessionStore,
 				jobStore, orgStore, repoStore, validationStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore)
@@ -172,7 +172,7 @@ func buildServices(
 	codexAuthSvc *codexauth.Service,
 	credentialStore *db.OrgCredentialStore,
 	issueStore *db.IssueStore,
-	agentRunStore *db.AgentRunStore,
+	sessionStore *db.SessionStore,
 	jobStore *db.JobStore,
 	orgStore *db.OrganizationStore,
 	repoStore *db.RepositoryStore,
@@ -216,15 +216,15 @@ func buildServices(
 	}
 
 	// Orchestrator.
-	agentRunLogStore := db.NewAgentRunLogStore(pool)
-	agentRunQuestionStore := db.NewAgentRunQuestionStore(pool)
+	sessionLogStore := db.NewSessionLogStore(pool)
+	sessionQuestionStore := db.NewSessionQuestionStore(pool)
 	projectTaskUpdater := pm.NewProjectHooks(projectTaskStore, projectStore, logger)
 	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:          sandboxProvider,
 		Adapters:          agentAdapters,
-		AgentRuns:         agentRunStore,
-		AgentRunLogs:      agentRunLogStore,
-		AgentRunQuestions: agentRunQuestionStore,
+		Sessions:         sessionStore,
+		SessionLogs:      sessionLogStore,
+		SessionQuestions: sessionQuestionStore,
 		DecisionLog:       pmDecisionLogStore,
 		ProjectTasks:      projectTaskUpdater,
 		Issues:            issueStore,
@@ -244,23 +244,23 @@ func buildServices(
 
 	// PR service.
 	prService := ghservice.NewPRService(
-		ghSvc, pullRequestStore, agentRunStore, issueStore,
+		ghSvc, pullRequestStore, sessionStore, issueStore,
 		deployStore, validationStore, repoStore, jobStore, logger,
 	)
 
 	// Failure analysis service.
-	failureSvc := agent.NewFailureService(agentRunStore, logger)
+	failureSvc := agent.NewFailureService(sessionStore, logger)
 
 	// Prioritization service.
 	prioritizationSvc := prioritization.NewService(
 		issueStore, priorityScoreStore, complexityEstimateStore,
-		agentRunStore, orgStore, jobStore, llmClient, logger,
+		sessionStore, orgStore, jobStore, llmClient, logger,
 	)
 
 	pmAdapter := adapters.NewClaudeCodeAdapter(logger)
 	pmSvc := pm.NewService(
 		issueStore,
-		agentRunStore,
+		sessionStore,
 		pullRequestStore,
 		orgStore,
 		repoStore,

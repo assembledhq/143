@@ -10,17 +10,17 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
-type SessionStore struct {
+type AuthSessionStore struct {
 	db DBTX
 }
 
-func NewSessionStore(db DBTX) *SessionStore {
-	return &SessionStore{db: db}
+func NewAuthSessionStore(db DBTX) *AuthSessionStore {
+	return &AuthSessionStore{db: db}
 }
 
-func (s *SessionStore) Create(ctx context.Context, session *models.Session) error {
+func (s *AuthSessionStore) Create(ctx context.Context, session *models.AuthSession) error {
 	query := `
-		INSERT INTO sessions (user_id, org_id, token, expires_at)
+		INSERT INTO auth_sessions (user_id, org_id, token, expires_at)
 		VALUES (@user_id, @org_id, @token, @expires_at)
 		RETURNING id, created_at`
 
@@ -35,27 +35,27 @@ func (s *SessionStore) Create(ctx context.Context, session *models.Session) erro
 	return row.Scan(&session.ID, &session.CreatedAt)
 }
 
-func (s *SessionStore) GetByToken(ctx context.Context, token string) (models.Session, error) {
+func (s *AuthSessionStore) GetByToken(ctx context.Context, token string) (models.AuthSession, error) {
 	query := `
 		SELECT id, user_id, org_id, token, expires_at, created_at
-		FROM sessions
+		FROM auth_sessions
 		WHERE token = @token AND expires_at > now()`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"token": token})
 	if err != nil {
-		return models.Session{}, fmt.Errorf("query session: %w", err)
+		return models.AuthSession{}, fmt.Errorf("query session: %w", err)
 	}
-	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.AuthSession])
 }
 
-func (s *SessionStore) DeleteByToken(ctx context.Context, token string) error {
-	query := `DELETE FROM sessions WHERE token = @token`
+func (s *AuthSessionStore) DeleteByToken(ctx context.Context, token string) error {
+	query := `DELETE FROM auth_sessions WHERE token = @token`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{"token": token})
 	return err
 }
 
-func (s *SessionStore) DeleteByUserID(ctx context.Context, userID uuid.UUID) error {
-	query := `DELETE FROM sessions WHERE user_id = @user_id`
+func (s *AuthSessionStore) DeleteByUserID(ctx context.Context, userID uuid.UUID) error {
+	query := `DELETE FROM auth_sessions WHERE user_id = @user_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{"user_id": userID})
 	return err
 }
