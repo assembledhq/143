@@ -411,9 +411,26 @@ func (h *IntegrationHandler) ConnectSentry(w http.ResponseWriter, r *http.Reques
 func (h *IntegrationHandler) StartGitHubOAuth(w http.ResponseWriter, r *http.Request) {
 	// If a GitHub App slug is configured, redirect to the App installation page
 	// instead of the OAuth flow. The App installation triggers a webhook that
-	// registers repos automatically.
+	// registers repos automatically. We still set the OAuth state cookie so
+	// the callback can validate the redirect when GitHub returns the user with
+	// a code (GitHub Apps pass the state parameter through).
 	if h.githubAppSlug != "" {
-		installURL := fmt.Sprintf("https://github.com/apps/%s/installations/new", h.githubAppSlug)
+		state, err := generateRandomString(32)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate oauth state")
+			return
+		}
+
+		http.SetCookie(w, &http.Cookie{
+			Name:     "github_integration_oauth_state",
+			Value:    state,
+			Path:     "/",
+			MaxAge:   600,
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+		})
+
+		installURL := fmt.Sprintf("https://github.com/apps/%s/installations/new?state=%s", h.githubAppSlug, url.QueryEscape(state))
 		http.Redirect(w, r, installURL, http.StatusTemporaryRedirect)
 		return
 	}

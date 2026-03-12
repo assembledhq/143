@@ -794,6 +794,41 @@ func TestIntegrationHandler_StartGitHubOAuth_NotConfigured(t *testing.T) {
 	require.Contains(t, w.Body.String(), "GITHUB_OAUTH_NOT_CONFIGURED")
 }
 
+func TestIntegrationHandler_StartGitHubOAuth_AppSlugSetsStateCookie(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	handler := NewIntegrationHandler(
+		store, nil, "", "", "http://localhost:8080", "http://localhost:3000",
+		WithGitHubIntegrationOAuth("github-client-id", "github-client-secret"),
+		WithGitHubAppSlug("my-app"),
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/github/login", nil)
+	w := httptest.NewRecorder()
+
+	handler.StartGitHubOAuth(w, req)
+
+	require.Equal(t, http.StatusTemporaryRedirect, w.Code)
+
+	redirectURL := w.Header().Get("Location")
+	require.NotEmpty(t, redirectURL)
+
+	parsed, parseErr := url.Parse(redirectURL)
+	require.NoError(t, parseErr)
+	require.Equal(t, "https", parsed.Scheme)
+	require.Equal(t, "github.com", parsed.Host)
+	require.Equal(t, "/apps/my-app/installations/new", parsed.Path)
+	require.NotEmpty(t, parsed.Query().Get("state"), "state parameter must be set for CSRF validation on callback")
+
+	setCookie := w.Result().Header.Get("Set-Cookie")
+	require.Contains(t, setCookie, "github_integration_oauth_state=", "state cookie must be set so the callback can validate it")
+}
+
 func TestIntegrationHandler_HandleGitHubOAuthCallback_SavesCredentialAndIntegration(t *testing.T) {
 	t.Parallel()
 
