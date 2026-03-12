@@ -2,6 +2,7 @@ package adapters
 
 import (
 	"context"
+	"io"
 	"strings"
 	"testing"
 
@@ -10,6 +11,7 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
+	"github.com/assembledhq/143/internal/testutil"
 )
 
 func TestCodexAdapter_Name(t *testing.T) {
@@ -314,6 +316,120 @@ func TestParseCodexStreamOutput(t *testing.T) {
 				require.Equal(t, "Straightforward fix", result.ConfidenceReasoning)
 			},
 		},
+		{
+			name:   "tool_use event type variant",
+			output: `{"type":"tool_use","name":"read_file","arguments":{"path":"main.go"},"call_id":"c1"}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Len(t, logs, 1)
+				require.Equal(t, "tool_use", logs[0].Level)
+				require.Equal(t, "read_file", logs[0].Metadata["tool"])
+				require.Equal(t, "c1", logs[0].Metadata["call_id"])
+			},
+		},
+		{
+			name:   "tool_call event type variant",
+			output: `{"type":"tool_call","name":"shell","arguments":{"command":"ls"}}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Len(t, logs, 1)
+				require.Equal(t, "tool_use", logs[0].Level)
+				require.Equal(t, "shell", logs[0].Metadata["tool"])
+			},
+		},
+		{
+			name:   "function_call_output with name field",
+			output: `{"type":"function_call_output","name":"shell","call_id":"c2","output":"done"}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Len(t, logs, 1)
+				require.Equal(t, "output", logs[0].Level)
+				require.Equal(t, "shell", logs[0].Metadata["tool"])
+				require.Equal(t, "c2", logs[0].Metadata["call_id"])
+			},
+		},
+		{
+			name:   "tool_result with result field fallback",
+			output: `{"type":"tool_result","call_id":"c3","result":"file contents here"}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Len(t, logs, 1)
+				require.Contains(t, logs[0].Message, "file contents here")
+			},
+		},
+		{
+			name:   "result event with Result JSON token usage",
+			output: `{"type":"result","content":"All done.","result":{"input_tokens":2000,"output_tokens":800}}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Contains(t, result.Summary, "All done.")
+				require.Equal(t, 2000, result.TokenUsage.InputTokens)
+				require.Equal(t, 800, result.TokenUsage.OutputTokens)
+			},
+		},
+		{
+			name: "assistant event type variant",
+			output: `{"type":"assistant","content":"Working on it..."}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Contains(t, result.Summary, "Working on it...")
+			},
+		},
+		{
+			name: "text event type variant",
+			output: `{"type":"text","content":"Some text output"}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Contains(t, result.Summary, "Some text output")
+			},
+		},
+		{
+			name:   "error event with message fallback",
+			output: `{"type":"error","message":"out of memory"}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Len(t, logs, 1)
+				require.Equal(t, "error", logs[0].Level)
+				require.Contains(t, logs[0].Message, "out of memory")
+			},
+		},
+		{
+			name:   "error event with content fallback",
+			output: `{"type":"error","content":"something broke"}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Len(t, logs, 1)
+				require.Equal(t, "error", logs[0].Level)
+				require.Contains(t, logs[0].Message, "something broke")
+			},
+		},
+		{
+			name:   "unknown event type logged as debug",
+			output: `{"type":"custom_unknown","content":"whatever"}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Len(t, logs, 1)
+				require.Equal(t, "debug", logs[0].Level)
+			},
+		},
+		{
+			name:   "non-JSON line in stream",
+			output: "some raw text that is not JSON",
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Len(t, logs, 1)
+				require.Equal(t, "output", logs[0].Level)
+				require.Contains(t, result.Summary, "some raw text")
+			},
+		},
+		{
+			name:   "message with empty content falls back to Message field",
+			output: `{"type":"message","message":"from message field"}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Contains(t, result.Summary, "from message field")
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -334,6 +450,193 @@ func TestParseCodexStreamOutput(t *testing.T) {
 			tt.checkResult(t, result, logs)
 		})
 	}
+}
+
+func TestCodexAdapter_Execute(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		codexOutput    string
+		codexExitCode  int
+		stderrOutput   string
+		diffOutput     string
+		diffExitCode   int
+		expectErr      bool
+		checkResult    func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry)
+	}{
+		{
+			name: "successful run with streaming JSON",
+			codexOutput: `{"type":"message","content":"Investigating the issue..."}
+{"type":"function_call","name":"shell","arguments":{"command":"go test ./..."},"call_id":"c1"}
+{"type":"function_call_output","call_id":"c1","output":"PASS"}
+{"type":"message","content":"Applied the fix."}
+{"type":"usage","stats":{"inputTokens":800,"outputTokens":300}}`,
+			codexExitCode: 0,
+			diffOutput:    "diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n",
+			diffExitCode:  0,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Equal(t, 0, result.ExitCode)
+				require.Empty(t, result.Error)
+				require.Contains(t, result.Diff, "diff --git")
+				require.Contains(t, result.Summary, "Investigating the issue...")
+				require.Contains(t, result.Summary, "Applied the fix.")
+				require.Equal(t, 800, result.TokenUsage.InputTokens)
+				require.Equal(t, 300, result.TokenUsage.OutputTokens)
+			},
+		},
+		{
+			name:          "non-zero exit code with stderr",
+			codexOutput:   "",
+			codexExitCode: 1,
+			stderrOutput:  "command not found",
+			diffOutput:    "",
+			diffExitCode:  0,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Equal(t, 1, result.ExitCode)
+				require.Contains(t, result.Error, "exited with code 1")
+				require.Contains(t, result.Error, "command not found")
+			},
+		},
+		{
+			name:          "empty output",
+			codexOutput:   "",
+			codexExitCode: 0,
+			diffOutput:    "",
+			diffExitCode:  0,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Equal(t, 0, result.ExitCode)
+				require.Empty(t, result.Diff)
+			},
+		},
+		{
+			name:          "legacy JSON format",
+			codexOutput:   `{"response":"Fixed the null pointer by adding a nil check.","stats":{"inputTokens":1500,"outputTokens":500}}`,
+			codexExitCode: 0,
+			diffOutput:    "diff --git a/f.go b/f.go\n",
+			diffExitCode:  0,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Contains(t, result.Summary, "nil check")
+				require.Equal(t, 1500, result.TokenUsage.InputTokens)
+				require.Equal(t, 500, result.TokenUsage.OutputTokens)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			provider := testutil.NewMockSandboxProvider()
+			provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+				if strings.HasPrefix(cmd, "codex") {
+					_, _ = stdout.Write([]byte(tt.codexOutput))
+					if tt.stderrOutput != "" {
+						_, _ = stderr.Write([]byte(tt.stderrOutput))
+					}
+					return tt.codexExitCode, nil
+				}
+				if strings.HasPrefix(cmd, "git diff") {
+					_, _ = stdout.Write([]byte(tt.diffOutput))
+					return tt.diffExitCode, nil
+				}
+				return 0, nil
+			}
+
+			adapter := NewCodexAdapter(zerolog.Nop())
+			sandbox := &agent.Sandbox{ID: "test-sandbox", WorkDir: "/workspace"}
+			prompt := &agent.AgentPrompt{
+				SystemPrompt: "Fix the bug.",
+				UserPrompt:   "Null pointer error.",
+				MaxTokens:    50_000,
+			}
+
+			logCh := make(chan agent.LogEntry, 100)
+			ctx := WithSandboxProvider(context.Background(), provider)
+
+			result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
+			if tt.expectErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, result)
+
+			close(logCh)
+			var logs []agent.LogEntry
+			for entry := range logCh {
+				logs = append(logs, entry)
+			}
+
+			tt.checkResult(t, result, logs)
+
+			// Verify prompt file was written.
+			promptData, exists := provider.Files["/workspace/.143-prompt.md"]
+			require.True(t, exists, "prompt file should have been written")
+			require.Contains(t, string(promptData), "Fix the bug.")
+		})
+	}
+}
+
+func TestCodexAdapter_Execute_ExecError(t *testing.T) {
+	t.Parallel()
+
+	provider := testutil.NewMockSandboxProvider()
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if strings.HasPrefix(cmd, "codex") {
+			return 0, context.DeadlineExceeded
+		}
+		return 0, nil
+	}
+
+	adapter := NewCodexAdapter(zerolog.Nop())
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
+	prompt := &agent.AgentPrompt{SystemPrompt: "test", UserPrompt: "test", MaxTokens: 50_000}
+	logCh := make(chan agent.LogEntry, 10)
+	ctx := WithSandboxProvider(context.Background(), provider)
+
+	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.Contains(t, err.Error(), "exec codex CLI")
+}
+
+func TestCodexAdapter_Execute_WriteFileError(t *testing.T) {
+	t.Parallel()
+
+	provider := testutil.NewMockSandboxProvider()
+	provider.WriteFileFn = func(ctx context.Context, sb *agent.Sandbox, path string, data []byte) error {
+		return context.DeadlineExceeded
+	}
+
+	adapter := NewCodexAdapter(zerolog.Nop())
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
+	prompt := &agent.AgentPrompt{SystemPrompt: "test", UserPrompt: "test", MaxTokens: 50_000}
+	logCh := make(chan agent.LogEntry, 10)
+	ctx := WithSandboxProvider(context.Background(), provider)
+
+	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.Contains(t, err.Error(), "write prompt file")
+}
+
+func TestCodexAdapter_Execute_MissingSandboxProvider(t *testing.T) {
+	t.Parallel()
+
+	adapter := NewCodexAdapter(zerolog.Nop())
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
+	prompt := &agent.AgentPrompt{SystemPrompt: "test", UserPrompt: "test", MaxTokens: 50_000}
+	logCh := make(chan agent.LogEntry, 10)
+
+	result, err := adapter.Execute(context.Background(), sandbox, prompt, logCh)
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.Contains(t, err.Error(), "sandbox provider not found")
 }
 
 func TestShellEscapeCodex(t *testing.T) {

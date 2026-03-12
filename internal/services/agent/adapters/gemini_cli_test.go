@@ -247,6 +247,49 @@ func TestGeminiCLIAdapter_Execute(t *testing.T) {
 	}
 }
 
+func TestGeminiCLIAdapter_Execute_WriteFileError(t *testing.T) {
+	t.Parallel()
+
+	provider := newMockProvider()
+	provider.WriteFileFn = func(ctx context.Context, sb *agent.Sandbox, path string, data []byte) error {
+		return context.DeadlineExceeded
+	}
+
+	adapter := NewGeminiCLIAdapter(zerolog.Nop())
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
+	prompt := &agent.AgentPrompt{SystemPrompt: "test", UserPrompt: "test", MaxTokens: 50_000}
+	logCh := make(chan agent.LogEntry, 10)
+	ctx := WithSandboxProvider(context.Background(), provider)
+
+	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.Contains(t, err.Error(), "write prompt file")
+}
+
+func TestGeminiCLIAdapter_Execute_ExecError(t *testing.T) {
+	t.Parallel()
+
+	provider := newMockProvider()
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if strings.HasPrefix(cmd, "gemini") {
+			return 0, context.DeadlineExceeded
+		}
+		return 0, nil
+	}
+
+	adapter := NewGeminiCLIAdapter(zerolog.Nop())
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
+	prompt := &agent.AgentPrompt{SystemPrompt: "test", UserPrompt: "test", MaxTokens: 50_000}
+	logCh := make(chan agent.LogEntry, 10)
+	ctx := WithSandboxProvider(context.Background(), provider)
+
+	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.Contains(t, err.Error(), "exec gemini CLI")
+}
+
 func TestGeminiCLIAdapter_Execute_MissingSandboxProvider(t *testing.T) {
 	t.Parallel()
 
@@ -463,6 +506,92 @@ func TestParseGeminiStreamOutput(t *testing.T) {
 				require.InDelta(t, 0.85, result.ConfidenceScore, 0.001)
 				require.Equal(t, "Simple fix", result.ConfidenceReasoning)
 				require.Equal(t, []string{"edge case"}, result.RiskFactors)
+			},
+		},
+		{
+			name:   "tool_result with name field",
+			output: `{"type":"tool_result","name":"shell","output":"PASS"}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Len(t, logs, 1)
+				require.Equal(t, "output", logs[0].Level)
+				require.Equal(t, "shell", logs[0].Metadata["tool"])
+			},
+		},
+		{
+			name:   "tool_result with result field fallback",
+			output: `{"type":"tool_result","tool":"read","result":"file data"}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Len(t, logs, 1)
+				require.Contains(t, logs[0].Message, "file data")
+			},
+		},
+		{
+			name:   "tool_use event variant",
+			output: `{"type":"tool_use","tool":"write_file","input":{"path":"f.go","content":"package main"}}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Len(t, logs, 1)
+				require.Equal(t, "tool_use", logs[0].Level)
+				require.Equal(t, "write_file", logs[0].Metadata["tool"])
+			},
+		},
+		{
+			name:   "result event with Result JSON token usage",
+			output: `{"type":"result","content":"Complete.","result":{"input_tokens":1500,"output_tokens":600}}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Contains(t, result.Summary, "Complete.")
+				require.Equal(t, 1500, result.TokenUsage.InputTokens)
+				require.Equal(t, 600, result.TokenUsage.OutputTokens)
+			},
+		},
+		{
+			name:   "error event with message fallback",
+			output: `{"type":"error","message":"timeout"}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Len(t, logs, 1)
+				require.Equal(t, "error", logs[0].Level)
+				require.Contains(t, logs[0].Message, "timeout")
+			},
+		},
+		{
+			name:   "error event with content fallback",
+			output: `{"type":"error","content":"crashed"}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Len(t, logs, 1)
+				require.Equal(t, "error", logs[0].Level)
+				require.Contains(t, logs[0].Message, "crashed")
+			},
+		},
+		{
+			name:   "unknown event type",
+			output: `{"type":"custom_event","content":"data"}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Len(t, logs, 1)
+				require.Equal(t, "debug", logs[0].Level)
+			},
+		},
+		{
+			name:   "non-JSON line in stream",
+			output: "raw text not JSON",
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Len(t, logs, 1)
+				require.Equal(t, "output", logs[0].Level)
+				require.Contains(t, result.Summary, "raw text")
+			},
+		},
+		{
+			name:   "assistant event type variant",
+			output: `{"type":"assistant","message":"Using message field."}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Contains(t, result.Summary, "Using message field.")
 			},
 		},
 	}
