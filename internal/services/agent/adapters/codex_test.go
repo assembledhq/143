@@ -16,7 +16,7 @@ import (
 
 func TestCodexAdapter_Name(t *testing.T) {
 	a := NewCodexAdapter(zerolog.Nop())
-	if a.Name() != "codex" {
+	if a.Name() != models.AgentTypeCodex {
 		t.Errorf("expected name 'codex', got %q", a.Name())
 	}
 }

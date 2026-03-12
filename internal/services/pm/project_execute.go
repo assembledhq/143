@@ -141,7 +141,7 @@ func (s *Service) dispatchProjectTasks(ctx context.Context, orgID uuid.UUID, pro
 
 	agentType := settings.DefaultAgentType
 	if project.AgentType != nil && *project.AgentType != "" {
-		agentType = *project.AgentType
+		agentType = models.AgentType(*project.AgentType)
 	}
 	if agentType == "" {
 		agentType = models.DefaultDefaultAgentType
@@ -156,7 +156,7 @@ func (s *Service) dispatchProjectTasks(ctx context.Context, orgID uuid.UUID, pro
 		task := &pending[i]
 
 		// Skip low-confidence tasks unless autonomy is auto_all.
-		if task.Confidence != nil && *task.Confidence == "low" && settings.AutonomyLevel != "auto_all" {
+		if task.Confidence != nil && *task.Confidence == "low" && settings.AutonomyLevel != models.AutonomyLevelAutoAll {
 			continue
 		}
 
@@ -176,7 +176,7 @@ func (s *Service) dispatchProjectTasks(ctx context.Context, orgID uuid.UUID, pro
 			IssueID:       placeholderIssueID(task),
 			AgentType:     agentType,
 			Status:        string(models.SessionStatusPending),
-			AutonomyLevel: settings.AutonomyLevel,
+			AutonomyLevel: string(settings.AutonomyLevel),
 			TokenMode:     tokenModeFromTaskComplexity(task.Complexity),
 			PMPlanID:      &planID,
 			PMApproach:    &approach,

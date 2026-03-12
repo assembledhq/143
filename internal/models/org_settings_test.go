@@ -68,7 +68,7 @@ func TestParseOrgSettings_OverrideValues(t *testing.T) {
 
 	s := ParseOrgSettings(raw)
 
-	require.Equal(t, "auto_all", s.AutonomyLevel, "should override autonomy_level")
+	require.Equal(t, AutonomyLevelAutoAll, s.AutonomyLevel, "should override autonomy_level")
 	require.Equal(t, 8, s.Aggressiveness, "should override aggressiveness")
 	require.Equal(t, 10, s.MaxConcurrentRuns, "should override max_concurrent_runs")
 	require.Equal(t, 50.0, s.MinPriorityThreshold, "should override min_priority_threshold")
@@ -96,7 +96,7 @@ func TestParseOrgSettings_PartialOverride(t *testing.T) {
 	raw := json.RawMessage(`{"autonomy_level": "auto_simple", "llm_model": "claude-sonnet-4-5"}`)
 	s := ParseOrgSettings(raw)
 
-	require.Equal(t, "auto_simple", s.AutonomyLevel, "should override autonomy_level")
+	require.Equal(t, AutonomyLevelAutoSimple, s.AutonomyLevel, "should override autonomy_level")
 	require.Equal(t, "claude-sonnet-4-5", s.LLMModel, "should override llm_model")
 	require.Equal(t, DefaultAggressiveness, s.Aggressiveness, "should default aggressiveness when not provided")
 	require.Equal(t, DefaultMaxConcurrentRuns, s.MaxConcurrentRuns, "should default max_concurrent_runs when not provided")

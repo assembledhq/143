@@ -13,6 +13,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 )
 
@@ -29,8 +30,8 @@ func NewGeminiCLIAdapter(logger zerolog.Logger) *GeminiCLIAdapter {
 }
 
 // Name returns the agent identifier.
-func (a *GeminiCLIAdapter) Name() string {
-	return "gemini_cli"
+func (a *GeminiCLIAdapter) Name() models.AgentType {
+	return models.AgentTypeGeminiCLI
 }
 
 // PreparePrompt constructs the prompts for Gemini CLI based on the issue context.

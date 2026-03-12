@@ -274,13 +274,13 @@ func (s *Service) CheckAutoTrigger(ctx context.Context, orgID uuid.UUID, score *
 	settings := parseOrgSettings(org.Settings)
 
 	// Gate 1: autonomy level.
-	if settings.AutonomyLevel == "manual" {
+	if settings.AutonomyLevel == string(models.AutonomyLevelManual) {
 		s.logger.Debug().Str("org_id", orgID.String()).Msg("auto-trigger skipped: manual mode")
 		return nil
 	}
 
 	// Gate 2: auto_simple mode — only trigger for high severity + high score.
-	if settings.AutonomyLevel == "auto_simple" {
+	if settings.AutonomyLevel == string(models.AutonomyLevelAutoSimple) {
 		if !isHighSeverity(issue.Severity) || score.Score < 60 {
 			s.logger.Debug().
 				Str("org_id", orgID.String()).
@@ -321,9 +321,9 @@ func (s *Service) CheckAutoTrigger(ctx context.Context, orgID uuid.UUID, score *
 	}
 
 	// All gates passed — create agent run and enqueue job.
-	agentType := settings.DefaultAgentType
+	agentType := models.AgentType(settings.DefaultAgentType)
 	if agentType == "" {
-		agentType = "codex"
+		agentType = models.DefaultDefaultAgentType
 	}
 	run := &models.Session{
 		IssueID:       issue.ID,

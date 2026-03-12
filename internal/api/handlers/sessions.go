@@ -119,7 +119,7 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 	// Ignore decode errors — body is optional, fields default below.
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
-	agentType := body.AgentType
+	agentType := models.AgentType(body.AgentType)
 	if agentType == "" {
 		org, err := h.orgStore.GetByID(r.Context(), orgID)
 		if err != nil {
@@ -131,8 +131,7 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 			agentType = models.DefaultDefaultAgentType
 		}
 	}
-	validAgentTypes := map[string]bool{"claude_code": true, "gemini_cli": true, "codex": true}
-	if !validAgentTypes[agentType] {
+	if !models.ValidAgentTypes[agentType] {
 		writeError(w, http.StatusBadRequest, "INVALID_AGENT_TYPE", "agent_type must be one of: claude_code, gemini_cli, codex")
 		return
 	}
@@ -427,7 +426,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agentType := body.AgentType
+	agentType := models.AgentType(body.AgentType)
 	if agentType == "" {
 		org, err := h.orgStore.GetByID(r.Context(), orgID)
 		if err != nil {
@@ -439,8 +438,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 			agentType = models.DefaultDefaultAgentType
 		}
 	}
-	validAgentTypes := map[string]bool{"claude_code": true, "gemini_cli": true, "codex": true}
-	if !validAgentTypes[agentType] {
+	if !models.ValidAgentTypes[agentType] {
 		writeError(w, http.StatusBadRequest, "INVALID_AGENT_TYPE", "agent_type must be one of: claude_code, gemini_cli, codex")
 		return
 	}

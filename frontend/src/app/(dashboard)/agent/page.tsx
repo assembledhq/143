@@ -17,9 +17,9 @@ const DEFAULT_SETTINGS: Pick<
   Required<OrgSettings>,
   "autonomy_level" | "execution_aggressiveness" | "max_concurrent_runs"
 > = {
-  autonomy_level: "manual",
+  autonomy_level: "auto_simple",
   execution_aggressiveness: 2,
-  max_concurrent_runs: 3,
+  max_concurrent_runs: 5,
 };
 
 export default function AgentPage() {

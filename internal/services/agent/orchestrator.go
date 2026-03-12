@@ -85,7 +85,7 @@ type ProjectTaskUpdater interface {
 // agent invocation, log streaming, result handling, and follow-up job enqueuing.
 type Orchestrator struct {
 	provider          SandboxProvider
-	adapters          map[string]AgentAdapter
+	adapters          map[models.AgentType]AgentAdapter
 	sessions         SessionStore
 	agentRunLogs      SessionLogStore
 	agentRunQuestions SessionQuestionStore
@@ -105,7 +105,7 @@ type Orchestrator struct {
 // OrchestratorConfig holds the dependencies for creating an Orchestrator.
 type OrchestratorConfig struct {
 	Provider          SandboxProvider
-	Adapters          map[string]AgentAdapter
+	Adapters          map[models.AgentType]AgentAdapter
 	Sessions         SessionStore
 	SessionLogs      SessionLogStore
 	SessionQuestions SessionQuestionStore
@@ -263,7 +263,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	}()
 
 	// 8. Inject Codex auth file if this is a codex agent run.
-	if run.AgentType == "codex" {
+	if run.AgentType == models.AgentTypeCodex {
 		injected, err := o.injectCodexAuth(ctx, run.OrgID, sandbox)
 		if err != nil {
 			log.Warn().Err(err).Msg("codex auth injection failed, falling back to API key")
@@ -496,7 +496,7 @@ func (o *Orchestrator) enqueueJob(ctx context.Context, orgID uuid.UUID, queue, j
 
 // resolveAgentEnv builds the sandbox env vars for the given agent type from
 // org-scoped credentials in org_credentials.
-func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, agentType string) map[string]string {
+func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, agentType models.AgentType) map[string]string {
 	if o.credentials == nil {
 		return nil
 	}
@@ -504,7 +504,7 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 	merged := make(map[string]string)
 
 	switch agentType {
-	case "claude_code":
+	case models.AgentTypeClaudeCode:
 		cred, err := o.credentials.Get(ctx, orgID, models.ProviderAnthropic)
 		if err == nil && cred != nil {
 			if cfg, ok := cred.Config.(models.AnthropicConfig); ok {
@@ -516,7 +516,7 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 				}
 			}
 		}
-	case "codex":
+	case models.AgentTypeCodex:
 		cred, err := o.credentials.Get(ctx, orgID, models.ProviderOpenAI)
 		if err == nil && cred != nil {
 			if cfg, ok := cred.Config.(models.OpenAIConfig); ok {
@@ -528,7 +528,7 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 				}
 			}
 		}
-	case "gemini_cli":
+	case models.AgentTypeGeminiCLI:
 		cred, err := o.credentials.Get(ctx, orgID, models.ProviderGemini)
 		if err == nil && cred != nil {
 			if cfg, ok := cred.Config.(models.GeminiConfig); ok {

@@ -235,9 +235,9 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Model != nil && *req.Model != "" {
-		agentType := "claude_code"
+		agentType := models.AgentTypeClaudeCode
 		if req.AgentType != nil && *req.AgentType != "" {
-			agentType = *req.AgentType
+			agentType = models.AgentType(*req.AgentType)
 		}
 		if err := models.ValidateModelForAgentType(agentType, *req.Model); err != nil {
 			writeError(w, http.StatusBadRequest, "INVALID_MODEL", err.Error())
