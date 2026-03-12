@@ -90,12 +90,12 @@ describe('api client', () => {
     });
   });
 
-  describe('runs', () => {
-    it('fetches runs list', async () => {
+  describe('sessions', () => {
+    it('fetches sessions list', async () => {
       const mockData = {
         data: [
           {
-            id: 'run-1',
+            id: 'session-1',
             issue_id: 'issue-1',
             org_id: 'org-1',
             agent_type: 'claude_code',
@@ -109,38 +109,38 @@ describe('api client', () => {
       };
 
       server.use(
-        http.get('/api/v1/runs', () => {
+        http.get('/api/v1/sessions', () => {
           return HttpResponse.json(mockData);
         }),
       );
 
-      const result = await api.runs.list();
+      const result = await api.sessions.list();
       expect(result.data).toHaveLength(1);
-      expect(result.data[0].id).toBe('run-1');
+      expect(result.data[0].id).toBe('session-1');
       expect(result.data[0].status).toBe('completed');
     });
 
-    it('fetches runs with status filter', async () => {
+    it('fetches sessions with status filter', async () => {
       let capturedUrl: string | undefined;
 
       server.use(
-        http.get('/api/v1/runs', ({ request }) => {
+        http.get('/api/v1/sessions', ({ request }) => {
           capturedUrl = request.url;
           return HttpResponse.json({ data: [], meta: {} });
         }),
       );
 
-      await api.runs.list({ status: 'completed' });
+      await api.sessions.list({ status: 'completed' });
 
       expect(capturedUrl).toBeDefined();
       const url = new URL(capturedUrl!);
       expect(url.searchParams.get('status')).toBe('completed');
     });
 
-    it('fetches single run', async () => {
-      const mockRun = {
+    it('fetches single session', async () => {
+      const mockSession = {
         data: {
-          id: 'run-abc',
+          id: 'session-abc',
           issue_id: 'issue-1',
           org_id: 'org-1',
           agent_type: 'claude_code',
@@ -152,13 +152,13 @@ describe('api client', () => {
       };
 
       server.use(
-        http.get('/api/v1/runs/:id', () => {
-          return HttpResponse.json(mockRun);
+        http.get('/api/v1/sessions/:id', () => {
+          return HttpResponse.json(mockSession);
         }),
       );
 
-      const result = await api.runs.get('run-abc');
-      expect(result.data.id).toBe('run-abc');
+      const result = await api.sessions.get('session-abc');
+      expect(result.data.id).toBe('session-abc');
       expect(result.data.status).toBe('running');
     });
 
@@ -166,13 +166,13 @@ describe('api client', () => {
       let capturedBody: unknown;
 
       server.use(
-        http.post('/api/v1/runs/:id/questions/:qid/answer', async ({ request }) => {
+        http.post('/api/v1/sessions/:id/questions/:qid/answer', async ({ request }) => {
           capturedBody = await request.json();
           return HttpResponse.json({ data: { id: 'q-1' } });
         }),
       );
 
-      await api.runs.answerQuestion('run-1', 'q-1', 'Try option B');
+      await api.sessions.answerQuestion('session-1', 'q-1', 'Try option B');
       expect(capturedBody).toEqual({ answer: 'Try option B' });
     });
   });

@@ -58,7 +58,7 @@ type ProjectTask struct {
 	Status        ProjectTaskStatus `db:"status" json:"status"`
 	Complexity    *string           `db:"complexity" json:"complexity,omitempty"`
 	Confidence    *string           `db:"confidence" json:"confidence,omitempty"`
-	AgentRunID    *uuid.UUID        `db:"agent_run_id" json:"agent_run_id,omitempty"`
+	SessionID    *uuid.UUID        `db:"session_id" json:"session_id,omitempty"`
 	IssueID       *uuid.UUID        `db:"issue_id" json:"issue_id,omitempty"`
 	BranchName    *string           `db:"branch_name" json:"branch_name,omitempty"`
 	PRURL         *string           `db:"pr_url" json:"pr_url,omitempty"`

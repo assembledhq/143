@@ -36,7 +36,7 @@ func WithOrgID(ctx context.Context, id uuid.UUID) context.Context {
 }
 
 // Auth middleware reads the session cookie, validates the session, and sets user on context.
-func Auth(sessionStore *db.SessionStore, userStore *db.UserStore) func(http.Handler) http.Handler {
+func Auth(sessionStore *db.AuthSessionStore, userStore *db.UserStore) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			cookie, err := r.Cookie("session_token")
@@ -56,7 +56,7 @@ func Auth(sessionStore *db.SessionStore, userStore *db.UserStore) func(http.Hand
 	}
 }
 
-func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, sessionStore *db.SessionStore, userStore *db.UserStore, token string, clearCookieOnFailure bool) {
+func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, sessionStore *db.AuthSessionStore, userStore *db.UserStore, token string, clearCookieOnFailure bool) {
 	session, err := sessionStore.GetByToken(r.Context(), token)
 	if err != nil {
 		if clearCookieOnFailure {

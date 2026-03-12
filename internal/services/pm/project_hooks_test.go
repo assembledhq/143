@@ -10,17 +10,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestProjectHooks_OnAgentRunComplete_NilProjectTaskID(t *testing.T) {
+func TestProjectHooks_OnSessionComplete_NilProjectTaskID(t *testing.T) {
 	t.Parallel()
 
 	hooks := NewProjectHooks(nil, nil, zerolog.Nop())
-	run := &models.AgentRun{ProjectTaskID: nil}
+	run := &models.Session{ProjectTaskID: nil}
 
-	err := hooks.OnAgentRunComplete(context.Background(), run, "completed")
+	err := hooks.OnSessionComplete(context.Background(), run, "completed")
 	require.NoError(t, err, "should return nil when no project task ID")
 }
 
-func TestProjectHooks_OnAgentRunComplete_Completed(t *testing.T) {
+func TestProjectHooks_OnSessionComplete_Completed(t *testing.T) {
 	t.Parallel()
 
 	taskID := uuid.New()
@@ -39,21 +39,21 @@ func TestProjectHooks_OnAgentRunComplete_Completed(t *testing.T) {
 
 	hooks := NewProjectHooks(pts, ps, zerolog.Nop())
 
-	run := &models.AgentRun{
+	run := &models.Session{
 		ID:            runID,
 		OrgID:         orgID,
 		ProjectTaskID: &taskID,
 	}
 
-	err := hooks.OnAgentRunComplete(context.Background(), run, "completed")
+	err := hooks.OnSessionComplete(context.Background(), run, "completed")
 	require.NoError(t, err)
 
 	require.Equal(t, models.ProjectTaskStatusCompleted, pts.tasks[0].Status)
 	require.NotNil(t, pts.tasks[0].CompletedAt)
-	require.Equal(t, &runID, pts.tasks[0].AgentRunID)
+	require.Equal(t, &runID, pts.tasks[0].SessionID)
 }
 
-func TestProjectHooks_OnAgentRunComplete_Failed(t *testing.T) {
+func TestProjectHooks_OnSessionComplete_Failed(t *testing.T) {
 	t.Parallel()
 
 	taskID := uuid.New()
@@ -71,13 +71,13 @@ func TestProjectHooks_OnAgentRunComplete_Failed(t *testing.T) {
 
 	hooks := NewProjectHooks(pts, ps, zerolog.Nop())
 
-	run := &models.AgentRun{
+	run := &models.Session{
 		ID:            uuid.New(),
 		OrgID:         orgID,
 		ProjectTaskID: &taskID,
 	}
 
-	err := hooks.OnAgentRunComplete(context.Background(), run, "failed")
+	err := hooks.OnSessionComplete(context.Background(), run, "failed")
 	require.NoError(t, err)
 
 	require.Equal(t, models.ProjectTaskStatusFailed, pts.tasks[0].Status)
@@ -85,7 +85,7 @@ func TestProjectHooks_OnAgentRunComplete_Failed(t *testing.T) {
 	require.Equal(t, "Agent run failed", *pts.tasks[0].OutcomeNotes)
 }
 
-func TestProjectHooks_OnAgentRunComplete_NeedsHumanGuidance(t *testing.T) {
+func TestProjectHooks_OnSessionComplete_NeedsHumanGuidance(t *testing.T) {
 	t.Parallel()
 
 	taskID := uuid.New()
@@ -103,20 +103,20 @@ func TestProjectHooks_OnAgentRunComplete_NeedsHumanGuidance(t *testing.T) {
 
 	hooks := NewProjectHooks(pts, ps, zerolog.Nop())
 
-	run := &models.AgentRun{
+	run := &models.Session{
 		ID:            uuid.New(),
 		OrgID:         orgID,
 		ProjectTaskID: &taskID,
 	}
 
-	err := hooks.OnAgentRunComplete(context.Background(), run, "needs_human_guidance")
+	err := hooks.OnSessionComplete(context.Background(), run, "needs_human_guidance")
 	require.NoError(t, err)
 
 	require.Equal(t, models.ProjectTaskStatusFailed, pts.tasks[0].Status)
 	require.Contains(t, *pts.tasks[0].OutcomeNotes, "human guidance")
 }
 
-func TestProjectHooks_OnAgentRunComplete_UnknownStatus(t *testing.T) {
+func TestProjectHooks_OnSessionComplete_UnknownStatus(t *testing.T) {
 	t.Parallel()
 
 	taskID := uuid.New()
@@ -132,13 +132,13 @@ func TestProjectHooks_OnAgentRunComplete_UnknownStatus(t *testing.T) {
 
 	hooks := NewProjectHooks(pts, nil, zerolog.Nop())
 
-	run := &models.AgentRun{
+	run := &models.Session{
 		ID:            uuid.New(),
 		OrgID:         orgID,
 		ProjectTaskID: &taskID,
 	}
 
-	err := hooks.OnAgentRunComplete(context.Background(), run, "unknown_status")
+	err := hooks.OnSessionComplete(context.Background(), run, "unknown_status")
 	require.NoError(t, err)
 
 	// Status should remain unchanged.

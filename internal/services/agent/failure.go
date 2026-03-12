@@ -28,21 +28,21 @@ type FailureRunUpdater interface {
 
 // FailureService classifies agent run failures and generates user-facing explanations.
 type FailureService struct {
-	agentRuns FailureRunUpdater
+	sessions FailureRunUpdater
 	logger    zerolog.Logger
 }
 
 // NewFailureService creates a new FailureService.
-func NewFailureService(agentRuns FailureRunUpdater, logger zerolog.Logger) *FailureService {
+func NewFailureService(sessions FailureRunUpdater, logger zerolog.Logger) *FailureService {
 	return &FailureService{
-		agentRuns: agentRuns,
+		sessions: sessions,
 		logger:    logger,
 	}
 }
 
 // AnalyzeFailure classifies the failure for a completed agent run and returns
 // a FailureSummary with a human-readable explanation, category, and next steps.
-func (s *FailureService) AnalyzeFailure(ctx context.Context, run *models.AgentRun) (*FailureSummary, error) {
+func (s *FailureService) AnalyzeFailure(ctx context.Context, run *models.Session) (*FailureSummary, error) {
 	if run == nil {
 		return nil, fmt.Errorf("agent run is nil")
 	}
@@ -50,7 +50,7 @@ func (s *FailureService) AnalyzeFailure(ctx context.Context, run *models.AgentRu
 	summary := s.classifyFailure(run)
 
 	s.logger.Info().
-		Str("agent_run_id", run.ID.String()).
+		Str("session_id", run.ID.String()).
 		Str("category", summary.Category).
 		Str("sub_type", summary.SubType).
 		Bool("retry_advised", summary.RetryAdvised).
@@ -61,7 +61,7 @@ func (s *FailureService) AnalyzeFailure(ctx context.Context, run *models.AgentRu
 
 // classifyFailure applies rule-based classification to determine the failure
 // category, sub-type, explanation, and next steps.
-func (s *FailureService) classifyFailure(run *models.AgentRun) *FailureSummary {
+func (s *FailureService) classifyFailure(run *models.Session) *FailureSummary {
 	errorMsg := ""
 	if run.Error != nil {
 		errorMsg = strings.ToLower(*run.Error)
@@ -177,14 +177,14 @@ func (s *FailureService) classifyFailure(run *models.AgentRun) *FailureSummary {
 	}
 }
 
-// UpdateRunWithFailure persists the failure analysis results to the agent_run record.
+// UpdateRunWithFailure persists the failure analysis results to the session record.
 func (s *FailureService) UpdateRunWithFailure(ctx context.Context, orgID, runID uuid.UUID, summary *FailureSummary) error {
-	if err := s.agentRuns.UpdateFailure(ctx, orgID, runID, summary.Explanation, summary.Category, summary.NextSteps, summary.RetryAdvised); err != nil {
+	if err := s.sessions.UpdateFailure(ctx, orgID, runID, summary.Explanation, summary.Category, summary.NextSteps, summary.RetryAdvised); err != nil {
 		return fmt.Errorf("update agent run failure: %w", err)
 	}
 
 	s.logger.Info().
-		Str("agent_run_id", runID.String()).
+		Str("session_id", runID.String()).
 		Str("category", summary.Category).
 		Msg("updated agent run with failure analysis")
 

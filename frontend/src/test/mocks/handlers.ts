@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import type { Issue, AgentRun, AgentRunLog, AgentSession, Validation, PullRequest, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, ProjectDetail } from '@/lib/types';
+import type { Issue, Session, SessionLog, Validation, PullRequest, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, ProjectDetail } from '@/lib/types';
 
 export const mockIssues: Issue[] = [
   {
@@ -40,9 +40,9 @@ export const mockIssues: Issue[] = [
   },
 ];
 
-export const mockRuns: AgentRun[] = [
+export const mockSessions: Session[] = [
   {
-    id: 'run-abcdef12-3456-7890',
+    id: 'session-abcdef12-3456-7890',
     issue_id: 'issue-1',
     org_id: 'org-1',
     agent_type: 'claude_code',
@@ -57,7 +57,7 @@ export const mockRuns: AgentRun[] = [
     created_at: '2026-02-17T07:00:00Z',
   },
   {
-    id: 'run-98765432-abcd-ef01',
+    id: 'session-98765432-abcd-ef01',
     issue_id: 'issue-2',
     org_id: 'org-1',
     agent_type: 'codex',
@@ -73,7 +73,7 @@ export const mockRuns: AgentRun[] = [
 
 export const mockValidation: Validation = {
   id: 'val-1',
-  agent_run_id: 'run-abcdef12-3456-7890',
+  session_id: 'session-abcdef12-3456-7890',
   org_id: 'org-1',
   status: 'passed',
   direction_check: 'pass',
@@ -94,7 +94,7 @@ export const mockValidation: Validation = {
 
 export const mockPR: PullRequest = {
   id: 'pr-1',
-  agent_run_id: 'run-abcdef12-3456-7890',
+  session_id: 'session-abcdef12-3456-7890',
   org_id: 'org-1',
   github_pr_number: 42,
   github_pr_url: 'https://github.com/example/repo/pull/42',
@@ -109,70 +109,6 @@ export const mockPR: PullRequest = {
   created_at: '2026-02-17T07:06:00Z',
   updated_at: '2026-02-17T07:06:00Z',
 };
-
-export const mockSessions: AgentSession[] = [
-  {
-    id: 'session-plan-1',
-    type: 'plan',
-    status: 'completed',
-    triggered_by: 'scheduled',
-    title: 'Analyzed 5 open issues and delegated 2 tasks.',
-    analysis: 'Found critical auth timeout and payment bug requiring immediate attention.',
-    tasks: [
-      {
-        rank: 1,
-        title: 'Fix auth timeout',
-        issue_ids: ['issue-1'],
-        complexity: 'moderate',
-        confidence: 'high',
-        reasoning: 'Critical user-facing issue',
-        approach: 'Check session handler timeout config',
-        risk: 'Low - isolated change',
-        status: 'delegated',
-        agent_run_id: 'run-abcdef12-3456-7890',
-        run_status: 'completed',
-        run_result_summary: 'Fixed TypeError by adding null check',
-        run_confidence_score: 0.92,
-        run_started_at: '2026-02-17T07:00:00Z',
-        run_completed_at: '2026-02-17T07:05:30Z',
-      },
-    ],
-    clusters: [],
-    skipped_issues: [],
-    issues_reviewed: 5,
-    task_count: 1,
-    active_run_count: 0,
-    completed_run_count: 1,
-    failed_run_count: 0,
-    created_at: '2026-02-17T08:00:00Z',
-    completed_at: '2026-02-17T08:10:00Z',
-  },
-  {
-    id: 'session-manual-1',
-    type: 'manual',
-    status: 'failed',
-    triggered_by: 'fix_this',
-    title: 'Run run-9876',
-    tasks: [
-      {
-        rank: 1,
-        title: 'Fix issue',
-        issue_ids: ['issue-2'],
-        status: 'delegated',
-        agent_run_id: 'run-98765432-abcd-ef01',
-        run_status: 'failed',
-        run_started_at: '2026-02-17T06:00:00Z',
-        run_completed_at: '2026-02-17T06:03:00Z',
-      },
-    ],
-    task_count: 1,
-    active_run_count: 0,
-    completed_run_count: 0,
-    failed_run_count: 1,
-    created_at: '2026-02-17T06:00:00Z',
-    completed_at: '2026-02-17T06:03:00Z',
-  },
-];
 
 export const mockProjectDetail: ProjectDetail = {
   project: {
@@ -217,54 +153,47 @@ export const handlers = [
     } satisfies ListResponse<Issue>);
   }),
 
-  http.get('/api/v1/runs', () => {
+  http.get('/api/v1/sessions', () => {
     return HttpResponse.json({
-      data: mockRuns,
+      data: mockSessions,
       meta: {},
-    } satisfies ListResponse<AgentRun>);
+    } satisfies ListResponse<Session>);
   }),
 
-  http.get('/api/v1/runs/:id', ({ params }) => {
-    const run = mockRuns.find((r) => r.id === params.id);
-    if (!run) {
+  http.get('/api/v1/sessions/:id', ({ params }) => {
+    const session = mockSessions.find((s) => s.id === params.id);
+    if (!session) {
       return HttpResponse.json(
-        { error: { code: 'NOT_FOUND', message: 'Run not found' } },
+        { error: { code: 'NOT_FOUND', message: 'Session not found' } },
         { status: 404 },
       );
     }
-    return HttpResponse.json({ data: run } satisfies SingleResponse<AgentRun>);
+    return HttpResponse.json({ data: session } satisfies SingleResponse<Session>);
   }),
 
-  http.get('/api/v1/runs/:id/logs', () => {
+  http.get('/api/v1/sessions/:id/logs', () => {
     return HttpResponse.json({
-      data: [] as AgentRunLog[],
+      data: [] as SessionLog[],
       meta: {},
-    } satisfies ListResponse<AgentRunLog>);
+    } satisfies ListResponse<SessionLog>);
   }),
 
-  http.get('/api/v1/runs/:id/validation', () => {
+  http.get('/api/v1/sessions/:id/validation', () => {
     return HttpResponse.json({ data: mockValidation } satisfies SingleResponse<Validation>);
   }),
 
-  http.get('/api/v1/runs/:id/pr', () => {
+  http.get('/api/v1/sessions/:id/pr', () => {
     return HttpResponse.json({ data: mockPR } satisfies SingleResponse<PullRequest>);
   }),
 
-  http.get('/api/v1/runs/:id/questions', () => {
+  http.get('/api/v1/sessions/:id/questions', () => {
     return HttpResponse.json({ data: [], meta: {} });
   }),
 
   http.post('/api/v1/issues/:id/fix', () => {
     return HttpResponse.json({
-      data: mockRuns[0],
-    } satisfies SingleResponse<AgentRun>);
-  }),
-
-  http.get('/api/v1/sessions', () => {
-    return HttpResponse.json({
-      data: mockSessions,
-      meta: {},
-    } satisfies ListResponse<AgentSession>);
+      data: mockSessions[0],
+    } satisfies SingleResponse<Session>);
   }),
 
   http.get('/api/v1/projects/:id', () => {
@@ -285,16 +214,5 @@ export const handlers = [
       summary: { total_delegated: 0, succeeded: 0, failed: 0, still_open: 0 },
       meta: {},
     } satisfies PMDecisionsResponse);
-  }),
-
-  http.get('/api/v1/sessions/:id', ({ params }) => {
-    const session = mockSessions.find((s) => s.id === params.id);
-    if (!session) {
-      return HttpResponse.json(
-        { error: { code: 'NOT_FOUND', message: 'Session not found' } },
-        { status: 404 },
-      );
-    }
-    return HttpResponse.json({ data: session } satisfies SingleResponse<AgentSession>);
   }),
 ];

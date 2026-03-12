@@ -53,20 +53,20 @@ func (f *fakeComplexityStore) Upsert(ctx context.Context, est *models.Complexity
 	return nil
 }
 
-type fakeAgentRunStore struct {
+type fakeSessionStore struct {
 	countRunningByOrgFn func(ctx context.Context, orgID uuid.UUID) (int, error)
-	createFn            func(ctx context.Context, run *models.AgentRun) error
-	createdRuns         []*models.AgentRun
+	createFn            func(ctx context.Context, run *models.Session) error
+	createdRuns         []*models.Session
 }
 
-func (f *fakeAgentRunStore) CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error) {
+func (f *fakeSessionStore) CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error) {
 	if f.countRunningByOrgFn != nil {
 		return f.countRunningByOrgFn(ctx, orgID)
 	}
 	return 0, nil
 }
 
-func (f *fakeAgentRunStore) Create(ctx context.Context, run *models.AgentRun) error {
+func (f *fakeSessionStore) Create(ctx context.Context, run *models.Session) error {
 	f.createdRuns = append(f.createdRuns, run)
 	if f.createFn != nil {
 		return f.createFn(ctx, run)
@@ -204,7 +204,7 @@ func TestComputeScore(t *testing.T) {
 				}
 			}
 
-			svc := NewService(issues, priorities, &fakeComplexityStore{}, &fakeAgentRunStore{}, orgs, &fakeJobStore{}, llm, zerolog.Nop())
+			svc := NewService(issues, priorities, &fakeComplexityStore{}, &fakeSessionStore{}, orgs, &fakeJobStore{}, llm, zerolog.Nop())
 
 			result, err := svc.ComputeScore(context.Background(), orgID, issueID)
 			require.NoError(t, err, "ComputeScore should succeed for valid issue and org data")
@@ -291,7 +291,7 @@ func TestEstimateComplexity(t *testing.T) {
 				}}
 			}
 
-			svc := NewService(issues, &fakePriorityStore{}, complexity, &fakeAgentRunStore{}, &fakeOrgStore{}, &fakeJobStore{}, llm, zerolog.Nop())
+			svc := NewService(issues, &fakePriorityStore{}, complexity, &fakeSessionStore{}, &fakeOrgStore{}, &fakeJobStore{}, llm, zerolog.Nop())
 
 			var inputIssue *models.Issue
 			if tt.passIssue {
@@ -381,12 +381,12 @@ func TestCheckAutoTrigger(t *testing.T) {
 
 			orgID := uuid.New()
 			issueID := uuid.New()
-			runs := &fakeAgentRunStore{
+			runs := &fakeSessionStore{
 				countRunningByOrgFn: func(ctx context.Context, gotOrgID uuid.UUID) (int, error) {
 					require.Equal(t, orgID, gotOrgID, "CheckAutoTrigger should query running runs using the same org id")
 					return tt.running, nil
 				},
-				createFn: func(ctx context.Context, run *models.AgentRun) error {
+				createFn: func(ctx context.Context, run *models.Session) error {
 					run.ID = uuid.New()
 					return nil
 				},
@@ -522,7 +522,7 @@ func TestLLMResponseParsing(t *testing.T) {
 				return tt.complexityResp, nil
 			}}
 
-			svc := NewService(&fakeIssueStore{}, &fakePriorityStore{}, &fakeComplexityStore{}, &fakeAgentRunStore{}, &fakeOrgStore{}, &fakeJobStore{}, llm, zerolog.Nop())
+			svc := NewService(&fakeIssueStore{}, &fakePriorityStore{}, &fakeComplexityStore{}, &fakeSessionStore{}, &fakeOrgStore{}, &fakeJobStore{}, llm, zerolog.Nop())
 			issue := &models.Issue{Title: "nil pointer", Severity: "high"}
 
 			align, alignErr := svc.computeDirectionAlignment(context.Background(), issue, "reduce churn")
@@ -551,12 +551,12 @@ func TestCheckAutoTriggerReturnsErrors(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		setup  func(runs *fakeAgentRunStore, jobs *fakeJobStore, orgs *fakeOrgStore)
+		setup  func(runs *fakeSessionStore, jobs *fakeJobStore, orgs *fakeOrgStore)
 		assert func(t *testing.T, err error)
 	}{
 		{
 			name: "returns org fetch error",
-			setup: func(runs *fakeAgentRunStore, jobs *fakeJobStore, orgs *fakeOrgStore) {
+			setup: func(runs *fakeSessionStore, jobs *fakeJobStore, orgs *fakeOrgStore) {
 				orgs.getByIDFn = func(ctx context.Context, id uuid.UUID) (models.Organization, error) {
 					return models.Organization{}, errors.New("org unavailable")
 				}
@@ -568,7 +568,7 @@ func TestCheckAutoTriggerReturnsErrors(t *testing.T) {
 		},
 		{
 			name: "returns count running error",
-			setup: func(runs *fakeAgentRunStore, jobs *fakeJobStore, orgs *fakeOrgStore) {
+			setup: func(runs *fakeSessionStore, jobs *fakeJobStore, orgs *fakeOrgStore) {
 				orgs.getByIDFn = func(ctx context.Context, id uuid.UUID) (models.Organization, error) {
 					return models.Organization{ID: id, Settings: json.RawMessage(`{"autonomy_level":"auto"}`)}, nil
 				}
@@ -583,12 +583,12 @@ func TestCheckAutoTriggerReturnsErrors(t *testing.T) {
 		},
 		{
 			name: "returns create run error",
-			setup: func(runs *fakeAgentRunStore, jobs *fakeJobStore, orgs *fakeOrgStore) {
+			setup: func(runs *fakeSessionStore, jobs *fakeJobStore, orgs *fakeOrgStore) {
 				orgs.getByIDFn = func(ctx context.Context, id uuid.UUID) (models.Organization, error) {
 					return models.Organization{ID: id, Settings: json.RawMessage(`{"autonomy_level":"auto"}`)}, nil
 				}
 				runs.countRunningByOrgFn = func(ctx context.Context, orgID uuid.UUID) (int, error) { return 0, nil }
-				runs.createFn = func(ctx context.Context, run *models.AgentRun) error { return errors.New("insert failed") }
+				runs.createFn = func(ctx context.Context, run *models.Session) error { return errors.New("insert failed") }
 			},
 			assert: func(t *testing.T, err error) {
 				require.Error(t, err, "CheckAutoTrigger should return an error when run creation fails")
@@ -597,12 +597,12 @@ func TestCheckAutoTriggerReturnsErrors(t *testing.T) {
 		},
 		{
 			name: "returns enqueue error",
-			setup: func(runs *fakeAgentRunStore, jobs *fakeJobStore, orgs *fakeOrgStore) {
+			setup: func(runs *fakeSessionStore, jobs *fakeJobStore, orgs *fakeOrgStore) {
 				orgs.getByIDFn = func(ctx context.Context, id uuid.UUID) (models.Organization, error) {
 					return models.Organization{ID: id, Settings: json.RawMessage(`{"autonomy_level":"auto"}`)}, nil
 				}
 				runs.countRunningByOrgFn = func(ctx context.Context, orgID uuid.UUID) (int, error) { return 0, nil }
-				runs.createFn = func(ctx context.Context, run *models.AgentRun) error {
+				runs.createFn = func(ctx context.Context, run *models.Session) error {
 					run.ID = uuid.New()
 					return nil
 				}
@@ -622,7 +622,7 @@ func TestCheckAutoTriggerReturnsErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			runs := &fakeAgentRunStore{}
+			runs := &fakeSessionStore{}
 			jobs := &fakeJobStore{}
 			orgs := &fakeOrgStore{}
 			tt.setup(runs, jobs, orgs)
@@ -697,7 +697,7 @@ func TestComputeScoreReturnsErrors(t *testing.T) {
 			orgs := &fakeOrgStore{}
 			tt.setup(issues, priorities, orgs)
 
-			svc := NewService(issues, priorities, &fakeComplexityStore{}, &fakeAgentRunStore{}, orgs, &fakeJobStore{}, nil, zerolog.Nop())
+			svc := NewService(issues, priorities, &fakeComplexityStore{}, &fakeSessionStore{}, orgs, &fakeJobStore{}, nil, zerolog.Nop())
 			_, err := svc.ComputeScore(context.Background(), uuid.New(), uuid.New())
 			tt.assert(t, err)
 		})
@@ -745,7 +745,7 @@ func TestEstimateComplexityReturnsErrors(t *testing.T) {
 			complexity := &fakeComplexityStore{}
 			tt.setup(issues, complexity)
 
-			svc := NewService(issues, &fakePriorityStore{}, complexity, &fakeAgentRunStore{}, &fakeOrgStore{}, &fakeJobStore{}, nil, zerolog.Nop())
+			svc := NewService(issues, &fakePriorityStore{}, complexity, &fakeSessionStore{}, &fakeOrgStore{}, &fakeJobStore{}, nil, zerolog.Nop())
 			issue := &models.Issue{ID: uuid.New(), Severity: "medium", LastSeenAt: time.Now()}
 			if tt.name == "returns issue fetch error when issue is nil" {
 				issue = nil

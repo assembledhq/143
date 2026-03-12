@@ -29,25 +29,25 @@ func (m *gatherIssueStoreMock) UpdateStatus(ctx context.Context, orgID, issueID 
 	return nil
 }
 
-type gatherAgentRunStoreMock struct {
-	byStatus map[string][]models.AgentRun
-	recent   []models.AgentRun
+type gatherSessionStoreMock struct {
+	byStatus map[string][]models.Session
+	recent   []models.Session
 	count    int
 	errByKey map[string]error
 }
 
-func (m *gatherAgentRunStoreMock) CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error) {
+func (m *gatherSessionStoreMock) CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error) {
 	if err := m.errByKey["count_running"]; err != nil {
 		return 0, err
 	}
 	return m.count, nil
 }
 
-func (m *gatherAgentRunStoreMock) Create(ctx context.Context, run *models.AgentRun) error {
+func (m *gatherSessionStoreMock) Create(ctx context.Context, run *models.Session) error {
 	return nil
 }
 
-func (m *gatherAgentRunStoreMock) ListByOrg(ctx context.Context, orgID uuid.UUID, filters db.AgentRunFilters) ([]models.AgentRun, error) {
+func (m *gatherSessionStoreMock) ListByOrg(ctx context.Context, orgID uuid.UUID, filters db.SessionFilters) ([]models.Session, error) {
 	key := string(filters.Status)
 	if err := m.errByKey[key]; err != nil {
 		return nil, err
@@ -55,7 +55,7 @@ func (m *gatherAgentRunStoreMock) ListByOrg(ctx context.Context, orgID uuid.UUID
 	return m.byStatus[key], nil
 }
 
-func (m *gatherAgentRunStoreMock) ListRecentByOrg(ctx context.Context, orgID uuid.UUID, statuses []string, limit int) ([]models.AgentRun, error) {
+func (m *gatherSessionStoreMock) ListRecentByOrg(ctx context.Context, orgID uuid.UUID, statuses []string, limit int) ([]models.Session, error) {
 	if err := m.errByKey["recent"]; err != nil {
 		return nil, err
 	}
@@ -139,7 +139,7 @@ func TestServiceGatherContext(t *testing.T) {
 		name             string
 		orgStore         orgStore
 		issueStore       issueStore
-		agentRunStore    agentRunStore
+		sessionStore    sessionStore
 		pullRequests     prStore
 		decisionLog      decisionLogStore
 		expectErr        string
@@ -153,14 +153,14 @@ func TestServiceGatherContext(t *testing.T) {
 			name:      "returns wrapped error when organization lookup fails",
 			orgStore:  &gatherOrgStoreMock{err: fmt.Errorf("org missing")},
 			issueStore: &gatherIssueStoreMock{},
-			agentRunStore: &gatherAgentRunStoreMock{},
+			sessionStore: &gatherSessionStoreMock{},
 			expectErr: "org missing",
 		},
 		{
 			name: "returns wrapped error when issue lookup fails",
 			orgStore: &gatherOrgStoreMock{org: models.Organization{ID: orgID, Settings: settingsJSON}},
 			issueStore: &gatherIssueStoreMock{errByKey: map[string]error{"open": fmt.Errorf("issues unavailable")}},
-			agentRunStore: &gatherAgentRunStoreMock{},
+			sessionStore: &gatherSessionStoreMock{},
 			expectErr: "issues unavailable",
 		},
 		{
@@ -195,8 +195,8 @@ func TestServiceGatherContext(t *testing.T) {
 					},
 				},
 			}},
-			agentRunStore: &gatherAgentRunStoreMock{
-				byStatus: map[string][]models.AgentRun{
+			sessionStore: &gatherSessionStoreMock{
+				byStatus: map[string][]models.Session{
 					"pending": {
 						{ID: pendingRunID, IssueID: issueID, Status: "pending", StartedAt: &now},
 					},
@@ -204,7 +204,7 @@ func TestServiceGatherContext(t *testing.T) {
 						{ID: uuid.New(), IssueID: secondIssueID, Status: "running", StartedAt: &now},
 					},
 				},
-				recent: []models.AgentRun{{
+				recent: []models.Session{{
 					ID:                 recentRunID,
 					IssueID:            issueID,
 					Status:             "completed",
@@ -217,7 +217,7 @@ func TestServiceGatherContext(t *testing.T) {
 			},
 			pullRequests: &gatherPRStoreMock{prs: []models.PullRequest{{
 				ID:           prID,
-				AgentRunID:   pendingRunID,
+				SessionID:   pendingRunID,
 				Title:        "Fix payment panic",
 				Status:       "open",
 				ReviewStatus: "pending",
@@ -246,7 +246,7 @@ func TestServiceGatherContext(t *testing.T) {
 
 			svc := &Service{
 				issues:       tt.issueStore,
-				agentRuns:    tt.agentRunStore,
+				sessions:    tt.sessionStore,
 				pullRequests: tt.pullRequests,
 				orgs:         tt.orgStore,
 				decisionLog:  tt.decisionLog,

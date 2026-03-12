@@ -134,24 +134,7 @@ export const api = {
     },
     get: (id: string) => get<import('./types').SingleResponse<import('./types').Issue>>(`/api/v1/issues/${id}`),
     triggerFix: (issueId: string, options?: { agent_type?: string; autonomy_level?: string; token_mode?: string }) =>
-      post<import('./types').SingleResponse<import('./types').AgentRun>>(`/api/v1/issues/${issueId}/fix`, options),
-  },
-  runs: {
-    list: (params?: { status?: string; cursor?: string; limit?: number }) => {
-      const searchParams = new URLSearchParams();
-      if (params?.status) searchParams.set('status', params.status);
-      if (params?.cursor) searchParams.set('cursor', params.cursor);
-      if (params?.limit) searchParams.set('limit', String(params.limit));
-      const qs = searchParams.toString();
-      return get<import('./types').ListResponse<import('./types').AgentRun>>(`/api/v1/runs${qs ? `?${qs}` : ''}`);
-    },
-    get: (id: string) => get<import('./types').SingleResponse<import('./types').AgentRun>>(`/api/v1/runs/${id}`),
-    getLogs: (runId: string) => get<import('./types').ListResponse<import('./types').AgentRunLog>>(`/api/v1/runs/${runId}/logs`),
-    getValidation: (runId: string) => get<import('./types').SingleResponse<import('./types').Validation>>(`/api/v1/runs/${runId}/validation`),
-    getPR: (runId: string) => get<import('./types').SingleResponse<import('./types').PullRequest>>(`/api/v1/runs/${runId}/pr`),
-    getQuestions: (runId: string) => get<import('./types').ListResponse<import('./types').AgentRunQuestion>>(`/api/v1/runs/${runId}/questions`),
-    answerQuestion: (runId: string, questionId: string, answer: string) =>
-      post<import('./types').SingleResponse<import('./types').AgentRunQuestion>>(`/api/v1/runs/${runId}/questions/${questionId}/answer`, { answer }),
+      post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/issues/${issueId}/fix`, options),
   },
   pm: {
     // Cursor format for /pm/plans: "<created_at RFC3339Nano>|<uuid>" (treat as opaque).
@@ -175,15 +158,23 @@ export const api = {
     status: () => get<import('./types').SingleResponse<import('./types').PMStatus>>('/api/v1/pm/status'),
   },
   sessions: {
-    list: (params?: { limit?: number }) => {
+    list: (params?: { status?: string; cursor?: string; limit?: number }) => {
       const searchParams = new URLSearchParams();
+      if (params?.status) searchParams.set('status', params.status);
+      if (params?.cursor) searchParams.set('cursor', params.cursor);
       if (params?.limit) searchParams.set('limit', String(params.limit));
       const qs = searchParams.toString();
-      return get<import('./types').SessionsListResponse>(`/api/v1/sessions${qs ? `?${qs}` : ''}`);
+      return get<import('./types').ListResponse<import('./types').Session>>(`/api/v1/sessions${qs ? `?${qs}` : ''}`);
     },
-    get: (id: string) => get<import('./types').SingleResponse<import('./types').AgentSession>>(`/api/v1/sessions/${id}`),
+    get: (id: string) => get<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${id}`),
+    getLogs: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/logs`),
+    getValidation: (sessionId: string) => get<import('./types').SingleResponse<import('./types').Validation>>(`/api/v1/sessions/${sessionId}/validation`),
+    getPR: (sessionId: string) => get<import('./types').SingleResponse<import('./types').PullRequest>>(`/api/v1/sessions/${sessionId}/pr`),
+    getQuestions: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions`),
+    answerQuestion: (sessionId: string, questionId: string, answer: string) =>
+      post<import('./types').SingleResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions/${questionId}/answer`, { answer }),
     createManual: (body: { message: string; images?: string[]; agent_type?: string; model?: string; autonomy_level?: string; token_mode?: string }) =>
-      post<import('./types').SingleResponse<import('./types').AgentSession>>('/api/v1/sessions/manual', body),
+      post<import('./types').SingleResponse<import('./types').Session>>('/api/v1/sessions/manual', body),
   },
   settings: {
     get: () => get<import('./types').SingleResponse<import('./types').Organization>>('/api/v1/settings'),

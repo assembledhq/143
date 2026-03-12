@@ -215,6 +215,42 @@ func TestWebhook_HandleGitHub(t *testing.T) {
 			expectedBody: "repositories updated",
 		},
 		{
+			name:   "pull_request event ignored when pr service not configured",
+			secret: "test-secret",
+			event:  "pull_request",
+			payload: `{"action":"opened","pull_request":{"number":1}}`,
+			signature: func(secret string, body []byte) string {
+				return computeTestSignature(secret, body)
+			},
+			setupMock:    func(mock pgxmock.PgxPoolIface) {},
+			expectedCode: http.StatusOK,
+			expectedBody: "pr_service_not_configured",
+		},
+		{
+			name:   "pull_request_review event ignored when pr service not configured",
+			secret: "test-secret",
+			event:  "pull_request_review",
+			payload: `{"action":"submitted","review":{"id":1}}`,
+			signature: func(secret string, body []byte) string {
+				return computeTestSignature(secret, body)
+			},
+			setupMock:    func(mock pgxmock.PgxPoolIface) {},
+			expectedCode: http.StatusOK,
+			expectedBody: "pr_service_not_configured",
+		},
+		{
+			name:   "pull_request_review_comment event ignored when pr service not configured",
+			secret: "test-secret",
+			event:  "pull_request_review_comment",
+			payload: `{"action":"created","comment":{"id":1}}`,
+			signature: func(secret string, body []byte) string {
+				return computeTestSignature(secret, body)
+			},
+			setupMock:    func(mock pgxmock.PgxPoolIface) {},
+			expectedCode: http.StatusOK,
+			expectedBody: "pr_service_not_configured",
+		},
+		{
 			name:   "installation_repositories event removes repos",
 			secret: "test-secret",
 			event:  "installation_repositories",
