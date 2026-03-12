@@ -113,6 +113,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	teamHandler := handlers.NewTeamHandler(userStore, authSessionStore, invitationStore, orgStore, cfg.FrontendURL)
 
 	projectHandler := handlers.NewProjectHandler(projectStore, projectTaskStore, projectCycleStore, projectAttachmentStore, projectSpecStore)
+	projectHandler.SetJobStore(jobStore)
 	projectAttachmentHandler := handlers.NewProjectAttachmentHandler(projectAttachmentStore, projectStore)
 	projectSpecHandler := handlers.NewProjectSpecHandler(projectSpecStore, projectStore)
 	projectAnalysisHandler := handlers.NewProjectAnalysisHandler(projectStore, projectSpecStore, projectAttachmentStore, projectTaskStore)
@@ -228,6 +229,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Post("/api/v1/projects/{id}/resume", projectHandler.Resume)
 			r.Post("/api/v1/projects/{id}/approve", projectHandler.Approve)
 			r.Post("/api/v1/projects/{id}/dismiss", projectHandler.Dismiss)
+			r.Post("/api/v1/projects/{id}/run", projectHandler.RunNow)
 			r.Post("/api/v1/projects/{id}/tasks", projectHandler.CreateTask)
 			r.Patch("/api/v1/projects/{id}/tasks/{taskId}", projectHandler.UpdateTask)
 			r.Delete("/api/v1/projects/{id}/tasks/{taskId}", projectHandler.DeleteTask)

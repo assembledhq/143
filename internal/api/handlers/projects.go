@@ -2,7 +2,9 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
@@ -17,6 +19,7 @@ type ProjectHandler struct {
 	projectCycleStore *db.ProjectCycleStore
 	attachmentStore   *db.ProjectAttachmentStore
 	specStore         *db.ProjectSpecStore
+	jobStore          *db.JobStore
 }
 
 func NewProjectHandler(
@@ -33,6 +36,11 @@ func NewProjectHandler(
 		attachmentStore:   attachmentStore,
 		specStore:         specStore,
 	}
+}
+
+// SetJobStore injects the job store for enqueuing project_cycle jobs.
+func (h *ProjectHandler) SetJobStore(jobStore *db.JobStore) {
+	h.jobStore = jobStore
 }
 
 // ProjectDetailResponse combines a project with its tasks, cycles, attachments, and specs.
@@ -175,6 +183,9 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 		BaseBranch         *string `json:"base_branch"`
 		AgentType          *string `json:"agent_type"`
 		Model              *string `json:"model"`
+		ScheduleEnabled    *bool   `json:"schedule_enabled"`
+		ScheduleInterval   *int    `json:"schedule_interval"`
+		ScheduleUnit       *string `json:"schedule_unit"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -234,6 +245,35 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	scheduleEnabled := false
+	scheduleInterval := 1
+	scheduleUnit := "days"
+	if req.ScheduleEnabled != nil {
+		scheduleEnabled = *req.ScheduleEnabled
+	}
+	if req.ScheduleInterval != nil && *req.ScheduleInterval > 0 {
+		if *req.ScheduleInterval > 365 {
+			writeError(w, http.StatusBadRequest, "INVALID_SCHEDULE_INTERVAL", "schedule_interval must be between 1 and 365")
+			return
+		}
+		scheduleInterval = *req.ScheduleInterval
+	}
+	if req.ScheduleUnit != nil && *req.ScheduleUnit != "" {
+		scheduleUnit = *req.ScheduleUnit
+		if err := models.ScheduleUnit(scheduleUnit).Validate(); err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_SCHEDULE_UNIT", err.Error())
+			return
+		}
+	}
+
+	// Compute next_run_at when schedule is enabled at creation time.
+	var nextRunAt *time.Time
+	if scheduleEnabled {
+		now := time.Now()
+		next := models.NextRunTime(now, scheduleInterval, scheduleUnit)
+		nextRunAt = &next
+	}
+
 	project := models.Project{
 		OrgID:              orgID,
 		RepositoryID:       repoID,
@@ -249,6 +289,10 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 		BaseBranch:         baseBranch,
 		AgentType:          req.AgentType,
 		ModelOverride:      req.Model,
+		ScheduleEnabled:    scheduleEnabled,
+		ScheduleInterval:   scheduleInterval,
+		ScheduleUnit:       scheduleUnit,
+		NextRunAt:          nextRunAt,
 		CreatedBy:          &user.ID,
 	}
 
@@ -286,6 +330,9 @@ func (h *ProjectHandler) Update(w http.ResponseWriter, r *http.Request) {
 		AutoMerge          *bool   `json:"auto_merge"`
 		BaseBranch         *string `json:"base_branch"`
 		CurrentPhase       *string `json:"current_phase"`
+		ScheduleEnabled    *bool   `json:"schedule_enabled"`
+		ScheduleInterval   *int    `json:"schedule_interval"`
+		ScheduleUnit       *string `json:"schedule_unit"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -340,6 +387,35 @@ func (h *ProjectHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if req.CurrentPhase != nil {
 		project.CurrentPhase = req.CurrentPhase
 	}
+	if req.ScheduleInterval != nil && *req.ScheduleInterval > 0 {
+		if *req.ScheduleInterval > 365 {
+			writeError(w, http.StatusBadRequest, "INVALID_SCHEDULE_INTERVAL", "schedule_interval must be between 1 and 365")
+			return
+		}
+		project.ScheduleInterval = *req.ScheduleInterval
+	}
+	if req.ScheduleUnit != nil && *req.ScheduleUnit != "" {
+		unit := models.ScheduleUnit(*req.ScheduleUnit)
+		if err := unit.Validate(); err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_SCHEDULE_UNIT", err.Error())
+			return
+		}
+		project.ScheduleUnit = *req.ScheduleUnit
+	}
+	if req.ScheduleEnabled != nil {
+		wasEnabled := project.ScheduleEnabled
+		project.ScheduleEnabled = *req.ScheduleEnabled
+		// When enabling schedule, compute next_run_at if not already set.
+		if *req.ScheduleEnabled && !wasEnabled {
+			now := time.Now()
+			next := models.NextRunTime(now, project.ScheduleInterval, project.ScheduleUnit)
+			project.NextRunAt = &next
+		}
+		// When disabling schedule, clear next_run_at.
+		if !*req.ScheduleEnabled && wasEnabled {
+			project.NextRunAt = nil
+		}
+	}
 
 	if err := h.projectStore.Update(r.Context(), &project); err != nil {
 		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update project")
@@ -383,6 +459,47 @@ func (h *ProjectHandler) Approve(w http.ResponseWriter, r *http.Request) {
 
 func (h *ProjectHandler) Dismiss(w http.ResponseWriter, r *http.Request) {
 	h.transitionStatus(w, r, models.ProjectStatusCancelled)
+}
+
+// RunNow enqueues an immediate project_cycle job for the project.
+func (h *ProjectHandler) RunNow(w http.ResponseWriter, r *http.Request) {
+	if h.jobStore == nil {
+		writeError(w, http.StatusServiceUnavailable, "NOT_CONFIGURED", "job store not configured")
+		return
+	}
+
+	orgID := middleware.OrgIDFromContext(r.Context())
+	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		return
+	}
+
+	project, err := h.projectStore.GetByID(r.Context(), orgID, projectID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "project not found")
+		return
+	}
+
+	if project.Status != models.ProjectStatusActive {
+		writeError(w, http.StatusBadRequest, "INVALID_STATUS", "project must be active to run")
+		return
+	}
+
+	dedupeKey := fmt.Sprintf("project_cycle:%s", projectID.String())
+	payload := map[string]string{
+		"org_id":     orgID.String(),
+		"project_id": projectID.String(),
+	}
+	jobID, err := h.jobStore.Enqueue(r.Context(), orgID, "default", "project_cycle", payload, 5, &dedupeKey)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue project cycle job")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[map[string]string]{
+		Data: map[string]string{"job_id": jobID.String()},
+	})
 }
 
 func (h *ProjectHandler) transitionStatus(w http.ResponseWriter, r *http.Request, target models.ProjectStatus) {

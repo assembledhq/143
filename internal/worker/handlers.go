@@ -30,6 +30,7 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, logger zero
 	}
 	if services != nil && services.PM != nil {
 		w.Register("pm_analyze", newPMAnalyzeHandler(stores, services, logger))
+		w.Register("project_cycle", newProjectCycleHandler(services, logger))
 	}
 	if hasServiceHandlersDependencies(services) {
 		w.Register("run_agent", newRunAgentHandler(stores, services, logger))
@@ -81,6 +82,7 @@ type Services struct {
 
 type pmService interface {
 	Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID) (*pm.Plan, error)
+	AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID) error
 }
 
 // ingest_webhook handler processes a webhook delivery asynchronously.
@@ -178,6 +180,31 @@ func newPMAnalyzeHandler(stores *Stores, services *Services, logger zerolog.Logg
 		logger.Info().Str("org_id", orgID.String()).Str("trigger", string(trigger)).Msg("running pm analyze")
 		_, err = services.PM.Analyze(ctx, orgID, trigger, repoID)
 		return err
+	}
+}
+
+// project_cycle handler runs a focused PM analysis for a single scheduled project.
+func newProjectCycleHandler(services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID     string `json:"org_id"`
+			ProjectID string `json:"project_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal project_cycle payload: %w", err)
+		}
+
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		projectID, err := uuid.Parse(input.ProjectID)
+		if err != nil {
+			return fmt.Errorf("parse project ID: %w", err)
+		}
+
+		logger.Info().Str("org_id", orgID.String()).Str("project_id", projectID.String()).Msg("running project_cycle job")
+		return services.PM.AnalyzeProject(ctx, orgID, projectID)
 	}
 }
 

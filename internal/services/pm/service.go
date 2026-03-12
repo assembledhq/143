@@ -37,6 +37,7 @@ type orgStore interface {
 
 type repoStore interface {
 	ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.Repository, error)
+	GetByID(ctx context.Context, orgID, repoID uuid.UUID) (models.Repository, error)
 }
 
 type jobStore interface {

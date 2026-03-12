@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { FolderKanban, Plus } from "lucide-react";
+import { FolderKanban, Plus, Timer } from "lucide-react";
 import Link from "next/link";
 import { useQueryState, parseAsString } from "nuqs";
 import { PageHeader } from "@/components/page-header";
@@ -85,6 +85,12 @@ function ProjectRow({ project }: { project: Project }) {
           <Badge variant="outline" className="text-[11px] px-1.5 py-0">
             {project.execution_mode}
           </Badge>
+          {project.schedule_enabled && (
+            <Badge variant="outline" className="text-[11px] px-1.5 py-0 gap-0.5">
+              <Timer className="h-3 w-3" />
+              {project.schedule_interval}{project.schedule_unit.charAt(0)}
+            </Badge>
+          )}
           <span>{formatTimeAgo(project.updated_at)}</span>
         </div>
       </div>
