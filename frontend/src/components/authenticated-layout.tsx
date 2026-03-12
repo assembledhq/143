@@ -64,27 +64,27 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
   if (isLoading) {
     return (
       <div className="flex h-screen">
-        <aside className="w-64 border-r border-border/80 bg-sidebar flex flex-col">
-          <div className="px-4 py-4">
-            <div className="h-4 w-14 rounded bg-muted animate-pulse" />
+        <aside className="w-64 border-r border-border bg-sidebar flex flex-col">
+          <div className="px-5 py-5">
+            <div className="h-5 w-14 rounded bg-muted animate-pulse" />
           </div>
           <nav className="flex-1 px-2.5 space-y-0.5">
             {Array.from({ length: 5 }).map((_, i) => (
-              <div key={i} className="flex items-center gap-2.5 px-2.5 py-1.5">
+              <div key={i} className="flex items-center gap-2.5 px-2.5 py-2">
                 <div className="h-4 w-4 rounded bg-muted animate-pulse" />
                 <div className="h-3.5 rounded bg-muted animate-pulse" style={{ width: `${60 + i * 12}px` }} />
               </div>
             ))}
           </nav>
           <div className="px-2.5 pb-3.5">
-            <div className="flex items-center gap-2 px-2.5 py-1.5">
+            <div className="flex items-center gap-2 px-2.5 py-2">
               <div className="h-5 w-5 rounded-full bg-muted animate-pulse" />
               <div className="h-3.5 w-20 rounded bg-muted animate-pulse" />
             </div>
           </div>
         </aside>
-        <main className="flex-1 overflow-auto bg-card">
-          <div className="max-w-none px-4 py-4 space-y-4">
+        <main className="flex-1 overflow-auto bg-background">
+          <div className="max-w-none px-8 py-6 space-y-4">
             <div className="h-7 w-40 rounded bg-muted animate-pulse" />
             <div className="space-y-3">
               <div className="h-4 w-full rounded bg-muted animate-pulse" />
@@ -107,9 +107,9 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
 
   return (
     <div className="flex h-screen">
-      <aside className="w-64 border-r border-border/80 bg-sidebar flex flex-col">
-        <div className="px-4 py-4">
-          <Link href="/overview" className="text-sm font-semibold tracking-tight text-sidebar-foreground">
+      <aside className="w-64 border-r border-border bg-sidebar flex flex-col">
+        <div className="px-5 py-5">
+          <Link href="/overview" className="text-base font-bold tracking-tight text-sidebar-foreground">
             143.dev
           </Link>
         </div>
@@ -124,9 +124,9 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                 key={item.href}
                 href={item.href}
                 className={cn(
-                  "flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-[13px] font-medium transition-colors",
+                  "relative flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13px] font-medium transition-colors duration-150",
                   isActive
-                    ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                    ? "bg-sidebar-accent text-sidebar-accent-foreground before:absolute before:left-0 before:top-1/2 before:-translate-y-1/2 before:h-4 before:w-[3px] before:rounded-full before:bg-primary"
                     : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
                 )}
               >
@@ -153,7 +153,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                   variant="ghost"
                   size="sm"
                   className={cn(
-                    "h-8 w-full justify-start gap-2 rounded-md px-2.5 text-[13px] font-medium transition-colors",
+                    "h-8 w-full justify-start gap-2 rounded-lg px-2.5 text-[13px] font-medium transition-colors duration-150",
                     pathname.startsWith("/settings") || pathname.startsWith("/team") || pathname.startsWith("/integrations") || pathname.startsWith("/agent") || pathname.startsWith("/prioritization") || pathname.startsWith("/llm")
                       ? "bg-sidebar-accent text-sidebar-accent-foreground"
                       : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
@@ -210,8 +210,8 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
           )}
         </div>
       </aside>
-      <main className="flex-1 overflow-auto bg-card">
-        <div className="max-w-none px-4 py-4 lg:px-5">
+      <main className="flex-1 overflow-auto bg-background">
+        <div className="max-w-none px-8 py-6 lg:px-10">
           {children}
         </div>
       </main>

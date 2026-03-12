@@ -41,7 +41,7 @@ describe("AuthenticatedLayout", () => {
     expect(screen.getByRole("link", { name: "Automations" })).toHaveAttribute("href", "/automations");
   });
 
-  it("uses a dense full-width content area", () => {
+  it("uses a full-width content area with generous padding", () => {
     const { container } = renderWithProviders(
       <AuthenticatedLayout>
         <div>content</div>
@@ -50,8 +50,8 @@ describe("AuthenticatedLayout", () => {
 
     const contentWrapper = container.querySelector("main > div");
     expect(contentWrapper).toHaveClass("max-w-none");
-    expect(contentWrapper).toHaveClass("px-4");
-    expect(contentWrapper).toHaveClass("py-4");
+    expect(contentWrapper).toHaveClass("px-8");
+    expect(contentWrapper).toHaveClass("py-6");
   });
 
   it("shows all settings entries in the user menu", async () => {

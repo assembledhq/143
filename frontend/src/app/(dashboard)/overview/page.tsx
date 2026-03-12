@@ -21,6 +21,7 @@ import {
 import { AgentSettingsEditor } from "@/components/agent-settings-editor";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { PageContainer } from "@/components/page-container";
+import { PageHeader } from "@/components/page-header";
 import type { CodexAuthStatus, OrgSettings } from "@/lib/types";
 
 function AgentSettingsModal({ onClose, initialAgentType }: { onClose: () => void; initialAgentType?: OrgSettings["default_agent_type"] }) {
@@ -54,7 +55,7 @@ function StepSection({
     <div className="space-y-3">
       <div className="flex items-center gap-3">
         <div
-          className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${
+          className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${
             completed
               ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
               : "bg-muted text-muted-foreground"
@@ -62,9 +63,9 @@ function StepSection({
         >
           {completed ? <Check className="h-4 w-4" /> : step}
         </div>
-        <h2 className="text-[13px] font-medium text-foreground">{title}</h2>
+        <h2 className="text-sm font-medium text-foreground">{title}</h2>
       </div>
-      <div className="ml-10">{children}</div>
+      <div className="ml-11">{children}</div>
     </div>
   );
 }
@@ -246,20 +247,18 @@ export default function Overview() {
     <PageContainer size="default">
       <div className="space-y-6">
       {/* Hero header */}
-      <div className="space-y-3">
-        <div>
-          <h1 className="text-[15px] font-semibold leading-5 text-foreground">Get started</h1>
-          <p className="mt-0.5 text-[13px] text-muted-foreground">
-            Connect your tools and start fixing issues automatically.
-          </p>
-        </div>
+      <div className="space-y-4">
+        <PageHeader
+          title="Get started"
+          description="Connect your tools and start fixing issues automatically."
+        />
         <div className="space-y-1.5">
           <div className="flex items-center justify-between">
             <p className="text-xs text-muted-foreground">
               {connectedCount} of {totalCount} connected
             </p>
           </div>
-          <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+          <div className="h-2 w-full rounded-full bg-muted overflow-hidden shadow-inner">
             <div
               className="h-full rounded-full bg-primary transition-all duration-500"
               style={{ width: `${(connectedCount / totalCount) * 100}%` }}
