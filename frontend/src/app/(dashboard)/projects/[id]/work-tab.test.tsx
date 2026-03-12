@@ -270,7 +270,7 @@ describe("WorkTab", () => {
     expect(screen.getByText("hard")).toBeInTheDocument();
   });
 
-  it("renders task with agent_run_id as Run link", () => {
+  it("renders task with session_id as Run link", () => {
     const tasksWithRun: ProjectTask[] = [
       {
         id: "task-run",
@@ -278,7 +278,7 @@ describe("WorkTab", () => {
         org_id: "org-1",
         title: "Task with Run",
         status: "running",
-        agent_run_id: "run-123",
+        session_id: "run-123",
         sort_order: 1,
         batch_number: 1,
         retry_count: 0,
@@ -292,8 +292,8 @@ describe("WorkTab", () => {
       <WorkTab project={mockProject} tasks={tasksWithRun} cycles={[]} />,
     );
 
-    const runLink = screen.getByText("Run").closest("a");
-    expect(runLink).toHaveAttribute("href", "/runs/run-123");
+    const runLink = screen.getByText("Session").closest("a");
+    expect(runLink).toHaveAttribute("href", "/sessions/run-123");
   });
 
   it("renders planning cycle details when expanded", async () => {

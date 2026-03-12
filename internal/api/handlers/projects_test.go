@@ -20,7 +20,7 @@ import (
 var projectTaskHandlerColumns = []string{
 	"id", "project_id", "org_id", "title", "description", "approach", "reasoning",
 	"sort_order", "depends_on", "batch_number", "status", "complexity", "confidence",
-	"agent_run_id", "issue_id", "branch_name", "pr_url", "outcome_notes",
+	"session_id", "issue_id", "branch_name", "pr_url", "outcome_notes",
 	"retry_count", "max_retries", "created_at", "updated_at", "completed_at",
 }
 

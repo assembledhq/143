@@ -5,7 +5,7 @@ import { AlertTriangle, RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
-import type { AgentRunLog } from "@/lib/types";
+import type { SessionLog } from "@/lib/types";
 
 const levelColors: Record<string, string> = {
   info: "bg-gray-100 text-gray-800",
@@ -35,7 +35,7 @@ const MAX_RECONNECT_ATTEMPTS = 5;
 const BASE_RECONNECT_DELAY_MS = 1000;
 
 export function LogViewer({ runId, isActive }: LogViewerProps) {
-  const [logs, setLogs] = useState<AgentRunLog[]>([]);
+  const [logs, setLogs] = useState<SessionLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [streaming, setStreaming] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
@@ -47,9 +47,9 @@ export function LogViewer({ runId, isActive }: LogViewerProps) {
   const seenIds = useRef<Set<number>>(new Set());
 
   // Merge new logs into state, deduplicating by ID.
-  const mergeLogs = useCallback((newLogs: AgentRunLog[]) => {
+  const mergeLogs = useCallback((newLogs: SessionLog[]) => {
     setLogs((prev) => {
-      const toAdd: AgentRunLog[] = [];
+      const toAdd: SessionLog[] = [];
       for (const log of newLogs) {
         if (!seenIds.current.has(log.id)) {
           seenIds.current.add(log.id);
@@ -65,7 +65,7 @@ export function LogViewer({ runId, isActive }: LogViewerProps) {
     setLoading(true);
     setFetchError(null);
     try {
-      const response = await api.runs.getLogs(runId);
+      const response = await api.sessions.getLogs(runId);
       if (!signal?.aborted) {
         const fetched = response.data || [];
         seenIds.current = new Set(fetched.map((l) => l.id));
@@ -104,7 +104,7 @@ export function LogViewer({ runId, isActive }: LogViewerProps) {
 
     function connect() {
       eventSource = new EventSource(
-        `${apiBase}/api/v1/runs/${runId}/logs/stream`,
+        `${apiBase}/api/v1/sessions/${runId}/logs/stream`,
         { withCredentials: true }
       );
 
@@ -116,7 +116,7 @@ export function LogViewer({ runId, isActive }: LogViewerProps) {
 
       eventSource.onmessage = (event) => {
         try {
-          const log: AgentRunLog = JSON.parse(event.data);
+          const log: SessionLog = JSON.parse(event.data);
           mergeLogs([log]);
         } catch {
           // ignore unparseable messages

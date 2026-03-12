@@ -57,7 +57,7 @@ func hasServiceHandlersDependencies(services *Services) bool {
 // Stores holds all the database stores needed by job handlers.
 type Stores struct {
 	Issues              *db.IssueStore
-	AgentRuns           *db.AgentRunStore
+	Sessions           *db.SessionStore
 	Jobs                *db.JobStore
 	Integrations        *db.IntegrationStore
 	Webhooks            *db.WebhookDeliveryStore
@@ -291,7 +291,7 @@ func syncSentryIntegration(
 func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			AgentRunID string `json:"agent_run_id"`
+			SessionID string `json:"session_id"`
 			OrgID      string `json:"org_id"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
@@ -302,18 +302,18 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		if err != nil {
 			return fmt.Errorf("parse org ID: %w", err)
 		}
-		runID, err := uuid.Parse(input.AgentRunID)
+		runID, err := uuid.Parse(input.SessionID)
 		if err != nil {
 			return fmt.Errorf("parse agent run ID: %w", err)
 		}
 
-		run, err := stores.AgentRuns.GetByID(ctx, orgID, runID)
+		run, err := stores.Sessions.GetByID(ctx, orgID, runID)
 		if err != nil {
 			return fmt.Errorf("fetch agent run: %w", err)
 		}
 
 		logger.Info().
-			Str("agent_run_id", runID.String()).
+			Str("session_id", runID.String()).
 			Str("org_id", orgID.String()).
 			Msg("starting run_agent job")
 
@@ -325,7 +325,7 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 func newValidateHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			AgentRunID string `json:"agent_run_id"`
+			SessionID string `json:"session_id"`
 			OrgID      string `json:"org_id"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
@@ -336,18 +336,18 @@ func newValidateHandler(stores *Stores, services *Services, logger zerolog.Logge
 		if err != nil {
 			return fmt.Errorf("parse org ID: %w", err)
 		}
-		runID, err := uuid.Parse(input.AgentRunID)
+		runID, err := uuid.Parse(input.SessionID)
 		if err != nil {
 			return fmt.Errorf("parse agent run ID: %w", err)
 		}
 
-		run, err := stores.AgentRuns.GetByID(ctx, orgID, runID)
+		run, err := stores.Sessions.GetByID(ctx, orgID, runID)
 		if err != nil {
 			return fmt.Errorf("fetch agent run: %w", err)
 		}
 
 		logger.Info().
-			Str("agent_run_id", runID.String()).
+			Str("session_id", runID.String()).
 			Str("org_id", orgID.String()).
 			Msg("starting validate job")
 
@@ -375,7 +375,7 @@ func newValidateHandler(stores *Stores, services *Services, logger zerolog.Logge
 func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			AgentRunID string `json:"agent_run_id"`
+			SessionID string `json:"session_id"`
 			OrgID      string `json:"org_id"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
@@ -386,18 +386,18 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 		if err != nil {
 			return fmt.Errorf("parse org ID: %w", err)
 		}
-		runID, err := uuid.Parse(input.AgentRunID)
+		runID, err := uuid.Parse(input.SessionID)
 		if err != nil {
 			return fmt.Errorf("parse agent run ID: %w", err)
 		}
 
-		run, err := stores.AgentRuns.GetByID(ctx, orgID, runID)
+		run, err := stores.Sessions.GetByID(ctx, orgID, runID)
 		if err != nil {
 			return fmt.Errorf("fetch agent run: %w", err)
 		}
 
 		logger.Info().
-			Str("agent_run_id", runID.String()).
+			Str("session_id", runID.String()).
 			Str("org_id", orgID.String()).
 			Msg("starting open_pr job")
 
@@ -410,7 +410,7 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 func newAnalyzeFailureHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			AgentRunID string `json:"agent_run_id"`
+			SessionID string `json:"session_id"`
 			OrgID      string `json:"org_id"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
@@ -421,18 +421,18 @@ func newAnalyzeFailureHandler(stores *Stores, services *Services, logger zerolog
 		if err != nil {
 			return fmt.Errorf("parse org ID: %w", err)
 		}
-		runID, err := uuid.Parse(input.AgentRunID)
+		runID, err := uuid.Parse(input.SessionID)
 		if err != nil {
 			return fmt.Errorf("parse agent run ID: %w", err)
 		}
 
-		run, err := stores.AgentRuns.GetByID(ctx, orgID, runID)
+		run, err := stores.Sessions.GetByID(ctx, orgID, runID)
 		if err != nil {
 			return fmt.Errorf("fetch agent run: %w", err)
 		}
 
 		logger.Info().
-			Str("agent_run_id", runID.String()).
+			Str("session_id", runID.String()).
 			Str("org_id", orgID.String()).
 			Msg("starting analyze_failure job")
 

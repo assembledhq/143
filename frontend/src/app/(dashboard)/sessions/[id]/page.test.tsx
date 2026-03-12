@@ -14,68 +14,60 @@ vi.mock('next/link', () => ({
 
 describe('SessionDetailPage', () => {
   it('shows loading state initially', () => {
-    renderWithProviders(<SessionDetailContent id="session-plan-1" />);
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     expect(screen.getByText('Loading session...')).toBeInTheDocument();
   });
 
-  it('renders plan session with title', async () => {
-    renderWithProviders(<SessionDetailContent id="session-plan-1" />);
-    expect(
-      await screen.findByText('Analyzed 5 open issues and delegated 2 tasks.'),
-    ).toBeInTheDocument();
+  it('renders session with result summary as title', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    const elements = await screen.findAllByText('Fixed TypeError by adding null check');
+    expect(elements.length).toBeGreaterThanOrEqual(1);
   });
 
   it('shows back to sessions link', async () => {
-    renderWithProviders(<SessionDetailContent id="session-plan-1" />);
-    await screen.findByText('Analyzed 5 open issues and delegated 2 tasks.');
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
     expect(screen.getByText('Back to sessions')).toBeInTheDocument();
   });
 
-  it('shows PM Analysis badge for plan sessions', async () => {
-    renderWithProviders(<SessionDetailContent id="session-plan-1" />);
-    await screen.findByText('Analyzed 5 open issues and delegated 2 tasks.');
-    expect(screen.getByText('PM Analysis')).toBeInTheDocument();
+  it('shows agent type label', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    expect(screen.getByText('Claude Code session')).toBeInTheDocument();
   });
 
-  it('shows situation analysis for plan sessions', async () => {
-    renderWithProviders(<SessionDetailContent id="session-plan-1" />);
-    await screen.findByText('Analyzed 5 open issues and delegated 2 tasks.');
-    expect(screen.getByText('Situation Analysis')).toBeInTheDocument();
-    expect(
-      screen.getByText('Found critical auth timeout and payment bug requiring immediate attention.'),
-    ).toBeInTheDocument();
-  });
-
-  it('shows tasks with run status for plan sessions', async () => {
-    renderWithProviders(<SessionDetailContent id="session-plan-1" />);
-    await screen.findByText('Analyzed 5 open issues and delegated 2 tasks.');
-    expect(screen.getByText('#1 · Fix auth timeout')).toBeInTheDocument();
-    // "Completed" appears as both the session status badge and the run status badge
+  it('shows overview tab with status and confidence', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
     expect(screen.getAllByText('Completed').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('92%')).toBeInTheDocument();
   });
 
-  it('shows run result summary in tasks', async () => {
-    renderWithProviders(<SessionDetailContent id="session-plan-1" />);
-    await screen.findByText('Analyzed 5 open issues and delegated 2 tasks.');
-    expect(screen.getByText('Fixed TypeError by adding null check')).toBeInTheDocument();
+  it('shows tabs for Overview, Logs, Diff, Validation, PR', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    expect(screen.getByRole('tab', { name: 'Overview' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Logs' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Diff' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Validation' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'PR' })).toBeInTheDocument();
   });
 
-  it('shows view run details link for delegated tasks', async () => {
-    renderWithProviders(<SessionDetailContent id="session-plan-1" />);
-    await screen.findByText('Analyzed 5 open issues and delegated 2 tasks.');
-    expect(screen.getByText('View run details')).toBeInTheDocument();
-  });
-
-  it('renders manual session', async () => {
+  it('renders failed session with failure details', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: mockSessions[1] });
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[1],
+            failure_explanation: 'Could not reproduce the error in test environment',
+          },
+        });
       }),
     );
 
-    renderWithProviders(<SessionDetailContent id="session-manual-1" />);
-    await screen.findByText('Run run-9876');
-    expect(screen.getByText('Manual')).toBeInTheDocument();
+    renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
+    await screen.findByText('Failure Details');
+    expect(screen.getByText('Could not reproduce the error in test environment')).toBeInTheDocument();
   });
 
   it('shows error state when session not found', async () => {
@@ -94,46 +86,9 @@ describe('SessionDetailPage', () => {
     ).toBeInTheDocument();
   });
 
-  it('shows issues reviewed count for plan sessions', async () => {
-    renderWithProviders(<SessionDetailContent id="session-plan-1" />);
-    await screen.findByText('Analyzed 5 open issues and delegated 2 tasks.');
-    expect(screen.getByText('5 issues reviewed')).toBeInTheDocument();
-  });
-
-  it('shows task complexity badge', async () => {
-    renderWithProviders(<SessionDetailContent id="session-plan-1" />);
-    await screen.findByText('Analyzed 5 open issues and delegated 2 tasks.');
-    expect(screen.getByText('moderate')).toBeInTheDocument();
-  });
-
-  it('shows task confidence badge', async () => {
-    renderWithProviders(<SessionDetailContent id="session-plan-1" />);
-    await screen.findByText('Analyzed 5 open issues and delegated 2 tasks.');
-    expect(screen.getByText('high confidence')).toBeInTheDocument();
-  });
-
-  it('shows run confidence score as percentage', async () => {
-    renderWithProviders(<SessionDetailContent id="session-plan-1" />);
-    await screen.findByText('Analyzed 5 open issues and delegated 2 tasks.');
-    expect(screen.getByText('92% confidence')).toBeInTheDocument();
-  });
-
-  it('shows failed run status for manual session tasks', async () => {
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: mockSessions[1] });
-      }),
-    );
-
-    renderWithProviders(<SessionDetailContent id="session-manual-1" />);
-    await screen.findByText('Run run-9876');
-    expect(screen.getAllByText('Failed').length).toBeGreaterThanOrEqual(1);
-  });
-
-  it('shows task reasoning and approach details', async () => {
-    renderWithProviders(<SessionDetailContent id="session-plan-1" />);
-    await screen.findByText('Analyzed 5 open issues and delegated 2 tasks.');
-    expect(screen.getByText('Critical user-facing issue')).toBeInTheDocument();
-    expect(screen.getByText('Check session handler timeout config')).toBeInTheDocument();
+  it('shows result summary card', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    expect(screen.getByText('Result')).toBeInTheDocument();
   });
 });

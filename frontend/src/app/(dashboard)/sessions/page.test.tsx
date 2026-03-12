@@ -21,34 +21,17 @@ describe('SessionsPage', () => {
     renderWithProviders(<SessionsPageContent />);
 
     expect(
-      await screen.findByText('Analyzed 5 open issues and delegated 2 tasks.'),
+      await screen.findByText('Fixed TypeError by adding null check'),
     ).toBeInTheDocument();
   });
 
-  it('shows session type badges', async () => {
+  it('shows agent type badges', async () => {
     renderWithProviders(<SessionsPageContent />);
 
-    await screen.findByText('Analyzed 5 open issues and delegated 2 tasks.');
+    await screen.findByText('Fixed TypeError by adding null check');
 
-    expect(screen.getByText('PM Analysis')).toBeInTheDocument();
-    expect(screen.getByText('Manual')).toBeInTheDocument();
-  });
-
-  it('shows triggered_by labels', async () => {
-    renderWithProviders(<SessionsPageContent />);
-
-    await screen.findByText('Analyzed 5 open issues and delegated 2 tasks.');
-
-    expect(screen.getByText('Scheduled')).toBeInTheDocument();
-    expect(screen.getByText('Fix This')).toBeInTheDocument();
-  });
-
-  it('shows task counts', async () => {
-    renderWithProviders(<SessionsPageContent />);
-
-    await screen.findByText('Analyzed 5 open issues and delegated 2 tasks.');
-
-    expect(screen.getAllByText('1 task').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('claude code')).toBeInTheDocument();
+    expect(screen.getByText('codex')).toBeInTheDocument();
   });
 
   it('displays page header with title and description', async () => {
@@ -56,7 +39,7 @@ describe('SessionsPage', () => {
 
     expect(screen.getByText('Sessions')).toBeInTheDocument();
     expect(
-      screen.getByText('Each PM analysis cycle or manual fix creates a session.'),
+      screen.getByText('Each agent execution creates a session.'),
     ).toBeInTheDocument();
   });
 
@@ -94,30 +77,28 @@ describe('SessionsPage', () => {
   it('shows status filter tabs', async () => {
     renderWithProviders(<SessionsPageContent />);
 
-    await screen.findByText('Analyzed 5 open issues and delegated 2 tasks.');
+    await screen.findByText('Fixed TypeError by adding null check');
 
     expect(screen.getByRole('button', { name: 'All' })).toBeInTheDocument();
-    // "Active", "Completed", "Failed" also appear as section headers and status badges,
-    // so use getAllByText to check they appear at least once.
     expect(screen.getAllByText('Active').length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText('Completed').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('Done').length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText('Failed').length).toBeGreaterThanOrEqual(1);
   });
 
-  it('groups sessions into sections by default', async () => {
+  it('groups sessions into sections by status', async () => {
     renderWithProviders(<SessionsPageContent />);
 
-    await screen.findByText('Analyzed 5 open issues and delegated 2 tasks.');
+    await screen.findByText('Fixed TypeError by adding null check');
 
     // The mock sessions have one completed and one failed
-    expect(screen.getAllByText('Completed').length).toBeGreaterThanOrEqual(2);
-    expect(screen.getAllByText('Failed').length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText('Completed').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('Failed').length).toBeGreaterThanOrEqual(1);
   });
 
   it('links session rows to detail pages', async () => {
     renderWithProviders(<SessionsPageContent />);
 
-    await screen.findByText('Analyzed 5 open issues and delegated 2 tasks.');
+    await screen.findByText('Fixed TypeError by adding null check');
 
     const links = screen.getAllByRole('link');
     const sessionLinks = links.filter((l) => l.getAttribute('href')?.startsWith('/sessions/'));

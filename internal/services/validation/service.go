@@ -74,14 +74,14 @@ func NewService(
 // Validate runs the validation pipeline for an agent run.
 // It creates a Validation record, runs checks sequentially (fail-fast),
 // and on success enqueues an "open_pr" job.
-func (s *Service) Validate(ctx context.Context, agentRun *models.AgentRun, issue *models.Issue, sandbox *agent.Sandbox) error {
+func (s *Service) Validate(ctx context.Context, agentRun *models.Session, issue *models.Issue, sandbox *agent.Sandbox) error {
 	diff := ""
 	if agentRun.Diff != nil {
 		diff = *agentRun.Diff
 	}
 
 	v := &models.Validation{
-		AgentRunID: agentRun.ID,
+		SessionID: agentRun.ID,
 		OrgID:      agentRun.OrgID,
 		Status:     "running",
 	}
@@ -94,7 +94,7 @@ func (s *Service) Validate(ctx context.Context, agentRun *models.AgentRun, issue
 
 	s.logger.Info().
 		Str("validation_id", v.ID.String()).
-		Str("agent_run_id", agentRun.ID.String()).
+		Str("session_id", agentRun.ID.String()).
 		Msg("starting validation pipeline")
 
 	// Fetch org settings for direction check.
@@ -165,7 +165,7 @@ func (s *Service) Validate(ctx context.Context, agentRun *models.AgentRun, issue
 			return fmt.Errorf("update validation status to passed: %w", err)
 		}
 		payload := map[string]string{
-			"agent_run_id": agentRun.ID.String(),
+			"session_id": agentRun.ID.String(),
 			"org_id":       agentRun.OrgID.String(),
 		}
 		dedupeKey := fmt.Sprintf("open_pr:%s", agentRun.ID.String())
@@ -173,7 +173,7 @@ func (s *Service) Validate(ctx context.Context, agentRun *models.AgentRun, issue
 			return fmt.Errorf("enqueue open_pr job: %w", err)
 		}
 		s.logger.Info().
-			Str("agent_run_id", agentRun.ID.String()).
+			Str("session_id", agentRun.ID.String()).
 			Msg("validation passed, open_pr job enqueued")
 	} else {
 		if err := s.validations.UpdateStatus(ctx, v.OrgID, v.ID, "failed"); err != nil {
@@ -183,7 +183,7 @@ func (s *Service) Validate(ctx context.Context, agentRun *models.AgentRun, issue
 			return fmt.Errorf("update issue status to triaged: %w", err)
 		}
 		s.logger.Info().
-			Str("agent_run_id", agentRun.ID.String()).
+			Str("session_id", agentRun.ID.String()).
 			Msg("validation failed, issue moved back to triaged")
 	}
 

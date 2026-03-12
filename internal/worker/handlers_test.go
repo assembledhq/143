@@ -22,7 +22,7 @@ func newTestStores(t *testing.T) (*Stores, pgxmock.PgxPoolIface) {
 	require.NoError(t, err, "should create pgxmock pool")
 	stores := &Stores{
 		Issues:       db.NewIssueStore(mock),
-		AgentRuns:    db.NewAgentRunStore(mock),
+		Sessions:    db.NewSessionStore(mock),
 		Jobs:         db.NewJobStore(mock),
 		Integrations: db.NewIntegrationStore(mock),
 		Webhooks:     db.NewWebhookDeliveryStore(mock),
@@ -201,13 +201,13 @@ func TestRunAgentHandler(t *testing.T) {
 		},
 		{
 			name:      "invalid org ID returns parse error",
-			payload:   json.RawMessage(`{"agent_run_id":"` + uuid.New().String() + `","org_id":"not-a-uuid"}`),
+			payload:   json.RawMessage(`{"session_id":"` + uuid.New().String() + `","org_id":"not-a-uuid"}`),
 			expectErr: true,
 			errSubstr: "parse org ID",
 		},
 		{
 			name:      "invalid run ID returns parse error",
-			payload:   json.RawMessage(`{"agent_run_id":"not-a-uuid","org_id":"` + uuid.New().String() + `"}`),
+			payload:   json.RawMessage(`{"session_id":"not-a-uuid","org_id":"` + uuid.New().String() + `"}`),
 			expectErr: true,
 			errSubstr: "parse agent run ID",
 		},
@@ -254,12 +254,12 @@ func TestValidateHandler_UsesJobOrgIDWhenPayloadMissingOrgID(t *testing.T) {
 
 	orgID := uuid.New()
 	runID := uuid.New()
-	mock.ExpectQuery("SELECT .* FROM agent_runs").
+	mock.ExpectQuery("SELECT .* FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(context.Canceled)
 
 	handler := newValidateHandler(stores, nil, logger)
-	payload := json.RawMessage(`{"agent_run_id":"` + runID.String() + `"}`)
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `"}`)
 	err := handler(withJobOrgID(context.Background(), orgID), "validate", payload)
 
 	require.Error(t, err, "validate handler should return an error when run fetch fails")
@@ -291,12 +291,12 @@ func TestOpenPRHandler_UsesJobOrgIDWhenPayloadMissingOrgID(t *testing.T) {
 
 	orgID := uuid.New()
 	runID := uuid.New()
-	mock.ExpectQuery("SELECT .* FROM agent_runs").
+	mock.ExpectQuery("SELECT .* FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(context.Canceled)
 
 	handler := newOpenPRHandler(stores, nil, logger)
-	payload := json.RawMessage(`{"agent_run_id":"` + runID.String() + `"}`)
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `"}`)
 	err := handler(withJobOrgID(context.Background(), orgID), "open_pr", payload)
 
 	require.Error(t, err, "open_pr handler should return an error when run fetch fails")
@@ -328,12 +328,12 @@ func TestAnalyzeFailureHandler_UsesJobOrgIDWhenPayloadMissingOrgID(t *testing.T)
 
 	orgID := uuid.New()
 	runID := uuid.New()
-	mock.ExpectQuery("SELECT .* FROM agent_runs").
+	mock.ExpectQuery("SELECT .* FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(context.Canceled)
 
 	handler := newAnalyzeFailureHandler(stores, nil, logger)
-	payload := json.RawMessage(`{"agent_run_id":"` + runID.String() + `"}`)
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `"}`)
 	err := handler(withJobOrgID(context.Background(), orgID), "analyze_failure", payload)
 
 	require.Error(t, err, "analyze_failure handler should return an error when run fetch fails")

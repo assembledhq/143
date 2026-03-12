@@ -29,7 +29,7 @@ type User struct {
 	CreatedAt    time.Time `db:"created_at" json:"created_at"`
 }
 
-type Session struct {
+type AuthSession struct {
 	ID        uuid.UUID `db:"id" json:"id"`
 	UserID    uuid.UUID `db:"user_id" json:"user_id"`
 	OrgID     uuid.UUID `db:"org_id" json:"org_id"`
@@ -91,8 +91,8 @@ type Issue struct {
 	UpdatedAt             time.Time       `db:"updated_at" json:"updated_at"`
 }
 
-// AgentRun represents an attempt to fix an issue via a coding agent.
-type AgentRun struct {
+// Session represents an attempt to fix an issue via a coding agent.
+type Session struct {
 	ID                   uuid.UUID       `db:"id" json:"id"`
 	IssueID              uuid.UUID       `db:"issue_id" json:"issue_id"`
 	OrgID                uuid.UUID       `db:"org_id" json:"org_id"`
@@ -112,7 +112,7 @@ type AgentRun struct {
 	FailureCategory      *string         `db:"failure_category" json:"failure_category,omitempty"`
 	FailureNextSteps     []string        `db:"failure_next_steps" json:"failure_next_steps,omitempty"`
 	FailureRetryAdvised  *bool           `db:"failure_retry_advised" json:"failure_retry_advised,omitempty"`
-	ParentRunID          *uuid.UUID      `db:"parent_run_id" json:"parent_run_id,omitempty"`
+	ParentSessionID      *uuid.UUID      `db:"parent_session_id" json:"parent_session_id,omitempty"`
 	RevisionContext      json.RawMessage `db:"revision_context" json:"revision_context,omitempty"`
 	Error                *string         `db:"error" json:"error,omitempty"`
 	ResultSummary        *string         `db:"result_summary" json:"result_summary,omitempty"`
@@ -125,8 +125,8 @@ type AgentRun struct {
 	CreatedAt            time.Time       `db:"created_at" json:"created_at"`
 }
 
-// AgentRunResult holds the result fields to update on an agent run.
-type AgentRunResult struct {
+// SessionResult holds the result fields to update on an agent run.
+type SessionResult struct {
 	ConfidenceScore     *float64        `json:"confidence_score,omitempty"`
 	ConfidenceReasoning *string         `json:"confidence_reasoning,omitempty"`
 	RiskFactors         []string        `json:"risk_factors,omitempty"`
@@ -139,7 +139,7 @@ type AgentRunResult struct {
 // Validation represents validation results for an agent run.
 type Validation struct {
 	ID                  uuid.UUID       `db:"id" json:"id"`
-	AgentRunID          uuid.UUID       `db:"agent_run_id" json:"agent_run_id"`
+	SessionID          uuid.UUID       `db:"session_id" json:"session_id"`
 	OrgID               uuid.UUID       `db:"org_id" json:"org_id"`
 	Status              string          `db:"status" json:"status"`
 	DirectionCheck      string          `db:"direction_check" json:"direction_check"`
@@ -158,7 +158,7 @@ type Validation struct {
 // PullRequest represents a GitHub PR created by an agent run.
 type PullRequest struct {
 	ID             uuid.UUID  `db:"id" json:"id"`
-	AgentRunID     uuid.UUID  `db:"agent_run_id" json:"agent_run_id"`
+	SessionID     uuid.UUID  `db:"session_id" json:"session_id"`
 	OrgID          uuid.UUID  `db:"org_id" json:"org_id"`
 	GitHubPRNumber int        `db:"github_pr_number" json:"github_pr_number"`
 	GitHubPRURL    string     `db:"github_pr_url" json:"github_pr_url"`
@@ -172,20 +172,20 @@ type PullRequest struct {
 	UpdatedAt      time.Time  `db:"updated_at" json:"updated_at"`
 }
 
-// AgentRunLog represents a log line emitted during an agent run.
-type AgentRunLog struct {
+// SessionLog represents a log line emitted during an agent run.
+type SessionLog struct {
 	ID         int64           `db:"id" json:"id"`
-	AgentRunID uuid.UUID       `db:"agent_run_id" json:"agent_run_id"`
+	SessionID uuid.UUID       `db:"session_id" json:"session_id"`
 	Timestamp  time.Time       `db:"timestamp" json:"created_at"`
 	Level      string          `db:"level" json:"level"`
 	Message    string          `db:"message" json:"message"`
 	Metadata   json.RawMessage `db:"metadata" json:"metadata,omitempty"`
 }
 
-// AgentRunQuestion represents a question the agent asks a human during a run.
-type AgentRunQuestion struct {
+// SessionQuestion represents a question the agent asks a human during a run.
+type SessionQuestion struct {
 	ID           uuid.UUID  `db:"id" json:"id"`
-	AgentRunID   uuid.UUID  `db:"agent_run_id" json:"agent_run_id"`
+	SessionID   uuid.UUID  `db:"session_id" json:"session_id"`
 	OrgID        uuid.UUID  `db:"org_id" json:"org_id"`
 	QuestionText string     `db:"question_text" json:"question_text"`
 	Options      []string   `db:"options" json:"options,omitempty"`

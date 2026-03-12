@@ -201,3 +201,5 @@ func TestPMHandler_Status(t *testing.T) {
 	require.Equal(t, 15, resp.Data.TotalDelegated, "should show total delegated")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
+
+func strPtr(s string) *string { return &s }

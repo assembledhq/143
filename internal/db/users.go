@@ -201,7 +201,7 @@ func (s *UserStore) Delete(ctx context.Context, orgID, userID uuid.UUID) error {
 	// Clear known user references before deletion to avoid FK failures for active users.
 	query := `
 		WITH cleared_agent_answers AS (
-			UPDATE agent_run_questions
+			UPDATE session_questions
 			SET answered_by = NULL
 			WHERE org_id = @org_id AND answered_by = @id
 		),

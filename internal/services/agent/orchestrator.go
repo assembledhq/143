@@ -33,21 +33,21 @@ type CredentialProvider interface {
 	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
 }
 
-// AgentRunStore defines the agent run DB operations needed by the orchestrator.
-type AgentRunStore interface {
+// SessionStore defines the agent run DB operations needed by the orchestrator.
+type SessionStore interface {
 	UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string) error
-	UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.AgentRunResult) error
+	UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.SessionResult) error
 	CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error)
 }
 
-// AgentRunLogStore defines the log persistence operations.
-type AgentRunLogStore interface {
-	Create(ctx context.Context, log *models.AgentRunLog) error
+// SessionLogStore defines the log persistence operations.
+type SessionLogStore interface {
+	Create(ctx context.Context, log *models.SessionLog) error
 }
 
-// AgentRunQuestionStore defines the question persistence operations.
-type AgentRunQuestionStore interface {
-	Create(ctx context.Context, q *models.AgentRunQuestion) error
+// SessionQuestionStore defines the question persistence operations.
+type SessionQuestionStore interface {
+	Create(ctx context.Context, q *models.SessionQuestion) error
 }
 
 // DecisionLogStore updates PM decision log outcomes.
@@ -78,7 +78,7 @@ type JobStore interface {
 // ProjectTaskUpdater is called after an agent run completes to update
 // the associated project task, if any.
 type ProjectTaskUpdater interface {
-	OnAgentRunComplete(ctx context.Context, run *models.AgentRun, status string) error
+	OnSessionComplete(ctx context.Context, run *models.Session, status string) error
 }
 
 // Orchestrator coordinates end-to-end agent execution: sandbox lifecycle,
@@ -86,9 +86,9 @@ type ProjectTaskUpdater interface {
 type Orchestrator struct {
 	provider          SandboxProvider
 	adapters          map[string]AgentAdapter
-	agentRuns         AgentRunStore
-	agentRunLogs      AgentRunLogStore
-	agentRunQuestions AgentRunQuestionStore
+	sessions         SessionStore
+	agentRunLogs      SessionLogStore
+	agentRunQuestions SessionQuestionStore
 	decisionLog       DecisionLogStore
 	projectTasks      ProjectTaskUpdater // can be nil
 	issues            IssueStore
@@ -106,9 +106,9 @@ type Orchestrator struct {
 type OrchestratorConfig struct {
 	Provider          SandboxProvider
 	Adapters          map[string]AgentAdapter
-	AgentRuns         AgentRunStore
-	AgentRunLogs      AgentRunLogStore
-	AgentRunQuestions AgentRunQuestionStore
+	Sessions         SessionStore
+	SessionLogs      SessionLogStore
+	SessionQuestions SessionQuestionStore
 	DecisionLog       DecisionLogStore
 	ProjectTasks      ProjectTaskUpdater // optional — updates project tasks on run completion
 	Issues            IssueStore
@@ -132,9 +132,9 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 	return &Orchestrator{
 		provider:          cfg.Provider,
 		adapters:          cfg.Adapters,
-		agentRuns:         cfg.AgentRuns,
-		agentRunLogs:      cfg.AgentRunLogs,
-		agentRunQuestions: cfg.AgentRunQuestions,
+		sessions:         cfg.Sessions,
+		agentRunLogs:      cfg.SessionLogs,
+		agentRunQuestions: cfg.SessionQuestions,
 		decisionLog:       cfg.DecisionLog,
 		projectTasks:      cfg.ProjectTasks,
 		issues:            cfg.Issues,
@@ -152,7 +152,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 // RunAgent is the main entry point. It executes an agent run end-to-end:
 // concurrency check → sandbox creation → repo clone → agent execution →
 // result handling → follow-up job enqueuing → sandbox cleanup.
-func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error {
+func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error {
 	log := o.logger.With().
 		Str("run_id", run.ID.String()).
 		Str("org_id", run.OrgID.String()).
@@ -166,7 +166,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error
 	}
 
 	// 2. Update status to "running" (sets started_at).
-	if err := o.agentRuns.UpdateStatus(ctx, run.OrgID, run.ID, "running"); err != nil {
+	if err := o.sessions.UpdateStatus(ctx, run.OrgID, run.ID, "running"); err != nil {
 		return fmt.Errorf("update run status to running: %w", err)
 	}
 
@@ -301,7 +301,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error
 	if err != nil {
 		o.failRun(ctx, run, err.Error())
 		o.enqueueJob(ctx, run.OrgID, "agent", "analyze_failure", map[string]interface{}{
-			"agent_run_id": run.ID.String(),
+			"session_id": run.ID.String(),
 			"org_id":       run.OrgID.String(),
 		})
 		return fmt.Errorf("execute agent: %w", err)
@@ -325,7 +325,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error
 		status = "needs_human_guidance"
 	}
 
-	if err := o.agentRuns.UpdateResult(ctx, run.OrgID, run.ID, status, runResult); err != nil {
+	if err := o.sessions.UpdateResult(ctx, run.OrgID, run.ID, status, runResult); err != nil {
 		return fmt.Errorf("update run result: %w", err)
 	}
 
@@ -338,7 +338,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error
 	// 12. Enqueue follow-up job based on confidence.
 	if result.ConfidenceScore >= confidenceThresholds.AutoProceed {
 		o.enqueueJob(ctx, run.OrgID, "agent", "validate", map[string]interface{}{
-			"agent_run_id": run.ID.String(),
+			"session_id": run.ID.String(),
 			"org_id":       run.OrgID.String(),
 		})
 	}
@@ -358,7 +358,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error
 
 	// 13. Update project task status if this run is part of a project.
 	if run.ProjectTaskID != nil && o.projectTasks != nil {
-		if err := o.projectTasks.OnAgentRunComplete(ctx, run, status); err != nil {
+		if err := o.projectTasks.OnSessionComplete(ctx, run, status); err != nil {
 			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update project task on run completion")
 		}
 	}
@@ -381,7 +381,7 @@ func outcomeFromRunStatus(status string) models.PMDecisionOutcome {
 
 // checkConcurrency verifies the org hasn't exceeded its concurrent run limit.
 func (o *Orchestrator) checkConcurrency(ctx context.Context, orgID uuid.UUID) error {
-	count, err := o.agentRuns.CountRunningByOrg(ctx, orgID)
+	count, err := o.sessions.CountRunningByOrg(ctx, orgID)
 	if err != nil {
 		return fmt.Errorf("count running runs: %w", err)
 	}
@@ -392,13 +392,13 @@ func (o *Orchestrator) checkConcurrency(ctx context.Context, orgID uuid.UUID) er
 }
 
 // streamLogs reads LogEntry values from the channel and persists them to the DB.
-// It also detects question-level log entries and creates AgentRunQuestion records.
+// It also detects question-level log entries and creates SessionQuestion records.
 func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, logCh <-chan LogEntry) {
 	for entry := range logCh {
 		metadata, _ := json.Marshal(entry.Metadata)
 
-		log := &models.AgentRunLog{
-			AgentRunID: runID,
+		log := &models.SessionLog{
+			SessionID: runID,
 			Level:      entry.Level,
 			Message:    entry.Message,
 			Metadata:   metadata,
@@ -414,10 +414,10 @@ func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, l
 	}
 }
 
-// handleQuestion creates an AgentRunQuestion and updates the run status to awaiting_input.
+// handleQuestion creates an SessionQuestion and updates the run status to awaiting_input.
 func (o *Orchestrator) handleQuestion(ctx context.Context, runID, orgID uuid.UUID, entry LogEntry) {
-	q := &models.AgentRunQuestion{
-		AgentRunID:   runID,
+	q := &models.SessionQuestion{
+		SessionID:   runID,
 		OrgID:        orgID,
 		QuestionText: entry.Message,
 		Status:       "pending",
@@ -449,31 +449,31 @@ func (o *Orchestrator) handleQuestion(ctx context.Context, runID, orgID uuid.UUI
 		return
 	}
 
-	if err := o.agentRuns.UpdateStatus(ctx, orgID, runID, "awaiting_input"); err != nil {
+	if err := o.sessions.UpdateStatus(ctx, orgID, runID, "awaiting_input"); err != nil {
 		o.logger.Error().Err(err).Str("run_id", runID.String()).Msg("failed to update run status to awaiting_input")
 	}
 }
 
 // failRun marks a run as failed and records the error.
-func (o *Orchestrator) failRun(ctx context.Context, run *models.AgentRun, errMsg string) {
-	result := &models.AgentRunResult{
+func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg string) {
+	result := &models.SessionResult{
 		Error: strPtr(errMsg),
 	}
-	if err := o.agentRuns.UpdateResult(ctx, run.OrgID, run.ID, "failed", result); err != nil {
+	if err := o.sessions.UpdateResult(ctx, run.OrgID, run.ID, "failed", result); err != nil {
 		o.logger.Error().Err(err).Str("run_id", run.ID.String()).Msg("failed to update run to failed")
 	}
 	if run.ProjectTaskID != nil && o.projectTasks != nil {
-		if err := o.projectTasks.OnAgentRunComplete(ctx, run, "failed"); err != nil {
+		if err := o.projectTasks.OnSessionComplete(ctx, run, "failed"); err != nil {
 			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update project task on run failure")
 		}
 	}
 }
 
 // buildRunResult converts an AgentResult into the DB update struct.
-func (o *Orchestrator) buildRunResult(result *AgentResult) *models.AgentRunResult {
+func (o *Orchestrator) buildRunResult(result *AgentResult) *models.SessionResult {
 	tokenUsage, _ := json.Marshal(result.TokenUsage)
 
-	return &models.AgentRunResult{
+	return &models.SessionResult{
 		ConfidenceScore:     &result.ConfidenceScore,
 		ConfidenceReasoning: strPtr(result.ConfidenceReasoning),
 		RiskFactors:         result.RiskFactors,

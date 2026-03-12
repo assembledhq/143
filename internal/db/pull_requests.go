@@ -26,12 +26,12 @@ type PullRequestFilters struct {
 
 func (s *PullRequestStore) Create(ctx context.Context, pr *models.PullRequest) error {
 	query := `
-		INSERT INTO pull_requests (agent_run_id, org_id, github_pr_number, github_pr_url, github_repo, title, body, status, review_status)
-		VALUES (@agent_run_id, @org_id, @github_pr_number, @github_pr_url, @github_repo, @title, @body, @status, @review_status)
+		INSERT INTO pull_requests (session_id, org_id, github_pr_number, github_pr_url, github_repo, title, body, status, review_status)
+		VALUES (@session_id, @org_id, @github_pr_number, @github_pr_url, @github_repo, @title, @body, @status, @review_status)
 		RETURNING id, created_at, updated_at`
 
 	args := pgx.NamedArgs{
-		"agent_run_id":     pr.AgentRunID,
+		"session_id":     pr.SessionID,
 		"org_id":           pr.OrgID,
 		"github_pr_number": pr.GitHubPRNumber,
 		"github_pr_url":    pr.GitHubPRURL,
@@ -48,7 +48,7 @@ func (s *PullRequestStore) Create(ctx context.Context, pr *models.PullRequest) e
 
 func (s *PullRequestStore) GetByID(ctx context.Context, orgID, id uuid.UUID) (models.PullRequest, error) {
 	query := `
-		SELECT id, agent_run_id, org_id, github_pr_number, github_pr_url, github_repo,
+		SELECT id, session_id, org_id, github_pr_number, github_pr_url, github_repo,
 		       title, body, status, review_status, merged_at, created_at, updated_at
 		FROM pull_requests
 		WHERE id = @id AND org_id = @org_id`
@@ -63,19 +63,19 @@ func (s *PullRequestStore) GetByID(ctx context.Context, orgID, id uuid.UUID) (mo
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PullRequest])
 }
 
-func (s *PullRequestStore) GetByAgentRunID(ctx context.Context, orgID, agentRunID uuid.UUID) (models.PullRequest, error) {
+func (s *PullRequestStore) GetBySessionID(ctx context.Context, orgID, sessionID uuid.UUID) (models.PullRequest, error) {
 	query := `
-		SELECT id, agent_run_id, org_id, github_pr_number, github_pr_url, github_repo,
+		SELECT id, session_id, org_id, github_pr_number, github_pr_url, github_repo,
 		       title, body, status, review_status, merged_at, created_at, updated_at
 		FROM pull_requests
-		WHERE agent_run_id = @agent_run_id AND org_id = @org_id`
+		WHERE session_id = @session_id AND org_id = @org_id`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
-		"agent_run_id": agentRunID,
+		"session_id": sessionID,
 		"org_id":       orgID,
 	})
 	if err != nil {
-		return models.PullRequest{}, fmt.Errorf("query pull request by agent run: %w", err)
+		return models.PullRequest{}, fmt.Errorf("query pull request by session: %w", err)
 	}
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PullRequest])
 }
@@ -93,9 +93,13 @@ func (s *PullRequestStore) UpdateStatus(ctx context.Context, orgID, id uuid.UUID
 	return err
 }
 
+// GetByRepoAndNumber looks up a PR by repo and number without org scoping.
+// This is intentionally org-agnostic because it is called from GitHub webhook
+// handlers where no org context exists. The returned pr.OrgID is used for
+// subsequent org-scoped operations.
 func (s *PullRequestStore) GetByRepoAndNumber(ctx context.Context, repo string, number int) (models.PullRequest, error) {
 	query := `
-		SELECT id, agent_run_id, org_id, github_pr_number, github_pr_url, github_repo,
+		SELECT id, session_id, org_id, github_pr_number, github_pr_url, github_repo,
 		       title, body, status, review_status, merged_at, created_at, updated_at
 		FROM pull_requests
 		WHERE github_repo = @github_repo AND github_pr_number = @github_pr_number`
@@ -122,7 +126,7 @@ func (s *PullRequestStore) UpdateReviewStatus(ctx context.Context, orgID, id uui
 
 func (s *PullRequestStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters PullRequestFilters) ([]models.PullRequest, error) {
 	query := `
-		SELECT id, agent_run_id, org_id, github_pr_number, github_pr_url, github_repo,
+		SELECT id, session_id, org_id, github_pr_number, github_pr_url, github_repo,
 		       title, body, status, review_status, merged_at, created_at, updated_at
 		FROM pull_requests
 		WHERE org_id = @org_id`

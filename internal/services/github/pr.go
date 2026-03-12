@@ -29,7 +29,7 @@ const (
 type PRService struct {
 	tokenProvider  *Service
 	pullRequests   *db.PullRequestStore
-	agentRuns      *db.AgentRunStore
+	sessions      *db.SessionStore
 	issues         *db.IssueStore
 	deploys        *db.DeployStore
 	validations    *db.ValidationStore
@@ -44,7 +44,7 @@ type PRService struct {
 func NewPRService(
 	tokenProvider *Service,
 	pullRequests *db.PullRequestStore,
-	agentRuns *db.AgentRunStore,
+	sessions *db.SessionStore,
 	issues *db.IssueStore,
 	deploys *db.DeployStore,
 	validations *db.ValidationStore,
@@ -55,7 +55,7 @@ func NewPRService(
 	return &PRService{
 		tokenProvider: tokenProvider,
 		pullRequests:  pullRequests,
-		agentRuns:     agentRuns,
+		sessions:     sessions,
 		issues:        issues,
 		deploys:       deploys,
 		validations:   validations,
@@ -78,7 +78,7 @@ func (s *PRService) SetBaseURL(url string) {
 }
 
 // CreatePR creates a GitHub PR from a completed agent run.
-func (s *PRService) CreatePR(ctx context.Context, run *models.AgentRun) (*models.PullRequest, error) {
+func (s *PRService) CreatePR(ctx context.Context, run *models.Session) (*models.PullRequest, error) {
 	if run.Diff == nil || *run.Diff == "" {
 		return nil, fmt.Errorf("agent run %s has no diff", run.ID)
 	}
@@ -185,7 +185,7 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.AgentRun) (*models
 
 	// 7. Store PR in DB.
 	pr := &models.PullRequest{
-		AgentRunID:     run.ID,
+		SessionID:     run.ID,
 		OrgID:          run.OrgID,
 		GitHubPRNumber: prNumber,
 		GitHubPRURL:    prURL,
@@ -200,7 +200,7 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.AgentRun) (*models
 	}
 
 	// 8. Update agent run status.
-	if err := s.agentRuns.UpdateStatus(ctx, run.OrgID, run.ID, "pr_created"); err != nil {
+	if err := s.sessions.UpdateStatus(ctx, run.OrgID, run.ID, "pr_created"); err != nil {
 		s.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update agent run status")
 	}
 
@@ -248,7 +248,7 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 		}
 
 		// Get the agent run to find the issue.
-		run, err := s.agentRuns.GetByID(ctx, pr.OrgID, pr.AgentRunID)
+		run, err := s.sessions.GetByID(ctx, pr.OrgID, pr.SessionID)
 		if err != nil {
 			return fmt.Errorf("get agent run: %w", err)
 		}
@@ -430,7 +430,7 @@ func (s *PRService) enqueueProcessReviewComment(ctx context.Context, orgID uuid.
 }
 
 // PushRevision pushes additional commits to an existing PR branch for a revision run.
-func (s *PRService) PushRevision(ctx context.Context, pr *models.PullRequest, run *models.AgentRun) error {
+func (s *PRService) PushRevision(ctx context.Context, pr *models.PullRequest, run *models.Session) error {
 	if run.Diff == nil || *run.Diff == "" {
 		return fmt.Errorf("revision run %s has no diff", run.ID)
 	}
@@ -490,8 +490,8 @@ func (s *PRService) PushRevision(ctx context.Context, pr *models.PullRequest, ru
 	}
 
 	commitMsg := fmt.Sprintf("address review feedback\n\nRevision of agent run %s", run.ID)
-	if run.ParentRunID != nil {
-		commitMsg = fmt.Sprintf("address review feedback\n\nRevision of agent run %s (parent: %s)", run.ID, run.ParentRunID)
+	if run.ParentSessionID != nil {
+		commitMsg = fmt.Sprintf("address review feedback\n\nRevision of agent run %s (parent: %s)", run.ID, run.ParentSessionID)
 	}
 
 	commitSHA, err := s.createCommit(ctx, token, owner, repoName, commitMsg, treeSHA, headSHA)
@@ -764,7 +764,7 @@ func formatCommitMessage(issue *models.Issue) string {
 	return msg
 }
 
-func (s *PRService) formatPRBody(ctx context.Context, run *models.AgentRun, issue *models.Issue) string {
+func (s *PRService) formatPRBody(ctx context.Context, run *models.Session, issue *models.Issue) string {
 	var b strings.Builder
 
 	b.WriteString("## Summary\n\n")
@@ -784,7 +784,7 @@ func (s *PRService) formatPRBody(ctx context.Context, run *models.AgentRun, issu
 
 	// Validation results (best-effort).
 	if s.validations != nil {
-		validation, err := s.validations.GetByAgentRunID(ctx, run.OrgID, run.ID)
+		validation, err := s.validations.GetBySessionID(ctx, run.OrgID, run.ID)
 		if err == nil {
 			b.WriteString("## Validation\n\n")
 			b.WriteString("| Check | Result |\n")
