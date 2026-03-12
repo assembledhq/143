@@ -30,6 +30,15 @@ const (
 	githubAuthorizeURL = "https://github.com/login/oauth/authorize"
 	githubTokenURL     = "https://github.com/login/oauth/access_token" // #nosec G101 -- OAuth endpoint URL, not credentials
 	githubAPIURL       = "https://api.github.com"
+
+	// OAuth state cookie names — each flow gets its own cookie so concurrent
+	// flows cannot collide. Integration cookies use the _integration_ infix to
+	// distinguish them from the user-auth cookies in auth.go.
+	githubOAuthStateCookie              = "github_oauth_state"
+	googleOAuthStateCookie              = "google_oauth_state"
+	linearIntegrationOAuthStateCookie   = "linear_integration_oauth_state"
+	sentryIntegrationOAuthStateCookie   = "sentry_integration_oauth_state"
+	githubIntegrationOAuthStateCookie   = "github_integration_oauth_state"
 )
 
 type integrationCredentialStore interface {
@@ -192,20 +201,11 @@ func (h *IntegrationHandler) StartLinearOAuth(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	state, err := generateRandomString(32)
+	state, err := setOAuthState(w, linearIntegrationOAuthStateCookie)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate oauth state")
 		return
 	}
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     "linear_oauth_state",
-		Value:    state,
-		Path:     "/",
-		MaxAge:   600,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
 
 	params := url.Values{
 		"client_id":     {h.linearClientID},
@@ -219,24 +219,8 @@ func (h *IntegrationHandler) StartLinearOAuth(w http.ResponseWriter, r *http.Req
 }
 
 func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r *http.Request) {
-	stateCookie, err := r.Cookie("linear_oauth_state")
-	if err != nil || stateCookie.Value != r.URL.Query().Get("state") {
-		writeError(w, http.StatusBadRequest, "INVALID_STATE", "OAuth state mismatch")
-		return
-	}
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     "linear_oauth_state",
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
-
-	code := r.URL.Query().Get("code")
-	if code == "" {
-		writeError(w, http.StatusBadRequest, "MISSING_CODE", "missing authorization code")
+	code, ok := validateOAuthCallback(w, r, linearIntegrationOAuthStateCookie)
+	if !ok {
 		return
 	}
 
@@ -303,20 +287,11 @@ func (h *IntegrationHandler) StartSentryOAuth(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	state, err := generateRandomString(32)
+	state, err := setOAuthState(w, sentryIntegrationOAuthStateCookie)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate oauth state")
 		return
 	}
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     "sentry_oauth_state",
-		Value:    state,
-		Path:     "/",
-		MaxAge:   600,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
 
 	params := url.Values{
 		"client_id":     {h.sentryClientID},
@@ -330,24 +305,8 @@ func (h *IntegrationHandler) StartSentryOAuth(w http.ResponseWriter, r *http.Req
 }
 
 func (h *IntegrationHandler) HandleSentryOAuthCallback(w http.ResponseWriter, r *http.Request) {
-	stateCookie, err := r.Cookie("sentry_oauth_state")
-	if err != nil || stateCookie.Value != r.URL.Query().Get("state") {
-		writeError(w, http.StatusBadRequest, "INVALID_STATE", "OAuth state mismatch")
-		return
-	}
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     "sentry_oauth_state",
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
-
-	code := r.URL.Query().Get("code")
-	if code == "" {
-		writeError(w, http.StatusBadRequest, "MISSING_CODE", "missing authorization code")
+	code, ok := validateOAuthCallback(w, r, sentryIntegrationOAuthStateCookie)
+	if !ok {
 		return
 	}
 
@@ -415,20 +374,11 @@ func (h *IntegrationHandler) StartGitHubOAuth(w http.ResponseWriter, r *http.Req
 	// the callback can validate the redirect when GitHub returns the user with
 	// a code (GitHub Apps pass the state parameter through).
 	if h.githubAppSlug != "" {
-		state, err := generateRandomString(32)
+		state, err := setOAuthState(w, githubIntegrationOAuthStateCookie)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate oauth state")
 			return
 		}
-
-		http.SetCookie(w, &http.Cookie{
-			Name:     "github_integration_oauth_state",
-			Value:    state,
-			Path:     "/",
-			MaxAge:   600,
-			HttpOnly: true,
-			SameSite: http.SameSiteLaxMode,
-		})
 
 		installURL := fmt.Sprintf("https://github.com/apps/%s/installations/new?state=%s", h.githubAppSlug, url.QueryEscape(state))
 		http.Redirect(w, r, installURL, http.StatusTemporaryRedirect)
@@ -440,20 +390,11 @@ func (h *IntegrationHandler) StartGitHubOAuth(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	state, err := generateRandomString(32)
+	state, err := setOAuthState(w, githubIntegrationOAuthStateCookie)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate oauth state")
 		return
 	}
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     "github_integration_oauth_state",
-		Value:    state,
-		Path:     "/",
-		MaxAge:   600,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
 
 	params := url.Values{
 		"client_id":    {h.githubClientID},
@@ -466,24 +407,8 @@ func (h *IntegrationHandler) StartGitHubOAuth(w http.ResponseWriter, r *http.Req
 }
 
 func (h *IntegrationHandler) HandleGitHubOAuthCallback(w http.ResponseWriter, r *http.Request) {
-	stateCookie, err := r.Cookie("github_integration_oauth_state")
-	if err != nil || stateCookie.Value != r.URL.Query().Get("state") {
-		writeError(w, http.StatusBadRequest, "INVALID_STATE", "OAuth state mismatch")
-		return
-	}
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     "github_integration_oauth_state",
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
-
-	code := r.URL.Query().Get("code")
-	if code == "" {
-		writeError(w, http.StatusBadRequest, "MISSING_CODE", "missing authorization code")
+	code, ok := validateOAuthCallback(w, r, githubIntegrationOAuthStateCookie)
+	if !ok {
 		return
 	}
 
@@ -542,6 +467,57 @@ func (h *IntegrationHandler) ConnectGitHub(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Integration]{Data: integration})
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// OAuth state helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+// setOAuthState generates a random state string and sets it as a cookie.
+// Returns the state value for use in the redirect URL.
+func setOAuthState(w http.ResponseWriter, cookieName string) (string, error) {
+	state, err := generateRandomString(32)
+	if err != nil {
+		return "", err
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     cookieName,
+		Value:    state,
+		Path:     "/",
+		MaxAge:   600,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	return state, nil
+}
+
+// validateOAuthCallback validates the state parameter against the cookie,
+// clears the state cookie, and extracts the authorization code.
+// Returns the authorization code on success. Writes an error response and
+// returns ("", false) if validation fails.
+func validateOAuthCallback(w http.ResponseWriter, r *http.Request, cookieName string) (code string, ok bool) {
+	stateCookie, err := r.Cookie(cookieName)
+	if err != nil || stateCookie.Value != r.URL.Query().Get("state") {
+		writeError(w, http.StatusBadRequest, "INVALID_STATE", "OAuth state mismatch")
+		return "", false
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     cookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+
+	code = r.URL.Query().Get("code")
+	if code == "" {
+		writeError(w, http.StatusBadRequest, "MISSING_CODE", "missing authorization code")
+		return "", false
+	}
+
+	return code, true
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

@@ -185,20 +185,11 @@ func (h *AuthHandler) EmailLogin(w http.ResponseWriter, r *http.Request) {
 // Login redirects to GitHub OAuth.
 // If ?invitation=TOKEN is provided, it's stored in a cookie for use after the callback.
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
-	state, err := generateRandomString(32)
+	state, err := setOAuthState(w, githubOAuthStateCookie)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate state")
 		return
 	}
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     "oauth_state",
-		Value:    state,
-		Path:     "/",
-		MaxAge:   600,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
 
 	if invToken := r.URL.Query().Get("invitation"); invToken != "" {
 		http.SetCookie(w, &http.Cookie{
@@ -242,25 +233,8 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate state
-	stateCookie, err := r.Cookie("oauth_state")
-	if err != nil || stateCookie.Value != r.URL.Query().Get("state") {
-		writeError(w, http.StatusBadRequest, "INVALID_STATE", "OAuth state mismatch")
-		return
-	}
-
-	// Clear state cookie
-	http.SetCookie(w, &http.Cookie{
-		Name:     "oauth_state",
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-	})
-
-	code := r.URL.Query().Get("code")
-	if code == "" {
-		writeError(w, http.StatusBadRequest, "MISSING_CODE", "missing authorization code")
+	code, ok := validateOAuthCallback(w, r, githubOAuthStateCookie)
+	if !ok {
 		return
 	}
 
@@ -380,20 +354,11 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 // GoogleLogin redirects to Google OAuth.
 // If ?invitation=TOKEN is provided, it's stored in a cookie for use after the callback.
 func (h *AuthHandler) GoogleLogin(w http.ResponseWriter, r *http.Request) {
-	state, err := generateRandomString(32)
+	state, err := setOAuthState(w, googleOAuthStateCookie)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate state")
 		return
 	}
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     "oauth_state",
-		Value:    state,
-		Path:     "/",
-		MaxAge:   600,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
 
 	if invToken := r.URL.Query().Get("invitation"); invToken != "" {
 		http.SetCookie(w, &http.Cookie{
@@ -430,25 +395,8 @@ func (h *AuthHandler) GoogleLogin(w http.ResponseWriter, r *http.Request) {
 
 // GoogleCallback handles Google OAuth callback.
 func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
-	// Validate state
-	stateCookie, err := r.Cookie("oauth_state")
-	if err != nil || stateCookie.Value != r.URL.Query().Get("state") {
-		writeError(w, http.StatusBadRequest, "INVALID_STATE", "OAuth state mismatch")
-		return
-	}
-
-	// Clear state cookie
-	http.SetCookie(w, &http.Cookie{
-		Name:     "oauth_state",
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-	})
-
-	code := r.URL.Query().Get("code")
-	if code == "" {
-		writeError(w, http.StatusBadRequest, "MISSING_CODE", "missing authorization code")
+	code, ok := validateOAuthCallback(w, r, googleOAuthStateCookie)
+	if !ok {
 		return
 	}
 

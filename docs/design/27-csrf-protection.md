@@ -25,7 +25,7 @@ This is insufficient. `SameSite=Lax` allows cookies on top-level GET navigations
 **Vectors already defended:**
 
 - **Webhook endpoints** — Use HMAC signature verification (`X-Hub-Signature-256`, `X-Sentry-Hook-Signature`, `X-Linear-Signature`). No browser session involved.
-- **OAuth callbacks** — Use a per-flow `oauth_state` cookie to prevent login CSRF.
+- **OAuth callbacks** — Use a per-flow state cookie (e.g. `github_oauth_state`, `google_oauth_state`, `linear_integration_oauth_state`) to prevent login CSRF.
 
 ## Approach: Double-Submit Cookie
 
