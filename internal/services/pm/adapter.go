@@ -20,7 +20,7 @@ func NewPMAdapter(inner agent.AgentAdapter, availableSlots int, maxConcurrent in
 	return &PMAdapter{inner: inner, availableSlots: availableSlots, maxConcurrent: maxConcurrent}
 }
 
-func (a *PMAdapter) Name() models.AgentType { return "pm_agent" }
+func (a *PMAdapter) Name() models.AgentType { return models.AgentTypePMAgent }
 
 func (a *PMAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
 	if input == nil {

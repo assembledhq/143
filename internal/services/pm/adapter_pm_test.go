@@ -87,5 +87,5 @@ func TestPMAdapterExecuteAndName(t *testing.T) {
 	require.NoError(t, err, "Execute should delegate to inner adapter without error")
 	require.Equal(t, expected, result, "Execute should return inner adapter result")
 	require.Equal(t, "ctx", inner.calledPrompt.UserPrompt, "Execute should pass prompt through to inner adapter")
-	require.Equal(t, models.AgentType("pm_agent"), adapter.Name(), "Name should return pm_agent")
+	require.Equal(t, models.AgentTypePMAgent, adapter.Name(), "Name should return pm_agent")
 }

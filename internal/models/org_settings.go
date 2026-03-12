@@ -18,6 +18,7 @@ const (
 	AgentTypeClaudeCode AgentType = "claude_code"
 	AgentTypeGeminiCLI  AgentType = "gemini_cli"
 	AgentTypeCodex      AgentType = "codex"
+	AgentTypePMAgent    AgentType = "pm_agent"
 )
 
 // ValidAgentTypes is the set of supported agent types.
