@@ -153,7 +153,7 @@ func TestIntegrationHandler_StartLinearOAuth_RedirectsToLinearAuthorize(t *testi
 	require.NotEmpty(t, parsed.Query().Get("state"), "redirect should include oauth state")
 
 	setCookie := w.Result().Header.Get("Set-Cookie")
-	require.Contains(t, setCookie, "linear_oauth_state=", "StartLinearOAuth should set linear oauth state cookie")
+	require.Contains(t, setCookie, "linear_integration_oauth_state=", "StartLinearOAuth should set linear oauth state cookie")
 }
 
 func TestIntegrationHandler_StartLinearOAuth_NotConfigured(t *testing.T) {
@@ -225,7 +225,7 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_SavesCredentialAndIntegrat
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/linear/callback?code=test-code&state=test-state", nil)
-	req.AddCookie(&http.Cookie{Name: "linear_oauth_state", Value: "test-state"})
+	req.AddCookie(&http.Cookie{Name: "linear_integration_oauth_state", Value: "test-state"})
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
 	w := httptest.NewRecorder()
 
@@ -240,7 +240,7 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_StateMismatch(t *testing.T
 	t.Parallel()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/linear/callback?code=test-code&state=wrong-state", nil)
-	req.AddCookie(&http.Cookie{Name: "linear_oauth_state", Value: "correct-state"})
+	req.AddCookie(&http.Cookie{Name: "linear_integration_oauth_state", Value: "correct-state"})
 	w := httptest.NewRecorder()
 
 	mock, err := pgxmock.NewPool()
@@ -259,7 +259,7 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_MissingCode(t *testing.T) 
 	t.Parallel()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/linear/callback?state=test-state", nil)
-	req.AddCookie(&http.Cookie{Name: "linear_oauth_state", Value: "test-state"})
+	req.AddCookie(&http.Cookie{Name: "linear_integration_oauth_state", Value: "test-state"})
 	w := httptest.NewRecorder()
 
 	mock, err := pgxmock.NewPool()
@@ -448,7 +448,7 @@ func TestIntegrationHandler_StartSentryOAuth_RedirectsToSentryAuthorize(t *testi
 	require.NotEmpty(t, parsed.Query().Get("state"))
 
 	setCookie := w.Result().Header.Get("Set-Cookie")
-	require.Contains(t, setCookie, "sentry_oauth_state=")
+	require.Contains(t, setCookie, "sentry_integration_oauth_state=")
 }
 
 func TestIntegrationHandler_StartSentryOAuth_NotConfigured(t *testing.T) {
@@ -523,7 +523,7 @@ func TestIntegrationHandler_HandleSentryOAuthCallback_SavesCredentialAndIntegrat
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/sentry/callback?code=sentry-auth-code&state=test-state", nil)
-	req.AddCookie(&http.Cookie{Name: "sentry_oauth_state", Value: "test-state"})
+	req.AddCookie(&http.Cookie{Name: "sentry_integration_oauth_state", Value: "test-state"})
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
 	w := httptest.NewRecorder()
 
@@ -548,7 +548,7 @@ func TestIntegrationHandler_HandleSentryOAuthCallback_StateMismatch(t *testing.T
 	)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/sentry/callback?code=test-code&state=wrong-state", nil)
-	req.AddCookie(&http.Cookie{Name: "sentry_oauth_state", Value: "correct-state"})
+	req.AddCookie(&http.Cookie{Name: "sentry_integration_oauth_state", Value: "correct-state"})
 	w := httptest.NewRecorder()
 
 	handler.HandleSentryOAuthCallback(w, req)
@@ -571,7 +571,7 @@ func TestIntegrationHandler_HandleSentryOAuthCallback_MissingCode(t *testing.T) 
 	)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/sentry/callback?state=test-state", nil)
-	req.AddCookie(&http.Cookie{Name: "sentry_oauth_state", Value: "test-state"})
+	req.AddCookie(&http.Cookie{Name: "sentry_integration_oauth_state", Value: "test-state"})
 	w := httptest.NewRecorder()
 
 	handler.HandleSentryOAuthCallback(w, req)
@@ -606,7 +606,7 @@ func TestIntegrationHandler_HandleSentryOAuthCallback_TokenExchangeFails(t *test
 	handler.client = &http.Client{Transport: transport}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/sentry/callback?code=bad-code&state=test-state", nil)
-	req.AddCookie(&http.Cookie{Name: "sentry_oauth_state", Value: "test-state"})
+	req.AddCookie(&http.Cookie{Name: "sentry_integration_oauth_state", Value: "test-state"})
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
 	w := httptest.NewRecorder()
 
@@ -654,7 +654,7 @@ func TestIntegrationHandler_HandleSentryOAuthCallback_CredentialStoreUnavailable
 	handler.client = &http.Client{Transport: transport}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/sentry/callback?code=test-code&state=test-state", nil)
-	req.AddCookie(&http.Cookie{Name: "sentry_oauth_state", Value: "test-state"})
+	req.AddCookie(&http.Cookie{Name: "sentry_integration_oauth_state", Value: "test-state"})
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
 	w := httptest.NewRecorder()
 
@@ -1098,4 +1098,134 @@ func TestIntegrationHandler_EnsureIntegration_CreateFails(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, w.Code)
 	require.Contains(t, w.Body.String(), "CONNECT_SENTRY_FAILED")
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// OAuth state helper tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestSetOAuthState(t *testing.T) {
+	t.Parallel()
+
+	t.Run("sets cookie and returns state", func(t *testing.T) {
+		t.Parallel()
+		w := httptest.NewRecorder()
+
+		state, err := setOAuthState(w, "test_oauth_state")
+		require.NoError(t, err)
+		require.NotEmpty(t, state)
+
+		cookies := w.Result().Cookies()
+		require.Len(t, cookies, 1)
+		c := cookies[0]
+		require.Equal(t, "test_oauth_state", c.Name)
+		require.Equal(t, state, c.Value)
+		require.Equal(t, "/", c.Path)
+		require.Equal(t, 600, c.MaxAge)
+		require.True(t, c.HttpOnly)
+		require.Equal(t, http.SameSiteLaxMode, c.SameSite)
+	})
+
+	t.Run("returns unique states on successive calls", func(t *testing.T) {
+		t.Parallel()
+		w1 := httptest.NewRecorder()
+		w2 := httptest.NewRecorder()
+
+		state1, err1 := setOAuthState(w1, "s")
+		state2, err2 := setOAuthState(w2, "s")
+		require.NoError(t, err1)
+		require.NoError(t, err2)
+		require.NotEqual(t, state1, state2)
+	})
+}
+
+func TestValidateOAuthCallback(t *testing.T) {
+	t.Parallel()
+
+	t.Run("valid state and code", func(t *testing.T) {
+		t.Parallel()
+
+		req := httptest.NewRequest(http.MethodGet, "/callback?state=abc&code=mycode", nil)
+		req.AddCookie(&http.Cookie{Name: "test_state", Value: "abc"})
+		w := httptest.NewRecorder()
+
+		code, ok := validateOAuthCallback(w, req, "test_state")
+		require.True(t, ok)
+		require.Equal(t, "mycode", code)
+
+		// Cookie should be cleared
+		cookies := w.Result().Cookies()
+		require.Len(t, cookies, 1)
+		require.Equal(t, "test_state", cookies[0].Name)
+		require.Equal(t, -1, cookies[0].MaxAge, "cookie should be cleared")
+	})
+
+	t.Run("missing state cookie", func(t *testing.T) {
+		t.Parallel()
+
+		req := httptest.NewRequest(http.MethodGet, "/callback?state=abc&code=mycode", nil)
+		w := httptest.NewRecorder()
+
+		code, ok := validateOAuthCallback(w, req, "test_state")
+		require.False(t, ok)
+		require.Empty(t, code)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Contains(t, w.Body.String(), "INVALID_STATE")
+	})
+
+	t.Run("state cookie does not match query param", func(t *testing.T) {
+		t.Parallel()
+
+		req := httptest.NewRequest(http.MethodGet, "/callback?state=abc&code=mycode", nil)
+		req.AddCookie(&http.Cookie{Name: "test_state", Value: "xyz"})
+		w := httptest.NewRecorder()
+
+		code, ok := validateOAuthCallback(w, req, "test_state")
+		require.False(t, ok)
+		require.Empty(t, code)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Contains(t, w.Body.String(), "INVALID_STATE")
+	})
+
+	t.Run("state cookie present but query param missing", func(t *testing.T) {
+		t.Parallel()
+
+		req := httptest.NewRequest(http.MethodGet, "/callback?code=mycode", nil)
+		req.AddCookie(&http.Cookie{Name: "test_state", Value: "abc"})
+		w := httptest.NewRecorder()
+
+		code, ok := validateOAuthCallback(w, req, "test_state")
+		require.False(t, ok)
+		require.Empty(t, code)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Contains(t, w.Body.String(), "INVALID_STATE")
+	})
+
+	t.Run("valid state but missing code", func(t *testing.T) {
+		t.Parallel()
+
+		req := httptest.NewRequest(http.MethodGet, "/callback?state=abc", nil)
+		req.AddCookie(&http.Cookie{Name: "test_state", Value: "abc"})
+		w := httptest.NewRecorder()
+
+		code, ok := validateOAuthCallback(w, req, "test_state")
+		require.False(t, ok)
+		require.Empty(t, code)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Contains(t, w.Body.String(), "MISSING_CODE")
+	})
+
+	t.Run("valid state but empty code param", func(t *testing.T) {
+		t.Parallel()
+
+		req := httptest.NewRequest(http.MethodGet, "/callback?state=abc&code=", nil)
+		req.AddCookie(&http.Cookie{Name: "test_state", Value: "abc"})
+		w := httptest.NewRecorder()
+
+		code, ok := validateOAuthCallback(w, req, "test_state")
+		require.False(t, ok)
+		require.Empty(t, code)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Contains(t, w.Body.String(), "MISSING_CODE")
+	})
 }

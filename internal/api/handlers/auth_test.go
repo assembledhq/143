@@ -40,17 +40,17 @@ func TestAuthHandler_Login_Redirects(t *testing.T) {
 	require.Contains(t, location, "client_id=test-client-id", "redirect URL should include the configured client ID")
 	require.Contains(t, location, "redirect_uri=", "redirect URL should include a redirect URI")
 
-	// Verify oauth_state cookie is set
+	// Verify github_oauth_state cookie is set
 	cookies := w.Result().Cookies()
 	var foundStateCookie bool
 	for _, c := range cookies {
-		if c.Name == "oauth_state" {
+		if c.Name == "github_oauth_state" {
 			foundStateCookie = true
-			require.NotEmpty(t, c.Value, "oauth_state cookie value should not be empty")
-			require.True(t, c.HttpOnly, "oauth_state cookie should be HttpOnly")
+			require.NotEmpty(t, c.Value, "github_oauth_state cookie value should not be empty")
+			require.True(t, c.HttpOnly, "github_oauth_state cookie should be HttpOnly")
 		}
 	}
-	require.True(t, foundStateCookie, "oauth_state cookie should be set")
+	require.True(t, foundStateCookie, "github_oauth_state cookie should be set")
 }
 
 func TestAuthHandler_Logout(t *testing.T) {
@@ -156,14 +156,14 @@ func TestAuthHandler_Callback(t *testing.T) {
 		{
 			name:         "state mismatch returns bad request",
 			url:          "/api/v1/auth/github/callback?state=abc&code=test-code",
-			cookie:       &http.Cookie{Name: "oauth_state", Value: "different-state"},
+			cookie:       &http.Cookie{Name: "github_oauth_state", Value: "different-state"},
 			expectedCode: http.StatusBadRequest,
 			expectedBody: "INVALID_STATE",
 		},
 		{
 			name:         "missing code returns bad request",
 			url:          "/api/v1/auth/github/callback?state=valid-state",
-			cookie:       &http.Cookie{Name: "oauth_state", Value: "valid-state"},
+			cookie:       &http.Cookie{Name: "github_oauth_state", Value: "valid-state"},
 			expectedCode: http.StatusBadRequest,
 			expectedBody: "MISSING_CODE",
 		},
@@ -441,14 +441,14 @@ func TestAuthHandler_GoogleCallback_Validation(t *testing.T) {
 		{
 			name:         "state mismatch returns bad request",
 			url:          "/api/v1/auth/google/callback?state=abc&code=test-code",
-			cookie:       &http.Cookie{Name: "oauth_state", Value: "different-state"},
+			cookie:       &http.Cookie{Name: "google_oauth_state", Value: "different-state"},
 			expectedCode: http.StatusBadRequest,
 			expectedBody: "INVALID_STATE",
 		},
 		{
 			name:         "missing code returns bad request",
 			url:          "/api/v1/auth/google/callback?state=valid-state",
-			cookie:       &http.Cookie{Name: "oauth_state", Value: "valid-state"},
+			cookie:       &http.Cookie{Name: "google_oauth_state", Value: "valid-state"},
 			expectedCode: http.StatusBadRequest,
 			expectedBody: "MISSING_CODE",
 		},
