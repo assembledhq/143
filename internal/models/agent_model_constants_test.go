@@ -79,6 +79,46 @@ func TestIsSupportedLLMModel(t *testing.T) {
 	require.False(t, IsSupportedLLMModel(""), "should reject empty string")
 }
 
+func TestValidateModelForAgentType(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		agentType string
+		model     string
+		wantErr   bool
+	}{
+		{name: "valid codex model", agentType: "codex", model: CodexModelGPT53Codex},
+		{name: "valid claude model", agentType: "claude_code", model: ClaudeCodeModelSonnet},
+		{name: "valid gemini model", agentType: "gemini_cli", model: GeminiCLIModelGemini3ProPreview},
+		{name: "invalid codex model", agentType: "codex", model: "bad", wantErr: true},
+		{name: "invalid claude model", agentType: "claude_code", model: "bad", wantErr: true},
+		{name: "invalid gemini model", agentType: "gemini_cli", model: "bad", wantErr: true},
+		{name: "unknown agent type", agentType: "unknown", model: "any", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateModelForAgentType(tt.agentType, tt.model)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestModelEnvVarForAgentType(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "OPENAI_MODEL", ModelEnvVarForAgentType("codex"))
+	require.Equal(t, "ANTHROPIC_MODEL", ModelEnvVarForAgentType("claude_code"))
+	require.Equal(t, "GEMINI_MODEL", ModelEnvVarForAgentType("gemini_cli"))
+	require.Equal(t, "", ModelEnvVarForAgentType("unknown"))
+}
+
 func TestValidateSettingsModels(t *testing.T) {
 	t.Parallel()
 

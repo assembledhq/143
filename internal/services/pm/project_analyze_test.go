@@ -146,6 +146,49 @@ func TestAnalyzeProject_ProjectNotActive(t *testing.T) {
 	require.NoError(t, err, "AnalyzeProject should succeed but skip non-active project")
 }
 
+type successOrgStore struct{}
+
+func (m *successOrgStore) GetByID(ctx context.Context, orgID uuid.UUID) (models.Organization, error) {
+	return models.Organization{ID: orgID}, nil
+}
+
+type failingRepoStore struct{}
+
+func (m *failingRepoStore) ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.Repository, error) {
+	return nil, nil
+}
+
+func (m *failingRepoStore) GetByID(ctx context.Context, orgID, repoID uuid.UUID) (models.Repository, error) {
+	return models.Repository{}, fmt.Errorf("repo not found")
+}
+
+func TestAnalyzeProject_RepoNotFound(t *testing.T) {
+	t.Parallel()
+
+	projectID := uuid.New()
+	orgID := uuid.New()
+	repoID := uuid.New()
+	project := models.Project{
+		ID:           projectID,
+		OrgID:        orgID,
+		RepositoryID: repoID,
+		Status:       models.ProjectStatusActive,
+	}
+	svc := &Service{
+		adapter:       &mockAdapter{},
+		sandbox:       &mockSandbox{},
+		projects:      newMockProjectStore(project),
+		projectTasks:  &mockProjectTaskStore{},
+		projectCycles: &mockProjectCycleStore{},
+		orgs:          &successOrgStore{},
+		repos:         &failingRepoStore{},
+		logger:        zerolog.Nop(),
+	}
+	err := svc.AnalyzeProject(context.Background(), orgID, projectID)
+	require.Error(t, err, "AnalyzeProject should fail when repo not found")
+	require.Contains(t, err.Error(), "get repository")
+}
+
 type failingOrgStore struct{}
 
 func (m *failingOrgStore) GetByID(ctx context.Context, orgID uuid.UUID) (models.Organization, error) {
