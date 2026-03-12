@@ -16,6 +16,7 @@ import type { Project } from "@/lib/types";
 const statusFilterTabs = [
   { value: "all", label: "All" },
   { value: "active", label: "Active" },
+  { value: "scheduled", label: "Scheduled" },
   { value: "draft", label: "Draft" },
   { value: "completed", label: "Completed" },
   { value: "paused", label: "Paused" },
@@ -101,16 +102,23 @@ function ProjectRow({ project }: { project: Project }) {
 export function ProjectsPageContent() {
   const [statusFilter, setStatusFilter] = useQueryState("status", parseAsString);
 
+  const isScheduledFilter = statusFilter === "scheduled";
+  const apiStatus = statusFilter && statusFilter !== "all" && !isScheduledFilter ? statusFilter : undefined;
+
   const { data, isLoading, error } = useQuery({
-    queryKey: ["projects", statusFilter],
-    queryFn: () => api.projects.list({ status: statusFilter && statusFilter !== "all" ? statusFilter : undefined }),
+    queryKey: ["projects", apiStatus],
+    queryFn: () => api.projects.list({ status: apiStatus }),
     refetchInterval: 10000,
   });
 
-  const projects = data?.data ?? [];
+  const allProjects = data?.data ?? [];
+  const projects = isScheduledFilter
+    ? allProjects.filter((p) => p.schedule_enabled)
+    : allProjects;
 
-  const activeCount = projects.filter((p) => p.status === "active").length;
-  const pausedCount = projects.filter((p) => p.status === "paused").length;
+  const activeCount = allProjects.filter((p) => p.status === "active").length;
+  const pausedCount = allProjects.filter((p) => p.status === "paused").length;
+  const scheduledCount = allProjects.filter((p) => p.schedule_enabled).length;
 
   return (
     <div className="space-y-6">
@@ -139,6 +147,9 @@ export function ProjectsPageContent() {
             {tab.label}
             {tab.value === "active" && activeCount > 0 && (
               <span className="ml-1.5 rounded-full bg-blue-500 text-white text-[10px] px-1.5 py-0">{activeCount}</span>
+            )}
+            {tab.value === "scheduled" && scheduledCount > 0 && (
+              <span className="ml-1.5 rounded-full bg-purple-500 text-white text-[10px] px-1.5 py-0">{scheduledCount}</span>
             )}
             {tab.value === "paused" && pausedCount > 0 && (
               <span className="ml-1.5 rounded-full bg-orange-500 text-white text-[10px] px-1.5 py-0">{pausedCount}</span>

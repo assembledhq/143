@@ -257,7 +257,7 @@ export const api = {
       return get<import('./types').ListResponse<import('./types').Project>>(`/api/v1/projects${qs ? `?${qs}` : ''}`);
     },
     get: (id: string) => get<import('./types').SingleResponse<import('./types').ProjectDetail>>(`/api/v1/projects/${id}`),
-    create: (body: { title: string; goal: string; repository_id: string; scope?: string; completion_criteria?: string; execution_mode?: string; max_concurrent?: number; priority?: number; base_branch?: string; agent_type?: string; model?: string }) =>
+    create: (body: { title: string; goal: string; repository_id: string; scope?: string; completion_criteria?: string; execution_mode?: string; max_concurrent?: number; priority?: number; base_branch?: string; agent_type?: string; model?: string; schedule_enabled?: boolean; schedule_interval?: number; schedule_unit?: string }) =>
       post<import('./types').SingleResponse<import('./types').Project>>('/api/v1/projects', body),
     update: (id: string, body: Record<string, unknown>) =>
       patch<import('./types').SingleResponse<import('./types').Project>>(`/api/v1/projects/${id}`, body),

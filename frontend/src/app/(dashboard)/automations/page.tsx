@@ -1,10 +1,5 @@
-import { PageContainer } from "@/components/page-container";
-import { AutomationsPageContent } from "./automations-page-content";
+import { redirect } from "next/navigation";
 
 export default function AutomationsPage() {
-  return (
-    <PageContainer size="default">
-      <AutomationsPageContent />
-    </PageContainer>
-  );
+  redirect("/projects?status=scheduled");
 }
