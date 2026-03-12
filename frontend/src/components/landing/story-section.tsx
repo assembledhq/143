@@ -548,7 +548,7 @@ export default function StorySection({ isDark }: StorySectionProps) {
                 isDark={isDark}
                 inView={inView}
                 delay={0.3}
-                active={activeIndex >= 0}
+                active={activeIndex === 0}
               />
               <Milestone
                 year="October 1943"
@@ -556,7 +556,7 @@ export default function StorySection({ isDark }: StorySectionProps) {
                 isDark={isDark}
                 inView={inView}
                 delay={0.45}
-                active={activeIndex >= 1}
+                active={activeIndex === 1}
               />
               <Milestone
                 year="November 1943"
@@ -564,7 +564,7 @@ export default function StorySection({ isDark }: StorySectionProps) {
                 isDark={isDark}
                 inView={inView}
                 delay={0.6}
-                active={activeIndex >= 2}
+                active={activeIndex === 2}
               />
             </div>
 
