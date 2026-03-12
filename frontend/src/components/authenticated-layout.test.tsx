@@ -31,14 +31,14 @@ vi.mock("@/hooks/use-auth", () => ({
 }));
 
 describe("AuthenticatedLayout", () => {
-  it("shows automations in the primary navigation", () => {
+  it("shows projects in the primary navigation", () => {
     renderWithProviders(
       <AuthenticatedLayout>
         <div>content</div>
       </AuthenticatedLayout>
     );
 
-    expect(screen.getByRole("link", { name: "Automations" })).toHaveAttribute("href", "/automations");
+    expect(screen.getByRole("link", { name: "Projects" })).toHaveAttribute("href", "/projects");
   });
 
   it("uses a full-width content area with generous padding", () => {
