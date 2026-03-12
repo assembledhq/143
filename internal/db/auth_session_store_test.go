@@ -3,6 +3,8 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -346,4 +348,46 @@ func TestSessionStore_ListByIssue(t *testing.T) {
 	require.Equal(t, runID, runs[0].ID, "should return the correct agent run ID")
 	require.Equal(t, issueID, runs[0].IssueID, "should return the correct issue ID")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+// TestSessionSelectColumns_MatchesModel is a regression test ensuring that
+// sessionSelectColumns includes every column expected by the Session model struct.
+// Without this, adding a new field to models.Session but forgetting to add it to
+// sessionSelectColumns causes GetByID/List queries to fail at runtime (the bug
+// that caused "failed to load session details" for manual sessions).
+func TestSessionSelectColumns_MatchesModel(t *testing.T) {
+	t.Parallel()
+
+	// Extract column names from the Session struct's db tags.
+	typ := reflect.TypeOf(models.Session{})
+	structCols := make(map[string]bool)
+	for i := range typ.NumField() {
+		tag := typ.Field(i).Tag.Get("db")
+		if tag != "" && tag != "-" {
+			structCols[tag] = true
+		}
+	}
+
+	// Parse column names out of sessionSelectColumns.
+	// Handles plain columns ("org_id") and aliased expressions ("COALESCE(...) AS issue_id").
+	selectCols := make(map[string]bool)
+	for _, part := range strings.Split(sessionSelectColumns, ",") {
+		col := strings.TrimSpace(part)
+		if col == "" {
+			continue
+		}
+		// If there's an "AS alias", use the alias.
+		if idx := strings.LastIndex(strings.ToUpper(col), " AS "); idx != -1 {
+			col = strings.TrimSpace(col[idx+4:])
+		} else if strings.Contains(col, "(") {
+			// Expression without an alias (e.g. COALESCE(...)) — skip, the alias form is required.
+			continue
+		}
+		selectCols[col] = true
+	}
+
+	for col := range structCols {
+		require.Contains(t, selectCols, col,
+			"sessionSelectColumns is missing column %q from models.Session — add it to the SELECT constant", col)
+	}
 }
