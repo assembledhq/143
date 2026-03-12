@@ -161,7 +161,7 @@ export const api = {
       get<import('./types').ListResponse<import('./types').PMDocument>>('/api/v1/pm/documents'),
     getDocument: (docId: string) =>
       get<import('./types').SingleResponse<import('./types').PMDocument>>(`/api/v1/pm/documents/${docId}`),
-    createDocument: (body: { title: string; content?: string; doc_type?: string }) =>
+    createDocument: (body: { title: string; content?: string; doc_type?: string; source_type?: string; source_url?: string; source_id?: string; source_meta?: Record<string, unknown> }) =>
       post<import('./types').SingleResponse<import('./types').PMDocument>>('/api/v1/pm/documents', body),
     updateDocument: (docId: string, body: Record<string, unknown>) =>
       patch<import('./types').SingleResponse<import('./types').PMDocument>>(`/api/v1/pm/documents/${docId}`, body),

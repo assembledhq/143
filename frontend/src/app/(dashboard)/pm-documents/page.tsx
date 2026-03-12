@@ -18,7 +18,7 @@ import {
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { Badge } from "@/components/ui/badge";
-import { Plus, Pencil, Trash2, FileText, X, Check } from "lucide-react";
+import { Plus, Pencil, Trash2, FileText, X, Check, ExternalLink, Link as LinkIcon } from "lucide-react";
 import type { PMDocument, ListResponse } from "@/lib/types";
 
 const DOC_TYPE_LABELS: Record<string, string> = {
@@ -39,6 +39,15 @@ const DOC_TYPE_COLORS: Record<string, string> = {
   reference: "bg-gray-100 text-gray-800",
 };
 
+const SOURCE_TYPE_LABELS: Record<string, string> = {
+  manual: "Manual",
+  url: "URL",
+  notion: "Notion",
+  google_docs: "Google Docs",
+  confluence: "Confluence",
+  file_upload: "File Upload",
+};
+
 export default function PMDocumentsPage() {
   const queryClient = useQueryClient();
   const [showCreate, setShowCreate] = useState(false);
@@ -49,11 +58,14 @@ export default function PMDocumentsPage() {
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [docType, setDocType] = useState("roadmap");
+  const [sourceType, setSourceType] = useState("manual");
+  const [sourceUrl, setSourceUrl] = useState("");
 
   // Edit state
   const [editTitle, setEditTitle] = useState("");
   const [editContent, setEditContent] = useState("");
   const [editDocType, setEditDocType] = useState("");
+  const [editSourceUrl, setEditSourceUrl] = useState("");
 
   const { data: docsData, isLoading } = useQuery<ListResponse<PMDocument>>({
     queryKey: ["pm", "documents"],
@@ -63,14 +75,11 @@ export default function PMDocumentsPage() {
   const docs = docsData?.data ?? [];
 
   const createMutation = useMutation({
-    mutationFn: (body: { title: string; content: string; doc_type: string }) =>
+    mutationFn: (body: Parameters<typeof api.pm.createDocument>[0]) =>
       api.pm.createDocument(body),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["pm", "documents"] });
-      setShowCreate(false);
-      setTitle("");
-      setContent("");
-      setDocType("roadmap");
+      resetCreateForm();
     },
   });
 
@@ -90,9 +99,24 @@ export default function PMDocumentsPage() {
     },
   });
 
+  function resetCreateForm() {
+    setShowCreate(false);
+    setTitle("");
+    setContent("");
+    setDocType("roadmap");
+    setSourceType("manual");
+    setSourceUrl("");
+  }
+
   function handleCreate() {
     if (!title.trim()) return;
-    createMutation.mutate({ title: title.trim(), content, doc_type: docType });
+    createMutation.mutate({
+      title: title.trim(),
+      content,
+      doc_type: docType,
+      source_type: sourceType,
+      source_url: sourceUrl.trim() || undefined,
+    });
   }
 
   function startEdit(doc: PMDocument) {
@@ -100,13 +124,19 @@ export default function PMDocumentsPage() {
     setEditTitle(doc.title);
     setEditContent(doc.content);
     setEditDocType(doc.doc_type);
+    setEditSourceUrl(doc.source_url ?? "");
   }
 
   function handleUpdate() {
     if (!editingId || !editTitle.trim()) return;
     updateMutation.mutate({
       id: editingId,
-      body: { title: editTitle.trim(), content: editContent, doc_type: editDocType },
+      body: {
+        title: editTitle.trim(),
+        content: editContent,
+        doc_type: editDocType,
+        source_url: editSourceUrl.trim() || null,
+      },
     });
   }
 
@@ -115,7 +145,7 @@ export default function PMDocumentsPage() {
       <div className="space-y-6">
         <PageHeader
           title="PM Documents"
-          description="Upload reference documents for the PM agent — roadmaps, product philosophy, strategy docs, and more."
+          description="Upload reference documents for the PM agent — roadmaps, product philosophy, strategy docs, and more. Link to external sources or paste content directly."
           action={
             !showCreate && (
               <Button size="sm" onClick={() => setShowCreate(true)}>
@@ -133,11 +163,11 @@ export default function PMDocumentsPage() {
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
                   <h3 className="text-sm font-medium">New Document</h3>
-                  <Button variant="ghost" size="sm" onClick={() => setShowCreate(false)}>
+                  <Button variant="ghost" size="sm" onClick={resetCreateForm}>
                     <X className="h-4 w-4" />
                   </Button>
                 </div>
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-3 gap-4">
                   <div className="space-y-2">
                     <Label htmlFor="doc-title">Title</Label>
                     <Input
@@ -162,7 +192,37 @@ export default function PMDocumentsPage() {
                       </SelectContent>
                     </Select>
                   </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="doc-source">Source</Label>
+                    <Select value={sourceType} onValueChange={setSourceType}>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {Object.entries(SOURCE_TYPE_LABELS).map(([value, label]) => (
+                          <SelectItem key={value} value={value}>
+                            {label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </div>
+                {sourceType !== "manual" && (
+                  <div className="space-y-2">
+                    <Label htmlFor="doc-source-url">Source URL</Label>
+                    <Input
+                      id="doc-source-url"
+                      type="url"
+                      placeholder="https://notion.so/... or link to original document"
+                      value={sourceUrl}
+                      onChange={(e) => setSourceUrl(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Link to the original document. Paste the content below — the PM agent uses the local copy.
+                    </p>
+                  </div>
+                )}
                 <div className="space-y-2">
                   <Label htmlFor="doc-content">Content</Label>
                   <Textarea
@@ -174,7 +234,7 @@ export default function PMDocumentsPage() {
                   />
                 </div>
                 <div className="flex justify-end gap-2">
-                  <Button variant="outline" size="sm" onClick={() => setShowCreate(false)}>
+                  <Button variant="outline" size="sm" onClick={resetCreateForm}>
                     Cancel
                   </Button>
                   <Button
@@ -209,8 +269,8 @@ export default function PMDocumentsPage() {
                 <p className="text-sm font-medium text-muted-foreground">
                   No documents yet
                 </p>
-                <p className="text-xs text-muted-foreground mt-1">
-                  Add your roadmap, product philosophy, or other reference documents to give the PM agent context.
+                <p className="text-xs text-muted-foreground mt-1 max-w-sm">
+                  Add your roadmap, product philosophy, or other reference documents to give the PM agent context. You can paste content directly or link to external sources like Notion or Google Docs.
                 </p>
               </div>
             </CardContent>
@@ -247,6 +307,15 @@ export default function PMDocumentsPage() {
                         </div>
                       </div>
                       <div className="space-y-2">
+                        <Label>Source URL</Label>
+                        <Input
+                          type="url"
+                          placeholder="https://... (optional link to original)"
+                          value={editSourceUrl}
+                          onChange={(e) => setEditSourceUrl(e.target.value)}
+                        />
+                      </div>
+                      <div className="space-y-2">
                         <Label>Content</Label>
                         <Textarea
                           rows={10}
@@ -275,13 +344,13 @@ export default function PMDocumentsPage() {
                   ) : (
                     <div>
                       <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-3">
-                          <FileText className="h-4 w-4 text-muted-foreground" />
+                        <div className="flex items-center gap-3 min-w-0">
+                          <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
                           <button
                             onClick={() =>
                               setExpandedId(expandedId === doc.id ? null : doc.id)
                             }
-                            className="text-sm font-medium hover:underline text-left"
+                            className="text-sm font-medium hover:underline text-left truncate"
                           >
                             {doc.title}
                           </button>
@@ -291,8 +360,25 @@ export default function PMDocumentsPage() {
                           >
                             {DOC_TYPE_LABELS[doc.doc_type] ?? doc.doc_type}
                           </Badge>
+                          {doc.source_type !== "manual" && (
+                            <Badge variant="outline" className="text-[11px] gap-1">
+                              <LinkIcon className="h-3 w-3" />
+                              {SOURCE_TYPE_LABELS[doc.source_type] ?? doc.source_type}
+                            </Badge>
+                          )}
                         </div>
-                        <div className="flex items-center gap-1">
+                        <div className="flex items-center gap-1 shrink-0">
+                          {doc.source_url && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              asChild
+                            >
+                              <a href={doc.source_url} target="_blank" rel="noopener noreferrer">
+                                <ExternalLink className="h-3.5 w-3.5" />
+                              </a>
+                            </Button>
+                          )}
                           <Button
                             variant="ghost"
                             size="sm"
@@ -315,6 +401,16 @@ export default function PMDocumentsPage() {
                       </div>
                       {expandedId === doc.id && (
                         <div className="mt-3 border-t pt-3">
+                          {doc.source_url && (
+                            <p className="text-xs text-muted-foreground mb-2">
+                              Source: <a href={doc.source_url} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">{doc.source_url}</a>
+                              {doc.last_synced_at && (
+                                <span className="ml-2">
+                                  (synced {new Date(doc.last_synced_at).toLocaleDateString()})
+                                </span>
+                              )}
+                            </p>
+                          )}
                           <pre className="text-xs text-muted-foreground whitespace-pre-wrap font-mono leading-relaxed max-h-96 overflow-auto">
                             {doc.content || "(empty)"}
                           </pre>

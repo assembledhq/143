@@ -18,13 +18,16 @@ func NewPMDocumentStore(db DBTX) *PMDocumentStore {
 	return &PMDocumentStore{db: db}
 }
 
-const pmDocColumns = `id, org_id, title, content, doc_type, sort_order, created_by, created_at, updated_at`
+const pmDocColumns = `id, org_id, title, content, doc_type, sort_order,
+	source_type, source_url, source_id, source_meta, last_synced_at,
+	created_by, created_at, updated_at`
 
 func scanPMDoc(row pgx.Row) (models.PMDocument, error) {
 	var d models.PMDocument
 	err := row.Scan(
 		&d.ID, &d.OrgID, &d.Title, &d.Content, &d.DocType,
-		&d.SortOrder, &d.CreatedBy, &d.CreatedAt, &d.UpdatedAt,
+		&d.SortOrder, &d.SourceType, &d.SourceURL, &d.SourceID,
+		&d.SourceMeta, &d.LastSyncedAt, &d.CreatedBy, &d.CreatedAt, &d.UpdatedAt,
 	)
 	return d, err
 }
@@ -35,7 +38,8 @@ func scanPMDocs(rows pgx.Rows) ([]models.PMDocument, error) {
 		var d models.PMDocument
 		err := rows.Scan(
 			&d.ID, &d.OrgID, &d.Title, &d.Content, &d.DocType,
-			&d.SortOrder, &d.CreatedBy, &d.CreatedAt, &d.UpdatedAt,
+			&d.SortOrder, &d.SourceType, &d.SourceURL, &d.SourceID,
+			&d.SourceMeta, &d.LastSyncedAt, &d.CreatedBy, &d.CreatedAt, &d.UpdatedAt,
 		)
 		if err != nil {
 			return nil, err
@@ -48,18 +52,31 @@ func scanPMDocs(rows pgx.Rows) ([]models.PMDocument, error) {
 func (s *PMDocumentStore) Create(ctx context.Context, doc *models.PMDocument) error {
 	query := `
 		INSERT INTO pm_documents (
-			org_id, title, content, doc_type, sort_order, created_by
+			org_id, title, content, doc_type, sort_order,
+			source_type, source_url, source_id, source_meta, last_synced_at,
+			created_by
 		) VALUES (
-			@org_id, @title, @content, @doc_type, @sort_order, @created_by
+			@org_id, @title, @content, @doc_type, @sort_order,
+			@source_type, @source_url, @source_id, @source_meta, @last_synced_at,
+			@created_by
 		) RETURNING id, created_at, updated_at`
 
+	if doc.SourceType == "" {
+		doc.SourceType = models.PMDocSourceManual
+	}
+
 	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
-		"org_id":     doc.OrgID,
-		"title":      doc.Title,
-		"content":    doc.Content,
-		"doc_type":   doc.DocType,
-		"sort_order": doc.SortOrder,
-		"created_by": doc.CreatedBy,
+		"org_id":         doc.OrgID,
+		"title":          doc.Title,
+		"content":        doc.Content,
+		"doc_type":       doc.DocType,
+		"sort_order":     doc.SortOrder,
+		"source_type":    doc.SourceType,
+		"source_url":     doc.SourceURL,
+		"source_id":      doc.SourceID,
+		"source_meta":    doc.SourceMeta,
+		"last_synced_at": doc.LastSyncedAt,
+		"created_by":     doc.CreatedBy,
 	})
 	return row.Scan(&doc.ID, &doc.CreatedAt, &doc.UpdatedAt)
 }
@@ -91,16 +108,24 @@ func (s *PMDocumentStore) GetByID(ctx context.Context, orgID, docID uuid.UUID) (
 func (s *PMDocumentStore) Update(ctx context.Context, doc *models.PMDocument) error {
 	query := `UPDATE pm_documents SET
 		title = @title, content = @content, doc_type = @doc_type,
-		sort_order = @sort_order, updated_at = now()
+		sort_order = @sort_order, source_type = @source_type,
+		source_url = @source_url, source_id = @source_id,
+		source_meta = @source_meta, last_synced_at = @last_synced_at,
+		updated_at = now()
 		WHERE id = @id AND org_id = @org_id
 		RETURNING updated_at`
 	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
-		"id":         doc.ID,
-		"org_id":     doc.OrgID,
-		"title":      doc.Title,
-		"content":    doc.Content,
-		"doc_type":   doc.DocType,
-		"sort_order": doc.SortOrder,
+		"id":             doc.ID,
+		"org_id":         doc.OrgID,
+		"title":          doc.Title,
+		"content":        doc.Content,
+		"doc_type":       doc.DocType,
+		"sort_order":     doc.SortOrder,
+		"source_type":    doc.SourceType,
+		"source_url":     doc.SourceURL,
+		"source_id":      doc.SourceID,
+		"source_meta":    doc.SourceMeta,
+		"last_synced_at": doc.LastSyncedAt,
 	})
 	return row.Scan(&doc.UpdatedAt)
 }

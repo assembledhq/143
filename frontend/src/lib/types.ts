@@ -555,6 +555,11 @@ export interface PMDocument {
   content: string;
   doc_type: string;
   sort_order: number;
+  source_type: string;
+  source_url?: string;
+  source_id?: string;
+  source_meta?: Record<string, unknown>;
+  last_synced_at?: string;
   created_by?: string;
   created_at: string;
   updated_at: string;

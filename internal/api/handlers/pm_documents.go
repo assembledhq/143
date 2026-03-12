@@ -42,9 +42,13 @@ func (h *PMDocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserFromContext(r.Context())
 
 	var req struct {
-		Title   string  `json:"title"`
-		Content *string `json:"content"`
-		DocType *string `json:"doc_type"`
+		Title      string           `json:"title"`
+		Content    *string          `json:"content"`
+		DocType    *string          `json:"doc_type"`
+		SourceType *string          `json:"source_type"`
+		SourceURL  *string          `json:"source_url"`
+		SourceID   *string          `json:"source_id"`
+		SourceMeta json.RawMessage  `json:"source_meta,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -67,12 +71,21 @@ func (h *PMDocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		content = *req.Content
 	}
 
+	sourceType := models.PMDocSourceManual
+	if req.SourceType != nil {
+		sourceType = *req.SourceType
+	}
+
 	doc := models.PMDocument{
-		OrgID:     orgID,
-		Title:     req.Title,
-		Content:   content,
-		DocType:   docType,
-		CreatedBy: &user.ID,
+		OrgID:      orgID,
+		Title:      req.Title,
+		Content:    content,
+		DocType:    docType,
+		SourceType: sourceType,
+		SourceURL:  req.SourceURL,
+		SourceID:   req.SourceID,
+		SourceMeta: req.SourceMeta,
+		CreatedBy:  &user.ID,
 	}
 
 	if err := h.store.Create(r.Context(), &doc); err != nil {
@@ -115,9 +128,13 @@ func (h *PMDocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Title   *string `json:"title"`
-		Content *string `json:"content"`
-		DocType *string `json:"doc_type"`
+		Title      *string          `json:"title"`
+		Content    *string          `json:"content"`
+		DocType    *string          `json:"doc_type"`
+		SourceType *string          `json:"source_type"`
+		SourceURL  *string          `json:"source_url"`
+		SourceID   *string          `json:"source_id"`
+		SourceMeta json.RawMessage  `json:"source_meta,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -133,6 +150,18 @@ func (h *PMDocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.DocType != nil {
 		doc.DocType = *req.DocType
+	}
+	if req.SourceType != nil {
+		doc.SourceType = *req.SourceType
+	}
+	if req.SourceURL != nil {
+		doc.SourceURL = req.SourceURL
+	}
+	if req.SourceID != nil {
+		doc.SourceID = req.SourceID
+	}
+	if req.SourceMeta != nil {
+		doc.SourceMeta = req.SourceMeta
 	}
 
 	if err := h.store.Update(r.Context(), &doc); err != nil {
