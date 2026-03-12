@@ -11,6 +11,10 @@ export default function IntegrationsPage() {
     queryKey: ["integrations"],
     queryFn: () => api.integrations.list(),
   });
+  const { data: reposResp } = useQuery({
+    queryKey: ["repositories"],
+    queryFn: () => api.repositories.list(),
+  });
   const githubIntegration = integrationsResp?.data?.find(
     (integration) => integration.provider === "github" && integration.status === "active"
   );
@@ -21,6 +25,10 @@ export default function IntegrationsPage() {
     (integration) => integration.provider === "linear" && integration.status === "active"
   );
 
+  const connectedRepoNames = (reposResp?.data ?? [])
+    .filter((r) => r.status === "active")
+    .map((r) => r.full_name);
+
   return (
     <PageContainer size="default">
       <div className="space-y-6">
@@ -30,6 +38,7 @@ export default function IntegrationsPage() {
         />
       <AllIntegrationCards
         githubConnected={Boolean(githubIntegration)}
+        githubRepoNames={connectedRepoNames}
         sentryConnected={Boolean(sentryIntegration)}
         linearConnected={Boolean(linearIntegration)}
         linearLoading={false}
