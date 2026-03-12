@@ -82,6 +82,50 @@ func (m *trackingJobs) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobT
 	return uuid.New(), nil
 }
 
+func TestNewScheduler(t *testing.T) {
+	t.Parallel()
+
+	s := NewScheduler(
+		&mockSchedulerLock{},
+		&mockJobs{},
+		&mockOrgs{},
+		&mockIntegrations{},
+		&mockPlanStore{},
+		&mockRepos{},
+		zerolog.Nop(),
+	)
+	require.NotNil(t, s, "NewScheduler should return a non-nil scheduler")
+	require.Nil(t, s.projects, "projects should be nil by default")
+}
+
+func TestScheduler_SetProjectStore(t *testing.T) {
+	t.Parallel()
+
+	s := &Scheduler{logger: zerolog.Nop()}
+	require.Nil(t, s.projects, "projects should be nil before SetProjectStore")
+
+	ps := &mockProjects{}
+	s.SetProjectStore(ps)
+	require.NotNil(t, s.projects, "projects should be set after SetProjectStore")
+}
+
+func TestScheduler_ScheduleProjectCycles_ListError(t *testing.T) {
+	t.Parallel()
+
+	projects := &mockProjects{listErr: pgx.ErrNoRows}
+	jobs := &trackingJobs{}
+
+	s := &Scheduler{
+		jobs:     jobs,
+		projects: projects,
+		logger:   zerolog.Nop(),
+	}
+
+	// Should not panic, should log error and continue.
+	s.scheduleProjectCycles(context.Background(), time.Now())
+	require.Empty(t, jobs.enqueued, "should not enqueue any jobs on list error")
+}
+
 func TestScheduler_ScheduleProjectCycles_NilStore(t *testing.T) {
 	t.Parallel()
 

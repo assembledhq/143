@@ -2,6 +2,7 @@ package pm
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"testing"
 
@@ -143,6 +144,36 @@ func TestAnalyzeProject_ProjectNotActive(t *testing.T) {
 	}
 	err := svc.AnalyzeProject(context.Background(), orgID, projectID)
 	require.NoError(t, err, "AnalyzeProject should succeed but skip non-active project")
+}
+
+type failingOrgStore struct{}
+
+func (m *failingOrgStore) GetByID(ctx context.Context, orgID uuid.UUID) (models.Organization, error) {
+	return models.Organization{}, fmt.Errorf("org not found")
+}
+
+func TestAnalyzeProject_OrgNotFound(t *testing.T) {
+	t.Parallel()
+
+	projectID := uuid.New()
+	orgID := uuid.New()
+	project := models.Project{
+		ID:     projectID,
+		OrgID:  orgID,
+		Status: models.ProjectStatusActive,
+	}
+	svc := &Service{
+		adapter:       &mockAdapter{},
+		sandbox:       &mockSandbox{},
+		projects:      newMockProjectStore(project),
+		projectTasks:  &mockProjectTaskStore{},
+		projectCycles: &mockProjectCycleStore{},
+		orgs:          &failingOrgStore{},
+		logger:        zerolog.Nop(),
+	}
+	err := svc.AnalyzeProject(context.Background(), orgID, projectID)
+	require.Error(t, err, "AnalyzeProject should fail when org not found")
+	require.Contains(t, err.Error(), "get org")
 }
 
 func TestAnalyzeProject_NilAdapter(t *testing.T) {
