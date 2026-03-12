@@ -105,14 +105,23 @@ DB_HOST="localhost"
 DB_PORT="5432"
 DATABASE_URL="postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=disable"
 
+NEED_ENV=false
 if [ ! -f .env ]; then
+  NEED_ENV=true
+elif [ -f .env.enc ] && [ .env.enc -nt .env ]; then
+  # Re-decrypt when .env.enc has been updated since .env was last written
+  info ".env.enc is newer than .env — re-decrypting..."
+  NEED_ENV=true
+fi
+
+if [ "$NEED_ENV" = true ]; then
   # If an encrypted .env.enc exists and the developer has sops+age, decrypt it.
   # This gives returning devs (or anyone with the age key) a seamless setup.
   if [ -f .env.enc ] && command -v sops >/dev/null 2>&1; then
     SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-$HOME/.config/sops/age/keys.txt}"
     if [ -f "$SOPS_AGE_KEY_FILE" ]; then
       info "Found .env.enc and age key — decrypting..."
-      if SOPS_AGE_KEY_FILE="$SOPS_AGE_KEY_FILE" sops --decrypt .env.enc > .env 2>/dev/null; then
+      if SOPS_AGE_KEY_FILE="$SOPS_AGE_KEY_FILE" sops --decrypt --input-type dotenv --output-type dotenv .env.enc > .env 2>/dev/null; then
         info "Decrypted .env.enc → .env"
       else
         warn "Could not decrypt .env.enc (wrong key?). Falling back to .env.example."
@@ -138,13 +147,9 @@ EOF
     info "Created .env with development defaults"
   fi
 else
-  info ".env already exists, skipping."
+  info ".env already exists and is up to date, skipping."
 fi
 
-# Source .env so DATABASE_URL is available
-set -a
-source .env
-set +a
 
 # ---------------------------------------------------------------------------
 # 5. Set up PostgreSQL database
