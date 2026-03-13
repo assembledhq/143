@@ -234,13 +234,11 @@ export default function Overview() {
     (integration) => integration.provider === "linear" && integration.status === "active"
   );
 
-  // Count connected steps (agent + GitHub required; sentry/linear optional but counted)
+  // Count completed setup stages (step 1: coding agent, step 2: integrations)
   const connectedCount =
     (agentConnected ? 1 : 0) +
-    (githubIntegration ? 1 : 0) +
-    (sentryIntegration ? 1 : 0) +
-    (linearIntegration ? 1 : 0);
-  const totalCount = 4;
+    (githubIntegration ? 1 : 0);
+  const totalCount = 2;
   const allRequiredConnected = agentConnected && Boolean(githubIntegration);
 
   return (
