@@ -11,6 +11,11 @@ import (
 
 // LinearTaskManager implements TaskManager for the Linear issue tracker.
 // It uses Linear's GraphQL API for all operations.
+//
+// The ingestion layer (ingestion.LinearAdapter) only handles webhook parsing
+// and normalizes incoming Linear events into NormalizedIssue. This is the
+// first Linear API client in the codebase — it provides the read/write
+// operations needed by the PM agent and MCP servers.
 type LinearTaskManager struct {
 	httpClient *http.Client
 	apiURL     string

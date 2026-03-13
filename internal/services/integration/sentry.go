@@ -10,11 +10,19 @@ import (
 	"time"
 )
 
-// SentryErrorTracker implements ErrorTracker for the Sentry error monitoring platform.
-// It uses the Sentry REST API to query issues, stack traces, and trends.
+// SentryErrorTracker implements ErrorTracker for the Sentry error monitoring
+// platform. It provides operations the ingestion layer doesn't cover:
+// single-issue detail with parsed stack traces, trend analysis, and
+// related-issue discovery.
+//
+// The ingestion layer (ingestion.SentryAPIClient) handles paginated issue
+// syncing with rate limiting and retry logic. This tracker shares the same
+// Sentry REST API but serves a different purpose: PM-level querying vs
+// bulk data ingestion. The two use the same credential (SentryConfig from
+// org_credentials) and the same API issue format.
 type SentryErrorTracker struct {
 	httpClient *http.Client
-	baseURL    string // e.g. "https://sentry.io"
+	baseURL    string
 	authToken  string
 	orgSlug    string
 }
@@ -32,9 +40,13 @@ func NewSentryErrorTracker(cfg SentryTrackerConfig) *SentryErrorTracker {
 	if baseURL == "" {
 		baseURL = "https://sentry.io"
 	}
+	baseURL = strings.TrimRight(baseURL, "/")
+
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+
 	return &SentryErrorTracker{
-		httpClient: &http.Client{Timeout: 30 * time.Second},
-		baseURL:    strings.TrimRight(baseURL, "/"),
+		httpClient: httpClient,
+		baseURL:    baseURL,
 		authToken:  cfg.AuthToken,
 		orgSlug:    cfg.OrgSlug,
 	}
@@ -43,6 +55,9 @@ func NewSentryErrorTracker(cfg SentryTrackerConfig) *SentryErrorTracker {
 func (s *SentryErrorTracker) Name() string { return "sentry" }
 
 // ListErrors fetches unresolved issues from Sentry matching the filter.
+// It queries the Sentry API directly (rather than delegating to the ingestion
+// client) because the ErrorTracker interface returns ErrorSummary, not
+// NormalizedIssue, and supports org-wide queries without a project slug.
 func (s *SentryErrorTracker) ListErrors(ctx context.Context, filter ErrorFilter) ([]ErrorSummary, error) {
 	query := "is:unresolved"
 	if filter.Severity != "" {
@@ -74,9 +89,10 @@ func (s *SentryErrorTracker) ListErrors(ctx context.Context, filter ErrorFilter)
 	return summaries, nil
 }
 
-// GetError fetches full details for a single Sentry issue, including the latest event's stack trace.
+// GetError fetches full details for a single Sentry issue, including the
+// latest event's parsed stack trace. This is new functionality not available
+// in the ingestion layer.
 func (s *SentryErrorTracker) GetError(ctx context.Context, errorID string) (*ErrorDetail, error) {
-	// Fetch the issue metadata.
 	issueEndpoint := fmt.Sprintf("%s/api/0/issues/%s/", s.baseURL, errorID)
 	var issue sentryAPIIssue
 	if err := s.doGet(ctx, issueEndpoint, &issue); err != nil {
@@ -90,7 +106,7 @@ func (s *SentryErrorTracker) GetError(ctx context.Context, errorID string) (*Err
 		WebURL:       issue.Permalink,
 	}
 
-	// Fetch the latest event for stack trace.
+	// Fetch the latest event for stack trace — not available via ingestion client.
 	eventEndpoint := fmt.Sprintf("%s/api/0/issues/%s/events/latest/", s.baseURL, errorID)
 	var event sentryAPIEvent
 	if err := s.doGet(ctx, eventEndpoint, &event); err == nil {
@@ -101,37 +117,20 @@ func (s *SentryErrorTracker) GetError(ctx context.Context, errorID string) (*Err
 	return detail, nil
 }
 
-// GetTrend fetches occurrence stats for an issue over the given period.
+// GetTrend returns occurrence counts over time for a Sentry issue. Uses the
+// stats data returned on the issue detail endpoint (14-day hourly buckets).
 func (s *SentryErrorTracker) GetTrend(ctx context.Context, errorID string, period time.Duration) (*ErrorTrend, error) {
-	// Sentry's stats endpoint provides hourly/daily buckets.
-	resolution := "1h"
-	if period > 7*24*time.Hour {
-		resolution = "1d"
-	}
-
-	since := time.Now().Add(-period)
-	endpoint := fmt.Sprintf(
-		"%s/api/0/issues/%s/events/?statsPeriod=%s&resolution=%s",
-		s.baseURL, errorID,
-		formatStatsPeriod(period), resolution,
-	)
-
-	// Fall back to a simpler approach: fetch the issue and build a basic trend.
-	var issue sentryAPIIssue
 	issueEndpoint := fmt.Sprintf("%s/api/0/issues/%s/", s.baseURL, errorID)
+	var issue sentryAPIIssue
 	if err := s.doGet(ctx, issueEndpoint, &issue); err != nil {
 		return nil, fmt.Errorf("get sentry issue for trend: %w", err)
 	}
-
-	_ = endpoint // TODO: use stats endpoint when available
-	_ = since
 
 	trend := &ErrorTrend{
 		ErrorID: errorID,
 		Period:  period,
 	}
 
-	// Parse stats14d if available (Sentry returns this on issue detail).
 	if len(issue.Stats14d) > 0 {
 		for _, bucket := range issue.Stats14d {
 			if len(bucket) == 2 {
@@ -149,9 +148,9 @@ func (s *SentryErrorTracker) GetTrend(ctx context.Context, errorID string, perio
 	return trend, nil
 }
 
-// FindRelated returns issues that share the same culprit (file/function) as the given error.
+// FindRelated returns issues that share the same culprit (file/function).
+// The PM agent uses this to cluster related errors for unified fixes.
 func (s *SentryErrorTracker) FindRelated(ctx context.Context, errorID string) ([]ErrorSummary, error) {
-	// First, get the target issue to find its culprit.
 	detail, err := s.GetError(ctx, errorID)
 	if err != nil {
 		return nil, err
@@ -160,7 +159,6 @@ func (s *SentryErrorTracker) FindRelated(ctx context.Context, errorID string) ([
 		return nil, nil
 	}
 
-	// Search for other issues with the same culprit.
 	endpoint := fmt.Sprintf(
 		"%s/api/0/organizations/%s/issues/?query=is:unresolved culprit:%s&sort=date&limit=10",
 		s.baseURL, s.orgSlug, detail.Culprit,
@@ -174,7 +172,7 @@ func (s *SentryErrorTracker) FindRelated(ctx context.Context, errorID string) ([
 	summaries := make([]ErrorSummary, 0, len(issues))
 	for _, issue := range issues {
 		if issue.ID == errorID {
-			continue // exclude the original
+			continue
 		}
 		summaries = append(summaries, sentryIssueToSummary(issue))
 	}
@@ -182,6 +180,11 @@ func (s *SentryErrorTracker) FindRelated(ctx context.Context, errorID string) ([
 }
 
 // --- internal types ---
+//
+// sentryAPIIssue extends ingestion.SentryIssue with fields the ErrorTracker
+// needs that the ingestion layer doesn't parse (Permalink, Stats14d, IsRegression).
+// We define a local type rather than modifying ingestion.SentryIssue to avoid
+// coupling the ingestion layer to ErrorTracker-specific concerns.
 
 type sentryAPIIssue struct {
 	ID        string `json:"id"`
@@ -203,16 +206,15 @@ type sentryAPIIssue struct {
 		Name string `json:"name"`
 		Slug string `json:"slug"`
 	} `json:"project"`
-	Stats14d   [][]float64 `json:"stats"`
-	StatusDetails struct {
-		AutoResolved bool `json:"autoResolved"`
-	} `json:"statusDetails"`
-	IsRegression bool `json:"isRegression,omitempty"`
+	Stats14d      [][]float64 `json:"stats"`
+	IsRegression  bool        `json:"isRegression,omitempty"`
 }
 
+// sentryAPIEvent is the response from /issues/{id}/events/latest/.
+// The ingestion layer doesn't fetch individual events — this is new.
 type sentryAPIEvent struct {
-	EventID  string `json:"eventID"`
-	Entries  []struct {
+	EventID string `json:"eventID"`
+	Entries []struct {
 		Type string          `json:"type"`
 		Data json.RawMessage `json:"data"`
 	} `json:"entries"`
@@ -228,11 +230,11 @@ type sentryExceptionData struct {
 		Value      string `json:"value"`
 		Stacktrace struct {
 			Frames []struct {
-				Filename string `json:"filename"`
-				AbsPath  string `json:"absPath"`
-				Function string `json:"function"`
-				LineNo   int    `json:"lineNo"`
-				InApp    bool   `json:"inApp"`
+				Filename string          `json:"filename"`
+				AbsPath  string          `json:"absPath"`
+				Function string          `json:"function"`
+				LineNo   int             `json:"lineNo"`
+				InApp    bool            `json:"inApp"`
 				Context  [][]interface{} `json:"context"`
 			} `json:"frames"`
 		} `json:"stacktrace"`
@@ -281,6 +283,9 @@ func sentryIssueToSummary(issue sentryAPIIssue) ErrorSummary {
 	}
 }
 
+// parseEventStackTrace extracts a structured stack trace from a Sentry event.
+// This is richer than the ingestion layer's extractStackTrace (in claude_code.go)
+// because it includes InApp filtering, source context, and a PM-friendly summary.
 func parseEventStackTrace(event sentryAPIEvent) *StackTrace {
 	for _, entry := range event.Entries {
 		if entry.Type != "exception" {
@@ -296,11 +301,9 @@ func parseEventStackTrace(event sentryAPIEvent) *StackTrace {
 		var summaryParts []string
 
 		for _, value := range data.Values {
-			// Iterate frames in reverse (most recent first).
 			for i := len(value.Stacktrace.Frames) - 1; i >= 0; i-- {
 				frame := value.Stacktrace.Frames[i]
 
-				// Skip vendor frames.
 				if !frame.InApp && (strings.Contains(frame.Filename, "node_modules") ||
 					strings.Contains(frame.Filename, "site-packages") ||
 					strings.HasPrefix(frame.Filename, "<")) {
@@ -318,7 +321,6 @@ func parseEventStackTrace(event sentryAPIEvent) *StackTrace {
 					Line:     frame.LineNo,
 				}
 
-				// Extract source context if available.
 				if len(frame.Context) > 0 {
 					var contextLines []string
 					for _, line := range frame.Context {
@@ -369,6 +371,9 @@ func parseSentryTags(tags []struct {
 	return m
 }
 
+// mapSentryLevelToSeverity mirrors ingestion.mapSentryLevel. We duplicate it
+// here rather than exporting the ingestion version because the ingestion
+// package's helpers are intentionally unexported internal details.
 func mapSentryLevelToSeverity(level string) string {
 	switch level {
 	case "fatal":
@@ -399,6 +404,9 @@ func mapSeverityToSentryLevel(severity string) string {
 	}
 }
 
+// parseTimeBestEffort mirrors ingestion.parseTimeSafe with additional format
+// support. We duplicate rather than export because the ingestion helpers are
+// intentionally unexported.
 func parseTimeBestEffort(s string) time.Time {
 	for _, layout := range []string{
 		time.RFC3339,
@@ -426,7 +434,6 @@ func computeTrendDirection(points []TrendDataPoint) string {
 		return "stable"
 	}
 
-	// Compare the last quarter to the first quarter.
 	quarter := len(points) / 4
 	if quarter < 1 {
 		quarter = 1
