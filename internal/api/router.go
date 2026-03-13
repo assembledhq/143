@@ -47,6 +47,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	projectCycleStore := db.NewProjectCycleStore(pool)
 	projectAttachmentStore := db.NewProjectAttachmentStore(pool)
 	projectSpecStore := db.NewProjectSpecStore(pool)
+	pmDocumentStore := db.NewPMDocumentStore(pool)
 
 	// Create credential store with optional encryption.
 	var cryptoSvc *crypto.Service
@@ -119,6 +120,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	projectAnalysisHandler := handlers.NewProjectAnalysisHandler(projectStore, projectSpecStore, projectAttachmentStore, projectTaskStore)
 	projectGenerateHandler := handlers.NewProjectGenerateHandler(llmClient)
 	codexAuthHandler := handlers.NewCodexAuthHandler(codexAuthSvc, logger)
+	pmDocumentHandler := handlers.NewPMDocumentHandler(pmDocumentStore)
 
 	r := chi.NewRouter()
 
@@ -201,6 +203,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/projects/{id}/attachments", projectAttachmentHandler.List)
 			r.Get("/api/v1/projects/{id}/specs", projectSpecHandler.List)
 			r.Get("/api/v1/projects/{id}/specs/{specId}", projectSpecHandler.Get)
+			r.Get("/api/v1/pm/documents", pmDocumentHandler.List)
+			r.Get("/api/v1/pm/documents/{docId}", pmDocumentHandler.Get)
 		})
 
 		// Write routes (admin and member only)
@@ -242,6 +246,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Delete("/api/v1/projects/{id}/specs/{specId}", projectSpecHandler.Delete)
 			r.Post("/api/v1/projects/ai/generate", projectGenerateHandler.Generate)
 			r.Post("/api/v1/projects/{id}/ai/improve", projectAnalysisHandler.Improve)
+			r.Post("/api/v1/pm/documents", pmDocumentHandler.Create)
+			r.Patch("/api/v1/pm/documents/{docId}", pmDocumentHandler.Update)
+			r.Delete("/api/v1/pm/documents/{docId}", pmDocumentHandler.Delete)
 		})
 
 		// Admin-only routes
