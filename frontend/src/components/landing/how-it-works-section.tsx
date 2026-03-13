@@ -496,7 +496,7 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
               <h2
                 className={`text-2xl sm:text-3xl font-light tracking-tight ${heading}`}
               >
-                Everything Connects
+                Everything connects
               </h2>
               <p className={`text-sm leading-relaxed max-w-sm ${body}`}>
                 Sentry errors, Linear tickets, Slack threads, your product
