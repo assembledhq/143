@@ -49,9 +49,8 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
           <p
             className={`max-w-md text-sm leading-relaxed ${isDark ? "text-white/45" : "text-slate-600"}`}
           >
-            Finds bugs worth fixing and breaks down your projects.
-            Ships the work to Claude Code, Codex, or any coding
-            agent your team runs.
+            Fix bugs and ship projects automatically. Works with
+            Claude Code, Codex, or any coding agent.
           </p>
 
           <div className="pt-2 pointer-events-auto">
