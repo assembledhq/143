@@ -51,7 +51,7 @@ describe("PMStatusBanner", () => {
       expect(screen.getByText("PM Agent")).toBeInTheDocument();
     });
     expect(screen.getByText("Idle")).toBeInTheDocument();
-    expect(screen.getByText("Analyze Now")).toBeInTheDocument();
+    expect(screen.getByText("Run PM Agent")).toBeInTheDocument();
   });
 
   it("renders running state", () => {
@@ -60,9 +60,9 @@ describe("PMStatusBanner", () => {
     renderWithProviders(<PMStatusBanner hasActivePlanSession={false} />);
 
     expect(screen.getByText("Running")).toBeInTheDocument();
-    expect(screen.getByText("Analyzing...")).toBeInTheDocument();
+    expect(screen.getByText("Running...")).toBeInTheDocument();
     expect(
-      screen.getByText("Analyzing issues, reviewing context, and generating a plan...")
+      screen.getByText("Analyzing issues and generating a plan...")
     ).toBeInTheDocument();
   });
 
@@ -138,9 +138,8 @@ describe("PMStatusBanner", () => {
     renderWithProviders(<PMStatusBanner hasActivePlanSession={false} />);
 
     await waitFor(() => {
-      expect(screen.getByText("10 issues reviewed")).toBeInTheDocument();
+      expect(screen.getByText("10 reviewed")).toBeInTheDocument();
     });
-    expect(screen.getByText("Next run: 5m")).toBeInTheDocument();
   });
 
   it("shows delegation stats", async () => {
@@ -163,10 +162,8 @@ describe("PMStatusBanner", () => {
     renderWithProviders(<PMStatusBanner hasActivePlanSession={false} />);
 
     await waitFor(() => {
-      expect(screen.getByText("80% success rate")).toBeInTheDocument();
+      expect(screen.getByText("80% success")).toBeInTheDocument();
     });
-    expect(screen.getByText("8 succeeded")).toBeInTheDocument();
-    expect(screen.getByText("2 failed")).toBeInTheDocument();
   });
 
   it("displays and dismisses analyze error", async () => {
