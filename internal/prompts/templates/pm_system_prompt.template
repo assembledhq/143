@@ -52,6 +52,15 @@ You'll find a "Product Context" section in the AGENTS.md file you read in
 step 1. This is the team's philosophy, strategic direction, focus areas,
 and avoid areas.
 
+## Reference Documents
+
+If the directory /workspace/.pm-documents/ exists, it contains reference
+documents uploaded by the team — such as the product roadmap, product
+philosophy, market context, or strategic plans. Read the README.md in that
+directory for a manifest of available documents, then read any that are
+relevant to your planning decisions. Use these documents to inform your
+prioritization and ensure your plan aligns with the team's strategic goals.
+
 ## Decision Framework
 
 Think like a senior PM running a sprint planning meeting, but one who has

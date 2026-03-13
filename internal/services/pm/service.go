@@ -77,6 +77,10 @@ type projectCycleStore interface {
 	ListByProject(ctx context.Context, orgID, projectID uuid.UUID, limit int) ([]models.ProjectCycle, error)
 }
 
+type pmDocumentStore interface {
+	ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.PMDocument, error)
+}
+
 // Service is the AI Product Manager. It runs the PM agent and delegates work.
 type Service struct {
 	issues        issueStore
@@ -90,6 +94,7 @@ type Service struct {
 	projects      projectStore      // nil-safe: projects feature disabled if nil
 	projectTasks  projectTaskStore  // nil-safe
 	projectCycles projectCycleStore // nil-safe
+	pmDocuments   pmDocumentStore   // nil-safe
 	sandbox       agent.SandboxProvider
 	adapter       agent.AgentAdapter
 	github        agent.GitHubTokenProvider
@@ -132,6 +137,12 @@ func (s *Service) SetProjectStores(projects projectStore, tasks projectTaskStore
 	s.projectTasks = tasks
 	s.projectCycles = cycles
 }
+
+// SetPMDocumentStore injects the PM document store. Nil-safe: if not called, PM documents are not included in context.
+func (s *Service) SetPMDocumentStore(store pmDocumentStore) {
+	s.pmDocuments = store
+}
+
 
 func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID) (*Plan, error) {
 	if s.adapter == nil || s.sandbox == nil {
@@ -204,6 +215,12 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	if ctxBundle.productContext != nil {
 		if err := s.writeProductContextToAgentsMD(ctx, sb, ctxBundle.productContext); err != nil {
 			s.logger.Warn().Err(err).Msg("failed to write product context to AGENTS.md")
+		}
+	}
+
+	if len(ctxBundle.pmDocuments) > 0 {
+		if err := s.writePMDocumentsToWorkspace(ctx, sb, ctxBundle.pmDocuments); err != nil {
+			s.logger.Warn().Err(err).Msg("failed to write PM documents to workspace")
 		}
 	}
 
