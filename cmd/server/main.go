@@ -109,7 +109,7 @@ func main() {
 			services = buildServices(cfg, pool, logger, codexAuthSvc, credentialStore, issueStore, sessionStore,
 				jobStore, orgStore, repoStore, validationStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
-				projectStore, projectTaskStore, projectCycleStore)
+				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore)
 		}
 		worker.RegisterHandlers(w, stores, services, logger)
 		go w.Start(ctx)
@@ -189,6 +189,7 @@ func buildServices(
 	projectStore *db.ProjectStore,
 	projectTaskStore *db.ProjectTaskStore,
 	projectCycleStore *db.ProjectCycleStore,
+	pmDocumentStore *db.PMDocumentStore,
 ) *worker.Services {
 	// GitHub App service (for installation tokens, PR creation).
 	ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
