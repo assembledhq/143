@@ -276,6 +276,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 	}
 
+	// 8b. Inject MCP server config for integration tools (non-fatal).
+	if err := o.injectMCPServer(ctx, run.OrgID, run.AgentType, sandbox); err != nil {
+		log.Warn().Err(err).Msg("MCP server injection failed, agent will run without integration tools")
+	}
+
 	// 9. Clone repo into sandbox.
 	if repoURL != "" {
 		if err := o.provider.CloneRepo(ctx, sandbox, repoURL, branch, token); err != nil {
@@ -542,6 +547,26 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 		}
 	}
 
+	// Integration credentials — consumed by the 143-mcp binary inside the sandbox.
+	// These are injected for all agent types since the MCP server is agent-agnostic.
+	if cred, err := o.credentials.Get(ctx, orgID, models.ProviderSentry); err == nil && cred != nil {
+		if cfg, ok := cred.Config.(models.SentryConfig); ok {
+			if cfg.AccessToken != "" {
+				merged["SENTRY_AUTH_TOKEN"] = cfg.AccessToken
+			}
+			if cfg.OrgSlug != "" {
+				merged["SENTRY_ORG_SLUG"] = cfg.OrgSlug
+			}
+		}
+	}
+	if cred, err := o.credentials.Get(ctx, orgID, models.ProviderLinear); err == nil && cred != nil {
+		if cfg, ok := cred.Config.(models.LinearConfig); ok {
+			if cfg.AccessToken != "" {
+				merged["LINEAR_ACCESS_TOKEN"] = cfg.AccessToken
+			}
+		}
+	}
+
 	if len(merged) == 0 {
 		return nil
 	}
@@ -597,6 +622,108 @@ func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, san
 		Msg("injected codex auth.json into sandbox")
 
 	return true, nil
+}
+
+// injectMCPServer writes MCP configuration files into the sandbox so the
+// agent CLI discovers the 143-mcp integration server at startup.
+//
+// The 143-mcp binary is pre-installed in the agent container image. This
+// method writes the per-CLI config that tells each agent where to find it.
+// Integration credentials are passed via environment variables (already in
+// the sandbox env from resolveAgentEnv).
+//
+// This is non-fatal — if injection fails, the agent runs without MCP tools.
+func (o *Orchestrator) injectMCPServer(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, sandbox *Sandbox) error {
+	if o.credentials == nil {
+		return nil
+	}
+
+	// Check if the org has any integration credentials worth exposing.
+	hasSentry := o.hasCredential(ctx, orgID, models.ProviderSentry)
+	hasLinear := o.hasCredential(ctx, orgID, models.ProviderLinear)
+	if !hasSentry && !hasLinear {
+		return nil // no integrations configured — skip MCP injection
+	}
+
+	mcpBinary := "/usr/local/bin/143-mcp"
+
+	switch agentType {
+	case models.AgentTypeClaudeCode:
+		return o.injectClaudeCodeMCP(ctx, sandbox, mcpBinary)
+	case models.AgentTypeCodex:
+		return o.injectCodexMCP(ctx, sandbox, mcpBinary)
+	case models.AgentTypeGeminiCLI:
+		// Gemini CLI does not have documented MCP support.
+		// Integration data is provided via prompt context instead.
+		return nil
+	default:
+		return nil
+	}
+}
+
+// injectClaudeCodeMCP writes $HOME/.claude/mcp.json for Claude Code.
+func (o *Orchestrator) injectClaudeCodeMCP(ctx context.Context, sandbox *Sandbox, mcpBinary string) error {
+	claudeDir := path.Join(sandbox.WorkDir, ".claude")
+
+	var mkdirOut, mkdirErr bytes.Buffer
+	if _, err := o.provider.Exec(ctx, sandbox, fmt.Sprintf("mkdir -p %s", claudeDir), &mkdirOut, &mkdirErr); err != nil {
+		return fmt.Errorf("create .claude dir: %w", err)
+	}
+
+	config := map[string]any{
+		"mcpServers": map[string]any{
+			"143-integrations": map[string]any{
+				"command": mcpBinary,
+				"args":    []string{},
+			},
+		},
+	}
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("marshal mcp.json: %w", err)
+	}
+
+	configPath := claudeDir + "/mcp.json"
+	if err := o.provider.WriteFile(ctx, sandbox, configPath, configJSON); err != nil {
+		return fmt.Errorf("write mcp.json: %w", err)
+	}
+
+	o.logger.Debug().Str("path", configPath).Msg("injected Claude Code MCP config")
+	return nil
+}
+
+// injectCodexMCP appends MCP server config to $HOME/.codex/config.toml.
+func (o *Orchestrator) injectCodexMCP(ctx context.Context, sandbox *Sandbox, mcpBinary string) error {
+	codexDir := path.Join(sandbox.WorkDir, ".codex")
+
+	var mkdirOut, mkdirErr bytes.Buffer
+	if _, err := o.provider.Exec(ctx, sandbox, fmt.Sprintf("mkdir -p %s", codexDir), &mkdirOut, &mkdirErr); err != nil {
+		return fmt.Errorf("create .codex dir: %w", err)
+	}
+
+	// TOML config for Codex MCP.
+	mcpConfig := fmt.Sprintf(`[mcp]
+[mcp.servers.143-integrations]
+command = "%s"
+type = "stdio"
+`, mcpBinary)
+
+	configPath := codexDir + "/config.toml"
+
+	// Append to existing config if present (injectCodexAuth may have written auth.json,
+	// but config.toml is separate).
+	if err := o.provider.WriteFile(ctx, sandbox, configPath, []byte(mcpConfig)); err != nil {
+		return fmt.Errorf("write config.toml: %w", err)
+	}
+
+	o.logger.Debug().Str("path", configPath).Msg("injected Codex MCP config")
+	return nil
+}
+
+// hasCredential returns true if the org has a configured credential for the given provider.
+func (o *Orchestrator) hasCredential(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) bool {
+	cred, err := o.credentials.Get(ctx, orgID, provider)
+	return err == nil && cred != nil
 }
 
 func strPtr(s string) *string {
