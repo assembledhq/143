@@ -88,7 +88,7 @@ describe('OverviewPage', () => {
   it('renders the progress indicator', () => {
     renderWithProviders(<Overview />);
 
-    expect(screen.getByText(/of 4 connected/)).toBeInTheDocument();
+    expect(screen.getByText(/of 2 connected/)).toBeInTheDocument();
   });
 
   it('shows a single coding agent card with dropdown defaulting to Codex', async () => {
