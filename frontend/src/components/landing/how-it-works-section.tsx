@@ -499,9 +499,9 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
                 Everything Connects
               </h2>
               <p className={`text-sm leading-relaxed max-w-sm ${body}`}>
-                Sentry errors, Linear tickets, support threads, and your product
-                roadmap &mdash; the PM sees your entire production surface in one
-                place.
+                Sentry errors, Linear tickets, Slack threads, your product
+                roadmap. The PM watches all of it so your team doesn&rsquo;t have
+                to.
               </p>
             </div>
             <div className="md:w-1/2 w-full max-w-[400px] md:max-w-none relative">
@@ -541,9 +541,8 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
                 Goes back to sleep.
               </h2>
               <p className={`text-sm leading-relaxed max-w-sm ${body}`}>
-                Every few hours the PM scans for the highest-impact issues,
-                dispatches your coding agents, and ships validated PRs. No prompt
-                needed.
+                The PM scans for bugs on a loop, sends them to your coding
+                agents, and opens PRs when CI passes. No prompt needed.
               </p>
             </div>
             <div className="md:w-1/2 relative">
@@ -572,7 +571,7 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
                   <div className="w-2.5 h-2.5 rounded-full bg-[#febc2e]" />
                   <div className="w-2.5 h-2.5 rounded-full bg-[#28c840]" />
                   <span className="ml-3 text-xs font-mono text-white/25">
-                    pm-agent &mdash; loop
+                    pm-agent · loop
                   </span>
                 </div>
                 <TerminalContent progress={termProgress} />
@@ -601,9 +600,8 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
                 The PM chips away.
               </h2>
               <p className={`text-sm leading-relaxed max-w-sm ${body}`}>
-                Define an initiative and the PM breaks it into sequenced tasks.
-                Set priorities in plain language and it balances across bugs,
-                projects, and tech debt.
+                Describe what you want built and the PM breaks it into tasks.
+                It works through them one by one, opening PRs as it goes.
               </p>
             </div>
             <div className="md:w-1/2 relative">
@@ -655,7 +653,7 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
                       isDark ? "text-white/20" : "text-slate-400"
                     }`}
                   >
-                    &ldquo;focus on auth this sprint&rdquo; &rarr; PM rebalances
+                    &ldquo;focus on auth this sprint&rdquo;
                   </p>
                 </div>
               </div>
@@ -678,14 +676,14 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
               <h2
                 className={`text-2xl sm:text-3xl font-light tracking-tight ${heading}`}
               >
-                Each engineer picks
+                Cloud agents for
                 <br />
-                their own agent
+                the whole team
               </h2>
               <p className={`text-sm leading-relaxed max-w-sm ${body}`}>
-                Claude Code, Codex, Gemini CLI &mdash; the PM dispatches the
-                task, your agent builds it, your CI validates it. Different
-                engineers can use different agents on the same team.
+                Agents run in the cloud, so anyone on your team can use them.
+                Each engineer picks their own, whether it&rsquo;s Claude Code,
+                Codex, or Gemini CLI.
               </p>
             </div>
             <div className="md:w-1/2 relative">
