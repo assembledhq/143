@@ -153,7 +153,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                   size="sm"
                   className={cn(
                     "h-8 w-full justify-start gap-2 rounded-lg px-2.5 text-[13px] font-medium transition-colors duration-150",
-                    pathname.startsWith("/settings") || pathname.startsWith("/team") || pathname.startsWith("/integrations") || pathname.startsWith("/agent") || pathname.startsWith("/prioritization") || pathname.startsWith("/llm") || pathname.startsWith("/pm-documents")
+                    pathname.startsWith("/settings") || pathname.startsWith("/team") || pathname.startsWith("/integrations") || pathname.startsWith("/agent") || pathname.startsWith("/prioritization") || pathname.startsWith("/llm") || pathname.startsWith("/product-context")
                       ? "bg-sidebar-accent text-sidebar-accent-foreground"
                       : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
                   )}
@@ -195,9 +195,9 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                   <Target className="h-4 w-4" />
                   Prioritization
                 </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => router.push("/pm-documents")}>
+                <DropdownMenuItem onClick={() => router.push("/product-context")}>
                   <FileText className="h-4 w-4" />
-                  PM Documents
+                  Product Context
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => router.push("/team")}>
                   <Users className="h-4 w-4" />

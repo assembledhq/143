@@ -48,7 +48,7 @@ const SOURCE_TYPE_LABELS: Record<string, string> = {
   file_upload: "File Upload",
 };
 
-export default function PMDocumentsPage() {
+export default function ProductContextPage() {
   const queryClient = useQueryClient();
   const [showCreate, setShowCreate] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -144,8 +144,8 @@ export default function PMDocumentsPage() {
     <PageContainer size="default">
       <div className="space-y-6">
         <PageHeader
-          title="PM Documents"
-          description="Upload reference documents for the PM agent — roadmaps, product philosophy, strategy docs, and more. Link to external sources or paste content directly."
+          title="Product Context"
+          description="Reference documents that shape how the PM agent prioritizes and plans — roadmaps, product philosophy, strategy docs, and more."
           action={
             !showCreate && (
               <Button size="sm" onClick={() => setShowCreate(true)}>
@@ -267,10 +267,10 @@ export default function PMDocumentsPage() {
               <div className="flex flex-col items-center justify-center py-12 text-center">
                 <FileText className="h-10 w-10 text-muted-foreground/40 mb-3" />
                 <p className="text-sm font-medium text-muted-foreground">
-                  No documents yet
+                  No context documents yet
                 </p>
                 <p className="text-xs text-muted-foreground mt-1 max-w-sm">
-                  Add your roadmap, product philosophy, or other reference documents to give the PM agent context. You can paste content directly or link to external sources like Notion or Google Docs.
+                  Add your roadmap, product philosophy, or strategy docs to guide how the PM agent prioritizes work. Paste content directly or link to Notion, Google Docs, and other sources.
                 </p>
               </div>
             </CardContent>
