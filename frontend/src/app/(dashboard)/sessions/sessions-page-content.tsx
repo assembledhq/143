@@ -1,11 +1,10 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { CalendarClock } from "lucide-react";
+import { CalendarClock, Plus } from "lucide-react";
 import Link from "next/link";
 import { useQueryState, parseAsString } from "nuqs";
 import { PageHeader } from "@/components/page-header";
-import { EmptyState } from "@/components/empty-state";
 import { PMStatusBanner } from "@/components/pm/pm-status-banner";
 import { DecisionsView } from "@/components/pm/decisions-view";
 import { Button } from "@/components/ui/button";
@@ -75,10 +74,10 @@ function SessionRow({ session }: { session: Session }) {
   return (
     <Link
       href={`/sessions/${session.id}`}
-      className="group flex items-center gap-4 py-3.5 px-4 hover:bg-muted/40 transition-colors duration-150 cursor-pointer"
+      className="group flex items-center gap-4 py-2.5 px-1 hover:bg-muted/50 transition-colors cursor-pointer rounded-md -mx-1"
     >
       {/* Status dot */}
-      <div className="flex-shrink-0">
+      <div className="flex-shrink-0 w-4 flex justify-center">
         {active ? (
           <span className="relative flex h-2 w-2">
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary/60 opacity-75" />
@@ -126,22 +125,21 @@ function SessionSection({ title, sessions, badge }: {
 }) {
   if (sessions.length === 0) return null;
   return (
-    <Card>
-      <CardContent className="p-0">
-        <div className="flex items-center gap-2 px-4 py-3 border-b border-border bg-muted/30">
-          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-            {title}
-          </span>
-          {badge}
-          <span className="text-xs text-muted-foreground">({sessions.length})</span>
-        </div>
-        <div className="divide-y divide-border">
-          {sessions.map((session) => (
-            <SessionRow key={session.id} session={session} />
-          ))}
-        </div>
-      </CardContent>
-    </Card>
+    <div>
+      <div className="flex items-center gap-2 py-2">
+        <span className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">
+          {title}
+        </span>
+        {badge}
+        <span className="text-[11px] text-muted-foreground">({sessions.length})</span>
+        <div className="flex-1 border-b border-border" />
+      </div>
+      <div className="divide-y divide-border/50">
+        {sessions.map((session) => (
+          <SessionRow key={session.id} session={session} />
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -167,7 +165,7 @@ export function SessionsPageContent() {
   const showGrouped = currentFilter === "all";
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       <PageHeader
         title="Sessions"
         description="Each agent execution creates a session."
@@ -225,23 +223,37 @@ export function SessionsPageContent() {
       )}
 
       {!showDecisions && !isLoading && !error && allSessions.length === 0 && (
-        <EmptyState
-          icon={CalendarClock}
-          title="No sessions yet"
-          description="Sessions are created when the PM agent runs an analysis or when you manually fix an issue."
-        />
+        <Card>
+          <CardContent className="flex flex-col items-center justify-center py-12">
+            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-muted">
+              <CalendarClock className="h-5 w-5 text-muted-foreground" />
+            </div>
+            <p className="mt-4 text-[13px] font-medium text-foreground">No sessions yet</p>
+            <p className="mt-1 max-w-sm text-center text-[13px] text-muted-foreground">
+              Click <span className="font-medium text-foreground">Run PM Agent</span> to review your issues and create sessions, or start a <span className="font-medium text-foreground">manual session</span> to fix a specific issue.
+            </p>
+            <div className="flex items-center gap-2 mt-4">
+              <Button variant="outline" size="sm" asChild>
+                <Link href="/sessions/new">
+                  <Plus className="mr-1.5 h-3.5 w-3.5" />
+                  Manual Session
+                </Link>
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       {!showDecisions && !isLoading && !error && allSessions.length > 0 && showGrouped && (
-        <div className="space-y-4">
+        <div className="space-y-5">
           <SessionSection
             title="Active"
             sessions={activeSessions}
             badge={
               activeSessions.length > 0 ? (
                 <span className="relative flex h-2 w-2">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary/60 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-primary" />
                 </span>
               ) : undefined
             }
@@ -253,26 +265,24 @@ export function SessionsPageContent() {
       )}
 
       {!showDecisions && !isLoading && !error && allSessions.length > 0 && !showGrouped && (
-        <Card>
-          <CardContent className="p-0">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-muted/30">
-              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                {filteredSessions.length} session{filteredSessions.length !== 1 ? "s" : ""}
-              </span>
+        <div>
+          <div className="flex items-center justify-between py-2">
+            <span className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">
+              {filteredSessions.length} session{filteredSessions.length !== 1 ? "s" : ""}
+            </span>
+          </div>
+          {filteredSessions.length === 0 ? (
+            <div className="py-12 text-center text-[13px] text-muted-foreground">
+              No sessions match this filter.
             </div>
-            {filteredSessions.length === 0 ? (
-              <div className="py-12 text-center text-[13px] text-muted-foreground">
-                No sessions match this filter.
-              </div>
-            ) : (
-              <div className="divide-y divide-border">
-                {filteredSessions.map((session) => (
-                  <SessionRow key={session.id} session={session} />
-                ))}
-              </div>
-            )}
-          </CardContent>
-        </Card>
+          ) : (
+            <div className="divide-y divide-border/50">
+              {filteredSessions.map((session) => (
+                <SessionRow key={session.id} session={session} />
+              ))}
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
