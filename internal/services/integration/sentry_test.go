@@ -103,27 +103,6 @@ func TestComputeTrendDirection(t *testing.T) {
 	}
 }
 
-func TestMapSentryLevelToSeverity(t *testing.T) {
-	tests := []struct {
-		level    string
-		expected string
-	}{
-		{"fatal", "critical"},
-		{"error", "high"},
-		{"warning", "medium"},
-		{"info", "low"},
-		{"debug", "medium"},
-		{"", "medium"},
-	}
-
-	for _, tt := range tests {
-		got := mapSentryLevelToSeverity(tt.level)
-		if got != tt.expected {
-			t.Errorf("mapSentryLevelToSeverity(%q) = %q, want %q", tt.level, got, tt.expected)
-		}
-	}
-}
-
 func TestMapSeverityToSentryLevel(t *testing.T) {
 	tests := []struct {
 		severity string
@@ -140,29 +119,6 @@ func TestMapSeverityToSentryLevel(t *testing.T) {
 		got := mapSeverityToSentryLevel(tt.severity)
 		if got != tt.expected {
 			t.Errorf("mapSeverityToSentryLevel(%q) = %q, want %q", tt.severity, got, tt.expected)
-		}
-	}
-}
-
-func TestParseTimeBestEffort(t *testing.T) {
-	tests := []struct {
-		input string
-		isSet bool
-	}{
-		{"2024-01-15T10:30:00Z", true},
-		{"2024-01-15T10:30:00.123Z", true},
-		{"2024-01-15T10:30:00+00:00", true},
-		{"not-a-date", false},
-		{"", false},
-	}
-
-	for _, tt := range tests {
-		result := parseTimeBestEffort(tt.input)
-		if tt.isSet && result.IsZero() {
-			t.Errorf("parseTimeBestEffort(%q) returned zero time, expected non-zero", tt.input)
-		}
-		if !tt.isSet && !result.IsZero() {
-			t.Errorf("parseTimeBestEffort(%q) returned non-zero time, expected zero", tt.input)
 		}
 	}
 }

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/assembledhq/143/internal/services/ingestion"
 )
 
 // LinearTaskManager implements TaskManager for the Linear issue tracker.
@@ -168,7 +170,7 @@ func (l *LinearTaskManager) GetTask(ctx context.Context, taskID string) (*TaskDe
 		detail.Comments = append(detail.Comments, TaskComment{
 			Author:    c.User.Name,
 			Body:      c.Body,
-			CreatedAt: parseTimeBestEffort(c.CreatedAt),
+			CreatedAt: ingestion.ParseTimeSafe(c.CreatedAt),
 		})
 	}
 
@@ -511,8 +513,8 @@ func linearNodeToSummary(node linearIssueNode) TaskSummary {
 		Team:       team,
 		Labels:     labels,
 		Assignee:   node.Assignee.Name,
-		CreatedAt:  parseTimeBestEffort(node.CreatedAt),
-		UpdatedAt:  parseTimeBestEffort(node.UpdatedAt),
+		CreatedAt:  ingestion.ParseTimeSafe(node.CreatedAt),
+		UpdatedAt:  ingestion.ParseTimeSafe(node.UpdatedAt),
 	}
 }
 
