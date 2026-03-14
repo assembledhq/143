@@ -71,14 +71,21 @@ func TestWebhook_HandleGitHub(t *testing.T) {
 				orgID := uuid.New()
 				integrationID := uuid.New()
 
-				// 1. GetByGitHubID -> no user found (empty rows)
+				// 1. GetByGitHubInstallationID -> no existing integration
+				mock.ExpectQuery("SELECT .+ FROM integrations WHERE provider").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}),
+					)
+
+				// 2. GetByGitHubID -> no user found (empty rows)
 				mock.ExpectQuery("SELECT .+ FROM users WHERE github_id").
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows([]string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}),
 					)
 
-				// 2. Create org (2 named args)
+				// 3. Create org (2 named args)
 				mock.ExpectQuery("INSERT INTO organizations").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
@@ -86,7 +93,7 @@ func TestWebhook_HandleGitHub(t *testing.T) {
 							AddRow(orgID, now, now),
 					)
 
-				// 3. Create integration (4 named args)
+				// 4. Create integration (4 named args)
 				mock.ExpectQuery("INSERT INTO integrations").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
@@ -94,7 +101,60 @@ func TestWebhook_HandleGitHub(t *testing.T) {
 							AddRow(integrationID, now),
 					)
 
-				// 4. UpsertFromGitHub repo (12 named args)
+				// 5. UpsertFromGitHub repo (12 named args)
+				mock.ExpectQuery("INSERT INTO repositories").
+					WithArgs(
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+					).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
+							AddRow(uuid.New(), now, now),
+					)
+			},
+			expectedCode: http.StatusOK,
+			expectedBody: "installation created",
+		},
+		{
+			name:   "installation created reuses existing integration",
+			secret: "test-secret",
+			event:  "installation",
+			payload: `{
+				"action": "created",
+				"installation": {
+					"id": 12345,
+					"account": {"id": 100, "login": "test-org"}
+				},
+				"repositories": [
+					{"id": 1001, "full_name": "test-org/repo1", "private": false}
+				]
+			}`,
+			signature: func(secret string, body []byte) string {
+				return computeTestSignature(secret, body)
+			},
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				now := time.Now()
+				orgID := uuid.New()
+				integrationID := uuid.New()
+
+				// 1. GetByGitHubInstallationID -> finds existing integration
+				mock.ExpectQuery("SELECT .+ FROM integrations WHERE provider").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+							AddRow(integrationID, orgID, "github", []byte(`{"installation_id":12345}`), "active", nil, now),
+					)
+
+				// 2. GetByID org -> found
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+							AddRow(orgID, "Test Org", []byte(`{}`), now, now),
+					)
+
+				// 3. UpsertFromGitHub repo (12 named args) — no integration created
 				mock.ExpectQuery("INSERT INTO repositories").
 					WithArgs(
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
