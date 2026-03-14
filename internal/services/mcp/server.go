@@ -214,10 +214,3 @@ func (s *Server) errorResponse(id json.RawMessage, code int, msg string) *Respon
 		Error:   &RPCError{Code: code, Message: msg},
 	}
 }
-
-// logf writes a formatted message to the diagnostic logger.
-func (s *Server) logf(format string, args ...any) {
-	if s.logger != nil {
-		fmt.Fprintf(s.logger, format+"\n", args...)
-	}
-}
