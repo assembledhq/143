@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
@@ -49,6 +50,11 @@ const (
 
 type integrationCredentialStore interface {
 	Upsert(ctx context.Context, orgID uuid.UUID, cfg models.ProviderConfig) error
+}
+
+// githubAppService provides GitHub App installation tokens for fetching repos.
+type githubAppService interface {
+	GetInstallationToken(ctx context.Context, installationID int64) (string, error)
 }
 
 // --- Linear types ---
@@ -135,6 +141,10 @@ type IntegrationHandler struct {
 	// GitHub App slug (for installation flow)
 	githubAppSlug string
 
+	// GitHub App service and repo store (for fetching repos on install)
+	githubService githubAppService
+	repoStore     *db.RepositoryStore
+
 	// Slack OAuth
 	slackClientID string
 	slackSecret   string
@@ -195,6 +205,15 @@ func WithGitHubIntegrationOAuth(clientID, secret string) IntegrationHandlerOptio
 func WithGitHubAppSlug(slug string) IntegrationHandlerOption {
 	return func(h *IntegrationHandler) {
 		h.githubAppSlug = slug
+	}
+}
+
+// WithGitHubApp injects the GitHub App service and repo store so that
+// HandleGitHubAppInstalled can fetch repos from the GitHub API.
+func WithGitHubApp(svc githubAppService, repoStore *db.RepositoryStore) IntegrationHandlerOption {
+	return func(h *IntegrationHandler) {
+		h.githubService = svc
+		h.repoStore = repoStore
 	}
 }
 
@@ -476,15 +495,115 @@ func (h *IntegrationHandler) HandleGitHubOAuthCallback(w http.ResponseWriter, r 
 }
 
 // HandleGitHubAppInstalled is called after a user installs the GitHub App.
-// It creates the integration record for the authenticated user's org and
+// It creates the integration record (with installation_id in config),
+// fetches the repos for that installation from the GitHub API, and
 // redirects to the frontend integrations page.
 func (h *IntegrationHandler) HandleGitHubAppInstalled(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
-	if _, _, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderGitHub); err != nil {
+	ctx := r.Context()
+
+	integration, _, err := h.ensureIntegration(ctx, orgID, models.IntegrationProviderGitHub)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "CONNECT_GITHUB_FAILED", "failed to connect github integration")
 		return
 	}
+
+	// GitHub redirects here with ?installation_id=<id>&setup_action=install.
+	// Store the installation_id in the integration config so webhooks can
+	// resolve the integration later, and fetch repos via the API so the user
+	// doesn't have to wait for the webhook.
+	if installIDStr := r.URL.Query().Get("installation_id"); installIDStr != "" {
+		installationID, parseErr := strconv.ParseInt(installIDStr, 10, 64)
+		if parseErr == nil {
+			configJSON, _ := json.Marshal(map[string]any{
+				"installation_id": installationID,
+			})
+			_ = h.integrationStore.UpdateConfig(ctx, orgID, integration.ID, configJSON)
+
+			// Fetch and upsert repos from the GitHub API.
+			if h.githubService != nil && h.repoStore != nil {
+				h.syncInstallationRepos(ctx, orgID, integration.ID, installationID)
+			}
+		}
+	}
+
 	http.Redirect(w, r, h.frontendURL+"/integrations?github=connected", http.StatusTemporaryRedirect)
+}
+
+// syncInstallationRepos fetches repos for a GitHub App installation and
+// upserts them into the database. Errors are logged but not surfaced to
+// the caller — the webhook provides a fallback if this fails.
+func (h *IntegrationHandler) syncInstallationRepos(ctx context.Context, orgID uuid.UUID, integrationID uuid.UUID, installationID int64) {
+	token, err := h.githubService.GetInstallationToken(ctx, installationID)
+	if err != nil {
+		return
+	}
+
+	repos, err := h.listInstallationRepos(ctx, token)
+	if err != nil {
+		return
+	}
+
+	for _, ghRepo := range repos {
+		repo := &models.Repository{
+			OrgID:          orgID,
+			IntegrationID:  integrationID,
+			GitHubID:       ghRepo.ID,
+			FullName:       ghRepo.FullName,
+			DefaultBranch:  ghRepo.DefaultBranch,
+			Private:        ghRepo.Private,
+			CloneURL:       ghRepo.CloneURL,
+			InstallationID: installationID,
+			Status:         "active",
+			Settings:       json.RawMessage(`{}`),
+		}
+		if repo.DefaultBranch == "" {
+			repo.DefaultBranch = "main"
+		}
+		if repo.CloneURL == "" {
+			repo.CloneURL = "https://github.com/" + ghRepo.FullName + ".git"
+		}
+		_ = h.repoStore.UpsertFromGitHub(ctx, repo)
+	}
+}
+
+// githubInstallationRepo is the subset of fields returned by
+// GET /installation/repositories.
+type githubInstallationRepo struct {
+	ID            int64  `json:"id"`
+	FullName      string `json:"full_name"`
+	Private       bool   `json:"private"`
+	DefaultBranch string `json:"default_branch"`
+	CloneURL      string `json:"clone_url"`
+}
+
+// listInstallationRepos calls the GitHub API to list all repos accessible
+// to the given installation token.
+func (h *IntegrationHandler) listInstallationRepos(ctx context.Context, token string) ([]githubInstallationRepo, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, githubAPIURL+"/installation/repositories?per_page=100", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "token "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("github API error %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Repositories []githubInstallationRepo `json:"repositories"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	return result.Repositories, nil
 }
 
 func (h *IntegrationHandler) ConnectGitHub(w http.ResponseWriter, r *http.Request) {

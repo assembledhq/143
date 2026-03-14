@@ -82,6 +82,20 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	healthHandler := handlers.NewHealthHandler(pool)
 	authHandler := handlers.NewAuthHandler(cfg, orgStore, userStore, authSessionStore, invitationStore)
 	repoHandler := handlers.NewRepositoryHandler(repoStore)
+	integrationOpts := []handlers.IntegrationHandlerOption{
+		handlers.WithSentryOAuth(cfg.SentryOAuthClientID, cfg.SentryOAuthClientSecret),
+		handlers.WithGitHubIntegrationOAuth(cfg.GitHubOAuthClientID, cfg.GitHubOAuthClientSecret),
+		handlers.WithGitHubAppSlug(cfg.GitHubAppSlug),
+		handlers.WithSlackOAuth(cfg.SlackOAuthClientID, cfg.SlackOAuthClientSecret),
+	}
+	// If the GitHub App service is available, let the integration handler
+	// fetch repos directly from the API during the install redirect.
+	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
+		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
+		if err == nil {
+			integrationOpts = append(integrationOpts, handlers.WithGitHubApp(ghSvc, repoStore))
+		}
+	}
 	integrationHandler := handlers.NewIntegrationHandler(
 		integrationStore,
 		credentialStore,
@@ -89,10 +103,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		cfg.LinearOAuthClientSecret,
 		cfg.BaseURL,
 		cfg.FrontendURL,
-		handlers.WithSentryOAuth(cfg.SentryOAuthClientID, cfg.SentryOAuthClientSecret),
-		handlers.WithGitHubIntegrationOAuth(cfg.GitHubOAuthClientID, cfg.GitHubOAuthClientSecret),
-		handlers.WithGitHubAppSlug(cfg.GitHubAppSlug),
-		handlers.WithSlackOAuth(cfg.SlackOAuthClientID, cfg.SlackOAuthClientSecret),
+		integrationOpts...,
 	)
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, userStore, repoStore, integrationStore, prService)
 	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeAgentEnv(), cfg.SafeLLMEnv())
