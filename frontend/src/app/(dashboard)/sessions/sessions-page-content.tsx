@@ -93,6 +93,11 @@ function SessionRow({ session }: { session: Session }) {
         <span className="text-[13px] font-medium text-foreground truncate block">
           {sessionTitle(session)}
         </span>
+        {session.status === "failed" && (session.failure_explanation || session.error) && (
+          <span className="text-[11px] text-destructive truncate block mt-0.5">
+            {session.failure_explanation || session.error}
+          </span>
+        )}
       </div>
 
       {/* Metadata */}
