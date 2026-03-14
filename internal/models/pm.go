@@ -74,4 +74,6 @@ type PMStatus struct {
 	SuccessCount   int        `json:"success_count"`
 	TotalDelegated int        `json:"total_delegated"`
 	NextRunIn      *string    `json:"next_run_in,omitempty"`
+	LastError      *string    `json:"last_error,omitempty"`
+	LastFailedAt   *time.Time `json:"last_failed_at,omitempty"`
 }
