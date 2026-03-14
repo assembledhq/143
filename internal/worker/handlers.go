@@ -40,7 +40,7 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, logger zero
 	}
 	if services != nil && services.Feedback != nil {
 		w.Register("process_review_comment", newProcessReviewCommentHandler(services, logger))
-		w.Register("update_review_patterns", newUpdateReviewPatternsHandler(services, logger))
+		w.Register("update_memories", newUpdateMemoriesHandler(services, logger))
 	}
 }
 
@@ -523,7 +523,7 @@ func newProcessReviewCommentHandler(services *Services, logger zerolog.Logger) J
 					category = *comment.Category
 				}
 				if err := services.Feedback.UpdatePatterns(ctx, orgID, commentID, input.Repo, *comment.GeneralizedRule, category); err != nil {
-					logger.Warn().Err(err).Str("comment_id", commentID.String()).Msg("failed to update review patterns")
+					logger.Warn().Err(err).Str("comment_id", commentID.String()).Msg("failed to update memories")
 				}
 			}
 		}
@@ -532,8 +532,8 @@ func newProcessReviewCommentHandler(services *Services, logger zerolog.Logger) J
 	}
 }
 
-// update_review_patterns handler updates patterns for a classified comment.
-func newUpdateReviewPatternsHandler(services *Services, logger zerolog.Logger) JobHandler {
+// update_memories handler updates memories for a classified comment.
+func newUpdateMemoriesHandler(services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
 			CommentID string `json:"comment_id"`
@@ -543,7 +543,7 @@ func newUpdateReviewPatternsHandler(services *Services, logger zerolog.Logger) J
 			Category  string `json:"category"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
-			return fmt.Errorf("unmarshal update_review_patterns payload: %w", err)
+			return fmt.Errorf("unmarshal update_memories payload: %w", err)
 		}
 
 		orgID, err := parseOrgID(input.OrgID, ctx)
@@ -559,7 +559,7 @@ func newUpdateReviewPatternsHandler(services *Services, logger zerolog.Logger) J
 			Str("comment_id", commentID.String()).
 			Str("org_id", orgID.String()).
 			Str("repo", input.Repo).
-			Msg("updating review patterns")
+			Msg("updating memories")
 
 		return services.Feedback.UpdatePatterns(ctx, orgID, commentID, input.Repo, input.Rule, input.Category)
 	}

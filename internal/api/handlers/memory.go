@@ -11,20 +11,20 @@ import (
 	"github.com/google/uuid"
 )
 
-type ReviewPatternHandler struct {
-	patternStore *db.ReviewPatternStore
+type MemoryHandler struct {
+	memoryStore  *db.MemoryStore
 	commentStore *db.ReviewCommentStore
 }
 
-func NewReviewPatternHandler(patternStore *db.ReviewPatternStore, commentStore *db.ReviewCommentStore) *ReviewPatternHandler {
-	return &ReviewPatternHandler{
-		patternStore: patternStore,
+func NewMemoryHandler(memoryStore *db.MemoryStore, commentStore *db.ReviewCommentStore) *MemoryHandler {
+	return &MemoryHandler{
+		memoryStore:  memoryStore,
 		commentStore: commentStore,
 	}
 }
 
-// ListByRepo returns review patterns for a specific repo.
-func (h *ReviewPatternHandler) ListByRepo(w http.ResponseWriter, r *http.Request) {
+// ListByRepo returns memories for a specific repo.
+func (h *MemoryHandler) ListByRepo(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	repo := chi.URLParam(r, "*")
 	if repo == "" {
@@ -33,38 +33,38 @@ func (h *ReviewPatternHandler) ListByRepo(w http.ResponseWriter, r *http.Request
 	}
 
 	limit := queryInt(r, "limit", 50)
-	filters := db.ReviewPatternFilters{
+	filters := db.MemoryFilters{
 		Status: r.URL.Query().Get("status"),
 		Limit:  limit,
 		Cursor: r.URL.Query().Get("cursor"),
 	}
 
-	patterns, err := h.patternStore.ListByRepo(r.Context(), orgID, repo, filters)
+	memories, err := h.memoryStore.ListByRepo(r.Context(), orgID, repo, filters)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list review patterns")
+		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list memories")
 		return
 	}
-	if patterns == nil {
-		patterns = []models.ReviewPattern{}
+	if memories == nil {
+		memories = []models.Memory{}
 	}
 
 	var nextCursor string
-	if len(patterns) > 0 && len(patterns) == limit {
-		nextCursor = patterns[len(patterns)-1].ID.String()
+	if len(memories) > 0 && len(memories) == limit {
+		nextCursor = memories[len(memories)-1].ID.String()
 	}
 
-	writeJSON(w, http.StatusOK, models.ListResponse[models.ReviewPattern]{
-		Data: patterns,
+	writeJSON(w, http.StatusOK, models.ListResponse[models.Memory]{
+		Data: memories,
 		Meta: models.PaginationMeta{NextCursor: nextCursor},
 	})
 }
 
-// UpdateStatus updates a review pattern's status (active, dismissed).
-func (h *ReviewPatternHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
+// UpdateStatus updates a memory's status (active, dismissed).
+func (h *MemoryHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
-	patternID, err := uuid.Parse(chi.URLParam(r, "id"))
+	memoryID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid pattern ID")
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid memory ID")
 		return
 	}
 
@@ -81,21 +81,21 @@ func (h *ReviewPatternHandler) UpdateStatus(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	pattern, err := h.patternStore.UpdatePatternAndGet(r.Context(), orgID, patternID, nil, &req.Status)
+	memory, err := h.memoryStore.UpdateMemoryAndGet(r.Context(), orgID, memoryID, nil, &req.Status)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update pattern status")
+		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update memory status")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, models.SingleResponse[models.ReviewPattern]{Data: pattern})
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.Memory]{Data: memory})
 }
 
-// UpdateRule updates a review pattern's rule text.
-func (h *ReviewPatternHandler) UpdateRule(w http.ResponseWriter, r *http.Request) {
+// UpdateRule updates a memory's rule text.
+func (h *MemoryHandler) UpdateRule(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
-	patternID, err := uuid.Parse(chi.URLParam(r, "id"))
+	memoryID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid pattern ID")
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid memory ID")
 		return
 	}
 
@@ -112,17 +112,17 @@ func (h *ReviewPatternHandler) UpdateRule(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	pattern, err := h.patternStore.UpdatePatternAndGet(r.Context(), orgID, patternID, &req.Rule, nil)
+	memory, err := h.memoryStore.UpdateMemoryAndGet(r.Context(), orgID, memoryID, &req.Rule, nil)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update pattern rule")
+		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update memory rule")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, models.SingleResponse[models.ReviewPattern]{Data: pattern})
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.Memory]{Data: memory})
 }
 
 // ListComments returns review comments, optionally filtered by PR.
-func (h *ReviewPatternHandler) ListComments(w http.ResponseWriter, r *http.Request) {
+func (h *MemoryHandler) ListComments(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
 	limit := queryInt(r, "limit", 50)

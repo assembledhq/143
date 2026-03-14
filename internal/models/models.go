@@ -302,8 +302,8 @@ type ReviewComment struct {
 	CreatedAt       time.Time  `db:"created_at" json:"created_at"`
 }
 
-// ReviewPattern represents a learned review convention for a repo.
-type ReviewPattern struct {
+// Memory represents a learned convention or rule for a repo or org.
+type Memory struct {
 	ID               uuid.UUID   `db:"id" json:"id"`
 	OrgID            uuid.UUID   `db:"org_id" json:"org_id"`
 	Repo             string      `db:"repo" json:"repo"`
@@ -314,5 +314,10 @@ type ReviewPattern struct {
 	Status           string      `db:"status" json:"status"`
 	ManuallyCurated  bool        `db:"manually_curated" json:"manually_curated"`
 	Active           bool        `db:"active" json:"active"`
+	Scope            string      `db:"scope" json:"scope"`
+	Source           string      `db:"source" json:"source"`
+	LastUsedAt       *time.Time  `db:"last_used_at" json:"last_used_at,omitempty"`
+	TimesReinforced  int         `db:"times_reinforced" json:"times_reinforced"`
+	FilePatterns     []string    `db:"file_patterns" json:"file_patterns,omitempty"`
 	CreatedAt        time.Time   `db:"created_at" json:"created_at"`
 }

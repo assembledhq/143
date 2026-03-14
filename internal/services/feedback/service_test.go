@@ -69,53 +69,53 @@ func (m *mockReviewCommentStore) ListActionableByPullRequest(ctx context.Context
 	return nil, nil
 }
 
-type mockReviewPatternStore struct {
-	createFn              func(ctx context.Context, p *models.ReviewPattern) error
-	getByIDFn             func(ctx context.Context, orgID, id uuid.UUID) (models.ReviewPattern, error)
-	findMatchingRuleFn    func(ctx context.Context, orgID uuid.UUID, repo, normalizedRule string) (models.ReviewPattern, error)
-	incrementOccurrenceFn func(ctx context.Context, orgID, patternID, commentID uuid.UUID) error
-	listActiveByRepoFn    func(ctx context.Context, orgID uuid.UUID, repo string) ([]models.ReviewPattern, error)
-	updatePatternFn       func(ctx context.Context, orgID, id uuid.UUID, rule *string, status *string) error
+type mockMemoryStore struct {
+	createFn              func(ctx context.Context, m *models.Memory) error
+	getByIDFn             func(ctx context.Context, orgID, id uuid.UUID) (models.Memory, error)
+	findMatchingRuleFn    func(ctx context.Context, orgID uuid.UUID, repo, normalizedRule string) (models.Memory, error)
+	incrementOccurrenceFn func(ctx context.Context, orgID, memoryID, commentID uuid.UUID) error
+	listActiveByRepoFn    func(ctx context.Context, orgID uuid.UUID, repo string) ([]models.Memory, error)
+	updateMemoryFn        func(ctx context.Context, orgID, id uuid.UUID, rule *string, status *string) error
 }
 
-func (m *mockReviewPatternStore) Create(ctx context.Context, p *models.ReviewPattern) error {
+func (m *mockMemoryStore) Create(ctx context.Context, mem *models.Memory) error {
 	if m.createFn != nil {
-		return m.createFn(ctx, p)
+		return m.createFn(ctx, mem)
 	}
 	return nil
 }
 
-func (m *mockReviewPatternStore) GetByID(ctx context.Context, orgID, id uuid.UUID) (models.ReviewPattern, error) {
+func (m *mockMemoryStore) GetByID(ctx context.Context, orgID, id uuid.UUID) (models.Memory, error) {
 	if m.getByIDFn != nil {
 		return m.getByIDFn(ctx, orgID, id)
 	}
-	return models.ReviewPattern{}, nil
+	return models.Memory{}, nil
 }
 
-func (m *mockReviewPatternStore) FindMatchingRule(ctx context.Context, orgID uuid.UUID, repo, normalizedRule string) (models.ReviewPattern, error) {
+func (m *mockMemoryStore) FindMatchingRule(ctx context.Context, orgID uuid.UUID, repo, normalizedRule string) (models.Memory, error) {
 	if m.findMatchingRuleFn != nil {
 		return m.findMatchingRuleFn(ctx, orgID, repo, normalizedRule)
 	}
-	return models.ReviewPattern{}, errors.New("no matching rule")
+	return models.Memory{}, errors.New("no matching rule")
 }
 
-func (m *mockReviewPatternStore) IncrementOccurrence(ctx context.Context, orgID, patternID, commentID uuid.UUID) error {
+func (m *mockMemoryStore) IncrementOccurrence(ctx context.Context, orgID, memoryID, commentID uuid.UUID) error {
 	if m.incrementOccurrenceFn != nil {
-		return m.incrementOccurrenceFn(ctx, orgID, patternID, commentID)
+		return m.incrementOccurrenceFn(ctx, orgID, memoryID, commentID)
 	}
 	return nil
 }
 
-func (m *mockReviewPatternStore) ListActiveByRepo(ctx context.Context, orgID uuid.UUID, repo string) ([]models.ReviewPattern, error) {
+func (m *mockMemoryStore) ListActiveByRepo(ctx context.Context, orgID uuid.UUID, repo string) ([]models.Memory, error) {
 	if m.listActiveByRepoFn != nil {
 		return m.listActiveByRepoFn(ctx, orgID, repo)
 	}
 	return nil, nil
 }
 
-func (m *mockReviewPatternStore) UpdatePattern(ctx context.Context, orgID, id uuid.UUID, rule *string, status *string) error {
-	if m.updatePatternFn != nil {
-		return m.updatePatternFn(ctx, orgID, id, rule, status)
+func (m *mockMemoryStore) UpdateMemory(ctx context.Context, orgID, id uuid.UUID, rule *string, status *string) error {
+	if m.updateMemoryFn != nil {
+		return m.updateMemoryFn(ctx, orgID, id, rule, status)
 	}
 	return nil
 }
@@ -140,11 +140,11 @@ func intPtr(i int) *int       { return &i }
 
 func newTestService(
 	comments ReviewCommentStore,
-	patterns ReviewPatternStore,
+	memories MemoryStore,
 	jobs JobStore,
 	llm LLMClient,
 ) *Service {
-	return NewService(comments, patterns, jobs, llm, zerolog.Nop())
+	return NewService(comments, memories, jobs, llm, zerolog.Nop())
 }
 
 // ---------------------------------------------------------------------------
@@ -214,7 +214,7 @@ func TestProcessComment(t *testing.T) {
 		commentID                uuid.UUID
 		orgID                    uuid.UUID
 		setupCommentStore        func(commentID, orgID uuid.UUID) *mockReviewCommentStore
-		setupPatternStore        func() *mockReviewPatternStore
+		setupMemoryStore        func() *mockMemoryStore
 		setupLLM                 func() *mockLLMClient
 		expectErr                bool
 		expectedUpdateFilterStat string // the filter_status passed to UpdateClassification, if any
@@ -236,8 +236,8 @@ func TestProcessComment(t *testing.T) {
 					},
 				}
 			},
-			setupPatternStore: func() *mockReviewPatternStore {
-				return &mockReviewPatternStore{}
+			setupMemoryStore: func() *mockMemoryStore {
+				return &mockMemoryStore{}
 			},
 			setupLLM: func() *mockLLMClient {
 				return &mockLLMClient{
@@ -273,8 +273,8 @@ func TestProcessComment(t *testing.T) {
 					},
 				}
 			},
-			setupPatternStore: func() *mockReviewPatternStore {
-				return &mockReviewPatternStore{}
+			setupMemoryStore: func() *mockMemoryStore {
+				return &mockMemoryStore{}
 			},
 			setupLLM: func() *mockLLMClient {
 				return &mockLLMClient{
@@ -311,8 +311,8 @@ func TestProcessComment(t *testing.T) {
 					},
 				}
 			},
-			setupPatternStore: func() *mockReviewPatternStore {
-				return &mockReviewPatternStore{}
+			setupMemoryStore: func() *mockMemoryStore {
+				return &mockMemoryStore{}
 			},
 			setupLLM: func() *mockLLMClient {
 				resp := classificationResult{
@@ -358,8 +358,8 @@ func TestProcessComment(t *testing.T) {
 					},
 				}
 			},
-			setupPatternStore: func() *mockReviewPatternStore {
-				return &mockReviewPatternStore{}
+			setupMemoryStore: func() *mockMemoryStore {
+				return &mockMemoryStore{}
 			},
 			setupLLM: func() *mockLLMClient {
 				rule := "Always check pointers for nil before dereferencing"
@@ -386,9 +386,9 @@ func TestProcessComment(t *testing.T) {
 			t.Parallel()
 
 			commentStore := tt.setupCommentStore(tt.commentID, tt.orgID)
-			patternStore := tt.setupPatternStore()
+			memoryStore := tt.setupMemoryStore()
 			llm := tt.setupLLM()
-			svc := newTestService(commentStore, patternStore, &mockJobStore{}, llm)
+			svc := newTestService(commentStore, memoryStore, &mockJobStore{}, llm)
 
 			err := svc.ProcessComment(context.Background(), tt.commentID, tt.orgID)
 			if tt.expectErr {
@@ -414,7 +414,7 @@ func TestUpdatePatterns(t *testing.T) {
 		repo              string
 		rule              string
 		category          string
-		setupPatternStore func(orgID, commentID uuid.UUID) *mockReviewPatternStore
+		setupMemoryStore func(orgID, commentID uuid.UUID) *mockMemoryStore
 		expectErr         bool
 	}{
 		{
@@ -424,12 +424,12 @@ func TestUpdatePatterns(t *testing.T) {
 			repo:      "my-org/my-repo",
 			rule:      "Always validate user input before processing.",
 			category:  "security",
-			setupPatternStore: func(orgID, commentID uuid.UUID) *mockReviewPatternStore {
-				return &mockReviewPatternStore{
-					findMatchingRuleFn: func(ctx context.Context, oID uuid.UUID, repo, normalizedRule string) (models.ReviewPattern, error) {
-						return models.ReviewPattern{}, errors.New("no matching rule found")
+			setupMemoryStore: func(orgID, commentID uuid.UUID) *mockMemoryStore {
+				return &mockMemoryStore{
+					findMatchingRuleFn: func(ctx context.Context, oID uuid.UUID, repo, normalizedRule string) (models.Memory, error) {
+						return models.Memory{}, errors.New("no matching rule found")
 					},
-					createFn: func(ctx context.Context, p *models.ReviewPattern) error {
+					createFn: func(ctx context.Context, p *models.Memory) error {
 						require.Equal(t, orgID, p.OrgID, "pattern org_id should match")
 						require.Equal(t, "my-org/my-repo", p.Repo, "pattern repo should match")
 						require.Equal(t, "Always validate user input before processing.", p.Rule, "pattern rule should match the original rule text")
@@ -451,11 +451,11 @@ func TestUpdatePatterns(t *testing.T) {
 			repo:      "my-org/my-repo",
 			rule:      "Always validate user input before processing.",
 			category:  "security",
-			setupPatternStore: func(orgID, commentID uuid.UUID) *mockReviewPatternStore {
+			setupMemoryStore: func(orgID, commentID uuid.UUID) *mockMemoryStore {
 				existingPatternID := uuid.New()
-				return &mockReviewPatternStore{
-					findMatchingRuleFn: func(ctx context.Context, oID uuid.UUID, repo, normalizedRule string) (models.ReviewPattern, error) {
-						return models.ReviewPattern{
+				return &mockMemoryStore{
+					findMatchingRuleFn: func(ctx context.Context, oID uuid.UUID, repo, normalizedRule string) (models.Memory, error) {
+						return models.Memory{
 							ID:              existingPatternID,
 							OrgID:           orgID,
 							Repo:            "my-org/my-repo",
@@ -471,7 +471,7 @@ func TestUpdatePatterns(t *testing.T) {
 						require.Equal(t, commentID, cID, "comment ID should match when incrementing occurrence")
 						return nil
 					},
-					createFn: func(ctx context.Context, p *models.ReviewPattern) error {
+					createFn: func(ctx context.Context, p *models.Memory) error {
 						t.Error("Create should not be called when a matching pattern already exists")
 						return nil
 					},
@@ -485,8 +485,8 @@ func TestUpdatePatterns(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			patternStore := tt.setupPatternStore(tt.orgID, tt.commentID)
-			svc := newTestService(&mockReviewCommentStore{}, patternStore, &mockJobStore{}, nil)
+			memoryStore := tt.setupMemoryStore(tt.orgID, tt.commentID)
+			svc := newTestService(&mockReviewCommentStore{}, memoryStore, &mockJobStore{}, nil)
 
 			err := svc.UpdatePatterns(context.Background(), tt.orgID, tt.commentID, tt.repo, tt.rule, tt.category)
 			if tt.expectErr {
@@ -563,7 +563,7 @@ func TestFormatRevisionFeedback(t *testing.T) {
 			t.Parallel()
 
 			commentStore := tt.setupCommentStore(tt.orgID, tt.prID)
-			svc := newTestService(commentStore, &mockReviewPatternStore{}, &mockJobStore{}, nil)
+			svc := newTestService(commentStore, &mockMemoryStore{}, &mockJobStore{}, nil)
 
 			result, err := svc.FormatRevisionFeedback(context.Background(), tt.orgID, tt.prID)
 			if tt.expectErr {
@@ -587,7 +587,7 @@ func TestGenerateConventionsDoc(t *testing.T) {
 		name              string
 		orgID             uuid.UUID
 		repo              string
-		setupPatternStore func(orgID uuid.UUID) *mockReviewPatternStore
+		setupMemoryStore func(orgID uuid.UUID) *mockMemoryStore
 		expectContains    []string
 		expectEmpty       bool
 		expectErr         bool
@@ -596,10 +596,10 @@ func TestGenerateConventionsDoc(t *testing.T) {
 			name:  "generates markdown from active patterns",
 			orgID: uuid.New(),
 			repo:  "my-org/my-repo",
-			setupPatternStore: func(orgID uuid.UUID) *mockReviewPatternStore {
-				return &mockReviewPatternStore{
-					listActiveByRepoFn: func(ctx context.Context, oID uuid.UUID, repo string) ([]models.ReviewPattern, error) {
-						return []models.ReviewPattern{
+			setupMemoryStore: func(orgID uuid.UUID) *mockMemoryStore {
+				return &mockMemoryStore{
+					listActiveByRepoFn: func(ctx context.Context, oID uuid.UUID, repo string) ([]models.Memory, error) {
+						return []models.Memory{
 							{
 								Rule:            "Always check nil pointers before dereferencing",
 								Category:        "logic_bug",
@@ -630,10 +630,10 @@ func TestGenerateConventionsDoc(t *testing.T) {
 			name:  "returns empty string when no active patterns exist",
 			orgID: uuid.New(),
 			repo:  "my-org/empty-repo",
-			setupPatternStore: func(orgID uuid.UUID) *mockReviewPatternStore {
-				return &mockReviewPatternStore{
-					listActiveByRepoFn: func(ctx context.Context, oID uuid.UUID, repo string) ([]models.ReviewPattern, error) {
-						return []models.ReviewPattern{}, nil
+			setupMemoryStore: func(orgID uuid.UUID) *mockMemoryStore {
+				return &mockMemoryStore{
+					listActiveByRepoFn: func(ctx context.Context, oID uuid.UUID, repo string) ([]models.Memory, error) {
+						return []models.Memory{}, nil
 					},
 				}
 			},
@@ -646,8 +646,8 @@ func TestGenerateConventionsDoc(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			patternStore := tt.setupPatternStore(tt.orgID)
-			svc := newTestService(&mockReviewCommentStore{}, patternStore, &mockJobStore{}, nil)
+			memoryStore := tt.setupMemoryStore(tt.orgID)
+			svc := newTestService(&mockReviewCommentStore{}, memoryStore, &mockJobStore{}, nil)
 
 			result, err := svc.GenerateConventionsDoc(context.Background(), tt.orgID, tt.repo)
 			if tt.expectErr {

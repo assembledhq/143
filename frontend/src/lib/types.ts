@@ -192,7 +192,7 @@ export interface ReviewComment {
   created_at: string;
 }
 
-export interface ReviewPattern {
+export interface Memory {
   id: string;
   org_id: string;
   repo: string;
@@ -203,6 +203,11 @@ export interface ReviewPattern {
   status: string;
   manually_curated: boolean;
   active: boolean;
+  scope: string;
+  source: string;
+  last_used_at?: string;
+  times_reinforced: number;
+  file_patterns?: string[];
   created_at: string;
 }
 

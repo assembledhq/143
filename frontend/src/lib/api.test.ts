@@ -472,8 +472,8 @@ describe('api client', () => {
     });
   });
 
-  describe('reviewPatterns', () => {
-    it('fetches review patterns by repo', async () => {
+  describe('memories', () => {
+    it('fetches memories by repo', async () => {
       const mockData = {
         data: [
           {
@@ -487,6 +487,9 @@ describe('api client', () => {
             status: 'active',
             manually_curated: false,
             active: true,
+            scope: 'repo',
+            source: 'review',
+            times_reinforced: 5,
             created_at: '2026-02-01T00:00:00Z',
           },
         ],
@@ -494,30 +497,30 @@ describe('api client', () => {
       };
 
       server.use(
-        http.get('/api/v1/review-patterns/:owner/:repo', ({ params }) => {
+        http.get('/api/v1/memories/:owner/:repo', ({ params }) => {
           expect(params.owner).toBe('org');
           expect(params.repo).toBe('repo');
           return HttpResponse.json(mockData);
         }),
       );
 
-      const result = await api.reviewPatterns.listByRepo('org/repo');
+      const result = await api.memories.listByRepo('org/repo');
       expect(result.data).toHaveLength(1);
       expect(result.data[0].id).toBe('rp-1');
       expect(result.data[0].rule).toBe('Always use error boundaries');
     });
 
-    it('fetches review patterns with params', async () => {
+    it('fetches memories with params', async () => {
       let capturedUrl: string | undefined;
 
       server.use(
-        http.get('/api/v1/review-patterns/:owner/:repo', ({ request }) => {
+        http.get('/api/v1/memories/:owner/:repo', ({ request }) => {
           capturedUrl = request.url;
           return HttpResponse.json({ data: [], meta: {} });
         }),
       );
 
-      await api.reviewPatterns.listByRepo('org/repo', { status: 'active', cursor: 'abc' });
+      await api.memories.listByRepo('org/repo', { status: 'active', cursor: 'abc' });
 
       expect(capturedUrl).toBeDefined();
       const url = new URL(capturedUrl!);
@@ -784,34 +787,34 @@ describe('api client', () => {
     });
   });
 
-  describe('reviewPatterns - updateStatus and updateRule', () => {
-    it('updates review pattern status', async () => {
+  describe('memories - updateStatus and updateRule', () => {
+    it('updates memory status', async () => {
       let capturedBody: unknown;
 
       server.use(
-        http.patch('/api/v1/review-patterns/:id', async ({ request }) => {
+        http.patch('/api/v1/memories/:id', async ({ request }) => {
           capturedBody = await request.json();
           return HttpResponse.json({ data: { id: 'rp-1', status: 'dismissed' } });
         }),
       );
 
-      await api.reviewPatterns.updateStatus('rp-1', 'dismissed');
+      await api.memories.updateStatus('rp-1', 'dismissed');
       expect(capturedBody).toEqual({ status: 'dismissed' });
     });
 
-    it('updates review pattern rule with PUT', async () => {
+    it('updates memory rule with PUT', async () => {
       let capturedBody: unknown;
       let capturedMethod: string | undefined;
 
       server.use(
-        http.put('/api/v1/review-patterns/:id', async ({ request }) => {
+        http.put('/api/v1/memories/:id', async ({ request }) => {
           capturedBody = await request.json();
           capturedMethod = request.method;
           return HttpResponse.json({ data: { id: 'rp-1', rule: 'new rule' } });
         }),
       );
 
-      await api.reviewPatterns.updateRule('rp-1', 'new rule');
+      await api.memories.updateRule('rp-1', 'new rule');
       expect(capturedBody).toEqual({ rule: 'new rule' });
       expect(capturedMethod).toBe('PUT');
     });
