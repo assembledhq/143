@@ -337,6 +337,8 @@ export interface PMStatus {
   success_count: number;
   total_delegated: number;
   next_run_in?: string;
+  last_error?: string;
+  last_failed_at?: string;
 }
 
 export interface SessionsListResponse {
