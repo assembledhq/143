@@ -385,9 +385,9 @@ export function AnalysisSection({ project }: { project: Project }) {
   });
 
   const priorityColors: Record<string, string> = {
-    high: "bg-red-100 text-red-800",
-    medium: "bg-yellow-100 text-yellow-800",
-    low: "bg-gray-100 text-gray-800",
+    high: "bg-red-500/10 text-red-700 dark:text-red-400",
+    medium: "bg-yellow-500/10 text-yellow-700 dark:text-yellow-400",
+    low: "bg-muted text-muted-foreground",
   };
 
   const typeIcons: Record<string, string> = { addition: "+", revision: "~", question: "?", task: "#" };

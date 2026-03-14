@@ -184,7 +184,7 @@ export default function AgentPage() {
           {mutation.isPending ? "Saving..." : "Save Settings"}
         </Button>
         {saveStatus === "success" && (
-          <span className="text-[13px] text-green-600">Settings saved.</span>
+          <span className="text-[13px] text-emerald-600 dark:text-emerald-400">Settings saved.</span>
         )}
         {saveStatus === "error" && (
           <span className="text-[13px] text-destructive">Failed to save settings.</span>

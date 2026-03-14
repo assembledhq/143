@@ -210,14 +210,14 @@ export function ManualSessionCreatePageContent() {
       <div className="relative mx-auto flex min-h-[calc(100vh-15rem)] w-full flex-col justify-end">
         <div className="pointer-events-none absolute inset-x-0 flex items-center justify-center" style={{ top: "45%", transform: "translateY(-50%)" }}>
           <div className="text-center">
-            <p className="text-3xl font-semibold tracking-tight text-foreground">Let&apos;s build</p>
+            <p className="text-3xl font-bold tracking-tight bg-[image:var(--gradient-primary)] bg-clip-text text-transparent">Let&apos;s build</p>
             <p className="mt-2 text-sm text-muted-foreground">Start a manual session with text, files, photos, or dictation.</p>
           </div>
         </div>
 
         <div className="pointer-events-none absolute inset-x-0 bottom-0 h-40 bg-gradient-to-t from-background via-background/80 to-transparent" />
 
-        <Card className="relative w-full border-border/60 bg-card shadow-lg rounded-2xl">
+        <Card className="relative w-full border-border/60 bg-card shadow-lg rounded-2xl dark:shadow-[0_0_20px_oklch(0.6_0.15_270_/_6%)]">
           <CardContent className="space-y-0 p-5 md:p-6">
             <Textarea
               ref={messageInputRef}

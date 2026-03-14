@@ -35,12 +35,12 @@ const DOC_TYPE_LABELS: Record<string, string> = {
 };
 
 const DOC_TYPE_COLORS: Record<string, string> = {
-  roadmap: "bg-blue-100 text-blue-800",
-  philosophy: "bg-purple-100 text-purple-800",
-  strategy: "bg-amber-100 text-amber-800",
-  market: "bg-green-100 text-green-800",
-  architecture: "bg-cyan-100 text-cyan-800",
-  reference: "bg-gray-100 text-gray-800",
+  roadmap: "bg-blue-500/10 text-blue-700 dark:text-blue-400",
+  philosophy: "bg-purple-500/10 text-purple-700 dark:text-purple-400",
+  strategy: "bg-amber-500/10 text-amber-700 dark:text-amber-400",
+  market: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
+  architecture: "bg-cyan-500/10 text-cyan-700 dark:text-cyan-400",
+  reference: "bg-muted text-muted-foreground",
 };
 
 const SOURCE_TYPE_LABELS: Record<string, string> = {
@@ -761,7 +761,7 @@ export default function PrioritizationPage() {
           {mutation.isPending ? "Saving..." : "Save Settings"}
         </Button>
         {saveStatus === "success" && (
-          <span className="text-[13px] text-green-600">Settings saved.</span>
+          <span className="text-[13px] text-emerald-600 dark:text-emerald-400">Settings saved.</span>
         )}
         {saveStatus === "error" && (
           <span className="text-[13px] text-destructive">Failed to save settings.</span>

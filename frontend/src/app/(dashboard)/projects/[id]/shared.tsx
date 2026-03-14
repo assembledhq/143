@@ -19,28 +19,28 @@ export const taskStatusConfig: Record<
   string,
   { color: string; label: string; icon: typeof Circle }
 > = {
-  pending: { color: "bg-gray-100 text-gray-800", label: "Pending", icon: Circle },
-  blocked: { color: "bg-yellow-100 text-yellow-800", label: "Blocked", icon: Pause },
-  delegated: { color: "bg-indigo-100 text-indigo-800", label: "Delegated", icon: ArrowUpRight },
-  running: { color: "bg-blue-100 text-blue-800", label: "Running", icon: Loader2 },
-  completed: { color: "bg-green-100 text-green-800", label: "Completed", icon: CheckCircle2 },
-  failed: { color: "bg-red-100 text-red-800", label: "Failed", icon: AlertCircle },
-  skipped: { color: "bg-gray-100 text-gray-700", label: "Skipped", icon: Ban },
-  cancelled: { color: "bg-gray-100 text-gray-700", label: "Cancelled", icon: Ban },
+  pending: { color: "bg-muted text-muted-foreground", label: "Pending", icon: Circle },
+  blocked: { color: "bg-yellow-500/10 text-yellow-700 dark:text-yellow-400", label: "Blocked", icon: Pause },
+  delegated: { color: "bg-indigo-500/10 text-indigo-700 dark:text-indigo-400", label: "Delegated", icon: ArrowUpRight },
+  running: { color: "bg-blue-500/10 text-blue-700 dark:text-blue-400", label: "Running", icon: Loader2 },
+  completed: { color: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400", label: "Completed", icon: CheckCircle2 },
+  failed: { color: "bg-red-500/10 text-red-700 dark:text-red-400", label: "Failed", icon: AlertCircle },
+  skipped: { color: "bg-muted text-muted-foreground", label: "Skipped", icon: Ban },
+  cancelled: { color: "bg-muted text-muted-foreground", label: "Cancelled", icon: Ban },
 };
 
 export const specTypeConfig: Record<string, { label: string; color: string }> = {
-  prd: { label: "PRD", color: "bg-blue-100 text-blue-800" },
-  technical: { label: "Technical", color: "bg-purple-100 text-purple-800" },
-  design: { label: "Design", color: "bg-pink-100 text-pink-800" },
-  user_story: { label: "User Story", color: "bg-green-100 text-green-800" },
+  prd: { label: "PRD", color: "bg-blue-500/10 text-blue-700 dark:text-blue-400" },
+  technical: { label: "Technical", color: "bg-purple-500/10 text-purple-700 dark:text-purple-400" },
+  design: { label: "Design", color: "bg-pink-500/10 text-pink-700 dark:text-pink-400" },
+  user_story: { label: "User Story", color: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400" },
 };
 
 export const attachmentCategoryConfig: Record<string, { label: string; color: string }> = {
-  screenshot: { label: "Screenshot", color: "bg-blue-100 text-blue-800" },
-  mockup: { label: "Mockup", color: "bg-purple-100 text-purple-800" },
-  wireframe: { label: "Wireframe", color: "bg-orange-100 text-orange-800" },
-  reference: { label: "Reference", color: "bg-gray-100 text-gray-800" },
+  screenshot: { label: "Screenshot", color: "bg-blue-500/10 text-blue-700 dark:text-blue-400" },
+  mockup: { label: "Mockup", color: "bg-purple-500/10 text-purple-700 dark:text-purple-400" },
+  wireframe: { label: "Wireframe", color: "bg-orange-500/10 text-orange-700 dark:text-orange-400" },
+  reference: { label: "Reference", color: "bg-muted text-muted-foreground" },
 };
 
 export function formatTimestamp(dateStr?: string): string {
@@ -65,7 +65,7 @@ export function ProgressBar({ completed, total }: { completed: number; total: nu
     <div className="flex items-center gap-3">
       <div className="h-2 flex-1 rounded-full bg-muted overflow-hidden">
         <div
-          className="h-full rounded-full bg-primary transition-all"
+          className="h-full rounded-full bg-[image:var(--gradient-primary)] transition-all"
           style={{ width: `${pct}%` }}
         />
       </div>

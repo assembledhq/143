@@ -307,7 +307,7 @@ export function ProjectDetailContent({ id }: { id: string }) {
 
       <div>
         <div className="flex items-center gap-3">
-          <h1 className="text-lg font-semibold text-foreground">{project.title}</h1>
+          <h1 className="text-xl font-bold text-foreground">{project.title}</h1>
           <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${status.color}`}>
             {isActive && (
               <span className="relative mr-1.5 flex h-2 w-2">
@@ -325,8 +325,8 @@ export function ProjectDetailContent({ id }: { id: string }) {
 
         <div className="mt-2 flex items-center gap-3 text-xs text-muted-foreground flex-wrap">
           <Badge variant="outline" className="text-[11px] px-1.5 py-0">{project.execution_mode}</Badge>
-          {runningCount > 0 && <span className="text-blue-600">{runningCount} running</span>}
-          {prCount > 0 && <span className="text-green-600">{prCount} PRs</span>}
+          {runningCount > 0 && <span className="text-blue-600 dark:text-blue-400">{runningCount} running</span>}
+          {prCount > 0 && <span className="text-emerald-600 dark:text-emerald-400">{prCount} PRs</span>}
           {specs.length > 0 && <span>{specs.length} specs</span>}
           {attachments.length > 0 && <span>{attachments.length} designs</span>}
           {project.current_phase && <span>Phase: {project.current_phase}</span>}

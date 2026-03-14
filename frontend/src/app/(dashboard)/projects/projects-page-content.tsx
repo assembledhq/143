@@ -42,7 +42,7 @@ function ProgressBar({ completed, total }: { completed: number; total: number })
     <div className="flex items-center gap-2">
       <div className="h-1.5 w-20 rounded-full bg-muted overflow-hidden">
         <div
-          className="h-full rounded-full bg-primary transition-all"
+          className="h-full rounded-full bg-[image:var(--gradient-primary)] transition-all"
           style={{ width: `${pct}%` }}
         />
       </div>
@@ -60,7 +60,7 @@ function ProjectRow({ project }: { project: Project }) {
   return (
     <Link
       href={`/projects/${project.id}`}
-      className="flex items-center justify-between py-3 px-4 border-b border-border last:border-b-0 hover:bg-muted/50 transition-colors cursor-pointer"
+      className="flex items-center justify-between py-3 px-4 border-b border-border/50 last:border-b-0 hover:bg-muted/40 dark:hover:bg-primary/[0.03] transition-all duration-150 cursor-pointer"
     >
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
@@ -186,8 +186,8 @@ export function ProjectsPageContent() {
       {!isLoading && !error && projects.length > 0 && (
         <Card>
           <CardContent className="p-0">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-muted/30">
-              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-border/50 bg-muted/30">
+              <span className="text-[11px] font-semibold text-muted-foreground/70 uppercase tracking-widest">
                 {projects.length} project{projects.length !== 1 ? "s" : ""}
               </span>
             </div>

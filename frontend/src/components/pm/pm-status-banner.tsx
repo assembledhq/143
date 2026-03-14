@@ -84,7 +84,7 @@ export function PMStatusBanner({ hasActivePlanSession }: PMStatusBannerProps) {
 
         <span className={`text-[11px] font-medium px-1.5 py-0.5 rounded ${
           isRunning ? "bg-primary/10 text-primary shadow-[var(--glow-primary-sm)]"
-          : agentStatus === "completed" ? "bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300"
+          : agentStatus === "completed" ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
           : agentStatus === "failed" ? "bg-destructive/10 text-destructive"
           : "bg-muted text-muted-foreground"
         }`}>
