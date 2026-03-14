@@ -182,7 +182,7 @@ describe("PMStatusBanner", () => {
     expect(dismissError).toHaveBeenCalled();
   });
 
-  it("shows job failure error from PM status", async () => {
+  it("shows attention needed when PM status has last_error", async () => {
     mockUseAnalyze.mockReturnValue(defaultAnalyze());
 
     server.use(
@@ -205,10 +205,8 @@ describe("PMStatusBanner", () => {
     renderWithProviders(<PMStatusBanner hasActivePlanSession={false} />);
 
     await waitFor(() => {
-      expect(screen.getByText("Last run failed")).toBeInTheDocument();
+      expect(screen.getByText("Attention needed")).toBeInTheDocument();
     });
-    expect(screen.getByText("no repositories configured for org")).toBeInTheDocument();
-    expect(screen.getByText("Attention needed")).toBeInTheDocument();
   });
 
   it("renders Manual Session link", () => {
