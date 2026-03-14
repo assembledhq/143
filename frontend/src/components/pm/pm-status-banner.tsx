@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { RefreshCw, Plus, Clock, Activity, AlertTriangle } from "lucide-react";
+import { RefreshCw, Plus, Clock, Activity } from "lucide-react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
@@ -144,18 +144,6 @@ export function PMStatusBanner({ hasActivePlanSession }: PMStatusBannerProps) {
         </div>
       )}
 
-      {!analyzeError && pmStatus?.last_error && (
-        <div className="flex items-start gap-2 rounded-md bg-red-50 dark:bg-red-950/30 px-3 py-2">
-          <AlertTriangle className="h-3.5 w-3.5 text-red-500 mt-0.5 shrink-0" />
-          <div className="flex-1 min-w-0">
-            <p className="text-xs font-medium text-red-700 dark:text-red-300">Last run failed</p>
-            <p className="text-xs text-red-600 dark:text-red-400 mt-0.5">{pmStatus.last_error}</p>
-            {pmStatus.last_failed_at && (
-              <p className="text-[11px] text-red-500/70 dark:text-red-400/60 mt-0.5">{formatTimeAgo(pmStatus.last_failed_at)}</p>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
