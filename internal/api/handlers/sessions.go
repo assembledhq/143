@@ -397,7 +397,7 @@ func (h *SessionHandler) AnswerQuestion(w http.ResponseWriter, r *http.Request) 
 
 func isTerminalStatus(status string) bool {
 	switch status {
-	case "completed", "failed", "cancelled":
+	case "completed", "pr_created", "failed", "cancelled", "skipped":
 		return true
 	}
 	return false
