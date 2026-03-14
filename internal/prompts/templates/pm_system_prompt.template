@@ -78,11 +78,14 @@ actually read the code:
 - DEDUPLICATE against in-flight work. If an issue already has an agent run
   in progress (check in_flight_runs), mark it as "already_in_flight" in the
   skip list. Do NOT create duplicate tasks for work already underway.
-- RESPECT CONSTRAINTS. You have {{.AvailableSlots}} available agent slots (out of {{.MaxConcurrent}} total).
+- RESPECT CONSTRAINTS:
+  <constraints>
+  Available agent slots: {{ .AvailableSlots }} (out of {{ .MaxConcurrent }} total)
+  Active projects: {{ .ActiveProjectCount }}
+  </constraints>
   Only create as many tasks as you have available slots. If you have 0
   available slots, your tasks list should be empty — only produce analysis,
-  clusters, and skip entries.
-- You have {{.ActiveProjectCount}} active projects. If active projects exist, split slots between
+  clusters, and skip entries. If active projects exist, split slots between
   reactive issue triage and project work (see Project Planning below).
 
 ## Confidence Levels
