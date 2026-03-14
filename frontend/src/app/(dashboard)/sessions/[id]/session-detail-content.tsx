@@ -8,7 +8,6 @@ import {
   CheckCircle2,
   XCircle,
   MinusCircle,
-  AlertTriangle,
 } from "lucide-react";
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
@@ -285,26 +284,13 @@ function ValidationTab({ sessionId }: { sessionId: string }) {
   );
 }
 
-function PRTab({ sessionId }: { sessionId: string }) {
-  const { data, isLoading, error } = useQuery({
+function ChangesTab({ session, sessionId }: { session: Session; sessionId: string }) {
+  const { data: prData, isLoading: prLoading } = useQuery({
     queryKey: ["session", sessionId, "pr"],
     queryFn: () => api.sessions.getPR(sessionId),
   });
 
-  if (isLoading) {
-    return <div className="py-8 text-center text-sm text-muted-foreground">Loading PR details...</div>;
-  }
-
-  if (error || !data?.data) {
-    return (
-      <div className="py-8 text-center text-sm text-muted-foreground">
-        <AlertTriangle className="mx-auto h-8 w-8 text-muted-foreground/50 mb-2" />
-        PR not yet created
-      </div>
-    );
-  }
-
-  const pr = data.data;
+  const pr = prData?.data;
 
   const prStatusColor: Record<string, string> = {
     open: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
@@ -313,47 +299,63 @@ function PRTab({ sessionId }: { sessionId: string }) {
   };
 
   return (
-    <Card>
-      <CardContent className="pt-6 space-y-4">
-        <div className="flex items-start justify-between">
-          <div>
-            <h3 className="text-sm font-medium">{pr.title}</h3>
-            <p className="text-xs text-muted-foreground mt-1">{pr.github_repo} #{pr.github_pr_number}</p>
-          </div>
-          <a href={pr.github_pr_url} target="_blank" rel="noopener noreferrer">
-            <Button variant="outline" size="sm">
-              <ExternalLink className="mr-1.5 h-3 w-3" />
-              View on GitHub
-            </Button>
-          </a>
-        </div>
-
-        <div className="flex items-center gap-3 text-sm">
-          <div>
-            <span className="text-muted-foreground">Status: </span>
-            <Badge variant="secondary" className={`text-[11px] ${prStatusColor[pr.status] || "bg-muted text-muted-foreground"}`}>
-              {pr.status}
-            </Badge>
-          </div>
-          {pr.review_status && (
-            <div>
-              <span className="text-muted-foreground">Review: </span>
-              <Badge variant="secondary" className="text-[11px]">{pr.review_status}</Badge>
+    <div className="space-y-4">
+      {pr && (
+        <Card>
+          <CardContent className="pt-6 space-y-4">
+            <div className="flex items-start justify-between">
+              <div>
+                <h3 className="text-sm font-medium">{pr.title}</h3>
+                <p className="text-xs text-muted-foreground mt-1">{pr.github_repo} #{pr.github_pr_number}</p>
+              </div>
+              <a href={pr.github_pr_url} target="_blank" rel="noopener noreferrer">
+                <Button variant="outline" size="sm">
+                  <ExternalLink className="mr-1.5 h-3 w-3" />
+                  View on GitHub
+                </Button>
+              </a>
             </div>
-          )}
-          <div>
-            <span className="text-muted-foreground">Branch: </span>
-            <code className="text-xs bg-muted px-1 py-0.5 rounded">{pr.branch_name}</code>
-          </div>
-        </div>
 
-        {pr.body && (
-          <div className="text-sm text-muted-foreground border-t border-border pt-3">
-            <p className="whitespace-pre-wrap">{pr.body}</p>
-          </div>
-        )}
-      </CardContent>
-    </Card>
+            <div className="flex items-center gap-3 text-sm">
+              <div>
+                <span className="text-muted-foreground">Status: </span>
+                <Badge variant="secondary" className={`text-[11px] ${prStatusColor[pr.status] || "bg-muted text-muted-foreground"}`}>
+                  {pr.status}
+                </Badge>
+              </div>
+              {pr.review_status && (
+                <div>
+                  <span className="text-muted-foreground">Review: </span>
+                  <Badge variant="secondary" className="text-[11px]">{pr.review_status}</Badge>
+                </div>
+              )}
+              <div>
+                <span className="text-muted-foreground">Branch: </span>
+                <code className="text-xs bg-muted px-1 py-0.5 rounded">{pr.branch_name}</code>
+              </div>
+            </div>
+
+            {pr.body && (
+              <div className="text-sm text-muted-foreground border-t border-border pt-3">
+                <p className="whitespace-pre-wrap">{pr.body}</p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {prLoading && (
+        <div className="text-center text-sm text-muted-foreground py-2">Loading PR details...</div>
+      )}
+
+      {session.diff ? (
+        <DiffViewer diff={session.diff} />
+      ) : (
+        <div className="py-8 text-center text-sm text-muted-foreground">
+          No diff available for this session.
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -422,9 +424,8 @@ export function SessionDetailContent({ id }: { id: string }) {
         <TabsList>
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="logs">Logs</TabsTrigger>
-          <TabsTrigger value="diff">Diff</TabsTrigger>
+          <TabsTrigger value="changes">Changes</TabsTrigger>
           <TabsTrigger value="validation">Validation</TabsTrigger>
-          <TabsTrigger value="pr">PR</TabsTrigger>
         </TabsList>
 
         <TabsContent value="overview">
@@ -435,22 +436,12 @@ export function SessionDetailContent({ id }: { id: string }) {
           <LogViewer runId={id} isActive={isActive} />
         </TabsContent>
 
-        <TabsContent value="diff">
-          {session.diff ? (
-            <DiffViewer diff={session.diff} />
-          ) : (
-            <div className="py-8 text-center text-sm text-muted-foreground">
-              No diff available for this session.
-            </div>
-          )}
+        <TabsContent value="changes">
+          <ChangesTab session={session} sessionId={id} />
         </TabsContent>
 
         <TabsContent value="validation">
           <ValidationTab sessionId={id} />
-        </TabsContent>
-
-        <TabsContent value="pr">
-          <PRTab sessionId={id} />
         </TabsContent>
       </Tabs>
     </div>
