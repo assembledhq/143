@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { AllIntegrationCards } from "@/components/integration-connection-cards";
@@ -16,37 +16,37 @@ function SlackChannelPicker() {
     queryFn: () => api.integrations.listSlackChannels(),
   });
 
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [initialized, setInitialized] = useState(false);
+  // Derive initial selection from server state.
+  const serverSelected = useMemo(() => {
+    if (!channelsResp?.data) return new Set<string>();
+    return new Set(
+      channelsResp.data
+        .filter((ch: { selected: boolean; id: string }) => ch.selected)
+        .map((ch: { id: string }) => ch.id)
+    );
+  }, [channelsResp?.data]);
 
-  // Initialize selection from server state once loaded.
-  useEffect(() => {
-    if (channelsResp?.data && !initialized) {
-      const preSelected = new Set(
-        channelsResp.data.filter((ch: { selected: boolean; id: string }) => ch.selected).map((ch: { id: string }) => ch.id)
-      );
-      setSelected(preSelected);
-      setInitialized(true);
-    }
-  }, [channelsResp?.data, initialized]);
+  // Track user overrides; null means "use server state".
+  const [userSelected, setUserSelected] = useState<Set<string> | null>(null);
+  const selected = userSelected ?? serverSelected;
 
   const mutation = useMutation({
     mutationFn: (channelIds: string[]) => api.integrations.updateSlackChannels(channelIds),
     onSuccess: () => {
+      setUserSelected(null);
       queryClient.invalidateQueries({ queryKey: ["slack-channels"] });
     },
   });
 
   const toggle = (id: string) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
+    const prev = selected;
+    const next = new Set(prev);
+    if (next.has(id)) {
+      next.delete(id);
+    } else {
+      next.add(id);
+    }
+    setUserSelected(next);
   };
 
   const save = () => {
