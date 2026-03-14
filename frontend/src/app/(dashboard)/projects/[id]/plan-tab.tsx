@@ -85,7 +85,7 @@ export function SpecsSection({
 
   return (
     <CollapsibleSection
-      title="Specs & Requirements"
+      title="Specs & requirements"
       icon={FileText}
       count={specs.length}
       actions={
@@ -136,7 +136,7 @@ export function SpecsSection({
                 onClick={() => createMutation.mutate()}
                 disabled={!newTitle.trim() || createMutation.isPending}
               >
-                {createMutation.isPending ? "Creating..." : "Create Spec"}
+                {createMutation.isPending ? "Creating..." : "Create spec"}
               </Button>
               <Button size="sm" variant="ghost" onClick={() => setShowAddForm(false)}>
                 Cancel
@@ -272,7 +272,7 @@ export function DesignsSection({
 
   return (
     <CollapsibleSection
-      title="Designs & Screenshots"
+      title="Designs & screenshots"
       icon={Image}
       count={attachments.length}
       actions={

@@ -23,10 +23,10 @@ import type { Session, Validation } from "@/lib/types";
 const statusConfig: Record<string, { color: string; label: string }> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
   running: { color: "bg-primary/10 text-primary", label: "Running" },
-  awaiting_input: { color: "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400", label: "Awaiting Input" },
-  needs_human_guidance: { color: "bg-orange-50 text-orange-700 dark:bg-orange-950/30 dark:text-orange-400", label: "Needs Guidance" },
+  awaiting_input: { color: "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400", label: "Awaiting input" },
+  needs_human_guidance: { color: "bg-orange-50 text-orange-700 dark:bg-orange-950/30 dark:text-orange-400", label: "Needs guidance" },
   completed: { color: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400", label: "Completed" },
-  pr_created: { color: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400", label: "PR Created" },
+  pr_created: { color: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400", label: "PR created" },
   failed: { color: "bg-destructive/10 text-destructive", label: "Failed" },
   cancelled: { color: "bg-muted text-muted-foreground", label: "Cancelled" },
   skipped: { color: "bg-muted text-muted-foreground", label: "Skipped" },
@@ -63,12 +63,12 @@ function confidenceColor(score: number): string {
 }
 
 const validationChecks: { key: string; label: string }[] = [
-  { key: "direction_check", label: "Direction Check" },
-  { key: "correctness_check", label: "Correctness Check" },
-  { key: "quality_check", label: "Quality Check" },
-  { key: "security_scan", label: "Security Scan" },
-  { key: "regression_test_check", label: "Regression Test Check" },
-  { key: "ci_check", label: "CI Check" },
+  { key: "direction_check", label: "Direction check" },
+  { key: "correctness_check", label: "Correctness check" },
+  { key: "quality_check", label: "Quality check" },
+  { key: "security_scan", label: "Security scan" },
+  { key: "regression_test_check", label: "Regression test check" },
+  { key: "ci_check", label: "CI check" },
 ];
 
 function checkResultBadge(result: string | null) {
@@ -151,7 +151,7 @@ function OverviewTab({ session }: { session: Session }) {
       {(session.pm_plan_id || session.pm_reasoning || session.pm_approach) && (
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm">PM Context</CardTitle>
+            <CardTitle className="text-sm">PM context</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3 text-sm">
             {session.pm_reasoning && (
@@ -175,7 +175,7 @@ function OverviewTab({ session }: { session: Session }) {
           <CardHeader className="pb-2">
             <CardTitle className="text-sm text-destructive flex items-center gap-2">
               <XCircle className="h-4 w-4" />
-              Failure Details
+              Failure details
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -187,7 +187,7 @@ function OverviewTab({ session }: { session: Session }) {
             <p className="text-sm">{session.failure_explanation}</p>
             {session.failure_next_steps && session.failure_next_steps.length > 0 && (
               <div>
-                <p className="text-xs font-medium text-muted-foreground mb-1">Next Steps</p>
+                <p className="text-xs font-medium text-muted-foreground mb-1">Next steps</p>
                 <ul className="list-disc list-inside text-sm space-y-1">
                   {session.failure_next_steps.map((step, i) => (
                     <li key={i}>{step}</li>

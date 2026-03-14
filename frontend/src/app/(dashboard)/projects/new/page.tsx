@@ -330,7 +330,7 @@ export default function NewProjectPage() {
                 disabled={description.trim().length === 0 || generateMutation.isPending}
               >
                 <Sparkles className="mr-2 h-4 w-4" />
-                {generateMutation.isPending ? "Generating..." : "Generate Project"}
+                {generateMutation.isPending ? "Generating..." : "Generate project"}
               </Button>
               {generateMutation.isError && (
                 <p className="text-xs text-destructive">
@@ -560,7 +560,7 @@ export default function NewProjectPage() {
                 {createMutation.isPending
                   ? "Creating..."
                   : projectType === "scheduled"
-                    ? "Create Scheduled Project"
+                    ? "Create scheduled project"
                     : "Create project"}
               </Button>
               {createMutation.isError && (

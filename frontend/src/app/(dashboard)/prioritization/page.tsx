@@ -27,9 +27,9 @@ import { DEFAULT_PM_MODEL, PM_MODELS_BY_PROVIDER } from "@/lib/model-constants";
 
 const DOC_TYPE_LABELS: Record<string, string> = {
   roadmap: "Roadmap",
-  philosophy: "Product Philosophy",
+  philosophy: "Product philosophy",
   strategy: "Strategy",
-  market: "Market Context",
+  market: "Market context",
   architecture: "Architecture",
   reference: "Reference",
 };
@@ -49,7 +49,7 @@ const SOURCE_TYPE_LABELS: Record<string, string> = {
   notion: "Notion",
   google_docs: "Google Docs",
   confluence: "Confluence",
-  file_upload: "File Upload",
+  file_upload: "File upload",
 };
 
 const DEFAULT_SETTINGS: Pick<

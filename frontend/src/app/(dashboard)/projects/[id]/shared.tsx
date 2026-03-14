@@ -33,7 +33,7 @@ export const specTypeConfig: Record<string, { label: string; color: string }> = 
   prd: { label: "PRD", color: "bg-blue-500/10 text-blue-700 dark:text-blue-400" },
   technical: { label: "Technical", color: "bg-purple-500/10 text-purple-700 dark:text-purple-400" },
   design: { label: "Design", color: "bg-pink-500/10 text-pink-700 dark:text-pink-400" },
-  user_story: { label: "User Story", color: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400" },
+  user_story: { label: "User story", color: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400" },
 };
 
 export const attachmentCategoryConfig: Record<string, { label: string; color: string }> = {
