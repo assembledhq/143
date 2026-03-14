@@ -192,15 +192,18 @@ const columns: ColumnDef<Session>[] = [
     },
   },
   {
-    id: "created_at",
-    accessorKey: "created_at",
-    header: ({ column }) => <SortableHeader label="Created" column={column} />,
-    size: 90,
-    cell: ({ row }) => (
-      <span className="text-[12px] text-muted-foreground tabular-nums">
-        {formatTimeAgo(row.original.created_at)}
-      </span>
-    ),
+    id: "last_modified",
+    accessorFn: (row) => row.completed_at || row.started_at || row.created_at,
+    header: ({ column }) => <SortableHeader label="Last modified" column={column} />,
+    size: 110,
+    cell: ({ row }) => {
+      const ts = row.original.completed_at || row.original.started_at || row.original.created_at;
+      return (
+        <span className="text-[12px] text-muted-foreground tabular-nums">
+          {formatTimeAgo(ts)}
+        </span>
+      );
+    },
   },
 ];
 

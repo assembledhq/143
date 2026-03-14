@@ -187,17 +187,6 @@ const columns: ColumnDef<Project>[] = [
     },
   },
   {
-    id: "execution_mode",
-    accessorKey: "execution_mode",
-    header: "Mode",
-    size: 100,
-    cell: ({ row }) => {
-      const mode = row.original.execution_mode;
-      const label = mode === "dependency_graph" ? "Dep graph" : mode;
-      return <span className="text-[12px] text-muted-foreground capitalize">{label}</span>;
-    },
-  },
-  {
     id: "schedule",
     accessorFn: (row) => row.schedule_enabled,
     header: "Schedule",
@@ -216,10 +205,10 @@ const columns: ColumnDef<Project>[] = [
     },
   },
   {
-    id: "updated_at",
+    id: "last_modified",
     accessorKey: "updated_at",
-    header: ({ column }) => <SortableHeader label="Updated" column={column} />,
-    size: 90,
+    header: ({ column }) => <SortableHeader label="Last modified" column={column} />,
+    size: 110,
     cell: ({ row }) => (
       <span className="text-[12px] text-muted-foreground tabular-nums">
         {formatTimeAgo(row.original.updated_at)}
