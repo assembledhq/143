@@ -233,6 +233,9 @@ export default function Overview() {
   const linearIntegration = integrationsResp?.data?.find(
     (integration) => integration.provider === "linear" && integration.status === "active"
   );
+  const slackIntegration = integrationsResp?.data?.find(
+    (integration) => integration.provider === "slack" && integration.status === "active"
+  );
 
   // Count completed setup stages (step 1: coding agent, step 2: integrations)
   const connectedCount =
@@ -277,9 +280,11 @@ export default function Overview() {
           <AdditionalIntegrationCards
             sentryConnected={Boolean(sentryIntegration)}
             linearConnected={Boolean(linearIntegration)}
+            slackConnected={Boolean(slackIntegration)}
             linearLoading={false}
             onConnectSentry={() => api.auth.loginSentry()}
             onConnectLinear={() => api.integrations.loginLinear()}
+            onConnectSlack={() => api.integrations.loginSlack()}
           />
         </div>
       </StepSection>

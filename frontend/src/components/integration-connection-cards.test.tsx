@@ -31,8 +31,10 @@ describe("integration connection cards", () => {
         sentryConnected={false}
         linearConnected={false}
         linearLoading={false}
+        slackConnected={false}
         onConnectSentry={onConnectSentry}
         onConnectLinear={onConnectLinear}
+        onConnectSlack={vi.fn()}
       />
     );
 
@@ -80,12 +82,69 @@ describe("integration connection cards", () => {
         sentryConnected={false}
         linearConnected
         linearLoading={false}
+        slackConnected={false}
         onConnectGitHub={vi.fn()}
         onConnectSentry={vi.fn()}
         onConnectLinear={vi.fn()}
+        onConnectSlack={vi.fn()}
       />
     );
 
     expect(screen.getByRole("button", { name: "Linear Connected" })).toBeDisabled();
+  });
+
+  it("renders Slack card with Connect button when not connected", () => {
+    renderWithProviders(
+      <AdditionalIntegrationCards
+        sentryConnected={false}
+        linearConnected={false}
+        linearLoading={false}
+        slackConnected={false}
+        onConnectSentry={vi.fn()}
+        onConnectLinear={vi.fn()}
+        onConnectSlack={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText("Slack")).toBeInTheDocument();
+    expect(screen.getByAltText("Slack logo")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Connect Slack" })).toBeEnabled();
+  });
+
+  it("shows Slack as Connected when slackConnected is true", () => {
+    renderWithProviders(
+      <AdditionalIntegrationCards
+        sentryConnected={false}
+        linearConnected={false}
+        linearLoading={false}
+        slackConnected
+        onConnectSentry={vi.fn()}
+        onConnectLinear={vi.fn()}
+        onConnectSlack={vi.fn()}
+      />
+    );
+
+    expect(screen.getByRole("button", { name: "Slack Connected" })).toBeDisabled();
+  });
+
+  it("calls onConnectSlack when Connect button is clicked", async () => {
+    const user = userEvent.setup();
+    const onConnectSlack = vi.fn();
+
+    renderWithProviders(
+      <AdditionalIntegrationCards
+        sentryConnected={false}
+        linearConnected={false}
+        linearLoading={false}
+        slackConnected={false}
+        onConnectSentry={vi.fn()}
+        onConnectLinear={vi.fn()}
+        onConnectSlack={onConnectSlack}
+      />
+    );
+
+    await user.click(screen.getByRole("button", { name: "Connect Slack" }));
+
+    expect(onConnectSlack).toHaveBeenCalledTimes(1);
   });
 });

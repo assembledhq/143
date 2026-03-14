@@ -31,6 +31,11 @@ const (
 	githubTokenURL     = "https://github.com/login/oauth/access_token" // #nosec G101 -- OAuth endpoint URL, not credentials
 	githubAPIURL       = "https://api.github.com"
 
+	// Slack OAuth endpoints
+	slackAuthorizeURL = "https://slack.com/oauth/v2/authorize"
+	slackTokenURL     = "https://slack.com/api/oauth.v2.access" // #nosec G101 -- OAuth endpoint URL, not credentials
+	slackAPIURL       = "https://slack.com/api"
+
 	// OAuth state cookie names — each flow gets its own cookie so concurrent
 	// flows cannot collide. Integration cookies use the _integration_ infix to
 	// distinguish them from the user-auth cookies in auth.go.
@@ -39,6 +44,7 @@ const (
 	linearIntegrationOAuthStateCookie   = "linear_integration_oauth_state"
 	sentryIntegrationOAuthStateCookie   = "sentry_integration_oauth_state"
 	githubIntegrationOAuthStateCookie   = "github_integration_oauth_state"
+	slackIntegrationOAuthStateCookie    = "slack_integration_oauth_state"
 )
 
 type integrationCredentialStore interface {
@@ -68,6 +74,20 @@ type linearViewerData struct {
 
 type linearViewerResponse struct {
 	Data linearViewerData `json:"data"`
+}
+
+// --- Slack types ---
+
+type slackTokenResponse struct {
+	AccessToken string          `json:"access_token"`
+	TokenType   string          `json:"token_type"`
+	Scope       string          `json:"scope"`
+	Team        slackTeamInfo   `json:"team"`
+}
+
+type slackTeamInfo struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 // --- Sentry types ---
@@ -114,6 +134,10 @@ type IntegrationHandler struct {
 
 	// GitHub App slug (for installation flow)
 	githubAppSlug string
+
+	// Slack OAuth
+	slackClientID string
+	slackSecret   string
 }
 
 // IntegrationOAuthConfig holds all integration OAuth credentials.
@@ -171,6 +195,14 @@ func WithGitHubIntegrationOAuth(clientID, secret string) IntegrationHandlerOptio
 func WithGitHubAppSlug(slug string) IntegrationHandlerOption {
 	return func(h *IntegrationHandler) {
 		h.githubAppSlug = slug
+	}
+}
+
+// WithSlackOAuth configures Slack OAuth credentials.
+func WithSlackOAuth(clientID, secret string) IntegrationHandlerOption {
+	return func(h *IntegrationHandler) {
+		h.slackClientID = clientID
+		h.slackSecret = secret
 	}
 }
 
@@ -470,6 +502,173 @@ func (h *IntegrationHandler) ConnectGitHub(w http.ResponseWriter, r *http.Reques
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Slack OAuth
+// ──────────────────────────────────────────────────────────────────────────────
+
+func (h *IntegrationHandler) StartSlackOAuth(w http.ResponseWriter, r *http.Request) {
+	if h.slackClientID == "" || h.slackSecret == "" {
+		writeError(w, http.StatusServiceUnavailable, "SLACK_OAUTH_NOT_CONFIGURED", "slack oauth is not configured")
+		return
+	}
+
+	state, err := setOAuthState(w, slackIntegrationOAuthStateCookie)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate oauth state")
+		return
+	}
+
+	params := url.Values{
+		"client_id":    {h.slackClientID},
+		"redirect_uri": {h.slackRedirectURL()},
+		"scope":        {"channels:history,channels:read,groups:read,groups:history,users:read"},
+		"state":        {state},
+	}
+
+	http.Redirect(w, r, slackAuthorizeURL+"?"+params.Encode(), http.StatusTemporaryRedirect)
+}
+
+func (h *IntegrationHandler) HandleSlackOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	code, ok := validateOAuthCallback(w, r, slackIntegrationOAuthStateCookie)
+	if !ok {
+		return
+	}
+
+	token, err := h.exchangeSlackCode(r.Context(), code)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "TOKEN_EXCHANGE_FAILED", "failed to exchange code")
+		return
+	}
+
+	orgID := middleware.OrgIDFromContext(r.Context())
+
+	if h.credentialStore == nil {
+		writeError(w, http.StatusInternalServerError, "CREDENTIAL_STORE_UNAVAILABLE", "credential store unavailable")
+		return
+	}
+
+	slackConfig := models.SlackConfig{
+		AccessToken: token.AccessToken,
+		TeamID:      token.Team.ID,
+		TeamName:    token.Team.Name,
+		Scope:       token.Scope,
+	}
+	if err := h.credentialStore.Upsert(r.Context(), orgID, slackConfig); err != nil {
+		writeError(w, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to store slack credential")
+		return
+	}
+
+	if _, _, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderSlack); err != nil {
+		writeError(w, http.StatusInternalServerError, "CONNECT_SLACK_FAILED", "failed to connect slack integration")
+		return
+	}
+
+	http.Redirect(w, r, h.frontendURL+"/integrations?slack=connected", http.StatusTemporaryRedirect)
+}
+
+func (h *IntegrationHandler) ConnectSlack(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	integration, created, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderSlack)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "CONNECT_SLACK_FAILED", "failed to connect slack integration")
+		return
+	}
+	if created {
+		writeJSON(w, http.StatusCreated, models.SingleResponse[models.Integration]{Data: integration})
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.Integration]{Data: integration})
+}
+
+// ListSlackChannels fetches available channels from the Slack API.
+func (h *IntegrationHandler) ListSlackChannels(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+
+	cred, err := h.getSlackCredential(r.Context(), orgID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "SLACK_NOT_CONNECTED", "slack integration not connected")
+		return
+	}
+
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet,
+		slackAPIURL+"/conversations.list?types=public_channel&exclude_archived=true&limit=200", nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create request")
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+cred.AccessToken)
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "SLACK_API_FAILED", "failed to fetch channels")
+		return
+	}
+	defer resp.Body.Close()
+
+	var slackResp struct {
+		OK       bool `json:"ok"`
+		Channels []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"channels"`
+		Error string `json:"error,omitempty"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&slackResp); err != nil {
+		writeError(w, http.StatusInternalServerError, "DECODE_FAILED", "failed to decode slack response")
+		return
+	}
+	if !slackResp.OK {
+		writeError(w, http.StatusBadGateway, "SLACK_API_ERROR", slackResp.Error)
+		return
+	}
+
+	type channelEntry struct {
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+		Selected bool   `json:"selected"`
+	}
+	channels := make([]channelEntry, 0, len(slackResp.Channels))
+	for _, ch := range slackResp.Channels {
+		selected := false
+		for _, id := range cred.ChannelIDs {
+			if id == ch.ID {
+				selected = true
+				break
+			}
+		}
+		channels = append(channels, channelEntry{ID: ch.ID, Name: ch.Name, Selected: selected})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"data": channels})
+}
+
+// UpdateSlackChannels saves the selected channel IDs to the credential config.
+func (h *IntegrationHandler) UpdateSlackChannels(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+
+	var body struct {
+		ChannelIDs []string `json:"channel_ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+
+	cred, err := h.getSlackCredential(r.Context(), orgID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "SLACK_NOT_CONNECTED", "slack integration not connected")
+		return
+	}
+
+	cred.ChannelIDs = body.ChannelIDs
+	if err := h.credentialStore.Upsert(r.Context(), orgID, *cred); err != nil {
+		writeError(w, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to update slack channels")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"channel_ids": body.ChannelIDs}})
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // OAuth state helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -558,6 +757,10 @@ func (h *IntegrationHandler) sentryRedirectURL() string {
 
 func (h *IntegrationHandler) githubRedirectURL() string {
 	return h.baseURL + "/api/v1/integrations/github/callback"
+}
+
+func (h *IntegrationHandler) slackRedirectURL() string {
+	return h.baseURL + "/api/v1/integrations/slack/callback"
 }
 
 // --- Linear token exchange ---
@@ -749,4 +952,66 @@ func (h *IntegrationHandler) exchangeGitHubCode(ctx context.Context, code string
 	}
 
 	return &token, nil
+}
+
+// --- Slack token exchange ---
+
+func (h *IntegrationHandler) exchangeSlackCode(ctx context.Context, code string) (*slackTokenResponse, error) {
+	data := url.Values{
+		"code":          {code},
+		"redirect_uri":  {h.slackRedirectURL()},
+		"client_id":     {h.slackClientID},
+		"client_secret": {h.slackSecret},
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, slackTokenURL, bytes.NewBufferString(data.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("create slack oauth request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("slack oauth token request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("slack oauth token request failed: status=%d body=%s", resp.StatusCode, string(responseBody))
+	}
+
+	var token slackTokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&token); err != nil {
+		return nil, fmt.Errorf("decode slack token response: %w", err)
+	}
+	if token.AccessToken == "" {
+		return nil, fmt.Errorf("slack token response missing access_token")
+	}
+
+	return &token, nil
+}
+
+// getSlackCredential reads the decrypted Slack config for an org.
+func (h *IntegrationHandler) getSlackCredential(ctx context.Context, orgID uuid.UUID) (*models.SlackConfig, error) {
+	type credentialGetter interface {
+		Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
+	}
+
+	getter, ok := h.credentialStore.(credentialGetter)
+	if !ok {
+		return nil, fmt.Errorf("credential store does not support Get")
+	}
+
+	decrypted, err := getter.Get(ctx, orgID, models.ProviderSlack)
+	if err != nil {
+		return nil, fmt.Errorf("get slack credential: %w", err)
+	}
+
+	cfg, ok := decrypted.Config.(models.SlackConfig)
+	if !ok {
+		return nil, fmt.Errorf("unexpected slack config type")
+	}
+
+	return &cfg, nil
 }
