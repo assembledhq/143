@@ -83,6 +83,13 @@ func AgentSystemPromptBase() string {
 	return render("agent_system_prompt_base.template", nil)
 }
 
+// ─── Slack ────────────────────────────────────────────────────────────────────
+
+// SlackSummarizerPrompt returns the system prompt for Slack thread analysis.
+func SlackSummarizerPrompt() string {
+	return render("slack_summarizer_prompt.template", nil)
+}
+
 // ─── Project ─────────────────────────────────────────────────────────────────
 
 // ProjectGeneratePrompt returns the system prompt for AI project generation.

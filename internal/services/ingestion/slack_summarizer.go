@@ -13,15 +13,8 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/assembledhq/143/internal/llm"
+	"github.com/assembledhq/143/internal/prompts"
 )
-
-const slackSummarizerSystemPrompt = `Analyze this Slack conversation and return a JSON object with these fields:
-- "actionable": boolean — true if this contains a bug report, feature request, customer issue, or work item
-- "category": one of "bug_report", "feature_request", "customer_issue", "discussion", "not_actionable"
-- "summary": string — max 200 characters summarizing what was discussed and any action needed
-- "urgency": one of "high", "medium", "low", "none"
-
-Return ONLY the JSON object, no other text.`
 
 var trivialPattern = regexp.MustCompile(`(?i)^(\s*|ok|okay|thanks|thank you|ty|thx|lgtm|👍|🎉|✅|💯|sure|yes|no|yep|nope|np|got it|sounds good|will do)\s*$`)
 
@@ -142,7 +135,7 @@ func (s *SlackSummarizer) SummarizeThreads(ctx context.Context, threads []SlackT
 }
 
 func (s *SlackSummarizer) analyzeThread(ctx context.Context, conversationText string) (*ThreadAnalysis, error) {
-	resp, err := s.llm.Complete(ctx, slackSummarizerSystemPrompt, conversationText)
+	resp, err := s.llm.Complete(ctx, prompts.SlackSummarizerPrompt(), conversationText)
 	if err != nil {
 		return nil, fmt.Errorf("llm complete: %w", err)
 	}

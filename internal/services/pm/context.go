@@ -206,22 +206,7 @@ func (s *Service) gatherSlackContext(ctx context.Context, orgID uuid.UUID) ([]Sl
 		return nil, nil, nil
 	}
 
-	var config struct {
-		RecentThreads []struct {
-			ChannelName  string   `json:"channel_name"`
-			ThreadTS     string   `json:"thread_ts"`
-			MessageCount int      `json:"message_count"`
-			Participants []string `json:"participants"`
-			LastActivity string   `json:"last_activity"`
-			Messages     json.RawMessage `json:"messages"`
-			Analysis     *struct {
-				Actionable bool   `json:"actionable"`
-				Category   string `json:"category"`
-				Summary    string `json:"summary"`
-				Urgency    string `json:"urgency"`
-			} `json:"analysis"`
-		} `json:"recent_threads"`
-	}
+	var config slackIntegrationConfig
 	if err := json.Unmarshal(integ.Config, &config); err != nil {
 		return nil, nil, fmt.Errorf("parse slack integration config: %w", err)
 	}

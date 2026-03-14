@@ -50,6 +50,42 @@ type SlackThreadSummary struct {
 	Messages     json.RawMessage `json:"messages"`
 }
 
+// slackResponseMetadata holds cursor-based pagination info from Slack API responses.
+type slackResponseMetadata struct {
+	NextCursor string `json:"next_cursor"`
+}
+
+// slackHistoryResponse is the response shape for conversations.history.
+type slackHistoryResponse struct {
+	OK               bool                   `json:"ok"`
+	Error            string                 `json:"error,omitempty"`
+	Messages         []SlackMessage         `json:"messages"`
+	HasMore          bool                   `json:"has_more"`
+	ResponseMetadata slackResponseMetadata  `json:"response_metadata"`
+}
+
+// slackRepliesResponse is the response shape for conversations.replies.
+type slackRepliesResponse struct {
+	OK       bool           `json:"ok"`
+	Error    string         `json:"error,omitempty"`
+	Messages []SlackMessage `json:"messages"`
+}
+
+// slackChannelInfoResponse is the response shape for conversations.info.
+type slackChannelInfoResponse struct {
+	OK      bool         `json:"ok"`
+	Error   string       `json:"error,omitempty"`
+	Channel SlackChannel `json:"channel"`
+}
+
+// slackChannelListResponse is the response shape for conversations.list.
+type slackChannelListResponse struct {
+	OK               bool                  `json:"ok"`
+	Error            string                `json:"error,omitempty"`
+	Channels         []SlackChannel        `json:"channels"`
+	ResponseMetadata slackResponseMetadata `json:"response_metadata"`
+}
+
 // SlackAPIClient interacts with the Slack Web API.
 type SlackAPIClient struct {
 	client  *http.Client
@@ -80,15 +116,7 @@ func (c *SlackAPIClient) FetchChannelMessages(ctx context.Context, accessToken, 
 			params.Set("cursor", cursor)
 		}
 
-		var resp struct {
-			OK               bool           `json:"ok"`
-			Error            string         `json:"error,omitempty"`
-			Messages         []SlackMessage `json:"messages"`
-			HasMore          bool           `json:"has_more"`
-			ResponseMetadata struct {
-				NextCursor string `json:"next_cursor"`
-			} `json:"response_metadata"`
-		}
+		var resp slackHistoryResponse
 		if err := c.slackGet(ctx, accessToken, "conversations.history", params, &resp); err != nil {
 			return nil, err
 		}
@@ -115,11 +143,7 @@ func (c *SlackAPIClient) FetchThreadReplies(ctx context.Context, accessToken, ch
 		"limit":   {"200"},
 	}
 
-	var resp struct {
-		OK       bool           `json:"ok"`
-		Error    string         `json:"error,omitempty"`
-		Messages []SlackMessage `json:"messages"`
-	}
+	var resp slackRepliesResponse
 	if err := c.slackGet(ctx, accessToken, "conversations.replies", params, &resp); err != nil {
 		return nil, err
 	}
@@ -135,21 +159,14 @@ func (c *SlackAPIClient) FetchChannelInfo(ctx context.Context, accessToken, chan
 		"channel": {channelID},
 	}
 
-	var resp struct {
-		OK      bool   `json:"ok"`
-		Error   string `json:"error,omitempty"`
-		Channel struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
-		} `json:"channel"`
-	}
+	var resp slackChannelInfoResponse
 	if err := c.slackGet(ctx, accessToken, "conversations.info", params, &resp); err != nil {
 		return nil, err
 	}
 	if !resp.OK {
 		return nil, fmt.Errorf("slack conversations.info: %s", resp.Error)
 	}
-	return &SlackChannel{ID: resp.Channel.ID, Name: resp.Channel.Name}, nil
+	return &resp.Channel, nil
 }
 
 // ListChannels lists channels visible to the bot.
@@ -167,17 +184,7 @@ func (c *SlackAPIClient) ListChannels(ctx context.Context, accessToken string) (
 			params.Set("cursor", cursor)
 		}
 
-		var resp struct {
-			OK       bool   `json:"ok"`
-			Error    string `json:"error,omitempty"`
-			Channels []struct {
-				ID   string `json:"id"`
-				Name string `json:"name"`
-			} `json:"channels"`
-			ResponseMetadata struct {
-				NextCursor string `json:"next_cursor"`
-			} `json:"response_metadata"`
-		}
+		var resp slackChannelListResponse
 		if err := c.slackGet(ctx, accessToken, "conversations.list", params, &resp); err != nil {
 			return nil, err
 		}
@@ -185,9 +192,7 @@ func (c *SlackAPIClient) ListChannels(ctx context.Context, accessToken string) (
 			return nil, fmt.Errorf("slack conversations.list: %s", resp.Error)
 		}
 
-		for _, ch := range resp.Channels {
-			allChannels = append(allChannels, SlackChannel{ID: ch.ID, Name: ch.Name})
-		}
+		allChannels = append(allChannels, resp.Channels...)
 
 		if resp.ResponseMetadata.NextCursor == "" {
 			break
