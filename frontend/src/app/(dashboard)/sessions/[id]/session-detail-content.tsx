@@ -19,6 +19,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { LogViewer } from "@/components/log-viewer";
 import { DiffViewer } from "@/components/diff-viewer";
 import { api } from "@/lib/api";
+import { SSE_EVENT, addSSEListener } from "@/lib/sse";
 import type { Session, Validation } from "@/lib/types";
 
 const statusConfig: Record<string, { color: string; label: string }> = {
@@ -373,7 +374,7 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   // Update the session query cache when we receive status updates via SSE.
   const handleSessionUpdate = useCallback(
-    (updated: Record<string, unknown>) => {
+    (updated: Session) => {
       queryClient.setQueryData(["session", id], { data: updated });
     },
     [queryClient, id]
@@ -389,17 +390,9 @@ export function SessionDetailContent({ id }: { id: string }) {
       { withCredentials: true }
     );
 
-    const handleStatus = (event: MessageEvent) => {
-      try {
-        handleSessionUpdate(JSON.parse(event.data));
-      } catch {
-        // ignore unparseable messages
-      }
-    };
-
-    eventSource.addEventListener("status", handleStatus);
-    eventSource.addEventListener("done", (event) => {
-      handleStatus(event as MessageEvent);
+    addSSEListener(eventSource, SSE_EVENT.STATUS, handleSessionUpdate);
+    addSSEListener(eventSource, SSE_EVENT.DONE, (session) => {
+      handleSessionUpdate(session);
       eventSource.close();
     });
 
