@@ -19,12 +19,14 @@ func parsePlan(output string) (*Plan, error) {
 	}
 
 	var payload struct {
-		Analysis       string          `json:"analysis"`
-		Tasks          []Task          `json:"tasks"`
-		Clusters       []Cluster       `json:"clusters"`
-		Skip           []SkipEntry     `json:"skip"`
-		ProjectPlans   []ProjectPlan   `json:"project_plans,omitempty"`
-		SlotAllocation *SlotAllocation `json:"slot_allocation,omitempty"`
+		Analysis       string           `json:"analysis"`
+		Tasks          []Task           `json:"tasks"`
+		Clusters       []Cluster        `json:"clusters"`
+		Skip           []SkipEntry      `json:"skip"`
+		ProjectPlans   []ProjectPlan    `json:"project_plans,omitempty"`
+		NewProjects    []NewProjectSpec `json:"new_projects,omitempty"`
+		LinearActions  []LinearAction   `json:"linear_actions,omitempty"`
+		SlotAllocation *SlotAllocation  `json:"slot_allocation,omitempty"`
 	}
 
 	if err := json.Unmarshal([]byte(content), &payload); err != nil {
@@ -51,6 +53,8 @@ func parsePlan(output string) (*Plan, error) {
 		Clusters:       payload.Clusters,
 		SkippedIssues:  payload.Skip,
 		ProjectPlans:   payload.ProjectPlans,
+		NewProjects:    payload.NewProjects,
+		LinearActions:  payload.LinearActions,
 		SlotAllocation: payload.SlotAllocation,
 	}, nil
 }

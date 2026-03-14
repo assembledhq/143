@@ -77,12 +77,12 @@ func (a *SentryAdapter) ParseWebhook(integrationID uuid.UUID, payload json.RawMe
 	}
 
 	occurrenceCount := 1
-	if n := parseIntSafe(issue.Count); n > 0 {
+	if n := ParseIntSafe(issue.Count); n > 0 {
 		occurrenceCount = n
 	}
 
-	firstSeen := parseTimeSafe(issue.FirstSeen)
-	lastSeen := parseTimeSafe(issue.LastSeen)
+	firstSeen := ParseTimeSafe(issue.FirstSeen)
+	lastSeen := ParseTimeSafe(issue.LastSeen)
 	if firstSeen.IsZero() {
 		firstSeen = time.Now()
 	}
@@ -98,7 +98,7 @@ func (a *SentryAdapter) ParseWebhook(integrationID uuid.UUID, payload json.RawMe
 		description += "\n\nCulprit: " + issue.Culprit
 	}
 
-	severity := mapSentryLevel(issue.Level)
+	severity := MapSentryLevel(issue.Level)
 
 	tags := []string{
 		fmt.Sprintf("project:%s", issue.Project.Slug),
@@ -118,19 +118,4 @@ func (a *SentryAdapter) ParseWebhook(integrationID uuid.UUID, payload json.RawMe
 		LastSeenAt:            lastSeen,
 		RawData:               payload,
 	}, nil
-}
-
-func mapSentryLevel(level string) string {
-	switch level {
-	case "fatal":
-		return "critical"
-	case "error":
-		return "high"
-	case "warning":
-		return "medium"
-	case "info":
-		return "low"
-	default:
-		return "medium"
-	}
 }
