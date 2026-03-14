@@ -17,7 +17,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { LogViewer } from "@/components/log-viewer";
 import { DiffViewer } from "@/components/diff-viewer";
 import { api } from "@/lib/api";
-import type { Session, Validation } from "@/lib/types";
+import type { Session, User, Validation } from "@/lib/types";
 
 const statusConfig: Record<string, { color: string; label: string }> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
@@ -77,7 +77,7 @@ function checkResultBadge(result: string | null) {
   return <Badge variant="secondary" className="text-[11px]">{result}</Badge>;
 }
 
-function OverviewTab({ session }: { session: Session }) {
+function OverviewTab({ session, members }: { session: Session; members: User[] }) {
   const queryClient = useQueryClient();
   const retryMutation = useMutation({
     mutationFn: () => api.issues.triggerFix(session.issue_id),
@@ -112,6 +112,14 @@ function OverviewTab({ session }: { session: Session }) {
               <span className="text-xs font-medium text-muted-foreground/70 uppercase tracking-wider">Agent Type</span>
               <p className="mt-1 font-medium">{agentTypeLabels[session.agent_type] || session.agent_type}</p>
             </div>
+            {session.triggered_by_user_id && (
+              <div>
+                <span className="text-xs font-medium text-muted-foreground/70 uppercase tracking-wider">Triggered by</span>
+                <p className="mt-1 font-medium">
+                  {members.find((m) => m.id === session.triggered_by_user_id)?.name || "Unknown user"}
+                </p>
+              </div>
+            )}
             {session.confidence_score != null && (
               <div>
                 <span className="text-xs font-medium text-muted-foreground/70 uppercase tracking-wider">Confidence</span>
@@ -372,7 +380,13 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
   });
 
+  const { data: membersData } = useQuery({
+    queryKey: ["team", "members"],
+    queryFn: () => api.team.listMembers(),
+  });
+
   const session = data?.data;
+  const members = membersData?.data ?? [];
   const isActive = session?.status === "running" || session?.status === "awaiting_input";
 
   if (isLoading) {
@@ -429,7 +443,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         </TabsList>
 
         <TabsContent value="overview">
-          <OverviewTab session={session} />
+          <OverviewTab session={session} members={members} />
         </TabsContent>
 
         <TabsContent value="logs">

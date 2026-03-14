@@ -122,6 +122,7 @@ type Session struct {
 	PMReasoning          *string         `db:"pm_reasoning" json:"pm_reasoning,omitempty"`
 	ProjectTaskID        *uuid.UUID      `db:"project_task_id" json:"project_task_id,omitempty"`
 	ModelOverride        *string         `db:"model_override" json:"model_override,omitempty"`
+	TriggeredByUserID    *uuid.UUID      `db:"triggered_by_user_id" json:"triggered_by_user_id,omitempty"`
 	CreatedAt            time.Time       `db:"created_at" json:"created_at"`
 }
 

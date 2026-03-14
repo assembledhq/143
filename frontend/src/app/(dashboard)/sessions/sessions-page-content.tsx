@@ -10,7 +10,7 @@ import { DecisionsView } from "@/components/pm/decisions-view";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { api } from "@/lib/api";
-import type { Session } from "@/lib/types";
+import type { Session, User } from "@/lib/types";
 
 const statusConfig: Record<string, { dot: string; text: string; bg: string; label: string }> = {
   pending: { dot: "bg-muted-foreground/50", text: "text-muted-foreground", bg: "bg-muted", label: "Pending" },
@@ -67,7 +67,7 @@ function sessionTitle(session: Session): string {
   return `Session ${session.id.slice(0, 8)}`;
 }
 
-function SessionRow({ session }: { session: Session }) {
+function SessionRow({ session, members }: { session: Session; members: User[] }) {
   const cfg = statusConfig[session.status] || statusConfig.pending;
   const active = isActive(session);
 
@@ -108,6 +108,14 @@ function SessionRow({ session }: { session: Session }) {
         <span className={`inline-flex items-center text-[11px] rounded-md px-2 py-0.5 ${cfg.text} ${cfg.bg}`}>
           {cfg.label}
         </span>
+        {session.triggered_by_user_id && (() => {
+          const triggeredBy = members.find((m) => m.id === session.triggered_by_user_id);
+          return triggeredBy ? (
+            <span className="text-[11px] text-muted-foreground truncate max-w-[100px]">
+              {triggeredBy.name.split(" ")[0]}
+            </span>
+          ) : null;
+        })()}
         {session.confidence_score != null && (
           <span className="text-[11px] text-muted-foreground">
             {Math.round(session.confidence_score * 100)}%
@@ -123,9 +131,10 @@ function SessionRow({ session }: { session: Session }) {
   );
 }
 
-function SessionSection({ title, sessions, badge }: {
+function SessionSection({ title, sessions, members, badge }: {
   title: string;
   sessions: Session[];
+  members: User[];
   badge?: React.ReactNode;
 }) {
   if (sessions.length === 0) return null;
@@ -141,7 +150,7 @@ function SessionSection({ title, sessions, badge }: {
       </div>
       <div className="divide-y divide-border/50">
         {sessions.map((session) => (
-          <SessionRow key={session.id} session={session} />
+          <SessionRow key={session.id} session={session} members={members} />
         ))}
       </div>
     </div>
@@ -157,7 +166,13 @@ export function SessionsPageContent() {
     refetchInterval: 10000,
   });
 
+  const { data: membersData } = useQuery({
+    queryKey: ["team", "members"],
+    queryFn: () => api.team.listMembers(),
+  });
+
   const allSessions = data?.data ?? [];
+  const members = membersData?.data ?? [];
 
   const currentFilter = activeFilter ?? "all";
   const showDecisions = currentFilter === "decisions";
@@ -254,6 +269,7 @@ export function SessionsPageContent() {
           <SessionSection
             title="Active"
             sessions={activeSessions}
+            members={members}
             badge={
               activeSessions.length > 0 ? (
                 <span className="relative flex h-2 w-2">
@@ -263,9 +279,9 @@ export function SessionsPageContent() {
               ) : undefined
             }
           />
-          <SessionSection title="Needs guidance" sessions={guidanceSessions} />
-          <SessionSection title="Failed" sessions={failedSessions} />
-          <SessionSection title="Completed" sessions={allSessions.filter((s) => doneStatuses.has(s.status))} />
+          <SessionSection title="Needs guidance" sessions={guidanceSessions} members={members} />
+          <SessionSection title="Failed" sessions={failedSessions} members={members} />
+          <SessionSection title="Completed" sessions={allSessions.filter((s) => doneStatuses.has(s.status))} members={members} />
         </div>
       )}
 
@@ -283,7 +299,7 @@ export function SessionsPageContent() {
           ) : (
             <div className="divide-y divide-border/50">
               {filteredSessions.map((session) => (
-                <SessionRow key={session.id} session={session} />
+                <SessionRow key={session.id} session={session} members={members} />
               ))}
             </div>
           )}

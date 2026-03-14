@@ -104,6 +104,7 @@ export interface Session {
   pm_reasoning?: string;
   project_task_id?: string;
   model_override?: string;
+  triggered_by_user_id?: string;
   error?: string;
   result_summary?: string;
   diff?: string;

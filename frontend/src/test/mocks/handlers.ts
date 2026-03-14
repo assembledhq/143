@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import type { Issue, Session, SessionLog, Validation, PullRequest, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, ProjectDetail } from '@/lib/types';
+import type { Issue, Session, SessionLog, User, Validation, PullRequest, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, ProjectDetail } from '@/lib/types';
 
 export const mockIssues: Issue[] = [
   {
@@ -148,6 +148,17 @@ export const mockPMStatus: PMStatus = {
   total_delegated: 0,
 };
 
+export const mockMembers: User[] = [
+  {
+    id: 'user-1',
+    org_id: 'org-1',
+    email: 'alice@example.com',
+    name: 'Alice Smith',
+    role: 'admin',
+    created_at: '2026-01-01T00:00:00Z',
+  },
+];
+
 export const handlers = [
   http.get('/api/v1/issues', () => {
     return HttpResponse.json({
@@ -209,6 +220,13 @@ export const handlers = [
 
   http.post('/api/v1/pm/analyze', () => {
     return HttpResponse.json({ data: { job_id: 'job-1' } });
+  }),
+
+  http.get('/api/v1/team/members', () => {
+    return HttpResponse.json({
+      data: mockMembers,
+      meta: {},
+    } satisfies ListResponse<User>);
   }),
 
   http.get('/api/v1/pm/decisions', () => {
