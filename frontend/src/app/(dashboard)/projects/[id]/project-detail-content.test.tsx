@@ -175,8 +175,8 @@ describe("ProjectDetailContent", () => {
 
     await user.click(screen.getByRole("tab", { name: /Settings/ }));
 
-    expect(screen.getByRole("button", { name: "Start Project" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Cancel Project" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start project" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel project" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
   });
@@ -214,8 +214,8 @@ describe("ProjectDetailContent", () => {
     await user.click(screen.getByRole("tab", { name: /Settings/ }));
 
     expect(screen.getByRole("button", { name: "Pause" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Cancel Project" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Start Project" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel project" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Start project" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
   });
 
@@ -252,8 +252,8 @@ describe("ProjectDetailContent", () => {
     await user.click(screen.getByRole("tab", { name: /Settings/ }));
 
     expect(screen.getByRole("button", { name: "Resume" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Cancel Project" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Start Project" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel project" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Start project" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
   });
 
@@ -292,13 +292,13 @@ describe("ProjectDetailContent", () => {
 
     expect(screen.getByLabelText("Goal")).toBeInTheDocument();
     expect(screen.getByLabelText("Scope")).toBeInTheDocument();
-    expect(screen.getByLabelText("Completion Criteria")).toBeInTheDocument();
-    expect(screen.getByText("Execution Mode")).toBeInTheDocument();
+    expect(screen.getByLabelText("Completion criteria")).toBeInTheDocument();
+    expect(screen.getByText("Execution mode")).toBeInTheDocument();
     expect(screen.getByLabelText("Sequential")).toBeInTheDocument();
     expect(screen.getByLabelText("Parallel")).toBeInTheDocument();
     expect(screen.getByText("Priority")).toBeInTheDocument();
-    expect(screen.getByLabelText("Base Branch")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Save Changes" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Base branch")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeInTheDocument();
   });
 
   it("shows Max Concurrent field when Parallel execution mode is selected", async () => {
@@ -333,7 +333,7 @@ describe("ProjectDetailContent", () => {
 
     await user.click(screen.getByRole("tab", { name: /Settings/ }));
 
-    expect(screen.getByLabelText("Max Concurrent")).toBeInTheDocument();
+    expect(screen.getByLabelText("Max concurrent")).toBeInTheDocument();
   });
 
   it("shows stats for project with running tasks and PRs", async () => {

@@ -169,8 +169,8 @@ export default function TeamSettingsPage() {
                 No members found.
               </div>
             ) : (
-              <div className="divide-y divide-border">
-                <div className="hidden items-center gap-4 bg-muted/30 px-4 py-2 text-xs font-medium uppercase tracking-wide text-muted-foreground md:grid md:grid-cols-[minmax(0,1.3fr)_minmax(0,1.3fr)_140px_100px]">
+              <div className="divide-y divide-border/50">
+                <div className="hidden items-center gap-4 bg-muted/30 px-4 py-2 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground/70 md:grid md:grid-cols-[minmax(0,1.3fr)_minmax(0,1.3fr)_140px_100px]">
                   <div>Name</div>
                   <div>Email</div>
                   <div>Role</div>
@@ -181,7 +181,7 @@ export default function TeamSettingsPage() {
                   return (
                     <div
                       key={member.id}
-                      className="grid gap-3 px-4 py-3 md:grid-cols-[minmax(0,1.3fr)_minmax(0,1.3fr)_140px_100px] md:items-center"
+                      className="grid gap-3 px-4 py-3 md:grid-cols-[minmax(0,1.3fr)_minmax(0,1.3fr)_140px_100px] md:items-center hover:bg-muted/40 dark:hover:bg-primary/[0.03] transition-colors"
                     >
                       <div className="flex items-center gap-3 min-w-0">
                         {member.avatar_url ? (
@@ -189,10 +189,10 @@ export default function TeamSettingsPage() {
                           <img
                             src={member.avatar_url}
                             alt=""
-                            className="h-8 w-8 rounded-full"
+                            className="h-8 w-8 rounded-full ring-1 ring-border/50"
                           />
                         ) : (
-                          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-xs font-medium text-muted-foreground">
+                          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-muted/50 dark:bg-white/5 ring-1 ring-border/50 text-xs font-medium text-muted-foreground">
                             {member.name?.[0]?.toUpperCase() ?? "?"}
                           </div>
                         )}
@@ -278,7 +278,7 @@ export default function TeamSettingsPage() {
       {canManageTeam && invitations.length > 0 && (
         <section className="space-y-3">
           <h2 className="text-[13px] font-medium text-foreground">
-            Pending Invitations
+            Pending invitations
           </h2>
           <Card>
             <CardContent className="p-0">
@@ -370,7 +370,7 @@ export default function TeamSettingsPage() {
                   className="h-9"
                   disabled={inviteMutation.isPending}
                 >
-                  {inviteMutation.isPending ? "Sending..." : "Send Invite"}
+                  {inviteMutation.isPending ? "Sending..." : "Send invite"}
                 </Button>
               </AlertDialogFooter>
             </form>

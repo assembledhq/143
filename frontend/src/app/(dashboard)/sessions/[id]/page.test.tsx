@@ -66,7 +66,7 @@ describe('SessionDetailPage', () => {
     );
 
     renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
-    await screen.findByText('Failure Details');
+    await screen.findByText('Failure details');
     expect(screen.getByText('Could not reproduce the error in test environment')).toBeInTheDocument();
   });
 

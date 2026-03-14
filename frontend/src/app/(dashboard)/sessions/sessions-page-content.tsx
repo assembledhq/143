@@ -15,10 +15,10 @@ import type { Session } from "@/lib/types";
 const statusConfig: Record<string, { dot: string; text: string; bg: string; label: string }> = {
   pending: { dot: "bg-muted-foreground/50", text: "text-muted-foreground", bg: "bg-muted", label: "Pending" },
   running: { dot: "bg-primary", text: "text-primary", bg: "bg-primary/10", label: "Running" },
-  awaiting_input: { dot: "bg-amber-500", text: "text-amber-700 dark:text-amber-400", bg: "bg-amber-50 dark:bg-amber-950/30", label: "Awaiting Input" },
-  needs_human_guidance: { dot: "bg-orange-500", text: "text-orange-700 dark:text-orange-400", bg: "bg-orange-50 dark:bg-orange-950/30", label: "Needs Guidance" },
+  awaiting_input: { dot: "bg-amber-500", text: "text-amber-700 dark:text-amber-400", bg: "bg-amber-50 dark:bg-amber-950/30", label: "Awaiting input" },
+  needs_human_guidance: { dot: "bg-orange-500", text: "text-orange-700 dark:text-orange-400", bg: "bg-orange-50 dark:bg-orange-950/30", label: "Needs guidance" },
   completed: { dot: "bg-emerald-500", text: "text-emerald-700 dark:text-emerald-400", bg: "bg-emerald-50 dark:bg-emerald-950/30", label: "Completed" },
-  pr_created: { dot: "bg-violet-500", text: "text-violet-700 dark:text-violet-400", bg: "bg-violet-50 dark:bg-violet-950/30", label: "PR Created" },
+  pr_created: { dot: "bg-violet-500", text: "text-violet-700 dark:text-violet-400", bg: "bg-violet-50 dark:bg-violet-950/30", label: "PR created" },
   failed: { dot: "bg-destructive", text: "text-destructive", bg: "bg-destructive/10", label: "Failed" },
   cancelled: { dot: "bg-muted-foreground/50", text: "text-muted-foreground", bg: "bg-muted", label: "Cancelled" },
   skipped: { dot: "bg-muted-foreground/30", text: "text-muted-foreground", bg: "bg-muted", label: "Skipped" },
@@ -27,7 +27,7 @@ const statusConfig: Record<string, { dot: string; text: string; bg: string; labe
 const filterTabs = [
   { value: "all", label: "All" },
   { value: "active", label: "Active" },
-  { value: "needs_human_guidance", label: "Needs Guidance" },
+  { value: "needs_human_guidance", label: "Needs guidance" },
   { value: "failed", label: "Failed" },
   { value: "done", label: "Done" },
   { value: "decisions", label: "Decisions" },
@@ -74,7 +74,7 @@ function SessionRow({ session }: { session: Session }) {
   return (
     <Link
       href={`/sessions/${session.id}`}
-      className="group flex items-center gap-4 py-2.5 px-1 hover:bg-muted/50 transition-colors cursor-pointer rounded-md -mx-1"
+      className="group flex items-center gap-4 py-2.5 px-1 hover:bg-muted/40 dark:hover:bg-primary/[0.03] transition-all duration-150 cursor-pointer rounded-md -mx-1"
     >
       {/* Status dot */}
       <div className="flex-shrink-0 w-4 flex justify-center">
@@ -132,7 +132,7 @@ function SessionSection({ title, sessions, badge }: {
         </span>
         {badge}
         <span className="text-[11px] text-muted-foreground">({sessions.length})</span>
-        <div className="flex-1 border-b border-border" />
+        <div className="flex-1 border-b border-border/50" />
       </div>
       <div className="divide-y divide-border/50">
         {sessions.map((session) => (
@@ -201,7 +201,7 @@ export function SessionsPageContent() {
                 )}
               </span>
               {isSelected && (
-                <span className="absolute bottom-0 left-3 right-3 h-0.5 bg-foreground rounded-full" />
+                <span className="absolute bottom-0 left-3 right-3 h-0.5 bg-[image:var(--gradient-primary)] rounded-full" />
               )}
             </button>
           );
@@ -230,13 +230,13 @@ export function SessionsPageContent() {
             </div>
             <p className="mt-4 text-[13px] font-medium text-foreground">No sessions yet</p>
             <p className="mt-1 max-w-sm text-center text-[13px] text-muted-foreground">
-              Click <span className="font-medium text-foreground">Run PM Agent</span> to review your issues and create sessions, or start a <span className="font-medium text-foreground">manual session</span> to fix a specific issue.
+              Click <span className="font-medium text-foreground">Run PM agent</span> to review your issues and create sessions, or start a <span className="font-medium text-foreground">manual session</span> to fix a specific issue.
             </p>
             <div className="flex items-center gap-2 mt-4">
               <Button variant="outline" size="sm" asChild>
                 <Link href="/sessions/new">
                   <Plus className="mr-1.5 h-3.5 w-3.5" />
-                  Manual Session
+                  Manual session
                 </Link>
               </Button>
             </div>
@@ -258,7 +258,7 @@ export function SessionsPageContent() {
               ) : undefined
             }
           />
-          <SessionSection title="Needs Guidance" sessions={guidanceSessions} />
+          <SessionSection title="Needs guidance" sessions={guidanceSessions} />
           <SessionSection title="Failed" sessions={failedSessions} />
           <SessionSection title="Completed" sessions={allSessions.filter((s) => doneStatuses.has(s.status))} />
         </div>

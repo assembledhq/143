@@ -133,7 +133,7 @@ function AcceptInvitationContent() {
                   )
                 }
               >
-                Create Account
+                Create account
               </Button>
               <Button
                 variant="outline"
@@ -150,7 +150,7 @@ function AcceptInvitationContent() {
                   )
                 }
               >
-                Sign In to Existing Account
+                Sign in to existing account
               </Button>
             </div>
           )}
@@ -184,7 +184,7 @@ function AcceptInvitationContent() {
                   )
                 }
               >
-                Sign In
+                Sign in
               </Button>
             </div>
           )}

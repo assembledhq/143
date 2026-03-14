@@ -145,7 +145,7 @@ describe('TeamSettingsPage', () => {
 
     expect(screen.getByText('Invite a member')).toBeInTheDocument();
     expect(screen.getByLabelText('Email')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Send Invite' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send invite' })).toBeInTheDocument();
   });
 
   it('uses consistent compact sizing for invite email input in modal', async () => {
@@ -161,7 +161,7 @@ describe('TeamSettingsPage', () => {
     renderWithProviders(<TeamSettingsPage />);
 
     await waitFor(() => {
-      expect(screen.getByText('Pending Invitations')).toBeInTheDocument();
+      expect(screen.getByText('Pending invitations')).toBeInTheDocument();
     });
 
     expect(screen.getByText('new@example.com')).toBeInTheDocument();
@@ -179,7 +179,7 @@ describe('TeamSettingsPage', () => {
     });
 
     await user.type(screen.getByLabelText('Email'), 'newuser@test.com');
-    await user.click(screen.getByRole('button', { name: 'Send Invite' }));
+    await user.click(screen.getByRole('button', { name: 'Send invite' }));
 
     await waitFor(() => {
       expect(createInvitationMock).toHaveBeenCalledWith('newuser@test.com', 'member');
@@ -334,7 +334,7 @@ describe('TeamSettingsPage', () => {
     });
 
     // The avatar fallback shows the first letter of the name
-    const avatarFallbacks = document.querySelectorAll('.rounded-full.bg-muted');
+    const avatarFallbacks = document.querySelectorAll('.h-8.w-8.rounded-full');
     expect(avatarFallbacks.length).toBeGreaterThanOrEqual(1);
   });
 });

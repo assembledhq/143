@@ -166,7 +166,7 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
         <CardContent>
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-medium">PM Settings</p>
+              <p className="text-sm font-medium">PM settings</p>
               <p className="text-xs text-muted-foreground">
                 {customized
                   ? "Custom PM settings for this repository."
@@ -179,7 +179,7 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
                 size="sm"
                 onClick={() => setCustomized(false)}
               >
-                Org Defaults
+                Org defaults
               </Button>
               <Button
                 variant={customized ? "default" : "outline"}
@@ -267,7 +267,7 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
                   )}
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="repo-direction">Current Direction</Label>
+                  <Label htmlFor="repo-direction">Current direction</Label>
                   <Textarea
                     id="repo-direction"
                     rows={2}
@@ -283,7 +283,7 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
                 </div>
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-2">
-                    <Label htmlFor="repo-focus-areas">Focus Areas</Label>
+                    <Label htmlFor="repo-focus-areas">Focus areas</Label>
                     <Input
                       id="repo-focus-areas"
                       value={focusInput}
@@ -314,7 +314,7 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
                     </div>
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="repo-avoid-areas">Avoid Areas</Label>
+                    <Label htmlFor="repo-avoid-areas">Avoid areas</Label>
                     <Input
                       id="repo-avoid-areas"
                       value={avoidInput}
@@ -351,21 +351,21 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
         </>
       )}
 
-      <div className="flex items-center gap-3">
-        <Button onClick={handleSave} disabled={mutation.isPending}>
-          {mutation.isPending ? "Saving..." : "Save Settings"}
-        </Button>
-        {customized && (
-          <Button variant="outline" onClick={handleResetToDefaults}>
-            Reset to Org Defaults
-          </Button>
-        )}
+      <div className="flex items-center justify-end gap-3">
         {saveStatus === "success" && (
-          <span className="text-sm text-green-600">Settings saved.</span>
+          <span className="text-sm text-emerald-600 dark:text-emerald-400">Settings saved.</span>
         )}
         {saveStatus === "error" && (
           <span className="text-sm text-destructive">Failed to save settings.</span>
         )}
+        {customized && (
+          <Button variant="outline" onClick={handleResetToDefaults}>
+            Reset to org defaults
+          </Button>
+        )}
+        <Button onClick={handleSave} disabled={mutation.isPending}>
+          {mutation.isPending ? "Saving..." : "Save settings"}
+        </Button>
       </div>
     </div>
   );

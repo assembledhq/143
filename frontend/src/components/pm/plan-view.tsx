@@ -11,7 +11,7 @@ export function PlanView({ plan }: { plan: PMPlan }) {
     <div className="space-y-6">
       <Card>
         <CardHeader>
-          <CardTitle className="text-sm">Situation Analysis</CardTitle>
+          <CardTitle className="text-sm">Situation analysis</CardTitle>
         </CardHeader>
         <CardContent className="text-sm text-muted-foreground">
           {plan.analysis || "No analysis provided."}
@@ -20,7 +20,7 @@ export function PlanView({ plan }: { plan: PMPlan }) {
 
       <div className="space-y-3">
         <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold">Priority Tasks</h3>
+          <h3 className="text-sm font-semibold">Priority tasks</h3>
           <Badge variant="secondary" className="text-[11px]">
             {plan.tasks.length} tasks
           </Badge>
@@ -35,7 +35,7 @@ export function PlanView({ plan }: { plan: PMPlan }) {
       {plan.clusters.length > 0 && (
         <Card>
           <CardHeader>
-            <CardTitle className="text-sm">Issue Clusters</CardTitle>
+            <CardTitle className="text-sm">Issue clusters</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4 text-sm">
             {plan.clusters.map((cluster, index) => (
@@ -63,7 +63,7 @@ export function PlanView({ plan }: { plan: PMPlan }) {
       {plan.skipped_issues.length > 0 && (
         <Card>
           <CardHeader>
-            <CardTitle className="text-sm">Skipped Issues</CardTitle>
+            <CardTitle className="text-sm">Skipped issues</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4 text-sm">
             {plan.skipped_issues.map((skip, index) => (

@@ -122,7 +122,7 @@ export function CodexDeviceCodeModal({
         <div className="mt-6 flex items-center justify-end gap-2">
           <Button variant="outline" size="sm" onClick={onClose}>{status === "completed" ? "Done" : "Cancel"}</Button>
           {(status === "error" || status === "expired") && (
-            <Button size="sm" onClick={startAuth}>Try Again</Button>
+            <Button size="sm" onClick={startAuth}>Try again</Button>
           )}
         </div>
       </div>

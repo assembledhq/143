@@ -49,18 +49,18 @@ function BoardSection({
   });
 
   const columns: { key: string; label: string; statuses: string[]; accent: string }[] = [
-    { key: "todo", label: "To Do", statuses: ["pending", "blocked"], accent: "border-t-gray-400" },
-    { key: "in_progress", label: "In Progress", statuses: ["running", "delegated"], accent: "border-t-blue-500" },
+    { key: "todo", label: "To do", statuses: ["pending", "blocked"], accent: "border-t-gray-400" },
+    { key: "in_progress", label: "In progress", statuses: ["running", "delegated"], accent: "border-t-blue-500" },
     { key: "done", label: "Done", statuses: ["completed"], accent: "border-t-green-500" },
-    { key: "needs_attention", label: "Needs Attention", statuses: ["failed", "skipped", "cancelled"], accent: "border-t-red-500" },
+    { key: "needs_attention", label: "Needs attention", statuses: ["failed", "skipped", "cancelled"], accent: "border-t-red-500" },
   ];
 
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold">Task Board</h3>
+        <h3 className="text-sm font-semibold">Task board</h3>
         <Button size="sm" variant="ghost" className="h-6 text-xs" onClick={() => setShowAddForm(!showAddForm)}>
-          <Plus className="h-3 w-3 mr-1" /> Add Task
+          <Plus className="h-3 w-3 mr-1" /> Add task
         </Button>
       </div>
 
@@ -155,7 +155,7 @@ function PRsSection({ tasks }: { tasks: ProjectTask[] }) {
   if (tasksWithPRs.length === 0) return null;
 
   return (
-    <CollapsibleSection title="Pull Requests" icon={GitPullRequest} count={tasksWithPRs.length}>
+    <CollapsibleSection title="Pull requests" icon={GitPullRequest} count={tasksWithPRs.length}>
       <div className="space-y-1">
         {tasksWithPRs.map((task) => {
           const cfg = taskStatusConfig[task.status] || taskStatusConfig.pending;
@@ -188,7 +188,7 @@ function TimelineSection({ cycles }: { cycles: ProjectCycle[] }) {
   if (cycles.length === 0) return null;
 
   return (
-    <CollapsibleSection title="Planning Cycles" icon={ArrowUpRight} count={cycles.length} defaultOpen={false}>
+    <CollapsibleSection title="Planning cycles" icon={ArrowUpRight} count={cycles.length} defaultOpen={false}>
       <div className="space-y-3">
         {cycles.map((cycle) => (
           <div key={cycle.id} className="border-l-2 border-muted pl-3 py-1">

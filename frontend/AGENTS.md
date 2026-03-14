@@ -97,7 +97,7 @@ Use `PageHeader` (`src/components/page-header.tsx`) for ALL page titles:
 
 ```tsx
 <PageHeader
-  title="Page Title"
+  title="Page title"
   description="Brief description of the page."
   action={<Button size="sm">Action</Button>}
 />
@@ -117,11 +117,11 @@ Use `SettingsPageFrame` for settings-style pages that combine PageContainer + Pa
 
 ### Section Pattern
 
-For sub-sections within a page (e.g., "Setup", "Execution", "Product Context"):
+For sub-sections within a page (e.g., "Setup", "Execution", "Product context"):
 
 ```tsx
 <section className="space-y-3">
-  <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Section Title</h2>
+  <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Section title</h2>
   <Card>
     <CardContent>
       {/* section content */}
@@ -220,7 +220,7 @@ Use `EmptyState` (`src/components/empty-state.tsx`) for all empty list/data stat
   icon={CalendarClock}
   title="No items yet"
   description="Items will appear here when..."
-  action={{ label: "Create Item", href: "/items/new" }}
+  action={{ label: "Create item", href: "/items/new" }}
 />
 ```
 
@@ -274,18 +274,19 @@ For radio groups displayed as selectable cards:
 
 ### Save Button Footer
 
-For pages with save actions:
+Primary action buttons (Save, Submit) must always be **right-aligned** using `justify-end`. This applies to all settings pages, form footers, and card action rows.
+
 ```tsx
-<div className="flex items-center gap-3">
-  <Button onClick={handleSave} disabled={mutation.isPending}>
-    {mutation.isPending ? "Saving..." : "Save Settings"}
-  </Button>
+<div className="flex items-center justify-end gap-3">
   {saveStatus === "success" && (
-    <span className="text-[13px] text-green-600">Settings saved.</span>
+    <span className="text-[13px] text-emerald-600 dark:text-emerald-400">Settings saved.</span>
   )}
   {saveStatus === "error" && (
     <span className="text-[13px] text-destructive">Failed to save settings.</span>
   )}
+  <Button onClick={handleSave} disabled={mutation.isPending}>
+    {mutation.isPending ? "Saving..." : "Save settings"}
+  </Button>
 </div>
 ```
 
@@ -366,6 +367,23 @@ Always include `dark:` variants for colored banners.
 | Inline destructive | `ghost` + `text-destructive` | `sm` |
 | Save/Submit | `default` | default (h-8) |
 | Modal cancel | via `AlertDialogCancel` or `outline` | default |
+
+## Text Casing
+
+**Always use sentence case** for all UI text: headings, section titles, button labels, tab labels, badge text, tooltips, and descriptions. Only capitalize the first word and proper nouns.
+
+| Correct (sentence case) | Wrong (Title Case) |
+|---|---|
+| `Save settings` | `Save Settings` |
+| `Project configuration` | `Project Configuration` |
+| `Provider keys` | `Provider Keys` |
+| `Pending invitations` | `Pending Invitations` |
+| `New project` | `New Project` |
+
+**Exceptions** — always capitalize:
+- Proper nouns and product names: GitHub, Linear, Sentry, Claude, Codex, Gemini
+- Acronyms: PM, LLM, PR, API
+- The word after an acronym stays lowercase: "PM agent", "LLM model", "PR status"
 
 ## Anti-Patterns to Avoid
 

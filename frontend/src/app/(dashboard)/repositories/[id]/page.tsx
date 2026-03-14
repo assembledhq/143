@@ -57,7 +57,7 @@ export default function RepositoryDetailPage({
         />
 
         <section className="space-y-3">
-          <h2 className="text-[13px] font-medium text-foreground">PM Agent Settings</h2>
+          <h2 className="text-[13px] font-medium text-foreground">PM agent settings</h2>
           <p className="text-xs text-muted-foreground">
             Customize how the PM agent behaves for this repository, or use your organization defaults.
           </p>

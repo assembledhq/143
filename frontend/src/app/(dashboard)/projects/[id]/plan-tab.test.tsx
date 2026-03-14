@@ -132,7 +132,7 @@ describe("SpecsSection", () => {
       <SpecsSection project={mockProject} specs={[]} />,
     );
 
-    expect(screen.getByText("Specs & Requirements")).toBeInTheDocument();
+    expect(screen.getByText("Specs & requirements")).toBeInTheDocument();
     expect(
       screen.getByText(
         /No specs yet\. Add product requirements, technical specs, or user stories/,
@@ -191,13 +191,13 @@ describe("SpecsSection", () => {
 
     // Form elements should appear
     expect(screen.getByText("Title")).toBeInTheDocument();
-    expect(screen.getByText("Create Spec")).toBeInTheDocument();
+    expect(screen.getByText("Create spec")).toBeInTheDocument();
 
     // Click Cancel to hide the form
     fireEvent.click(screen.getByText("Cancel"));
 
     // Form should be gone
-    expect(screen.queryByText("Create Spec")).not.toBeInTheDocument();
+    expect(screen.queryByText("Create spec")).not.toBeInTheDocument();
   });
 
   it("creates a spec via the form", async () => {
@@ -243,11 +243,11 @@ describe("SpecsSection", () => {
     );
 
     // Submit the form
-    await user.click(screen.getByText("Create Spec"));
+    await user.click(screen.getByText("Create spec"));
 
     // Wait for the form to disappear after successful creation
     await waitFor(() => {
-      expect(screen.queryByText("Create Spec")).not.toBeInTheDocument();
+      expect(screen.queryByText("Create spec")).not.toBeInTheDocument();
     });
   });
 
@@ -303,7 +303,7 @@ describe("DesignsSection", () => {
       <DesignsSection project={mockProject} attachments={[]} />,
     );
 
-    expect(screen.getByText("Designs & Screenshots")).toBeInTheDocument();
+    expect(screen.getByText("Designs & screenshots")).toBeInTheDocument();
     expect(
       screen.getByText(
         /No designs yet\. Add screenshots, mockups, or wireframes/,
@@ -381,7 +381,7 @@ describe("DesignsSection", () => {
     await user.click(screen.getByText("Add"));
 
     // Form should appear
-    expect(screen.getByText("File Name")).toBeInTheDocument();
+    expect(screen.getByText("File name")).toBeInTheDocument();
 
     // Fill in the form
     await user.type(
@@ -402,7 +402,7 @@ describe("DesignsSection", () => {
 
     // Wait for the form to disappear after successful creation
     await waitFor(() => {
-      expect(screen.queryByText("File Name")).not.toBeInTheDocument();
+      expect(screen.queryByText("File name")).not.toBeInTheDocument();
     });
   });
 
@@ -433,10 +433,10 @@ describe("AnalysisSection", () => {
     renderWithProviders(<AnalysisSection project={mockProject} />);
 
     // Section header should be visible
-    expect(screen.getByText("Project Analysis")).toBeInTheDocument();
+    expect(screen.getByText("Project analysis")).toBeInTheDocument();
 
     // AnalysisSection defaults to collapsed (defaultOpen={false}), so click to open
-    fireEvent.click(screen.getByText("Project Analysis"));
+    fireEvent.click(screen.getByText("Project analysis"));
 
     // Now the Analyze button and target select should be visible
     expect(screen.getByText("Analyze")).toBeInTheDocument();
@@ -470,7 +470,7 @@ describe("AnalysisSection", () => {
     renderWithProviders(<AnalysisSection project={mockProject} />);
 
     // Open the collapsed section
-    await user.click(screen.getByText("Project Analysis"));
+    await user.click(screen.getByText("Project analysis"));
 
     // Click Analyze
     await user.click(screen.getByText("Analyze"));
@@ -499,7 +499,7 @@ describe("AnalysisSection", () => {
     renderWithProviders(<AnalysisSection project={mockProject} />);
 
     // Open the collapsed section
-    await user.click(screen.getByText("Project Analysis"));
+    await user.click(screen.getByText("Project analysis"));
 
     // Click Analyze
     await user.click(screen.getByText("Analyze"));
@@ -522,13 +522,13 @@ describe("PlanTab", () => {
     );
 
     // SpecsSection header
-    expect(screen.getByText("Specs & Requirements")).toBeInTheDocument();
+    expect(screen.getByText("Specs & requirements")).toBeInTheDocument();
 
     // DesignsSection header
-    expect(screen.getByText("Designs & Screenshots")).toBeInTheDocument();
+    expect(screen.getByText("Designs & screenshots")).toBeInTheDocument();
 
     // AnalysisSection header
-    expect(screen.getByText("Project Analysis")).toBeInTheDocument();
+    expect(screen.getByText("Project analysis")).toBeInTheDocument();
 
     // Content from SpecsSection
     expect(screen.getByText("Test PRD")).toBeInTheDocument();

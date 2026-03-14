@@ -19,7 +19,7 @@ export default function SettingsPage() {
     <PageContainer size="default">
       <div className="space-y-6">
         <PageHeader
-          title="General Settings"
+          title="General settings"
           description="Manage your organization."
         />
         <section className="space-y-3">
@@ -27,7 +27,7 @@ export default function SettingsPage() {
           <Card>
             <CardContent>
               <div className="max-w-[560px] space-y-2">
-                <Label htmlFor="org-name">Organization Name</Label>
+                <Label htmlFor="org-name">Organization name</Label>
                 <Input
                   id="org-name"
                   value={settings?.data?.name ?? ""}

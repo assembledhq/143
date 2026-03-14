@@ -77,7 +77,7 @@ export default function PlansPage() {
     <PageContainer size="default">
       <div className="space-y-6">
         <PageHeader
-          title="PM Plans"
+          title="PM plans"
           description="See the PM agent's latest analysis and delegated tasks."
           action={
             <Button
@@ -87,7 +87,7 @@ export default function PlansPage() {
               title="Review open issues, prioritize them, and kick off agent runs"
             >
               <RefreshCw className={`mr-2 h-4 w-4 ${isPending || isAnalyzing ? "animate-spin" : ""}`} />
-              {isPending ? "Starting..." : isAnalyzing ? "Analyzing..." : "Analyze Issues"}
+              {isPending ? "Starting..." : isAnalyzing ? "Analyzing..." : "Analyze issues"}
             </Button>
           }
         />
@@ -126,7 +126,7 @@ export default function PlansPage() {
         {latest && (
         <Tabs defaultValue="latest" className="space-y-4">
           <TabsList>
-            <TabsTrigger value="latest">Latest Plan</TabsTrigger>
+            <TabsTrigger value="latest">Latest plan</TabsTrigger>
             <TabsTrigger value="history">History</TabsTrigger>
           </TabsList>
           <TabsContent value="latest" className="space-y-4">

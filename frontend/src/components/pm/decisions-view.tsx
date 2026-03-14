@@ -14,9 +14,9 @@ function formatDate(dateStr: string): string {
 
 function DecisionBadge({ decision }: { decision: string }) {
   const styles: Record<string, string> = {
-    delegate: "bg-blue-100 text-blue-800",
-    skip: "bg-gray-100 text-gray-700",
-    cluster: "bg-purple-100 text-purple-800",
+    delegate: "bg-blue-500/10 text-blue-700 dark:text-blue-400",
+    skip: "bg-muted text-muted-foreground",
+    cluster: "bg-purple-500/10 text-purple-700 dark:text-purple-400",
   };
   return (
     <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${styles[decision] ?? styles.skip}`}>
