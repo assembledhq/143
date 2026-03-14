@@ -115,6 +115,8 @@ func TestGenerateSkillsDoc_SentryOnly(t *testing.T) {
 }
 
 func TestGenerateSkillsDoc_LinearOnly(t *testing.T) {
+	t.Parallel()
+
 	reg := integration.NewRegistry()
 	reg.RegisterTaskManager(&mockTaskManager{name: "linear"})
 	tr := NewToolRegistry(reg)
@@ -131,5 +133,8 @@ func TestGenerateSkillsDoc_LinearOnly(t *testing.T) {
 	}
 	if strings.Contains(doc, "sentry_") {
 		t.Error("sentry tools should not appear when only Linear is configured")
+	}
+	if strings.Contains(doc, "143-tools sentry_list_errors") {
+		t.Error("sentry-specific usage tips should not appear when only Linear is configured")
 	}
 }

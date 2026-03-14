@@ -3,9 +3,13 @@ package integration
 import (
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestComputeTrendDirection(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name   string
 		points []TrendDataPoint
@@ -70,6 +74,20 @@ func TestComputeTrendDirection(t *testing.T) {
 			want: "spike",
 		},
 		{
+			name: "smooth growth is increasing not spike",
+			points: []TrendDataPoint{
+				{Count: 10},
+				{Count: 12},
+				{Count: 14},
+				{Count: 18},
+				{Count: 22},
+				{Count: 26},
+				{Count: 28},
+				{Count: 30},
+			},
+			want: "increasing",
+		},
+		{
 			name: "decreasing trend",
 			points: func() []TrendDataPoint {
 				pts := make([]TrendDataPoint, 8)
@@ -94,11 +112,12 @@ func TestComputeTrendDirection(t *testing.T) {
 	}
 
 	for _, tt := range tests {
+		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			got := computeTrendDirection(tt.points)
-			if got != tt.want {
-				t.Errorf("computeTrendDirection() = %q, want %q", got, tt.want)
-			}
+			require.Equal(t, tt.want, got, "computeTrendDirection should classify the aggregate trend correctly")
 		})
 	}
 }

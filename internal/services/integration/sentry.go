@@ -393,9 +393,11 @@ func computeTrendDirection(points []TrendDataPoint) string {
 	}
 
 	ratio := float64(lateSum) / float64(earlySum)
-	switch {
-	case ratio > 2.0:
+	if ratio > 2.0 && hasLateSpike(points, quarter) {
 		return "spike"
+	}
+
+	switch {
 	case ratio > 1.2:
 		return "increasing"
 	case ratio < 0.5:
@@ -403,4 +405,29 @@ func computeTrendDirection(points []TrendDataPoint) string {
 	default:
 		return "stable"
 	}
+}
+
+func hasLateSpike(points []TrendDataPoint, quarter int) bool {
+	start := len(points) - quarter
+	if start <= 0 {
+		return false
+	}
+
+	var baselineSum int
+	for i := 0; i < start; i++ {
+		baselineSum += points[i].Count
+	}
+	if baselineSum == 0 {
+		return true
+	}
+
+	baselineAvg := float64(baselineSum) / float64(start)
+	lateMax := 0
+	for i := start; i < len(points); i++ {
+		if points[i].Count > lateMax {
+			lateMax = points[i].Count
+		}
+	}
+
+	return float64(lateMax) >= baselineAvg*3
 }

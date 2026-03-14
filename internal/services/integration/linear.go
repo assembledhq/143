@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/assembledhq/143/internal/services/ingestion"
@@ -115,6 +116,11 @@ func (l *LinearTaskManager) ListTasks(ctx context.Context, filter TaskFilter) ([
 
 // GetTask fetches full details for a single Linear issue, including comments.
 func (l *LinearTaskManager) GetTask(ctx context.Context, taskID string) (*TaskDetail, error) {
+	issueRef, err := l.resolveIssueReference(ctx, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve linear task reference: %w", err)
+	}
+
 	query := `query($id: String!) {
 		issue(id: $id) {
 			id
@@ -147,7 +153,7 @@ func (l *LinearTaskManager) GetTask(ctx context.Context, taskID string) (*TaskDe
 		} `json:"data"`
 	}
 
-	if err := l.doGraphQL(ctx, query, map[string]interface{}{"id": taskID}, &result); err != nil {
+	if err := l.doGraphQL(ctx, query, map[string]interface{}{"id": issueRef.ID}, &result); err != nil {
 		return nil, fmt.Errorf("get linear task: %w", err)
 	}
 
@@ -241,6 +247,11 @@ func (l *LinearTaskManager) FindRelated(ctx context.Context, taskID string) ([]T
 
 // UpdateTask applies a change to a Linear issue.
 func (l *LinearTaskManager) UpdateTask(ctx context.Context, taskID string, update TaskUpdate) error {
+	issueRef, err := l.resolveIssueReference(ctx, taskID)
+	if err != nil {
+		return fmt.Errorf("resolve linear task reference: %w", err)
+	}
+
 	// Add comment first if provided, since it's a separate mutation.
 	if update.Comment != nil && *update.Comment != "" {
 		commentQuery := `mutation($issueId: String!, $body: String!) {
@@ -256,7 +267,7 @@ func (l *LinearTaskManager) UpdateTask(ctx context.Context, taskID string, updat
 			} `json:"data"`
 		}
 		if err := l.doGraphQL(ctx, commentQuery, map[string]interface{}{
-			"issueId": taskID,
+			"issueId": issueRef.ID,
 			"body":    *update.Comment,
 		}, &commentResult); err != nil {
 			return fmt.Errorf("add comment to linear task: %w", err)
@@ -269,12 +280,11 @@ func (l *LinearTaskManager) UpdateTask(ctx context.Context, taskID string, updat
 		input["priority"] = mapPriorityToLinear(*update.Priority)
 	}
 	if update.State != nil {
-		// State updates need the state ID, but we accept the state name.
-		// For simplicity, we set it via the stateId field — the caller
-		// should resolve the state name to an ID before calling UpdateTask,
-		// or we could add a state resolution step here. For now, we pass
-		// the name as Linear also accepts it in some contexts.
-		input["stateId"] = *update.State
+		stateID, err := l.resolveWorkflowStateID(ctx, issueRef, *update.State)
+		if err != nil {
+			return fmt.Errorf("resolve linear workflow state: %w", err)
+		}
+		input["stateId"] = stateID
 	}
 
 	if len(input) > 0 {
@@ -291,7 +301,7 @@ func (l *LinearTaskManager) UpdateTask(ctx context.Context, taskID string, updat
 			} `json:"data"`
 		}
 		if err := l.doGraphQL(ctx, updateQuery, map[string]interface{}{
-			"id":    taskID,
+			"id":    issueRef.ID,
 			"input": input,
 		}, &updateResult); err != nil {
 			return fmt.Errorf("update linear task: %w", err)
@@ -307,6 +317,11 @@ func (l *LinearTaskManager) UpdateTask(ctx context.Context, taskID string, updat
 	}
 
 	return nil
+}
+
+type linearIssueReference struct {
+	ID     string
+	TeamID string
 }
 
 // CreateTask creates a new Linear issue.
@@ -437,8 +452,8 @@ type linearIssueDetailNode struct {
 	} `json:"relations"`
 	Comments struct {
 		Nodes []struct {
-			Body      string `json:"body"`
-			User      struct {
+			Body string `json:"body"`
+			User struct {
 				Name string `json:"name"`
 			} `json:"user"`
 			CreatedAt string `json:"createdAt"`
@@ -516,6 +531,120 @@ func linearNodeToSummary(node linearIssueNode) TaskSummary {
 		CreatedAt:  ingestion.ParseTimeSafe(node.CreatedAt),
 		UpdatedAt:  ingestion.ParseTimeSafe(node.UpdatedAt),
 	}
+}
+
+var linearIdentifierPattern = regexp.MustCompile(`^[A-Z0-9]+-\d+$`)
+
+func (l *LinearTaskManager) resolveIssueReference(ctx context.Context, taskID string) (linearIssueReference, error) {
+	if !linearIdentifierPattern.MatchString(taskID) {
+		return linearIssueReference{ID: taskID}, nil
+	}
+
+	query := `query($identifier: String!) {
+		issues(filter: { identifier: { eq: $identifier } }, first: 1) {
+			nodes {
+				id
+				team { id }
+			}
+		}
+	}`
+
+	var result struct {
+		Data struct {
+			Issues struct {
+				Nodes []struct {
+					ID   string `json:"id"`
+					Team struct {
+						ID string `json:"id"`
+					} `json:"team"`
+				} `json:"nodes"`
+			} `json:"issues"`
+		} `json:"data"`
+	}
+
+	if err := l.doGraphQL(ctx, query, map[string]interface{}{"identifier": taskID}, &result); err != nil {
+		return linearIssueReference{}, err
+	}
+	if len(result.Data.Issues.Nodes) == 0 {
+		return linearIssueReference{}, fmt.Errorf("linear issue identifier %q not found", taskID)
+	}
+
+	return linearIssueReference{
+		ID:     result.Data.Issues.Nodes[0].ID,
+		TeamID: result.Data.Issues.Nodes[0].Team.ID,
+	}, nil
+}
+
+func (l *LinearTaskManager) resolveWorkflowStateID(ctx context.Context, issueRef linearIssueReference, stateName string) (string, error) {
+	teamID := issueRef.TeamID
+	if teamID == "" {
+		var err error
+		teamID, err = l.getIssueTeamID(ctx, issueRef.ID)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	query := `query($teamID: String!, $stateName: String!) {
+		workflowStates(
+			filter: {
+				team: { id: { eq: $teamID } }
+				name: { eq: $stateName }
+			}
+			first: 1
+		) {
+			nodes { id }
+		}
+	}`
+
+	var result struct {
+		Data struct {
+			WorkflowStates struct {
+				Nodes []struct {
+					ID string `json:"id"`
+				} `json:"nodes"`
+			} `json:"workflowStates"`
+		} `json:"data"`
+	}
+
+	if err := l.doGraphQL(ctx, query, map[string]interface{}{
+		"teamID":    teamID,
+		"stateName": stateName,
+	}, &result); err != nil {
+		return "", err
+	}
+	if len(result.Data.WorkflowStates.Nodes) == 0 {
+		return "", fmt.Errorf("linear workflow state %q not found", stateName)
+	}
+
+	return result.Data.WorkflowStates.Nodes[0].ID, nil
+}
+
+func (l *LinearTaskManager) getIssueTeamID(ctx context.Context, issueID string) (string, error) {
+	query := `query($id: String!) {
+		issue(id: $id) {
+			team { id }
+		}
+	}`
+
+	var result struct {
+		Data struct {
+			Issue *struct {
+				Team struct {
+					ID string `json:"id"`
+				} `json:"team"`
+			} `json:"issue"`
+		} `json:"data"`
+	}
+
+	if err := l.doGraphQL(ctx, query, map[string]interface{}{"id": issueID}, &result); err != nil {
+		return "", err
+	}
+	if result.Data.Issue == nil || result.Data.Issue.Team.ID == "" {
+		return "", fmt.Errorf("linear issue %q does not have a team", issueID)
+	}
+
+	return result.Data.Issue.Team.ID, nil
 }
 
 func mapLinearPriorityToString(priority int) string {

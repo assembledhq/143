@@ -56,7 +56,7 @@ func GenerateSkillsDoc(tr *ToolRegistry) string {
 
 	// Add composability tips.
 	b.WriteString("## Tips\n\n")
-	b.WriteString("- Output is JSON. Pipe through `jq` for filtering: `143-tools sentry_list_errors | jq '.[].title'`\n")
+	b.WriteString(fmt.Sprintf("- Output is JSON. Pipe through `jq` for filtering: `%s`\n", exampleJQTip(tools)))
 	b.WriteString("- Combine tools: find an error, then look up related tasks.\n")
 	b.WriteString("- Use `--limit` to control result size and keep output manageable.\n")
 
@@ -140,4 +140,13 @@ func isHighValueFlag(name string) bool {
 		return true
 	}
 	return false
+}
+
+func exampleJQTip(tools []Tool) string {
+	for _, tool := range tools {
+		if strings.Contains(tool.Name, "list_") || strings.Contains(tool.Name, "search_") {
+			return fmt.Sprintf("143-tools %s | jq '.[].title // .[].id'", tool.Name)
+		}
+	}
+	return "143-tools <tool_name> | jq '.'"
 }
