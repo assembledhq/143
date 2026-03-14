@@ -90,3 +90,46 @@ func TestGenerateSkillsDoc_ExamplesIncludeFlags(t *testing.T) {
 		t.Error("examples missing --team_key flag for create_task")
 	}
 }
+
+func TestGenerateSkillsDoc_SentryOnly(t *testing.T) {
+	reg := integration.NewRegistry()
+	reg.RegisterErrorTracker(&mockErrorTracker{name: "sentry"})
+	tr := NewToolRegistry(reg)
+	doc := GenerateSkillsDoc(tr)
+
+	if doc == "" {
+		t.Fatal("expected non-empty skills doc with sentry only")
+	}
+	if !strings.Contains(doc, "## Sentry") {
+		t.Error("missing Sentry section")
+	}
+	if strings.Contains(doc, "## Linear") {
+		t.Error("Linear section should not appear when only Sentry is configured")
+	}
+	if !strings.Contains(doc, "sentry_list_errors") {
+		t.Error("missing sentry tools")
+	}
+	if strings.Contains(doc, "linear_") {
+		t.Error("linear tools should not appear when only Sentry is configured")
+	}
+}
+
+func TestGenerateSkillsDoc_LinearOnly(t *testing.T) {
+	reg := integration.NewRegistry()
+	reg.RegisterTaskManager(&mockTaskManager{name: "linear"})
+	tr := NewToolRegistry(reg)
+	doc := GenerateSkillsDoc(tr)
+
+	if doc == "" {
+		t.Fatal("expected non-empty skills doc with linear only")
+	}
+	if !strings.Contains(doc, "## Linear") {
+		t.Error("missing Linear section")
+	}
+	if strings.Contains(doc, "## Sentry") {
+		t.Error("Sentry section should not appear when only Linear is configured")
+	}
+	if strings.Contains(doc, "sentry_") {
+		t.Error("sentry tools should not appear when only Linear is configured")
+	}
+}
