@@ -431,6 +431,33 @@ type DecryptedCredential struct {
 	UpdatedAt      time.Time      `json:"updated_at"`
 }
 
+// UserCredential is the DB row representation for per-user credentials.
+type UserCredential struct {
+	ID             uuid.UUID    `db:"id"`
+	UserID         uuid.UUID    `db:"user_id"`
+	OrgID          uuid.UUID    `db:"org_id"`
+	Provider       ProviderName `db:"provider"`
+	Config         []byte       `db:"config"`
+	IsTeamDefault  bool         `db:"is_team_default"`
+	Status         string       `db:"status"`
+	LastVerifiedAt *time.Time   `db:"last_verified_at"`
+	CreatedAt      time.Time    `db:"created_at"`
+	UpdatedAt      time.Time    `db:"updated_at"`
+}
+
+// DecryptedUserCredential pairs DB metadata with the strongly-typed, decrypted config.
+type DecryptedUserCredential struct {
+	ID             uuid.UUID      `json:"id"`
+	UserID         uuid.UUID      `json:"user_id"`
+	OrgID          uuid.UUID      `json:"org_id"`
+	Provider       ProviderName   `json:"provider"`
+	Config         ProviderConfig `json:"-"`
+	IsTeamDefault  bool           `json:"is_team_default"`
+	Status         string         `json:"status"`
+	LastVerifiedAt *time.Time     `json:"last_verified_at,omitempty"`
+	UpdatedAt      time.Time      `json:"updated_at"`
+}
+
 // --- API response types ---
 
 // CredentialSummary is the API-safe representation. Never contains full keys.
@@ -446,6 +473,30 @@ type CredentialSummary struct {
 	AppName     string `json:"app_name,omitempty"`
 	AppID       int64  `json:"app_id,omitempty"`
 	AccountType string `json:"account_type,omitempty"` // OpenAI ChatGPT account tier
+}
+
+// UserCredentialSummary is the API-safe representation of a user credential.
+type UserCredentialSummary struct {
+	Provider       ProviderName `json:"provider"`
+	Configured     bool         `json:"configured"`
+	IsTeamDefault  bool         `json:"is_team_default"`
+	MaskedKey      string       `json:"masked_key,omitempty"`
+	SetByUserID    *uuid.UUID   `json:"set_by_user_id,omitempty"`
+	SetByUserName  string       `json:"set_by_user_name,omitempty"`
+	Status         string       `json:"status,omitempty"`
+	LastVerifiedAt *time.Time   `json:"last_verified_at,omitempty"`
+}
+
+// ResolvedCredential describes which credential source would be used for a provider.
+type ResolvedCredential struct {
+	Provider  ProviderName `json:"provider"`
+	Source    string       `json:"source"` // "personal", "team_default", "org", "none"
+	MaskedKey string       `json:"masked_key,omitempty"`
+}
+
+// CodingAgentProviders lists the LLM providers used as coding agent credentials.
+var CodingAgentProviders = []ProviderName{
+	ProviderAnthropic, ProviderOpenAI, ProviderGemini, ProviderOpenRouter,
 }
 
 // MaskKey preserves the first 6 and last 4 characters of a key.

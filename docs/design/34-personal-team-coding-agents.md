@@ -219,14 +219,16 @@ Show which credential source was used (personal/team/org) in the session detail 
 
 ## Implementation Order
 
-1. **Migration**: Add `user_credentials` table + `triggered_by_user_id` column on sessions
-2. **Models**: Add `UserCredential`, `DecryptedUserCredential`, `UserCredentialSummary` types
-3. **DB Store**: Implement `UserCredentialStore` with all methods
-4. **Credential Resolver**: Update `resolveAgentEnv` in orchestrator to use the resolution chain
-5. **API Handlers**: Personal + team credential CRUD endpoints
-6. **Session Trigger**: Pass `triggered_by_user_id` through the trigger → job → orchestrator flow
-7. **Frontend**: Settings UI for personal/team credential management
-8. **Tests**: Unit tests for store, resolver, and handlers
+1. [x] **Migration**: Add `user_credentials` table (`000020`) + `triggered_by_user_id` column on sessions (`000019`)
+2. [x] **Models**: Add `UserCredential`, `DecryptedUserCredential`, `UserCredentialSummary`, `ResolvedCredential` types + `CodingAgentProviders` list
+3. [x] **DB Store**: Implement `UserCredentialStore` with all methods (Upsert, GetForUser, GetTeamDefault, ListByUser, ListTeamDefaults, Disable, SetTeamDefault, RemoveTeamDefault)
+4. [x] **Credential Resolver**: Add `resolveProviderConfig` method and `UserCredentialProvider` interface in orchestrator; update `resolveAgentEnv` to accept `userID`
+5. [x] **API Handlers**: `UserCredentialHandler` with ListPersonal, UpsertPersonal, DeletePersonal, ListTeamDefaults, SetTeamDefault, DeleteTeamDefault, ListResolved
+6. [x] **Router + Wiring**: Register routes in `router.go`, wire `UserCredentialStore` into orchestrator via `cmd/server/main.go`
+7. [x] **Session Trigger**: `triggered_by_user_id` captured in TriggerFix/CreateManual handlers, passed through to orchestrator
+8. [x] **Frontend API Client**: Added `api.userCredentials` methods (listPersonal, upsertPersonal, deletePersonal, listTeamDefaults, setTeamDefault, removeTeamDefault, listResolved) + `UserCredentialSummary`/`ResolvedCredential` types
+9. [x] **Frontend UI**: "My Agents" page with tabs (My Keys, Team Defaults, Active Config) + nav menu entry
+10. [x] **Tests**: Handler tests for ListPersonal, UpsertPersonal, DeletePersonal, ListTeamDefaults, ListResolved with mock stores
 
 ---
 

@@ -35,6 +35,12 @@ type CredentialProvider interface {
 	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
 }
 
+// UserCredentialProvider abstracts retrieving user-scoped provider credentials.
+type UserCredentialProvider interface {
+	GetForUser(ctx context.Context, orgID, userID uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error)
+	GetTeamDefault(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error)
+}
+
 // SessionStore defines the agent run DB operations needed by the orchestrator.
 type SessionStore interface {
 	UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string) error
@@ -100,6 +106,7 @@ type Orchestrator struct {
 	github            GitHubTokenProvider
 	codexAuth         CodexAuthProvider // can be nil
 	credentials       CredentialProvider
+	userCredentials   UserCredentialProvider // can be nil
 	logger            zerolog.Logger
 	maxConcurrent     int
 }
@@ -118,8 +125,9 @@ type OrchestratorConfig struct {
 	Orgs              OrgStore
 	Jobs              JobStore
 	GitHub            GitHubTokenProvider
-	CodexAuth         CodexAuthProvider // optional — enables ChatGPT OAuth for Codex agent
+	CodexAuth         CodexAuthProvider      // optional — enables ChatGPT OAuth for Codex agent
 	Credentials       CredentialProvider
+	UserCredentials   UserCredentialProvider // optional — enables personal/team credential resolution
 	Logger            zerolog.Logger
 	MaxConcurrent     int
 }
@@ -146,6 +154,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		github:            cfg.GitHub,
 		codexAuth:         cfg.CodexAuth,
 		credentials:       cfg.Credentials,
+		userCredentials:   cfg.UserCredentials,
 		logger:            cfg.Logger,
 		maxConcurrent:     maxConcurrent,
 	}
@@ -242,7 +251,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// 7. Create sandbox with agent-specific env vars (API keys).
 	// Start with server-level defaults, then overlay org-level overrides.
 	sandboxCfg := DefaultSandboxConfig()
-	sandboxCfg.Env = o.resolveAgentEnv(ctx, run.OrgID, run.AgentType)
+	sandboxCfg.Env = o.resolveAgentEnv(ctx, run.OrgID, run.AgentType, run.TriggeredByUserID)
 	// Ensure HOME points to the sandbox workdir so CLI tools (e.g. Codex
 	// resolving ~/.codex/auth.json) find files written to the workdir.
 	if sandboxCfg.Env == nil {
@@ -532,9 +541,9 @@ func (o *Orchestrator) fetchIntegrationCredentials(ctx context.Context, orgID uu
 	return ic
 }
 
-// resolveAgentEnv builds the sandbox env vars for the given agent type from
-// org-scoped credentials in org_credentials.
-func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, agentType models.AgentType) map[string]string {
+// resolveAgentEnv builds the sandbox env vars for the given agent type.
+// It checks credentials in order: user personal → team default → org credential.
+func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, userID *uuid.UUID) map[string]string {
 	if o.credentials == nil {
 		return nil
 	}
@@ -543,39 +552,33 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 
 	switch agentType {
 	case models.AgentTypeClaudeCode:
-		cred, err := o.credentials.Get(ctx, orgID, models.ProviderAnthropic)
-		if err == nil && cred != nil {
-			if cfg, ok := cred.Config.(models.AnthropicConfig); ok {
-				if cfg.APIKey != "" {
-					merged["ANTHROPIC_API_KEY"] = cfg.APIKey
-				}
-				if cfg.BaseURL != "" {
-					merged["ANTHROPIC_BASE_URL"] = cfg.BaseURL
-				}
+		cfg := o.resolveProviderConfig(ctx, orgID, userID, models.ProviderAnthropic)
+		if ac, ok := cfg.(models.AnthropicConfig); ok {
+			if ac.APIKey != "" {
+				merged["ANTHROPIC_API_KEY"] = ac.APIKey
+			}
+			if ac.BaseURL != "" {
+				merged["ANTHROPIC_BASE_URL"] = ac.BaseURL
 			}
 		}
 	case models.AgentTypeCodex:
-		cred, err := o.credentials.Get(ctx, orgID, models.ProviderOpenAI)
-		if err == nil && cred != nil {
-			if cfg, ok := cred.Config.(models.OpenAIConfig); ok {
-				if cfg.APIKey != "" {
-					merged["OPENAI_API_KEY"] = cfg.APIKey
-				}
-				if cfg.BaseURL != "" {
-					merged["OPENAI_BASE_URL"] = cfg.BaseURL
-				}
+		cfg := o.resolveProviderConfig(ctx, orgID, userID, models.ProviderOpenAI)
+		if oc, ok := cfg.(models.OpenAIConfig); ok {
+			if oc.APIKey != "" {
+				merged["OPENAI_API_KEY"] = oc.APIKey
+			}
+			if oc.BaseURL != "" {
+				merged["OPENAI_BASE_URL"] = oc.BaseURL
 			}
 		}
 	case models.AgentTypeGeminiCLI:
-		cred, err := o.credentials.Get(ctx, orgID, models.ProviderGemini)
-		if err == nil && cred != nil {
-			if cfg, ok := cred.Config.(models.GeminiConfig); ok {
-				if cfg.APIKey != "" {
-					merged["GEMINI_API_KEY"] = cfg.APIKey
-				}
-				if cfg.Model != "" {
-					merged["GEMINI_MODEL"] = cfg.Model
-				}
+		cfg := o.resolveProviderConfig(ctx, orgID, userID, models.ProviderGemini)
+		if gc, ok := cfg.(models.GeminiConfig); ok {
+			if gc.APIKey != "" {
+				merged["GEMINI_API_KEY"] = gc.APIKey
+			}
+			if gc.Model != "" {
+				merged["GEMINI_MODEL"] = gc.Model
 			}
 		}
 	}
@@ -602,6 +605,33 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 	}
 
 	return merged
+}
+
+// resolveProviderConfig returns the best ProviderConfig for a provider,
+// checking in order: user personal → team default → org credential.
+func (o *Orchestrator) resolveProviderConfig(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) models.ProviderConfig {
+	// 1. Check user's personal credential.
+	if userID != nil && o.userCredentials != nil {
+		if cred, err := o.userCredentials.GetForUser(ctx, orgID, *userID, provider); err == nil && cred != nil {
+			return cred.Config
+		}
+	}
+
+	// 2. Check team default credential.
+	if o.userCredentials != nil {
+		if cred, err := o.userCredentials.GetTeamDefault(ctx, orgID, provider); err == nil && cred != nil {
+			return cred.Config
+		}
+	}
+
+	// 3. Fall back to org credential.
+	if o.credentials != nil {
+		if cred, err := o.credentials.Get(ctx, orgID, provider); err == nil && cred != nil {
+			return cred.Config
+		}
+	}
+
+	return nil
 }
 
 // injectCodexAuth writes a ~/.codex/auth.json file into the sandbox if

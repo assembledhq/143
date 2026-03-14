@@ -384,6 +384,23 @@ export interface CredentialSummary {
   account_type?: string;
 }
 
+export interface UserCredentialSummary {
+  provider: string;
+  configured: boolean;
+  is_team_default: boolean;
+  masked_key?: string;
+  set_by_user_id?: string;
+  set_by_user_name?: string;
+  status?: string;
+  last_verified_at?: string;
+}
+
+export interface ResolvedCredential {
+  provider: string;
+  source: string;
+  masked_key?: string;
+}
+
 export interface ListResponse<T> {
   data: T[];
   meta: {

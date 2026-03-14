@@ -203,6 +203,28 @@ export const api = {
       }),
     delete: (provider: string) => del(`/api/v1/settings/credentials/${provider}`),
   },
+  userCredentials: {
+    listPersonal: () =>
+      get<import('./types').ListResponse<import('./types').UserCredentialSummary>>('/api/v1/settings/credentials/personal'),
+    upsertPersonal: (provider: string, config: Record<string, unknown>, isTeamDefault?: boolean) =>
+      request<import('./types').SingleResponse<import('./types').UserCredentialSummary>>(`/api/v1/settings/credentials/personal/${provider}`, {
+        method: 'PUT',
+        body: JSON.stringify({ config, is_team_default: isTeamDefault ?? false }),
+      }),
+    deletePersonal: (provider: string) =>
+      del(`/api/v1/settings/credentials/personal/${provider}`),
+    listTeamDefaults: () =>
+      get<import('./types').ListResponse<import('./types').UserCredentialSummary>>('/api/v1/settings/credentials/team'),
+    setTeamDefault: (provider: string, userId: string) =>
+      request(`/api/v1/settings/credentials/team/${provider}`, {
+        method: 'PUT',
+        body: JSON.stringify({ user_id: userId }),
+      }),
+    removeTeamDefault: (provider: string) =>
+      del(`/api/v1/settings/credentials/team/${provider}`),
+    listResolved: () =>
+      get<import('./types').ListResponse<import('./types').ResolvedCredential>>('/api/v1/settings/credentials/resolved'),
+  },
   integrations: {
     list: () => get<import('./types').ListResponse<import('./types').Integration>>('/api/v1/integrations'),
     loginGitHub: () => {

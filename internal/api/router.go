@@ -59,6 +59,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		}
 	}
 	credentialStore := db.NewOrgCredentialStore(pool, cryptoSvc)
+	userCredentialStore := db.NewUserCredentialStore(pool, cryptoSvc)
 
 	// Create services
 	ingestionSvc := ingestion.NewService(issueStore, webhookDeliveryStore, jobStore, logger)
@@ -122,6 +123,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
 	credentialHandler := handlers.NewCredentialHandler(credentialStore)
+	userCredentialHandler := handlers.NewUserCredentialHandler(userCredentialStore, credentialStore, userStore)
 	reviewPatternHandler := handlers.NewReviewPatternHandler(reviewPatternStore, reviewCommentStore)
 	teamHandler := handlers.NewTeamHandler(userStore, authSessionStore, invitationStore, orgStore, cfg.FrontendURL)
 
@@ -182,6 +184,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.RequireRole("admin", "member", "viewer"))
 
+			// Personal and resolved credential views
+			r.Get("/api/v1/settings/credentials/personal", userCredentialHandler.ListPersonal)
+			r.Get("/api/v1/settings/credentials/resolved", userCredentialHandler.ListResolved)
+			r.Get("/api/v1/settings/credentials/team", userCredentialHandler.ListTeamDefaults)
+
 			r.Get("/api/v1/repositories", repoHandler.List)
 			r.Get("/api/v1/repositories/{id}", repoHandler.Get)
 			r.Get("/api/v1/integrations", integrationHandler.ListIntegrations)
@@ -239,6 +246,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Post("/api/v1/integrations/slack/connect", integrationHandler.ConnectSlack)
 			r.Get("/api/v1/integrations/slack/channels", integrationHandler.ListSlackChannels)
 			r.Patch("/api/v1/integrations/slack/channels", integrationHandler.UpdateSlackChannels)
+			// Personal credential management
+			r.Put("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.UpsertPersonal)
+			r.Delete("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.DeletePersonal)
+
 			r.Post("/api/v1/issues/{id}/fix", sessionHandler.TriggerFix)
 			r.Post("/api/v1/sessions/manual", sessionHandler.CreateManual)
 			r.Post("/api/v1/sessions/{id}/questions/{qid}/answer", sessionHandler.AnswerQuestion)
@@ -279,10 +290,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Patch("/api/v1/review-patterns/{id}", reviewPatternHandler.UpdateStatus)
 			r.Put("/api/v1/review-patterns/{id}", reviewPatternHandler.UpdateRule)
 
-			// Credential management
+			// Org credential management
 			r.Get("/api/v1/settings/credentials", credentialHandler.List)
 			r.Put("/api/v1/settings/credentials/{provider}", credentialHandler.Update)
 			r.Delete("/api/v1/settings/credentials/{provider}", credentialHandler.Delete)
+
+			// Team default credential management
+			r.Put("/api/v1/settings/credentials/team/{provider}", userCredentialHandler.SetTeamDefault)
+			r.Delete("/api/v1/settings/credentials/team/{provider}", userCredentialHandler.DeleteTeamDefault)
 
 			// Codex (ChatGPT) OAuth device code auth
 			r.Post("/api/v1/settings/codex-auth/initiate", codexAuthHandler.Initiate)

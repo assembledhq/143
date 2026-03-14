@@ -12,6 +12,7 @@ import {
   Bot,
   Target,
   Sparkles,
+  KeyRound,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
@@ -153,7 +154,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                   size="sm"
                   className={cn(
                     "h-8 w-full justify-start gap-2 rounded-lg px-2.5 text-[13px] font-medium transition-colors duration-150",
-                    pathname.startsWith("/settings") || pathname.startsWith("/team") || pathname.startsWith("/integrations") || pathname.startsWith("/agent") || pathname.startsWith("/prioritization") || pathname.startsWith("/llm")                      ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                    pathname.startsWith("/settings") || pathname.startsWith("/team") || pathname.startsWith("/integrations") || pathname.startsWith("/agent") || pathname.startsWith("/my-agents") || pathname.startsWith("/prioritization") || pathname.startsWith("/llm")                      ? "bg-sidebar-accent text-sidebar-accent-foreground"
                       : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
                   )}
                 >
@@ -185,6 +186,10 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                 <DropdownMenuItem onClick={() => router.push("/agent")}>
                   <Bot className="h-4 w-4" />
                   Coding Agent
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => router.push("/my-agents")}>
+                  <KeyRound className="h-4 w-4" />
+                  My Agents
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => router.push("/llm")}>
                   <Sparkles className="h-4 w-4" />
