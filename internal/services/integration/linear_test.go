@@ -296,3 +296,294 @@ func TestLinearTaskManager_UpdateTaskResolvesIdentifierAndState(t *testing.T) {
 	require.NoError(t, err, "UpdateTask should resolve both task identifiers and workflow state names before mutating Linear")
 	require.Len(t, requests, 3, "UpdateTask should resolve the task and state before issuing the update mutation")
 }
+
+func TestLinearTaskManager_DoGraphQL_BearerAuth(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify Bearer auth header.
+		require.Equal(t, "Bearer test-token", r.Header.Get("Authorization"),
+			"doGraphQL should send a Bearer auth header")
+		require.Equal(t, "application/json", r.Header.Get("Content-Type"),
+			"doGraphQL should set Content-Type to application/json")
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{
+			"data": {
+				"teams": {
+					"nodes": [{"id": "team-1", "key": "ENG", "name": "Engineering"}]
+				}
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	tm := NewLinearTaskManager(LinearManagerConfig{
+		AuthToken: "test-token",
+		APIURL:    server.URL,
+	})
+
+	var result struct {
+		Data struct {
+			Teams struct {
+				Nodes []struct {
+					ID string `json:"id"`
+				} `json:"nodes"`
+			} `json:"teams"`
+		} `json:"data"`
+	}
+
+	err := tm.doGraphQL(context.Background(), `query { teams { nodes { id } } }`, nil, &result)
+	require.NoError(t, err, "doGraphQL should succeed with Bearer auth")
+	require.Len(t, result.Data.Teams.Nodes, 1, "doGraphQL should decode the response")
+}
+
+func TestLinearTaskManager_CreateTask_EndToEnd(t *testing.T) {
+	t.Parallel()
+
+	type graphqlRequest struct {
+		Query     string                 `json:"query"`
+		Variables map[string]interface{} `json:"variables"`
+	}
+
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		defer r.Body.Close()
+
+		var req graphqlRequest
+		err := json.NewDecoder(r.Body).Decode(&req)
+		require.NoError(t, err)
+
+		w.Header().Set("Content-Type", "application/json")
+
+		switch callCount {
+		case 1:
+			// Team resolution.
+			require.Contains(t, req.Query, "teams(filter:")
+			w.Write([]byte(`{
+				"data": {
+					"teams": {
+						"nodes": [{"id": "team-eng"}]
+					}
+				}
+			}`))
+		case 2:
+			// Issue creation.
+			require.Contains(t, req.Query, "issueCreate")
+			input := req.Variables["input"].(map[string]interface{})
+			require.Equal(t, "Test Task", input["title"])
+			require.Equal(t, "team-eng", input["teamId"])
+			w.Write([]byte(`{
+				"data": {
+					"issueCreate": {
+						"success": true,
+						"issue": {
+							"id": "new-id",
+							"identifier": "ENG-999",
+							"title": "Test Task",
+							"state": {"name": "Backlog", "type": "backlog"},
+							"priority": 3,
+							"team": {"key": "ENG", "name": "Engineering"},
+							"labels": {"nodes": []},
+							"assignee": {"name": ""},
+							"createdAt": "2024-01-15T10:00:00Z",
+							"updatedAt": "2024-01-15T10:00:00Z"
+						}
+					}
+				}
+			}`))
+		}
+	}))
+	defer server.Close()
+
+	tm := NewLinearTaskManager(LinearManagerConfig{
+		AuthToken: "test-token",
+		APIURL:    server.URL,
+	})
+
+	summary, err := tm.CreateTask(context.Background(), TaskCreateSpec{
+		Title:   "Test Task",
+		TeamKey: "ENG",
+	})
+	require.NoError(t, err, "CreateTask should succeed with mock server")
+	require.Equal(t, "new-id", summary.ID)
+	require.Equal(t, "ENG-999", summary.Identifier)
+}
+
+func TestLinearTaskManager_UpdateTask_LabelResolution(t *testing.T) {
+	t.Parallel()
+
+	type graphqlRequest struct {
+		Query     string                 `json:"query"`
+		Variables map[string]interface{} `json:"variables"`
+	}
+
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		defer r.Body.Close()
+
+		var req graphqlRequest
+		err := json.NewDecoder(r.Body).Decode(&req)
+		require.NoError(t, err)
+
+		w.Header().Set("Content-Type", "application/json")
+
+		switch callCount {
+		case 1:
+			// Resolve identifier.
+			require.Contains(t, req.Query, "issues(filter:")
+			w.Write([]byte(`{
+				"data": {
+					"issues": {
+						"nodes": [{"id": "issue-1", "team": {"id": "team-1"}}]
+					}
+				}
+			}`))
+		case 2:
+			// Get current labels.
+			require.Contains(t, req.Query, "labels")
+			w.Write([]byte(`{
+				"data": {
+					"issue": {
+						"labels": {
+							"nodes": [
+								{"id": "label-bug-id", "name": "bug"},
+								{"id": "label-auth-id", "name": "auth"}
+							]
+						}
+					}
+				}
+			}`))
+		case 3:
+			// Get team labels to resolve "feature" name to ID.
+			require.Contains(t, req.Query, "team(id:")
+			w.Write([]byte(`{
+				"data": {
+					"team": {
+						"labels": {
+							"nodes": [
+								{"id": "label-bug-id", "name": "bug"},
+								{"id": "label-feature-id", "name": "feature"},
+								{"id": "label-auth-id", "name": "auth"}
+							]
+						}
+					}
+				}
+			}`))
+		case 4:
+			// Issue update with label IDs.
+			require.Contains(t, req.Query, "issueUpdate")
+			input := req.Variables["input"].(map[string]interface{})
+			labelIDs := input["labelIds"].([]interface{})
+			// Should have: bug (kept) + feature (added) - auth (removed) = 2 labels.
+			require.Len(t, labelIDs, 2,
+				"label update should compute final set: current + add - remove")
+
+			// Verify the IDs are correct (order may vary).
+			ids := make(map[string]bool)
+			for _, id := range labelIDs {
+				ids[id.(string)] = true
+			}
+			require.True(t, ids["label-bug-id"], "bug label should be kept")
+			require.True(t, ids["label-feature-id"], "feature label should be added")
+			require.False(t, ids["label-auth-id"], "auth label should be removed")
+
+			w.Write([]byte(`{
+				"data": {
+					"issueUpdate": {"success": true}
+				}
+			}`))
+		}
+	}))
+	defer server.Close()
+
+	tm := NewLinearTaskManager(LinearManagerConfig{
+		AuthToken: "test-token",
+		APIURL:    server.URL,
+	})
+
+	update := TaskUpdate{
+		Labels: struct {
+			Add    []string `json:"add,omitempty"`
+			Remove []string `json:"remove,omitempty"`
+		}{
+			Add:    []string{"feature"},
+			Remove: []string{"auth"},
+		},
+	}
+	err := tm.UpdateTask(context.Background(), "ENG-100", update)
+	require.NoError(t, err, "UpdateTask with label changes should resolve names to IDs")
+	require.Equal(t, 4, callCount, "UpdateTask with labels should make 4 GraphQL calls")
+}
+
+func TestLinearTaskManager_UpdateTask_LabelNotFound(t *testing.T) {
+	t.Parallel()
+
+	type graphqlRequest struct {
+		Query     string                 `json:"query"`
+		Variables map[string]interface{} `json:"variables"`
+	}
+
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		defer r.Body.Close()
+
+		var req graphqlRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+
+		switch callCount {
+		case 1:
+			// Resolve identifier (use raw UUID, skip identifier resolution).
+			w.Write([]byte(`{
+				"data": {
+					"issues": {
+						"nodes": [{"id": "issue-1", "team": {"id": "team-1"}}]
+					}
+				}
+			}`))
+		case 2:
+			// Get current labels.
+			w.Write([]byte(`{
+				"data": {
+					"issue": {
+						"labels": {"nodes": []}
+					}
+				}
+			}`))
+		case 3:
+			// Get team labels — "nonexistent" label not found.
+			w.Write([]byte(`{
+				"data": {
+					"team": {
+						"labels": {
+							"nodes": [{"id": "label-bug-id", "name": "bug"}]
+						}
+					}
+				}
+			}`))
+		}
+	}))
+	defer server.Close()
+
+	tm := NewLinearTaskManager(LinearManagerConfig{
+		AuthToken: "test-token",
+		APIURL:    server.URL,
+	})
+
+	update := TaskUpdate{
+		Labels: struct {
+			Add    []string `json:"add,omitempty"`
+			Remove []string `json:"remove,omitempty"`
+		}{
+			Add: []string{"nonexistent"},
+		},
+	}
+	err := tm.UpdateTask(context.Background(), "ENG-100", update)
+	require.Error(t, err, "UpdateTask should fail when a label name can't be resolved")
+	require.Contains(t, err.Error(), `label "nonexistent" not found`,
+		"error should indicate which label wasn't found")
+}

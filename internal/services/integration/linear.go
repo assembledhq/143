@@ -310,10 +310,28 @@ func (l *LinearTaskManager) UpdateTask(ctx context.Context, taskID string, updat
 
 	// Handle label changes.
 	if len(update.Labels.Add) > 0 || len(update.Labels.Remove) > 0 {
-		// Linear's label API requires label IDs, not names. For now,
-		// we note this as a TODO — the MCP server will need to resolve
-		// label names to IDs via a separate query.
-		// This is intentionally a no-op until label resolution is added.
+		labelIDs, err := l.resolveLabelIDs(ctx, issueRef, update.Labels.Add, update.Labels.Remove)
+		if err != nil {
+			return fmt.Errorf("resolve linear labels: %w", err)
+		}
+		labelQuery := `mutation($id: String!, $input: IssueUpdateInput!) {
+			issueUpdate(id: $id, input: $input) {
+				success
+			}
+		}`
+		var labelResult struct {
+			Data struct {
+				IssueUpdate struct {
+					Success bool `json:"success"`
+				} `json:"issueUpdate"`
+			} `json:"data"`
+		}
+		if err := l.doGraphQL(ctx, labelQuery, map[string]interface{}{
+			"id":    issueRef.ID,
+			"input": map[string]interface{}{"labelIds": labelIDs},
+		}, &labelResult); err != nil {
+			return fmt.Errorf("update linear task labels: %w", err)
+		}
 	}
 
 	return nil
@@ -477,7 +495,7 @@ func (l *LinearTaskManager) doGraphQL(ctx context.Context, query string, variabl
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", l.authToken)
+	req.Header.Set("Authorization", "Bearer "+l.authToken)
 
 	resp, err := l.httpClient.Do(req) // #nosec G107 -- URL is from internal config
 	if err != nil {
@@ -645,6 +663,100 @@ func (l *LinearTaskManager) getIssueTeamID(ctx context.Context, issueID string) 
 	}
 
 	return result.Data.Issue.Team.ID, nil
+}
+
+// resolveLabelIDs computes the final set of label IDs for an issue by fetching
+// current labels, adding new ones by name, and removing specified ones by name.
+func (l *LinearTaskManager) resolveLabelIDs(ctx context.Context, issueRef linearIssueReference, addNames, removeNames []string) ([]string, error) {
+	// 1. Get the issue's current labels.
+	currentQuery := `query($id: String!) {
+		issue(id: $id) {
+			labels { nodes { id name } }
+		}
+	}`
+	var currentResult struct {
+		Data struct {
+			Issue struct {
+				Labels struct {
+					Nodes []struct {
+						ID   string `json:"id"`
+						Name string `json:"name"`
+					} `json:"nodes"`
+				} `json:"labels"`
+			} `json:"issue"`
+		} `json:"data"`
+	}
+	if err := l.doGraphQL(ctx, currentQuery, map[string]interface{}{"id": issueRef.ID}, &currentResult); err != nil {
+		return nil, fmt.Errorf("get current labels: %w", err)
+	}
+
+	// Build a map of current label name→ID and track the set of IDs.
+	currentIDs := make(map[string]bool)
+	nameToID := make(map[string]string)
+	for _, label := range currentResult.Data.Issue.Labels.Nodes {
+		currentIDs[label.ID] = true
+		nameToID[label.Name] = label.ID
+	}
+
+	// 2. Resolve add label names to IDs via the team's labels.
+	if len(addNames) > 0 {
+		teamID := issueRef.TeamID
+		if teamID == "" {
+			var err error
+			teamID, err = l.getIssueTeamID(ctx, issueRef.ID)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		teamLabelsQuery := `query($teamID: ID!) {
+			team(id: $teamID) {
+				labels { nodes { id name } }
+			}
+		}`
+		var teamLabelsResult struct {
+			Data struct {
+				Team struct {
+					Labels struct {
+						Nodes []struct {
+							ID   string `json:"id"`
+							Name string `json:"name"`
+						} `json:"nodes"`
+					} `json:"labels"`
+				} `json:"team"`
+			} `json:"data"`
+		}
+		if err := l.doGraphQL(ctx, teamLabelsQuery, map[string]interface{}{"teamID": teamID}, &teamLabelsResult); err != nil {
+			return nil, fmt.Errorf("get team labels: %w", err)
+		}
+
+		teamNameToID := make(map[string]string)
+		for _, label := range teamLabelsResult.Data.Team.Labels.Nodes {
+			teamNameToID[label.Name] = label.ID
+		}
+
+		for _, name := range addNames {
+			id, ok := teamNameToID[name]
+			if !ok {
+				return nil, fmt.Errorf("label %q not found on team", name)
+			}
+			currentIDs[id] = true
+		}
+	}
+
+	// 3. Remove labels by name.
+	for _, name := range removeNames {
+		if id, ok := nameToID[name]; ok {
+			delete(currentIDs, id)
+		}
+	}
+
+	// 4. Collect final label IDs.
+	finalIDs := make([]string, 0, len(currentIDs))
+	for id := range currentIDs {
+		finalIDs = append(finalIDs, id)
+	}
+	return finalIDs, nil
 }
 
 func mapLinearPriorityToString(priority int) string {

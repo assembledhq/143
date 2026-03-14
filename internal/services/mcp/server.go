@@ -56,6 +56,9 @@ func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 
 	encoder := json.NewEncoder(w)
 
+	// Note: scanner.Scan() blocks and does not respect context cancellation.
+	// This is acceptable for STDIO transport — when the parent process kills
+	// us, stdin is closed, which unblocks the scanner and causes a clean exit.
 	for {
 		select {
 		case <-ctx.Done():

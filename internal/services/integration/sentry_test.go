@@ -1,6 +1,10 @@
 package integration
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -142,25 +146,6 @@ func TestMapSeverityToSentryLevel(t *testing.T) {
 	}
 }
 
-func TestFormatStatsPeriod(t *testing.T) {
-	tests := []struct {
-		duration time.Duration
-		expected string
-	}{
-		{1 * time.Hour, "1h"},
-		{24 * time.Hour, "24h"},
-		{48 * time.Hour, "2d"},
-		{7 * 24 * time.Hour, "7d"},
-	}
-
-	for _, tt := range tests {
-		got := formatStatsPeriod(tt.duration)
-		if got != tt.expected {
-			t.Errorf("formatStatsPeriod(%v) = %q, want %q", tt.duration, got, tt.expected)
-		}
-	}
-}
-
 func TestSentryErrorTracker_Name(t *testing.T) {
 	tracker := NewSentryErrorTracker(SentryTrackerConfig{
 		AuthToken: "test-token",
@@ -190,4 +175,112 @@ func TestSentryErrorTracker_CustomBaseURL(t *testing.T) {
 	if tracker.baseURL != "https://sentry.example.com" {
 		t.Errorf("baseURL = %q, want %q", tracker.baseURL, "https://sentry.example.com")
 	}
+}
+
+func TestSentryErrorTracker_ListErrors_AuthAndEncoding(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify Bearer auth header.
+		require.Equal(t, "Bearer test-token", r.Header.Get("Authorization"),
+			"ListErrors should send a Bearer auth header")
+
+		// Verify query parameter is URL-encoded.
+		query := r.URL.Query().Get("query")
+		require.Contains(t, query, "is:unresolved",
+			"ListErrors should include the base unresolved filter")
+
+		sort := r.URL.Query().Get("sort")
+		require.Equal(t, "date", sort, "ListErrors should sort by date")
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]interface{}{
+			{
+				"id":        "1",
+				"title":     "Test Error",
+				"culprit":   "module.function",
+				"level":     "error",
+				"count":     "5",
+				"userCount": 3,
+				"firstSeen": "2024-01-15T10:00:00Z",
+				"lastSeen":  "2024-01-16T12:00:00Z",
+				"project":   map[string]string{"slug": "test-proj"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	tracker := NewSentryErrorTracker(SentryTrackerConfig{
+		BaseURL:   server.URL,
+		AuthToken: "test-token",
+		OrgSlug:   "test-org",
+	})
+
+	summaries, err := tracker.ListErrors(context.Background(), ErrorFilter{Limit: 10})
+	require.NoError(t, err, "ListErrors should succeed with a mock server")
+	require.Len(t, summaries, 1, "ListErrors should return the issues from the mock server")
+	require.Equal(t, "1", summaries[0].ID)
+	require.Equal(t, "Test Error", summaries[0].Title)
+}
+
+func TestSentryErrorTracker_FindRelated_SpecialCharacters(t *testing.T) {
+	t.Parallel()
+
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+
+		switch callCount {
+		case 1:
+			// GetError: issue detail.
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":        "123",
+				"title":     "Error with special culprit",
+				"culprit":   "module.func & bar#baz",
+				"level":     "error",
+				"count":     "1",
+				"firstSeen": "2024-01-15T10:00:00Z",
+				"lastSeen":  "2024-01-16T12:00:00Z",
+				"project":   map[string]string{"slug": "proj"},
+			})
+		case 2:
+			// GetError: latest event (return empty).
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"eventID": "evt-1",
+				"entries": []interface{}{},
+				"tags":    []interface{}{},
+			})
+		case 3:
+			// FindRelated: verify query is URL-encoded.
+			query := r.URL.Query().Get("query")
+			require.Contains(t, query, "module.func & bar#baz",
+				"FindRelated should pass the culprit as a decoded query value (URL encoding handled by net/url)")
+
+			json.NewEncoder(w).Encode([]map[string]interface{}{
+				{
+					"id":        "456",
+					"title":     "Related error",
+					"culprit":   "module.func & bar#baz",
+					"level":     "error",
+					"count":     "1",
+					"firstSeen": "2024-01-15T10:00:00Z",
+					"lastSeen":  "2024-01-16T12:00:00Z",
+					"project":   map[string]string{"slug": "proj"},
+				},
+			})
+		}
+	}))
+	defer server.Close()
+
+	tracker := NewSentryErrorTracker(SentryTrackerConfig{
+		BaseURL:   server.URL,
+		AuthToken: "test-token",
+		OrgSlug:   "test-org",
+	})
+
+	related, err := tracker.FindRelated(context.Background(), "123")
+	require.NoError(t, err, "FindRelated should handle special characters in culprit")
+	require.Len(t, related, 1, "FindRelated should return related issues excluding the source issue")
+	require.Equal(t, "456", related[0].ID)
 }

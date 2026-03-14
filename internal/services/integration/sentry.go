@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -64,10 +65,14 @@ func (s *SentryErrorTracker) ListErrors(ctx context.Context, filter ErrorFilter)
 	if filter.ProjectSlug != "" {
 		endpoint = fmt.Sprintf("%s/api/0/projects/%s/%s/issues/", s.baseURL, s.orgSlug, filter.ProjectSlug)
 	}
-	endpoint += fmt.Sprintf("?query=%s&sort=date", query)
-	if filter.Limit > 0 {
-		endpoint += fmt.Sprintf("&limit=%d", filter.Limit)
+	params := url.Values{
+		"query": {query},
+		"sort":  {"date"},
 	}
+	if filter.Limit > 0 {
+		params.Set("limit", fmt.Sprintf("%d", filter.Limit))
+	}
+	endpoint += "?" + params.Encode()
 
 	var issues []sentryAPIIssue
 	if err := s.doGet(ctx, endpoint, &issues); err != nil {
@@ -152,9 +157,14 @@ func (s *SentryErrorTracker) FindRelated(ctx context.Context, errorID string) ([
 		return nil, nil
 	}
 
+	params := url.Values{
+		"query": {"is:unresolved culprit:" + detail.Culprit},
+		"sort":  {"date"},
+		"limit": {"10"},
+	}
 	endpoint := fmt.Sprintf(
-		"%s/api/0/organizations/%s/issues/?query=is:unresolved culprit:%s&sort=date&limit=10",
-		s.baseURL, s.orgSlug, detail.Culprit,
+		"%s/api/0/organizations/%s/issues/?%s",
+		s.baseURL, s.orgSlug, params.Encode(),
 	)
 
 	var issues []sentryAPIIssue
@@ -357,14 +367,6 @@ func mapSeverityToSentryLevel(severity string) string {
 	default:
 		return severity
 	}
-}
-
-func formatStatsPeriod(d time.Duration) string {
-	hours := int(d.Hours())
-	if hours <= 24 {
-		return fmt.Sprintf("%dh", hours)
-	}
-	return fmt.Sprintf("%dd", hours/24)
 }
 
 func computeTrendDirection(points []TrendDataPoint) string {

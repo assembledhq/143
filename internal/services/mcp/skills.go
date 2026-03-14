@@ -40,7 +40,11 @@ func GenerateSkillsDoc(tr *ToolRegistry) string {
 
 	for _, provider := range providerNames {
 		providerTools := groups[provider]
-		b.WriteString(fmt.Sprintf("## %s\n\n", strings.Title(provider)))
+		title := provider
+		if len(title) > 0 {
+			title = strings.ToUpper(title[:1]) + title[1:]
+		}
+		b.WriteString(fmt.Sprintf("## %s\n\n", title))
 
 		for _, tool := range providerTools {
 			b.WriteString(fmt.Sprintf("**%s** — %s\n", tool.Name, tool.Description))

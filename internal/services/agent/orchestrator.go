@@ -505,6 +505,33 @@ func (o *Orchestrator) enqueueJob(ctx context.Context, orgID uuid.UUID, queue, j
 	}
 }
 
+// integrationCredentials holds the resolved Sentry and Linear configs for an org.
+type integrationCredentials struct {
+	Sentry *models.SentryConfig
+	Linear *models.LinearConfig
+}
+
+// fetchIntegrationCredentials retrieves the Sentry and Linear configs for
+// an org from the credential provider. Returns nil configs if unavailable.
+func (o *Orchestrator) fetchIntegrationCredentials(ctx context.Context, orgID uuid.UUID) integrationCredentials {
+	var ic integrationCredentials
+	if o.credentials == nil {
+		return ic
+	}
+
+	if cred, err := o.credentials.Get(ctx, orgID, models.ProviderSentry); err == nil && cred != nil {
+		if cfg, ok := cred.Config.(models.SentryConfig); ok {
+			ic.Sentry = &cfg
+		}
+	}
+	if cred, err := o.credentials.Get(ctx, orgID, models.ProviderLinear); err == nil && cred != nil {
+		if cfg, ok := cred.Config.(models.LinearConfig); ok {
+			ic.Linear = &cfg
+		}
+	}
+	return ic
+}
+
 // resolveAgentEnv builds the sandbox env vars for the given agent type from
 // org-scoped credentials in org_credentials.
 func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, agentType models.AgentType) map[string]string {
@@ -555,21 +582,18 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 
 	// Integration credentials — consumed by the 143-mcp binary inside the sandbox.
 	// These are injected for all agent types since the MCP server is agent-agnostic.
-	if cred, err := o.credentials.Get(ctx, orgID, models.ProviderSentry); err == nil && cred != nil {
-		if cfg, ok := cred.Config.(models.SentryConfig); ok {
-			if cfg.AccessToken != "" {
-				merged["SENTRY_AUTH_TOKEN"] = cfg.AccessToken
-			}
-			if cfg.OrgSlug != "" {
-				merged["SENTRY_ORG_SLUG"] = cfg.OrgSlug
-			}
+	ic := o.fetchIntegrationCredentials(ctx, orgID)
+	if ic.Sentry != nil {
+		if ic.Sentry.AccessToken != "" {
+			merged["SENTRY_AUTH_TOKEN"] = ic.Sentry.AccessToken
+		}
+		if ic.Sentry.OrgSlug != "" {
+			merged["SENTRY_ORG_SLUG"] = ic.Sentry.OrgSlug
 		}
 	}
-	if cred, err := o.credentials.Get(ctx, orgID, models.ProviderLinear); err == nil && cred != nil {
-		if cfg, ok := cred.Config.(models.LinearConfig); ok {
-			if cfg.AccessToken != "" {
-				merged["LINEAR_ACCESS_TOKEN"] = cfg.AccessToken
-			}
+	if ic.Linear != nil {
+		if ic.Linear.AccessToken != "" {
+			merged["LINEAR_ACCESS_TOKEN"] = ic.Linear.AccessToken
 		}
 	}
 
@@ -638,25 +662,22 @@ func (o *Orchestrator) buildIntegrationSkills(ctx context.Context, orgID uuid.UU
 		return ""
 	}
 
+	ic := o.fetchIntegrationCredentials(ctx, orgID)
 	reg := integration.NewRegistry()
 
 	// Register integrations based on available credentials.
-	if cred, err := o.credentials.Get(ctx, orgID, models.ProviderSentry); err == nil && cred != nil {
-		if cfg, ok := cred.Config.(models.SentryConfig); ok && cfg.AccessToken != "" {
-			tracker := integration.NewSentryErrorTracker(integration.SentryTrackerConfig{
-				AuthToken: cfg.AccessToken,
-				OrgSlug:   cfg.OrgSlug,
-			})
-			reg.RegisterErrorTracker(tracker)
-		}
+	if ic.Sentry != nil && ic.Sentry.AccessToken != "" {
+		tracker := integration.NewSentryErrorTracker(integration.SentryTrackerConfig{
+			AuthToken: ic.Sentry.AccessToken,
+			OrgSlug:   ic.Sentry.OrgSlug,
+		})
+		reg.RegisterErrorTracker(tracker)
 	}
-	if cred, err := o.credentials.Get(ctx, orgID, models.ProviderLinear); err == nil && cred != nil {
-		if cfg, ok := cred.Config.(models.LinearConfig); ok && cfg.AccessToken != "" {
-			manager := integration.NewLinearTaskManager(integration.LinearManagerConfig{
-				AuthToken: cfg.AccessToken,
-			})
-			reg.RegisterTaskManager(manager)
-		}
+	if ic.Linear != nil && ic.Linear.AccessToken != "" {
+		manager := integration.NewLinearTaskManager(integration.LinearManagerConfig{
+			AuthToken: ic.Linear.AccessToken,
+		})
+		reg.RegisterTaskManager(manager)
 	}
 
 	if !reg.HasAny() {
