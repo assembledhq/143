@@ -43,14 +43,13 @@ describe('SessionDetailPage', () => {
     expect(screen.getByText('92%')).toBeInTheDocument();
   });
 
-  it('shows tabs for Overview, Logs, Diff, Validation, PR', async () => {
+  it('shows tabs for Overview, Logs, Changes, Validation', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
     expect(screen.getByRole('tab', { name: 'Overview' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Logs' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'Diff' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Changes' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Validation' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'PR' })).toBeInTheDocument();
   });
 
   it('renders failed session with failure details', async () => {
