@@ -154,6 +154,19 @@ func (h *PMHandler) Status(w http.ResponseWriter, r *http.Request) {
 		status.IsRunning = latestPlan.Status == models.PMPlanStatusExecuting
 	}
 
+	// Check for recent failed pm_analyze jobs. If the latest failed job is more
+	// recent than the latest plan, surface the error so the user understands
+	// why the PM agent isn't producing results.
+	failedJob, err := h.jobStore.GetLatestFailedByType(r.Context(), orgID, "pm_analyze")
+	if err == nil && failedJob != nil {
+		// Only show the error if it's newer than the last successful plan.
+		showError := status.LastRunAt == nil || failedJob.UpdatedAt.After(*status.LastRunAt)
+		if showError {
+			status.LastError = &failedJob.LastError
+			status.LastFailedAt = &failedJob.UpdatedAt
+		}
+	}
+
 	// Get decision success rate.
 	summary, err := h.decisionLogStore.GetDecisionSummary(r.Context(), orgID)
 	if err == nil {

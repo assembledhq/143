@@ -21,6 +21,7 @@ vi.mock("lucide-react", () => {
     RefreshCw: icon("RefreshCw"),
     Plus: icon("Plus"),
     Activity: icon("Activity"),
+    AlertTriangle: icon("AlertTriangle"),
     CheckCircle2: icon("CheckCircle2"),
     XCircle: icon("XCircle"),
     Clock: icon("Clock"),
@@ -179,6 +180,35 @@ describe("PMStatusBanner", () => {
     const user = userEvent.setup();
     await user.click(screen.getByText("dismiss"));
     expect(dismissError).toHaveBeenCalled();
+  });
+
+  it("shows job failure error from PM status", async () => {
+    mockUseAnalyze.mockReturnValue(defaultAnalyze());
+
+    server.use(
+      http.get("*/api/v1/pm/status", () => {
+        return HttpResponse.json({
+          data: {
+            is_running: false,
+            last_run_status: "",
+            issues_reviewed: 0,
+            success_rate: 0,
+            success_count: 0,
+            total_delegated: 0,
+            last_error: "no repositories configured for org",
+            last_failed_at: new Date().toISOString(),
+          },
+        });
+      })
+    );
+
+    renderWithProviders(<PMStatusBanner hasActivePlanSession={false} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Last run failed")).toBeInTheDocument();
+    });
+    expect(screen.getByText("no repositories configured for org")).toBeInTheDocument();
+    expect(screen.getByText("Attention needed")).toBeInTheDocument();
   });
 
   it("renders Manual Session link", () => {
