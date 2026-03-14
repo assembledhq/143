@@ -48,7 +48,7 @@ describe("AuthenticatedLayout", () => {
       </AuthenticatedLayout>
     );
 
-    const contentWrapper = container.querySelector("main > div");
+    const contentWrapper = container.querySelector("main > div:last-child");
     expect(contentWrapper).toHaveClass("max-w-none");
     expect(contentWrapper).toHaveClass("px-8");
     expect(contentWrapper).toHaveClass("py-6");

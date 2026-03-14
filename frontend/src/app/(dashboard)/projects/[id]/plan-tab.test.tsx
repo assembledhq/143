@@ -132,7 +132,7 @@ describe("SpecsSection", () => {
       <SpecsSection project={mockProject} specs={[]} />,
     );
 
-    expect(screen.getByText("Specs & Requirements")).toBeInTheDocument();
+    expect(screen.getByText("Specs & requirements")).toBeInTheDocument();
     expect(
       screen.getByText(
         /No specs yet\. Add product requirements, technical specs, or user stories/,
@@ -303,7 +303,7 @@ describe("DesignsSection", () => {
       <DesignsSection project={mockProject} attachments={[]} />,
     );
 
-    expect(screen.getByText("Designs & Screenshots")).toBeInTheDocument();
+    expect(screen.getByText("Designs & screenshots")).toBeInTheDocument();
     expect(
       screen.getByText(
         /No designs yet\. Add screenshots, mockups, or wireframes/,
@@ -522,10 +522,10 @@ describe("PlanTab", () => {
     );
 
     // SpecsSection header
-    expect(screen.getByText("Specs & Requirements")).toBeInTheDocument();
+    expect(screen.getByText("Specs & requirements")).toBeInTheDocument();
 
     // DesignsSection header
-    expect(screen.getByText("Designs & Screenshots")).toBeInTheDocument();
+    expect(screen.getByText("Designs & screenshots")).toBeInTheDocument();
 
     // AnalysisSection header
     expect(screen.getByText("Project analysis")).toBeInTheDocument();

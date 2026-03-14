@@ -330,7 +330,7 @@ describe('OverviewPage', () => {
       expect(screen.getByText('Failed to start authentication. Please try again.')).toBeInTheDocument();
     });
 
-    const tryAgainButton = screen.getByRole('button', { name: 'Try Again' });
+    const tryAgainButton = screen.getByRole('button', { name: 'Try again' });
     const cancelButton = screen
       .getAllByRole('button', { name: 'Cancel' })
       .find((button) => button.parentElement === tryAgainButton.parentElement);
@@ -391,7 +391,7 @@ describe('OverviewPage', () => {
       expect(screen.getByText('Code expired. Please try again.')).toBeInTheDocument();
     }, { timeout: 10000 });
 
-    expect(screen.getByRole('button', { name: 'Try Again' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
   });
 
   it('shows error state when polling returns error', async () => {
