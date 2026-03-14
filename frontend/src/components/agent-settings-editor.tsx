@@ -183,7 +183,7 @@ export function AgentSettingsEditor({
       </div>
 
       <div className="space-y-3">
-        <Label>Default Coding Agent</Label>
+        <Label>Default coding agent</Label>
         <RadioGroup
           value={defaultAgentType}
           onValueChange={(value) => setDefaultAgentTypeOverride(value as OrgSettings["default_agent_type"])}

@@ -5,9 +5,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import type { PMTask } from "@/lib/types";
 
 const statusStyles: Record<string, string> = {
-  delegated: "bg-green-100 text-green-800",
-  skipped_capacity: "bg-gray-100 text-gray-700",
-  pending: "bg-yellow-100 text-yellow-800",
+  delegated: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
+  skipped_capacity: "bg-muted text-muted-foreground",
+  pending: "bg-yellow-500/10 text-yellow-700 dark:text-yellow-400",
 };
 
 export function TaskCard({ task }: { task: PMTask }) {

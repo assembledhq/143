@@ -39,7 +39,7 @@ describe('SettingsPage', () => {
       expect(screen.getByText('General')).toBeInTheDocument();
     });
 
-    expect(screen.getByLabelText('Organization Name')).toBeInTheDocument();
+    expect(screen.getByLabelText('Organization name')).toBeInTheDocument();
   });
 
   it('displays the organization name from server', async () => {
@@ -53,7 +53,7 @@ describe('SettingsPage', () => {
     renderWithProviders(<SettingsPage />);
 
     await waitFor(() => {
-      expect(screen.getByLabelText('Organization Name')).toHaveValue('My Org');
+      expect(screen.getByLabelText('Organization name')).toHaveValue('My Org');
     });
   });
 
@@ -61,7 +61,7 @@ describe('SettingsPage', () => {
     renderWithProviders(<SettingsPage />);
 
     await waitFor(() => {
-      expect(screen.getByLabelText('Organization Name')).toBeDisabled();
+      expect(screen.getByLabelText('Organization name')).toBeDisabled();
     });
   });
 });

@@ -52,7 +52,7 @@ describe("PMStatusBanner", () => {
       expect(screen.getByText("PM Agent")).toBeInTheDocument();
     });
     expect(screen.getByText("Idle")).toBeInTheDocument();
-    expect(screen.getByText("Run PM Agent")).toBeInTheDocument();
+    expect(screen.getByText("Run PM agent")).toBeInTheDocument();
   });
 
   it("renders running state", () => {

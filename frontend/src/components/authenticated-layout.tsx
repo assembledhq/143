@@ -105,13 +105,14 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
 
   return (
     <div className="flex h-screen">
-      <aside className="w-64 border-r border-border bg-sidebar flex flex-col">
-        <div className="px-5 py-5">
+      <aside className="w-64 border-r border-border bg-sidebar flex flex-col relative">
+        <div className="absolute inset-0 bg-gradient-to-b from-primary/[0.03] to-transparent pointer-events-none" />
+        <div className="relative px-5 py-5">
           <Link href="/overview" className="text-base font-bold tracking-tight text-sidebar-foreground">
             143.dev
           </Link>
         </div>
-        <nav className="flex-1 px-2.5 space-y-0.5">
+        <nav className="relative flex-1 px-2.5 space-y-0.5">
           {navItems.map((item) => {
             const isActive =
               item.href === "/overview"
@@ -122,9 +123,9 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                 key={item.href}
                 href={item.href}
                 className={cn(
-                  "relative flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13px] font-medium transition-colors duration-150",
+                  "relative flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13px] font-medium transition-all duration-150",
                   isActive
-                    ? "bg-sidebar-accent text-sidebar-accent-foreground before:absolute before:left-0 before:top-1/2 before:-translate-y-1/2 before:h-4 before:w-[3px] before:rounded-full before:bg-primary"
+                    ? "bg-sidebar-accent text-sidebar-accent-foreground shadow-[inset_0_0_0_1px_oklch(0.6_0.15_270_/_8%)] before:absolute before:left-0 before:top-1/2 before:-translate-y-1/2 before:h-4 before:w-[3px] before:rounded-full before:bg-gradient-to-b before:from-primary before:to-primary/50"
                     : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
                 )}
               >
@@ -143,7 +144,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
             );
           })}
         </nav>
-        <div className="px-2.5 pb-3.5">
+        <div className="relative px-2.5 pb-3.5">
           {user && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -207,8 +208,9 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
           )}
         </div>
       </aside>
-      <main className="flex-1 overflow-auto bg-background">
-        <div className="max-w-none px-8 py-6 lg:px-10">
+      <main className="flex-1 overflow-auto bg-background relative">
+        <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(ellipse_at_top_right,oklch(0.6_0.1_270_/_3%)_0%,transparent_50%)]" />
+        <div className="relative max-w-none px-8 py-6 lg:px-10">
           {children}
         </div>
       </main>
