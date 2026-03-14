@@ -14,8 +14,10 @@ type AdditionalIntegrationCardsProps = {
   sentryConnected: boolean;
   linearConnected: boolean;
   linearLoading: boolean;
+  slackConnected: boolean;
   onConnectSentry: () => void;
   onConnectLinear: () => void;
+  onConnectSlack: () => void;
 };
 
 type AllIntegrationCardsProps = SourceControlIntegrationCardProps & AdditionalIntegrationCardsProps;
@@ -84,11 +86,14 @@ export function AdditionalIntegrationCards({
   sentryConnected,
   linearConnected,
   linearLoading,
+  slackConnected,
   onConnectSentry,
   onConnectLinear,
+  onConnectSlack,
 }: AdditionalIntegrationCardsProps) {
   const sentry = getIntegrationByKey("sentry");
   const linear = getIntegrationByKey("linear");
+  const slack = getIntegrationByKey("slack");
 
   return (
     <IntegrationsCard
@@ -128,6 +133,23 @@ export function AdditionalIntegrationCards({
             </Button>
           ),
         },
+        {
+          id: slack.key,
+          title: slack.name,
+          description: slack.description,
+          logo: <IntegrationLogo name={slack.name} src={slack.logoSrc} />,
+          badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
+          action: (
+            <Button
+              size="sm"
+              disabled={slackConnected}
+              onClick={onConnectSlack}
+              aria-label={slackConnected ? "Slack Connected" : "Connect Slack"}
+            >
+              {slackConnected ? "Connected" : "Connect"}
+            </Button>
+          ),
+        },
       ]}
     />
   );
@@ -137,15 +159,18 @@ export function AllIntegrationCards({
   onConnectGitHub,
   onConnectSentry,
   onConnectLinear,
+  onConnectSlack,
   githubConnected,
   githubRepoNames = [],
   sentryConnected,
   linearConnected,
   linearLoading,
+  slackConnected,
 }: AllIntegrationCardsProps) {
   const github = getIntegrationByKey("github");
   const sentry = getIntegrationByKey("sentry");
   const linear = getIntegrationByKey("linear");
+  const slack = getIntegrationByKey("slack");
 
   return (
     <IntegrationsCard
@@ -200,6 +225,23 @@ export function AllIntegrationCards({
               onClick={onConnectLinear}
             >
               {linearConnected ? "Connected" : "Connect"}
+            </Button>
+          ),
+        },
+        {
+          id: slack.key,
+          title: slack.name,
+          description: slack.description,
+          logo: <IntegrationLogo name={slack.name} src={slack.logoSrc} />,
+          badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
+          action: (
+            <Button
+              size="sm"
+              disabled={slackConnected}
+              onClick={onConnectSlack}
+              aria-label={slackConnected ? "Slack Connected" : "Connect Slack"}
+            >
+              {slackConnected ? "Connected" : "Connect"}
             </Button>
           ),
         },

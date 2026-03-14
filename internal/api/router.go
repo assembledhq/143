@@ -92,6 +92,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		handlers.WithSentryOAuth(cfg.SentryOAuthClientID, cfg.SentryOAuthClientSecret),
 		handlers.WithGitHubIntegrationOAuth(cfg.GitHubOAuthClientID, cfg.GitHubOAuthClientSecret),
 		handlers.WithGitHubAppSlug(cfg.GitHubAppSlug),
+		handlers.WithSlackOAuth(cfg.SlackOAuthClientID, cfg.SlackOAuthClientSecret),
 	)
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, userStore, repoStore, integrationStore, prService)
 	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeAgentEnv(), cfg.SafeLLMEnv())
@@ -222,6 +223,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/integrations/github/callback", integrationHandler.HandleGitHubOAuthCallback)
 			r.Get("/api/v1/integrations/github/installed", integrationHandler.HandleGitHubAppInstalled)
 			r.Post("/api/v1/integrations/github/connect", integrationHandler.ConnectGitHub)
+			r.Get("/api/v1/integrations/slack/login", integrationHandler.StartSlackOAuth)
+			r.Get("/api/v1/integrations/slack/callback", integrationHandler.HandleSlackOAuthCallback)
+			r.Post("/api/v1/integrations/slack/connect", integrationHandler.ConnectSlack)
+			r.Get("/api/v1/integrations/slack/channels", integrationHandler.ListSlackChannels)
+			r.Patch("/api/v1/integrations/slack/channels", integrationHandler.UpdateSlackChannels)
 			r.Post("/api/v1/issues/{id}/fix", sessionHandler.TriggerFix)
 			r.Post("/api/v1/sessions/manual", sessionHandler.CreateManual)
 			r.Post("/api/v1/sessions/{id}/questions/{qid}/answer", sessionHandler.AnswerQuestion)

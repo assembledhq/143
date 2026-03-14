@@ -212,6 +212,15 @@ export const api = {
       window.location.href = `${API_BASE}/api/v1/integrations/linear/login`;
     },
     connectLinear: () => post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/linear/connect'),
+    loginSlack: () => {
+      window.location.href = `${API_BASE}/api/v1/integrations/slack/login`;
+    },
+    connectSlack: () => post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/slack/connect'),
+    listSlackChannels: () => get<{ data: Array<{ id: string; name: string; selected: boolean }> }>('/api/v1/integrations/slack/channels'),
+    updateSlackChannels: (channelIds: string[]) => request('/api/v1/integrations/slack/channels', {
+      method: 'PATCH',
+      body: JSON.stringify({ channel_ids: channelIds }),
+    }),
   },
   codexAuth: {
     initiate: () => post<import('./types').SingleResponse<import('./types').CodexDeviceAuth>>('/api/v1/settings/codex-auth/initiate'),

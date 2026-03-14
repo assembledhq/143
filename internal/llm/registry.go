@@ -61,6 +61,11 @@ var defaultChains = map[string][]providerModel{
 		{ProviderName: "anthropic", ModelID: "claude-sonnet-4-5-20250929"},
 		{ProviderName: "openrouter", ModelID: "openai/o3-mini"},
 	},
+	"gpt-5-nano": {
+		{ProviderName: "openai_chat", ModelID: "gpt-5-nano"},
+		{ProviderName: "openai_responses", ModelID: "gpt-5-nano"},
+		{ProviderName: "openrouter", ModelID: "openai/gpt-5-nano"},
+	},
 }
 
 // buildChain constructs an ordered fallback chain for the requested model,

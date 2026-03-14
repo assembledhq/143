@@ -164,6 +164,13 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 			}
 		}
 
+		// Enqueue sync_slack for orgs with active Slack integrations.
+		slackDedupeKey := fmt.Sprintf("sync_slack:%s", orgID.String())
+		slackPayload := map[string]string{"org_id": orgID.String()}
+		if _, err := s.jobs.Enqueue(ctx, orgID, "default", "sync_slack", slackPayload, 3, &slackDedupeKey); err != nil {
+			s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to enqueue sync_slack job")
+		}
+
 		// Enqueue an org-level job (no repo_id) for repos without custom settings,
 		// or as the default when no repos have custom PM config.
 		if !hasCustomRepos {
