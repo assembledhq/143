@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { RefreshCw, Plus, Clock, Activity } from "lucide-react";
+import { RefreshCw, Plus, Clock, Activity, AlertTriangle } from "lucide-react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
@@ -41,6 +41,7 @@ function StatusDot({ status }: { status: "running" | "completed" | "failed" | "i
 
 function deriveAgentStatus(pmStatus: PMStatus | undefined, isAnalyzing: boolean): "running" | "completed" | "failed" | "idle" {
   if (isAnalyzing || pmStatus?.is_running) return "running";
+  if (pmStatus?.last_error) return "failed";
   if (!pmStatus?.last_run_status) return "idle";
   if (pmStatus.last_run_status === "completed" || pmStatus.last_run_status === "executing") return "completed";
   if (pmStatus.last_run_status === "failed") return "failed";
@@ -140,6 +141,19 @@ export function PMStatusBanner({ hasActivePlanSession }: PMStatusBannerProps) {
         <div className="flex items-center justify-between rounded-md bg-red-50 dark:bg-red-950/30 px-3 py-2">
           <p className="text-xs text-red-700 dark:text-red-300">{analyzeError}</p>
           <button onClick={dismissError} className="text-xs text-red-500 hover:text-red-700 ml-2">dismiss</button>
+        </div>
+      )}
+
+      {!analyzeError && pmStatus?.last_error && (
+        <div className="flex items-start gap-2 rounded-md bg-red-50 dark:bg-red-950/30 px-3 py-2">
+          <AlertTriangle className="h-3.5 w-3.5 text-red-500 mt-0.5 shrink-0" />
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-medium text-red-700 dark:text-red-300">Last run failed</p>
+            <p className="text-xs text-red-600 dark:text-red-400 mt-0.5">{pmStatus.last_error}</p>
+            {pmStatus.last_failed_at && (
+              <p className="text-[11px] text-red-500/70 dark:text-red-400/60 mt-0.5">{formatTimeAgo(pmStatus.last_failed_at)}</p>
+            )}
+          </div>
         </div>
       )}
     </div>
