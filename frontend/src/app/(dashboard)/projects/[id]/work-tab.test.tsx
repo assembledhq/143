@@ -156,14 +156,14 @@ describe("WorkTab", () => {
     renderWithProviders(
       <WorkTab project={mockProject} tasks={mockTasks} cycles={mockCycles} />,
     );
-    expect(screen.getByText("Pull Requests")).toBeInTheDocument();
+    expect(screen.getByText("Pull requests")).toBeInTheDocument();
   });
 
   it("renders planning cycles timeline", () => {
     renderWithProviders(
       <WorkTab project={mockProject} tasks={mockTasks} cycles={mockCycles} />,
     );
-    expect(screen.getByText("Planning Cycles")).toBeInTheDocument();
+    expect(screen.getByText("Planning cycles")).toBeInTheDocument();
   });
 
   it("does not render PR section when no tasks have PRs", () => {
@@ -171,14 +171,14 @@ describe("WorkTab", () => {
     renderWithProviders(
       <WorkTab project={mockProject} tasks={tasksWithoutPRs} cycles={[]} />,
     );
-    expect(screen.queryByText("Pull Requests")).not.toBeInTheDocument();
+    expect(screen.queryByText("Pull requests")).not.toBeInTheDocument();
   });
 
   it("does not render cycles section when no cycles", () => {
     renderWithProviders(
       <WorkTab project={mockProject} tasks={mockTasks} cycles={[]} />,
     );
-    expect(screen.queryByText("Planning Cycles")).not.toBeInTheDocument();
+    expect(screen.queryByText("Planning cycles")).not.toBeInTheDocument();
   });
 
   it("toggles add task form visibility", async () => {
@@ -307,7 +307,7 @@ describe("WorkTab", () => {
     );
 
     // Planning Cycles section is collapsed by default (defaultOpen={false})
-    await user.click(screen.getByText("Planning Cycles"));
+    await user.click(screen.getByText("Planning cycles"));
 
     expect(screen.getByText("Cycle #1")).toBeInTheDocument();
     expect(screen.getByText("First planning cycle analysis")).toBeInTheDocument();

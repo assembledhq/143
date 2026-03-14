@@ -15,7 +15,7 @@ describe('ManualSessionCreatePage', () => {
   it('renders centered composer controls', () => {
     renderWithProviders(<ManualSessionCreatePageContent />);
 
-    expect(screen.getByText('New Manual Session')).toBeInTheDocument();
+    expect(screen.getByText('New manual session')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('Tell the agent what to do...')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Add files or photos' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Dictate' })).toBeInTheDocument();

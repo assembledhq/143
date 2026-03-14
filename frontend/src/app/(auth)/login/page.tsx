@@ -173,8 +173,8 @@ function LoginPageContent() {
 
           <Tabs value={tab} onValueChange={setTab}>
             <TabsList className="w-full">
-              <TabsTrigger value="signin" className="flex-1">Sign In</TabsTrigger>
-              <TabsTrigger value="signup" className="flex-1">Sign Up</TabsTrigger>
+              <TabsTrigger value="signin" className="flex-1">Sign in</TabsTrigger>
+              <TabsTrigger value="signup" className="flex-1">Sign up</TabsTrigger>
             </TabsList>
 
             <TabsContent value="signin">
@@ -202,7 +202,7 @@ function LoginPageContent() {
                   />
                 </div>
                 <Button type="submit" className="w-full" loading={loading}>
-                  Sign In
+                  Sign in
                 </Button>
               </form>
             </TabsContent>
@@ -245,7 +245,7 @@ function LoginPageContent() {
                   />
                 </div>
                 <Button type="submit" className="w-full" loading={loading}>
-                  Create Account
+                  Create account
                 </Button>
               </form>
             </TabsContent>
