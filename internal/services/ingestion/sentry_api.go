@@ -50,7 +50,7 @@ func (c *SentryAPIClient) FetchIssues(ctx context.Context, integrationID uuid.UU
 		}
 
 		for _, issue := range issues {
-			lastSeen := parseTimeSafe(issue.LastSeen)
+			lastSeen := ParseTimeSafe(issue.LastSeen)
 			if !since.IsZero() && !lastSeen.IsZero() && lastSeen.Before(since) {
 				// We've gone past the since boundary, stop paginating
 				return allIssues, nil
@@ -118,12 +118,12 @@ func (c *SentryAPIClient) fetchPage(ctx context.Context, url, authToken string) 
 
 func (c *SentryAPIClient) normalizeIssue(integrationID uuid.UUID, issue SentryIssue) NormalizedIssue {
 	occurrenceCount := 1
-	if n := parseIntSafe(issue.Count); n > 0 {
+	if n := ParseIntSafe(issue.Count); n > 0 {
 		occurrenceCount = n
 	}
 
-	firstSeen := parseTimeSafe(issue.FirstSeen)
-	lastSeen := parseTimeSafe(issue.LastSeen)
+	firstSeen := ParseTimeSafe(issue.FirstSeen)
+	lastSeen := ParseTimeSafe(issue.LastSeen)
 	if firstSeen.IsZero() {
 		firstSeen = time.Now()
 	}
@@ -136,7 +136,7 @@ func (c *SentryAPIClient) normalizeIssue(integrationID uuid.UUID, issue SentryIs
 		description = fmt.Sprintf("%s: %s", issue.Metadata.Type, issue.Metadata.Value)
 	}
 
-	severity := mapSentryLevel(issue.Level)
+	severity := MapSentryLevel(issue.Level)
 
 	tags := []string{
 		fmt.Sprintf("project:%s", issue.Project.Slug),

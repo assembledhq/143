@@ -192,7 +192,7 @@ func TestMapSentryLevel(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			require.Equal(t, tt.expected, mapSentryLevel(tt.input), "mapSentryLevel should return expected severity")
+			require.Equal(t, tt.expected, MapSentryLevel(tt.input), "MapSentryLevel should return expected severity")
 		})
 	}
 }

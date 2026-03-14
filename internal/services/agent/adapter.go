@@ -39,6 +39,7 @@ type AgentInput struct {
 	RevisionContext    *RevisionContext
 	PMContext          *PMTaskContext // PM guidance for coding agents
 	PMContextJSON      string         // serialized PM context for PM agent runs
+	IntegrationSkills  string         // auto-generated CLI skills doc for integration tools
 }
 
 // PMTaskContext carries the PM agent's analysis into the coding agent's prompt.

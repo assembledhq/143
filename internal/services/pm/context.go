@@ -246,9 +246,9 @@ func summarizeIssue(issue models.Issue) IssueSummary {
 	if issue.Description != nil {
 		description = *issue.Description
 	}
-	description = truncate(description, 200)
+	description = truncate(description, 500)
 
-	return IssueSummary{
+	summary := IssueSummary{
 		ID:                    issue.ID.String(),
 		Source:                issue.Source,
 		Title:                 issue.Title,
@@ -260,6 +260,104 @@ func summarizeIssue(issue models.Issue) IssueSummary {
 		LastSeenAt:            issue.LastSeenAt.Format(time.RFC3339),
 		Tags:                  issue.Tags,
 		HasStackTrace:         hasStackTrace(issue.RawData),
+	}
+
+	// Enrich with source-specific metadata.
+	switch issue.Source {
+	case "sentry":
+		summary.StackTraceSummary = extractStackTraceSummary(issue.RawData)
+	case "linear":
+		enrichLinearMetadata(&summary, issue.RawData)
+	}
+
+	return summary
+}
+
+// extractStackTraceSummary pulls a condensed stack trace from Sentry raw data
+// so the PM agent can reason about root causes without exploring the codebase.
+func extractStackTraceSummary(rawData json.RawMessage) string {
+	if len(rawData) == 0 {
+		return ""
+	}
+
+	var data struct {
+		Entries []struct {
+			Type string `json:"type"`
+			Data struct {
+				Values []struct {
+					Type       string `json:"type"`
+					Value      string `json:"value"`
+					Stacktrace struct {
+						Frames []struct {
+							Filename string `json:"filename"`
+							Function string `json:"function"`
+							LineNo   int    `json:"lineNo"`
+						} `json:"frames"`
+					} `json:"stacktrace"`
+				} `json:"values"`
+			} `json:"data"`
+		} `json:"entries"`
+	}
+
+	if err := json.Unmarshal(rawData, &data); err != nil {
+		return ""
+	}
+
+	var b strings.Builder
+	for _, entry := range data.Entries {
+		if entry.Type != "exception" {
+			continue
+		}
+		for _, value := range entry.Data.Values {
+			b.WriteString(value.Type + ": " + value.Value + "\n")
+			// Include the top 5 app frames (most relevant for root cause).
+			frameCount := 0
+			for i := len(value.Stacktrace.Frames) - 1; i >= 0 && frameCount < 5; i-- {
+				frame := value.Stacktrace.Frames[i]
+				if frame.Filename == "" || strings.HasPrefix(frame.Filename, "<") ||
+					strings.Contains(frame.Filename, "node_modules") ||
+					strings.Contains(frame.Filename, "site-packages") {
+					continue
+				}
+				fmt.Fprintf(&b, "  at %s (%s:%d)\n", frame.Function, frame.Filename, frame.LineNo)
+				frameCount++
+			}
+		}
+	}
+
+	return truncate(b.String(), 800)
+}
+
+// enrichLinearMetadata extracts Linear-specific fields from raw webhook data.
+func enrichLinearMetadata(summary *IssueSummary, rawData json.RawMessage) {
+	if len(rawData) == 0 {
+		return
+	}
+
+	var payload struct {
+		Data struct {
+			Identifier string `json:"identifier"`
+			State      struct {
+				Name string `json:"name"`
+				Type string `json:"type"`
+			} `json:"state"`
+			Team struct {
+				Key  string `json:"key"`
+				Name string `json:"name"`
+			} `json:"team"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(rawData, &payload); err != nil {
+		return
+	}
+
+	summary.LinearIdentifier = payload.Data.Identifier
+	summary.LinearState = payload.Data.State.Name
+	if payload.Data.Team.Name != "" {
+		summary.LinearTeam = payload.Data.Team.Name
+	} else {
+		summary.LinearTeam = payload.Data.Team.Key
 	}
 }
 

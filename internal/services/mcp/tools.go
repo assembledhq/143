@@ -1,0 +1,545 @@
+package mcp
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/assembledhq/143/internal/services/integration"
+)
+
+// ToolRegistry builds MCP tool definitions from an integration registry and
+// dispatches tool calls to the appropriate integration method.
+type ToolRegistry struct {
+	integrations *integration.Registry
+}
+
+// NewToolRegistry creates a ToolRegistry backed by the given integration registry.
+func NewToolRegistry(reg *integration.Registry) *ToolRegistry {
+	return &ToolRegistry{integrations: reg}
+}
+
+// ListTools returns all available MCP tools based on which integrations are
+// registered. Only tools for configured integrations are included.
+func (tr *ToolRegistry) ListTools() []Tool {
+	var tools []Tool
+
+	for _, et := range tr.integrations.ErrorTrackers() {
+		prefix := et.Name()
+		tools = append(tools,
+			Tool{
+				Name:        prefix + "_list_errors",
+				Description: fmt.Sprintf("List unresolved errors from %s. Returns error summaries with severity, occurrence counts, and affected users.", prefix),
+				InputSchema: ToolSchema{
+					Type: "object",
+					Properties: map[string]SchemaProperty{
+						"project":  {Type: "string", Description: "Project slug to filter by (optional)"},
+						"severity": {Type: "string", Description: "Filter by severity level", Enum: []string{"critical", "high", "medium", "low"}},
+						"since":    {Type: "string", Description: "Only errors seen after this ISO 8601 timestamp (optional)"},
+						"limit":    {Type: "number", Description: "Max results to return (default: 25)", Default: 25},
+					},
+				},
+			},
+			Tool{
+				Name:        prefix + "_get_error",
+				Description: fmt.Sprintf("Get full details for a single error from %s, including stack trace, tags, and error type.", prefix),
+				InputSchema: ToolSchema{
+					Type:       "object",
+					Properties: map[string]SchemaProperty{"error_id": {Type: "string", Description: "The error/issue ID"}},
+					Required:   []string{"error_id"},
+				},
+			},
+			Tool{
+				Name:        prefix + "_get_error_trend",
+				Description: fmt.Sprintf("Get occurrence trend for an error from %s over a time period. Returns data points and a direction (increasing/decreasing/stable/spike).", prefix),
+				InputSchema: ToolSchema{
+					Type: "object",
+					Properties: map[string]SchemaProperty{
+						"error_id": {Type: "string", Description: "The error/issue ID"},
+						"period":   {Type: "string", Description: "Time period (e.g. '24h', '7d', '14d')", Default: "14d"},
+					},
+					Required: []string{"error_id"},
+				},
+			},
+			Tool{
+				Name:        prefix + "_find_related_errors",
+				Description: fmt.Sprintf("Find errors from %s that likely share a root cause with the given error (same stack trace prefix, same culprit).", prefix),
+				InputSchema: ToolSchema{
+					Type:       "object",
+					Properties: map[string]SchemaProperty{"error_id": {Type: "string", Description: "The error/issue ID"}},
+					Required:   []string{"error_id"},
+				},
+			},
+		)
+	}
+
+	for _, tm := range tr.integrations.TaskManagers() {
+		prefix := tm.Name()
+		tools = append(tools,
+			Tool{
+				Name:        prefix + "_list_tasks",
+				Description: fmt.Sprintf("List tasks from %s matching filters. Returns task summaries with state, priority, and assignee.", prefix),
+				InputSchema: ToolSchema{
+					Type: "object",
+					Properties: map[string]SchemaProperty{
+						"team":     {Type: "string", Description: "Team key to filter by (e.g. 'ENG')"},
+						"states":   {Type: "array", Description: "Filter by states (e.g. ['triage','backlog','in_progress'])", Items: &SchemaProperty{Type: "string"}},
+						"priority": {Type: "string", Description: "Filter by priority", Enum: []string{"urgent", "high", "medium", "low"}},
+						"limit":    {Type: "number", Description: "Max results to return (default: 25)", Default: 25},
+					},
+				},
+			},
+			Tool{
+				Name:        prefix + "_get_task",
+				Description: fmt.Sprintf("Get full details for a task from %s, including description, comments, and linked issues.", prefix),
+				InputSchema: ToolSchema{
+					Type:       "object",
+					Properties: map[string]SchemaProperty{"task_id": {Type: "string", Description: "The task ID or identifier (e.g. 'ENG-123')"}},
+					Required:   []string{"task_id"},
+				},
+			},
+			Tool{
+				Name:        prefix + "_find_related_tasks",
+				Description: fmt.Sprintf("Find tasks from %s related to the given task (linked issues, sub-issues, same project).", prefix),
+				InputSchema: ToolSchema{
+					Type:       "object",
+					Properties: map[string]SchemaProperty{"task_id": {Type: "string", Description: "The task ID"}},
+					Required:   []string{"task_id"},
+				},
+			},
+			Tool{
+				Name:        prefix + "_update_task",
+				Description: fmt.Sprintf("Update a task in %s. Can change priority, state, add comments, or modify labels.", prefix),
+				InputSchema: ToolSchema{
+					Type: "object",
+					Properties: map[string]SchemaProperty{
+						"task_id":  {Type: "string", Description: "The task ID"},
+						"priority": {Type: "string", Description: "New priority level", Enum: []string{"urgent", "high", "medium", "low"}},
+						"state":    {Type: "string", Description: "Target state name"},
+						"comment":  {Type: "string", Description: "Comment to add"},
+					},
+					Required: []string{"task_id"},
+				},
+			},
+			Tool{
+				Name:        prefix + "_create_task",
+				Description: fmt.Sprintf("Create a new task in %s.", prefix),
+				InputSchema: ToolSchema{
+					Type: "object",
+					Properties: map[string]SchemaProperty{
+						"title":       {Type: "string", Description: "Task title"},
+						"description": {Type: "string", Description: "Task description (markdown)"},
+						"team_key":    {Type: "string", Description: "Team key (e.g. 'ENG')"},
+						"priority":    {Type: "string", Description: "Priority level", Enum: []string{"urgent", "high", "medium", "low"}},
+						"labels":      {Type: "array", Description: "Labels to apply", Items: &SchemaProperty{Type: "string"}},
+					},
+					Required: []string{"title", "team_key"},
+				},
+			},
+		)
+	}
+
+	for _, ds := range tr.integrations.DocumentStores() {
+		prefix := ds.Name()
+		tools = append(tools,
+			Tool{
+				Name:        prefix + "_search_documents",
+				Description: fmt.Sprintf("Search documents in %s by text query. Returns document summaries with titles and snippets.", prefix),
+				InputSchema: ToolSchema{
+					Type: "object",
+					Properties: map[string]SchemaProperty{
+						"query":     {Type: "string", Description: "Search query text"},
+						"workspace": {Type: "string", Description: "Workspace or space to search within (optional)"},
+						"limit":     {Type: "number", Description: "Max results (default: 10)", Default: 10},
+					},
+					Required: []string{"query"},
+				},
+			},
+			Tool{
+				Name:        prefix + "_get_document",
+				Description: fmt.Sprintf("Get the full content of a document from %s.", prefix),
+				InputSchema: ToolSchema{
+					Type:       "object",
+					Properties: map[string]SchemaProperty{"doc_id": {Type: "string", Description: "The document ID"}},
+					Required:   []string{"doc_id"},
+				},
+			},
+		)
+	}
+
+	for _, ms := range tr.integrations.MessageSources() {
+		prefix := ms.Name()
+		tools = append(tools,
+			Tool{
+				Name:        prefix + "_search_messages",
+				Description: fmt.Sprintf("Search messages in %s by text query. Returns message summaries.", prefix),
+				InputSchema: ToolSchema{
+					Type: "object",
+					Properties: map[string]SchemaProperty{
+						"query":   {Type: "string", Description: "Search query text"},
+						"channel": {Type: "string", Description: "Channel name or ID to search within (optional)"},
+						"limit":   {Type: "number", Description: "Max results (default: 10)", Default: 10},
+					},
+					Required: []string{"query"},
+				},
+			},
+			Tool{
+				Name:        prefix + "_get_thread",
+				Description: fmt.Sprintf("Get a full conversation thread from %s.", prefix),
+				InputSchema: ToolSchema{
+					Type:       "object",
+					Properties: map[string]SchemaProperty{"message_id": {Type: "string", Description: "The message ID of the thread root"}},
+					Required:   []string{"message_id"},
+				},
+			},
+		)
+	}
+
+	return tools
+}
+
+// CallTool dispatches a tool call to the appropriate integration method.
+func (tr *ToolRegistry) CallTool(ctx context.Context, name string, args json.RawMessage) *ToolCallResult {
+	// Try each integration category. The tool name is prefixed with the
+	// provider name (e.g. "sentry_list_errors"), so we match by prefix.
+	for _, et := range tr.integrations.ErrorTrackers() {
+		prefix := et.Name() + "_"
+		if len(name) <= len(prefix) || name[:len(prefix)] != prefix {
+			continue
+		}
+		method := name[len(prefix):]
+		return tr.callErrorTracker(ctx, et, method, args)
+	}
+
+	for _, tm := range tr.integrations.TaskManagers() {
+		prefix := tm.Name() + "_"
+		if len(name) <= len(prefix) || name[:len(prefix)] != prefix {
+			continue
+		}
+		method := name[len(prefix):]
+		return tr.callTaskManager(ctx, tm, method, args)
+	}
+
+	for _, ds := range tr.integrations.DocumentStores() {
+		prefix := ds.Name() + "_"
+		if len(name) <= len(prefix) || name[:len(prefix)] != prefix {
+			continue
+		}
+		method := name[len(prefix):]
+		return tr.callDocumentStore(ctx, ds, method, args)
+	}
+
+	for _, ms := range tr.integrations.MessageSources() {
+		prefix := ms.Name() + "_"
+		if len(name) <= len(prefix) || name[:len(prefix)] != prefix {
+			continue
+		}
+		method := name[len(prefix):]
+		return tr.callMessageSource(ctx, ms, method, args)
+	}
+
+	return ErrorResult(fmt.Sprintf("unknown tool: %s", name))
+}
+
+// --------------------------------------------------------------------------
+// Error tracker dispatch
+// --------------------------------------------------------------------------
+
+func (tr *ToolRegistry) callErrorTracker(ctx context.Context, et integration.ErrorTracker, method string, args json.RawMessage) *ToolCallResult {
+	switch method {
+	case "list_errors":
+		var p struct {
+			Project  string `json:"project"`
+			Severity string `json:"severity"`
+			Since    string `json:"since"`
+			Limit    int    `json:"limit"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil && len(args) > 0 {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		filter := integration.ErrorFilter{
+			ProjectSlug:  p.Project,
+			Severity:     p.Severity,
+			IsUnresolved: true,
+			Limit:        p.Limit,
+		}
+		if p.Since != "" {
+			if t, err := time.Parse(time.RFC3339, p.Since); err == nil {
+				filter.Since = t
+			}
+		}
+		results, err := et.ListErrors(ctx, filter)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("list errors failed: %s", err))
+		}
+		return jsonResult(results)
+
+	case "get_error":
+		var p struct {
+			ErrorID string `json:"error_id"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		detail, err := et.GetError(ctx, p.ErrorID)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("get error failed: %s", err))
+		}
+		return jsonResult(detail)
+
+	case "get_error_trend":
+		var p struct {
+			ErrorID string `json:"error_id"`
+			Period  string `json:"period"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		period := parseDuration(p.Period, 14*24*time.Hour)
+		trend, err := et.GetTrend(ctx, p.ErrorID, period)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("get trend failed: %s", err))
+		}
+		return jsonResult(trend)
+
+	case "find_related_errors":
+		var p struct {
+			ErrorID string `json:"error_id"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		related, err := et.FindRelated(ctx, p.ErrorID)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("find related failed: %s", err))
+		}
+		return jsonResult(related)
+
+	default:
+		return ErrorResult(fmt.Sprintf("unknown error tracker method: %s", method))
+	}
+}
+
+// --------------------------------------------------------------------------
+// Task manager dispatch
+// --------------------------------------------------------------------------
+
+func (tr *ToolRegistry) callTaskManager(ctx context.Context, tm integration.TaskManager, method string, args json.RawMessage) *ToolCallResult {
+	switch method {
+	case "list_tasks":
+		var p struct {
+			Team     string   `json:"team"`
+			States   []string `json:"states"`
+			Priority string   `json:"priority"`
+			Limit    int      `json:"limit"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil && len(args) > 0 {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		filter := integration.TaskFilter{
+			TeamKey:  p.Team,
+			States:   p.States,
+			Priority: p.Priority,
+			Limit:    p.Limit,
+		}
+		results, err := tm.ListTasks(ctx, filter)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("list tasks failed: %s", err))
+		}
+		return jsonResult(results)
+
+	case "get_task":
+		var p struct {
+			TaskID string `json:"task_id"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		detail, err := tm.GetTask(ctx, p.TaskID)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("get task failed: %s", err))
+		}
+		return jsonResult(detail)
+
+	case "find_related_tasks":
+		var p struct {
+			TaskID string `json:"task_id"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		related, err := tm.FindRelated(ctx, p.TaskID)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("find related failed: %s", err))
+		}
+		return jsonResult(related)
+
+	case "update_task":
+		var p struct {
+			TaskID   string  `json:"task_id"`
+			Priority *string `json:"priority"`
+			State    *string `json:"state"`
+			Comment  *string `json:"comment"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		update := integration.TaskUpdate{
+			Priority: p.Priority,
+			State:    p.State,
+			Comment:  p.Comment,
+		}
+		if err := tm.UpdateTask(ctx, p.TaskID, update); err != nil {
+			return ErrorResult(fmt.Sprintf("update task failed: %s", err))
+		}
+		return TextResult("task updated successfully")
+
+	case "create_task":
+		var p struct {
+			Title       string   `json:"title"`
+			Description string   `json:"description"`
+			TeamKey     string   `json:"team_key"`
+			Priority    string   `json:"priority"`
+			Labels      []string `json:"labels"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		spec := integration.TaskCreateSpec{
+			Title:       p.Title,
+			Description: p.Description,
+			TeamKey:     p.TeamKey,
+			Priority:    p.Priority,
+			Labels:      p.Labels,
+		}
+		task, err := tm.CreateTask(ctx, spec)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("create task failed: %s", err))
+		}
+		return jsonResult(task)
+
+	default:
+		return ErrorResult(fmt.Sprintf("unknown task manager method: %s", method))
+	}
+}
+
+// --------------------------------------------------------------------------
+// Document store dispatch
+// --------------------------------------------------------------------------
+
+func (tr *ToolRegistry) callDocumentStore(ctx context.Context, ds integration.DocumentStore, method string, args json.RawMessage) *ToolCallResult {
+	switch method {
+	case "search_documents":
+		var p struct {
+			Query     string `json:"query"`
+			Workspace string `json:"workspace"`
+			Limit     int    `json:"limit"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		filter := integration.DocFilter{
+			Workspace: p.Workspace,
+			Limit:     p.Limit,
+		}
+		results, err := ds.SearchDocuments(ctx, p.Query, filter)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("search documents failed: %s", err))
+		}
+		return jsonResult(results)
+
+	case "get_document":
+		var p struct {
+			DocID string `json:"doc_id"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		doc, err := ds.GetDocument(ctx, p.DocID)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("get document failed: %s", err))
+		}
+		return jsonResult(doc)
+
+	default:
+		return ErrorResult(fmt.Sprintf("unknown document store method: %s", method))
+	}
+}
+
+// --------------------------------------------------------------------------
+// Message source dispatch
+// --------------------------------------------------------------------------
+
+func (tr *ToolRegistry) callMessageSource(ctx context.Context, ms integration.MessageSource, method string, args json.RawMessage) *ToolCallResult {
+	switch method {
+	case "search_messages":
+		var p struct {
+			Query   string `json:"query"`
+			Channel string `json:"channel"`
+			Limit   int    `json:"limit"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		filter := integration.MessageFilter{
+			Channel: p.Channel,
+			Limit:   p.Limit,
+		}
+		results, err := ms.SearchMessages(ctx, p.Query, filter)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("search messages failed: %s", err))
+		}
+		return jsonResult(results)
+
+	case "get_thread":
+		var p struct {
+			MessageID string `json:"message_id"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		thread, err := ms.GetThread(ctx, p.MessageID)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("get thread failed: %s", err))
+		}
+		return jsonResult(thread)
+
+	default:
+		return ErrorResult(fmt.Sprintf("unknown message source method: %s", method))
+	}
+}
+
+// --------------------------------------------------------------------------
+// Helpers
+// --------------------------------------------------------------------------
+
+// jsonResult marshals v to JSON and wraps it in a ToolCallResult.
+func jsonResult(v any) *ToolCallResult {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return ErrorResult(fmt.Sprintf("failed to marshal result: %s", err))
+	}
+	return TextResult(string(data))
+}
+
+// parseDuration parses human-friendly durations like "24h", "7d", "14d".
+// Falls back to defaultDur on parse failure.
+func parseDuration(s string, defaultDur time.Duration) time.Duration {
+	if s == "" {
+		return defaultDur
+	}
+
+	// Handle day suffixes (e.g. "7d", "14d") which time.ParseDuration doesn't support.
+	if len(s) > 1 && s[len(s)-1] == 'd' {
+		var days int
+		if _, err := fmt.Sscanf(s, "%dd", &days); err == nil && days > 0 {
+			return time.Duration(days) * 24 * time.Hour
+		}
+	}
+
+	if d, err := time.ParseDuration(s); err == nil {
+		return d
+	}
+	return defaultDur
+}
