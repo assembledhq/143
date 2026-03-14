@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { AllIntegrationCards } from "@/components/integration-connection-cards";
@@ -17,14 +17,13 @@ function SlackChannelPicker() {
   });
 
   // Derive initial selection from server state.
-  const serverSelected = useMemo(() => {
-    if (!channelsResp?.data) return new Set<string>();
-    return new Set(
-      channelsResp.data
-        .filter((ch: { selected: boolean; id: string }) => ch.selected)
-        .map((ch: { id: string }) => ch.id)
-    );
-  }, [channelsResp?.data]);
+  const serverSelected = channelsResp?.data
+    ? new Set(
+        channelsResp.data
+          .filter((ch: { selected: boolean; id: string }) => ch.selected)
+          .map((ch: { id: string }) => ch.id)
+      )
+    : new Set<string>();
 
   // Track user overrides; null means "use server state".
   const [userSelected, setUserSelected] = useState<Set<string> | null>(null);
