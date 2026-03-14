@@ -38,7 +38,7 @@ function ConnectedReposList({ repoNames }: { repoNames: string[] }) {
 
 function IntegrationLogo({ name, src }: { name: string; src: string }) {
   return (
-    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-muted">
+    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-muted/50 dark:bg-white/5 ring-1 ring-border/50 transition-transform duration-200 group-hover:scale-105">
       <Image
         src={src}
         alt={`${name} logo`}

@@ -74,7 +74,7 @@ function SessionRow({ session }: { session: Session }) {
   return (
     <Link
       href={`/sessions/${session.id}`}
-      className="group flex items-center gap-4 py-2.5 px-1 hover:bg-muted/50 transition-colors cursor-pointer rounded-md -mx-1"
+      className="group flex items-center gap-4 py-2.5 px-1 hover:bg-muted/40 dark:hover:bg-primary/[0.03] transition-all duration-150 cursor-pointer rounded-md -mx-1"
     >
       {/* Status dot */}
       <div className="flex-shrink-0 w-4 flex justify-center">
@@ -132,7 +132,7 @@ function SessionSection({ title, sessions, badge }: {
         </span>
         {badge}
         <span className="text-[11px] text-muted-foreground">({sessions.length})</span>
-        <div className="flex-1 border-b border-border" />
+        <div className="flex-1 border-b border-border/50" />
       </div>
       <div className="divide-y divide-border/50">
         {sessions.map((session) => (
@@ -201,7 +201,7 @@ export function SessionsPageContent() {
                 )}
               </span>
               {isSelected && (
-                <span className="absolute bottom-0 left-3 right-3 h-0.5 bg-foreground rounded-full" />
+                <span className="absolute bottom-0 left-3 right-3 h-0.5 bg-[image:var(--gradient-primary)] rounded-full" />
               )}
             </button>
           );

@@ -114,7 +114,7 @@ export default function AgentPage() {
                       key={option.value}
                       className={`relative flex cursor-pointer flex-col rounded-lg border p-3 shadow-sm transition-all duration-150 ${
                         autonomyLevel === option.value
-                          ? "border-primary bg-primary/5 ring-1 ring-primary/20"
+                          ? "border-primary bg-primary/5 ring-1 ring-primary/20 dark:shadow-[var(--glow-primary-sm)]"
                           : "border-input hover:bg-muted/40 hover:border-border"
                       }`}
                     >
@@ -147,7 +147,7 @@ export default function AgentPage() {
                       key={option.value}
                       className={`relative flex cursor-pointer flex-col rounded-lg border p-3 shadow-sm transition-all duration-150 ${
                         aggressiveness === option.value
-                          ? "border-primary bg-primary/5 ring-1 ring-primary/20"
+                          ? "border-primary bg-primary/5 ring-1 ring-primary/20 dark:shadow-[var(--glow-primary-sm)]"
                           : "border-input hover:bg-muted/40 hover:border-border"
                       }`}
                     >

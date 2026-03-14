@@ -19,7 +19,7 @@ export function IntegrationsCard({ items }: IntegrationsCardProps) {
   return (
     <div className="space-y-3">
       {items.map((item) => (
-        <Card key={item.id} className="py-0" data-testid="integration-card">
+        <Card key={item.id} className="group py-0" data-testid="integration-card">
           <CardContent className="flex items-center justify-between gap-4 py-4">
             <div className="flex min-w-0 flex-1 items-center gap-3">
               {item.logo ? <div className="shrink-0">{item.logo}</div> : null}
