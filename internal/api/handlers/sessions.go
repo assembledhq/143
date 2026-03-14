@@ -261,6 +261,12 @@ func (h *SessionHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	flusher.Flush()
 
+	// Send initial status event with the current session state.
+	lastStatus := run.Status
+	statusData, _ := json.Marshal(run)
+	fmt.Fprintf(w, "event: status\ndata: %s\n\n", statusData) // #nosec G705 -- SSE event stream, data is JSON-marshaled
+	flusher.Flush()
+
 	// Poll for new logs.
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -285,11 +291,20 @@ func (h *SessionHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 				fmt.Fprintf(w, "data: %s\n\n", data) // #nosec G705 -- SSE event stream, data is JSON-marshaled
 				lastSeenID = log.ID
 			}
+
+			// Send a status event whenever the session status changes.
+			if run.Status != lastStatus {
+				lastStatus = run.Status
+				statusData, _ := json.Marshal(run)
+				fmt.Fprintf(w, "event: status\ndata: %s\n\n", statusData) // #nosec G705 -- SSE event stream, data is JSON-marshaled
+			}
+
 			flusher.Flush()
 
 			if isTerminalStatus(run.Status) {
-				// Send a final "done" event so the client knows to stop.
-				fmt.Fprintf(w, "event: done\ndata: {}\n\n")
+				// Send a final "done" event with the session so the client has the final state.
+				doneData, _ := json.Marshal(run)
+				fmt.Fprintf(w, "event: done\ndata: %s\n\n", doneData) // #nosec G705 -- SSE event stream, data is JSON-marshaled
 				flusher.Flush()
 				return
 			}

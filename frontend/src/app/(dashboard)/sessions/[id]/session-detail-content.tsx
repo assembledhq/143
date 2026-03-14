@@ -1,5 +1,6 @@
 "use client";
 
+import { useCallback, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
@@ -360,21 +361,56 @@ function PRTab({ sessionId }: { sessionId: string }) {
 
 export function SessionDetailContent({ id }: { id: string }) {
   const terminalStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
+  const queryClient = useQueryClient();
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["session", id],
     queryFn: () => api.sessions.get(id),
-    refetchInterval: (query) => {
-      const session = query.state.data?.data;
-      if (session && !terminalStatuses.has(session.status)) {
-        return 5000;
-      }
-      return false;
-    },
   });
 
   const session = data?.data;
   const isActive = session ? !terminalStatuses.has(session.status) : false;
+
+  // Update the session query cache when we receive status updates via SSE.
+  const handleSessionUpdate = useCallback(
+    (updated: Record<string, unknown>) => {
+      queryClient.setQueryData(["session", id], { data: updated });
+    },
+    [queryClient, id]
+  );
+
+  // Subscribe to session status changes via SSE.
+  const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
+  useEffect(() => {
+    if (!isActive) return;
+
+    const eventSource = new EventSource(
+      `${apiBase}/api/v1/sessions/${id}/logs/stream`,
+      { withCredentials: true }
+    );
+
+    const handleStatus = (event: MessageEvent) => {
+      try {
+        handleSessionUpdate(JSON.parse(event.data));
+      } catch {
+        // ignore unparseable messages
+      }
+    };
+
+    eventSource.addEventListener("status", handleStatus);
+    eventSource.addEventListener("done", (event) => {
+      handleStatus(event as MessageEvent);
+      eventSource.close();
+    });
+
+    eventSource.onerror = () => {
+      eventSource.close();
+    };
+
+    return () => {
+      eventSource.close();
+    };
+  }, [id, apiBase, isActive, handleSessionUpdate]);
 
   if (isLoading) {
     return (
