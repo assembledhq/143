@@ -170,7 +170,7 @@ function OverviewTab({ session }: { session: Session }) {
         </Card>
       )}
 
-      {session.status === "failed" && session.failure_explanation && (
+      {session.status === "failed" && (session.failure_explanation || session.error) && (
         <Card className="border-destructive/20 dark:border-destructive/30">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm text-destructive flex items-center gap-2">
@@ -184,7 +184,7 @@ function OverviewTab({ session }: { session: Session }) {
                 {session.failure_category}
               </Badge>
             )}
-            <p className="text-sm">{session.failure_explanation}</p>
+            <p className="text-sm">{session.failure_explanation || session.error}</p>
             {session.failure_next_steps && session.failure_next_steps.length > 0 && (
               <div>
                 <p className="text-xs font-medium text-muted-foreground mb-1">Next steps</p>
