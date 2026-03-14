@@ -66,6 +66,19 @@ type PMContext struct {
 	MaxConcurrentRuns int                       `json:"max_concurrent_runs"`
 	CurrentRunCount   int                       `json:"current_run_count"`
 	ActiveProjects    []ProjectSummary          `json:"active_projects,omitempty"`
+	SlackThreads      []SlackThreadContext      `json:"slack_threads,omitempty"`
+}
+
+// SlackThreadContext is a lightweight summary of a Slack thread for PM analysis.
+type SlackThreadContext struct {
+	ChannelName  string   `json:"channel_name"`
+	Category     string   `json:"category"`
+	Summary      string   `json:"summary"`
+	Urgency      string   `json:"urgency"`
+	MessageCount int      `json:"message_count"`
+	Participants []string `json:"participants"`
+	LastActivity string   `json:"last_activity"`
+	ThreadFile   string   `json:"thread_file"`
 }
 
 type IssueSummary struct {

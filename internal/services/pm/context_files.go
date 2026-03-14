@@ -2,6 +2,7 @@ package pm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -80,4 +81,41 @@ func sanitizeFilename(title string) string {
 		title = title[:60]
 	}
 	return title
+}
+
+// writeSlackThreadFiles writes full Slack thread data to the sandbox so the PM can drill down.
+func (s *Service) writeSlackThreadFiles(ctx context.Context, sb *agent.Sandbox, threads []slackThreadData) error {
+	if len(threads) == 0 {
+		return nil
+	}
+
+	readme := `# Slack Thread Files
+
+This directory contains full Slack thread data for threads identified as actionable.
+Each file is named {channel_name}-{thread_ts}.json and contains the raw messages.
+
+Use these files to drill down into specific threads when the summary in
+.pm-context.json is not enough to make a decision.
+`
+	if err := s.sandbox.WriteFile(ctx, sb, "/workspace/.slack-threads/README.md", []byte(readme)); err != nil {
+		return fmt.Errorf("write slack threads README: %w", err)
+	}
+
+	for _, t := range threads {
+		path := fmt.Sprintf("/workspace/.slack-threads/%s-%s.json", t.ChannelName, t.ThreadTS)
+		data, err := json.MarshalIndent(map[string]any{
+			"channel":  t.ChannelName,
+			"thread":   t.ThreadTS,
+			"messages": json.RawMessage(t.Messages),
+		}, "", "  ")
+		if err != nil {
+			s.logger.Warn().Err(err).Str("thread", t.ThreadTS).Msg("failed to marshal slack thread")
+			continue
+		}
+		if err := s.sandbox.WriteFile(ctx, sb, path, data); err != nil {
+			s.logger.Warn().Err(err).Str("path", path).Msg("failed to write slack thread file")
+			continue
+		}
+	}
+	return nil
 }

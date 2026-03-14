@@ -1,4 +1,4 @@
-export type IntegrationKey = "github" | "sentry" | "linear";
+export type IntegrationKey = "github" | "sentry" | "linear" | "slack";
 
 export type IntegrationDefinition = {
   key: IntegrationKey;
@@ -25,6 +25,12 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
     name: "Linear",
     description: "Sync issues and auto-assign fixes.",
     logoSrc: "/integrations/linear.svg",
+  },
+  {
+    key: "slack",
+    name: "Slack",
+    description: "Monitor channels for actionable conversations.",
+    logoSrc: "/integrations/slack.svg",
   },
 ];
 
