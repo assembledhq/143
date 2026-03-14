@@ -30,6 +30,7 @@ func newSessionHandler(t *testing.T, mock pgxmock.PgxPoolIface) *SessionHandler 
 		db.NewIssueStore(mock),
 		db.NewOrganizationStore(mock),
 		db.NewJobStore(mock),
+		nil, // llmClient — not needed in unit tests
 	)
 }
 

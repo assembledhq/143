@@ -10,6 +10,7 @@ import (
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -24,6 +25,7 @@ type SessionHandler struct {
 	issueStore       *db.IssueStore
 	orgStore         *db.OrganizationStore
 	jobStore         *db.JobStore
+	llmClient        llm.Client // optional, used for generating manual session titles
 }
 
 func NewSessionHandler(
@@ -35,6 +37,7 @@ func NewSessionHandler(
 	issueStore *db.IssueStore,
 	orgStore *db.OrganizationStore,
 	jobStore *db.JobStore,
+	llmClient llm.Client,
 ) *SessionHandler {
 	return &SessionHandler{
 		runStore:         runStore,
@@ -45,6 +48,7 @@ func NewSessionHandler(
 		issueStore:       issueStore,
 		orgStore:         orgStore,
 		jobStore:         jobStore,
+		llmClient:        llmClient,
 	}
 }
 
@@ -505,6 +509,20 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Generate a concise session title via LLM (best-effort).
+	// Falls back to the first line of the message if the LLM is unavailable.
+	sessionApproach := title
+	if h.llmClient != nil {
+		const titlePrompt = "You are a concise title generator. Given a user's task description, produce a short title (max 80 characters) that summarizes what needs to be done. Output ONLY the title, nothing else. No quotes, no punctuation at the end."
+		if generated, err := h.llmClient.Complete(r.Context(), titlePrompt, body.Message); err == nil {
+			generated = strings.TrimSpace(generated)
+			generated = strings.Trim(generated, "\"'")
+			if len(generated) > 0 && len(generated) <= 120 {
+				sessionApproach = generated
+			}
+		}
+	}
+
 	session := &models.Session{
 		IssueID:       issue.ID,
 		OrgID:         orgID,
@@ -513,6 +531,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		AutonomyLevel: autonomyLevel,
 		TokenMode:     tokenMode,
 		ModelOverride: modelOverride,
+		PMApproach:    &sessionApproach,
 	}
 	if err := h.runStore.Create(r.Context(), session); err != nil {
 		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create manual session")
