@@ -14,6 +14,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 )
 
 type SessionHandler struct {
@@ -25,6 +26,7 @@ type SessionHandler struct {
 	issueStore       *db.IssueStore
 	orgStore         *db.OrganizationStore
 	jobStore         *db.JobStore
+	logger           zerolog.Logger
 }
 
 func NewSessionHandler(
@@ -36,6 +38,7 @@ func NewSessionHandler(
 	issueStore *db.IssueStore,
 	orgStore *db.OrganizationStore,
 	jobStore *db.JobStore,
+	logger zerolog.Logger,
 ) *SessionHandler {
 	return &SessionHandler{
 		runStore:         runStore,
@@ -46,6 +49,7 @@ func NewSessionHandler(
 		issueStore:       issueStore,
 		orgStore:         orgStore,
 		jobStore:         jobStore,
+		logger:           logger,
 	}
 }
 
@@ -253,6 +257,7 @@ func (h *SessionHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 	var lastSeenID int64
 	for _, log := range logs {
 		if err := sw.WriteData(log); err != nil {
+			h.logger.Error().Err(err).Str("session_id", runID.String()).Msg("failed to write log event to SSE stream")
 			return
 		}
 		lastSeenID = log.ID
@@ -261,6 +266,7 @@ func (h *SessionHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 	// Send initial status event with the current session state.
 	lastStatus := run.Status
 	if err := sw.WriteEvent(sse.EventStatus, run); err != nil {
+		h.logger.Error().Err(err).Str("session_id", runID.String()).Msg("failed to write initial status event to SSE stream")
 		return
 	}
 	sw.Flush()
@@ -285,6 +291,7 @@ func (h *SessionHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 			}
 			for _, log := range newLogs {
 				if err := sw.WriteData(log); err != nil {
+					h.logger.Error().Err(err).Str("session_id", runID.String()).Msg("failed to write log event to SSE stream")
 					return
 				}
 				lastSeenID = log.ID
@@ -294,6 +301,7 @@ func (h *SessionHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 			if run.Status != lastStatus {
 				lastStatus = run.Status
 				if err := sw.WriteEvent(sse.EventStatus, run); err != nil {
+					h.logger.Error().Err(err).Str("session_id", runID.String()).Msg("failed to write status event to SSE stream")
 					return
 				}
 			}
@@ -302,6 +310,7 @@ func (h *SessionHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 
 			if isTerminalStatus(run.Status) {
 				if err := sw.WriteEvent(sse.EventDone, run); err != nil {
+					h.logger.Error().Err(err).Str("session_id", runID.String()).Msg("failed to write done event to SSE stream")
 					return
 				}
 				sw.Flush()
