@@ -105,11 +105,11 @@ describe("WorkTab", () => {
     renderWithProviders(
       <WorkTab project={mockProject} tasks={mockTasks} cycles={mockCycles} />,
     );
-    expect(screen.getByText("Task Board")).toBeInTheDocument();
-    expect(screen.getByText("To Do")).toBeInTheDocument();
-    expect(screen.getByText("In Progress")).toBeInTheDocument();
+    expect(screen.getByText("Task board")).toBeInTheDocument();
+    expect(screen.getByText("To do")).toBeInTheDocument();
+    expect(screen.getByText("In progress")).toBeInTheDocument();
     expect(screen.getByText("Done")).toBeInTheDocument();
-    expect(screen.getByText("Needs Attention")).toBeInTheDocument();
+    expect(screen.getByText("Needs attention")).toBeInTheDocument();
   });
 
   it("renders task titles in correct columns", () => {
@@ -188,8 +188,8 @@ describe("WorkTab", () => {
       <WorkTab project={mockProject} tasks={mockTasks} cycles={[]} />,
     );
 
-    // Click "Add Task" to show form
-    await user.click(screen.getByText("Add Task"));
+    // Click "Add task" to show form
+    await user.click(screen.getByText("Add task"));
     expect(screen.getByPlaceholderText("Task title")).toBeInTheDocument();
 
     // Click "Cancel" to hide form
@@ -227,7 +227,7 @@ describe("WorkTab", () => {
       <WorkTab project={mockProject} tasks={mockTasks} cycles={[]} />,
     );
 
-    await user.click(screen.getByText("Add Task"));
+    await user.click(screen.getByText("Add task"));
     await user.type(screen.getByPlaceholderText("Task title"), "New Task");
     await user.click(screen.getByRole("button", { name: "Add" }));
 
@@ -243,7 +243,7 @@ describe("WorkTab", () => {
       <WorkTab project={mockProject} tasks={mockTasks} cycles={[]} />,
     );
 
-    await user.click(screen.getByText("Add Task"));
+    await user.click(screen.getByText("Add task"));
 
     expect(screen.getByRole("button", { name: "Add" })).toBeDisabled();
   });

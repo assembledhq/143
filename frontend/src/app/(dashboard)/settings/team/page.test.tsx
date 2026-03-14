@@ -334,7 +334,7 @@ describe('TeamSettingsPage', () => {
     });
 
     // The avatar fallback shows the first letter of the name
-    const avatarFallbacks = document.querySelectorAll('.rounded-full.bg-muted');
+    const avatarFallbacks = document.querySelectorAll('.h-8.w-8.rounded-full');
     expect(avatarFallbacks.length).toBeGreaterThanOrEqual(1);
   });
 });
