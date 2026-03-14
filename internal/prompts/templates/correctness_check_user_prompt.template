@@ -1,0 +1,9 @@
+Check if this code change correctly fixes the reported issue.
+
+<issue_context>
+{{ .IssueContext }}
+</issue_context>
+
+<code_diff>
+{{ .Diff }}
+</code_diff>

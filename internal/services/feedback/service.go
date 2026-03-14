@@ -153,17 +153,10 @@ func (s *Service) classifyComment(ctx context.Context, comment *models.ReviewCom
 		}
 	}
 
-	userPrompt := fmt.Sprintf(`Diff context: %s
-Review comment: %s
-
-Respond with this exact JSON format:
-{
-  "actionable": true or false,
-  "category": "style|logic_bug|edge_case|wrong_approach|missing_test|security|performance|nit",
-  "summary": "one-line description of what the reviewer wants",
-  "generalizable": true or false,
-  "generalized_rule": "if generalizable, a repo-level instruction phrased as a directive, otherwise null"
-}`, diffContext, comment.Body)
+	userPrompt := prompts.ReviewCommentUserPrompt(prompts.ReviewCommentUserPromptData{
+		DiffContext: diffContext,
+		CommentBody: comment.Body,
+	})
 
 	response, err := s.llm.Complete(ctx, systemPrompt, userPrompt)
 	if err != nil {

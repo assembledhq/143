@@ -398,13 +398,13 @@ func (s *Service) computeDirectionAlignment(ctx context.Context, issue *models.I
 		desc = *issue.Description
 	}
 
-	userPrompt := fmt.Sprintf(`Product Direction: %s
-
-Issue Title: %s
-Issue Description: %s
-Severity: %s
-Occurrences: %d`,
-		productDirection, issue.Title, desc, issue.Severity, issue.OccurrenceCount)
+	userPrompt := prompts.DirectionAlignmentUserPrompt(prompts.DirectionAlignmentUserPromptData{
+		ProductDirection: productDirection,
+		Title:            issue.Title,
+		Description:      desc,
+		Severity:         issue.Severity,
+		OccurrenceCount:  issue.OccurrenceCount,
+	})
 
 	response, err := s.llm.Complete(ctx, systemPrompt, userPrompt)
 	if err != nil {
@@ -439,12 +439,13 @@ func (s *Service) estimateComplexityViaLLM(ctx context.Context, issue *models.Is
 		desc = *issue.Description
 	}
 
-	userPrompt := fmt.Sprintf(`Issue Title: %s
-Issue Description: %s
-Severity: %s
-Occurrences: %d
-Affected Customers: %d`,
-		issue.Title, desc, issue.Severity, issue.OccurrenceCount, issue.AffectedCustomerCount)
+	userPrompt := prompts.ComplexityEstimateUserPrompt(prompts.ComplexityEstimateUserPromptData{
+		Title:                 issue.Title,
+		Description:           desc,
+		Severity:              issue.Severity,
+		OccurrenceCount:       issue.OccurrenceCount,
+		AffectedCustomerCount: issue.AffectedCustomerCount,
+	})
 
 	response, err := s.llm.Complete(ctx, systemPrompt, userPrompt)
 	if err != nil {

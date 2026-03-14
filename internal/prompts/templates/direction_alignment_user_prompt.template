@@ -1,0 +1,10 @@
+<product_direction>
+{{ .ProductDirection }}
+</product_direction>
+
+<issue>
+Title: {{ .Title }}
+Description: {{ .Description }}
+Severity: {{ .Severity }}
+Occurrences: {{ .OccurrenceCount }}
+</issue>
