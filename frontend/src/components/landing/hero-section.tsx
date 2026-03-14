@@ -43,7 +43,7 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
           >
             Open-source autopilot
             <br />
-            for coding agents
+            for Claude Code
           </h1>
 
           <p
