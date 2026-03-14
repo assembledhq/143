@@ -129,7 +129,7 @@ export function ProjectsPageContent() {
           <Button size="sm" variant="outline" asChild>
             <Link href="/projects/new">
               <Plus className="mr-2 h-4 w-4" />
-              New Project
+              New project
             </Link>
           </Button>
         }
@@ -179,7 +179,7 @@ export function ProjectsPageContent() {
           icon={FolderKanban}
           title="No projects yet"
           description="Projects are multi-task efforts managed by the PM agent or created manually."
-          action={{ label: "Create Project", href: "/projects/new" }}
+          action={{ label: "Create project", href: "/projects/new" }}
         />
       )}
 

@@ -286,7 +286,7 @@ export function DesignsSection({
           <CardContent className="space-y-3 pt-4">
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
-                <Label className="text-xs">File Name</Label>
+                <Label className="text-xs">File name</Label>
                 <Input value={fileName} onChange={(e) => setFileName(e.target.value)} placeholder="homepage-mockup.png" />
               </div>
               <div className="space-y-1">
@@ -393,7 +393,7 @@ export function AnalysisSection({ project }: { project: Project }) {
   const typeIcons: Record<string, string> = { addition: "+", revision: "~", question: "?", task: "#" };
 
   return (
-    <CollapsibleSection title="Project Analysis" icon={Sparkles} defaultOpen={false}>
+    <CollapsibleSection title="Project analysis" icon={Sparkles} defaultOpen={false}>
       <div className="space-y-3">
         <p className="text-xs text-muted-foreground">
           Analyze your specs, designs, and tasks for gaps and improvements.

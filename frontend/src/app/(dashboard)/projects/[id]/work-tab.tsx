@@ -155,7 +155,7 @@ function PRsSection({ tasks }: { tasks: ProjectTask[] }) {
   if (tasksWithPRs.length === 0) return null;
 
   return (
-    <CollapsibleSection title="Pull Requests" icon={GitPullRequest} count={tasksWithPRs.length}>
+    <CollapsibleSection title="Pull requests" icon={GitPullRequest} count={tasksWithPRs.length}>
       <div className="space-y-1">
         {tasksWithPRs.map((task) => {
           const cfg = taskStatusConfig[task.status] || taskStatusConfig.pending;
@@ -188,7 +188,7 @@ function TimelineSection({ cycles }: { cycles: ProjectCycle[] }) {
   if (cycles.length === 0) return null;
 
   return (
-    <CollapsibleSection title="Planning Cycles" icon={ArrowUpRight} count={cycles.length} defaultOpen={false}>
+    <CollapsibleSection title="Planning cycles" icon={ArrowUpRight} count={cycles.length} defaultOpen={false}>
       <div className="space-y-3">
         {cycles.map((cycle) => (
           <div key={cycle.id} className="border-l-2 border-muted pl-3 py-1">

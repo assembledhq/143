@@ -195,13 +195,13 @@ export function ManualSessionCreatePageContent() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="New Manual Session"
+        title="New manual session"
         description="Describe the task, attach files or photos, then start the session."
         action={
           <Button variant="outline" asChild>
             <Link href="/sessions">
               <ArrowLeft className="mr-2 h-4 w-4" />
-              Back to Sessions
+              Back to sessions
             </Link>
           </Button>
         }

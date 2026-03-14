@@ -278,7 +278,7 @@ export default function TeamSettingsPage() {
       {canManageTeam && invitations.length > 0 && (
         <section className="space-y-3">
           <h2 className="text-[13px] font-medium text-foreground">
-            Pending Invitations
+            Pending invitations
           </h2>
           <Card>
             <CardContent className="p-0">
@@ -370,7 +370,7 @@ export default function TeamSettingsPage() {
                   className="h-9"
                   disabled={inviteMutation.isPending}
                 >
-                  {inviteMutation.isPending ? "Sending..." : "Send Invite"}
+                  {inviteMutation.isPending ? "Sending..." : "Send invite"}
                 </Button>
               </AlertDialogFooter>
             </form>

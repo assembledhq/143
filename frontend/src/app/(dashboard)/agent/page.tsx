@@ -75,7 +75,7 @@ export default function AgentPage() {
     <PageContainer size="default">
       <div className="space-y-6">
       <PageHeader
-        title="Coding Agent"
+        title="Coding agent"
         description="Configure how the coding agent runs and behaves."
       />
 
@@ -99,7 +99,7 @@ export default function AgentPage() {
           <CardContent>
             <div className="space-y-6">
               <div className="space-y-3">
-                <Label>Autonomy Level</Label>
+                <Label>Autonomy level</Label>
                 <RadioGroup
                   value={autonomyLevel}
                   onValueChange={(v) => setAutonomyLevel(v as OrgSettings["autonomy_level"] & string)}
@@ -131,7 +131,7 @@ export default function AgentPage() {
               </div>
 
               <div className="space-y-3">
-                <Label>Execution Aggressiveness</Label>
+                <Label>Execution aggressiveness</Label>
                 <RadioGroup
                   value={aggressiveness}
                   onValueChange={setAggressiveness}
@@ -164,7 +164,7 @@ export default function AgentPage() {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="max-concurrent">Max Concurrent Runs</Label>
+                <Label htmlFor="max-concurrent">Max concurrent runs</Label>
                 <Input
                   id="max-concurrent"
                   type="number"
@@ -181,7 +181,7 @@ export default function AgentPage() {
 
       <div className="flex items-center justify-end gap-3">
         <Button onClick={handleSave} disabled={mutation.isPending}>
-          {mutation.isPending ? "Saving..." : "Save Settings"}
+          {mutation.isPending ? "Saving..." : "Save settings"}
         </Button>
         {saveStatus === "success" && (
           <span className="text-[13px] text-emerald-600 dark:text-emerald-400">Settings saved.</span>

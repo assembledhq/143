@@ -95,7 +95,7 @@ function SettingsTab({ project }: { project: import("@/lib/types").Project }) {
         <CardHeader><CardTitle className="text-sm">Lifecycle</CardTitle></CardHeader>
         <CardContent className="flex items-center gap-2">
           {(project.status === "draft" || project.status === "planning") && (
-            <Button size="sm" onClick={() => lifecycleMutation.mutate("start")} disabled={lifecycleMutation.isPending}>Start Project</Button>
+            <Button size="sm" onClick={() => lifecycleMutation.mutate("start")} disabled={lifecycleMutation.isPending}>Start project</Button>
           )}
           {project.status === "active" && (
             <Button size="sm" variant="outline" onClick={() => lifecycleMutation.mutate("pause")} disabled={lifecycleMutation.isPending}>Pause</Button>
@@ -104,14 +104,14 @@ function SettingsTab({ project }: { project: import("@/lib/types").Project }) {
             <Button size="sm" onClick={() => lifecycleMutation.mutate("resume")} disabled={lifecycleMutation.isPending}>Resume</Button>
           )}
           {project.status !== "completed" && project.status !== "cancelled" && (
-            <Button size="sm" variant="destructive" onClick={() => lifecycleMutation.mutate("cancel")} disabled={lifecycleMutation.isPending}>Cancel Project</Button>
+            <Button size="sm" variant="destructive" onClick={() => lifecycleMutation.mutate("cancel")} disabled={lifecycleMutation.isPending}>Cancel project</Button>
           )}
           {lifecycleMutation.isError && <p className="text-xs text-destructive">Action failed.</p>}
         </CardContent>
       </Card>
 
       <Card>
-        <CardHeader><CardTitle className="text-sm">Project Configuration</CardTitle></CardHeader>
+        <CardHeader><CardTitle className="text-sm">Project configuration</CardTitle></CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
             <Label htmlFor="s-goal">Goal</Label>
@@ -122,11 +122,11 @@ function SettingsTab({ project }: { project: import("@/lib/types").Project }) {
             <Textarea id="s-scope" value={scope} onChange={(e) => setScope(e.target.value)} rows={2} />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="s-criteria">Completion Criteria</Label>
+            <Label htmlFor="s-criteria">Completion criteria</Label>
             <Textarea id="s-criteria" value={completionCriteria} onChange={(e) => setCompletionCriteria(e.target.value)} rows={2} />
           </div>
           <div className="space-y-2">
-            <Label>Execution Mode</Label>
+            <Label>Execution mode</Label>
             <RadioGroup value={executionMode} onValueChange={(v) => setExecutionMode(v as "sequential" | "parallel" | "dependency_graph")} className="flex gap-4">
               <div className="flex items-center space-x-2">
                 <RadioGroupItem value="sequential" id="s-seq" /><Label htmlFor="s-seq" className="font-normal">Sequential</Label>
@@ -138,7 +138,7 @@ function SettingsTab({ project }: { project: import("@/lib/types").Project }) {
           </div>
           {executionMode === "parallel" && (
             <div className="space-y-2">
-              <Label htmlFor="s-max">Max Concurrent</Label>
+              <Label htmlFor="s-max">Max concurrent</Label>
               <Input id="s-max" type="number" min={1} max={10} value={maxConcurrent} onChange={(e) => setMaxConcurrent(Number(e.target.value))} />
             </div>
           )}
@@ -158,23 +158,23 @@ function SettingsTab({ project }: { project: import("@/lib/types").Project }) {
             </Select>
           </div>
           <div className="space-y-2">
-            <Label htmlFor="s-branch">Base Branch</Label>
+            <Label htmlFor="s-branch">Base branch</Label>
             <Input id="s-branch" value={baseBranch} onChange={(e) => setBaseBranch(e.target.value)} />
           </div>
-          <div className="flex items-center gap-3 pt-2">
+          <div className="flex items-center justify-end gap-3 pt-2">
+            {updateMutation.isError && <p className="text-xs text-destructive">Failed to save.</p>}
             <Button size="sm" onClick={() => updateMutation.mutate({
               goal: goal.trim(), scope: scope.trim() || null, completion_criteria: completionCriteria.trim() || null,
               execution_mode: executionMode, max_concurrent: maxConcurrent, priority: priorityLevelToNumeric(priorityLevel), base_branch: baseBranch.trim(),
             })} disabled={updateMutation.isPending}>
-              {updateMutation.isPending ? "Saving..." : "Save Changes"}
+              {updateMutation.isPending ? "Saving..." : "Save changes"}
             </Button>
-            {updateMutation.isError && <p className="text-xs text-destructive">Failed to save.</p>}
           </div>
         </CardContent>
       </Card>
 
       <Card>
-        <CardHeader><CardTitle className="text-sm">Recurring Schedule</CardTitle></CardHeader>
+        <CardHeader><CardTitle className="text-sm">Recurring schedule</CardTitle></CardHeader>
         <CardContent className="space-y-4">
           <div className="flex items-center gap-3">
             <Button
@@ -219,7 +219,20 @@ function SettingsTab({ project }: { project: import("@/lib/types").Project }) {
             </p>
           )}
 
-          <div className="flex items-center gap-3 pt-2">
+          <div className="flex items-center justify-end gap-3 pt-2">
+            {updateMutation.isError && <p className="text-xs text-destructive">Failed to save schedule.</p>}
+            {runNowMutation.isError && <p className="text-xs text-destructive">Failed to trigger run.</p>}
+            {project.status === "active" && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => runNowMutation.mutate()}
+                disabled={runNowMutation.isPending}
+              >
+                <Play className="h-3 w-3 mr-1" />
+                {runNowMutation.isPending ? "Running..." : "Run now"}
+              </Button>
+            )}
             <Button
               size="sm"
               onClick={() => updateMutation.mutate({
@@ -229,21 +242,8 @@ function SettingsTab({ project }: { project: import("@/lib/types").Project }) {
               })}
               disabled={updateMutation.isPending}
             >
-              {updateMutation.isPending ? "Saving..." : "Save Schedule"}
+              {updateMutation.isPending ? "Saving..." : "Save schedule"}
             </Button>
-            {project.status === "active" && (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => runNowMutation.mutate()}
-                disabled={runNowMutation.isPending}
-              >
-                <Play className="h-3 w-3 mr-1" />
-                {runNowMutation.isPending ? "Running..." : "Run Now"}
-              </Button>
-            )}
-            {updateMutation.isError && <p className="text-xs text-destructive">Failed to save schedule.</p>}
-            {runNowMutation.isError && <p className="text-xs text-destructive">Failed to trigger run.</p>}
           </div>
         </CardContent>
       </Card>

@@ -131,7 +131,7 @@ export function PMStatusBanner({ hasActivePlanSession }: PMStatusBannerProps) {
             disabled={isPending || isAnalyzing}
           >
             <RefreshCw className={`mr-1 h-3 w-3 ${isPending || isAnalyzing ? "animate-spin" : ""}`} />
-            {isPending ? "Starting..." : isAnalyzing ? "Running..." : "Run PM Agent"}
+            {isPending ? "Starting..." : isAnalyzing ? "Running..." : "Run PM agent"}
           </Button>
         </div>
       </div>
