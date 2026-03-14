@@ -17,6 +17,15 @@ type gatheredContext struct {
 	pmContext      *PMContext
 	productContext *models.ProductContext
 	settings       models.OrgSettings
+	pmDocuments    []models.PMDocument
+	slackThreads   []slackThreadData // raw thread data for sandbox files
+}
+
+// slackThreadData holds raw thread data for writing to sandbox files.
+type slackThreadData struct {
+	ChannelName string          `json:"channel_name"`
+	ThreadTS    string          `json:"thread_ts"`
+	Messages    json.RawMessage `json:"messages"`
 }
 
 // gatherContext collects the context needed for PM analysis. When repo is
@@ -153,11 +162,83 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 		}
 	}
 
+	// Gather PM documents if store is configured.
+	var pmDocs []models.PMDocument
+	if s.pmDocuments != nil {
+		docs, err := s.pmDocuments.ListByOrg(ctx, orgID)
+		if err != nil {
+			s.logger.Warn().Err(err).Msg("failed to load PM documents for context")
+		} else {
+			pmDocs = docs
+		}
+	}
+
+	// Gather Slack thread summaries if integration is connected.
+	var slackThreads []slackThreadData
+	if s.integrations != nil && s.credentials != nil {
+		slackCtx, threadData, err := s.gatherSlackContext(ctx, orgID)
+		if err != nil {
+			s.logger.Warn().Err(err).Msg("failed to gather slack context")
+		} else if len(slackCtx) > 0 {
+			pmCtx.SlackThreads = slackCtx
+			slackThreads = threadData
+		}
+	}
+
 	return &gatheredContext{
 		pmContext:      pmCtx,
 		productContext: settings.ProductContext,
 		settings:       settings,
+		pmDocuments:    pmDocs,
+		slackThreads:   slackThreads,
 	}, nil
+}
+
+// gatherSlackContext reads recent thread summaries from the Slack integration config.
+func (s *Service) gatherSlackContext(ctx context.Context, orgID uuid.UUID) ([]SlackThreadContext, []slackThreadData, error) {
+	integrations, err := s.integrations.ListByOrgAndProvider(ctx, orgID, string(models.IntegrationProviderSlack))
+	if err != nil || len(integrations) == 0 {
+		return nil, nil, err
+	}
+
+	integ := integrations[0]
+	if integ.Config == nil {
+		return nil, nil, nil
+	}
+
+	var config slackIntegrationConfig
+	if err := json.Unmarshal(integ.Config, &config); err != nil {
+		return nil, nil, fmt.Errorf("parse slack integration config: %w", err)
+	}
+
+	var summaries []SlackThreadContext
+	var threadData []slackThreadData
+
+	for _, t := range config.RecentThreads {
+		if t.Analysis == nil || !t.Analysis.Actionable {
+			continue
+		}
+
+		threadFile := fmt.Sprintf("/workspace/.slack-threads/%s-%s.json", t.ChannelName, t.ThreadTS)
+		summaries = append(summaries, SlackThreadContext{
+			ChannelName:  t.ChannelName,
+			Category:     t.Analysis.Category,
+			Summary:      t.Analysis.Summary,
+			Urgency:      t.Analysis.Urgency,
+			MessageCount: t.MessageCount,
+			Participants: t.Participants,
+			LastActivity: t.LastActivity,
+			ThreadFile:   threadFile,
+		})
+
+		threadData = append(threadData, slackThreadData{
+			ChannelName: t.ChannelName,
+			ThreadTS:    t.ThreadTS,
+			Messages:    t.Messages,
+		})
+	}
+
+	return summaries, threadData, nil
 }
 
 func summarizeIssue(issue models.Issue) IssueSummary {

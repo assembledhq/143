@@ -507,7 +507,7 @@ export default function StorySection({ isDark }: StorySectionProps) {
                   Why 143
                 </p>
                 <h2
-                  className={`text-3xl sm:text-4xl md:text-[2.75rem] font-light leading-[1.15] tracking-tight ${heading}`}
+                  className={`text-2xl sm:text-3xl font-light tracking-tight ${heading}`}
                 >
                   Fast doesn&rsquo;t mean
                   <br />

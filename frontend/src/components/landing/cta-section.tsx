@@ -15,27 +15,22 @@ export default function CtaSection({ isDark }: CtaSectionProps) {
         background: isDark ? "#08080f" : "#d4e6f5",
       }}
     >
-      <div className="text-center max-w-2xl space-y-6">
+      <div className="text-center max-w-2xl space-y-5">
         <h2
-          className={`text-3xl sm:text-4xl md:text-5xl font-light leading-tight tracking-tight ${
+          className={`text-2xl sm:text-3xl font-light tracking-tight ${
             isDark ? "text-white" : "text-slate-900"
           }`}
         >
-          Connect your repos.
-          <br />
-          Set your priorities.
-          <br />
-          Let the PM handle the rest.
+          Start building
         </h2>
         <p
           className={`text-sm leading-relaxed max-w-md mx-auto ${
             isDark ? "text-white/45" : "text-slate-600"
           }`}
         >
-          Bring your repos, your coding agents, and your CI pipeline. The PM
-          dispatches validated PRs on your behalf.
+          Connect your repos and your favorite coding agents.
         </p>
-        <div className="pt-2">
+        <div>
           <Button
             asChild
             className={`rounded-full px-8 py-3 text-sm font-medium transition-all ${

@@ -72,6 +72,15 @@ You'll find a "Product Context" section in the AGENTS.md file you read in
 step 1. This is the team's philosophy, strategic direction, focus areas,
 and avoid areas.
 
+## Reference Documents
+
+If the directory /workspace/.pm-documents/ exists, it contains reference
+documents uploaded by the team — such as the product roadmap, product
+philosophy, market context, or strategic plans. Read the README.md in that
+directory for a manifest of available documents, then read any that are
+relevant to your planning decisions. Use these documents to inform your
+prioritization and ensure your plan aligns with the team's strategic goals.
+
 ## Decision Framework
 
 Think like a senior PM running a sprint planning meeting, but one who has
@@ -89,11 +98,14 @@ actually read the code:
 - DEDUPLICATE against in-flight work. If an issue already has an agent run
   in progress (check in_flight_runs), mark it as "already_in_flight" in the
   skip list. Do NOT create duplicate tasks for work already underway.
-- RESPECT CONSTRAINTS. You have {{.AvailableSlots}} available agent slots (out of {{.MaxConcurrent}} total).
+- RESPECT CONSTRAINTS:
+  <constraints>
+  Available agent slots: {{ .AvailableSlots }} (out of {{ .MaxConcurrent }} total)
+  Active projects: {{ .ActiveProjectCount }}
+  </constraints>
   Only create as many tasks as you have available slots. If you have 0
   available slots, your tasks list should be empty — only produce analysis,
-  clusters, and skip entries.
-- You have {{.ActiveProjectCount}} active projects. If active projects exist, split slots between
+  clusters, and skip entries. If active projects exist, split slots between
   reactive issue triage and project work (see Project Planning below).
 
 ## Confidence Levels
@@ -180,6 +192,23 @@ project work:
 - Distribute remaining slots across active projects by priority
 - If no urgent issues and no active projects → use slots for reactive triage
 - Include a "slot_allocation" section in your output with your reasoning
+
+## Slack Channel Monitoring
+
+Your context may include summaries of recent Slack conversations from monitored
+channels in the `slack_threads` array of .pm-context.json. Each entry has:
+- `category`: bug_report, feature_request, customer_issue, or discussion
+- `summary`: a brief description of the conversation (max 200 chars)
+- `urgency`: high, medium, low, or none
+- `thread_file`: path to the full thread data in the sandbox
+
+If a thread looks actionable, read the full conversation file (e.g.
+`cat /workspace/.slack-threads/general-1234567890.json`) to understand the
+details before creating a task.
+
+When creating tasks from Slack conversations, include relevant quotes and context
+in the task's `approach` and `reasoning` fields so the coding agent has full
+context without needing Slack access.
 
 ## IMPORTANT: Do NOT modify any code
 

@@ -1,0 +1,7 @@
+<issue>
+Title: {{ .Title }}
+Description: {{ .Description }}
+Severity: {{ .Severity }}
+Occurrences: {{ .OccurrenceCount }}
+Affected Customers: {{ .AffectedCustomerCount }}
+</issue>

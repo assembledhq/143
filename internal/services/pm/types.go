@@ -68,6 +68,19 @@ type PMContext struct {
 	MaxConcurrentRuns int                       `json:"max_concurrent_runs"`
 	CurrentRunCount   int                       `json:"current_run_count"`
 	ActiveProjects    []ProjectSummary          `json:"active_projects,omitempty"`
+	SlackThreads      []SlackThreadContext      `json:"slack_threads,omitempty"`
+}
+
+// SlackThreadContext is a lightweight summary of a Slack thread for PM analysis.
+type SlackThreadContext struct {
+	ChannelName  string   `json:"channel_name"`
+	Category     string   `json:"category"`
+	Summary      string   `json:"summary"`
+	Urgency      string   `json:"urgency"`
+	MessageCount int      `json:"message_count"`
+	Participants []string `json:"participants"`
+	LastActivity string   `json:"last_activity"`
+	ThreadFile   string   `json:"thread_file"`
 }
 
 type IssueSummary struct {
@@ -196,6 +209,30 @@ type ProjectTaskSpec struct {
 type SkippedTaskEntry struct {
 	Description string `json:"description"`
 	Reason      string `json:"reason"`
+}
+
+// slackIntegrationConfig is the shape of the config stored on a Slack integration.
+type slackIntegrationConfig struct {
+	RecentThreads []slackIntegrationThread `json:"recent_threads"`
+}
+
+// slackIntegrationThread is a single thread stored in the Slack integration config.
+type slackIntegrationThread struct {
+	ChannelName  string                        `json:"channel_name"`
+	ThreadTS     string                        `json:"thread_ts"`
+	MessageCount int                           `json:"message_count"`
+	Participants []string                      `json:"participants"`
+	LastActivity string                        `json:"last_activity"`
+	Messages     json.RawMessage               `json:"messages"`
+	Analysis     *slackIntegrationAnalysis     `json:"analysis"`
+}
+
+// slackIntegrationAnalysis is the analysis result attached to a thread.
+type slackIntegrationAnalysis struct {
+	Actionable bool   `json:"actionable"`
+	Category   string `json:"category"`
+	Summary    string `json:"summary"`
+	Urgency    string `json:"urgency"`
 }
 
 // SlotAllocation is the PM's recommendation for how to split slots.

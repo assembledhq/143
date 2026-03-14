@@ -1,0 +1,13 @@
+Check if this code change aligns with the issue and product direction.
+
+<issue_context>
+{{ .IssueContext }}
+</issue_context>
+
+<org_context>
+{{ .OrgContext }}
+</org_context>
+
+<code_diff>
+{{ .Diff }}
+</code_diff>

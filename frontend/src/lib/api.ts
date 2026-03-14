@@ -156,6 +156,17 @@ export const api = {
       return get<import('./types').PMDecisionsResponse>(`/api/v1/pm/decisions${qs ? `?${qs}` : ''}`);
     },
     status: () => get<import('./types').SingleResponse<import('./types').PMStatus>>('/api/v1/pm/status'),
+    // Documents
+    listDocuments: () =>
+      get<import('./types').ListResponse<import('./types').PMDocument>>('/api/v1/pm/documents'),
+    getDocument: (docId: string) =>
+      get<import('./types').SingleResponse<import('./types').PMDocument>>(`/api/v1/pm/documents/${docId}`),
+    createDocument: (body: { title: string; content?: string; doc_type?: string; source_type?: string; source_url?: string; source_id?: string; source_meta?: Record<string, unknown> }) =>
+      post<import('./types').SingleResponse<import('./types').PMDocument>>('/api/v1/pm/documents', body),
+    updateDocument: (docId: string, body: Record<string, unknown>) =>
+      patch<import('./types').SingleResponse<import('./types').PMDocument>>(`/api/v1/pm/documents/${docId}`, body),
+    deleteDocument: (docId: string) =>
+      del(`/api/v1/pm/documents/${docId}`),
   },
   sessions: {
     list: (params?: { status?: string; cursor?: string; limit?: number }) => {
@@ -201,6 +212,15 @@ export const api = {
       window.location.href = `${API_BASE}/api/v1/integrations/linear/login`;
     },
     connectLinear: () => post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/linear/connect'),
+    loginSlack: () => {
+      window.location.href = `${API_BASE}/api/v1/integrations/slack/login`;
+    },
+    connectSlack: () => post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/slack/connect'),
+    listSlackChannels: () => get<{ data: Array<{ id: string; name: string; selected: boolean }> }>('/api/v1/integrations/slack/channels'),
+    updateSlackChannels: (channelIds: string[]) => request('/api/v1/integrations/slack/channels', {
+      method: 'PATCH',
+      body: JSON.stringify({ channel_ids: channelIds }),
+    }),
   },
   codexAuth: {
     initiate: () => post<import('./types').SingleResponse<import('./types').CodexDeviceAuth>>('/api/v1/settings/codex-auth/initiate'),

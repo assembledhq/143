@@ -1,11 +1,11 @@
 // Package prompts centralizes all LLM prompt templates used across the application.
-// Templates are stored in the templates/ directory and rendered using html/template.
+// Templates are stored in the templates/ directory and rendered using text/template.
 package prompts
 
 import (
 	"bytes"
 	"embed"
-	"html/template"
+	"text/template"
 )
 
 //go:embed templates/*.template
@@ -83,9 +83,103 @@ func AgentSystemPromptBase() string {
 	return render("agent_system_prompt_base.template", nil)
 }
 
+// ─── Slack ────────────────────────────────────────────────────────────────────
+
+// SlackSummarizerPrompt returns the system prompt for Slack thread analysis.
+func SlackSummarizerPrompt() string {
+	return render("slack_summarizer_prompt.template", nil)
+}
+
 // ─── Project ─────────────────────────────────────────────────────────────────
 
 // ProjectGeneratePrompt returns the system prompt for AI project generation.
 func ProjectGeneratePrompt() string {
 	return render("project_generate_prompt.template", nil)
+}
+
+// ProjectCycleSystemPromptData holds the dynamic values for the project cycle system prompt.
+type ProjectCycleSystemPromptData struct {
+	Title string
+	Goal  string
+	ID    string
+}
+
+// ProjectCycleSystemPrompt renders the system prompt for project-scoped PM cycles.
+func ProjectCycleSystemPrompt(data ProjectCycleSystemPromptData) string {
+	return render("project_cycle_system_prompt.template", data)
+}
+
+// ─── User Prompts ────────────────────────────────────────────────────────────
+
+// DirectionCheckUserPromptData holds the dynamic values for the direction check user prompt.
+type DirectionCheckUserPromptData struct {
+	IssueContext string
+	OrgContext   string
+	Diff         string
+}
+
+// DirectionCheckUserPrompt renders the user prompt for direction validation.
+func DirectionCheckUserPrompt(data DirectionCheckUserPromptData) string {
+	return render("direction_check_user_prompt.template", data)
+}
+
+// CorrectnessCheckUserPromptData holds the dynamic values for the correctness check user prompt.
+type CorrectnessCheckUserPromptData struct {
+	IssueContext string
+	Diff         string
+}
+
+// CorrectnessCheckUserPrompt renders the user prompt for correctness validation.
+func CorrectnessCheckUserPrompt(data CorrectnessCheckUserPromptData) string {
+	return render("correctness_check_user_prompt.template", data)
+}
+
+// RegressionCheckUserPromptData holds the dynamic values for the regression check user prompt.
+type RegressionCheckUserPromptData struct {
+	IssueContext string
+	Diff         string
+}
+
+// RegressionCheckUserPrompt renders the user prompt for regression test validation.
+func RegressionCheckUserPrompt(data RegressionCheckUserPromptData) string {
+	return render("regression_check_user_prompt.template", data)
+}
+
+// ReviewCommentUserPromptData holds the dynamic values for the review comment user prompt.
+type ReviewCommentUserPromptData struct {
+	DiffContext string
+	CommentBody string
+}
+
+// ReviewCommentUserPrompt renders the user prompt for review comment classification.
+func ReviewCommentUserPrompt(data ReviewCommentUserPromptData) string {
+	return render("review_comment_user_prompt.template", data)
+}
+
+// DirectionAlignmentUserPromptData holds the dynamic values for the direction alignment user prompt.
+type DirectionAlignmentUserPromptData struct {
+	ProductDirection string
+	Title            string
+	Description      string
+	Severity         string
+	OccurrenceCount  int
+}
+
+// DirectionAlignmentUserPrompt renders the user prompt for direction alignment assessment.
+func DirectionAlignmentUserPrompt(data DirectionAlignmentUserPromptData) string {
+	return render("direction_alignment_user_prompt.template", data)
+}
+
+// ComplexityEstimateUserPromptData holds the dynamic values for the complexity estimate user prompt.
+type ComplexityEstimateUserPromptData struct {
+	Title                 string
+	Description           string
+	Severity              string
+	OccurrenceCount       int
+	AffectedCustomerCount int
+}
+
+// ComplexityEstimateUserPrompt renders the user prompt for complexity estimation.
+func ComplexityEstimateUserPrompt(data ComplexityEstimateUserPromptData) string {
+	return render("complexity_estimate_user_prompt.template", data)
 }

@@ -26,6 +26,7 @@ import (
 	"github.com/assembledhq/143/internal/services/agent/providers"
 	"github.com/assembledhq/143/internal/services/codexauth"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/pm"
 	"github.com/assembledhq/143/internal/services/prioritization"
 	"github.com/assembledhq/143/internal/services/validation"
@@ -89,6 +90,7 @@ func main() {
 		projectStore := db.NewProjectStore(pool)
 		projectTaskStore := db.NewProjectTaskStore(pool)
 		projectCycleStore := db.NewProjectCycleStore(pool)
+		pmDocumentStore := db.NewPMDocumentStore(pool)
 
 		stores := &worker.Stores{
 			Issues:              issueStore,
@@ -100,6 +102,7 @@ func main() {
 			ComplexityEstimates: complexityEstimateStore,
 			Projects:            projectStore,
 			ProjectTasks:        projectTaskStore,
+			Credentials:         credentialStore,
 		}
 
 		// Build Phase 3+ services if runtime dependencies are available.
@@ -108,7 +111,7 @@ func main() {
 			services = buildServices(cfg, pool, logger, codexAuthSvc, credentialStore, issueStore, sessionStore,
 				jobStore, orgStore, repoStore, validationStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
-				projectStore, projectTaskStore, projectCycleStore)
+				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore)
 		}
 		worker.RegisterHandlers(w, stores, services, logger)
 		go w.Start(ctx)
@@ -188,6 +191,8 @@ func buildServices(
 	projectStore *db.ProjectStore,
 	projectTaskStore *db.ProjectTaskStore,
 	projectCycleStore *db.ProjectCycleStore,
+	pmDocumentStore *db.PMDocumentStore,
+	integrationStore *db.IntegrationStore,
 ) *worker.Services {
 	// GitHub App service (for installation tokens, PR creation).
 	ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
@@ -275,11 +280,19 @@ func buildServices(
 		logger,
 	)
 	pmSvc.SetProjectStores(projectStore, projectTaskStore, projectCycleStore)
+	pmSvc.SetPMDocumentStore(pmDocumentStore)
+	pmSvc.SetSlackStores(integrationStore, credentialStore)
 
 	logger.Info().
 		Int("adapters", len(agentAdapters)).
 		Bool("llm_configured", llmClient != nil).
 		Msg("Phase 3+ services initialized")
+
+	// Slack summarizer (optional — only if LLM client is available).
+	var slackSummarizer *ingestion.SlackSummarizer
+	if llmClient != nil {
+		slackSummarizer = ingestion.NewSlackSummarizer(llmClient, cfg.SlackSummaryModel, logger)
+	}
 
 	return &worker.Services{
 		Orchestrator:    orchestrator,
@@ -289,5 +302,6 @@ func buildServices(
 		SandboxProvider: sandboxProvider,
 		Prioritization:  prioritizationSvc,
 		PM:              pmSvc,
+		SlackSummarizer: slackSummarizer,
 	}
 }

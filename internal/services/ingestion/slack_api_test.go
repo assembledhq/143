@@ -1,0 +1,442 @@
+package ingestion
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/require"
+)
+
+func newTestSlackClient(baseURL string) *SlackAPIClient {
+	return &SlackAPIClient{
+		client:  &http.Client{},
+		logger:  zerolog.Nop(),
+		baseURL: baseURL,
+	}
+}
+
+func TestGroupIntoThreads(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		messages []SlackMessage
+		expected map[string][]SlackMessage
+	}{
+		{
+			name:     "empty messages returns empty map",
+			messages: []SlackMessage{},
+			expected: map[string][]SlackMessage{},
+		},
+		{
+			name: "messages without thread_ts each get their own key",
+			messages: []SlackMessage{
+				{User: "U1", Text: "hello", Timestamp: "1000.1"},
+				{User: "U2", Text: "world", Timestamp: "1000.2"},
+			},
+			expected: map[string][]SlackMessage{
+				"1000.1": {{User: "U1", Text: "hello", Timestamp: "1000.1"}},
+				"1000.2": {{User: "U2", Text: "world", Timestamp: "1000.2"}},
+			},
+		},
+		{
+			name: "messages with same thread_ts grouped together",
+			messages: []SlackMessage{
+				{User: "U1", Text: "root", Timestamp: "1000.1", ThreadTS: "1000.1", ReplyCount: 2},
+				{User: "U2", Text: "reply 1", Timestamp: "1000.2", ThreadTS: "1000.1"},
+				{User: "U3", Text: "reply 2", Timestamp: "1000.3", ThreadTS: "1000.1"},
+			},
+			expected: map[string][]SlackMessage{
+				"1000.1": {
+					{User: "U1", Text: "root", Timestamp: "1000.1", ThreadTS: "1000.1", ReplyCount: 2},
+					{User: "U2", Text: "reply 1", Timestamp: "1000.2", ThreadTS: "1000.1"},
+					{User: "U3", Text: "reply 2", Timestamp: "1000.3", ThreadTS: "1000.1"},
+				},
+			},
+		},
+		{
+			name: "mix of standalone and threaded messages",
+			messages: []SlackMessage{
+				{User: "U1", Text: "standalone", Timestamp: "1000.1"},
+				{User: "U2", Text: "thread root", Timestamp: "1000.2", ThreadTS: "1000.2", ReplyCount: 1},
+				{User: "U3", Text: "thread reply", Timestamp: "1000.3", ThreadTS: "1000.2"},
+				{User: "U4", Text: "another standalone", Timestamp: "1000.4"},
+			},
+			expected: map[string][]SlackMessage{
+				"1000.1": {{User: "U1", Text: "standalone", Timestamp: "1000.1"}},
+				"1000.2": {
+					{User: "U2", Text: "thread root", Timestamp: "1000.2", ThreadTS: "1000.2", ReplyCount: 1},
+					{User: "U3", Text: "thread reply", Timestamp: "1000.3", ThreadTS: "1000.2"},
+				},
+				"1000.4": {{User: "U4", Text: "another standalone", Timestamp: "1000.4"}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := GroupIntoThreads(tt.messages)
+			require.Equal(t, tt.expected, result, "GroupIntoThreads should return expected thread grouping")
+		})
+	}
+}
+
+func TestSlackAPIClient_FetchChannelMessages(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		handler     http.HandlerFunc
+		expected    []SlackMessage
+		expectErr   bool
+		errContains string
+	}{
+		{
+			name: "successful response with messages",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, "Bearer test-token", r.Header.Get("Authorization"), "should send auth header")
+				require.Equal(t, "C123", r.URL.Query().Get("channel"), "should pass channel ID")
+				require.Contains(t, r.URL.Path, "conversations.history", "should call conversations.history")
+
+				w.Header().Set("Content-Type", "application/json")
+				err := json.NewEncoder(w).Encode(map[string]any{
+					"ok": true,
+					"messages": []SlackMessage{
+						{User: "U1", Text: "hello", Timestamp: "1000.1"},
+						{User: "U2", Text: "world", Timestamp: "1000.2"},
+					},
+					"has_more":          false,
+					"response_metadata": map[string]string{"next_cursor": ""},
+				})
+				require.NoError(t, err)
+			},
+			expected: []SlackMessage{
+				{User: "U1", Text: "hello", Timestamp: "1000.1"},
+				{User: "U2", Text: "world", Timestamp: "1000.2"},
+			},
+		},
+		{
+			name: "slack API error (ok=false)",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				err := json.NewEncoder(w).Encode(map[string]any{
+					"ok":    false,
+					"error": "channel_not_found",
+				})
+				require.NoError(t, err)
+			},
+			expectErr:   true,
+			errContains: "channel_not_found",
+		},
+		{
+			name: "HTTP error (non-200 status)",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, err := w.Write([]byte("internal error"))
+				require.NoError(t, err)
+			},
+			expectErr:   true,
+			errContains: "status 500",
+		},
+		{
+			name: "rate limiting (429 response)",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Retry-After", "30")
+				w.WriteHeader(http.StatusTooManyRequests)
+			},
+			expectErr:   true,
+			errContains: "rate limited",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := httptest.NewServer(tt.handler)
+			defer server.Close()
+
+			client := newTestSlackClient(server.URL)
+			messages, err := client.FetchChannelMessages(context.Background(), "test-token", "C123", time.Now().Add(-1*time.Hour))
+
+			if tt.expectErr {
+				require.Error(t, err, "FetchChannelMessages should return an error")
+				require.Contains(t, err.Error(), tt.errContains, "error should contain expected message")
+				return
+			}
+
+			require.NoError(t, err, "FetchChannelMessages should not return an error")
+			require.Equal(t, tt.expected, messages, "should return expected messages")
+		})
+	}
+}
+
+func TestSlackAPIClient_FetchThreadReplies(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		handler     http.HandlerFunc
+		expected    []SlackMessage
+		expectErr   bool
+		errContains string
+	}{
+		{
+			name: "successful response with replies",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, "Bearer test-token", r.Header.Get("Authorization"), "should send auth header")
+				require.Equal(t, "C123", r.URL.Query().Get("channel"), "should pass channel ID")
+				require.Equal(t, "1000.1", r.URL.Query().Get("ts"), "should pass thread timestamp")
+				require.Contains(t, r.URL.Path, "conversations.replies", "should call conversations.replies")
+
+				w.Header().Set("Content-Type", "application/json")
+				err := json.NewEncoder(w).Encode(map[string]any{
+					"ok": true,
+					"messages": []SlackMessage{
+						{User: "U1", Text: "root", Timestamp: "1000.1", ThreadTS: "1000.1"},
+						{User: "U2", Text: "reply", Timestamp: "1000.2", ThreadTS: "1000.1"},
+					},
+				})
+				require.NoError(t, err)
+			},
+			expected: []SlackMessage{
+				{User: "U1", Text: "root", Timestamp: "1000.1", ThreadTS: "1000.1"},
+				{User: "U2", Text: "reply", Timestamp: "1000.2", ThreadTS: "1000.1"},
+			},
+		},
+		{
+			name: "slack API error (ok=false)",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				err := json.NewEncoder(w).Encode(map[string]any{
+					"ok":    false,
+					"error": "thread_not_found",
+				})
+				require.NoError(t, err)
+			},
+			expectErr:   true,
+			errContains: "thread_not_found",
+		},
+		{
+			name: "HTTP error (non-200 status)",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusBadGateway)
+				_, err := w.Write([]byte("bad gateway"))
+				require.NoError(t, err)
+			},
+			expectErr:   true,
+			errContains: "status 502",
+		},
+		{
+			name: "rate limiting (429 response)",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Retry-After", "10")
+				w.WriteHeader(http.StatusTooManyRequests)
+			},
+			expectErr:   true,
+			errContains: "rate limited",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := httptest.NewServer(tt.handler)
+			defer server.Close()
+
+			client := newTestSlackClient(server.URL)
+			messages, err := client.FetchThreadReplies(context.Background(), "test-token", "C123", "1000.1")
+
+			if tt.expectErr {
+				require.Error(t, err, "FetchThreadReplies should return an error")
+				require.Contains(t, err.Error(), tt.errContains, "error should contain expected message")
+				return
+			}
+
+			require.NoError(t, err, "FetchThreadReplies should not return an error")
+			require.Equal(t, tt.expected, messages, "should return expected replies")
+		})
+	}
+}
+
+func TestSlackAPIClient_ListChannels(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		handler     http.HandlerFunc
+		expected    []SlackChannel
+		expectErr   bool
+		errContains string
+	}{
+		{
+			name: "successful response with channels",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, "Bearer test-token", r.Header.Get("Authorization"), "should send auth header")
+				require.Contains(t, r.URL.Path, "conversations.list", "should call conversations.list")
+				require.Equal(t, "true", r.URL.Query().Get("exclude_archived"), "should exclude archived")
+
+				w.Header().Set("Content-Type", "application/json")
+				err := json.NewEncoder(w).Encode(map[string]any{
+					"ok": true,
+					"channels": []map[string]string{
+						{"id": "C1", "name": "general"},
+						{"id": "C2", "name": "random"},
+					},
+					"response_metadata": map[string]string{"next_cursor": ""},
+				})
+				require.NoError(t, err)
+			},
+			expected: []SlackChannel{
+				{ID: "C1", Name: "general"},
+				{ID: "C2", Name: "random"},
+			},
+		},
+		{
+			name: "slack API error (ok=false)",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				err := json.NewEncoder(w).Encode(map[string]any{
+					"ok":    false,
+					"error": "invalid_auth",
+				})
+				require.NoError(t, err)
+			},
+			expectErr:   true,
+			errContains: "invalid_auth",
+		},
+		{
+			name: "HTTP error (non-200 status)",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, err := w.Write([]byte("service unavailable"))
+				require.NoError(t, err)
+			},
+			expectErr:   true,
+			errContains: "status 503",
+		},
+		{
+			name: "rate limiting (429 response)",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Retry-After", "5")
+				w.WriteHeader(http.StatusTooManyRequests)
+			},
+			expectErr:   true,
+			errContains: "rate limited",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := httptest.NewServer(tt.handler)
+			defer server.Close()
+
+			client := newTestSlackClient(server.URL)
+			channels, err := client.ListChannels(context.Background(), "test-token")
+
+			if tt.expectErr {
+				require.Error(t, err, "ListChannels should return an error")
+				require.Contains(t, err.Error(), tt.errContains, "error should contain expected message")
+				return
+			}
+
+			require.NoError(t, err, "ListChannels should not return an error")
+			require.Equal(t, tt.expected, channels, "should return expected channels")
+		})
+	}
+}
+
+func TestSlackAPIClient_FetchChannelInfo(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		handler     http.HandlerFunc
+		expected    *SlackChannel
+		expectErr   bool
+		errContains string
+	}{
+		{
+			name: "successful response with channel info",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, "Bearer test-token", r.Header.Get("Authorization"), "should send auth header")
+				require.Equal(t, "C123", r.URL.Query().Get("channel"), "should pass channel ID")
+				require.Contains(t, r.URL.Path, "conversations.info", "should call conversations.info")
+
+				w.Header().Set("Content-Type", "application/json")
+				err := json.NewEncoder(w).Encode(map[string]any{
+					"ok": true,
+					"channel": map[string]string{
+						"id":   "C123",
+						"name": "engineering",
+					},
+				})
+				require.NoError(t, err)
+			},
+			expected: &SlackChannel{ID: "C123", Name: "engineering"},
+		},
+		{
+			name: "slack API error (ok=false)",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				err := json.NewEncoder(w).Encode(map[string]any{
+					"ok":    false,
+					"error": "channel_not_found",
+				})
+				require.NoError(t, err)
+			},
+			expectErr:   true,
+			errContains: "channel_not_found",
+		},
+		{
+			name: "HTTP error (non-200 status)",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusForbidden)
+				_, err := w.Write([]byte("forbidden"))
+				require.NoError(t, err)
+			},
+			expectErr:   true,
+			errContains: "status 403",
+		},
+		{
+			name: "rate limiting (429 response)",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Retry-After", "15")
+				w.WriteHeader(http.StatusTooManyRequests)
+			},
+			expectErr:   true,
+			errContains: "rate limited",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := httptest.NewServer(tt.handler)
+			defer server.Close()
+
+			client := newTestSlackClient(server.URL)
+			channel, err := client.FetchChannelInfo(context.Background(), "test-token", "C123")
+
+			if tt.expectErr {
+				require.Error(t, err, "FetchChannelInfo should return an error")
+				require.Contains(t, err.Error(), tt.errContains, "error should contain expected message")
+				return
+			}
+
+			require.NoError(t, err, "FetchChannelInfo should not return an error")
+			require.Equal(t, tt.expected, channel, "should return expected channel info")
+		})
+	}
+}
