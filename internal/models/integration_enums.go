@@ -9,11 +9,12 @@ const (
 	IntegrationProviderGitHub IntegrationProvider = "github"
 	IntegrationProviderSentry IntegrationProvider = "sentry"
 	IntegrationProviderLinear IntegrationProvider = "linear"
+	IntegrationProviderSlack  IntegrationProvider = "slack"
 )
 
 func (p IntegrationProvider) Validate() error {
 	switch p {
-	case IntegrationProviderGitHub, IntegrationProviderSentry, IntegrationProviderLinear:
+	case IntegrationProviderGitHub, IntegrationProviderSentry, IntegrationProviderLinear, IntegrationProviderSlack:
 		return nil
 	default:
 		return fmt.Errorf("invalid IntegrationProvider: %q", p)

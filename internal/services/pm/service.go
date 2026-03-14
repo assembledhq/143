@@ -81,6 +81,14 @@ type pmDocumentStore interface {
 	ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.PMDocument, error)
 }
 
+type integrationStore interface {
+	ListByOrgAndProvider(ctx context.Context, orgID uuid.UUID, provider string) ([]models.Integration, error)
+}
+
+type credentialStore interface {
+	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
+}
+
 // Service is the AI Product Manager. It runs the PM agent and delegates work.
 type Service struct {
 	issues        issueStore
@@ -95,6 +103,8 @@ type Service struct {
 	projectTasks  projectTaskStore  // nil-safe
 	projectCycles projectCycleStore // nil-safe
 	pmDocuments   pmDocumentStore   // nil-safe
+	integrations  integrationStore  // nil-safe: Slack context disabled if nil
+	credentials   credentialStore   // nil-safe
 	sandbox       agent.SandboxProvider
 	adapter       agent.AgentAdapter
 	github        agent.GitHubTokenProvider
@@ -141,6 +151,12 @@ func (s *Service) SetProjectStores(projects projectStore, tasks projectTaskStore
 // SetPMDocumentStore injects the PM document store. Nil-safe: if not called, PM documents are not included in context.
 func (s *Service) SetPMDocumentStore(store pmDocumentStore) {
 	s.pmDocuments = store
+}
+
+// SetSlackStores injects integration and credential stores for Slack context.
+func (s *Service) SetSlackStores(integrations integrationStore, credentials credentialStore) {
+	s.integrations = integrations
+	s.credentials = credentials
 }
 
 
@@ -230,6 +246,13 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	}
 	if err := s.sandbox.WriteFile(ctx, sb, "/workspace/.pm-context.json", contextJSON); err != nil {
 		return nil, fmt.Errorf("write context: %w", err)
+	}
+
+	// Write full Slack thread files to the sandbox for PM drill-down.
+	if ctxBundle.slackThreads != nil {
+		if err := s.writeSlackThreadFiles(ctx, sb, ctxBundle.slackThreads); err != nil {
+			s.logger.Warn().Err(err).Msg("failed to write slack thread files to sandbox")
+		}
 	}
 
 	available := ctxBundle.pmContext.MaxConcurrentRuns - ctxBundle.pmContext.CurrentRunCount

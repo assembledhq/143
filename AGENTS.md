@@ -8,6 +8,8 @@ Use docs/design/overall.md as the overall design of the system, think of it as a
 
 **Service layer**: Handlers call services, services call the DB layer. Business logic belongs in `internal/services/`, never in HTTP handlers. Services are defined as interfaces for testability (mock with `go.uber.org/mock`).
 
+**LLM prompts live in Go templates**: All LLM system prompts must be stored as `.template` files in `internal/prompts/templates/`, rendered via the `prompts` package (`internal/prompts/prompts.go`). Never inline prompt strings as Go constants or string literals in service code. Add a corresponding exported render function in `prompts.go` for each new template.
+
 **Logging**: Use `zerolog` for all log output. Never use `fmt.Printf` or `log.Println`. Logs are JSON-structured and shipped to Mezmo.
 
 **Multi-tenancy**: Every table has an `org_id` column (FK to `organizations`). Every query MUST filter by `org_id`. Auth middleware extracts org from the session and sets it in request context. Missing an `org_id` filter is a data isolation bug.

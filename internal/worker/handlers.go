@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,6 +27,7 @@ import (
 func RegisterHandlers(w *Worker, stores *Stores, services *Services, logger zerolog.Logger) {
 	w.Register("ingest_webhook", newIngestWebhookHandler(stores, logger))
 	w.Register("sync_sentry", newSyncSentryHandler(stores, logger))
+	w.Register("sync_slack", newSyncSlackHandler(stores, services, logger))
 	if services != nil && services.Prioritization != nil {
 		w.Register("prioritize", newPrioritizeHandler(stores, services, logger))
 	}
@@ -66,6 +69,7 @@ type Stores struct {
 	ComplexityEstimates *db.ComplexityEstimateStore
 	Projects            *db.ProjectStore      // nil-safe: projects feature disabled if nil
 	ProjectTasks        *db.ProjectTaskStore  // nil-safe
+	Credentials         *db.OrgCredentialStore // nil-safe: needed for sync_slack
 }
 
 // Services holds the service dependencies needed by job handlers.
@@ -78,6 +82,7 @@ type Services struct {
 	Prioritization  *prioritization.Service
 	Feedback        *feedback.Service
 	PM              pmService
+	SlackSummarizer *ingestion.SlackSummarizer // nil-safe: Slack summarization disabled if nil
 }
 
 type pmService interface {
@@ -312,6 +317,168 @@ func syncSentryIntegration(
 		Msg("sentry sync complete")
 
 	return nil
+}
+
+// sync_slack handler fetches recent messages from Slack channels, summarizes them,
+// and stores the results in the integration config for PM context.
+func newSyncSlackHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	slackClient := ingestion.NewSlackAPIClient(logger)
+
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID string `json:"org_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal sync_slack payload: %w", err)
+		}
+
+		orgID, err := uuid.Parse(input.OrgID)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+
+		integrations, err := stores.Integrations.ListByOrgAndProvider(ctx, orgID, string(models.IntegrationProviderSlack))
+		if err != nil {
+			return fmt.Errorf("list slack integrations: %w", err)
+		}
+		if len(integrations) == 0 {
+			logger.Debug().Str("org_id", orgID.String()).Msg("no active slack integrations found")
+			return nil
+		}
+
+		if stores.Credentials == nil {
+			logger.Debug().Msg("credential store not available for sync_slack")
+			return nil
+		}
+
+		cred, err := stores.Credentials.Get(ctx, orgID, models.ProviderSlack)
+		if err != nil {
+			return fmt.Errorf("get slack credentials: %w", err)
+		}
+
+		slackCfg, ok := cred.Config.(models.SlackConfig)
+		if !ok {
+			return fmt.Errorf("unexpected slack credential type")
+		}
+
+		if len(slackCfg.ChannelIDs) == 0 {
+			logger.Debug().Str("org_id", orgID.String()).Msg("no slack channels configured")
+			return nil
+		}
+
+		integ := integrations[0]
+		since := time.Time{}
+		if integ.LastSyncedAt != nil {
+			since = *integ.LastSyncedAt
+		}
+
+		syncStart := time.Now()
+		var allThreads []ingestion.SlackThreadSummary
+
+		for _, channelID := range slackCfg.ChannelIDs {
+			channelInfo, err := slackClient.FetchChannelInfo(ctx, slackCfg.AccessToken, channelID)
+			if err != nil {
+				logger.Warn().Err(err).Str("channel_id", channelID).Msg("failed to fetch slack channel info")
+				continue
+			}
+
+			messages, err := slackClient.FetchChannelMessages(ctx, slackCfg.AccessToken, channelID, since)
+			if err != nil {
+				logger.Warn().Err(err).Str("channel_id", channelID).Msg("failed to fetch slack messages")
+				continue
+			}
+
+			threadMap := ingestion.GroupIntoThreads(messages)
+
+			// Build SlackThreadSummary for each thread, fetching replies as needed.
+			for threadTS, threadMsgs := range threadMap {
+				// Check if root message has replies we should fetch.
+				if len(threadMsgs) > 0 && threadMsgs[0].ReplyCount > 0 {
+					replies, err := slackClient.FetchThreadReplies(ctx, slackCfg.AccessToken, channelID, threadTS)
+					if err != nil {
+						logger.Warn().Err(err).Str("thread_ts", threadTS).Msg("failed to fetch thread replies")
+					} else {
+						threadMsgs = replies
+					}
+				}
+
+				// Collect participants and find last activity time.
+				seen := map[string]bool{}
+				var participants []string
+				var lastActivity time.Time
+				for _, m := range threadMsgs {
+					if !seen[m.User] {
+						seen[m.User] = true
+						participants = append(participants, m.User)
+					}
+					if ts := parseSlackTimestamp(m.Timestamp); ts.After(lastActivity) {
+						lastActivity = ts
+					}
+				}
+
+				msgsJSON, err := json.Marshal(threadMsgs)
+				if err != nil {
+					logger.Warn().Err(err).Str("thread_ts", threadTS).Msg("failed to marshal thread messages")
+					continue
+				}
+
+				allThreads = append(allThreads, ingestion.SlackThreadSummary{
+					ChannelID:    channelID,
+					ChannelName:  channelInfo.Name,
+					ThreadTS:     threadTS,
+					MessageCount: len(threadMsgs),
+					Participants: participants,
+					LastActivity: lastActivity,
+					Messages:     msgsJSON,
+				})
+			}
+		}
+
+		// Summarize threads with cheap LLM.
+		if services != nil && services.SlackSummarizer != nil && len(allThreads) > 0 {
+			allThreads, err = services.SlackSummarizer.SummarizeThreads(ctx, allThreads)
+			if err != nil {
+				logger.Warn().Err(err).Msg("failed to summarize slack threads")
+			}
+		}
+
+		// Store results in integration config.
+		configData, err := json.Marshal(map[string]any{
+			"recent_threads": allThreads,
+		})
+		if err != nil {
+			return fmt.Errorf("marshal slack sync results: %w", err)
+		}
+
+		if err := stores.Integrations.UpdateConfig(ctx, orgID, integ.ID, configData); err != nil {
+			return fmt.Errorf("update slack integration config: %w", err)
+		}
+
+		if err := stores.Integrations.UpdateLastSyncedAt(ctx, orgID, integ.ID, syncStart); err != nil {
+			return fmt.Errorf("update last_synced_at: %w", err)
+		}
+
+		logger.Info().
+			Str("integration_id", integ.ID.String()).
+			Int("threads", len(allThreads)).
+			Msg("slack sync complete")
+
+		return nil
+	}
+}
+
+// parseSlackTimestamp parses a Slack message timestamp (e.g. "1678901234.567890")
+// into a time.Time. Returns zero time on parse failure.
+func parseSlackTimestamp(ts string) time.Time {
+	parts := strings.SplitN(ts, ".", 2)
+	if len(parts) == 0 {
+		return time.Time{}
+	}
+	sec, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return time.Time{}
+	}
+	return time.Unix(sec, 0)
 }
 
 // run_agent handler executes an agent run end-to-end via the orchestrator.
