@@ -188,13 +188,13 @@ export default function NewProjectPage() {
     <PageContainer size="default">
     <div className="space-y-6">
       <PageHeader
-        title="New Project"
+        title="New project"
         description="Create a project for the PM agent to manage."
         action={
           <Button variant="outline" asChild>
             <Link href="/projects">
               <ArrowLeft className="mr-2 h-4 w-4" />
-              Back to Projects
+              Back to projects
             </Link>
           </Button>
         }
@@ -330,7 +330,7 @@ export default function NewProjectPage() {
                 disabled={description.trim().length === 0 || generateMutation.isPending}
               >
                 <Sparkles className="mr-2 h-4 w-4" />
-                {generateMutation.isPending ? "Generating..." : "Generate Project"}
+                {generateMutation.isPending ? "Generating..." : "Generate project"}
               </Button>
               {generateMutation.isError && (
                 <p className="text-xs text-destructive">
@@ -488,7 +488,7 @@ export default function NewProjectPage() {
             </div>
 
             <div className="space-y-2">
-              <Label>Execution Mode</Label>
+              <Label>Execution mode</Label>
               <RadioGroup
                 value={executionMode}
                 onValueChange={setExecutionMode}
@@ -511,7 +511,7 @@ export default function NewProjectPage() {
 
             {executionMode === "parallel" && (
               <div className="space-y-2">
-                <Label htmlFor="max-concurrent">Max Concurrent Tasks</Label>
+                <Label htmlFor="max-concurrent">Max concurrent tasks</Label>
                 <Input
                   id="max-concurrent"
                   type="number"
@@ -543,7 +543,7 @@ export default function NewProjectPage() {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="base-branch">Base Branch</Label>
+              <Label htmlFor="base-branch">Base branch</Label>
               <Input
                 id="base-branch"
                 value={baseBranch}
@@ -560,8 +560,8 @@ export default function NewProjectPage() {
                 {createMutation.isPending
                   ? "Creating..."
                   : projectType === "scheduled"
-                    ? "Create Scheduled Project"
-                    : "Create Project"}
+                    ? "Create scheduled project"
+                    : "Create project"}
               </Button>
               {createMutation.isError && (
                 <p className="text-xs text-destructive">

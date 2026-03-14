@@ -27,20 +27,20 @@ import { DEFAULT_PM_MODEL, PM_MODELS_BY_PROVIDER } from "@/lib/model-constants";
 
 const DOC_TYPE_LABELS: Record<string, string> = {
   roadmap: "Roadmap",
-  philosophy: "Product Philosophy",
+  philosophy: "Product philosophy",
   strategy: "Strategy",
-  market: "Market Context",
+  market: "Market context",
   architecture: "Architecture",
   reference: "Reference",
 };
 
 const DOC_TYPE_COLORS: Record<string, string> = {
-  roadmap: "bg-blue-100 text-blue-800",
-  philosophy: "bg-purple-100 text-purple-800",
-  strategy: "bg-amber-100 text-amber-800",
-  market: "bg-green-100 text-green-800",
-  architecture: "bg-cyan-100 text-cyan-800",
-  reference: "bg-gray-100 text-gray-800",
+  roadmap: "bg-blue-500/10 text-blue-700 dark:text-blue-400",
+  philosophy: "bg-purple-500/10 text-purple-700 dark:text-purple-400",
+  strategy: "bg-amber-500/10 text-amber-700 dark:text-amber-400",
+  market: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
+  architecture: "bg-cyan-500/10 text-cyan-700 dark:text-cyan-400",
+  reference: "bg-muted text-muted-foreground",
 };
 
 const SOURCE_TYPE_LABELS: Record<string, string> = {
@@ -49,7 +49,7 @@ const SOURCE_TYPE_LABELS: Record<string, string> = {
   notion: "Notion",
   google_docs: "Google Docs",
   confluence: "Confluence",
-  file_upload: "File Upload",
+  file_upload: "File upload",
 };
 
 const DEFAULT_SETTINGS: Pick<
@@ -280,7 +280,7 @@ export default function PrioritizationPage() {
 
       {/* PM Agent */}
       <section className="space-y-3">
-        <h2 className="text-[13px] font-medium text-foreground">PM Agent</h2>
+        <h2 className="text-[13px] font-medium text-foreground">PM agent</h2>
         <Card>
           <CardContent>
             <div className="grid gap-4 md:grid-cols-2">
@@ -335,7 +335,7 @@ export default function PrioritizationPage() {
 
       {/* Product Context */}
       <section className="space-y-3">
-        <h2 className="text-[13px] font-medium text-foreground">Product Context</h2>
+        <h2 className="text-[13px] font-medium text-foreground">Product context</h2>
         <Card>
           <CardContent>
             <div className="space-y-4">
@@ -350,7 +350,7 @@ export default function PrioritizationPage() {
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="product-direction">Current Direction</Label>
+                <Label htmlFor="product-direction">Current direction</Label>
                 <Textarea
                   id="product-direction"
                   rows={3}
@@ -361,7 +361,7 @@ export default function PrioritizationPage() {
               </div>
               <div className="grid gap-4 md:grid-cols-2">
                 <div className="space-y-2">
-                  <Label htmlFor="focus-areas">Focus Areas</Label>
+                  <Label htmlFor="focus-areas">Focus areas</Label>
                   <Input
                     id="focus-areas"
                     value={focusInput}
@@ -392,7 +392,7 @@ export default function PrioritizationPage() {
                   </div>
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="avoid-areas">Avoid Areas</Label>
+                  <Label htmlFor="avoid-areas">Avoid areas</Label>
                   <Input
                     id="avoid-areas"
                     value={avoidInput}
@@ -432,7 +432,7 @@ export default function PrioritizationPage() {
       <section className="space-y-3">
         <div className="flex items-center justify-between">
           <div>
-            <h2 className="text-[13px] font-medium text-foreground">Reference Documents</h2>
+            <h2 className="text-[13px] font-medium text-foreground">Reference documents</h2>
             <p className="text-xs text-muted-foreground mt-0.5">
               Roadmaps, strategy docs, and other references the PM agent reads during planning.
             </p>
@@ -529,7 +529,7 @@ export default function PrioritizationPage() {
                     }}
                     disabled={!docTitle.trim() || createDocMutation.isPending}
                   >
-                    {createDocMutation.isPending ? "Saving..." : "Save Document"}
+                    {createDocMutation.isPending ? "Saving..." : "Save document"}
                   </Button>
                 </div>
               </div>
@@ -676,7 +676,7 @@ export default function PrioritizationPage() {
 
       {/* Priority Weights */}
       <section className="space-y-3">
-        <h2 className="text-[13px] font-medium text-foreground">Priority Weights</h2>
+        <h2 className="text-[13px] font-medium text-foreground">Priority weights</h2>
         <Card>
           <CardContent>
             <div className="space-y-4">
@@ -696,7 +696,7 @@ export default function PrioritizationPage() {
               <div className="space-y-4">
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <Label htmlFor="w-customer" className="text-xs text-muted-foreground">Customer Impact</Label>
+                    <Label htmlFor="w-customer" className="text-xs text-muted-foreground">Customer impact</Label>
                     <span className="text-xs font-medium tabular-nums">{customerImpact}</span>
                   </div>
                   <Slider
@@ -738,7 +738,7 @@ export default function PrioritizationPage() {
                 </div>
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <Label htmlFor="w-revenue" className="text-xs text-muted-foreground">Revenue Risk</Label>
+                    <Label htmlFor="w-revenue" className="text-xs text-muted-foreground">Revenue risk</Label>
                     <span className="text-xs font-medium tabular-nums">{revenueRisk}</span>
                   </div>
                   <Slider
@@ -756,16 +756,16 @@ export default function PrioritizationPage() {
         </Card>
       </section>
 
-      <div className="flex items-center gap-3">
-        <Button onClick={handleSave} disabled={mutation.isPending || !weightsValid}>
-          {mutation.isPending ? "Saving..." : "Save Settings"}
-        </Button>
+      <div className="flex items-center justify-end gap-3">
         {saveStatus === "success" && (
-          <span className="text-[13px] text-green-600">Settings saved.</span>
+          <span className="text-[13px] text-emerald-600 dark:text-emerald-400">Settings saved.</span>
         )}
         {saveStatus === "error" && (
           <span className="text-[13px] text-destructive">Failed to save settings.</span>
         )}
+        <Button onClick={handleSave} disabled={mutation.isPending || !weightsValid}>
+          {mutation.isPending ? "Saving..." : "Save settings"}
+        </Button>
       </div>
       </div>
     </PageContainer>

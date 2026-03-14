@@ -204,7 +204,7 @@ export default function LLMPage() {
 
         {/* Provider API Keys */}
         <section className="space-y-3">
-          <h2 className="text-[13px] font-medium text-foreground">Provider Keys</h2>
+          <h2 className="text-[13px] font-medium text-foreground">Provider keys</h2>
           <p className="text-xs text-muted-foreground">
             Add your own API key for any provider below. If you don&apos;t configure a key, the platform
             default will be used when available.
@@ -224,7 +224,7 @@ export default function LLMPage() {
                           <div className="flex items-center gap-2">
                             <span className="text-sm font-medium">{info.name}</span>
                             {ps?.orgConfigured && (
-                              <Badge variant="default" className="text-[10px] px-1.5 py-0">
+                              <Badge variant="success" className="text-[10px] px-1.5 py-0">
                                 <Check className="mr-0.5 h-3 w-3" />
                                 Configured
                               </Badge>
@@ -286,11 +286,11 @@ export default function LLMPage() {
                           onClick={() => handleSaveKey(provider)}
                           disabled={!apiKeys[provider]?.trim() || status === "saving"}
                         >
-                          {status === "saving" ? "Saving..." : "Save Key"}
+                          {status === "saving" ? "Saving..." : "Save key"}
                         </Button>
                       </div>
                       {status === "success" && (
-                        <p className="text-xs text-green-600">Key saved successfully.</p>
+                        <p className="text-xs text-emerald-600 dark:text-emerald-400">Key saved successfully.</p>
                       )}
                       {status === "error" && (
                         <p className="text-xs text-destructive">Failed to save key.</p>
@@ -310,7 +310,7 @@ export default function LLMPage() {
             <CardContent>
               <div className="space-y-3">
                 <div className="space-y-2">
-                  <Label htmlFor="llm-model">Default LLM Model</Label>
+                  <Label htmlFor="llm-model">Default LLM model</Label>
                   <Select value={llmModel} onValueChange={setLlmModel}>
                     <SelectTrigger id="llm-model" aria-label="LLM Model">
                       <SelectValue placeholder="Select a model" />
@@ -344,16 +344,16 @@ export default function LLMPage() {
           </Card>
         </section>
 
-        <div className="flex items-center gap-3">
-          <Button onClick={handleSaveModel} disabled={modelMutation.isPending}>
-            {modelMutation.isPending ? "Saving..." : "Save Model"}
-          </Button>
+        <div className="flex items-center justify-end gap-3">
           {saveStatus === "success" && (
-            <span className="text-sm text-green-600">Model saved.</span>
+            <span className="text-sm text-emerald-600 dark:text-emerald-400">Model saved.</span>
           )}
           {saveStatus === "error" && (
             <span className="text-sm text-destructive">Failed to save model.</span>
           )}
+          <Button onClick={handleSaveModel} disabled={modelMutation.isPending}>
+            {modelMutation.isPending ? "Saving..." : "Save model"}
+          </Button>
         </div>
       </div>
 

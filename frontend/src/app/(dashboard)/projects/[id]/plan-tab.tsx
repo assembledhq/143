@@ -85,7 +85,7 @@ export function SpecsSection({
 
   return (
     <CollapsibleSection
-      title="Specs & Requirements"
+      title="Specs & requirements"
       icon={FileText}
       count={specs.length}
       actions={
@@ -136,7 +136,7 @@ export function SpecsSection({
                 onClick={() => createMutation.mutate()}
                 disabled={!newTitle.trim() || createMutation.isPending}
               >
-                {createMutation.isPending ? "Creating..." : "Create Spec"}
+                {createMutation.isPending ? "Creating..." : "Create spec"}
               </Button>
               <Button size="sm" variant="ghost" onClick={() => setShowAddForm(false)}>
                 Cancel
@@ -272,7 +272,7 @@ export function DesignsSection({
 
   return (
     <CollapsibleSection
-      title="Designs & Screenshots"
+      title="Designs & screenshots"
       icon={Image}
       count={attachments.length}
       actions={
@@ -286,7 +286,7 @@ export function DesignsSection({
           <CardContent className="space-y-3 pt-4">
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
-                <Label className="text-xs">File Name</Label>
+                <Label className="text-xs">File name</Label>
                 <Input value={fileName} onChange={(e) => setFileName(e.target.value)} placeholder="homepage-mockup.png" />
               </div>
               <div className="space-y-1">
@@ -385,15 +385,15 @@ export function AnalysisSection({ project }: { project: Project }) {
   });
 
   const priorityColors: Record<string, string> = {
-    high: "bg-red-100 text-red-800",
-    medium: "bg-yellow-100 text-yellow-800",
-    low: "bg-gray-100 text-gray-800",
+    high: "bg-red-500/10 text-red-700 dark:text-red-400",
+    medium: "bg-yellow-500/10 text-yellow-700 dark:text-yellow-400",
+    low: "bg-muted text-muted-foreground",
   };
 
   const typeIcons: Record<string, string> = { addition: "+", revision: "~", question: "?", task: "#" };
 
   return (
-    <CollapsibleSection title="Project Analysis" icon={Sparkles} defaultOpen={false}>
+    <CollapsibleSection title="Project analysis" icon={Sparkles} defaultOpen={false}>
       <div className="space-y-3">
         <p className="text-xs text-muted-foreground">
           Analyze your specs, designs, and tasks for gaps and improvements.
