@@ -39,7 +39,10 @@ func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID
 	if err != nil {
 		return fmt.Errorf("get org: %w", err)
 	}
-	settings := models.ParseOrgSettings(org.Settings)
+	settings, parseErr := models.ParseOrgSettings(org.Settings)
+	if parseErr != nil {
+		return fmt.Errorf("parse org settings: %w", parseErr)
+	}
 
 	// Fetch the repository for this project.
 	repo, err := s.repos.GetByID(ctx, orgID, project.RepositoryID)
@@ -125,7 +128,11 @@ func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID
 		TriggeredBy: models.PMTriggerCron,
 	}
 	if result.TokenUsage != (agent.TokenUsage{}) {
-		tokenJSON, _ := json.Marshal(result.TokenUsage)
+		tokenJSON, err := json.Marshal(result.TokenUsage)
+		if err != nil {
+			s.logger.Warn().Err(err).Msg("failed to marshal token usage")
+			tokenJSON = nil
+		}
 		plan.TokenUsage = tokenJSON
 	}
 	now := time.Now()

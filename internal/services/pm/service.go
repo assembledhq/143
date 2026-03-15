@@ -289,7 +289,11 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	plan.TriggeredBy = trigger
 	plan.IssuesReviewed = len(ctxBundle.pmContext.OpenIssues)
 	if result.TokenUsage != (agent.TokenUsage{}) {
-		tokenJSON, _ := json.Marshal(result.TokenUsage)
+		tokenJSON, err := json.Marshal(result.TokenUsage)
+		if err != nil {
+			s.logger.Warn().Err(err).Msg("failed to marshal token usage")
+			tokenJSON = nil
+		}
 		plan.TokenUsage = tokenJSON
 	}
 
@@ -367,7 +371,11 @@ func planToModel(plan *Plan, productContext *models.ProductContext) (*models.PMP
 
 	var productSnapshot json.RawMessage
 	if productContext != nil {
-		productSnapshot, _ = json.Marshal(productContext)
+		var err error
+		productSnapshot, err = json.Marshal(productContext)
+		if err != nil {
+			return nil, fmt.Errorf("marshal product context: %w", err)
+		}
 	}
 
 	return &models.PMPlan{
