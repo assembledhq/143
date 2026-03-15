@@ -54,6 +54,8 @@ export const mockSessions: Session[] = [
     started_at: '2026-02-17T07:00:00Z',
     completed_at: '2026-02-17T07:05:30Z',
     result_summary: 'Fixed TypeError by adding null check',
+    current_turn: 0,
+    sandbox_state: 'none',
     created_at: '2026-02-17T07:00:00Z',
   },
   {
@@ -67,6 +69,8 @@ export const mockSessions: Session[] = [
     failure_explanation: 'Could not reproduce the error in test environment',
     started_at: '2026-02-17T06:00:00Z',
     completed_at: '2026-02-17T06:03:00Z',
+    current_turn: 0,
+    sandbox_state: 'none',
     created_at: '2026-02-17T06:00:00Z',
   },
 ];
