@@ -326,7 +326,7 @@ const (
     AuditActionAuthRegister AuditAction = "auth.register"
 )
 
-// AuditAction.Validate checks that the action is a known value.
+// Validate checks that the action is a known value.
 func (a AuditAction) Validate() error {
     switch a {
     case AuditActionSessionCreated, AuditActionSessionStarted, AuditActionSessionCompleted,
@@ -415,12 +415,6 @@ type AuditLog struct {
 
 ### 5.3 Store (`internal/db/audit_log_store.go`)
 
-> **Note**: The `whereClause` helper below is defined in a shared file
-> `internal/db/where_clause.go` so that other stores (`SessionStore`,
-> `IssueStore`, `ProjectStore`, etc.) can adopt it to replace their ad-hoc
-> `query += " AND ..."` concatenation. The audit log store is the first
-> consumer.
-
 ```go
 package db
 
@@ -504,45 +498,6 @@ type AuditLogFilters struct {
     Cursor       string                   // cursor for keyset pagination (bigserial id)
 }
 
-// The following types and functions live in the shared file
-// internal/db/where_clause.go (not in audit_log_store.go).
-
-// whereClause accumulates WHERE conditions and named args. It eliminates the
-// error-prone pattern of manually concatenating " AND ..." fragments and
-// ensures every condition is joined consistently. Other stores should adopt
-// this instead of ad-hoc concatenation.
-type whereClause struct {
-    conditions []string
-    args       pgx.NamedArgs
-}
-
-func newWhereClause() *whereClause {
-    return &whereClause{args: pgx.NamedArgs{}}
-}
-
-func (w *whereClause) add(condition string, name string, value interface{}) {
-    w.conditions = append(w.conditions, condition)
-    w.args[name] = value
-}
-
-func (w *whereClause) build() (string, pgx.NamedArgs) {
-    if len(w.conditions) == 0 {
-        return "", w.args
-    }
-    return " WHERE " + strings.Join(w.conditions, " AND "), w.args
-}
-
-// escapeLike escapes SQL LIKE meta-characters (%, _) so that user-supplied
-// values are matched literally.
-func escapeLike(s string) string {
-    s = strings.ReplaceAll(s, `\`, `\\`)
-    s = strings.ReplaceAll(s, `%`, `\%`)
-    s = strings.ReplaceAll(s, `_`, `\_`)
-    return s
-}
-
-// --- end of internal/db/where_clause.go ---
-
 // List returns audit log entries for an organization, filtered and paginated.
 func (s *AuditLogStore) List(ctx context.Context, orgID uuid.UUID, filters AuditLogFilters) ([]models.AuditLog, error) {
     w := newWhereClause()
@@ -609,7 +564,55 @@ func (s *AuditLogStore) List(ctx context.Context, orgID uuid.UUID, filters Audit
 }
 ```
 
-### 5.4 Emitter helper (`internal/db/audit_emitter.go`)
+### 5.4 Shared query builder (`internal/db/where_clause.go`)
+
+The `whereClause` helper is defined in a shared file so that other stores (`SessionStore`, `IssueStore`, `ProjectStore`, etc.) can adopt it to replace their ad-hoc `query += " AND ..."` concatenation. The audit log store is the first consumer.
+
+```go
+package db
+
+import (
+    "strings"
+
+    "github.com/jackc/pgx/v5"
+)
+
+// whereClause accumulates WHERE conditions and named args. It eliminates the
+// error-prone pattern of manually concatenating " AND ..." fragments and
+// ensures every condition is joined consistently. Other stores should adopt
+// this instead of ad-hoc concatenation.
+type whereClause struct {
+    conditions []string
+    args       pgx.NamedArgs
+}
+
+func newWhereClause() *whereClause {
+    return &whereClause{args: pgx.NamedArgs{}}
+}
+
+func (w *whereClause) add(condition string, name string, value interface{}) {
+    w.conditions = append(w.conditions, condition)
+    w.args[name] = value
+}
+
+func (w *whereClause) build() (string, pgx.NamedArgs) {
+    if len(w.conditions) == 0 {
+        return "", w.args
+    }
+    return " WHERE " + strings.Join(w.conditions, " AND "), w.args
+}
+
+// escapeLike escapes SQL LIKE meta-characters (%, _) so that user-supplied
+// values are matched literally.
+func escapeLike(s string) string {
+    s = strings.ReplaceAll(s, `\`, `\\`)
+    s = strings.ReplaceAll(s, `%`, `\%`)
+    s = strings.ReplaceAll(s, `_`, `\_`)
+    return s
+}
+```
+
+### 5.5 Emitter helper (`internal/db/audit_emitter.go`)
 
 To reduce boilerplate at call sites, provide a convenience layer:
 
@@ -881,9 +884,14 @@ Audit entries should be emitted at the **handler/service boundary** — the poin
 
 ### 7.2 Helper functions
 
-Two small helpers are used at call sites to extract request context:
+Three small helpers are used at call sites to extract request context:
 
 ```go
+// stringPtr returns a pointer to a string value. Used for optional fields.
+func stringPtr(s string) *string {
+    return &s
+}
+
 // requestIDFromContext returns the chi middleware.RequestID value, if present.
 func requestIDFromContext(ctx context.Context) *string {
     id, ok := ctx.Value(middleware.RequestIDKey).(string)
@@ -995,7 +1003,7 @@ A scheduled job (`audit_log_cleanup`) runs daily, deleting entries older than th
 
 ```sql
 -- Included in the 000019 migration alongside the table creation.
-CREATE OR REPLACE FUNCTION delete_expired_audit_logs(retention_days int)
+CREATE OR REPLACE FUNCTION delete_expired_audit_logs(target_org_id uuid, retention_days int)
 RETURNS bigint
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -1005,14 +1013,18 @@ DECLARE
     deleted bigint;
 BEGIN
     -- Temporarily disable the immutability trigger for this transaction.
+    -- Note: ALTER TABLE ... DISABLE/ENABLE TRIGGER is transactional in
+    -- Postgres, so if the transaction rolls back the trigger is restored
+    -- automatically. A crash before commit also rolls back, so the trigger
+    -- remains enabled. This is safe without additional EXCEPTION handling.
     ALTER TABLE audit_logs DISABLE TRIGGER audit_logs_immutable;
 
     DELETE FROM audit_logs
-    WHERE created_at < now() - make_interval(days => retention_days);
+    WHERE org_id = target_org_id
+      AND created_at < now() - make_interval(days => retention_days);
 
     GET DIAGNOSTICS deleted = ROW_COUNT;
 
-    -- Re-enable the trigger before committing.
     ALTER TABLE audit_logs ENABLE TRIGGER audit_logs_immutable;
 
     RETURN deleted;
@@ -1024,8 +1036,8 @@ The Go cleanup job calls this function per-org using the configured retention:
 
 ```go
 // In the scheduled cleanup worker:
-_, err := db.Exec(ctx, `SELECT delete_expired_audit_logs(@retention)`,
-    pgx.NamedArgs{"retention": org.Settings.AuditLogRetentionDays})
+_, err := db.Exec(ctx, `SELECT delete_expired_audit_logs(@org_id, @retention)`,
+    pgx.NamedArgs{"org_id": org.ID, "retention": org.Settings.AuditLogRetentionDays})
 ```
 
 ---
