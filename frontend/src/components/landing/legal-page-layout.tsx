@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { usePrefersDark } from "@/hooks/use-prefers-dark";
 import Link from "next/link";
 import Footer from "./footer";
 
@@ -15,15 +15,7 @@ export default function LegalPageLayout({
   lastUpdated,
   children,
 }: LegalPageLayoutProps) {
-  const [isDark, setIsDark] = useState(true);
-
-  useEffect(() => {
-    const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    const update = () => setIsDark(mq.matches);
-    update();
-    mq.addEventListener("change", update);
-    return () => mq.removeEventListener("change", update);
-  }, []);
+  const isDark = usePrefersDark();
 
   return (
     <div

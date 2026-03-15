@@ -1,3 +1,4 @@
+import Link from "next/link";
 import LegalPageLayout, {
   Section,
 } from "@/components/landing/legal-page-layout";
@@ -72,9 +73,9 @@ export default function TermsPage() {
           You retain ownership of all code, issues, and other content you
           connect to or create through the service. We do not claim intellectual
           property rights over your content. See our{" "}
-          <a href="/privacy" className="underline underline-offset-2">
+          <Link href="/privacy" className="underline underline-offset-2">
             Privacy Policy
-          </a>{" "}
+          </Link>{" "}
           for how we handle your data.
         </p>
       </Section>

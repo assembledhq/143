@@ -1,3 +1,4 @@
+import Link from "next/link";
 import LegalPageLayout, {
   Section,
 } from "@/components/landing/legal-page-layout";
@@ -105,9 +106,9 @@ export default function PrivacyPage() {
           We use industry-standard measures to protect your data, including
           encryption in transit (TLS) and at rest. For more details, see
           our{" "}
-          <a href="/security" className="underline underline-offset-2">
+          <Link href="/security" className="underline underline-offset-2">
             Security page
-          </a>
+          </Link>
           .
         </p>
       </Section>
