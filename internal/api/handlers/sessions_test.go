@@ -1285,6 +1285,158 @@ func TestManualSessionTitle(t *testing.T) {
 	}
 }
 
+// mockLLMClient is a test double for llm.Client.
+type mockLLMClient struct {
+	response string
+	err      error
+}
+
+func (m *mockLLMClient) Complete(_ context.Context, _, _ string) (string, error) {
+	return m.response, m.err
+}
+
+func TestSessionHandler_CreateManual_WithLLMTitle(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+
+	llmClient := &mockLLMClient{response: "Fix authentication login flow"}
+	handler := NewSessionHandler(
+		db.NewSessionStore(mock),
+		db.NewSessionLogStore(mock),
+		db.NewSessionQuestionStore(mock),
+		db.NewValidationStore(mock),
+		db.NewPullRequestStore(mock),
+		db.NewIssueStore(mock),
+		db.NewOrganizationStore(mock),
+		db.NewJobStore(mock),
+		llmClient,
+	)
+
+	now := time.Now()
+	issueID := uuid.New()
+	runID := uuid.New()
+	jobID := uuid.New()
+
+	// Mock issue upsert
+	mock.ExpectQuery("INSERT INTO issues").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(issueID, now, now))
+
+	// Mock session create
+	mock.ExpectQuery("INSERT INTO sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
+
+	// Mock job enqueue
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+
+	// Mock the async UpdateTitle call
+	mock.ExpectExec("UPDATE sessions SET pm_approach").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/manual",
+		strings.NewReader(`{"message":"The login page throws a 500 error when users try to authenticate with SSO","agent_type":"claude_code"}`))
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CreateManual(w, req)
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	// Wait briefly for the async goroutine to complete.
+	time.Sleep(200 * time.Millisecond)
+
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionHandler_CreateManual_LLMError_FallsBack(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+
+	llmClient := &mockLLMClient{err: fmt.Errorf("rate limited")}
+	handler := NewSessionHandler(
+		db.NewSessionStore(mock),
+		db.NewSessionLogStore(mock),
+		db.NewSessionQuestionStore(mock),
+		db.NewValidationStore(mock),
+		db.NewPullRequestStore(mock),
+		db.NewIssueStore(mock),
+		db.NewOrganizationStore(mock),
+		db.NewJobStore(mock),
+		llmClient,
+	)
+
+	now := time.Now()
+	issueID := uuid.New()
+	runID := uuid.New()
+	jobID := uuid.New()
+
+	// Mock issue upsert
+	mock.ExpectQuery("INSERT INTO issues").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(issueID, now, now))
+
+	// Mock session create
+	mock.ExpectQuery("INSERT INTO sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
+
+	// Mock job enqueue
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+
+	// No UpdateTitle mock — the LLM error means it should never be called.
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/manual",
+		strings.NewReader(`{"message":"Fix the login bug","agent_type":"claude_code"}`))
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CreateManual(w, req)
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	// The response should still contain the session with the fallback title.
+	var resp models.SingleResponse[models.Session]
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	require.NotNil(t, resp.Data.PMApproach)
+	require.Equal(t, "Fix the login bug", *resp.Data.PMApproach)
+
+	// Wait briefly for the async goroutine to complete (it should return early on error).
+	time.Sleep(200 * time.Millisecond)
+
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func stringPtr(s string) *string {
 	return &s
 }

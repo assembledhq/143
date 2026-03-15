@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -509,20 +510,6 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate a concise session title via LLM (best-effort).
-	// Falls back to the first line of the message if the LLM is unavailable.
-	sessionApproach := title
-	if h.llmClient != nil {
-		const titlePrompt = "You are a concise title generator. Given a user's task description, produce a short title (max 80 characters) that summarizes what needs to be done. Output ONLY the title, nothing else. No quotes, no punctuation at the end."
-		if generated, err := h.llmClient.Complete(r.Context(), titlePrompt, body.Message); err == nil {
-			generated = strings.TrimSpace(generated)
-			generated = strings.Trim(generated, "\"'")
-			if len(generated) > 0 && len(generated) <= 120 {
-				sessionApproach = generated
-			}
-		}
-	}
-
 	session := &models.Session{
 		IssueID:       issue.ID,
 		OrgID:         orgID,
@@ -531,7 +518,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		AutonomyLevel: autonomyLevel,
 		TokenMode:     tokenMode,
 		ModelOverride: modelOverride,
-		PMApproach:    &sessionApproach,
+		PMApproach:    &title,
 	}
 	if err := h.runStore.Create(r.Context(), session); err != nil {
 		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create manual session")
@@ -548,6 +535,32 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.Session]{Data: *session})
+
+	// Generate a concise session title via LLM asynchronously (best-effort).
+	// The initial title is set to the first line of the message; if the LLM
+	// succeeds, it gets replaced with a cleaner summary.
+	if h.llmClient != nil {
+		go h.generateSessionTitle(session.ID, orgID, body.Message)
+	}
+}
+
+func (h *SessionHandler) generateSessionTitle(sessionID, orgID uuid.UUID, message string) {
+	const titlePrompt = "You are a concise title generator. Given a user's task description, produce a short title (max 80 characters) that summarizes what needs to be done. Output ONLY the title, nothing else. No quotes, no punctuation at the end."
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	generated, err := h.llmClient.Complete(ctx, titlePrompt, message)
+	if err != nil {
+		return
+	}
+	generated = strings.TrimSpace(generated)
+	generated = strings.Trim(generated, "\"'")
+	if len(generated) == 0 || len(generated) > 120 {
+		return
+	}
+
+	_ = h.runStore.UpdateTitle(ctx, orgID, sessionID, generated)
 }
 
 func buildManualSessionDescription(message string, images []string) string {
