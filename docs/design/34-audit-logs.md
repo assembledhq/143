@@ -84,7 +84,8 @@ CREATE TABLE audit_logs (
     ip_address      inet,                      -- source IP for user-initiated actions
     user_agent      text,                      -- browser/client user-agent for user-initiated actions
 
-    -- Correlation
+    -- Correlation (no FK intentionally — audit entries must survive if the
+    -- referenced session or project is deleted)
     session_id      uuid,                      -- links to sessions table when action is session-related
     project_id      uuid,                      -- links to projects table when action is project-related
 
@@ -134,6 +135,16 @@ DROP TRIGGER IF EXISTS audit_logs_immutable ON audit_logs;
 DROP FUNCTION IF EXISTS prevent_audit_logs_modification();
 DROP TABLE IF EXISTS audit_logs;
 ALTER TABLE IF EXISTS audit_log_legacy RENAME TO audit_log;
+
+-- Re-create the immutability function in case it was dropped by a later migration.
+-- Using CREATE OR REPLACE so this is safe even if it still exists from 000001.
+CREATE OR REPLACE FUNCTION prevent_audit_log_modification()
+RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'audit_log is append-only: % operations are not allowed', TG_OP;
+END;
+$$ LANGUAGE plpgsql;
+
 CREATE TRIGGER audit_log_immutable
     BEFORE UPDATE OR DELETE ON audit_log
     FOR EACH ROW
@@ -315,6 +326,29 @@ const (
     AuditActionAuthRegister AuditAction = "auth.register"
 )
 
+// AuditAction.Validate checks that the action is a known value.
+func (a AuditAction) Validate() error {
+    switch a {
+    case AuditActionSessionCreated, AuditActionSessionStarted, AuditActionSessionCompleted,
+        AuditActionSessionFailed, AuditActionSessionCancelled, AuditActionSessionStatusChanged,
+        AuditActionSessionQuestionCreated, AuditActionSessionQuestionAnswered, AuditActionSessionResumedLocally,
+        AuditActionProjectCreated, AuditActionProjectUpdated, AuditActionProjectDeleted,
+        AuditActionProjectStarted, AuditActionProjectPaused, AuditActionProjectResumed,
+        AuditActionProjectApproved, AuditActionProjectDismissed, AuditActionProjectRunTriggered,
+        AuditActionProjectCycleCompleted, AuditActionProjectTaskCreated, AuditActionProjectTaskUpdated,
+        AuditActionProjectTaskDeleted, AuditActionProjectTaskRetried,
+        AuditActionIssueCreated, AuditActionIssueReprioritized,
+        AuditActionPMAnalysisTriggered, AuditActionPMPlanCreated, AuditActionPMDecisionMade,
+        AuditActionSettingsUpdated, AuditActionTeamMemberInvited, AuditActionTeamMemberRoleChanged,
+        AuditActionTeamMemberRemoved, AuditActionTeamInvitationRevoked, AuditActionTeamInvitationAccepted,
+        AuditActionIntegrationConnected, AuditActionCredentialUpdated, AuditActionCredentialDeleted,
+        AuditActionAuthLogin, AuditActionAuthLogout, AuditActionAuthRegister:
+        return nil
+    default:
+        return fmt.Errorf("invalid AuditAction: %q", a)
+    }
+}
+
 // AuditResourceType identifies the type of resource an action targets.
 type AuditResourceType string
 
@@ -332,6 +366,18 @@ const (
     AuditResourceCredential  AuditResourceType = "credential"
     AuditResourceUser        AuditResourceType = "user"
 )
+
+func (t AuditResourceType) Validate() error {
+    switch t {
+    case AuditResourceSession, AuditResourceProject, AuditResourceProjectTask,
+        AuditResourceIssue, AuditResourcePMPlan, AuditResourcePMDecision,
+        AuditResourceSettings, AuditResourceTeamMember, AuditResourceInvitation,
+        AuditResourceIntegration, AuditResourceCredential, AuditResourceUser:
+        return nil
+    default:
+        return fmt.Errorf("invalid AuditResourceType: %q", t)
+    }
+}
 ```
 
 ### 5.2 Model (`internal/models/audit.go`)
@@ -341,7 +387,7 @@ package models
 
 import (
     "encoding/json"
-    "net"
+    "net/netip"
     "time"
 
     "github.com/google/uuid"
@@ -359,7 +405,7 @@ type AuditLog struct {
     ResourceID   *string           `db:"resource_id" json:"resource_id,omitempty"`
     Details      json.RawMessage   `db:"details" json:"details,omitempty"`
     RequestID    *string           `db:"request_id" json:"request_id,omitempty"`
-    IPAddress    net.IP            `db:"ip_address" json:"ip_address,omitempty"`
+    IPAddress    *netip.Addr       `db:"ip_address" json:"ip_address,omitempty"`
     UserAgent    *string           `db:"user_agent" json:"user_agent,omitempty"`
     SessionID    *uuid.UUID        `db:"session_id" json:"session_id,omitempty"`
     ProjectID    *uuid.UUID        `db:"project_id" json:"project_id,omitempty"`
@@ -369,18 +415,34 @@ type AuditLog struct {
 
 ### 5.3 Store (`internal/db/audit_log_store.go`)
 
+> **Note**: The `whereClause` helper below is defined in a shared file
+> `internal/db/where_clause.go` so that other stores (`SessionStore`,
+> `IssueStore`, `ProjectStore`, etc.) can adopt it to replace their ad-hoc
+> `query += " AND ..."` concatenation. The audit log store is the first
+> consumer.
+
 ```go
 package db
 
 import (
     "context"
     "fmt"
+    "strconv"
     "strings"
 
     "github.com/assembledhq/143/internal/models"
     "github.com/google/uuid"
     "github.com/jackc/pgx/v5"
 )
+
+// escapeLike escapes SQL LIKE meta-characters (%, _) so that user-supplied
+// values are matched literally.
+func escapeLike(s string) string {
+    s = strings.ReplaceAll(s, `\`, `\\`)
+    s = strings.ReplaceAll(s, `%`, `\%`)
+    s = strings.ReplaceAll(s, `_`, `\_`)
+    return s
+}
 
 type AuditLogStore struct {
     db DBTX
@@ -441,9 +503,10 @@ type AuditLogFilters struct {
     Cursor       string                   // cursor for keyset pagination (bigserial id)
 }
 
-// whereClause is a small helper that accumulates WHERE conditions and named args.
-// It eliminates the error-prone pattern of manually concatenating " AND ..." fragments
-// and ensures every condition is joined consistently.
+// whereClause is a shared helper (internal/db/where_clause.go) that accumulates
+// WHERE conditions and named args. It eliminates the error-prone pattern of
+// manually concatenating " AND ..." fragments and ensures every condition is
+// joined consistently. Other stores should adopt this instead of ad-hoc concatenation.
 type whereClause struct {
     conditions []string
     args       pgx.NamedArgs
@@ -456,10 +519,6 @@ func newWhereClause() *whereClause {
 func (w *whereClause) add(condition string, name string, value interface{}) {
     w.conditions = append(w.conditions, condition)
     w.args[name] = value
-}
-
-func (w *whereClause) addRaw(condition string) {
-    w.conditions = append(w.conditions, condition)
 }
 
 func (w *whereClause) build() (string, pgx.NamedArgs) {
@@ -484,7 +543,7 @@ func (s *AuditLogStore) List(ctx context.Context, orgID uuid.UUID, filters Audit
         w.add("action = @action", "action", filters.Action)
     }
     if filters.ActionPrefix != "" {
-        w.add("action LIKE @action_prefix", "action_prefix", filters.ActionPrefix+"%")
+        w.add("action LIKE @action_prefix ESCAPE '\\'", "action_prefix", escapeLike(filters.ActionPrefix)+"%")
     }
     if filters.ResourceType != "" {
         w.add("resource_type = @resource_type", "resource_type", filters.ResourceType)
@@ -505,7 +564,11 @@ func (s *AuditLogStore) List(ctx context.Context, orgID uuid.UUID, filters Audit
         w.add("created_at <= @until", "until", *filters.Until)
     }
     if filters.Cursor != "" {
-        w.add("id < @cursor", "cursor", filters.Cursor)
+        cursorID, err := strconv.ParseInt(filters.Cursor, 10, 64)
+        if err != nil {
+            return nil, fmt.Errorf("invalid cursor %q: %w", filters.Cursor, err)
+        }
+        w.add("id < @cursor", "cursor", cursorID)
     }
 
     where, args := w.build()
@@ -541,23 +604,27 @@ package db
 import (
     "context"
     "encoding/json"
-    "net"
+    "log/slog"
+    "net/netip"
 
     "github.com/assembledhq/143/internal/models"
     "github.com/google/uuid"
 )
 
 // AuditEmitter provides convenience methods for emitting audit log entries.
+// All Emit* methods log errors internally and never return them, so callers
+// can treat emission as fire-and-forget without discarding errors silently.
 type AuditEmitter struct {
-    store *AuditLogStore
+    store  *AuditLogStore
+    logger *slog.Logger
 }
 
-func NewAuditEmitter(store *AuditLogStore) *AuditEmitter {
-    return &AuditEmitter{store: store}
+func NewAuditEmitter(store *AuditLogStore, logger *slog.Logger) *AuditEmitter {
+    return &AuditEmitter{store: store, logger: logger}
 }
 
 // EmitUserAction logs an action performed by an authenticated user.
-func (e *AuditEmitter) EmitUserAction(ctx context.Context, params UserActionParams) error {
+func (e *AuditEmitter) EmitUserAction(ctx context.Context, params UserActionParams) {
     entry := &models.AuditLog{
         OrgID:        params.OrgID,
         ActorType:    models.AuditActorUser,
@@ -573,7 +640,13 @@ func (e *AuditEmitter) EmitUserAction(ctx context.Context, params UserActionPara
         SessionID:    params.SessionID,
         ProjectID:    params.ProjectID,
     }
-    return e.store.Create(ctx, entry)
+    if err := e.store.Create(ctx, entry); err != nil {
+        e.logger.ErrorContext(ctx, "failed to emit audit log",
+            "action", params.Action,
+            "actor_id", params.UserID,
+            "error", err,
+        )
+    }
 }
 
 type UserActionParams struct {
@@ -584,14 +657,14 @@ type UserActionParams struct {
     ResourceID   *string
     Details      json.RawMessage
     RequestID    *string
-    IPAddress    net.IP
+    IPAddress    *netip.Addr
     UserAgent    *string
     SessionID    *uuid.UUID
     ProjectID    *uuid.UUID
 }
 
 // EmitSystemAction logs an action performed by a system process (PM agent, scheduler, etc.).
-func (e *AuditEmitter) EmitSystemAction(ctx context.Context, params SystemActionParams) error {
+func (e *AuditEmitter) EmitSystemAction(ctx context.Context, params SystemActionParams) {
     entry := &models.AuditLog{
         OrgID:        params.OrgID,
         ActorType:    models.AuditActorSystem,
@@ -603,7 +676,13 @@ func (e *AuditEmitter) EmitSystemAction(ctx context.Context, params SystemAction
         SessionID:    params.SessionID,
         ProjectID:    params.ProjectID,
     }
-    return e.store.Create(ctx, entry)
+    if err := e.store.Create(ctx, entry); err != nil {
+        e.logger.ErrorContext(ctx, "failed to emit audit log",
+            "action", params.Action,
+            "actor_id", params.ActorID,
+            "error", err,
+        )
+    }
 }
 
 type SystemActionParams struct {
@@ -728,9 +807,9 @@ Audit entries are emitted **after** the primary operation succeeds. If the opera
 func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
     // ... existing logic to create session and enqueue job ...
 
-    // Emit audit entry (fire-and-forget; failure is logged, not returned to user)
+    // Emit audit entry (fire-and-forget; the emitter logs errors internally)
     resID := session.ID.String()
-    _ = h.auditEmitter.EmitUserAction(r.Context(), db.UserActionParams{
+    h.auditEmitter.EmitUserAction(r.Context(), db.UserActionParams{
         OrgID:        orgID,
         UserID:       user.ID,
         Action:       models.AuditActionSessionCreated,
@@ -738,7 +817,7 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
         ResourceID:   &resID,
         Details:      json.RawMessage(`{"issue_id":"` + issueID.String() + `"}`),
         RequestID:    requestIDFromContext(r.Context()),
-        IPAddress:    net.ParseIP(r.RemoteAddr),
+        IPAddress:    addrFromRequest(r), // returns *netip.Addr parsed from r.RemoteAddr
         UserAgent:    stringPtr(r.UserAgent()),
         SessionID:    &session.ID,
     })
