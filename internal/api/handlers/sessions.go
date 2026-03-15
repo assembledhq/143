@@ -534,33 +534,40 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, models.SingleResponse[models.Session]{Data: *session})
-
-	// Generate a concise session title via LLM asynchronously (best-effort).
-	// The initial title is set to the first line of the message; if the LLM
-	// succeeds, it gets replaced with a cleaner summary.
+	// Generate a concise session title via LLM (with a short timeout so the
+	// request doesn't block for too long). If it succeeds, update the session
+	// with the generated title before returning the response.
 	if h.llmClient != nil {
-		go h.generateSessionTitle(session.ID, orgID, body.Message)
+		if err := h.generateSessionTitle(r.Context(), session, orgID, body.Message); err != nil {
+			writeError(w, http.StatusInternalServerError, "TITLE_GENERATION_FAILED", fmt.Sprintf("failed to generate session title: %v", err))
+			return
+		}
 	}
+
+	writeJSON(w, http.StatusCreated, models.SingleResponse[models.Session]{Data: *session})
 }
 
-func (h *SessionHandler) generateSessionTitle(sessionID, orgID uuid.UUID, message string) {
+func (h *SessionHandler) generateSessionTitle(parent context.Context, session *models.Session, orgID uuid.UUID, message string) error {
 	const titlePrompt = "You are a concise title generator. Given a user's task description, produce a short title (max 80 characters) that summarizes what needs to be done. Output ONLY the title, nothing else. No quotes, no punctuation at the end."
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
 	generated, err := h.llmClient.Complete(ctx, titlePrompt, message)
 	if err != nil {
-		return
+		return fmt.Errorf("llm completion: %w", err)
 	}
 	generated = strings.TrimSpace(generated)
 	generated = strings.Trim(generated, "\"'")
 	if len(generated) == 0 || len(generated) > 120 {
-		return
+		return nil
 	}
 
-	_ = h.runStore.UpdateTitle(ctx, orgID, sessionID, generated)
+	if err := h.runStore.UpdateTitle(ctx, orgID, session.ID, generated); err != nil {
+		return fmt.Errorf("update title: %w", err)
+	}
+	session.PMApproach = &generated
+	return nil
 }
 
 func buildManualSessionDescription(message string, images []string) string {

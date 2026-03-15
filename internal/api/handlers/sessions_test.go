@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1286,13 +1287,23 @@ func TestManualSessionTitle(t *testing.T) {
 }
 
 // mockLLMClient is a test double for llm.Client.
+// The WaitGroup lets the test verify that the handler waits for the LLM call
+// to finish before returning a response (i.e. the call is synchronous).
 type mockLLMClient struct {
 	response string
 	err      error
+	wg       sync.WaitGroup
 }
 
 func (m *mockLLMClient) Complete(_ context.Context, _, _ string) (string, error) {
+	defer m.wg.Done()
 	return m.response, m.err
+}
+
+func newMockLLMClient(response string, err error) *mockLLMClient {
+	m := &mockLLMClient{response: response, err: err}
+	m.wg.Add(1)
+	return m
 }
 
 func TestSessionHandler_CreateManual_WithLLMTitle(t *testing.T) {
@@ -1304,7 +1315,7 @@ func TestSessionHandler_CreateManual_WithLLMTitle(t *testing.T) {
 
 	orgID := uuid.New()
 
-	llmClient := &mockLLMClient{response: "Fix authentication login flow"}
+	llmClient := newMockLLMClient("Fix authentication login flow", nil)
 	handler := NewSessionHandler(
 		db.NewSessionStore(mock),
 		db.NewSessionLogStore(mock),
@@ -1344,7 +1355,7 @@ func TestSessionHandler_CreateManual_WithLLMTitle(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
 
-	// Mock the async UpdateTitle call
+	// Mock UpdateTitle call
 	mock.ExpectExec("UPDATE sessions SET pm_approach").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -1356,15 +1367,22 @@ func TestSessionHandler_CreateManual_WithLLMTitle(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	handler.CreateManual(w, req)
+
+	// WaitGroup confirms the LLM was called synchronously before the response.
+	llmClient.wg.Wait()
+
 	require.Equal(t, http.StatusCreated, w.Code)
 
-	// Wait briefly for the async goroutine to complete.
-	time.Sleep(200 * time.Millisecond)
+	var resp models.SingleResponse[models.Session]
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	require.NotNil(t, resp.Data.PMApproach)
+	require.Equal(t, "Fix authentication login flow", *resp.Data.PMApproach)
 
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestSessionHandler_CreateManual_LLMError_FallsBack(t *testing.T) {
+func TestSessionHandler_CreateManual_LLMError_Returns500(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -1373,7 +1391,7 @@ func TestSessionHandler_CreateManual_LLMError_FallsBack(t *testing.T) {
 
 	orgID := uuid.New()
 
-	llmClient := &mockLLMClient{err: fmt.Errorf("rate limited")}
+	llmClient := newMockLLMClient("", fmt.Errorf("rate limited"))
 	handler := NewSessionHandler(
 		db.NewSessionStore(mock),
 		db.NewSessionLogStore(mock),
@@ -1422,17 +1440,12 @@ func TestSessionHandler_CreateManual_LLMError_FallsBack(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	handler.CreateManual(w, req)
-	require.Equal(t, http.StatusCreated, w.Code)
 
-	// The response should still contain the session with the fallback title.
-	var resp models.SingleResponse[models.Session]
-	err = json.Unmarshal(w.Body.Bytes(), &resp)
-	require.NoError(t, err)
-	require.NotNil(t, resp.Data.PMApproach)
-	require.Equal(t, "Fix the login bug", *resp.Data.PMApproach)
+	// WaitGroup confirms the LLM was called synchronously.
+	llmClient.wg.Wait()
 
-	// Wait briefly for the async goroutine to complete (it should return early on error).
-	time.Sleep(200 * time.Millisecond)
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "TITLE_GENERATION_FAILED")
 
 	require.NoError(t, mock.ExpectationsWereMet())
 }
