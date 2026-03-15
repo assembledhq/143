@@ -47,6 +47,16 @@ func (p ProviderName) Valid() bool {
 	return false
 }
 
+// IsCodingAgentProvider returns true if the provider is used for coding agents.
+func (p ProviderName) IsCodingAgentProvider() bool {
+	for _, v := range CodingAgentProviders {
+		if p == v {
+			return true
+		}
+	}
+	return false
+}
+
 // IsLLMProvider returns true if the provider serves LLM completions.
 func (p ProviderName) IsLLMProvider() bool {
 	for _, v := range LLMProviders {

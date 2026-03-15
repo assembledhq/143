@@ -270,6 +270,25 @@ func TestUserCredentialHandler_UpsertPersonal(t *testing.T) {
 
 		require.Equal(t, http.StatusBadRequest, w.Code)
 	})
+
+	t.Run("rejects non-coding-agent provider like openai_chatgpt", func(t *testing.T) {
+		h := newTestUserCredHandler(&mockUserCredentialStore{})
+
+		body, _ := json.Marshal(map[string]interface{}{
+			"config": map[string]string{"api_key": "test"},
+		})
+		r := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(body))
+		r = withUserAndOrg(r, userID, orgID, "member")
+
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("provider", "openai_chatgpt")
+		r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
+
+		w := httptest.NewRecorder()
+		h.UpsertPersonal(w, r)
+
+		require.Equal(t, http.StatusBadRequest, w.Code)
+	})
 }
 
 func TestUserCredentialHandler_DeletePersonal(t *testing.T) {

@@ -101,8 +101,8 @@ func (h *UserCredentialHandler) UpsertPersonal(w http.ResponseWriter, r *http.Re
 
 	providerStr := chi.URLParam(r, "provider")
 	provider := models.ProviderName(providerStr)
-	if !provider.Valid() {
-		writeError(w, http.StatusBadRequest, "INVALID_PROVIDER", "unknown provider: "+providerStr)
+	if !provider.IsCodingAgentProvider() {
+		writeError(w, http.StatusBadRequest, "INVALID_PROVIDER", "unsupported coding agent provider: "+providerStr)
 		return
 	}
 
@@ -157,8 +157,8 @@ func (h *UserCredentialHandler) DeletePersonal(w http.ResponseWriter, r *http.Re
 
 	providerStr := chi.URLParam(r, "provider")
 	provider := models.ProviderName(providerStr)
-	if !provider.Valid() {
-		writeError(w, http.StatusBadRequest, "INVALID_PROVIDER", "unknown provider: "+providerStr)
+	if !provider.IsCodingAgentProvider() {
+		writeError(w, http.StatusBadRequest, "INVALID_PROVIDER", "unsupported coding agent provider: "+providerStr)
 		return
 	}
 
@@ -206,8 +206,8 @@ func (h *UserCredentialHandler) SetTeamDefault(w http.ResponseWriter, r *http.Re
 
 	providerStr := chi.URLParam(r, "provider")
 	provider := models.ProviderName(providerStr)
-	if !provider.Valid() {
-		writeError(w, http.StatusBadRequest, "INVALID_PROVIDER", "unknown provider: "+providerStr)
+	if !provider.IsCodingAgentProvider() {
+		writeError(w, http.StatusBadRequest, "INVALID_PROVIDER", "unsupported coding agent provider: "+providerStr)
 		return
 	}
 
@@ -238,8 +238,8 @@ func (h *UserCredentialHandler) DeleteTeamDefault(w http.ResponseWriter, r *http
 
 	providerStr := chi.URLParam(r, "provider")
 	provider := models.ProviderName(providerStr)
-	if !provider.Valid() {
-		writeError(w, http.StatusBadRequest, "INVALID_PROVIDER", "unknown provider: "+providerStr)
+	if !provider.IsCodingAgentProvider() {
+		writeError(w, http.StatusBadRequest, "INVALID_PROVIDER", "unsupported coding agent provider: "+providerStr)
 		return
 	}
 

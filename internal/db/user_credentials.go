@@ -166,9 +166,9 @@ func (s *UserCredentialStore) ListTeamDefaults(ctx context.Context, orgID uuid.U
 	return creds, nil
 }
 
-// Disable soft-deletes a user credential.
+// Disable soft-deletes a user credential, also clearing is_team_default.
 func (s *UserCredentialStore) Disable(ctx context.Context, orgID, userID uuid.UUID, provider models.ProviderName) error {
-	query := `UPDATE user_credentials SET status = 'disabled', updated_at = now() WHERE org_id = @org_id AND user_id = @user_id AND provider = @provider`
+	query := `UPDATE user_credentials SET status = 'disabled', is_team_default = false, updated_at = now() WHERE org_id = @org_id AND user_id = @user_id AND provider = @provider`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"org_id":   orgID,
 		"user_id":  userID,
@@ -213,12 +213,16 @@ func (s *UserCredentialStore) SetTeamDefault(ctx context.Context, orgID, userID 
 
 	// Set the new team default.
 	setQuery := `UPDATE user_credentials SET is_team_default = true, updated_at = now() WHERE org_id = @org_id AND user_id = @user_id AND provider = @provider AND status = 'active'`
-	if _, err := tx.Exec(ctx, setQuery, pgx.NamedArgs{
+	tag, err := tx.Exec(ctx, setQuery, pgx.NamedArgs{
 		"org_id":   orgID,
 		"user_id":  userID,
 		"provider": string(provider),
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("set team default: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("no active %s credential found for user", provider)
 	}
 
 	return tx.Commit(ctx)

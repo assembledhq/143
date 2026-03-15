@@ -52,10 +52,11 @@ export default function MyAgentsPage() {
   });
   const personalCreds = useMemo(() => personalResp?.data ?? [], [personalResp?.data]);
 
-  // Fetch team defaults
+  // Fetch team defaults (admin only — skipped for non-admins)
   const { data: teamResp } = useQuery<ListResponse<UserCredentialSummary>>({
     queryKey: ["user-credentials", "team"],
     queryFn: () => api.userCredentials.listTeamDefaults(),
+    enabled: isAdmin,
   });
   const teamDefaults = useMemo(() => teamResp?.data ?? [], [teamResp?.data]);
 
