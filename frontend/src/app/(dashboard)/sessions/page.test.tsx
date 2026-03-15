@@ -11,6 +11,13 @@ vi.mock('next/link', () => ({
   ),
 }));
 
+// Mock next/navigation — SessionsPageContent uses useRouter for row clicks
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn() }),
+  useSearchParams: () => new URLSearchParams(),
+  usePathname: () => '/sessions',
+}));
+
 describe('SessionsPage', () => {
   it('shows loading state initially', () => {
     renderWithProviders(<SessionsPageContent />);

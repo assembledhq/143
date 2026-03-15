@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -9,10 +10,13 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/api/sse"
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 )
 
 type SessionHandler struct {
@@ -24,6 +28,8 @@ type SessionHandler struct {
 	issueStore       *db.IssueStore
 	orgStore         *db.OrganizationStore
 	jobStore         *db.JobStore
+	llmClient        llm.Client // optional, used for generating manual session titles
+	logger           zerolog.Logger
 }
 
 func NewSessionHandler(
@@ -35,6 +41,8 @@ func NewSessionHandler(
 	issueStore *db.IssueStore,
 	orgStore *db.OrganizationStore,
 	jobStore *db.JobStore,
+	llmClient llm.Client,
+	logger zerolog.Logger,
 ) *SessionHandler {
 	return &SessionHandler{
 		runStore:         runStore,
@@ -45,6 +53,8 @@ func NewSessionHandler(
 		issueStore:       issueStore,
 		orgStore:         orgStore,
 		jobStore:         jobStore,
+		llmClient:        llmClient,
+		logger:           logger,
 	}
 }
 
@@ -243,15 +253,11 @@ func (h *SessionHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
+	sw := sse.NewWriter(w)
+	if sw == nil {
 		writeError(w, http.StatusInternalServerError, "SSE_NOT_SUPPORTED", "streaming not supported")
 		return
 	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
 
 	// Send existing logs.
 	logs, err := h.logStore.ListByRunID(r.Context(), orgID, runID)
@@ -261,11 +267,20 @@ func (h *SessionHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 
 	var lastSeenID int64
 	for _, log := range logs {
-		data, _ := json.Marshal(log)
-		fmt.Fprintf(w, "data: %s\n\n", data) // #nosec G705 -- SSE event stream, data is JSON-marshaled
+		if err := sw.WriteData(log); err != nil {
+			h.logger.Error().Err(err).Str("session_id", runID.String()).Msg("failed to write log event to SSE stream")
+			return
+		}
 		lastSeenID = log.ID
 	}
-	flusher.Flush()
+
+	// Send initial status event with the current session state.
+	lastStatus := run.Status
+	if err := sw.WriteEvent(sse.EventStatus, run); err != nil {
+		h.logger.Error().Err(err).Str("session_id", runID.String()).Msg("failed to write initial status event to SSE stream")
+		return
+	}
+	sw.Flush()
 
 	// Poll for new logs.
 	ticker := time.NewTicker(1 * time.Second)
@@ -276,7 +291,6 @@ func (h *SessionHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-ticker.C:
-			// Check if run is terminal.
 			run, err := h.runStore.GetByID(r.Context(), orgID, runID)
 			if err != nil {
 				return
@@ -287,16 +301,30 @@ func (h *SessionHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			for _, log := range newLogs {
-				data, _ := json.Marshal(log)
-				fmt.Fprintf(w, "data: %s\n\n", data) // #nosec G705 -- SSE event stream, data is JSON-marshaled
+				if err := sw.WriteData(log); err != nil {
+					h.logger.Error().Err(err).Str("session_id", runID.String()).Msg("failed to write log event to SSE stream")
+					return
+				}
 				lastSeenID = log.ID
 			}
-			flusher.Flush()
+
+			// Send a status event whenever the session status changes.
+			if run.Status != lastStatus {
+				lastStatus = run.Status
+				if err := sw.WriteEvent(sse.EventStatus, run); err != nil {
+					h.logger.Error().Err(err).Str("session_id", runID.String()).Msg("failed to write status event to SSE stream")
+					return
+				}
+			}
+
+			sw.Flush()
 
 			if isTerminalStatus(run.Status) {
-				// Send a final "done" event so the client knows to stop.
-				fmt.Fprintf(w, "event: done\ndata: {}\n\n")
-				flusher.Flush()
+				if err := sw.WriteEvent(sse.EventDone, run); err != nil {
+					h.logger.Error().Err(err).Str("session_id", runID.String()).Msg("failed to write done event to SSE stream")
+					return
+				}
+				sw.Flush()
 				return
 			}
 		}
@@ -403,7 +431,7 @@ func (h *SessionHandler) AnswerQuestion(w http.ResponseWriter, r *http.Request) 
 
 func isTerminalStatus(status string) bool {
 	switch status {
-	case "completed", "failed", "cancelled":
+	case "completed", "pr_created", "failed", "cancelled", "skipped":
 		return true
 	}
 	return false
@@ -525,6 +553,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		TokenMode:         tokenMode,
 		ModelOverride:     modelOverride,
 		TriggeredByUserID: manualTriggeredByUserID,
+		PMApproach:        &title,
 	}
 	if err := h.runStore.Create(r.Context(), session); err != nil {
 		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create manual session")
@@ -540,7 +569,40 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Generate a concise session title via LLM (with a short timeout so the
+	// request doesn't block for too long). If it succeeds, update the session
+	// with the generated title before returning the response.
+	if h.llmClient != nil {
+		if err := h.generateSessionTitle(r.Context(), session, orgID, body.Message); err != nil {
+			writeError(w, http.StatusInternalServerError, "TITLE_GENERATION_FAILED", fmt.Sprintf("failed to generate session title: %v", err))
+			return
+		}
+	}
+
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.Session]{Data: *session})
+}
+
+func (h *SessionHandler) generateSessionTitle(parent context.Context, session *models.Session, orgID uuid.UUID, message string) error {
+	const titlePrompt = "You are a concise title generator. Given a user's task description, produce a short title (max 80 characters) that summarizes what needs to be done. Output ONLY the title, nothing else. No quotes, no punctuation at the end."
+
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
+
+	generated, err := h.llmClient.Complete(ctx, titlePrompt, message)
+	if err != nil {
+		return fmt.Errorf("llm completion: %w", err)
+	}
+	generated = strings.TrimSpace(generated)
+	generated = strings.Trim(generated, "\"'")
+	if len(generated) == 0 || len(generated) > 120 {
+		return nil
+	}
+
+	if err := h.runStore.UpdateTitle(ctx, orgID, session.ID, generated); err != nil {
+		return fmt.Errorf("update title: %w", err)
+	}
+	session.PMApproach = &generated
+	return nil
 }
 
 func buildManualSessionDescription(message string, images []string) string {

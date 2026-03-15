@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -30,6 +32,8 @@ func newSessionHandler(t *testing.T, mock pgxmock.PgxPoolIface) *SessionHandler 
 		db.NewIssueStore(mock),
 		db.NewOrganizationStore(mock),
 		db.NewJobStore(mock),
+		nil, // llmClient — not needed in unit tests
+		zerolog.Nop(),
 	)
 }
 
@@ -1288,6 +1292,172 @@ func TestManualSessionTitle(t *testing.T) {
 			require.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+// mockLLMClient is a test double for llm.Client.
+// The WaitGroup lets the test verify that the handler waits for the LLM call
+// to finish before returning a response (i.e. the call is synchronous).
+type mockLLMClient struct {
+	response string
+	err      error
+	wg       sync.WaitGroup
+}
+
+func (m *mockLLMClient) Complete(_ context.Context, _, _ string) (string, error) {
+	defer m.wg.Done()
+	return m.response, m.err
+}
+
+func newMockLLMClient(response string, err error) *mockLLMClient {
+	m := &mockLLMClient{response: response, err: err}
+	m.wg.Add(1)
+	return m
+}
+
+func TestSessionHandler_CreateManual_WithLLMTitle(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+
+	llmClient := newMockLLMClient("Fix authentication login flow", nil)
+	handler := NewSessionHandler(
+		db.NewSessionStore(mock),
+		db.NewSessionLogStore(mock),
+		db.NewSessionQuestionStore(mock),
+		db.NewValidationStore(mock),
+		db.NewPullRequestStore(mock),
+		db.NewIssueStore(mock),
+		db.NewOrganizationStore(mock),
+		db.NewJobStore(mock),
+		llmClient,
+		zerolog.Nop(),
+	)
+
+	now := time.Now()
+	issueID := uuid.New()
+	runID := uuid.New()
+	jobID := uuid.New()
+
+	// Mock issue upsert
+	mock.ExpectQuery("INSERT INTO issues").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(issueID, now, now))
+
+	// Mock session create
+	mock.ExpectQuery("INSERT INTO sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
+
+	// Mock job enqueue
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+
+	// Mock UpdateTitle call
+	mock.ExpectExec("UPDATE sessions SET pm_approach").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/manual",
+		strings.NewReader(`{"message":"The login page throws a 500 error when users try to authenticate with SSO","agent_type":"claude_code"}`))
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CreateManual(w, req)
+
+	// WaitGroup confirms the LLM was called synchronously before the response.
+	llmClient.wg.Wait()
+
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	var resp models.SingleResponse[models.Session]
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	require.NotNil(t, resp.Data.PMApproach)
+	require.Equal(t, "Fix authentication login flow", *resp.Data.PMApproach)
+
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionHandler_CreateManual_LLMError_Returns500(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+
+	llmClient := newMockLLMClient("", fmt.Errorf("rate limited"))
+	handler := NewSessionHandler(
+		db.NewSessionStore(mock),
+		db.NewSessionLogStore(mock),
+		db.NewSessionQuestionStore(mock),
+		db.NewValidationStore(mock),
+		db.NewPullRequestStore(mock),
+		db.NewIssueStore(mock),
+		db.NewOrganizationStore(mock),
+		db.NewJobStore(mock),
+		llmClient,
+		zerolog.Nop(),
+	)
+
+	now := time.Now()
+	issueID := uuid.New()
+	runID := uuid.New()
+	jobID := uuid.New()
+
+	// Mock issue upsert
+	mock.ExpectQuery("INSERT INTO issues").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(issueID, now, now))
+
+	// Mock session create
+	mock.ExpectQuery("INSERT INTO sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
+
+	// Mock job enqueue
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+
+	// No UpdateTitle mock — the LLM error means it should never be called.
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/manual",
+		strings.NewReader(`{"message":"Fix the login bug","agent_type":"claude_code"}`))
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CreateManual(w, req)
+
+	// WaitGroup confirms the LLM was called synchronously.
+	llmClient.wg.Wait()
+
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "TITLE_GENERATION_FAILED")
+
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func stringPtr(s string) *string {

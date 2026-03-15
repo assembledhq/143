@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { RefreshCw, Plus, Clock, Activity } from "lucide-react";
+import { RefreshCw, Plus, Clock, Activity, Timer } from "lucide-react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
@@ -115,6 +115,12 @@ export function PMStatusBanner({ hasActivePlanSession }: PMStatusBannerProps) {
                 {pmStatus.issues_reviewed} reviewed
               </span>
             )}
+            {pmStatus.next_run_in && (
+              <span className="flex items-center gap-1">
+                <Timer className="h-3 w-3" />
+                Next run {pmStatus.next_run_in}
+              </span>
+            )}
           </div>
         )}
 
@@ -130,9 +136,10 @@ export function PMStatusBanner({ hasActivePlanSession }: PMStatusBannerProps) {
             className="h-7 text-[12px]"
             onClick={handleAnalyze}
             disabled={isPending || isAnalyzing}
+            title="Run the PM agent now without waiting for the next scheduled run"
           >
             <RefreshCw className={`mr-1 h-3 w-3 ${isPending || isAnalyzing ? "animate-spin" : ""}`} />
-            {isPending ? "Starting..." : isAnalyzing ? "Running..." : "Run PM agent"}
+            {isPending ? "Starting..." : isAnalyzing ? "Running..." : "Run now"}
           </Button>
         </div>
       </div>

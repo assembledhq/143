@@ -5,6 +5,7 @@ import { AlertTriangle, RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
+import { SSE_EVENT, addSSEListener } from "@/lib/sse";
 import type { SessionLog } from "@/lib/types";
 
 const levelColors: Record<string, string> = {
@@ -114,17 +115,11 @@ export function LogViewer({ runId, isActive }: LogViewerProps) {
         reconnectAttempts.current = 0;
       };
 
-      eventSource.onmessage = (event) => {
-        try {
-          const log: SessionLog = JSON.parse(event.data);
-          mergeLogs([log]);
-        } catch {
-          // ignore unparseable messages
-        }
-      };
+      addSSEListener(eventSource, SSE_EVENT.LOG, (log) => {
+        mergeLogs([log]);
+      });
 
-      // Listen for the "done" event sent when the run reaches terminal status.
-      eventSource.addEventListener("done", () => {
+      addSSEListener(eventSource, SSE_EVENT.DONE, () => {
         setStreaming(false);
         eventSource?.close();
       });
