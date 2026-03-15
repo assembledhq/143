@@ -401,10 +401,10 @@ func TestProcessComment(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Tests: UpdatePatterns
+// Tests: UpdateMemories
 // ---------------------------------------------------------------------------
 
-func TestUpdatePatterns(t *testing.T) {
+func TestUpdateMemories(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -488,11 +488,11 @@ func TestUpdatePatterns(t *testing.T) {
 			memoryStore := tt.setupMemoryStore(tt.orgID, tt.commentID)
 			svc := newTestService(&mockReviewCommentStore{}, memoryStore, &mockJobStore{}, nil)
 
-			err := svc.UpdatePatterns(context.Background(), tt.orgID, tt.commentID, tt.repo, tt.rule, tt.category)
+			err := svc.UpdateMemories(context.Background(), tt.orgID, tt.commentID, tt.repo, tt.rule, tt.category)
 			if tt.expectErr {
-				require.Error(t, err, "UpdatePatterns should return an error")
+				require.Error(t, err, "UpdateMemories should return an error")
 			} else {
-				require.NoError(t, err, "UpdatePatterns should not return an error")
+				require.NoError(t, err, "UpdateMemories should not return an error")
 			}
 		})
 	}

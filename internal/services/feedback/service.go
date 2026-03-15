@@ -1,6 +1,6 @@
 // Package feedback implements the review feedback loop: capturing PR review
-// comments, classifying them via LLM, deduplicating against existing patterns,
-// and managing the review patterns knowledge base.
+// comments, classifying them via LLM, deduplicating against existing memories,
+// and managing the learned memories knowledge base.
 package feedback
 
 import (
@@ -110,7 +110,7 @@ func (s *Service) ProcessComment(ctx context.Context, commentID, orgID uuid.UUID
 		return fmt.Errorf("update comment classification: %w", err)
 	}
 
-	// Pattern dedup/creation is handled by UpdatePatterns, called by the worker
+	// Memory dedup/creation is handled by UpdateMemories, called by the worker
 	// handler which has the repo name from the job payload.
 
 	return nil
@@ -207,9 +207,9 @@ func extractJSON(s string) string {
 	return s
 }
 
-// UpdatePatterns performs dedup and creates/updates memories for a classified comment.
+// UpdateMemories performs dedup and creates/updates memories for a classified comment.
 // This is called by the worker handler which has the repo name from the PR.
-func (s *Service) UpdatePatterns(ctx context.Context, orgID, commentID uuid.UUID, repo, rule, category string) error {
+func (s *Service) UpdateMemories(ctx context.Context, orgID, commentID uuid.UUID, repo, rule, category string) error {
 	normalized := normalizeRule(rule)
 
 	existing, err := s.memories.FindMatchingRule(ctx, orgID, repo, normalized)

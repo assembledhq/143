@@ -272,7 +272,7 @@ func (s *MemoryStore) IncrementOccurrence(ctx context.Context, orgID, memoryID, 
 
 	insertQuery := `
 		INSERT INTO memories (org_id, repo, rule, category, source_comment_ids, occurrence_count, status, manually_curated, active, scope, source, last_used_at, times_reinforced, file_patterns)
-		VALUES (@org_id, @repo, @rule, @category, @source_comment_ids, @occurrence_count, @status, @manually_curated, true, @scope, @source, @last_used_at, @times_reinforced, @file_patterns)`
+		VALUES (@org_id, @repo, @rule, @category, @source_comment_ids, @occurrence_count, @status, @manually_curated, true, @scope, @source, now(), @times_reinforced, @file_patterns)`
 
 	_, err = tx.Exec(ctx, insertQuery, pgx.NamedArgs{
 		"org_id":             existing.OrgID,
@@ -285,7 +285,6 @@ func (s *MemoryStore) IncrementOccurrence(ctx context.Context, orgID, memoryID, 
 		"manually_curated":   existing.ManuallyCurated,
 		"scope":              existing.Scope,
 		"source":             existing.Source,
-		"last_used_at":       existing.LastUsedAt,
 		"times_reinforced":   existing.TimesReinforced + 1,
 		"file_patterns":      existing.FilePatterns,
 	})

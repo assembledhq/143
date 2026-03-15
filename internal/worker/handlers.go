@@ -498,7 +498,7 @@ func newProcessReviewCommentHandler(services *Services, logger zerolog.Logger) J
 			Str("org_id", orgID.String()).
 			Msg("processing review comment")
 
-		shouldUpdatePatterns := false
+		shouldUpdateMemories := false
 		if input.Repo != "" {
 			// Only update learned patterns when this job is processing a pending comment.
 			// This prevents duplicate occurrence increments on retries/redeliveries.
@@ -506,7 +506,7 @@ func newProcessReviewCommentHandler(services *Services, logger zerolog.Logger) J
 			if err != nil {
 				return fmt.Errorf("get review comment before processing: %w", err)
 			}
-			shouldUpdatePatterns = currentComment.FilterStatus == "pending"
+			shouldUpdateMemories = currentComment.FilterStatus == "pending"
 		}
 
 		if err := services.Feedback.ProcessComment(ctx, commentID, orgID); err != nil {
@@ -515,14 +515,14 @@ func newProcessReviewCommentHandler(services *Services, logger zerolog.Logger) J
 
 		// After processing, check if the comment is generalizable and update patterns.
 		// The repo is passed from the webhook handler.
-		if shouldUpdatePatterns {
+		if shouldUpdateMemories {
 			comment, err := services.Feedback.GetProcessedComment(ctx, commentID, orgID)
 			if err == nil && comment.Generalizable && comment.GeneralizedRule != nil {
 				category := "nit"
 				if comment.Category != nil {
 					category = *comment.Category
 				}
-				if err := services.Feedback.UpdatePatterns(ctx, orgID, commentID, input.Repo, *comment.GeneralizedRule, category); err != nil {
+				if err := services.Feedback.UpdateMemories(ctx, orgID, commentID, input.Repo, *comment.GeneralizedRule, category); err != nil {
 					logger.Warn().Err(err).Str("comment_id", commentID.String()).Msg("failed to update memories")
 				}
 			}
@@ -561,7 +561,7 @@ func newUpdateMemoriesHandler(services *Services, logger zerolog.Logger) JobHand
 			Str("repo", input.Repo).
 			Msg("updating memories")
 
-		return services.Feedback.UpdatePatterns(ctx, orgID, commentID, input.Repo, input.Rule, input.Category)
+		return services.Feedback.UpdateMemories(ctx, orgID, commentID, input.Repo, input.Rule, input.Category)
 	}
 }
 

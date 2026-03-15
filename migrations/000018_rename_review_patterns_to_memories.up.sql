@@ -13,7 +13,14 @@ ALTER TABLE memories ADD COLUMN last_used_at timestamptz;
 ALTER TABLE memories ADD COLUMN times_reinforced int NOT NULL DEFAULT 0;
 ALTER TABLE memories ADD COLUMN file_patterns text[];
 
--- Backfill: existing patterns get their created_at as last_used_at.
+-- Constraints on new enum-like columns.
+ALTER TABLE memories ADD CONSTRAINT chk_memories_scope CHECK (scope IN ('repo', 'org'));
+ALTER TABLE memories ADD CONSTRAINT chk_memories_source CHECK (source IN ('review', 'manual', 'project'));
+
+-- Partial index for org-scoped memory queries (cross-repo lookups).
+CREATE INDEX idx_memories_org_scope ON memories (org_id, scope) WHERE active = true AND scope = 'org';
+
+-- Backfill: existing memories get their created_at as last_used_at.
 UPDATE memories SET last_used_at = created_at WHERE last_used_at IS NULL;
 
 -- Backfill: occurrence_count seeds times_reinforced.
