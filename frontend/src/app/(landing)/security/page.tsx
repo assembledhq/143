@@ -55,15 +55,15 @@ export default function SecurityPage() {
         <ul className="list-disc pl-5 space-y-1.5">
           <li>
             <strong className="font-medium opacity-80">Acknowledgment:</strong>{" "}
-            within 5 business days
+            within 14 business days
           </li>
           <li>
             <strong className="font-medium opacity-80">Initial assessment:</strong>{" "}
-            within 10 business days
+            within 30 business days
           </li>
           <li>
             <strong className="font-medium opacity-80">Fix and disclosure:</strong>{" "}
-            we aim to release a fix within 30 days of confirmation, followed by
+            we aim to release a fix within 180 days of confirmation, followed by
             coordinated public disclosure
           </li>
         </ul>
