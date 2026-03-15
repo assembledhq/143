@@ -9,7 +9,7 @@ CREATE TABLE user_credentials (
     last_verified_at timestamptz,
     created_at       timestamptz NOT NULL DEFAULT now(),
     updated_at       timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (user_id, provider)
+    UNIQUE (org_id, user_id, provider)
 );
 
 CREATE INDEX idx_user_credentials_org_id ON user_credentials(org_id);

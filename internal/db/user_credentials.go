@@ -40,7 +40,7 @@ func (s *UserCredentialStore) Upsert(ctx context.Context, userID, orgID uuid.UUI
 	query := `
 		INSERT INTO user_credentials (user_id, org_id, provider, config, is_team_default, status)
 		VALUES (@user_id, @org_id, @provider, @config, @is_team_default, 'active')
-		ON CONFLICT (user_id, provider)
+		ON CONFLICT (org_id, user_id, provider)
 		DO UPDATE SET config = @config, is_team_default = @is_team_default, status = 'active', updated_at = now()
 		RETURNING id, created_at, updated_at`
 
@@ -189,20 +189,39 @@ func (s *UserCredentialStore) ClearTeamDefault(ctx context.Context, orgID uuid.U
 
 // SetTeamDefault sets a user's credential as the team default for a provider,
 // clearing any existing team default for that provider in the org.
+// Both operations run in a single transaction to prevent races.
 func (s *UserCredentialStore) SetTeamDefault(ctx context.Context, orgID, userID uuid.UUID, provider models.ProviderName) error {
-	// Clear existing team default.
-	if err := s.ClearTeamDefault(ctx, orgID, provider); err != nil {
+	txStarter, ok := s.db.(TxStarter)
+	if !ok {
+		return fmt.Errorf("user credential store db does not support transactions")
+	}
+
+	tx, err := txStarter.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	// Clear existing team default within the transaction.
+	clearQuery := `UPDATE user_credentials SET is_team_default = false, updated_at = now() WHERE org_id = @org_id AND provider = @provider AND is_team_default = true`
+	if _, err := tx.Exec(ctx, clearQuery, pgx.NamedArgs{
+		"org_id":   orgID,
+		"provider": string(provider),
+	}); err != nil {
 		return fmt.Errorf("clear team default: %w", err)
 	}
 
 	// Set the new team default.
-	query := `UPDATE user_credentials SET is_team_default = true, updated_at = now() WHERE org_id = @org_id AND user_id = @user_id AND provider = @provider AND status = 'active'`
-	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+	setQuery := `UPDATE user_credentials SET is_team_default = true, updated_at = now() WHERE org_id = @org_id AND user_id = @user_id AND provider = @provider AND status = 'active'`
+	if _, err := tx.Exec(ctx, setQuery, pgx.NamedArgs{
 		"org_id":   orgID,
 		"user_id":  userID,
 		"provider": string(provider),
-	})
-	return err
+	}); err != nil {
+		return fmt.Errorf("set team default: %w", err)
+	}
+
+	return tx.Commit(ctx)
 }
 
 // RemoveTeamDefault removes the team default for a provider in an org.

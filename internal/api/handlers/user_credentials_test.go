@@ -21,12 +21,13 @@ import (
 // --- Mocks ---
 
 type mockUserCredentialStore struct {
-	upsertFn           func(ctx context.Context, userID, orgID uuid.UUID, cfg models.ProviderConfig, isTeamDefault bool) error
-	getForUserFn       func(ctx context.Context, orgID, userID uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error)
-	listByUserFn       func(ctx context.Context, orgID, userID uuid.UUID) ([]models.DecryptedUserCredential, error)
-	listTeamDefaultsFn func(ctx context.Context, orgID uuid.UUID) ([]models.DecryptedUserCredential, error)
-	disableFn          func(ctx context.Context, orgID, userID uuid.UUID, provider models.ProviderName) error
-	setTeamDefaultFn   func(ctx context.Context, orgID, userID uuid.UUID, provider models.ProviderName) error
+	upsertFn            func(ctx context.Context, userID, orgID uuid.UUID, cfg models.ProviderConfig, isTeamDefault bool) error
+	getForUserFn        func(ctx context.Context, orgID, userID uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error)
+	getTeamDefaultFn    func(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error)
+	listByUserFn        func(ctx context.Context, orgID, userID uuid.UUID) ([]models.DecryptedUserCredential, error)
+	listTeamDefaultsFn  func(ctx context.Context, orgID uuid.UUID) ([]models.DecryptedUserCredential, error)
+	disableFn           func(ctx context.Context, orgID, userID uuid.UUID, provider models.ProviderName) error
+	setTeamDefaultFn    func(ctx context.Context, orgID, userID uuid.UUID, provider models.ProviderName) error
 	removeTeamDefaultFn func(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) error
 }
 
@@ -39,6 +40,12 @@ func (m *mockUserCredentialStore) Upsert(ctx context.Context, userID, orgID uuid
 func (m *mockUserCredentialStore) GetForUser(ctx context.Context, orgID, userID uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error) {
 	if m.getForUserFn != nil {
 		return m.getForUserFn(ctx, orgID, userID, provider)
+	}
+	return nil, errors.New("not found")
+}
+func (m *mockUserCredentialStore) GetTeamDefault(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error) {
+	if m.getTeamDefaultFn != nil {
+		return m.getTeamDefaultFn(ctx, orgID, provider)
 	}
 	return nil, errors.New("not found")
 }

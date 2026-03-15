@@ -36,7 +36,7 @@ CREATE TABLE user_credentials (
     last_verified_at timestamptz,
     created_at       timestamptz NOT NULL DEFAULT now(),
     updated_at       timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (user_id, provider)
+    UNIQUE (org_id, user_id, provider)
 );
 
 CREATE INDEX idx_user_credentials_org_id ON user_credentials(org_id);
@@ -44,7 +44,7 @@ CREATE INDEX idx_user_credentials_user_id ON user_credentials(user_id);
 ```
 
 Key design decisions:
-- **`UNIQUE(user_id, provider)`** — one config per provider per user (same pattern as `org_credentials`)
+- **`UNIQUE(org_id, user_id, provider)`** — one config per provider per user per org (supports users in multiple orgs)
 - **`is_team_default`** — when true, this credential is used as the org-wide fallback for that provider. Only admins can set this. Only one user_credential per (org_id, provider) can be `is_team_default = true` (enforced in application logic; a partial unique index could enforce it in DB too)
 - **`org_id`** — for multi-tenancy filtering (all queries filter by org_id)
 - **`ON DELETE CASCADE`** on user_id — credentials are cleaned up when a user is removed

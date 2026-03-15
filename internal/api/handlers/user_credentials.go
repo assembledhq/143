@@ -16,6 +16,7 @@ import (
 type userCredentialStore interface {
 	Upsert(ctx context.Context, userID, orgID uuid.UUID, cfg models.ProviderConfig, isTeamDefault bool) error
 	GetForUser(ctx context.Context, orgID, userID uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error)
+	GetTeamDefault(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error)
 	ListByUser(ctx context.Context, orgID, userID uuid.UUID) ([]models.DecryptedUserCredential, error)
 	ListTeamDefaults(ctx context.Context, orgID uuid.UUID) ([]models.DecryptedUserCredential, error)
 	Disable(ctx context.Context, orgID, userID uuid.UUID, provider models.ProviderName) error
@@ -259,6 +260,13 @@ func (h *UserCredentialHandler) ListResolved(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Fetch team defaults once (instead of per-provider).
+	teamDefaults, _ := h.store.ListTeamDefaults(r.Context(), orgID)
+	teamDefaultByProvider := make(map[models.ProviderName]models.DecryptedUserCredential, len(teamDefaults))
+	for _, td := range teamDefaults {
+		teamDefaultByProvider[td.Provider] = td
+	}
+
 	var resolved []models.ResolvedCredential
 	for _, provider := range models.CodingAgentProviders {
 		rc := models.ResolvedCredential{Provider: provider, Source: "none"}
@@ -272,20 +280,11 @@ func (h *UserCredentialHandler) ListResolved(w http.ResponseWriter, r *http.Requ
 		}
 
 		// 2. Check team default.
-		if cred, err := h.store.ListTeamDefaults(r.Context(), orgID); err == nil {
-			found := false
-			for _, c := range cred {
-				if c.Provider == provider {
-					rc.Source = "team_default"
-					rc.MaskedKey = c.Config.MaskedSummary().MaskedKey
-					found = true
-					break
-				}
-			}
-			if found {
-				resolved = append(resolved, rc)
-				continue
-			}
+		if td, ok := teamDefaultByProvider[provider]; ok {
+			rc.Source = "team_default"
+			rc.MaskedKey = td.Config.MaskedSummary().MaskedKey
+			resolved = append(resolved, rc)
+			continue
 		}
 
 		// 3. Check org credential.
