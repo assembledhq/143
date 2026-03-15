@@ -247,6 +247,67 @@ func TestRepositoryStore_UpsertFromGitHub(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestRepositoryStore_GetSummary(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewRepositoryStore(mock)
+	orgID := uuid.New()
+	repoID := uuid.New()
+	latestStatus := "running"
+
+	summaryColumns := []string{
+		"repository_id", "full_name", "active_session_count",
+		"latest_session_status", "active_project_count",
+	}
+
+	mock.ExpectQuery("SELECT .+ FROM repositories r").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(summaryColumns).
+				AddRow(repoID, "org/repo", 3, &latestStatus, 1),
+		)
+
+	summaries, err := store.GetSummary(context.Background(), orgID)
+	require.NoError(t, err, "GetSummary should not return an error")
+	require.Len(t, summaries, 1, "should return one summary")
+	require.Equal(t, repoID, summaries[0].RepositoryID, "should return the correct repository ID")
+	require.Equal(t, "org/repo", summaries[0].FullName, "should return the correct full name")
+	require.Equal(t, 3, summaries[0].ActiveSessionCount, "should return the correct active session count")
+	require.NotNil(t, summaries[0].LatestSessionStatus, "latest session status should not be nil")
+	require.Equal(t, "running", *summaries[0].LatestSessionStatus, "should return the correct latest session status")
+	require.Equal(t, 1, summaries[0].ActiveProjectCount, "should return the correct active project count")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestRepositoryStore_GetSummary_Empty(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewRepositoryStore(mock)
+	orgID := uuid.New()
+
+	summaryColumns := []string{
+		"repository_id", "full_name", "active_session_count",
+		"latest_session_status", "active_project_count",
+	}
+
+	mock.ExpectQuery("SELECT .+ FROM repositories r").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(summaryColumns))
+
+	summaries, err := store.GetSummary(context.Background(), orgID)
+	require.NoError(t, err, "GetSummary should not return an error for empty result")
+	require.Empty(t, summaries, "should return empty summaries")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestRepositoryStore_DisconnectByInstallationID(t *testing.T) {
 	t.Parallel()
 

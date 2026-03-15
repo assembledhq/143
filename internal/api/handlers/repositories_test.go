@@ -247,6 +247,80 @@ func TestRepositoryHandler_Update(t *testing.T) {
 	}
 }
 
+func TestRepositoryHandler_Summary(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		setupMock    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID)
+		expectedCode int
+		expectedLen  int
+	}{
+		{
+			name: "returns summary successfully",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				repoID := uuid.New()
+				latestStatus := "running"
+				cols := []string{
+					"repository_id", "full_name", "active_session_count",
+					"latest_session_status", "active_project_count",
+				}
+				mock.ExpectQuery("SELECT .+ FROM repositories r").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(cols).AddRow(repoID, "org/repo", 2, &latestStatus, 1),
+					)
+			},
+			expectedCode: http.StatusOK,
+			expectedLen:  1,
+		},
+		{
+			name: "returns empty list when no repositories",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				cols := []string{
+					"repository_id", "full_name", "active_session_count",
+					"latest_session_status", "active_project_count",
+				}
+				mock.ExpectQuery("SELECT .+ FROM repositories r").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(cols))
+			},
+			expectedCode: http.StatusOK,
+			expectedLen:  0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create pgxmock pool without error")
+			defer mock.Close()
+
+			orgID := uuid.New()
+			store := db.NewRepositoryStore(mock)
+			handler := NewRepositoryHandler(store)
+
+			tt.setupMock(mock, orgID)
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/repositories/summary", nil)
+			ctx := middleware.WithOrgID(req.Context(), orgID)
+			req = req.WithContext(ctx)
+			w := httptest.NewRecorder()
+
+			handler.Summary(w, req)
+			require.Equal(t, tt.expectedCode, w.Code, "should return expected status code")
+
+			var resp models.ListResponse[db.RepoSummary]
+			err = json.Unmarshal(w.Body.Bytes(), &resp)
+			require.NoError(t, err, "response body should be valid JSON")
+			require.Equal(t, tt.expectedLen, len(resp.Data), "should return expected number of summaries")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
 func TestRepositoryHandler_Delete_Success(t *testing.T) {
 	t.Parallel()
 

@@ -126,6 +126,71 @@ func TestSessionHandler_List(t *testing.T) {
 	}
 }
 
+func TestSessionHandler_List_WithRepositoryID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	now := time.Now()
+	runID := uuid.New()
+	issueID := uuid.New()
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id .+ issue_id IN").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).AddRow(
+				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
+				nil, nil, nil, nil,
+				nil, &now, &now, nil,
+				nil, nil, nil, nil,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil,
+				nil, nil, nil,
+				now,
+			),
+		)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions?repository_id="+repoID.String(), nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.List(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "should return 200 when filtering by repository_id")
+
+	var resp models.ListResponse[models.Session]
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err, "response body should be valid JSON")
+	require.Equal(t, 1, len(resp.Data), "should return filtered sessions")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_List_InvalidRepositoryID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions?repository_id=not-a-uuid", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.List(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "should return 400 for invalid repository_id")
+	require.Contains(t, w.Body.String(), "INVALID_REPOSITORY_ID", "error code should indicate invalid repository_id")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionHandler_Get(t *testing.T) {
 	t.Parallel()
 

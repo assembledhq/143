@@ -19,10 +19,11 @@ func NewSessionStore(db DBTX) *SessionStore {
 }
 
 type SessionFilters struct {
-	Status    models.SessionStatus
-	Limit     int
-	Cursor    string
-	AdHocOnly bool // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
+	Status       models.SessionStatus
+	Limit        int
+	Cursor       string
+	AdHocOnly    bool      // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
+	RepositoryID uuid.UUID // When non-nil, filter sessions by repository via issues table.
 }
 
 const sessionSelectColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-000000000000'::uuid) AS issue_id,
@@ -35,12 +36,22 @@ const sessionSelectColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-00
 	model_override, triggered_by_user_id, created_at`
 
 func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters SessionFilters) ([]models.Session, error) {
-	query := `
+	args := pgx.NamedArgs{"org_id": orgID}
+
+	var query string
+	if filters.RepositoryID != uuid.Nil {
+		query = `
+		SELECT ` + sessionSelectColumns + `
+		FROM sessions
+		WHERE org_id = @org_id
+		AND issue_id IN (SELECT id FROM issues WHERE repository_id = @repository_id)`
+		args["repository_id"] = filters.RepositoryID
+	} else {
+		query = `
 		SELECT ` + sessionSelectColumns + `
 		FROM sessions
 		WHERE org_id = @org_id`
-
-	args := pgx.NamedArgs{"org_id": orgID}
+	}
 
 	if filters.Status != "" {
 		query += ` AND status = @status`

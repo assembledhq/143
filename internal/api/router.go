@@ -193,6 +193,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/settings/credentials/team", userCredentialHandler.ListTeamDefaults)
 
 			r.Get("/api/v1/repositories", repoHandler.List)
+			r.Get("/api/v1/repositories/summary", repoHandler.Summary)
 			r.Get("/api/v1/repositories/{id}", repoHandler.Get)
 			r.Get("/api/v1/integrations", integrationHandler.ListIntegrations)
 			r.Get("/api/v1/issues", issueHandler.List)

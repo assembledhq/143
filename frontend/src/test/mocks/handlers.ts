@@ -229,6 +229,13 @@ export const handlers = [
     } satisfies ListResponse<User>);
   }),
 
+  http.get('/api/v1/repositories/summary', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {},
+    });
+  }),
+
   http.get('/api/v1/pm/decisions', () => {
     return HttpResponse.json({
       data: [],

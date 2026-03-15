@@ -48,6 +48,19 @@ func (h *RepositoryHandler) Get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Repository]{Data: repo})
 }
 
+func (h *RepositoryHandler) Summary(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	summaries, err := h.repoStore.GetSummary(r.Context(), orgID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "SUMMARY_FAILED", "failed to get repository summary")
+		return
+	}
+	if summaries == nil {
+		summaries = []db.RepoSummary{}
+	}
+	writeJSON(w, http.StatusOK, models.ListResponse[db.RepoSummary]{Data: summaries})
+}
+
 func (h *RepositoryHandler) Update(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	repoID, err := uuid.Parse(chi.URLParam(r, "id"))
