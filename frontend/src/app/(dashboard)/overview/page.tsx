@@ -112,15 +112,15 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
   const [selectedAgentType, setSelectedAgentType] = useState<AgentType>("codex");
 
   const fetchData = useCallback(() => {
-    api.codexAuth.status().then((res) => setCodexAuthStatus(res.data)).catch(() => {});
+    api.codexAuth.status().then((res) => setCodexAuthStatus(res.data)).catch((err) => console.error("failed to load codex auth status:", err));
     api.settings.get().then((res) => {
       const settings = res.data?.settings as OrgSettings | undefined;
       setAgentConfig(settings?.agent_config ?? {});
       setSelectedAgentType(settings?.default_agent_type ?? "codex");
-    }).catch(() => {});
+    }).catch((err) => console.error("failed to load settings:", err));
     api.settings.getAgentDefaults().then((res) => {
       setAgentDefaults(res.data ?? {});
-    }).catch(() => {});
+    }).catch((err) => console.error("failed to load agent defaults:", err));
   }, []);
 
   useEffect(() => { fetchData(); }, [fetchData]);

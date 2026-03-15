@@ -76,7 +76,11 @@ func (h *RepositoryHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Settings != nil {
 		// Validate PM settings if present.
-		repoSettings := models.ParseRepoSettings(*req.Settings)
+		repoSettings, parseErr := models.ParseRepoSettings(*req.Settings)
+		if parseErr != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_SETTINGS", "invalid settings JSON")
+			return
+		}
 		if repoSettings.PM != nil {
 			if err := models.ValidateRepoPMSettings(*repoSettings.PM); err != nil {
 				writeError(w, http.StatusBadRequest, "INVALID_SETTINGS", err.Error())

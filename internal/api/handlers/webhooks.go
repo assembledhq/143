@@ -13,6 +13,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	"github.com/rs/zerolog"
 )
 
 type WebhookHandler struct {
@@ -163,10 +164,15 @@ func (h *WebhookHandler) handleInstallation(w http.ResponseWriter, r *http.Reque
 
 		// Create integration if one doesn't already exist.
 		if integration == nil {
-			configJSON, _ := json.Marshal(map[string]any{
+			configJSON, marshalErr := json.Marshal(map[string]any{
 				"installation_id": event.Installation.ID,
 				"account_login":   event.Installation.Account.Login,
 			})
+			if marshalErr != nil {
+				zerolog.Ctx(r.Context()).Warn().Err(marshalErr).Msg("failed to marshal integration config")
+				writeError(w, http.StatusInternalServerError, "MARSHAL_FAILED", "failed to marshal integration config")
+				return
+			}
 			integration = &models.Integration{
 				OrgID:    org.ID,
 				Provider: models.IntegrationProviderGitHub,

@@ -21,12 +21,14 @@ type RepoSettings struct {
 }
 
 // ParseRepoSettings deserializes a repository's settings JSONB.
-func ParseRepoSettings(raw json.RawMessage) RepoSettings {
+func ParseRepoSettings(raw json.RawMessage) (RepoSettings, error) {
 	var s RepoSettings
 	if len(raw) > 0 {
-		_ = json.Unmarshal(raw, &s)
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return s, fmt.Errorf("unmarshal repo settings: %w", err)
+		}
 	}
-	return s
+	return s, nil
 }
 
 // MergeRepoPMSettings returns a copy of the org settings with any repo-level
