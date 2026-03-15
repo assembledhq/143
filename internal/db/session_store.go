@@ -32,7 +32,7 @@ const sessionSelectColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-00
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, pm_approach, pm_reasoning, project_task_id,
-	model_override, created_at`
+	model_override, triggered_by_user_id, created_at`
 
 func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters SessionFilters) ([]models.Session, error) {
 	query := `
@@ -93,12 +93,12 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 		INSERT INTO sessions (
 			issue_id, org_id, agent_type, status, autonomy_level, token_mode, complexity_tier,
 			parent_session_id, revision_context, pm_plan_id, pm_approach, pm_reasoning, project_task_id,
-			model_override
+			model_override, triggered_by_user_id
 		)
 		VALUES (
 			@issue_id, @org_id, @agent_type, @status, @autonomy_level, @token_mode, @complexity_tier,
 			@parent_session_id, @revision_context, @pm_plan_id, @pm_approach, @pm_reasoning, @project_task_id,
-			@model_override
+			@model_override, @triggered_by_user_id
 		)
 		RETURNING id, created_at`
 
@@ -121,7 +121,8 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 		"pm_approach":      run.PMApproach,
 		"pm_reasoning":     run.PMReasoning,
 		"project_task_id":  run.ProjectTaskID,
-		"model_override":   run.ModelOverride,
+		"model_override":          run.ModelOverride,
+		"triggered_by_user_id":    run.TriggeredByUserID,
 	}
 
 	row := s.db.QueryRow(ctx, query, args)

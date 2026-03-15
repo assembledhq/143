@@ -920,6 +920,136 @@ describe('api client', () => {
     });
   });
 
+  describe('userCredentials', () => {
+    it('lists personal credentials', async () => {
+      server.use(
+        http.get('/api/v1/settings/credentials/personal', () => {
+          return HttpResponse.json({
+            data: [{ provider: 'anthropic', configured: true, masked_key: 'sk-ant-...abc' }],
+            meta: {},
+          });
+        }),
+      );
+
+      const result = await api.userCredentials.listPersonal();
+      expect(result.data).toHaveLength(1);
+      expect(result.data[0].provider).toBe('anthropic');
+      expect(result.data[0].configured).toBe(true);
+    });
+
+    it('upserts personal credential', async () => {
+      let capturedBody: unknown;
+      let capturedUrl: string | undefined;
+
+      server.use(
+        http.put('/api/v1/settings/credentials/personal/:provider', async ({ request, params }) => {
+          capturedBody = await request.json();
+          capturedUrl = params.provider as string;
+          return HttpResponse.json({ data: { provider: 'anthropic', configured: true } });
+        }),
+      );
+
+      await api.userCredentials.upsertPersonal('anthropic', { api_key: 'sk-ant-test' });
+      expect(capturedUrl).toBe('anthropic');
+      expect(capturedBody).toEqual({ config: { api_key: 'sk-ant-test' }, is_team_default: false });
+    });
+
+    it('upserts personal credential with team default flag', async () => {
+      let capturedBody: unknown;
+
+      server.use(
+        http.put('/api/v1/settings/credentials/personal/:provider', async ({ request }) => {
+          capturedBody = await request.json();
+          return HttpResponse.json({ data: { provider: 'openai', configured: true } });
+        }),
+      );
+
+      await api.userCredentials.upsertPersonal('openai', { api_key: 'sk-test' }, true);
+      expect(capturedBody).toEqual({ config: { api_key: 'sk-test' }, is_team_default: true });
+    });
+
+    it('deletes personal credential', async () => {
+      let deleteCalled = false;
+
+      server.use(
+        http.delete('/api/v1/settings/credentials/personal/:provider', ({ params }) => {
+          deleteCalled = true;
+          expect(params.provider).toBe('anthropic');
+          return new HttpResponse(null, { status: 204 });
+        }),
+      );
+
+      await api.userCredentials.deletePersonal('anthropic');
+      expect(deleteCalled).toBe(true);
+    });
+
+    it('lists team defaults', async () => {
+      server.use(
+        http.get('/api/v1/settings/credentials/team', () => {
+          return HttpResponse.json({
+            data: [{ provider: 'anthropic', configured: true, is_team_default: true, set_by_user_name: 'Alice' }],
+            meta: {},
+          });
+        }),
+      );
+
+      const result = await api.userCredentials.listTeamDefaults();
+      expect(result.data).toHaveLength(1);
+      expect(result.data[0].is_team_default).toBe(true);
+    });
+
+    it('sets team default', async () => {
+      let capturedBody: unknown;
+
+      server.use(
+        http.put('/api/v1/settings/credentials/team/:provider', async ({ request, params }) => {
+          capturedBody = await request.json();
+          expect(params.provider).toBe('anthropic');
+          return HttpResponse.json({});
+        }),
+      );
+
+      await api.userCredentials.setTeamDefault('anthropic', 'user-1');
+      expect(capturedBody).toEqual({ user_id: 'user-1' });
+    });
+
+    it('removes team default', async () => {
+      let deleteCalled = false;
+
+      server.use(
+        http.delete('/api/v1/settings/credentials/team/:provider', ({ params }) => {
+          deleteCalled = true;
+          expect(params.provider).toBe('openai');
+          return new HttpResponse(null, { status: 204 });
+        }),
+      );
+
+      await api.userCredentials.removeTeamDefault('openai');
+      expect(deleteCalled).toBe(true);
+    });
+
+    it('lists resolved credentials', async () => {
+      server.use(
+        http.get('/api/v1/settings/credentials/resolved', () => {
+          return HttpResponse.json({
+            data: [
+              { provider: 'anthropic', source: 'personal', masked_key: 'sk-ant-...abc' },
+              { provider: 'openai', source: 'team_default', masked_key: 'sk-...def' },
+              { provider: 'gemini', source: 'none' },
+            ],
+            meta: {},
+          });
+        }),
+      );
+
+      const result = await api.userCredentials.listResolved();
+      expect(result.data).toHaveLength(3);
+      expect(result.data[0].source).toBe('personal');
+      expect(result.data[1].source).toBe('team_default');
+      expect(result.data[2].source).toBe('none');
+    });
+  });
+
   // These tests must be last because they modify window.location
   describe('auth - browser redirects', () => {
     const originalLocation = window.location;
