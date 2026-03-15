@@ -75,6 +75,25 @@ type JobStore interface {
 	Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
 }
 
+// MemoryService provides scored memory context for agent prompts.
+type MemoryService interface {
+	GetContextMemories(ctx context.Context, req MemoryContextRequest) (*MemoryContextResult, error)
+}
+
+// MemoryContextRequest describes the context for memory selection.
+// Mirrors memory.ContextRequest but avoids a circular import.
+type MemoryContextRequest struct {
+	OrgID     uuid.UUID
+	Repo      string
+	FilePaths []string
+}
+
+// MemoryContextResult contains the selected memory context.
+type MemoryContextResult struct {
+	Formatted string
+	MemoryIDs []uuid.UUID
+}
+
 // ProjectTaskUpdater is called after an agent run completes to update
 // the associated project task, if any.
 type ProjectTaskUpdater interface {
@@ -98,6 +117,7 @@ type Orchestrator struct {
 	github            GitHubTokenProvider
 	codexAuth         CodexAuthProvider // can be nil
 	credentials       CredentialProvider
+	memory            MemoryService // can be nil
 	logger            zerolog.Logger
 	maxConcurrent     int
 }
@@ -118,6 +138,7 @@ type OrchestratorConfig struct {
 	GitHub            GitHubTokenProvider
 	CodexAuth         CodexAuthProvider // optional — enables ChatGPT OAuth for Codex agent
 	Credentials       CredentialProvider
+	Memory            MemoryService // optional — injects learned memories into agent prompts
 	Logger            zerolog.Logger
 	MaxConcurrent     int
 }
@@ -144,6 +165,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		github:            cfg.GitHub,
 		codexAuth:         cfg.CodexAuth,
 		credentials:       cfg.Credentials,
+		memory:            cfg.Memory,
 		logger:            cfg.Logger,
 		maxConcurrent:     maxConcurrent,
 	}
@@ -178,7 +200,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	}
 
 	// 4. Look up the repository for clone URL and branch.
-	var repoURL, branch, token string
+	var repoURL, branch, token, repoFullName string
 	if issue.RepositoryID != nil {
 		repo, err := o.repositories.GetByID(ctx, run.OrgID, *issue.RepositoryID)
 		if err != nil {
@@ -187,6 +209,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 		repoURL = repo.CloneURL
 		branch = repo.DefaultBranch
+		repoFullName = repo.FullName
 
 		// Get GitHub installation token for cloning.
 		ghToken, err := o.github.GetInstallationToken(ctx, repo.InstallationID)
@@ -216,6 +239,19 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			Tier: *run.ComplexityTier,
 		}
 	}
+	// Inject learned memories into agent context.
+	if o.memory != nil && repoFullName != "" {
+		memResult, memErr := o.memory.GetContextMemories(ctx, MemoryContextRequest{
+			OrgID: run.OrgID,
+			Repo:  repoFullName,
+		})
+		if memErr != nil {
+			log.Warn().Err(memErr).Msg("failed to retrieve memories for agent context")
+		} else if memResult != nil && memResult.Formatted != "" {
+			input.ContextDocs = append(input.ContextDocs, memResult.Formatted)
+		}
+	}
+
 	if run.PMApproach != nil || run.PMReasoning != nil {
 		pmCtx := &PMTaskContext{}
 		if run.PMApproach != nil {

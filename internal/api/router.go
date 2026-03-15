@@ -259,6 +259,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Post("/api/v1/issues/{id}/reprioritize", priorityHandler.Reprioritize)
 			r.Post("/api/v1/pm/analyze", pmHandler.Analyze)
 			r.Patch("/api/v1/settings", settingsHandler.Update)
+			r.Post("/api/v1/memories", memoryHandler.Create)
 			r.Patch("/api/v1/memories/{id}", memoryHandler.UpdateStatus)
 			r.Put("/api/v1/memories/{id}", memoryHandler.UpdateRule)
 

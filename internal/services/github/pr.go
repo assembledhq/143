@@ -333,6 +333,13 @@ func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event Pull
 		return fmt.Errorf("update review status: %w", err)
 	}
 
+	// If the PR was approved, reinforce memories that were active for this repo.
+	// This closes the feedback loop: memories that helped produce approved code
+	// get stronger, while unused memories naturally decay.
+	if reviewStatus == "approved" {
+		s.enqueueReinforceMemories(ctx, pr.OrgID, pr.GitHubRepo)
+	}
+
 	// If changes were requested and we have review comments from the review body,
 	// enqueue a processing job. Individual inline comments are captured by
 	// HandlePullRequestReviewCommentEvent.
@@ -426,6 +433,16 @@ func (s *PRService) enqueueProcessReviewComment(ctx context.Context, orgID uuid.
 		"repo":       repo,
 	}, 3, &dedupeKey); err != nil {
 		s.logger.Warn().Err(err).Str("comment_id", commentID.String()).Msg("failed to enqueue process_review_comment job")
+	}
+}
+
+func (s *PRService) enqueueReinforceMemories(ctx context.Context, orgID uuid.UUID, repo string) {
+	dedupeKey := fmt.Sprintf("reinforce_memories:%s:%s", orgID, repo)
+	if _, err := s.jobs.Enqueue(ctx, orgID, "feedback", "reinforce_memories", map[string]string{
+		"org_id": orgID.String(),
+		"repo":   repo,
+	}, 5, &dedupeKey); err != nil {
+		s.logger.Warn().Err(err).Str("repo", repo).Msg("failed to enqueue reinforce_memories job")
 	}
 }
 

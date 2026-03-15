@@ -294,3 +294,107 @@ func (s *MemoryStore) IncrementOccurrence(ctx context.Context, orgID, memoryID, 
 
 	return tx.Commit(ctx)
 }
+
+// ListForContext returns all active memories relevant to a given repo context.
+// This includes repo-scoped memories for the specific repo AND org-scoped
+// memories that apply across all repos. Used by the memory scoring service to
+// build agent context.
+func (s *MemoryStore) ListForContext(ctx context.Context, orgID uuid.UUID, repo string) ([]models.Memory, error) {
+	query := `
+		SELECT id, org_id, repo, rule, category, source_comment_ids, occurrence_count,
+		       status, manually_curated, active, scope, source, last_used_at, times_reinforced, file_patterns, created_at
+		FROM memories
+		WHERE org_id = @org_id AND active = true AND status = 'active'
+		  AND (
+		    (scope = 'repo' AND repo = @repo)
+		    OR scope = 'org'
+		  )
+		ORDER BY times_reinforced DESC, created_at DESC`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id": orgID,
+		"repo":   repo,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query memories for context: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Memory])
+}
+
+// ListActiveByOrg returns all active org-scoped memories for an organization.
+func (s *MemoryStore) ListActiveByOrg(ctx context.Context, orgID uuid.UUID) ([]models.Memory, error) {
+	query := `
+		SELECT id, org_id, repo, rule, category, source_comment_ids, occurrence_count,
+		       status, manually_curated, active, scope, source, last_used_at, times_reinforced, file_patterns, created_at
+		FROM memories
+		WHERE org_id = @org_id AND active = true AND status = 'active' AND scope = 'org'
+		ORDER BY category, created_at`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID})
+	if err != nil {
+		return nil, fmt.Errorf("query org-scoped memories: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Memory])
+}
+
+// ReinforceBatch updates last_used_at and increments times_reinforced for
+// multiple memories. Used when a PR is approved after memories were injected
+// into the agent context. Uses insert-only versioning for each memory.
+func (s *MemoryStore) ReinforceBatch(ctx context.Context, orgID uuid.UUID, memoryIDs []uuid.UUID) error {
+	if len(memoryIDs) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	for _, memID := range memoryIDs {
+		inactivateQuery := `
+			UPDATE memories SET active = false
+			WHERE id = @id AND org_id = @org_id AND active = true
+			RETURNING org_id, repo, rule, category, source_comment_ids, occurrence_count, status, manually_curated, scope, source, last_used_at, times_reinforced, file_patterns`
+
+		var existing models.Memory
+		err := tx.QueryRow(ctx, inactivateQuery, pgx.NamedArgs{
+			"id":     memID,
+			"org_id": orgID,
+		}).Scan(
+			&existing.OrgID, &existing.Repo, &existing.Rule, &existing.Category,
+			&existing.SourceCommentIDs, &existing.OccurrenceCount, &existing.Status,
+			&existing.ManuallyCurated, &existing.Scope, &existing.Source,
+			&existing.LastUsedAt, &existing.TimesReinforced, &existing.FilePatterns,
+		)
+		if err != nil {
+			// Memory may have been deactivated between selection and reinforcement.
+			// This is expected in concurrent scenarios — skip silently.
+			continue
+		}
+
+		insertQuery := `
+			INSERT INTO memories (org_id, repo, rule, category, source_comment_ids, occurrence_count, status, manually_curated, active, scope, source, last_used_at, times_reinforced, file_patterns)
+			VALUES (@org_id, @repo, @rule, @category, @source_comment_ids, @occurrence_count, @status, @manually_curated, true, @scope, @source, now(), @times_reinforced, @file_patterns)`
+
+		_, err = tx.Exec(ctx, insertQuery, pgx.NamedArgs{
+			"org_id":             existing.OrgID,
+			"repo":               existing.Repo,
+			"rule":               existing.Rule,
+			"category":           existing.Category,
+			"source_comment_ids": existing.SourceCommentIDs,
+			"occurrence_count":   existing.OccurrenceCount,
+			"status":             existing.Status,
+			"manually_curated":   existing.ManuallyCurated,
+			"scope":              existing.Scope,
+			"source":             existing.Source,
+			"times_reinforced":   existing.TimesReinforced + 1,
+			"file_patterns":      existing.FilePatterns,
+		})
+		if err != nil {
+			return fmt.Errorf("insert reinforced memory %s: %w", memID, err)
+		}
+	}
+
+	return tx.Commit(ctx)
+}

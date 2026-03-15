@@ -246,6 +246,8 @@ export const api = {
         body: JSON.stringify({ rule }),
       });
     },
+    create: (memory: { repo: string; rule: string; category?: string; scope?: string; file_patterns?: string[] }) =>
+      post<import('./types').SingleResponse<import('./types').Memory>>('/api/v1/memories', memory),
   },
   team: {
     listMembers: () => get<import('./types').ListResponse<import('./types').User>>('/api/v1/team/members'),

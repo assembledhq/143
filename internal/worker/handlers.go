@@ -42,6 +42,9 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, logger zero
 		w.Register("process_review_comment", newProcessReviewCommentHandler(services, logger))
 		w.Register("update_memories", newUpdateMemoriesHandler(services, logger))
 	}
+	if services != nil && services.Memory != nil {
+		w.Register("reinforce_memories", newReinforceMemoriesHandler(services, logger))
+	}
 }
 
 func hasServiceHandlersDependencies(services *Services) bool {
@@ -68,6 +71,12 @@ type Stores struct {
 	ProjectTasks        *db.ProjectTaskStore  // nil-safe
 }
 
+// MemoryReinforcer retrieves and reinforces memories for a repo.
+type MemoryReinforcer interface {
+	GetContextMemories(ctx context.Context, req agent.MemoryContextRequest) (*agent.MemoryContextResult, error)
+	ReinforceMemories(ctx context.Context, orgID uuid.UUID, memoryIDs []uuid.UUID) error
+}
+
 // Services holds the service dependencies needed by job handlers.
 type Services struct {
 	Orchestrator    *agent.Orchestrator
@@ -78,6 +87,7 @@ type Services struct {
 	Prioritization  *prioritization.Service
 	Feedback        *feedback.Service
 	PM              pmService
+	Memory          MemoryReinforcer // optional — enables memory reinforcement on PR approval
 }
 
 type pmService interface {
@@ -500,7 +510,7 @@ func newProcessReviewCommentHandler(services *Services, logger zerolog.Logger) J
 
 		shouldUpdateMemories := false
 		if input.Repo != "" {
-			// Only update learned patterns when this job is processing a pending comment.
+			// Only update learned memories when this job is processing a pending comment.
 			// This prevents duplicate occurrence increments on retries/redeliveries.
 			currentComment, err := services.Feedback.GetProcessedComment(ctx, commentID, orgID)
 			if err != nil {
@@ -513,7 +523,7 @@ func newProcessReviewCommentHandler(services *Services, logger zerolog.Logger) J
 			return fmt.Errorf("process review comment: %w", err)
 		}
 
-		// After processing, check if the comment is generalizable and update patterns.
+		// After processing, check if the comment is generalizable and update memories.
 		// The repo is passed from the webhook handler.
 		if shouldUpdateMemories {
 			comment, err := services.Feedback.GetProcessedComment(ctx, commentID, orgID)
@@ -562,6 +572,51 @@ func newUpdateMemoriesHandler(services *Services, logger zerolog.Logger) JobHand
 			Msg("updating memories")
 
 		return services.Feedback.UpdateMemories(ctx, orgID, commentID, input.Repo, input.Rule, input.Category)
+	}
+}
+
+// reinforce_memories handler re-derives the active memory set for a repo and
+// reinforces those memories. Enqueued when a 143-generated PR is approved.
+func newReinforceMemoriesHandler(services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID string `json:"org_id"`
+			Repo  string `json:"repo"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal reinforce_memories payload: %w", err)
+		}
+
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+
+		if input.Repo == "" {
+			return fmt.Errorf("missing repo in reinforce_memories payload")
+		}
+
+		// Re-derive which memories would be selected for this repo's context.
+		memResult, err := services.Memory.GetContextMemories(ctx, agent.MemoryContextRequest{
+			OrgID: orgID,
+			Repo:  input.Repo,
+		})
+		if err != nil {
+			return fmt.Errorf("get context memories for reinforcement: %w", err)
+		}
+
+		if memResult == nil || len(memResult.MemoryIDs) == 0 {
+			logger.Debug().Str("repo", input.Repo).Msg("no active memories to reinforce")
+			return nil
+		}
+
+		logger.Info().
+			Str("org_id", orgID.String()).
+			Str("repo", input.Repo).
+			Int("memory_count", len(memResult.MemoryIDs)).
+			Msg("reinforcing memories after PR approval")
+
+		return services.Memory.ReinforceMemories(ctx, orgID, memResult.MemoryIDs)
 	}
 }
 

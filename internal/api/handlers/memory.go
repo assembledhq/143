@@ -158,3 +158,60 @@ func (h *MemoryHandler) ListComments(w http.ResponseWriter, r *http.Request) {
 		Meta: models.PaginationMeta{NextCursor: nextCursor},
 	})
 }
+
+// Create creates a new manually-curated memory.
+func (h *MemoryHandler) Create(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+
+	var req struct {
+		Repo         string   `json:"repo"`
+		Rule         string   `json:"rule"`
+		Category     string   `json:"category"`
+		Scope        string   `json:"scope"`
+		FilePatterns []string `json:"file_patterns,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+
+	if req.Rule == "" {
+		writeError(w, http.StatusBadRequest, "MISSING_RULE", "rule text is required")
+		return
+	}
+	if req.Category == "" {
+		req.Category = "general"
+	}
+	if req.Scope == "" {
+		req.Scope = "repo"
+	}
+	if req.Scope != "repo" && req.Scope != "org" {
+		writeError(w, http.StatusBadRequest, "INVALID_SCOPE", "scope must be 'repo' or 'org'")
+		return
+	}
+	if req.Scope == "repo" && req.Repo == "" {
+		writeError(w, http.StatusBadRequest, "MISSING_REPO", "repo is required for repo-scoped memories")
+		return
+	}
+
+	memory := &models.Memory{
+		OrgID:           orgID,
+		Repo:            req.Repo,
+		Rule:            req.Rule,
+		Category:        req.Category,
+		SourceCommentIDs: []uuid.UUID{},
+		OccurrenceCount: 1,
+		Status:          "active", // manual memories start active
+		ManuallyCurated: true,
+		Scope:           req.Scope,
+		Source:          "manual",
+		FilePatterns:    req.FilePatterns,
+	}
+
+	if err := h.memoryStore.Create(r.Context(), memory); err != nil {
+		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create memory")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, models.SingleResponse[models.Memory]{Data: *memory})
+}
