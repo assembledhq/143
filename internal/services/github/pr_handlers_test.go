@@ -32,7 +32,7 @@ var sessionColumns = []string{
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "pm_approach", "pm_reasoning", "project_task_id",
-	"model_override",
+	"model_override", "triggered_by_user_id",
 	"created_at",
 }
 
@@ -131,6 +131,7 @@ func TestHandlePullRequestEvent_MergedFlow(t *testing.T) {
 					nil, nil, nil, nil, nil,
 					nil, nil, nil, nil,
 					nil, // model_override
+					nil, // triggered_by_user_id
 					now),
 		)
 

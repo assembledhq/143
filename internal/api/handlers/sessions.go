@@ -170,13 +170,19 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var triggeredByUserID *uuid.UUID
+	if user := middleware.UserFromContext(r.Context()); user != nil {
+		triggeredByUserID = &user.ID
+	}
+
 	run := &models.Session{
-		IssueID:       issueID,
-		OrgID:         orgID,
-		AgentType:     agentType,
-		Status:        "pending",
-		AutonomyLevel: autonomyLevel,
-		TokenMode:     tokenMode,
+		IssueID:           issueID,
+		OrgID:             orgID,
+		AgentType:         agentType,
+		Status:            "pending",
+		AutonomyLevel:     autonomyLevel,
+		TokenMode:         tokenMode,
+		TriggeredByUserID: triggeredByUserID,
 	}
 	if err := h.runStore.Create(r.Context(), run); err != nil {
 		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create agent run")
@@ -541,15 +547,21 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var manualTriggeredByUserID *uuid.UUID
+	if user := middleware.UserFromContext(r.Context()); user != nil {
+		manualTriggeredByUserID = &user.ID
+	}
+
 	session := &models.Session{
-		IssueID:       issue.ID,
-		OrgID:         orgID,
-		AgentType:     agentType,
-		Status:        "pending",
-		AutonomyLevel: autonomyLevel,
-		TokenMode:     tokenMode,
-		ModelOverride: modelOverride,
-		PMApproach:    &title,
+		IssueID:           issue.ID,
+		OrgID:             orgID,
+		AgentType:         agentType,
+		Status:            "pending",
+		AutonomyLevel:     autonomyLevel,
+		TokenMode:         tokenMode,
+		ModelOverride:     modelOverride,
+		TriggeredByUserID: manualTriggeredByUserID,
+		PMApproach:        &title,
 	}
 	if err := h.runStore.Create(r.Context(), session); err != nil {
 		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create manual session")

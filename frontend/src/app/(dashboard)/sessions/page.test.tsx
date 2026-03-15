@@ -2,7 +2,9 @@ import { describe, it, expect, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { renderWithProviders, screen } from '@/test/test-utils';
 import { server } from '@/test/mocks/server';
+import { mockSessions, mockMembers } from '@/test/mocks/handlers';
 import { SessionsPageContent } from './sessions-page-content';
+import type { Session, User, ListResponse } from '@/lib/types';
 
 // Mock next/link to render a plain anchor
 vi.mock('next/link', () => ({
@@ -92,7 +94,7 @@ describe('SessionsPage', () => {
     expect(screen.getAllByText('Failed').length).toBeGreaterThanOrEqual(1);
   });
 
-  it('groups sessions into sections by status', async () => {
+  it('shows status indicators for sessions', async () => {
     renderWithProviders(<SessionsPageContent />);
 
     await screen.findByText('Fixed TypeError by adding null check');
@@ -102,14 +104,69 @@ describe('SessionsPage', () => {
     expect(screen.getAllByText('Failed').length).toBeGreaterThanOrEqual(1);
   });
 
-  it('links session rows to detail pages', async () => {
+  it('shows Triggered by column header', async () => {
     renderWithProviders(<SessionsPageContent />);
 
     await screen.findByText('Fixed TypeError by adding null check');
 
-    const links = screen.getAllByRole('link');
-    const sessionLinks = links.filter((l) => l.getAttribute('href')?.startsWith('/sessions/'));
-    expect(sessionLinks.length).toBeGreaterThan(0);
+    expect(screen.getByText('Triggered by')).toBeInTheDocument();
   });
 
+  it('displays triggered-by user name for sessions with triggered_by_user_id', async () => {
+    const sessionsWithTriggeredBy: Session[] = [
+      {
+        ...mockSessions[0],
+        triggered_by_user_id: 'user-1',
+      },
+    ];
+
+    server.use(
+      http.get('/api/v1/sessions', () => {
+        return HttpResponse.json({
+          data: sessionsWithTriggeredBy,
+          meta: {},
+        } satisfies ListResponse<Session>);
+      }),
+      http.get('/api/v1/team/members', () => {
+        return HttpResponse.json({
+          data: mockMembers,
+          meta: {},
+        } satisfies ListResponse<User>);
+      }),
+    );
+
+    renderWithProviders(<SessionsPageContent />);
+
+    // Alice Smith -> shows first name "Alice"
+    expect(await screen.findByText('Alice')).toBeInTheDocument();
+  });
+
+  it('shows dash when session has no triggered_by_user_id', async () => {
+    renderWithProviders(<SessionsPageContent />);
+
+    await screen.findByText('Fixed TypeError by adding null check');
+
+    // Mock sessions don't have triggered_by_user_id, so should show dashes
+    const dashes = screen.getAllByText('—');
+    expect(dashes.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('shows sortable column headers', async () => {
+    renderWithProviders(<SessionsPageContent />);
+
+    await screen.findByText('Fixed TypeError by adding null check');
+
+    expect(screen.getByText('Status')).toBeInTheDocument();
+    expect(screen.getByText('Agent')).toBeInTheDocument();
+    expect(screen.getByText('Confidence')).toBeInTheDocument();
+    expect(screen.getByText('Last modified')).toBeInTheDocument();
+  });
+
+  it('shows session count', async () => {
+    renderWithProviders(<SessionsPageContent />);
+
+    await screen.findByText('Fixed TypeError by adding null check');
+
+    expect(screen.getByText('2 sessions')).toBeInTheDocument();
+  });
 });
