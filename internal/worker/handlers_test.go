@@ -456,6 +456,7 @@ func TestRegisterHandlers_AllRegistered(t *testing.T) {
 	expectedHandlers := []string{
 		"ingest_webhook",
 		"sync_sentry",
+		"sync_slack",
 	}
 	for _, name := range expectedHandlers {
 		_, ok := w.handlers[name]
@@ -855,6 +856,7 @@ func TestRegisterHandlers_WithAllServices(t *testing.T) {
 	allExpected := []string{
 		"ingest_webhook",
 		"sync_sentry",
+		"sync_slack",
 		"prioritize",
 		"pm_analyze",
 		"run_agent",

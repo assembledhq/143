@@ -23,6 +23,7 @@ func TestProviderName_Valid(t *testing.T) {
 		{"github_oauth is valid", ProviderGitHubOAuth, true},
 		{"sentry is valid", ProviderSentry, true},
 		{"linear is valid", ProviderLinear, true},
+		{"slack is valid", ProviderSlack, true},
 		{"unknown is invalid", ProviderName("unknown"), false},
 		{"empty is invalid", ProviderName(""), false},
 	}
@@ -232,6 +233,7 @@ func TestProviderConfig_Provider(t *testing.T) {
 		{"GitHubOAuthConfig", GitHubOAuthConfig{}, ProviderGitHubOAuth},
 		{"SentryConfig", SentryConfig{}, ProviderSentry},
 		{"LinearConfig", LinearConfig{}, ProviderLinear},
+		{"SlackConfig", SlackConfig{}, ProviderSlack},
 		{"OpenAIChatGPTConfig", OpenAIChatGPTConfig{}, ProviderOpenAIChatGPT},
 	}
 
@@ -273,6 +275,8 @@ func TestProviderConfig_Validate(t *testing.T) {
 		{"linear valid", LinearConfig{WebhookSecret: "secret"}, false},
 		{"linear oauth valid", LinearConfig{AccessToken: "lin-token"}, false},
 		{"linear empty", LinearConfig{WebhookSecret: ""}, true},
+		{"slack valid", SlackConfig{AccessToken: "xoxb-test-token"}, false},
+		{"slack missing access_token", SlackConfig{AccessToken: ""}, true},
 		{"openai_chatgpt valid", OpenAIChatGPTConfig{AccessToken: "cha_tok", RefreshToken: "chr_tok"}, false},
 		{"openai_chatgpt missing access_token", OpenAIChatGPTConfig{AccessToken: "", RefreshToken: "chr_tok"}, true},
 		{"openai_chatgpt missing refresh_token", OpenAIChatGPTConfig{AccessToken: "cha_tok", RefreshToken: ""}, true},
@@ -475,6 +479,40 @@ func TestParseProviderConfig_OpenAIChatGPT_Invalid(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestMaskedSummary_Slack(t *testing.T) {
+	t.Parallel()
+
+	cfg := SlackConfig{AccessToken: "xoxb-test-token"}
+	summary := cfg.MaskedSummary()
+
+	require.Equal(t, ProviderSlack, summary.Provider, "summary should have correct provider")
+	require.True(t, summary.Configured, "summary should be configured")
+	require.Empty(t, summary.MaskedKey, "slack summary should not include masked key")
+}
+
+func TestParseProviderConfig_Slack(t *testing.T) {
+	t.Parallel()
+
+	input := `{"access_token":"xoxb-test-token","team_id":"T123","team_name":"Test Team","scope":"channels:read","channel_ids":["C1","C2"]}`
+	cfg, err := ParseProviderConfig(ProviderSlack, []byte(input))
+	require.NoError(t, err, "ParseProviderConfig should not return an error")
+
+	sc, ok := cfg.(SlackConfig)
+	require.True(t, ok, "config should be SlackConfig")
+	require.Equal(t, "xoxb-test-token", sc.AccessToken, "should parse access_token")
+	require.Equal(t, "T123", sc.TeamID, "should parse team_id")
+	require.Equal(t, "Test Team", sc.TeamName, "should parse team_name")
+	require.Equal(t, "channels:read", sc.Scope, "should parse scope")
+	require.Equal(t, []string{"C1", "C2"}, sc.ChannelIDs, "should parse channel_ids")
+}
+
+func TestParseProviderConfig_Slack_Invalid(t *testing.T) {
+	t.Parallel()
+
+	_, err := ParseProviderConfig(ProviderSlack, []byte(`{bad json`))
+	require.Error(t, err)
+}
+
 func TestIsLLMProvider(t *testing.T) {
 	t.Parallel()
 
@@ -491,6 +529,7 @@ func TestIsLLMProvider(t *testing.T) {
 		{"github_oauth is not LLM", ProviderGitHubOAuth, false},
 		{"sentry is not LLM", ProviderSentry, false},
 		{"linear is not LLM", ProviderLinear, false},
+		{"slack is not LLM", ProviderSlack, false},
 	}
 
 	for _, tt := range tests {

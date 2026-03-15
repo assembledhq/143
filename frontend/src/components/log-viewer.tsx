@@ -5,15 +5,16 @@ import { AlertTriangle, RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
+import { SSE_EVENT, addSSEListener } from "@/lib/sse";
 import type { SessionLog } from "@/lib/types";
 
 const levelColors: Record<string, string> = {
-  info: "bg-gray-100 text-gray-800",
-  error: "bg-red-100 text-red-800",
-  warn: "bg-yellow-100 text-yellow-800",
-  tool_use: "bg-blue-100 text-blue-800",
-  question: "bg-yellow-100 text-yellow-800",
-  debug: "bg-gray-100 text-gray-600",
+  info: "bg-muted text-muted-foreground",
+  error: "bg-red-500/10 text-red-700 dark:text-red-400",
+  warn: "bg-yellow-500/10 text-yellow-700 dark:text-yellow-400",
+  tool_use: "bg-blue-500/10 text-blue-700 dark:text-blue-400",
+  question: "bg-yellow-500/10 text-yellow-700 dark:text-yellow-400",
+  debug: "bg-muted text-muted-foreground/70",
 };
 
 function formatTimestamp(dateStr: string): string {
@@ -114,17 +115,11 @@ export function LogViewer({ runId, isActive }: LogViewerProps) {
         reconnectAttempts.current = 0;
       };
 
-      eventSource.onmessage = (event) => {
-        try {
-          const log: SessionLog = JSON.parse(event.data);
-          mergeLogs([log]);
-        } catch {
-          // ignore unparseable messages
-        }
-      };
+      addSSEListener(eventSource, SSE_EVENT.LOG, (log) => {
+        mergeLogs([log]);
+      });
 
-      // Listen for the "done" event sent when the run reaches terminal status.
-      eventSource.addEventListener("done", () => {
+      addSSEListener(eventSource, SSE_EVENT.DONE, () => {
         setStreaming(false);
         eventSource?.close();
       });

@@ -183,7 +183,7 @@ func TestMapLinearPriority(t *testing.T) {
 		t.Run(fmt.Sprintf("priority_%d", tt.input), func(t *testing.T) {
 			t.Parallel()
 
-			require.Equal(t, tt.expected, mapLinearPriority(tt.input), "mapLinearPriority should return expected severity")
+			require.Equal(t, tt.expected, MapLinearPriority(tt.input), "MapLinearPriority should return expected severity")
 		})
 	}
 }

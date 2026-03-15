@@ -6,7 +6,10 @@ import (
 )
 
 func TestParseRepoSettings_Empty(t *testing.T) {
-	s := ParseRepoSettings(nil)
+	s, err := ParseRepoSettings(nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if s.PM != nil {
 		t.Fatal("expected nil PM for empty settings")
 	}
@@ -14,7 +17,10 @@ func TestParseRepoSettings_Empty(t *testing.T) {
 
 func TestParseRepoSettings_WithPM(t *testing.T) {
 	raw := json.RawMessage(`{"pm":{"pm_schedule_hours":2,"pm_model":"opus"}}`)
-	s := ParseRepoSettings(raw)
+	s, err := ParseRepoSettings(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if s.PM == nil {
 		t.Fatal("expected PM to be parsed")
 	}
@@ -26,8 +32,18 @@ func TestParseRepoSettings_WithPM(t *testing.T) {
 	}
 }
 
+func TestParseRepoSettings_InvalidJSON(t *testing.T) {
+	_, err := ParseRepoSettings(json.RawMessage(`{invalid`))
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+}
+
 func TestMergeRepoPMSettings_NilPM(t *testing.T) {
-	org := ParseOrgSettings(nil)
+	org, err := ParseOrgSettings(nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	repo := RepoSettings{}
 	merged := MergeRepoPMSettings(org, repo)
 	if merged.PMScheduleHours != DefaultPMScheduleHours {
@@ -36,7 +52,10 @@ func TestMergeRepoPMSettings_NilPM(t *testing.T) {
 }
 
 func TestMergeRepoPMSettings_Overrides(t *testing.T) {
-	org := ParseOrgSettings(nil)
+	org, err := ParseOrgSettings(nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	hours := 2
 	model := "opus"
 	threshold := 50.0
@@ -73,7 +92,10 @@ func TestMergeRepoPMSettings_Overrides(t *testing.T) {
 }
 
 func TestMergeRepoPMSettings_PartialOverride(t *testing.T) {
-	org := ParseOrgSettings(nil)
+	org, err := ParseOrgSettings(nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	hours := 6
 	repo := RepoSettings{
 		PM: &RepoPMSettings{

@@ -3,6 +3,7 @@ package pm
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -17,6 +18,14 @@ type gatheredContext struct {
 	productContext *models.ProductContext
 	settings       models.OrgSettings
 	pmDocuments    []models.PMDocument
+	slackThreads   []slackThreadData // raw thread data for sandbox files
+}
+
+// slackThreadData holds raw thread data for writing to sandbox files.
+type slackThreadData struct {
+	ChannelName string          `json:"channel_name"`
+	ThreadTS    string          `json:"thread_ts"`
+	Messages    json.RawMessage `json:"messages"`
 }
 
 // gatherContext collects the context needed for PM analysis. When repo is
@@ -26,11 +35,17 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 	if err != nil {
 		return nil, err
 	}
-	settings := models.ParseOrgSettings(org.Settings)
+	settings, parseErr := models.ParseOrgSettings(org.Settings)
+	if parseErr != nil {
+		return nil, fmt.Errorf("parse org settings: %w", parseErr)
+	}
 
 	// Apply repo-level PM overrides when running for a specific repository.
 	if repo != nil {
-		repoSettings := models.ParseRepoSettings(repo.Settings)
+		repoSettings, repoParseErr := models.ParseRepoSettings(repo.Settings)
+		if repoParseErr != nil {
+			return nil, fmt.Errorf("parse repo settings: %w", repoParseErr)
+		}
 		settings = models.MergeRepoPMSettings(settings, repoSettings)
 	}
 
@@ -164,12 +179,72 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 		}
 	}
 
+	// Gather Slack thread summaries if integration is connected.
+	var slackThreads []slackThreadData
+	if s.integrations != nil && s.credentials != nil {
+		slackCtx, threadData, err := s.gatherSlackContext(ctx, orgID)
+		if err != nil {
+			s.logger.Warn().Err(err).Msg("failed to gather slack context")
+		} else if len(slackCtx) > 0 {
+			pmCtx.SlackThreads = slackCtx
+			slackThreads = threadData
+		}
+	}
+
 	return &gatheredContext{
 		pmContext:      pmCtx,
 		productContext: settings.ProductContext,
 		settings:       settings,
 		pmDocuments:    pmDocs,
+		slackThreads:   slackThreads,
 	}, nil
+}
+
+// gatherSlackContext reads recent thread summaries from the Slack integration config.
+func (s *Service) gatherSlackContext(ctx context.Context, orgID uuid.UUID) ([]SlackThreadContext, []slackThreadData, error) {
+	integrations, err := s.integrations.ListByOrgAndProvider(ctx, orgID, string(models.IntegrationProviderSlack))
+	if err != nil || len(integrations) == 0 {
+		return nil, nil, err
+	}
+
+	integ := integrations[0]
+	if integ.Config == nil {
+		return nil, nil, nil
+	}
+
+	var config slackIntegrationConfig
+	if err := json.Unmarshal(integ.Config, &config); err != nil {
+		return nil, nil, fmt.Errorf("parse slack integration config: %w", err)
+	}
+
+	var summaries []SlackThreadContext
+	var threadData []slackThreadData
+
+	for _, t := range config.RecentThreads {
+		if t.Analysis == nil || !t.Analysis.Actionable {
+			continue
+		}
+
+		threadFile := fmt.Sprintf("/workspace/.slack-threads/%s-%s.json", t.ChannelName, t.ThreadTS)
+		summaries = append(summaries, SlackThreadContext{
+			ChannelName:  t.ChannelName,
+			Category:     t.Analysis.Category,
+			Summary:      t.Analysis.Summary,
+			Urgency:      t.Analysis.Urgency,
+			MessageCount: t.MessageCount,
+			Participants: t.Participants,
+			LastActivity: t.LastActivity,
+			ThreadFile:   threadFile,
+		})
+
+		threadData = append(threadData, slackThreadData{
+			ChannelName: t.ChannelName,
+			ThreadTS:    t.ThreadTS,
+			Messages:    t.Messages,
+		})
+	}
+
+	return summaries, threadData, nil
 }
 
 func summarizeIssue(issue models.Issue) IssueSummary {
@@ -177,9 +252,9 @@ func summarizeIssue(issue models.Issue) IssueSummary {
 	if issue.Description != nil {
 		description = *issue.Description
 	}
-	description = truncate(description, 200)
+	description = truncate(description, 500)
 
-	return IssueSummary{
+	summary := IssueSummary{
 		ID:                    issue.ID.String(),
 		Source:                issue.Source,
 		Title:                 issue.Title,
@@ -191,6 +266,104 @@ func summarizeIssue(issue models.Issue) IssueSummary {
 		LastSeenAt:            issue.LastSeenAt.Format(time.RFC3339),
 		Tags:                  issue.Tags,
 		HasStackTrace:         hasStackTrace(issue.RawData),
+	}
+
+	// Enrich with source-specific metadata.
+	switch issue.Source {
+	case "sentry":
+		summary.StackTraceSummary = extractStackTraceSummary(issue.RawData)
+	case "linear":
+		enrichLinearMetadata(&summary, issue.RawData)
+	}
+
+	return summary
+}
+
+// extractStackTraceSummary pulls a condensed stack trace from Sentry raw data
+// so the PM agent can reason about root causes without exploring the codebase.
+func extractStackTraceSummary(rawData json.RawMessage) string {
+	if len(rawData) == 0 {
+		return ""
+	}
+
+	var data struct {
+		Entries []struct {
+			Type string `json:"type"`
+			Data struct {
+				Values []struct {
+					Type       string `json:"type"`
+					Value      string `json:"value"`
+					Stacktrace struct {
+						Frames []struct {
+							Filename string `json:"filename"`
+							Function string `json:"function"`
+							LineNo   int    `json:"lineNo"`
+						} `json:"frames"`
+					} `json:"stacktrace"`
+				} `json:"values"`
+			} `json:"data"`
+		} `json:"entries"`
+	}
+
+	if err := json.Unmarshal(rawData, &data); err != nil {
+		return ""
+	}
+
+	var b strings.Builder
+	for _, entry := range data.Entries {
+		if entry.Type != "exception" {
+			continue
+		}
+		for _, value := range entry.Data.Values {
+			b.WriteString(value.Type + ": " + value.Value + "\n")
+			// Include the top 5 app frames (most relevant for root cause).
+			frameCount := 0
+			for i := len(value.Stacktrace.Frames) - 1; i >= 0 && frameCount < 5; i-- {
+				frame := value.Stacktrace.Frames[i]
+				if frame.Filename == "" || strings.HasPrefix(frame.Filename, "<") ||
+					strings.Contains(frame.Filename, "node_modules") ||
+					strings.Contains(frame.Filename, "site-packages") {
+					continue
+				}
+				fmt.Fprintf(&b, "  at %s (%s:%d)\n", frame.Function, frame.Filename, frame.LineNo)
+				frameCount++
+			}
+		}
+	}
+
+	return truncate(b.String(), 800)
+}
+
+// enrichLinearMetadata extracts Linear-specific fields from raw webhook data.
+func enrichLinearMetadata(summary *IssueSummary, rawData json.RawMessage) {
+	if len(rawData) == 0 {
+		return
+	}
+
+	var payload struct {
+		Data struct {
+			Identifier string `json:"identifier"`
+			State      struct {
+				Name string `json:"name"`
+				Type string `json:"type"`
+			} `json:"state"`
+			Team struct {
+				Key  string `json:"key"`
+				Name string `json:"name"`
+			} `json:"team"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(rawData, &payload); err != nil {
+		return
+	}
+
+	summary.LinearIdentifier = payload.Data.Identifier
+	summary.LinearState = payload.Data.State.Name
+	if payload.Data.Team.Name != "" {
+		summary.LinearTeam = payload.Data.Team.Name
+	} else {
+		summary.LinearTeam = payload.Data.Team.Key
 	}
 }
 

@@ -22,6 +22,7 @@ services:
 
   server:
     image: golang:1.26
+    restart: on-failure:3
     working_dir: /app
     command: >
       sh -c "go install github.com/air-verse/air@latest &&
@@ -47,6 +48,7 @@ services:
       - go_mod_cache:/go/pkg/mod
       - go_build_cache:/root/.cache/go-build
       - go_bin_cache:/go/bin  # cache compiled binaries (e.g. air) across restarts
+      - /var/run/docker.sock:/var/run/docker.sock  # allow server to create sandbox containers
     deploy:
       resources:
         limits:

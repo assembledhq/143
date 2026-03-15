@@ -62,8 +62,8 @@ describe('LoginPage', () => {
   it('renders Sign In and Sign Up tabs', () => {
     renderWithProviders(<LoginPage />);
 
-    expect(screen.getByRole('tab', { name: 'Sign In' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'Sign Up' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Sign in' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Sign up' })).toBeInTheDocument();
   });
 
   it('shows GitHub button', () => {
@@ -112,7 +112,7 @@ describe('LoginPage', () => {
 
     await user.type(screen.getByLabelText('Email', { exact: false }), 'test@example.com');
     await user.type(screen.getByLabelText('Password', { exact: false }), 'password123');
-    await user.click(screen.getByRole('button', { name: 'Sign In' }));
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
 
     expect(loginEmailMock).toHaveBeenCalledWith('test@example.com', 'password123');
   });
@@ -123,7 +123,7 @@ describe('LoginPage', () => {
     renderWithProviders(<LoginPage />);
 
     // Switch to Sign Up tab
-    await user.click(screen.getByRole('tab', { name: 'Sign Up' }));
+    await user.click(screen.getByRole('tab', { name: 'Sign up' }));
 
     await user.type(screen.getByLabelText('Name'), 'New User');
     // There are now two email fields; get the one in the sign-up tab
@@ -131,7 +131,7 @@ describe('LoginPage', () => {
     await user.type(emailInputs[emailInputs.length - 1], 'new@example.com');
     const passwordInputs = screen.getAllByLabelText('Password');
     await user.type(passwordInputs[passwordInputs.length - 1], 'newpass123');
-    await user.click(screen.getByRole('button', { name: 'Create Account' }));
+    await user.click(screen.getByRole('button', { name: 'Create account' }));
 
     expect(registerMock).toHaveBeenCalledWith('new@example.com', 'newpass123', 'New User', undefined);
   });
@@ -143,7 +143,7 @@ describe('LoginPage', () => {
 
     await user.type(screen.getByLabelText('Email', { exact: false }), 'bad@example.com');
     await user.type(screen.getByLabelText('Password', { exact: false }), 'wrongpass');
-    await user.click(screen.getByRole('button', { name: 'Sign In' }));
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('invalid email or password');
   });
@@ -162,7 +162,7 @@ describe('LoginPage', () => {
     await user.type(screen.getByLabelText('Email', { exact: false }), 'test@example.com');
     await user.type(screen.getByLabelText('Password', { exact: false }), 'password123');
 
-    const signInButton = screen.getByRole('button', { name: 'Sign In' });
+    const signInButton = screen.getByRole('button', { name: 'Sign in' });
     await user.click(signInButton);
 
     expect(signInButton).toBeDisabled();
@@ -195,7 +195,7 @@ describe('LoginPage', () => {
 
     await user.type(screen.getByLabelText('Name'), 'Invited User');
     await user.type(screen.getByLabelText('Password'), 'invitepass123');
-    await user.click(screen.getByRole('button', { name: 'Create Account' }));
+    await user.click(screen.getByRole('button', { name: 'Create account' }));
 
     expect(registerMock).toHaveBeenCalledWith('invitee@example.com', 'invitepass123', 'Invited User', 'invite-123');
   });

@@ -21,9 +21,11 @@ vi.mock("lucide-react", () => {
     RefreshCw: icon("RefreshCw"),
     Plus: icon("Plus"),
     Activity: icon("Activity"),
+    AlertTriangle: icon("AlertTriangle"),
     CheckCircle2: icon("CheckCircle2"),
     XCircle: icon("XCircle"),
     Clock: icon("Clock"),
+    Timer: icon("Timer"),
   };
 });
 
@@ -51,7 +53,7 @@ describe("PMStatusBanner", () => {
       expect(screen.getByText("PM Agent")).toBeInTheDocument();
     });
     expect(screen.getByText("Idle")).toBeInTheDocument();
-    expect(screen.getByText("Run PM Agent")).toBeInTheDocument();
+    expect(screen.getByText("Run now")).toBeInTheDocument();
   });
 
   it("renders running state", () => {
@@ -142,6 +144,33 @@ describe("PMStatusBanner", () => {
     });
   });
 
+  it("shows next automatic run time", async () => {
+    mockUseAnalyze.mockReturnValue(defaultAnalyze());
+
+    server.use(
+      http.get("*/api/v1/pm/status", () => {
+        return HttpResponse.json({
+          data: {
+            is_running: false,
+            last_run_at: "2026-03-01T10:00:00Z",
+            last_run_status: "completed",
+            issues_reviewed: 5,
+            next_run_in: "in 2h 30m",
+            success_rate: 0,
+            success_count: 0,
+            total_delegated: 0,
+          },
+        });
+      })
+    );
+
+    renderWithProviders(<PMStatusBanner hasActivePlanSession={false} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Next run in 2h 30m")).toBeInTheDocument();
+    });
+  });
+
   it("shows delegation stats", async () => {
     mockUseAnalyze.mockReturnValue(defaultAnalyze());
 
@@ -179,6 +208,33 @@ describe("PMStatusBanner", () => {
     const user = userEvent.setup();
     await user.click(screen.getByText("dismiss"));
     expect(dismissError).toHaveBeenCalled();
+  });
+
+  it("shows attention needed when PM status has last_error", async () => {
+    mockUseAnalyze.mockReturnValue(defaultAnalyze());
+
+    server.use(
+      http.get("*/api/v1/pm/status", () => {
+        return HttpResponse.json({
+          data: {
+            is_running: false,
+            last_run_status: "",
+            issues_reviewed: 0,
+            success_rate: 0,
+            success_count: 0,
+            total_delegated: 0,
+            last_error: "no repositories configured for org",
+            last_failed_at: new Date().toISOString(),
+          },
+        });
+      })
+    );
+
+    renderWithProviders(<PMStatusBanner hasActivePlanSession={false} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Attention needed")).toBeInTheDocument();
+    });
   });
 
   it("renders Manual Session link", () => {

@@ -122,7 +122,10 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 			s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("scheduler failed to fetch org settings")
 			continue
 		}
-		settings := models.ParseOrgSettings(org.Settings)
+		settings, parseErr := models.ParseOrgSettings(org.Settings)
+		if parseErr != nil {
+			s.logger.Warn().Err(parseErr).Str("org_id", orgID.String()).Msg("scheduler failed to parse org settings, using defaults")
+		}
 		orgScheduleHours := settings.PMScheduleHours
 		if orgScheduleHours <= 0 {
 			orgScheduleHours = models.DefaultPMScheduleHours
@@ -149,7 +152,11 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 			if repo.Status != "active" {
 				continue
 			}
-			repoSettings := models.ParseRepoSettings(repo.Settings)
+			repoSettings, repoParseErr := models.ParseRepoSettings(repo.Settings)
+			if repoParseErr != nil {
+				s.logger.Warn().Err(repoParseErr).Str("org_id", orgID.String()).Str("repo_id", repo.ID.String()).Msg("scheduler failed to parse repo settings, skipping")
+				continue
+			}
 			if repoSettings.PM != nil {
 				hasCustomRepos = true
 				dedupeKey := fmt.Sprintf("pm_analyze:%s:%s", orgID.String(), repo.ID.String())
@@ -162,6 +169,13 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 					s.logger.Warn().Err(err).Str("org_id", orgID.String()).Str("repo_id", repo.ID.String()).Msg("failed to enqueue repo pm_analyze job")
 				}
 			}
+		}
+
+		// Enqueue sync_slack for orgs with active Slack integrations.
+		slackDedupeKey := fmt.Sprintf("sync_slack:%s", orgID.String())
+		slackPayload := map[string]string{"org_id": orgID.String()}
+		if _, err := s.jobs.Enqueue(ctx, orgID, "default", "sync_slack", slackPayload, 3, &slackDedupeKey); err != nil {
+			s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to enqueue sync_slack job")
 		}
 
 		// Enqueue an org-level job (no repo_id) for repos without custom settings,

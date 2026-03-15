@@ -34,7 +34,7 @@ func TestPMHandler_AnalyzeEnqueuesJob(t *testing.T) {
 	jobStore := db.NewJobStore(mock)
 	planStore := db.NewPMPlanStore(mock)
 	decisionLogStore := db.NewPMDecisionLogStore(mock)
-	handler := NewPMHandler(planStore, decisionLogStore, jobStore)
+	handler := NewPMHandler(planStore, decisionLogStore, jobStore, nil)
 
 	orgID := uuid.New()
 	jobID := uuid.New()
@@ -64,7 +64,7 @@ func TestPMHandler_ListPlans(t *testing.T) {
 	jobStore := db.NewJobStore(mock)
 	planStore := db.NewPMPlanStore(mock)
 	decisionLogStore := db.NewPMDecisionLogStore(mock)
-	handler := NewPMHandler(planStore, decisionLogStore, jobStore)
+	handler := NewPMHandler(planStore, decisionLogStore, jobStore, nil)
 
 	orgID := uuid.New()
 	now := time.Now()
@@ -102,7 +102,7 @@ func TestPMHandler_Decisions(t *testing.T) {
 	planStore := db.NewPMPlanStore(mock)
 	decisionLogStore := db.NewPMDecisionLogStore(mock)
 	jobStore := db.NewJobStore(mock)
-	handler := NewPMHandler(planStore, decisionLogStore, jobStore)
+	handler := NewPMHandler(planStore, decisionLogStore, jobStore, nil)
 
 	orgID := uuid.New()
 	planID := uuid.New()
@@ -159,7 +159,7 @@ func TestPMHandler_Status(t *testing.T) {
 	planStore := db.NewPMPlanStore(mock)
 	decisionLogStore := db.NewPMDecisionLogStore(mock)
 	jobStore := db.NewJobStore(mock)
-	handler := NewPMHandler(planStore, decisionLogStore, jobStore)
+	handler := NewPMHandler(planStore, decisionLogStore, jobStore, nil)
 
 	orgID := uuid.New()
 	now := time.Now()
@@ -176,6 +176,11 @@ func TestPMHandler_Status(t *testing.T) {
 					now, &now,
 				),
 		)
+
+	// Mock GetLatestFailedByType — no recent failures.
+	mock.ExpectQuery("SELECT id, last_error, updated_at FROM jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "last_error", "updated_at"}))
 
 	// Mock GetDecisionSummary query.
 	mock.ExpectQuery("SELECT").
@@ -199,6 +204,68 @@ func TestPMHandler_Status(t *testing.T) {
 	require.Equal(t, 14, resp.Data.IssuesReviewed, "should show issues reviewed from last plan")
 	require.Equal(t, 11, resp.Data.SuccessCount, "should show success count")
 	require.Equal(t, 15, resp.Data.TotalDelegated, "should show total delegated")
+	require.Nil(t, resp.Data.LastError, "should have no error when no recent failures")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPMHandler_StatusWithJobError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	planStore := db.NewPMPlanStore(mock)
+	decisionLogStore := db.NewPMDecisionLogStore(mock)
+	jobStore := db.NewJobStore(mock)
+	handler := NewPMHandler(planStore, decisionLogStore, jobStore, nil)
+
+	orgID := uuid.New()
+	now := time.Now()
+	failedAt := now.Add(5 * time.Minute) // Failed after the last plan
+
+	// Mock GetLatestByOrg — has a previous successful plan.
+	mock.ExpectQuery("SELECT .+ FROM pm_plans WHERE org_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(pmPlanColumnsWithContext).
+				AddRow(uuid.New(), orgID, "completed", "analysis",
+					json.RawMessage(`[]`), json.RawMessage(`[]`), json.RawMessage(`[]`),
+					5, 0, 0, 0, 0, 0,
+					json.RawMessage(`{}`), json.RawMessage(`{}`), "cron",
+					now, &now,
+				),
+		)
+
+	// Mock GetLatestFailedByType — has a recent failure newer than the plan.
+	mock.ExpectQuery("SELECT id, last_error, updated_at FROM jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "last_error", "updated_at"}).
+				AddRow(uuid.New(), "no repositories configured for org", failedAt),
+		)
+
+	// Mock GetDecisionSummary query.
+	mock.ExpectQuery("SELECT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"total_delegated", "succeeded", "failed", "still_open"}).
+				AddRow(0, 0, 0, 0),
+		)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/pm/status", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.Status(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "should return OK")
+
+	var resp models.SingleResponse[models.PMStatus]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "response should be valid JSON")
+	require.NotNil(t, resp.Data.LastError, "should include job error")
+	require.Equal(t, "no repositories configured for org", *resp.Data.LastError, "should contain the error message")
+	require.NotNil(t, resp.Data.LastFailedAt, "should include failure timestamp")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

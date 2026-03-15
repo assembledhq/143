@@ -82,6 +82,20 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	healthHandler := handlers.NewHealthHandler(pool)
 	authHandler := handlers.NewAuthHandler(cfg, orgStore, userStore, authSessionStore, invitationStore)
 	repoHandler := handlers.NewRepositoryHandler(repoStore)
+	integrationOpts := []handlers.IntegrationHandlerOption{
+		handlers.WithSentryOAuth(cfg.SentryOAuthClientID, cfg.SentryOAuthClientSecret),
+		handlers.WithGitHubIntegrationOAuth(cfg.GitHubOAuthClientID, cfg.GitHubOAuthClientSecret),
+		handlers.WithGitHubAppSlug(cfg.GitHubAppSlug),
+		handlers.WithSlackOAuth(cfg.SlackOAuthClientID, cfg.SlackOAuthClientSecret),
+	}
+	// If the GitHub App service is available, let the integration handler
+	// fetch repos directly from the API during the install redirect.
+	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
+		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
+		if err == nil {
+			integrationOpts = append(integrationOpts, handlers.WithGitHubApp(ghSvc, repoStore))
+		}
+	}
 	integrationHandler := handlers.NewIntegrationHandler(
 		integrationStore,
 		credentialStore,
@@ -89,9 +103,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		cfg.LinearOAuthClientSecret,
 		cfg.BaseURL,
 		cfg.FrontendURL,
-		handlers.WithSentryOAuth(cfg.SentryOAuthClientID, cfg.SentryOAuthClientSecret),
-		handlers.WithGitHubIntegrationOAuth(cfg.GitHubOAuthClientID, cfg.GitHubOAuthClientSecret),
-		handlers.WithGitHubAppSlug(cfg.GitHubAppSlug),
+		integrationOpts...,
 	)
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, userStore, repoStore, integrationStore, prService)
 	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeAgentEnv(), cfg.SafeLLMEnv())
@@ -105,8 +117,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		issueStore,
 		orgStore,
 		jobStore,
+		llmClient,
+		logger,
 	)
-	pmHandler := handlers.NewPMHandler(pmPlanStore, pmDecisionLogStore, jobStore)
+	pmHandler := handlers.NewPMHandler(pmPlanStore, pmDecisionLogStore, jobStore, orgStore)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
 	credentialHandler := handlers.NewCredentialHandler(credentialStore)
@@ -161,7 +175,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.Auth(authSessionStore, userStore))
 		r.Use(middleware.OrgContext)
-		r.Use(middleware.CSRF(cfg.CSRFSigningKey))
+		r.Use(middleware.LogContext(logger))
+		r.Use(middleware.CSRF(cfg.CSRFSigningKey, logger))
 
 		r.Get("/api/v1/auth/me", authHandler.Me)
 		r.Post("/api/v1/auth/logout", authHandler.Logout)
@@ -222,6 +237,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/integrations/github/callback", integrationHandler.HandleGitHubOAuthCallback)
 			r.Get("/api/v1/integrations/github/installed", integrationHandler.HandleGitHubAppInstalled)
 			r.Post("/api/v1/integrations/github/connect", integrationHandler.ConnectGitHub)
+			r.Get("/api/v1/integrations/slack/login", integrationHandler.StartSlackOAuth)
+			r.Get("/api/v1/integrations/slack/callback", integrationHandler.HandleSlackOAuthCallback)
+			r.Post("/api/v1/integrations/slack/connect", integrationHandler.ConnectSlack)
+			r.Get("/api/v1/integrations/slack/channels", integrationHandler.ListSlackChannels)
+			r.Patch("/api/v1/integrations/slack/channels", integrationHandler.UpdateSlackChannels)
 			r.Post("/api/v1/issues/{id}/fix", sessionHandler.TriggerFix)
 			r.Post("/api/v1/sessions/manual", sessionHandler.CreateManual)
 			r.Post("/api/v1/sessions/{id}/questions/{qid}/answer", sessionHandler.AnswerQuestion)

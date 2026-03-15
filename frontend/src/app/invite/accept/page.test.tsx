@@ -37,10 +37,10 @@ describe('AcceptInvitationPage', () => {
     const user = userEvent.setup();
     renderWithProviders(<AcceptInvitationPage />);
 
-    await screen.findByRole('button', { name: 'Create Account' });
+    await screen.findByRole('button', { name: 'Create account' });
     expect(screen.getByText(/invitee@example.com/i)).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'Create Account' }));
+    await user.click(screen.getByRole('button', { name: 'Create account' }));
 
     await waitFor(() => {
       expect(pushMock).toHaveBeenCalledWith('/login?tab=signup&invitation=invite-token-123&email=invitee%40example.com&org=Acme');

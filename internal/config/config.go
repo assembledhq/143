@@ -37,6 +37,11 @@ type Config struct {
 	SentryOAuthClientID     string `env:"SENTRY_OAUTH_CLIENT_ID"`
 	SentryOAuthClientSecret string `env:"SENTRY_OAUTH_CLIENT_SECRET"`
 
+	// Slack OAuth
+	SlackOAuthClientID     string `env:"SLACK_OAUTH_CLIENT_ID"`
+	SlackOAuthClientSecret string `env:"SLACK_OAUTH_CLIENT_SECRET"`
+	SlackSummaryModel      string `env:"SLACK_SUMMARY_MODEL" envDefault:"gpt-5-nano"`
+
 	// GitHub App
 	GitHubAppID         int64  `env:"GITHUB_APP_ID"`
 	GitHubAppPrivateKey string `env:"GITHUB_APP_PRIVATE_KEY"`

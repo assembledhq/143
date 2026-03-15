@@ -238,11 +238,11 @@ func (s *Service) checkDirection(ctx context.Context, diff string, issue *models
 		orgContext = fmt.Sprintf("Organization Settings: %s\n", string(org.Settings))
 	}
 
-	userPrompt := fmt.Sprintf(`Check if this code change aligns with the issue and product direction.
-
-%s%s
-Code diff:
-%s`, issueContext, orgContext, wrapDiff(diff))
+	userPrompt := prompts.DirectionCheckUserPrompt(prompts.DirectionCheckUserPromptData{
+		IssueContext: issueContext,
+		OrgContext:   orgContext,
+		Diff:         diff,
+	})
 
 	response, err := s.llm.Complete(ctx, systemPrompt, userPrompt)
 	if err != nil {
@@ -272,11 +272,10 @@ func (s *Service) checkCorrectness(ctx context.Context, diff string, issue *mode
 		issueContext = "No issue context available.\n"
 	}
 
-	userPrompt := fmt.Sprintf(`Check if this code change correctly fixes the reported issue.
-
-%s
-Code diff:
-%s`, issueContext, wrapDiff(diff))
+	userPrompt := prompts.CorrectnessCheckUserPrompt(prompts.CorrectnessCheckUserPromptData{
+		IssueContext: issueContext,
+		Diff:         diff,
+	})
 
 	response, err := s.llm.Complete(ctx, systemPrompt, userPrompt)
 	if err != nil {
@@ -305,11 +304,10 @@ func (s *Service) checkRegressionTest(ctx context.Context, diff string, issue *m
 		issueContext = "No issue context available.\n"
 	}
 
-	userPrompt := fmt.Sprintf(`Check if this code change includes appropriate regression tests.
-
-%s
-Code diff:
-%s`, issueContext, wrapDiff(diff))
+	userPrompt := prompts.RegressionCheckUserPrompt(prompts.RegressionCheckUserPromptData{
+		IssueContext: issueContext,
+		Diff:         diff,
+	})
 
 	response, err := s.llm.Complete(ctx, systemPrompt, userPrompt)
 	if err != nil {

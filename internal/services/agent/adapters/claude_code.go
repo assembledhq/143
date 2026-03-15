@@ -193,6 +193,12 @@ func buildSystemPrompt(input *agent.AgentInput) string {
 		}
 	}
 
+	// Integration tools: inject CLI skills doc so the agent knows what's available.
+	if input.IntegrationSkills != "" {
+		b.WriteString(input.IntegrationSkills)
+		b.WriteString("\n\n")
+	}
+
 	// PM context: inject PM guidance when available.
 	if input.PMContext != nil {
 		b.WriteString("## Product Manager Analysis\n\n")

@@ -26,7 +26,7 @@ import type { CodexAuthStatus, OrgSettings } from "@/lib/types";
 
 function AgentSettingsModal({ onClose, initialAgentType }: { onClose: () => void; initialAgentType?: OrgSettings["default_agent_type"] }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
       <div className="w-full max-w-2xl rounded-lg border bg-background p-6 shadow-lg">
         <AgentSettingsEditor
           title="Configure coding agent"
@@ -55,10 +55,10 @@ function StepSection({
     <div className="space-y-3">
       <div className="flex items-center gap-3">
         <div
-          className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${
+          className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-semibold ring-1 ${
             completed
-              ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
-              : "bg-muted text-muted-foreground"
+              ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 ring-emerald-500/20"
+              : "bg-muted text-muted-foreground ring-border/50"
           }`}
         >
           {completed ? <Check className="h-4 w-4" /> : step}
@@ -112,15 +112,15 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
   const [selectedAgentType, setSelectedAgentType] = useState<AgentType>("codex");
 
   const fetchData = useCallback(() => {
-    api.codexAuth.status().then((res) => setCodexAuthStatus(res.data)).catch(() => {});
+    api.codexAuth.status().then((res) => setCodexAuthStatus(res.data)).catch((err) => console.error("failed to load codex auth status:", err));
     api.settings.get().then((res) => {
       const settings = res.data?.settings as OrgSettings | undefined;
       setAgentConfig(settings?.agent_config ?? {});
       setSelectedAgentType(settings?.default_agent_type ?? "codex");
-    }).catch(() => {});
+    }).catch((err) => console.error("failed to load settings:", err));
     api.settings.getAgentDefaults().then((res) => {
       setAgentDefaults(res.data ?? {});
-    }).catch(() => {});
+    }).catch((err) => console.error("failed to load agent defaults:", err));
   }, []);
 
   useEffect(() => { fetchData(); }, [fetchData]);
@@ -153,7 +153,7 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
       <Card className={`py-0 ${selectedAgentType === "codex" && !isCodexConnected ? "border-primary" : ""}`} data-testid="agent-card-codex">
         <CardContent className="flex items-center justify-between gap-4 py-4">
           <div className="flex items-center gap-3 min-w-0 flex-1">
-            <div className="flex shrink-0 items-center justify-center h-9 w-9 rounded-lg bg-muted text-muted-foreground">
+            <div className="flex shrink-0 items-center justify-center h-9 w-9 rounded-lg bg-muted/50 dark:bg-white/5 ring-1 ring-border/50 text-muted-foreground">
               <Bot className="h-5 w-5" />
             </div>
             <div className="min-w-0 flex-1">
@@ -233,6 +233,9 @@ export default function Overview() {
   const linearIntegration = integrationsResp?.data?.find(
     (integration) => integration.provider === "linear" && integration.status === "active"
   );
+  const slackIntegration = integrationsResp?.data?.find(
+    (integration) => integration.provider === "slack" && integration.status === "active"
+  );
 
   // Count completed setup stages (step 1: coding agent, step 2: integrations)
   const connectedCount =
@@ -256,9 +259,9 @@ export default function Overview() {
               {connectedCount} of {totalCount} connected
             </p>
           </div>
-          <div className="h-2 w-full rounded-full bg-muted overflow-hidden shadow-inner">
+          <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
             <div
-              className="h-full rounded-full bg-primary transition-all duration-500"
+              className="h-full rounded-full bg-[image:var(--gradient-primary)] transition-all duration-500"
               style={{ width: `${(connectedCount / totalCount) * 100}%` }}
             />
           </div>
@@ -277,20 +280,22 @@ export default function Overview() {
           <AdditionalIntegrationCards
             sentryConnected={Boolean(sentryIntegration)}
             linearConnected={Boolean(linearIntegration)}
+            slackConnected={Boolean(slackIntegration)}
             linearLoading={false}
             onConnectSentry={() => api.auth.loginSentry()}
             onConnectLinear={() => api.integrations.loginLinear()}
+            onConnectSlack={() => api.integrations.loginSlack()}
           />
         </div>
       </StepSection>
 
       {/* Success banner when all required steps are done */}
       {allRequiredConnected && (
-        <div className="flex items-center gap-3 rounded-lg border border-green-200 bg-green-50 px-4 py-3 dark:border-green-800 dark:bg-green-950/30">
-          <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-400">
+        <div className="flex items-center gap-3 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-4 py-3 dark:shadow-[0_0_15px_oklch(0.6_0.17_160_/_8%)]">
+          <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-emerald-500/10 text-emerald-700 dark:text-emerald-400">
             <Check className="h-3.5 w-3.5" />
           </div>
-          <p className="text-[13px] text-green-800 dark:text-green-300">
+          <p className="text-[13px] text-emerald-700 dark:text-emerald-300">
             You&apos;re all set! 143 will pick up issues and open PRs automatically.
           </p>
         </div>

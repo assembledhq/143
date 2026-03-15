@@ -122,6 +122,16 @@ func (s *IntegrationStore) UpdateStatus(ctx context.Context, orgID, id uuid.UUID
 	return err
 }
 
+func (s *IntegrationStore) UpdateConfig(ctx context.Context, orgID, integrationID uuid.UUID, config json.RawMessage) error {
+	query := `UPDATE integrations SET config = @config, updated_at = now() WHERE org_id = @org_id AND id = @id`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":     integrationID,
+		"org_id": orgID,
+		"config": config,
+	})
+	return err
+}
+
 func (s *IntegrationStore) GetByGitHubInstallationID(ctx context.Context, installationID int64) (models.Integration, error) {
 	query := `
 		SELECT id, org_id, provider, config, status, last_synced_at, created_at

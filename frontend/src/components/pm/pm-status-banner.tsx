@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { RefreshCw, Plus, Clock, Activity } from "lucide-react";
+import { RefreshCw, Plus, Clock, Activity, Timer } from "lucide-react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
@@ -41,6 +41,7 @@ function StatusDot({ status }: { status: "running" | "completed" | "failed" | "i
 
 function deriveAgentStatus(pmStatus: PMStatus | undefined, isAnalyzing: boolean): "running" | "completed" | "failed" | "idle" {
   if (isAnalyzing || pmStatus?.is_running) return "running";
+  if (pmStatus?.last_error) return "failed";
   if (!pmStatus?.last_run_status) return "idle";
   if (pmStatus.last_run_status === "completed" || pmStatus.last_run_status === "executing") return "completed";
   if (pmStatus.last_run_status === "failed") return "failed";
@@ -74,7 +75,7 @@ export function PMStatusBanner({ hasActivePlanSession }: PMStatusBannerProps) {
       <div
         className={`flex items-center gap-3 rounded-lg border px-4 py-2.5 transition-colors ${
           isRunning
-            ? "border-primary/20 bg-primary/5 dark:border-primary/30 dark:bg-primary/10"
+            ? "border-primary/20 bg-primary/5 dark:border-primary/30 dark:bg-primary/10 dark:shadow-[0_0_20px_oklch(0.6_0.15_270_/_8%)]"
             : "border-border bg-muted/30"
         }`}
       >
@@ -83,8 +84,8 @@ export function PMStatusBanner({ hasActivePlanSession }: PMStatusBannerProps) {
         <span className="text-[13px] font-medium text-foreground">PM Agent</span>
 
         <span className={`text-[11px] font-medium px-1.5 py-0.5 rounded ${
-          isRunning ? "bg-primary/10 text-primary"
-          : agentStatus === "completed" ? "bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300"
+          isRunning ? "bg-primary/10 text-primary shadow-[var(--glow-primary-sm)]"
+          : agentStatus === "completed" ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
           : agentStatus === "failed" ? "bg-destructive/10 text-destructive"
           : "bg-muted text-muted-foreground"
         }`}>
@@ -114,6 +115,12 @@ export function PMStatusBanner({ hasActivePlanSession }: PMStatusBannerProps) {
                 {pmStatus.issues_reviewed} reviewed
               </span>
             )}
+            {pmStatus.next_run_in && (
+              <span className="flex items-center gap-1">
+                <Timer className="h-3 w-3" />
+                Next run {pmStatus.next_run_in}
+              </span>
+            )}
           </div>
         )}
 
@@ -129,9 +136,10 @@ export function PMStatusBanner({ hasActivePlanSession }: PMStatusBannerProps) {
             className="h-7 text-[12px]"
             onClick={handleAnalyze}
             disabled={isPending || isAnalyzing}
+            title="Run the PM agent now without waiting for the next scheduled run"
           >
             <RefreshCw className={`mr-1 h-3 w-3 ${isPending || isAnalyzing ? "animate-spin" : ""}`} />
-            {isPending ? "Starting..." : isAnalyzing ? "Running..." : "Run PM Agent"}
+            {isPending ? "Starting..." : isAnalyzing ? "Running..." : "Run now"}
           </Button>
         </div>
       </div>
@@ -142,6 +150,7 @@ export function PMStatusBanner({ hasActivePlanSession }: PMStatusBannerProps) {
           <button onClick={dismissError} className="text-xs text-red-500 hover:text-red-700 ml-2">dismiss</button>
         </div>
       )}
+
     </div>
   );
 }

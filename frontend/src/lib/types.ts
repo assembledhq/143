@@ -342,6 +342,9 @@ export interface PMStatus {
   success_count: number;
   total_delegated: number;
   next_run_in?: string;
+  next_run_at?: string;
+  last_error?: string;
+  last_failed_at?: string;
 }
 
 export interface SessionsListResponse {
@@ -599,11 +602,11 @@ export interface ProjectDetail {
 }
 
 export const projectStatusConfig: Record<string, { color: string; label: string }> = {
-  proposed: { color: "bg-purple-100 text-purple-800", label: "Proposed" },
-  draft: { color: "bg-gray-100 text-gray-800", label: "Draft" },
-  planning: { color: "bg-yellow-100 text-yellow-800", label: "Planning" },
-  active: { color: "bg-blue-100 text-blue-800", label: "Active" },
-  paused: { color: "bg-orange-100 text-orange-800", label: "Paused" },
-  completed: { color: "bg-green-100 text-green-800", label: "Completed" },
-  cancelled: { color: "bg-red-100 text-red-800", label: "Cancelled" },
+  proposed: { color: "bg-purple-500/10 text-purple-700 dark:text-purple-400", label: "Proposed" },
+  draft: { color: "bg-muted text-muted-foreground", label: "Draft" },
+  planning: { color: "bg-yellow-500/10 text-yellow-700 dark:text-yellow-400", label: "Planning" },
+  active: { color: "bg-blue-500/10 text-blue-700 dark:text-blue-400", label: "Active" },
+  paused: { color: "bg-orange-500/10 text-orange-700 dark:text-orange-400", label: "Paused" },
+  completed: { color: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400", label: "Completed" },
+  cancelled: { color: "bg-red-500/10 text-red-700 dark:text-red-400", label: "Cancelled" },
 };

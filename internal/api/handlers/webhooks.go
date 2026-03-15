@@ -13,6 +13,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	"github.com/rs/zerolog"
 )
 
 type WebhookHandler struct {
@@ -123,15 +124,29 @@ func (h *WebhookHandler) handleInstallation(w http.ResponseWriter, r *http.Reque
 
 	switch event.Action {
 	case "created":
-		// Find the org for this installation. The GitHub account ID from the
-		// webhook matches the github_id on the user who installed the app,
-		// so look up the user first, then resolve their org.
+		// Try to find an existing integration for this installation. The
+		// HandleGitHubAppInstalled endpoint (browser redirect) creates the
+		// integration with installation_id in its config before this webhook
+		// arrives, so check for it first.
 		var org *models.Organization
-		user, err := h.userStore.GetByGitHubID(ctx, event.Installation.Account.ID)
-		if err == nil {
-			existingOrg, orgErr := h.orgStore.GetByID(ctx, user.OrgID)
+		var integration *models.Integration
+		existingIntegration, lookupErr := h.integrationStore.GetByGitHubInstallationID(ctx, event.Installation.ID)
+		if lookupErr == nil {
+			integration = &existingIntegration
+			existingOrg, orgErr := h.orgStore.GetByID(ctx, integration.OrgID)
 			if orgErr == nil {
 				org = &existingOrg
+			}
+		}
+
+		if org == nil {
+			// Fall back to looking up the user by GitHub account ID.
+			user, err := h.userStore.GetByGitHubID(ctx, event.Installation.Account.ID)
+			if err == nil {
+				existingOrg, orgErr := h.orgStore.GetByID(ctx, user.OrgID)
+				if orgErr == nil {
+					org = &existingOrg
+				}
 			}
 		}
 		if org == nil {
@@ -147,20 +162,27 @@ func (h *WebhookHandler) handleInstallation(w http.ResponseWriter, r *http.Reque
 			org = newOrg
 		}
 
-		// Create integration
-		configJSON, _ := json.Marshal(map[string]any{
-			"installation_id": event.Installation.ID,
-			"account_login":   event.Installation.Account.Login,
-		})
-		integration := &models.Integration{
-			OrgID:    org.ID,
-			Provider: models.IntegrationProviderGitHub,
-			Config:   configJSON,
-			Status:   models.IntegrationStatusActive,
-		}
-		if err := h.integrationStore.Create(ctx, integration); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTEGRATION_CREATE_FAILED", "failed to create integration")
-			return
+		// Create integration if one doesn't already exist.
+		if integration == nil {
+			configJSON, marshalErr := json.Marshal(map[string]any{
+				"installation_id": event.Installation.ID,
+				"account_login":   event.Installation.Account.Login,
+			})
+			if marshalErr != nil {
+				zerolog.Ctx(r.Context()).Warn().Err(marshalErr).Msg("failed to marshal integration config")
+				writeError(w, http.StatusInternalServerError, "MARSHAL_FAILED", "failed to marshal integration config")
+				return
+			}
+			integration = &models.Integration{
+				OrgID:    org.ID,
+				Provider: models.IntegrationProviderGitHub,
+				Config:   configJSON,
+				Status:   models.IntegrationStatusActive,
+			}
+			if err := h.integrationStore.Create(ctx, integration); err != nil {
+				writeError(w, http.StatusInternalServerError, "INTEGRATION_CREATE_FAILED", "failed to create integration")
+				return
+			}
 		}
 
 		// Create repositories

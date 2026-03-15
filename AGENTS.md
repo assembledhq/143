@@ -8,7 +8,11 @@ Use docs/design/overall.md as the overall design of the system, think of it as a
 
 **Service layer**: Handlers call services, services call the DB layer. Business logic belongs in `internal/services/`, never in HTTP handlers. Services are defined as interfaces for testability (mock with `go.uber.org/mock`).
 
+**LLM prompts live in Go templates**: All LLM system prompts must be stored as `.template` files in `internal/prompts/templates/`, rendered via the `prompts` package (`internal/prompts/prompts.go`). Never inline prompt strings as Go constants or string literals in service code. Add a corresponding exported render function in `prompts.go` for each new template.
+
 **Logging**: Use `zerolog` for all log output. Never use `fmt.Printf` or `log.Println`. Logs are JSON-structured and shipped to Mezmo.
+
+**Error handling**: Never discard errors with `_ =` in Go or empty `.catch()` in TypeScript. If an error cannot be propagated (e.g., best-effort cleanup after the main operation succeeded), log it at `Warn` level with context. In HTTP handlers, use `zerolog.Ctx(r.Context())` to get the request-scoped logger (enriched with org_id, user_id, request_id by the `LogContext` middleware). In services, use `s.logger`. If an error CAN be propagated, return it — prefer bubbling errors to the top of the call stack. Transaction rollback in `defer` is the one exception: `defer func() { _ = tx.Rollback(ctx) }()` is acceptable because rollback after commit is a no-op. Frontend: at minimum log with `console.error`; prefer surfacing errors through TanStack Query error states.
 
 **Multi-tenancy**: Every table has an `org_id` column (FK to `organizations`). Every query MUST filter by `org_id`. Auth middleware extracts org from the session and sets it in request context. Missing an `org_id` filter is a data isolation bug.
 

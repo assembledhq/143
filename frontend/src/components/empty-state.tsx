@@ -17,11 +17,11 @@ export function EmptyState({ icon: Icon, title, description, action }: EmptyStat
   return (
     <Card>
       <CardContent className="flex flex-col items-center justify-center py-12">
-        <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted">
-          <Icon className="h-6 w-6 text-muted-foreground" />
+        <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted/50 dark:bg-white/5 ring-1 ring-border/50">
+          <Icon className="h-6 w-6 text-muted-foreground/70" />
         </div>
-        <p className="mt-4 text-sm font-medium text-foreground">{title}</p>
-        <p className="mt-1 max-w-xs text-center text-[13px] text-muted-foreground">
+        <p className="mt-4 text-sm font-semibold text-foreground">{title}</p>
+        <p className="mt-1.5 max-w-xs text-center text-[13px] text-muted-foreground/80">
           {description}
         </p>
         {action && (

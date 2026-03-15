@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/agent/adapters"
 )
@@ -38,7 +39,10 @@ func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID
 	if err != nil {
 		return fmt.Errorf("get org: %w", err)
 	}
-	settings := models.ParseOrgSettings(org.Settings)
+	settings, parseErr := models.ParseOrgSettings(org.Settings)
+	if parseErr != nil {
+		return fmt.Errorf("parse org settings: %w", parseErr)
+	}
 
 	// Fetch the repository for this project.
 	repo, err := s.repos.GetByID(ctx, orgID, project.RepositoryID)
@@ -124,7 +128,11 @@ func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID
 		TriggeredBy: models.PMTriggerCron,
 	}
 	if result.TokenUsage != (agent.TokenUsage{}) {
-		tokenJSON, _ := json.Marshal(result.TokenUsage)
+		tokenJSON, err := json.Marshal(result.TokenUsage)
+		if err != nil {
+			s.logger.Warn().Err(err).Msg("failed to marshal token usage")
+			tokenJSON = nil
+		}
 		plan.TokenUsage = tokenJSON
 	}
 	now := time.Now()
@@ -149,40 +157,11 @@ type ProjectCycleContext struct {
 
 // buildProjectCycleSystemPrompt creates a system prompt focused on a single project.
 func buildProjectCycleSystemPrompt(project *ProjectSummary) string {
-	return fmt.Sprintf(`You are an AI Product Manager running a scheduled cycle for the project "%s".
-
-Goal: %s
-
-Your job is to analyze the current state of this project, review completed and failed tasks,
-and plan the next batch of work. You should:
-
-1. Analyze what has been accomplished and what remains.
-2. Learn from any failed tasks and adjust approaches.
-3. Create new tasks for the next batch of work.
-4. Recommend status changes if the project is complete or needs human review.
-
-Respond with a JSON object containing:
-{
-  "project_id": "%s",
-  "cycle_analysis": "Your analysis of the current project state",
-  "progress_pct": 0-100,
-  "current_phase": "description of current phase",
-  "status_recommendation": "" or "completed" or "needs_human_review",
-  "lessons_learned": ["lesson1", "lesson2"],
-  "new_tasks": [
-    {
-      "title": "Task title",
-      "description": "What needs to be done",
-      "approach": "How to do it",
-      "reasoning": "Why this task",
-      "complexity": "trivial|simple|moderate|complex",
-      "confidence": "high|medium|low"
-    }
-  ],
-  "skipped_tasks": [
-    {"description": "What was considered", "reason": "Why it was skipped"}
-  ]
-}`, project.Title, project.Goal, project.ID)
+	return prompts.ProjectCycleSystemPrompt(prompts.ProjectCycleSystemPromptData{
+		Title: project.Title,
+		Goal:  project.Goal,
+		ID:    project.ID,
+	})
 }
 
 // parseProjectPlan parses the PM agent's output into a ProjectPlan.

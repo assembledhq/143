@@ -1,24 +1,46 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { CalendarClock, Plus } from "lucide-react";
+import {
+  flexRender,
+  getCoreRowModel,
+  getSortedRowModel,
+  useReactTable,
+  type ColumnDef,
+  type SortingState,
+} from "@tanstack/react-table";
+import { ArrowUpDown, CalendarClock, Plus } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useMemo, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { PageHeader } from "@/components/page-header";
 import { PMStatusBanner } from "@/components/pm/pm-status-banner";
 import { DecisionsView } from "@/components/pm/decisions-view";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { api } from "@/lib/api";
 import type { Session } from "@/lib/types";
+
+// ---------------------------------------------------------------------------
+// Status config
+// ---------------------------------------------------------------------------
 
 const statusConfig: Record<string, { dot: string; text: string; bg: string; label: string }> = {
   pending: { dot: "bg-muted-foreground/50", text: "text-muted-foreground", bg: "bg-muted", label: "Pending" },
   running: { dot: "bg-primary", text: "text-primary", bg: "bg-primary/10", label: "Running" },
-  awaiting_input: { dot: "bg-amber-500", text: "text-amber-700 dark:text-amber-400", bg: "bg-amber-50 dark:bg-amber-950/30", label: "Awaiting Input" },
-  needs_human_guidance: { dot: "bg-orange-500", text: "text-orange-700 dark:text-orange-400", bg: "bg-orange-50 dark:bg-orange-950/30", label: "Needs Guidance" },
+  awaiting_input: { dot: "bg-amber-500", text: "text-amber-700 dark:text-amber-400", bg: "bg-amber-50 dark:bg-amber-950/30", label: "Awaiting input" },
+  needs_human_guidance: { dot: "bg-orange-500", text: "text-orange-700 dark:text-orange-400", bg: "bg-orange-50 dark:bg-orange-950/30", label: "Needs guidance" },
   completed: { dot: "bg-emerald-500", text: "text-emerald-700 dark:text-emerald-400", bg: "bg-emerald-50 dark:bg-emerald-950/30", label: "Completed" },
-  pr_created: { dot: "bg-violet-500", text: "text-violet-700 dark:text-violet-400", bg: "bg-violet-50 dark:bg-violet-950/30", label: "PR Created" },
+  pr_created: { dot: "bg-violet-500", text: "text-violet-700 dark:text-violet-400", bg: "bg-violet-50 dark:bg-violet-950/30", label: "PR created" },
   failed: { dot: "bg-destructive", text: "text-destructive", bg: "bg-destructive/10", label: "Failed" },
   cancelled: { dot: "bg-muted-foreground/50", text: "text-muted-foreground", bg: "bg-muted", label: "Cancelled" },
   skipped: { dot: "bg-muted-foreground/30", text: "text-muted-foreground", bg: "bg-muted", label: "Skipped" },
@@ -27,7 +49,7 @@ const statusConfig: Record<string, { dot: string; text: string; bg: string; labe
 const filterTabs = [
   { value: "all", label: "All" },
   { value: "active", label: "Active" },
-  { value: "needs_human_guidance", label: "Needs Guidance" },
+  { value: "needs_human_guidance", label: "Needs guidance" },
   { value: "failed", label: "Failed" },
   { value: "done", label: "Done" },
   { value: "decisions", label: "Decisions" },
@@ -39,6 +61,10 @@ const doneStatuses = new Set(["completed", "pr_created"]);
 function isActive(s: Session): boolean {
   return activeStatuses.has(s.status);
 }
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 function formatTimeAgo(dateStr: string): string {
   const date = new Date(dateStr);
@@ -67,84 +93,128 @@ function sessionTitle(session: Session): string {
   return `Session ${session.id.slice(0, 8)}`;
 }
 
-function SessionRow({ session }: { session: Session }) {
-  const cfg = statusConfig[session.status] || statusConfig.pending;
-  const active = isActive(session);
+// ---------------------------------------------------------------------------
+// Inline cell components
+// ---------------------------------------------------------------------------
 
-  return (
-    <Link
-      href={`/sessions/${session.id}`}
-      className="group flex items-center gap-4 py-2.5 px-1 hover:bg-muted/50 transition-colors cursor-pointer rounded-md -mx-1"
-    >
-      {/* Status dot */}
-      <div className="flex-shrink-0 w-4 flex justify-center">
-        {active ? (
-          <span className="relative flex h-2 w-2">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary/60 opacity-75" />
-            <span className="relative inline-flex rounded-full h-2 w-2 bg-primary" />
-          </span>
-        ) : (
-          <span className={`inline-flex rounded-full h-2 w-2 ${cfg.dot}`} />
-        )}
-      </div>
+function StatusDot({ status }: { status: string }) {
+  const active = activeStatuses.has(status);
+  const cfg = statusConfig[status] || statusConfig.pending;
 
-      {/* Main content */}
-      <div className="flex-1 min-w-0">
-        <span className="text-[13px] font-medium text-foreground truncate block">
-          {sessionTitle(session)}
-        </span>
-      </div>
-
-      {/* Metadata */}
-      <div className="flex items-center gap-2 flex-shrink-0">
-        <span className="inline-flex items-center text-[11px] text-muted-foreground bg-muted rounded-md px-2 py-0.5">
-          {session.agent_type.replace(/_/g, " ")}
-        </span>
-        <span className={`inline-flex items-center text-[11px] rounded-md px-2 py-0.5 ${cfg.text} ${cfg.bg}`}>
-          {cfg.label}
-        </span>
-        {session.confidence_score != null && (
-          <span className="text-[11px] text-muted-foreground">
-            {Math.round(session.confidence_score * 100)}%
-          </span>
-        )}
-      </div>
-
-      {/* Timestamp */}
-      <span className="text-[11px] text-muted-foreground flex-shrink-0 w-16 text-right">
-        {formatTimeAgo(session.created_at)}
+  if (active) {
+    return (
+      <span className="relative flex h-2 w-2">
+        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary/60 opacity-75" />
+        <span className="relative inline-flex rounded-full h-2 w-2 bg-primary" />
       </span>
-    </Link>
+    );
+  }
+  return <span className={`inline-flex rounded-full h-2 w-2 ${cfg.dot}`} />;
+}
+
+function SortableHeader({ label, column }: { label: string; column: { toggleSorting: (desc?: boolean) => void; getIsSorted: () => false | "asc" | "desc" } }) {
+  return (
+    <button
+      className="flex items-center gap-1 hover:text-foreground transition-colors -ml-1 px-1 py-0.5 rounded"
+      onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
+    >
+      {label}
+      <ArrowUpDown className="h-3 w-3 opacity-50" />
+    </button>
   );
 }
 
-function SessionSection({ title, sessions, badge }: {
-  title: string;
-  sessions: Session[];
-  badge?: React.ReactNode;
-}) {
-  if (sessions.length === 0) return null;
-  return (
-    <div>
-      <div className="flex items-center gap-2 py-2">
-        <span className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">
-          {title}
+// ---------------------------------------------------------------------------
+// Column definitions
+// ---------------------------------------------------------------------------
+
+const columns: ColumnDef<Session>[] = [
+  {
+    id: "status",
+    accessorKey: "status",
+    header: ({ column }) => <SortableHeader label="Status" column={column} />,
+    size: 140,
+    cell: ({ row }) => {
+      const status = row.original.status;
+      const cfg = statusConfig[status] || statusConfig.pending;
+      return (
+        <div className="flex items-center gap-2">
+          <StatusDot status={status} />
+          <span className={`text-[12px] font-medium ${cfg.text}`}>{cfg.label}</span>
+        </div>
+      );
+    },
+  },
+  {
+    id: "title",
+    accessorFn: (row) => sessionTitle(row),
+    header: "Session",
+    size: 999,
+    cell: ({ row }) => {
+      const session = row.original;
+      const failed = session.status === "failed";
+      return (
+        <div className="min-w-0">
+          <span className="text-[13px] font-medium text-foreground truncate block max-w-[480px]">
+            {sessionTitle(session)}
+          </span>
+          {failed && (session.failure_explanation || session.error) && (
+            <span className="text-[11px] text-destructive/80 truncate block max-w-[480px] mt-0.5">
+              {session.failure_explanation || session.error}
+            </span>
+          )}
+        </div>
+      );
+    },
+  },
+  {
+    id: "agent_type",
+    accessorKey: "agent_type",
+    header: ({ column }) => <SortableHeader label="Agent" column={column} />,
+    size: 120,
+    cell: ({ row }) => (
+      <span className="text-[12px] text-muted-foreground">
+        {row.original.agent_type.replace(/_/g, " ")}
+      </span>
+    ),
+  },
+  {
+    id: "confidence",
+    accessorKey: "confidence_score",
+    header: ({ column }) => <SortableHeader label="Confidence" column={column} />,
+    size: 100,
+    cell: ({ row }) => {
+      const score = row.original.confidence_score;
+      if (score == null) return <span className="text-[12px] text-muted-foreground/40">—</span>;
+      const pct = Math.round(score * 100);
+      const color = pct >= 80 ? "text-emerald-600 dark:text-emerald-400" : pct >= 50 ? "text-amber-600 dark:text-amber-400" : "text-destructive";
+      return <span className={`text-[12px] font-medium tabular-nums ${color}`}>{pct}%</span>;
+    },
+  },
+  {
+    id: "last_modified",
+    accessorFn: (row) => row.completed_at || row.started_at || row.created_at,
+    header: ({ column }) => <SortableHeader label="Last modified" column={column} />,
+    size: 110,
+    cell: ({ row }) => {
+      const ts = row.original.completed_at || row.original.started_at || row.original.created_at;
+      return (
+        <span className="text-[12px] text-muted-foreground tabular-nums">
+          {formatTimeAgo(ts)}
         </span>
-        {badge}
-        <span className="text-[11px] text-muted-foreground">({sessions.length})</span>
-        <div className="flex-1 border-b border-border" />
-      </div>
-      <div className="divide-y divide-border/50">
-        {sessions.map((session) => (
-          <SessionRow key={session.id} session={session} />
-        ))}
-      </div>
-    </div>
-  );
-}
+      );
+    },
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Main component
+// ---------------------------------------------------------------------------
 
 export function SessionsPageContent() {
+  const router = useRouter();
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
+  const [sorting, setSorting] = useState<SortingState>([]);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["sessions"],
@@ -161,8 +231,19 @@ export function SessionsPageContent() {
   const failedSessions = allSessions.filter((s) => s.status === "failed");
   const guidanceSessions = allSessions.filter((s) => s.status === "needs_human_guidance");
 
-  const filteredSessions = showDecisions ? [] : filterSessions(allSessions, activeFilter);
-  const showGrouped = currentFilter === "all";
+  const filteredSessions = useMemo(
+    () => (showDecisions ? [] : filterSessions(allSessions, activeFilter)),
+    [allSessions, activeFilter, showDecisions],
+  );
+
+  const table = useReactTable({
+    data: filteredSessions,
+    columns,
+    state: { sorting },
+    onSortingChange: setSorting,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+  });
 
   return (
     <div className="space-y-5">
@@ -173,10 +254,12 @@ export function SessionsPageContent() {
 
       <PMStatusBanner hasActivePlanSession={activeSessions.length > 0} />
 
+      {/* ── Tab filters ────────────────────────────────────────────── */}
       <div className="flex items-center gap-0 border-b border-border">
         {filterTabs.map((tab) => {
           const isSelected = currentFilter === tab.value;
-          const count = tab.value === "active" ? activeSessions.length
+          const count =
+            tab.value === "active" ? activeSessions.length
             : tab.value === "failed" ? failedSessions.length
             : tab.value === "needs_human_guidance" ? guidanceSessions.length
             : 0;
@@ -201,15 +284,17 @@ export function SessionsPageContent() {
                 )}
               </span>
               {isSelected && (
-                <span className="absolute bottom-0 left-3 right-3 h-0.5 bg-foreground rounded-full" />
+                <span className="absolute bottom-0 left-3 right-3 h-0.5 bg-[image:var(--gradient-primary)] rounded-full" />
               )}
             </button>
           );
         })}
       </div>
 
+      {/* ── Decisions tab ──────────────────────────────────────────── */}
       {showDecisions && <DecisionsView />}
 
+      {/* ── Loading / error / empty states ─────────────────────────── */}
       {!showDecisions && isLoading && (
         <div className="py-16 text-center text-[13px] text-muted-foreground">
           Loading sessions...
@@ -230,13 +315,13 @@ export function SessionsPageContent() {
             </div>
             <p className="mt-4 text-[13px] font-medium text-foreground">No sessions yet</p>
             <p className="mt-1 max-w-sm text-center text-[13px] text-muted-foreground">
-              Click <span className="font-medium text-foreground">Run PM Agent</span> to review your issues and create sessions, or start a <span className="font-medium text-foreground">manual session</span> to fix a specific issue.
+              The PM agent runs automatically on a schedule. Click <span className="font-medium text-foreground">Run now</span> above to start it immediately, or create a <span className="font-medium text-foreground">manual session</span> for a specific issue.
             </p>
             <div className="flex items-center gap-2 mt-4">
               <Button variant="outline" size="sm" asChild>
                 <Link href="/sessions/new">
                   <Plus className="mr-1.5 h-3.5 w-3.5" />
-                  Manual Session
+                  Manual session
                 </Link>
               </Button>
             </div>
@@ -244,43 +329,54 @@ export function SessionsPageContent() {
         </Card>
       )}
 
-      {!showDecisions && !isLoading && !error && allSessions.length > 0 && showGrouped && (
-        <div className="space-y-5">
-          <SessionSection
-            title="Active"
-            sessions={activeSessions}
-            badge={
-              activeSessions.length > 0 ? (
-                <span className="relative flex h-2 w-2">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary/60 opacity-75" />
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-primary" />
-                </span>
-              ) : undefined
-            }
-          />
-          <SessionSection title="Needs Guidance" sessions={guidanceSessions} />
-          <SessionSection title="Failed" sessions={failedSessions} />
-          <SessionSection title="Completed" sessions={allSessions.filter((s) => doneStatuses.has(s.status))} />
-        </div>
-      )}
-
-      {!showDecisions && !isLoading && !error && allSessions.length > 0 && !showGrouped && (
-        <div>
-          <div className="flex items-center justify-between py-2">
-            <span className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">
+      {/* ── Data table ─────────────────────────────────────────────── */}
+      {!showDecisions && !isLoading && !error && allSessions.length > 0 && (
+        <div className="rounded-lg border border-border bg-card overflow-hidden">
+          {/* Count header */}
+          <div className="flex items-center justify-between px-4 py-2.5 border-b border-border/50 bg-muted/30">
+            <span className="text-[11px] font-semibold text-muted-foreground/70 uppercase tracking-widest">
               {filteredSessions.length} session{filteredSessions.length !== 1 ? "s" : ""}
             </span>
           </div>
+
           {filteredSessions.length === 0 ? (
             <div className="py-12 text-center text-[13px] text-muted-foreground">
               No sessions match this filter.
             </div>
           ) : (
-            <div className="divide-y divide-border/50">
-              {filteredSessions.map((session) => (
-                <SessionRow key={session.id} session={session} />
-              ))}
-            </div>
+            <Table>
+              <TableHeader>
+                {table.getHeaderGroups().map((headerGroup) => (
+                  <TableRow key={headerGroup.id} className="hover:bg-transparent border-border/50">
+                    {headerGroup.headers.map((header) => (
+                      <TableHead
+                        key={header.id}
+                        style={{ width: header.column.getSize() !== 150 ? header.column.getSize() : undefined }}
+                      >
+                        {header.isPlaceholder
+                          ? null
+                          : flexRender(header.column.columnDef.header, header.getContext())}
+                      </TableHead>
+                    ))}
+                  </TableRow>
+                ))}
+              </TableHeader>
+              <TableBody>
+                {table.getRowModel().rows.map((row) => (
+                  <TableRow
+                    key={row.id}
+                    className="cursor-pointer"
+                    onClick={() => router.push(`/sessions/${row.original.id}`)}
+                  >
+                    {row.getVisibleCells().map((cell) => (
+                      <TableCell key={cell.id}>
+                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                      </TableCell>
+                    ))}
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
           )}
         </div>
       )}

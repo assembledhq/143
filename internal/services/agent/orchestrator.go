@@ -12,6 +12,8 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/integration"
+	"github.com/assembledhq/143/internal/services/mcp"
 )
 
 const (
@@ -263,6 +265,10 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		input.PMContext = pmCtx
 	}
 
+	// 6b. Generate integration skills doc from org credentials.
+	// This tells the agent what CLI tools are available in the sandbox.
+	input.IntegrationSkills = o.buildIntegrationSkills(ctx, run.OrgID)
+
 	prompt, err := adapter.PreparePrompt(ctx, input)
 	if err != nil {
 		o.failRun(ctx, run, fmt.Sprintf("prepare prompt: %s", err))
@@ -312,6 +318,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 	}
 
+	// 8b. Integration tools (143-tools CLI) are pre-installed in the container
+	// image. Credentials are injected via env vars (resolveAgentEnv), and the
+	// skills doc is injected into the prompt (buildIntegrationSkills). No
+	// per-CLI config file injection needed — all agents can shell out directly.
+
 	// 9. Clone repo into sandbox.
 	if repoURL != "" {
 		if err := o.provider.CloneRepo(ctx, sandbox, repoURL, branch, token); err != nil {
@@ -347,8 +358,12 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	confidenceThresholds := models.ConfidenceThresholdsForAutonomy(models.DefaultAgentAutonomy)
 	if o.orgs != nil {
 		if org, orgErr := o.orgs.GetByID(ctx, run.OrgID); orgErr == nil {
-			orgSettings := models.ParseOrgSettings(org.Settings)
-			confidenceThresholds = orgSettings.ConfidenceThresholds
+			orgSettings, parseErr := models.ParseOrgSettings(org.Settings)
+			if parseErr != nil {
+				o.logger.Warn().Err(parseErr).Str("org_id", run.OrgID.String()).Msg("failed to parse org settings, using defaults")
+			} else {
+				confidenceThresholds = orgSettings.ConfidenceThresholds
+			}
 		}
 	}
 
@@ -431,7 +446,11 @@ func (o *Orchestrator) checkConcurrency(ctx context.Context, orgID uuid.UUID) er
 // It also detects question-level log entries and creates SessionQuestion records.
 func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, logCh <-chan LogEntry) {
 	for entry := range logCh {
-		metadata, _ := json.Marshal(entry.Metadata)
+		metadata, err := json.Marshal(entry.Metadata)
+		if err != nil {
+			o.logger.Warn().Err(err).Str("run_id", runID.String()).Msg("failed to marshal log entry metadata")
+			metadata = nil
+		}
 
 		log := &models.SessionLog{
 			SessionID: runID,
@@ -507,7 +526,11 @@ func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg 
 
 // buildRunResult converts an AgentResult into the DB update struct.
 func (o *Orchestrator) buildRunResult(result *AgentResult) *models.SessionResult {
-	tokenUsage, _ := json.Marshal(result.TokenUsage)
+	tokenUsage, err := json.Marshal(result.TokenUsage)
+	if err != nil {
+		o.logger.Warn().Err(err).Msg("failed to marshal token usage")
+		tokenUsage = nil
+	}
 
 	return &models.SessionResult{
 		ConfidenceScore:     &result.ConfidenceScore,
@@ -528,6 +551,33 @@ func (o *Orchestrator) enqueueJob(ctx context.Context, orgID uuid.UUID, queue, j
 			Str("job_type", jobType).
 			Msg("failed to enqueue follow-up job")
 	}
+}
+
+// integrationCredentials holds the resolved Sentry and Linear configs for an org.
+type integrationCredentials struct {
+	Sentry *models.SentryConfig
+	Linear *models.LinearConfig
+}
+
+// fetchIntegrationCredentials retrieves the Sentry and Linear configs for
+// an org from the credential provider. Returns nil configs if unavailable.
+func (o *Orchestrator) fetchIntegrationCredentials(ctx context.Context, orgID uuid.UUID) integrationCredentials {
+	var ic integrationCredentials
+	if o.credentials == nil {
+		return ic
+	}
+
+	if cred, err := o.credentials.Get(ctx, orgID, models.ProviderSentry); err == nil && cred != nil {
+		if cfg, ok := cred.Config.(models.SentryConfig); ok {
+			ic.Sentry = &cfg
+		}
+	}
+	if cred, err := o.credentials.Get(ctx, orgID, models.ProviderLinear); err == nil && cred != nil {
+		if cfg, ok := cred.Config.(models.LinearConfig); ok {
+			ic.Linear = &cfg
+		}
+	}
+	return ic
 }
 
 // resolveAgentEnv builds the sandbox env vars for the given agent type from
@@ -575,6 +625,23 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 					merged["GEMINI_MODEL"] = cfg.Model
 				}
 			}
+		}
+	}
+
+	// Integration credentials — consumed by the 143-mcp binary inside the sandbox.
+	// These are injected for all agent types since the MCP server is agent-agnostic.
+	ic := o.fetchIntegrationCredentials(ctx, orgID)
+	if ic.Sentry != nil {
+		if ic.Sentry.AccessToken != "" {
+			merged["SENTRY_AUTH_TOKEN"] = ic.Sentry.AccessToken
+		}
+		if ic.Sentry.OrgSlug != "" {
+			merged["SENTRY_ORG_SLUG"] = ic.Sentry.OrgSlug
+		}
+	}
+	if ic.Linear != nil {
+		if ic.Linear.AccessToken != "" {
+			merged["LINEAR_ACCESS_TOKEN"] = ic.Linear.AccessToken
 		}
 	}
 
@@ -633,6 +700,40 @@ func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, san
 		Msg("injected codex auth.json into sandbox")
 
 	return true, nil
+}
+
+// buildIntegrationSkills generates a CLI skills doc from the org's integration
+// credentials. The doc is injected into the agent's system prompt so it knows
+// what 143-tools commands are available in the sandbox.
+func (o *Orchestrator) buildIntegrationSkills(ctx context.Context, orgID uuid.UUID) string {
+	if o.credentials == nil {
+		return ""
+	}
+
+	ic := o.fetchIntegrationCredentials(ctx, orgID)
+	reg := integration.NewRegistry()
+
+	// Register integrations based on available credentials.
+	if ic.Sentry != nil && ic.Sentry.AccessToken != "" {
+		tracker := integration.NewSentryErrorTracker(integration.SentryTrackerConfig{
+			AuthToken: ic.Sentry.AccessToken,
+			OrgSlug:   ic.Sentry.OrgSlug,
+		})
+		reg.RegisterErrorTracker(tracker)
+	}
+	if ic.Linear != nil && ic.Linear.AccessToken != "" {
+		manager := integration.NewLinearTaskManager(integration.LinearManagerConfig{
+			AuthToken: ic.Linear.AccessToken,
+		})
+		reg.RegisterTaskManager(manager)
+	}
+
+	if !reg.HasAny() {
+		return ""
+	}
+
+	tr := mcp.NewToolRegistry(reg)
+	return mcp.GenerateSkillsDoc(tr)
 }
 
 func strPtr(s string) *string {

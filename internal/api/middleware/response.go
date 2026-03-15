@@ -3,6 +3,8 @@ package middleware
 import (
 	"encoding/json"
 	"net/http"
+
+	"github.com/rs/zerolog/log"
 )
 
 type errorBody struct {
@@ -17,5 +19,7 @@ type errorDetail struct {
 func writeError(w http.ResponseWriter, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(errorBody{Error: errorDetail{Code: code, Message: message}})
+	if err := json.NewEncoder(w).Encode(errorBody{Error: errorDetail{Code: code, Message: message}}); err != nil {
+		log.Warn().Err(err).Str("code", code).Msg("failed to encode error response")
+	}
 }

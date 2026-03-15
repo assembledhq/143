@@ -64,12 +64,12 @@ func (a *LinearAdapter) ParseWebhook(integrationID uuid.UUID, payload json.RawMe
 		return nil, fmt.Errorf("linear webhook missing issue ID")
 	}
 
-	createdAt := parseTimeSafe(issue.CreatedAt)
+	createdAt := ParseTimeSafe(issue.CreatedAt)
 	if createdAt.IsZero() {
 		createdAt = time.Now()
 	}
 
-	severity := mapLinearPriority(issue.Priority)
+	severity := MapLinearPriority(issue.Priority)
 
 	tags := make([]string, 0, len(issue.Labels)+1)
 	for _, l := range issue.Labels {
@@ -97,21 +97,4 @@ func (a *LinearAdapter) ParseWebhook(integrationID uuid.UUID, payload json.RawMe
 		LastSeenAt:          createdAt,
 		RawData:             payload,
 	}, nil
-}
-
-func mapLinearPriority(priority int) string {
-	switch priority {
-	case 0:
-		return "medium" // No priority
-	case 1:
-		return "critical" // Urgent
-	case 2:
-		return "high"
-	case 3:
-		return "medium"
-	case 4:
-		return "low"
-	default:
-		return "medium"
-	}
 }

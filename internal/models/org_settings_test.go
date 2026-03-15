@@ -10,7 +10,8 @@ import (
 func TestParseOrgSettings_Defaults(t *testing.T) {
 	t.Parallel()
 
-	s := ParseOrgSettings(nil)
+	s, err := ParseOrgSettings(nil)
+	require.NoError(t, err)
 
 	require.Equal(t, DefaultAutonomyLevel, s.AutonomyLevel, "should default autonomy_level")
 	require.Equal(t, DefaultAggressiveness, s.Aggressiveness, "should default aggressiveness")
@@ -33,7 +34,8 @@ func TestParseOrgSettings_Defaults(t *testing.T) {
 func TestParseOrgSettings_EmptyJSON(t *testing.T) {
 	t.Parallel()
 
-	s := ParseOrgSettings(json.RawMessage(`{}`))
+	s, err := ParseOrgSettings(json.RawMessage(`{}`))
+	require.NoError(t, err)
 
 	require.Equal(t, DefaultAutonomyLevel, s.AutonomyLevel, "should default autonomy_level for empty JSON")
 	require.Equal(t, DefaultMaxConcurrentRuns, s.MaxConcurrentRuns, "should default max_concurrent_runs for empty JSON")
@@ -66,7 +68,8 @@ func TestParseOrgSettings_OverrideValues(t *testing.T) {
 		}
 	}`)
 
-	s := ParseOrgSettings(raw)
+	s, err := ParseOrgSettings(raw)
+	require.NoError(t, err)
 
 	require.Equal(t, AutonomyLevelAutoAll, s.AutonomyLevel, "should override autonomy_level")
 	require.Equal(t, 8, s.Aggressiveness, "should override aggressiveness")
@@ -94,7 +97,8 @@ func TestParseOrgSettings_PartialOverride(t *testing.T) {
 	t.Parallel()
 
 	raw := json.RawMessage(`{"autonomy_level": "auto_simple", "llm_model": "claude-sonnet-4-5"}`)
-	s := ParseOrgSettings(raw)
+	s, err := ParseOrgSettings(raw)
+	require.NoError(t, err)
 
 	require.Equal(t, AutonomyLevelAutoSimple, s.AutonomyLevel, "should override autonomy_level")
 	require.Equal(t, "claude-sonnet-4-5", s.LLMModel, "should override llm_model")
@@ -106,7 +110,8 @@ func TestParseOrgSettings_ProductContextMigration(t *testing.T) {
 	t.Parallel()
 
 	raw := json.RawMessage(`{"product_direction":"shift to reliability"}`)
-	s := ParseOrgSettings(raw)
+	s, err := ParseOrgSettings(raw)
+	require.NoError(t, err)
 
 	require.Equal(t, "shift to reliability", s.ProductDirection, "should preserve product_direction")
 	require.NotNil(t, s.ProductContext, "should migrate product_direction into product_context")
@@ -124,7 +129,8 @@ func TestParseOrgSettings_AgentConfig(t *testing.T) {
 		}
 	}`)
 
-	s := ParseOrgSettings(raw)
+	s, err := ParseOrgSettings(raw)
+	require.NoError(t, err)
 
 	require.NotNil(t, s.AgentConfig, "should parse agent_config")
 	require.Equal(t, "opus", s.AgentConfig["claude_code"]["ANTHROPIC_MODEL"])
@@ -136,7 +142,8 @@ func TestParseOrgSettings_AgentConfig(t *testing.T) {
 func TestParseOrgSettings_AgentConfigEmpty(t *testing.T) {
 	t.Parallel()
 
-	s := ParseOrgSettings(json.RawMessage(`{}`))
+	s, err := ParseOrgSettings(json.RawMessage(`{}`))
+	require.NoError(t, err)
 
 	require.Nil(t, s.AgentConfig, "agent_config should be nil for empty JSON")
 }
@@ -144,8 +151,7 @@ func TestParseOrgSettings_AgentConfigEmpty(t *testing.T) {
 func TestParseOrgSettings_InvalidJSON(t *testing.T) {
 	t.Parallel()
 
-	s := ParseOrgSettings(json.RawMessage(`{invalid`))
-
-	require.Equal(t, DefaultAutonomyLevel, s.AutonomyLevel, "should fall back to defaults on invalid JSON")
-	require.Equal(t, DefaultMaxConcurrentRuns, s.MaxConcurrentRuns, "should fall back to defaults on invalid JSON")
+	_, err := ParseOrgSettings(json.RawMessage(`{invalid`))
+	require.Error(t, err, "should return error on invalid JSON")
+	require.Contains(t, err.Error(), "unmarshal org settings", "should wrap error")
 }

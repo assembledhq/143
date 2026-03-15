@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/rs/zerolog"
 )
 
 const (
@@ -23,7 +25,7 @@ const (
 // on state-changing HTTP methods. Safe methods (GET, HEAD, OPTIONS) are
 // skipped. Requests with a Bearer Authorization header are also skipped
 // because the browser does not attach those automatically.
-func CSRF(signingKey string) func(http.Handler) http.Handler {
+func CSRF(signingKey string, logger zerolog.Logger) func(http.Handler) http.Handler {
 	key := []byte(signingKey)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -35,7 +37,7 @@ func CSRF(signingKey string) func(http.Handler) http.Handler {
 
 			// Safe methods: skip validation but ensure token cookie exists.
 			if isSafeMethod(r.Method) {
-				ensureCSRFCookie(w, r, key)
+				ensureCSRFCookie(w, r, key, logger)
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -112,11 +114,13 @@ func isSafeMethod(method string) bool {
 // ensureCSRFCookie sets the CSRF cookie if it doesn't already exist or
 // if the existing token has an invalid signature. Errors from token
 // generation are silently ignored (best-effort on safe methods).
-func ensureCSRFCookie(w http.ResponseWriter, r *http.Request, key []byte) {
+func ensureCSRFCookie(w http.ResponseWriter, r *http.Request, key []byte, logger zerolog.Logger) {
 	if c, err := r.Cookie(CSRFCookieName); err == nil && validSignedToken(c.Value, key) {
 		return // already has a valid token
 	}
-	_ = SetCSRFCookie(w, r, key)
+	if err := SetCSRFCookie(w, r, key); err != nil {
+		logger.Warn().Err(err).Msg("failed to set CSRF cookie")
+	}
 }
 
 func isRequestSecure(r *http.Request) bool {

@@ -19,6 +19,8 @@ type Plan struct {
 	Clusters       []Cluster       `json:"clusters"`
 	SkippedIssues  []SkipEntry     `json:"skipped_issues"`
 	ProjectPlans   []ProjectPlan   `json:"project_plans,omitempty"`
+	NewProjects    []NewProjectSpec `json:"new_projects,omitempty"`
+	LinearActions  []LinearAction  `json:"linear_actions,omitempty"`
 	SlotAllocation *SlotAllocation `json:"slot_allocation,omitempty"`
 	IssuesReviewed int             `json:"issues_reviewed"`
 	TokenUsage     json.RawMessage `json:"token_usage,omitempty"`
@@ -66,6 +68,19 @@ type PMContext struct {
 	MaxConcurrentRuns int                       `json:"max_concurrent_runs"`
 	CurrentRunCount   int                       `json:"current_run_count"`
 	ActiveProjects    []ProjectSummary          `json:"active_projects,omitempty"`
+	SlackThreads      []SlackThreadContext      `json:"slack_threads,omitempty"`
+}
+
+// SlackThreadContext is a lightweight summary of a Slack thread for PM analysis.
+type SlackThreadContext struct {
+	ChannelName  string   `json:"channel_name"`
+	Category     string   `json:"category"`
+	Summary      string   `json:"summary"`
+	Urgency      string   `json:"urgency"`
+	MessageCount int      `json:"message_count"`
+	Participants []string `json:"participants"`
+	LastActivity string   `json:"last_activity"`
+	ThreadFile   string   `json:"thread_file"`
 }
 
 type IssueSummary struct {
@@ -80,6 +95,10 @@ type IssueSummary struct {
 	LastSeenAt            string   `json:"last_seen"`
 	Tags                  []string `json:"tags,omitempty"`
 	HasStackTrace         bool     `json:"has_stack_trace"`
+	StackTraceSummary     string   `json:"stack_trace_summary,omitempty"`
+	LinearState           string   `json:"linear_state,omitempty"`
+	LinearTeam            string   `json:"linear_team,omitempty"`
+	LinearIdentifier      string   `json:"linear_identifier,omitempty"`
 }
 
 type RunSummary struct {
@@ -192,9 +211,54 @@ type SkippedTaskEntry struct {
 	Reason      string `json:"reason"`
 }
 
+// slackIntegrationConfig is the shape of the config stored on a Slack integration.
+type slackIntegrationConfig struct {
+	RecentThreads []slackIntegrationThread `json:"recent_threads"`
+}
+
+// slackIntegrationThread is a single thread stored in the Slack integration config.
+type slackIntegrationThread struct {
+	ChannelName  string                        `json:"channel_name"`
+	ThreadTS     string                        `json:"thread_ts"`
+	MessageCount int                           `json:"message_count"`
+	Participants []string                      `json:"participants"`
+	LastActivity string                        `json:"last_activity"`
+	Messages     json.RawMessage               `json:"messages"`
+	Analysis     *slackIntegrationAnalysis     `json:"analysis"`
+}
+
+// slackIntegrationAnalysis is the analysis result attached to a thread.
+type slackIntegrationAnalysis struct {
+	Actionable bool   `json:"actionable"`
+	Category   string `json:"category"`
+	Summary    string `json:"summary"`
+	Urgency    string `json:"urgency"`
+}
+
 // SlotAllocation is the PM's recommendation for how to split slots.
 type SlotAllocation struct {
 	Reactive  int            `json:"reactive"`
 	Projects  map[string]int `json:"projects"`
 	Reasoning string         `json:"reasoning"`
+}
+
+// NewProjectSpec is a project the PM agent recommends creating from a cluster
+// of related issues or a strategic initiative it identifies.
+type NewProjectSpec struct {
+	Title              string      `json:"title"`
+	Goal               string      `json:"goal"`
+	Scope              string      `json:"scope,omitempty"`
+	CompletionCriteria string      `json:"completion_criteria,omitempty"`
+	IssueIDs           []uuid.UUID `json:"issue_ids"`
+	Priority           int         `json:"priority"`
+	Reasoning          string      `json:"reasoning"`
+}
+
+// LinearAction is an action the PM recommends taking on a Linear issue.
+type LinearAction struct {
+	IssueID    uuid.UUID `json:"issue_id"`
+	ExternalID string    `json:"external_id"`
+	Action     string    `json:"action"` // "re_prioritize", "re_label", "add_comment", "close"
+	Detail     string    `json:"detail"`
+	Reasoning  string    `json:"reasoning"`
 }

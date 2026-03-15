@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	llmpkg "github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/models"
@@ -169,7 +170,7 @@ func (s *Service) ComputeScore(ctx context.Context, orgID, issueID uuid.UUID) (*
 		(issue.Status == "open" || issue.Status == "triaged") &&
 		finalScore > threshold
 
-	factors, _ := json.Marshal(map[string]any{
+	factors, err := json.Marshal(map[string]any{
 		"customer_impact_raw": customerImpact,
 		"severity_raw":        severity,
 		"recency_raw":         recency,
@@ -182,6 +183,10 @@ func (s *Service) ComputeScore(ctx context.Context, orgID, issueID uuid.UUID) (*
 			"revenue_risk":    wRev,
 		},
 	})
+	if err != nil {
+		s.logger.Warn().Err(err).Msg("failed to marshal priority score factors")
+		factors = nil
+	}
 
 	ps := &models.PriorityScore{
 		IssueID:             issueID,
@@ -398,13 +403,13 @@ func (s *Service) computeDirectionAlignment(ctx context.Context, issue *models.I
 		desc = *issue.Description
 	}
 
-	userPrompt := fmt.Sprintf(`Product Direction: %s
-
-Issue Title: %s
-Issue Description: %s
-Severity: %s
-Occurrences: %d`,
-		productDirection, issue.Title, desc, issue.Severity, issue.OccurrenceCount)
+	userPrompt := prompts.DirectionAlignmentUserPrompt(prompts.DirectionAlignmentUserPromptData{
+		ProductDirection: productDirection,
+		Title:            issue.Title,
+		Description:      desc,
+		Severity:         issue.Severity,
+		OccurrenceCount:  issue.OccurrenceCount,
+	})
 
 	response, err := s.llm.Complete(ctx, systemPrompt, userPrompt)
 	if err != nil {
@@ -439,12 +444,13 @@ func (s *Service) estimateComplexityViaLLM(ctx context.Context, issue *models.Is
 		desc = *issue.Description
 	}
 
-	userPrompt := fmt.Sprintf(`Issue Title: %s
-Issue Description: %s
-Severity: %s
-Occurrences: %d
-Affected Customers: %d`,
-		issue.Title, desc, issue.Severity, issue.OccurrenceCount, issue.AffectedCustomerCount)
+	userPrompt := prompts.ComplexityEstimateUserPrompt(prompts.ComplexityEstimateUserPromptData{
+		Title:                 issue.Title,
+		Description:           desc,
+		Severity:              issue.Severity,
+		OccurrenceCount:       issue.OccurrenceCount,
+		AffectedCustomerCount: issue.AffectedCustomerCount,
+	})
 
 	response, err := s.llm.Complete(ctx, systemPrompt, userPrompt)
 	if err != nil {
@@ -490,7 +496,9 @@ func heuristicComplexity(issue *models.Issue) (tier int, label string, confidenc
 func parseOrgSettings(raw json.RawMessage) OrgSettings {
 	var settings OrgSettings
 	if len(raw) > 0 {
-		_ = json.Unmarshal(raw, &settings)
+		if err := json.Unmarshal(raw, &settings); err != nil {
+			log.Warn().Err(err).Msg("failed to parse org settings for prioritization, using defaults")
+		}
 	}
 	return settings
 }
