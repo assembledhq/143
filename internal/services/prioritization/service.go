@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	llmpkg "github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/models"
@@ -495,7 +496,8 @@ func heuristicComplexity(issue *models.Issue) (tier int, label string, confidenc
 func parseOrgSettings(raw json.RawMessage) OrgSettings {
 	var settings OrgSettings
 	if len(raw) > 0 {
-		if err := json.Unmarshal(raw, &settings); err != nil { //nolint:errcheck // intentional: fall back to zero-value defaults on bad JSON
+		if err := json.Unmarshal(raw, &settings); err != nil {
+			log.Warn().Err(err).Msg("failed to parse org settings for prioritization, using defaults")
 		}
 	}
 	return settings
