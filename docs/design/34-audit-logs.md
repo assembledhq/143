@@ -50,7 +50,7 @@ We need a production-grade audit log that captures **all significant state chang
 
 ## 3. Schema
 
-### 3.1 Migration: `000021_audit_logs.up.sql`
+### 3.1 Migration: `000022_audit_logs.up.sql`
 
 The new `audit_logs` table replaces the existing `audit_log` table. A migration renames the old table for data preservation, then creates the new one.
 
@@ -130,7 +130,7 @@ CREATE TRIGGER audit_logs_immutable
     EXECUTE FUNCTION prevent_audit_logs_modification();
 ```
 
-### 3.2 Down migration: `000021_audit_logs.down.sql`
+### 3.2 Down migration: `000022_audit_logs.down.sql`
 
 ```sql
 DROP FUNCTION IF EXISTS delete_expired_audit_logs(uuid, int);

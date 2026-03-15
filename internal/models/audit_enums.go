@@ -72,8 +72,8 @@ const (
 
 	// Integration & credential actions
 	AuditActionIntegrationConnected AuditAction = "integration.connected"
-	AuditActionCredentialUpdated    AuditAction = "credential.updated"
-	AuditActionCredentialDeleted    AuditAction = "credential.deleted"
+	AuditActionCredentialUpdated AuditAction = "credential.updated" // #nosec G101 -- not a credential
+	AuditActionCredentialDeleted AuditAction = "credential.deleted" // #nosec G101 -- not a credential
 
 	// Auth actions
 	AuditActionAuthLogin    AuditAction = "auth.login"
