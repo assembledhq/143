@@ -150,7 +150,7 @@ function OverviewTab({ session }: { session: Session }) {
         </Card>
       )}
 
-      {(session.pm_plan_id || session.pm_reasoning || session.pm_approach) && (
+      {session.pm_plan_id && (session.pm_reasoning || session.pm_approach) && (
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm">PM context</CardTitle>

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/api/sse"
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -26,6 +28,7 @@ type SessionHandler struct {
 	issueStore       *db.IssueStore
 	orgStore         *db.OrganizationStore
 	jobStore         *db.JobStore
+	llmClient        llm.Client // optional, used for generating manual session titles
 	logger           zerolog.Logger
 }
 
@@ -38,6 +41,7 @@ func NewSessionHandler(
 	issueStore *db.IssueStore,
 	orgStore *db.OrganizationStore,
 	jobStore *db.JobStore,
+	llmClient llm.Client,
 	logger zerolog.Logger,
 ) *SessionHandler {
 	return &SessionHandler{
@@ -49,6 +53,7 @@ func NewSessionHandler(
 		issueStore:       issueStore,
 		orgStore:         orgStore,
 		jobStore:         jobStore,
+		llmClient:        llmClient,
 		logger:           logger,
 	}
 }
@@ -536,6 +541,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		AutonomyLevel: autonomyLevel,
 		TokenMode:     tokenMode,
 		ModelOverride: modelOverride,
+		PMApproach:    &title,
 	}
 	if err := h.runStore.Create(r.Context(), session); err != nil {
 		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create manual session")
@@ -551,7 +557,40 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Generate a concise session title via LLM (with a short timeout so the
+	// request doesn't block for too long). If it succeeds, update the session
+	// with the generated title before returning the response.
+	if h.llmClient != nil {
+		if err := h.generateSessionTitle(r.Context(), session, orgID, body.Message); err != nil {
+			writeError(w, http.StatusInternalServerError, "TITLE_GENERATION_FAILED", fmt.Sprintf("failed to generate session title: %v", err))
+			return
+		}
+	}
+
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.Session]{Data: *session})
+}
+
+func (h *SessionHandler) generateSessionTitle(parent context.Context, session *models.Session, orgID uuid.UUID, message string) error {
+	const titlePrompt = "You are a concise title generator. Given a user's task description, produce a short title (max 80 characters) that summarizes what needs to be done. Output ONLY the title, nothing else. No quotes, no punctuation at the end."
+
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
+
+	generated, err := h.llmClient.Complete(ctx, titlePrompt, message)
+	if err != nil {
+		return fmt.Errorf("llm completion: %w", err)
+	}
+	generated = strings.TrimSpace(generated)
+	generated = strings.Trim(generated, "\"'")
+	if len(generated) == 0 || len(generated) > 120 {
+		return nil
+	}
+
+	if err := h.runStore.UpdateTitle(ctx, orgID, session.ID, generated); err != nil {
+		return fmt.Errorf("update title: %w", err)
+	}
+	session.PMApproach = &generated
+	return nil
 }
 
 func buildManualSessionDescription(message string, images []string) string {
