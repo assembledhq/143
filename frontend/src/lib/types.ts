@@ -104,6 +104,7 @@ export interface Session {
   pm_reasoning?: string;
   project_task_id?: string;
   model_override?: string;
+  triggered_by_user_id?: string;
   error?: string;
   result_summary?: string;
   diff?: string;
@@ -382,6 +383,23 @@ export interface CredentialSummary {
   app_name?: string;
   app_id?: number;
   account_type?: string;
+}
+
+export interface UserCredentialSummary {
+  provider: string;
+  configured: boolean;
+  is_team_default: boolean;
+  masked_key?: string;
+  set_by_user_id?: string;
+  set_by_user_name?: string;
+  status?: string;
+  last_verified_at?: string;
+}
+
+export interface ResolvedCredential {
+  provider: string;
+  source: string;
+  masked_key?: string;
 }
 
 export interface ListResponse<T> {

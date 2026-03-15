@@ -56,6 +56,7 @@ func main() {
 		}
 	}
 	credentialStore := db.NewOrgCredentialStore(pool, cryptoSvc)
+	userCredentialStore := db.NewUserCredentialStore(pool, cryptoSvc)
 	codexAuthSvc := codexauth.NewService(credentialStore, logger)
 
 	// LLM client (shared between router and worker services).
@@ -108,7 +109,7 @@ func main() {
 		// Build Phase 3+ services if runtime dependencies are available.
 		var services *worker.Services
 		if canBuildServices(cfg, logger) {
-			services = buildServices(cfg, pool, logger, codexAuthSvc, credentialStore, issueStore, sessionStore,
+			services = buildServices(cfg, pool, logger, codexAuthSvc, credentialStore, userCredentialStore, issueStore, sessionStore,
 				jobStore, orgStore, repoStore, validationStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore)
@@ -176,6 +177,7 @@ func buildServices(
 	logger zerolog.Logger,
 	codexAuthSvc *codexauth.Service,
 	credentialStore *db.OrgCredentialStore,
+	userCredentialStore *db.UserCredentialStore,
 	issueStore *db.IssueStore,
 	sessionStore *db.SessionStore,
 	jobStore *db.JobStore,
@@ -241,6 +243,7 @@ func buildServices(
 		GitHub:            ghSvc,
 		CodexAuth:         codexAuthSvc,
 		Credentials:       credentialStore,
+		UserCredentials:   userCredentialStore,
 		Logger:            logger,
 	})
 

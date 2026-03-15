@@ -28,7 +28,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { api } from "@/lib/api";
-import type { Session } from "@/lib/types";
+import type { Session, User } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
 // Status config
@@ -125,87 +125,105 @@ function SortableHeader({ label, column }: { label: string; column: { toggleSort
 }
 
 // ---------------------------------------------------------------------------
-// Column definitions
+// Column definitions (members is captured via closure in the component)
 // ---------------------------------------------------------------------------
 
-const columns: ColumnDef<Session>[] = [
-  {
-    id: "status",
-    accessorKey: "status",
-    header: ({ column }) => <SortableHeader label="Status" column={column} />,
-    size: 140,
-    cell: ({ row }) => {
-      const status = row.original.status;
-      const cfg = statusConfig[status] || statusConfig.pending;
-      return (
-        <div className="flex items-center gap-2">
-          <StatusDot status={status} />
-          <span className={`text-[12px] font-medium ${cfg.text}`}>{cfg.label}</span>
-        </div>
-      );
+function buildColumns(members: User[]): ColumnDef<Session>[] {
+  return [
+    {
+      id: "status",
+      accessorKey: "status",
+      header: ({ column }) => <SortableHeader label="Status" column={column} />,
+      size: 140,
+      cell: ({ row }) => {
+        const status = row.original.status;
+        const cfg = statusConfig[status] || statusConfig.pending;
+        return (
+          <div className="flex items-center gap-2">
+            <StatusDot status={status} />
+            <span className={`text-[12px] font-medium ${cfg.text}`}>{cfg.label}</span>
+          </div>
+        );
+      },
     },
-  },
-  {
-    id: "title",
-    accessorFn: (row) => sessionTitle(row),
-    header: "Session",
-    size: 999,
-    cell: ({ row }) => {
-      const session = row.original;
-      const failed = session.status === "failed";
-      return (
-        <div className="min-w-0">
-          <span className="text-[13px] font-medium text-foreground truncate block max-w-[480px]">
-            {sessionTitle(session)}
-          </span>
-          {failed && (session.failure_explanation || session.error) && (
-            <span className="text-[11px] text-destructive/80 truncate block max-w-[480px] mt-0.5">
-              {session.failure_explanation || session.error}
+    {
+      id: "title",
+      accessorFn: (row) => sessionTitle(row),
+      header: "Session",
+      size: 999,
+      cell: ({ row }) => {
+        const session = row.original;
+        const failed = session.status === "failed";
+        return (
+          <div className="min-w-0">
+            <span className="text-[13px] font-medium text-foreground truncate block max-w-[480px]">
+              {sessionTitle(session)}
             </span>
-          )}
-        </div>
-      );
+            {failed && (session.failure_explanation || session.error) && (
+              <span className="text-[11px] text-destructive/80 truncate block max-w-[480px] mt-0.5">
+                {session.failure_explanation || session.error}
+              </span>
+            )}
+          </div>
+        );
+      },
     },
-  },
-  {
-    id: "agent_type",
-    accessorKey: "agent_type",
-    header: ({ column }) => <SortableHeader label="Agent" column={column} />,
-    size: 120,
-    cell: ({ row }) => (
-      <span className="text-[12px] text-muted-foreground">
-        {row.original.agent_type.replace(/_/g, " ")}
-      </span>
-    ),
-  },
-  {
-    id: "confidence",
-    accessorKey: "confidence_score",
-    header: ({ column }) => <SortableHeader label="Confidence" column={column} />,
-    size: 100,
-    cell: ({ row }) => {
-      const score = row.original.confidence_score;
-      if (score == null) return <span className="text-[12px] text-muted-foreground/40">—</span>;
-      const pct = Math.round(score * 100);
-      const color = pct >= 80 ? "text-emerald-600 dark:text-emerald-400" : pct >= 50 ? "text-amber-600 dark:text-amber-400" : "text-destructive";
-      return <span className={`text-[12px] font-medium tabular-nums ${color}`}>{pct}%</span>;
-    },
-  },
-  {
-    id: "last_modified",
-    accessorFn: (row) => row.completed_at || row.started_at || row.created_at,
-    header: ({ column }) => <SortableHeader label="Last modified" column={column} />,
-    size: 110,
-    cell: ({ row }) => {
-      const ts = row.original.completed_at || row.original.started_at || row.original.created_at;
-      return (
-        <span className="text-[12px] text-muted-foreground tabular-nums">
-          {formatTimeAgo(ts)}
+    {
+      id: "agent_type",
+      accessorKey: "agent_type",
+      header: ({ column }) => <SortableHeader label="Agent" column={column} />,
+      size: 120,
+      cell: ({ row }) => (
+        <span className="text-[12px] text-muted-foreground">
+          {row.original.agent_type.replace(/_/g, " ")}
         </span>
-      );
+      ),
     },
-  },
-];
+    {
+      id: "triggered_by",
+      accessorKey: "triggered_by_user_id",
+      header: "Triggered by",
+      size: 120,
+      cell: ({ row }) => {
+        const userId = row.original.triggered_by_user_id;
+        if (!userId) return <span className="text-[12px] text-muted-foreground/40">—</span>;
+        const user = members.find((m) => m.id === userId);
+        return (
+          <span className="text-[12px] text-muted-foreground truncate block max-w-[100px]">
+            {user ? user.name.split(" ")[0] : "Unknown"}
+          </span>
+        );
+      },
+    },
+    {
+      id: "confidence",
+      accessorKey: "confidence_score",
+      header: ({ column }) => <SortableHeader label="Confidence" column={column} />,
+      size: 100,
+      cell: ({ row }) => {
+        const score = row.original.confidence_score;
+        if (score == null) return <span className="text-[12px] text-muted-foreground/40">—</span>;
+        const pct = Math.round(score * 100);
+        const color = pct >= 80 ? "text-emerald-600 dark:text-emerald-400" : pct >= 50 ? "text-amber-600 dark:text-amber-400" : "text-destructive";
+        return <span className={`text-[12px] font-medium tabular-nums ${color}`}>{pct}%</span>;
+      },
+    },
+    {
+      id: "last_modified",
+      accessorFn: (row) => row.completed_at || row.started_at || row.created_at,
+      header: ({ column }) => <SortableHeader label="Last modified" column={column} />,
+      size: 110,
+      cell: ({ row }) => {
+        const ts = row.original.completed_at || row.original.started_at || row.original.created_at;
+        return (
+          <span className="text-[12px] text-muted-foreground tabular-nums">
+            {formatTimeAgo(ts)}
+          </span>
+        );
+      },
+    },
+  ];
+}
 
 // ---------------------------------------------------------------------------
 // Main component
@@ -222,7 +240,13 @@ export function SessionsPageContent() {
     refetchInterval: 10000,
   });
 
+  const { data: membersData } = useQuery({
+    queryKey: ["team", "members"],
+    queryFn: () => api.team.listMembers(),
+  });
+
   const allSessions = data?.data ?? [];
+  const members = membersData?.data ?? [];
 
   const currentFilter = activeFilter ?? "all";
   const showDecisions = currentFilter === "decisions";
@@ -235,6 +259,8 @@ export function SessionsPageContent() {
     () => (showDecisions ? [] : filterSessions(allSessions, activeFilter)),
     [allSessions, activeFilter, showDecisions],
   );
+
+  const columns = useMemo(() => buildColumns(members), [members]);
 
   const table = useReactTable({
     data: filteredSessions,
