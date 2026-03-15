@@ -56,10 +56,14 @@ func scanProject(row pgx.Row) (models.Project, error) {
 	}
 
 	if len(lessonsRaw) > 0 {
-		_ = json.Unmarshal(lessonsRaw, &p.LessonsLearned)
+		if err := json.Unmarshal(lessonsRaw, &p.LessonsLearned); err != nil {
+			return models.Project{}, fmt.Errorf("unmarshal lessons_learned: %w", err)
+		}
 	}
 	if len(approachRaw) > 0 {
-		_ = json.Unmarshal(approachRaw, &p.ApproachHistory)
+		if err := json.Unmarshal(approachRaw, &p.ApproachHistory); err != nil {
+			return models.Project{}, fmt.Errorf("unmarshal approach_history: %w", err)
+		}
 	}
 	p.SourceIssueIDs = sourceIssueIDs
 
@@ -88,10 +92,14 @@ func scanProjects(rows pgx.Rows) ([]models.Project, error) {
 		}
 
 		if len(lessonsRaw) > 0 {
-			_ = json.Unmarshal(lessonsRaw, &p.LessonsLearned)
+			if err := json.Unmarshal(lessonsRaw, &p.LessonsLearned); err != nil {
+				return nil, fmt.Errorf("unmarshal lessons_learned: %w", err)
+			}
 		}
 		if len(approachRaw) > 0 {
-			_ = json.Unmarshal(approachRaw, &p.ApproachHistory)
+			if err := json.Unmarshal(approachRaw, &p.ApproachHistory); err != nil {
+				return nil, fmt.Errorf("unmarshal approach_history: %w", err)
+			}
 		}
 		p.SourceIssueIDs = sourceIssueIDs
 

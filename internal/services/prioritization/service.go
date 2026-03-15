@@ -169,7 +169,7 @@ func (s *Service) ComputeScore(ctx context.Context, orgID, issueID uuid.UUID) (*
 		(issue.Status == "open" || issue.Status == "triaged") &&
 		finalScore > threshold
 
-	factors, _ := json.Marshal(map[string]any{
+	factors, err := json.Marshal(map[string]any{
 		"customer_impact_raw": customerImpact,
 		"severity_raw":        severity,
 		"recency_raw":         recency,
@@ -182,6 +182,10 @@ func (s *Service) ComputeScore(ctx context.Context, orgID, issueID uuid.UUID) (*
 			"revenue_risk":    wRev,
 		},
 	})
+	if err != nil {
+		s.logger.Warn().Err(err).Msg("failed to marshal priority score factors")
+		factors = nil
+	}
 
 	ps := &models.PriorityScore{
 		IssueID:             issueID,
@@ -491,7 +495,8 @@ func heuristicComplexity(issue *models.Issue) (tier int, label string, confidenc
 func parseOrgSettings(raw json.RawMessage) OrgSettings {
 	var settings OrgSettings
 	if len(raw) > 0 {
-		_ = json.Unmarshal(raw, &settings)
+		if err := json.Unmarshal(raw, &settings); err != nil { //nolint:errcheck // intentional: fall back to zero-value defaults on bad JSON
+		}
 	}
 	return settings
 }

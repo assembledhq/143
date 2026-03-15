@@ -142,7 +142,11 @@ func (c *SentryAPIClient) normalizeIssue(integrationID uuid.UUID, issue SentryIs
 		fmt.Sprintf("project:%s", issue.Project.Slug),
 	}
 
-	rawData, _ := json.Marshal(issue)
+	rawData, err := json.Marshal(issue)
+	if err != nil {
+		c.logger.Warn().Err(err).Str("issue_id", issue.ID).Msg("failed to marshal sentry issue raw data")
+		rawData = nil
+	}
 
 	return NormalizedIssue{
 		ExternalID:            issue.ID,

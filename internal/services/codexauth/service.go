@@ -193,7 +193,9 @@ func (s *Service) InitiateDeviceAuth(ctx context.Context, orgID uuid.UUID) (*Dev
 		if err := s.credentials.Upsert(ctx, orgID, pendingCfg); err != nil {
 			s.logger.Warn().Err(err).Msg("failed to persist pending device auth to DB")
 		} else {
-			_ = s.credentials.UpdateStatus(ctx, orgID, models.ProviderOpenAIChatGPT, "pending_auth")
+			if err := s.credentials.UpdateStatus(ctx, orgID, models.ProviderOpenAIChatGPT, "pending_auth"); err != nil {
+				s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to update credential status")
+			}
 		}
 	}
 
@@ -421,7 +423,9 @@ func (s *Service) RefreshToken(ctx context.Context, orgID uuid.UUID) (*models.Op
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		// Refresh token revoked or expired — mark credential as invalid.
-		_ = s.credentials.UpdateStatus(ctx, orgID, models.ProviderOpenAIChatGPT, "invalid")
+		if err := s.credentials.UpdateStatus(ctx, orgID, models.ProviderOpenAIChatGPT, "invalid"); err != nil {
+			s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to update credential status")
+		}
 		return nil, fmt.Errorf("refresh token revoked (status %d)", resp.StatusCode)
 	}
 

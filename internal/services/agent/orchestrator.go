@@ -322,8 +322,12 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	confidenceThresholds := models.ConfidenceThresholdsForAutonomy(models.DefaultAgentAutonomy)
 	if o.orgs != nil {
 		if org, orgErr := o.orgs.GetByID(ctx, run.OrgID); orgErr == nil {
-			orgSettings := models.ParseOrgSettings(org.Settings)
-			confidenceThresholds = orgSettings.ConfidenceThresholds
+			orgSettings, parseErr := models.ParseOrgSettings(org.Settings)
+			if parseErr != nil {
+				o.logger.Warn().Err(parseErr).Str("org_id", run.OrgID.String()).Msg("failed to parse org settings, using defaults")
+			} else {
+				confidenceThresholds = orgSettings.ConfidenceThresholds
+			}
 		}
 	}
 
@@ -406,7 +410,11 @@ func (o *Orchestrator) checkConcurrency(ctx context.Context, orgID uuid.UUID) er
 // It also detects question-level log entries and creates SessionQuestion records.
 func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, logCh <-chan LogEntry) {
 	for entry := range logCh {
-		metadata, _ := json.Marshal(entry.Metadata)
+		metadata, err := json.Marshal(entry.Metadata)
+		if err != nil {
+			o.logger.Warn().Err(err).Str("run_id", runID.String()).Msg("failed to marshal log entry metadata")
+			metadata = nil
+		}
 
 		log := &models.SessionLog{
 			SessionID: runID,
@@ -482,7 +490,11 @@ func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg 
 
 // buildRunResult converts an AgentResult into the DB update struct.
 func (o *Orchestrator) buildRunResult(result *AgentResult) *models.SessionResult {
-	tokenUsage, _ := json.Marshal(result.TokenUsage)
+	tokenUsage, err := json.Marshal(result.TokenUsage)
+	if err != nil {
+		o.logger.Warn().Err(err).Msg("failed to marshal token usage")
+		tokenUsage = nil
+	}
 
 	return &models.SessionResult{
 		ConfidenceScore:     &result.ConfidenceScore,

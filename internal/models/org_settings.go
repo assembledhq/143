@@ -131,10 +131,12 @@ type ProductContext struct {
 
 // ParseOrgSettings deserializes the JSONB settings column into OrgSettings,
 // applying defaults for any missing or zero-valued fields.
-func ParseOrgSettings(raw json.RawMessage) OrgSettings {
+func ParseOrgSettings(raw json.RawMessage) (OrgSettings, error) {
 	var s OrgSettings
 	if len(raw) > 0 {
-		_ = json.Unmarshal(raw, &s)
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return s, fmt.Errorf("unmarshal org settings: %w", err)
+		}
 	}
 
 	if s.AutonomyLevel == "" {
@@ -176,5 +178,5 @@ func ParseOrgSettings(raw json.RawMessage) OrgSettings {
 			Direction: s.ProductDirection,
 		}
 	}
-	return s
+	return s, nil
 }

@@ -69,7 +69,8 @@ export function CodexDeviceCodeModal({
           if (pollRef.current) clearInterval(pollRef.current);
           if (timerRef.current) clearInterval(timerRef.current);
         }
-      } catch {
+      } catch (err) {
+        console.warn("codex auth poll failed:", err);
       }
     }, 3000);
 

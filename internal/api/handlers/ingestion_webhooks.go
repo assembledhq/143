@@ -122,7 +122,9 @@ func (h *IngestionWebhookHandler) handleProvider(w http.ResponseWriter, r *http.
 
 	if err != nil {
 		errMsg := err.Error()
-		_ = h.webhookStore.MarkProcessed(r.Context(), delivery, &errMsg)
+		if markErr := h.webhookStore.MarkProcessed(r.Context(), delivery, &errMsg); markErr != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(markErr).Msg("failed to mark webhook processed")
+		}
 		h.logger.Error().Err(err).Str("provider", provider).Msg("failed to parse webhook")
 		writeError(w, http.StatusBadRequest, "PARSE_FAILED", "failed to parse webhook payload")
 		return
@@ -130,7 +132,9 @@ func (h *IngestionWebhookHandler) handleProvider(w http.ResponseWriter, r *http.
 
 	if normalized == nil {
 		// Non-actionable event (e.g., resolved, comment)
-		_ = h.webhookStore.MarkProcessed(r.Context(), delivery, nil)
+		if err := h.webhookStore.MarkProcessed(r.Context(), delivery, nil); err != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to mark webhook processed")
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored"})
 		return
 	}
@@ -138,13 +142,17 @@ func (h *IngestionWebhookHandler) handleProvider(w http.ResponseWriter, r *http.
 	_, err = h.ingestionSvc.IngestNormalized(r.Context(), integration.OrgID, *normalized)
 	if err != nil {
 		errMsg := err.Error()
-		_ = h.webhookStore.MarkProcessed(r.Context(), delivery, &errMsg)
+		if markErr := h.webhookStore.MarkProcessed(r.Context(), delivery, &errMsg); markErr != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(markErr).Msg("failed to mark webhook processed")
+		}
 		h.logger.Error().Err(err).Str("provider", provider).Msg("failed to ingest issue")
 		writeError(w, http.StatusInternalServerError, "INGEST_FAILED", "failed to ingest issue")
 		return
 	}
 
-	_ = h.webhookStore.MarkProcessed(r.Context(), delivery, nil)
+	if err := h.webhookStore.MarkProcessed(r.Context(), delivery, nil); err != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to mark webhook processed")
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
 }
 
