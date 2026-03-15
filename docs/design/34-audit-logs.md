@@ -97,7 +97,9 @@ CREATE TABLE audit_logs (
 -- -----------------------------------------------------------------------
 
 -- Primary listing: "show me the audit trail for this org, newest first"
-CREATE INDEX idx_audit_logs_org_created ON audit_logs (org_id, created_at DESC);
+-- Includes id DESC so the (created_at, id) composite cursor can be satisfied
+-- by an index-only backward scan without an extra sort step.
+CREATE INDEX idx_audit_logs_org_created ON audit_logs (org_id, created_at DESC, id DESC);
 
 -- Resource drill-down: "show me all actions on this specific resource"
 CREATE INDEX idx_audit_logs_resource ON audit_logs (org_id, resource_type, resource_id, created_at DESC);
@@ -519,6 +521,9 @@ func (s *AuditLogStore) List(ctx context.Context, orgID uuid.UUID, filters Audit
         w.add("action = @action", "action", filters.Action)
     }
     if filters.ActionPrefix != "" {
+        // ESCAPE '\\' is explicit for clarity — PostgreSQL's default LIKE
+        // escape character is also backslash, but stating it explicitly
+        // makes the intent obvious and guards against non-default settings.
         w.add("action LIKE @action_prefix ESCAPE '\\'", "action_prefix", escapeLike(filters.ActionPrefix)+"%")
     }
     if filters.ResourceType != "" {
@@ -541,7 +546,7 @@ func (s *AuditLogStore) List(ctx context.Context, orgID uuid.UUID, filters Audit
     }
     if filters.CursorTime != nil && filters.CursorID != nil {
         w.add("(created_at, id) < (@cursor_time, @cursor_id)", "cursor_time", *filters.CursorTime)
-        w.args["cursor_id"] = *filters.CursorID
+        w.addArg("cursor_id", *filters.CursorID)
     }
 
     where, args := w.build()
@@ -567,6 +572,8 @@ func (s *AuditLogStore) List(ctx context.Context, orgID uuid.UUID, filters Audit
 }
 
 // GetByID returns a single audit log entry by ID, scoped to an organization.
+// Returns pgx.ErrNoRows (wrapped) when the entry does not exist, so callers
+// can use errors.Is(err, pgx.ErrNoRows) to distinguish 404 from 500.
 func (s *AuditLogStore) GetByID(ctx context.Context, orgID uuid.UUID, id int64) (*models.AuditLog, error) {
     query := `
         SELECT id, org_id, actor_type, actor_id, user_id,
@@ -580,6 +587,8 @@ func (s *AuditLogStore) GetByID(ctx context.Context, orgID uuid.UUID, id int64) 
     if err != nil {
         return nil, fmt.Errorf("query audit log by id: %w", err)
     }
+    // pgx.CollectOneRow returns pgx.ErrNoRows when no row matches.
+    // We wrap with %w so the caller can check errors.Is(err, pgx.ErrNoRows).
     entry, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.AuditLog])
     if err != nil {
         return nil, fmt.Errorf("get audit log %d: %w", id, err)
@@ -616,6 +625,13 @@ func newWhereClause() *whereClause {
 
 func (w *whereClause) add(condition string, name string, value interface{}) {
     w.conditions = append(w.conditions, condition)
+    w.args[name] = value
+}
+
+// addArg registers an additional named argument without appending a new
+// condition. Use this when a single condition references multiple parameters
+// (e.g. a composite cursor: "(created_at, id) < (@cursor_time, @cursor_id)").
+func (w *whereClause) addArg(name string, value interface{}) {
     w.args[name] = value
 }
 
@@ -872,12 +888,120 @@ Audit log listing is restricted to **admin** role. This is sensitive data — or
 ### 6.4 Handler (`internal/api/handlers/audit_logs.go`)
 
 ```go
+package handlers
+
+import (
+    "encoding/base64"
+    "errors"
+    "fmt"
+    "net/http"
+    "strconv"
+    "strings"
+    "time"
+
+    "github.com/assembledhq/143/internal/db"
+    "github.com/go-chi/chi/v5"
+    "github.com/jackc/pgx/v5"
+)
+
 type AuditLogHandler struct {
     store *db.AuditLogStore
 }
 
 func NewAuditLogHandler(store *db.AuditLogStore) *AuditLogHandler {
     return &AuditLogHandler{store: store}
+}
+
+// --- Cursor encode/decode ---------------------------------------------------
+
+// encodeCursor produces an opaque, base64-encoded cursor from the last row's
+// created_at and id. Format: "RFC3339Nano,id" → base64.
+func encodeCursor(createdAt time.Time, id int64) string {
+    raw := fmt.Sprintf("%s,%d", createdAt.UTC().Format(time.RFC3339Nano), id)
+    return base64.StdEncoding.EncodeToString([]byte(raw))
+}
+
+// decodeCursor is the inverse of encodeCursor. It returns the created_at
+// timestamp and id embedded in the cursor, or an error if the format is
+// invalid.
+func decodeCursor(cursor string) (time.Time, int64, error) {
+    b, err := base64.StdEncoding.DecodeString(cursor)
+    if err != nil {
+        return time.Time{}, 0, fmt.Errorf("invalid cursor encoding: %w", err)
+    }
+    parts := strings.SplitN(string(b), ",", 2)
+    if len(parts) != 2 {
+        return time.Time{}, 0, fmt.Errorf("invalid cursor format")
+    }
+    t, err := time.Parse(time.RFC3339Nano, parts[0])
+    if err != nil {
+        return time.Time{}, 0, fmt.Errorf("invalid cursor timestamp: %w", err)
+    }
+    id, err := strconv.ParseInt(parts[1], 10, 64)
+    if err != nil {
+        return time.Time{}, 0, fmt.Errorf("invalid cursor id: %w", err)
+    }
+    return t, id, nil
+}
+
+// --- List handler (sketch) --------------------------------------------------
+
+// List handles GET /api/v1/audit-logs. It parses query parameters into
+// AuditLogFilters, calls the store, and builds the paginated response
+// including the next_cursor.
+func (h *AuditLogHandler) List(w http.ResponseWriter, r *http.Request) {
+    // ... parse orgID from auth context, parse filter query params ...
+
+    var filters db.AuditLogFilters
+    // ... populate filters from query params ...
+
+    if cursor := r.URL.Query().Get("cursor"); cursor != "" {
+        t, id, err := decodeCursor(cursor)
+        if err != nil {
+            http.Error(w, "invalid cursor", http.StatusBadRequest)
+            return
+        }
+        filters.CursorTime = &t
+        filters.CursorID = &id
+    }
+
+    entries, err := h.store.List(r.Context(), orgID, filters)
+    // ... handle err ...
+
+    // Build next_cursor from the last entry in the page.
+    var nextCursor *string
+    if len(entries) == filters.Limit {
+        last := entries[len(entries)-1]
+        c := encodeCursor(last.CreatedAt, last.ID)
+        nextCursor = &c
+    }
+
+    // ... render JSON response with data + meta.next_cursor ...
+}
+
+// --- Get handler (sketch) ---------------------------------------------------
+
+// Get handles GET /api/v1/audit-logs/{id}.
+func (h *AuditLogHandler) Get(w http.ResponseWriter, r *http.Request) {
+    // ... parse orgID from auth context ...
+
+    id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+    if err != nil {
+        http.Error(w, "invalid id", http.StatusBadRequest)
+        return
+    }
+
+    entry, err := h.store.GetByID(r.Context(), orgID, id)
+    if err != nil {
+        if errors.Is(err, pgx.ErrNoRows) {
+            http.Error(w, "not found", http.StatusNotFound)
+            return
+        }
+        // ... handle internal error ...
+        return
+    }
+
+    // ... render JSON response ...
 }
 ```
 
@@ -1036,6 +1160,13 @@ AS $$
 DECLARE
     deleted bigint;
 BEGIN
+    -- Guard: refuse non-positive retention to prevent accidental mass deletion.
+    -- This is a SECURITY DEFINER function that disables the immutability
+    -- trigger, so we must be defensive about the inputs it accepts.
+    IF retention_days <= 0 THEN
+        RAISE EXCEPTION 'retention_days must be positive, got %', retention_days;
+    END IF;
+
     -- Temporarily disable the immutability trigger for this transaction.
     -- Note: ALTER TABLE ... DISABLE/ENABLE TRIGGER is transactional in
     -- Postgres, so if the transaction rolls back the trigger is restored
@@ -1060,8 +1191,12 @@ The Go cleanup job calls this function per-org using the configured retention:
 
 ```go
 // In the scheduled cleanup worker:
+retention := org.Settings.AuditLogRetentionDays
+if retention <= 0 {
+    retention = 90 // default; the SQL function also rejects non-positive values
+}
 _, err := db.Exec(ctx, `SELECT delete_expired_audit_logs(@org_id, @retention)`,
-    pgx.NamedArgs{"org_id": org.ID, "retention": org.Settings.AuditLogRetentionDays})
+    pgx.NamedArgs{"org_id": org.ID, "retention": retention})
 ```
 
 ---
