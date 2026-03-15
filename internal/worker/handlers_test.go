@@ -547,32 +547,32 @@ func (m *testFeedbackCommentStore) ListActionableByPullRequest(ctx context.Conte
 	return nil, nil
 }
 
-type testFeedbackPatternStore struct {
+type testFeedbackMemoryStore struct {
 	createCalls int
 }
 
-func (m *testFeedbackPatternStore) Create(ctx context.Context, p *models.ReviewPattern) error {
+func (m *testFeedbackMemoryStore) Create(ctx context.Context, p *models.Memory) error {
 	m.createCalls++
 	return nil
 }
 
-func (m *testFeedbackPatternStore) GetByID(ctx context.Context, orgID, id uuid.UUID) (models.ReviewPattern, error) {
-	return models.ReviewPattern{}, nil
+func (m *testFeedbackMemoryStore) GetByID(ctx context.Context, orgID, id uuid.UUID) (models.Memory, error) {
+	return models.Memory{}, nil
 }
 
-func (m *testFeedbackPatternStore) FindMatchingRule(ctx context.Context, orgID uuid.UUID, repo, normalizedRule string) (models.ReviewPattern, error) {
-	return models.ReviewPattern{}, errors.New("not found")
+func (m *testFeedbackMemoryStore) FindMatchingRule(ctx context.Context, orgID uuid.UUID, repo, normalizedRule string) (models.Memory, error) {
+	return models.Memory{}, errors.New("not found")
 }
 
-func (m *testFeedbackPatternStore) IncrementOccurrence(ctx context.Context, orgID, patternID, commentID uuid.UUID) error {
+func (m *testFeedbackMemoryStore) IncrementOccurrence(ctx context.Context, orgID, memoryID, commentID uuid.UUID) error {
 	return nil
 }
 
-func (m *testFeedbackPatternStore) ListActiveByRepo(ctx context.Context, orgID uuid.UUID, repo string) ([]models.ReviewPattern, error) {
+func (m *testFeedbackMemoryStore) ListActiveByRepo(ctx context.Context, orgID uuid.UUID, repo string) ([]models.Memory, error) {
 	return nil, nil
 }
 
-func (m *testFeedbackPatternStore) UpdatePattern(ctx context.Context, orgID, id uuid.UUID, rule *string, status *string) error {
+func (m *testFeedbackMemoryStore) UpdateMemory(ctx context.Context, orgID, id uuid.UUID, rule *string, status *string) error {
 	return nil
 }
 
@@ -602,8 +602,8 @@ func TestProcessReviewCommentHandler_SkipsPatternUpdateWhenCommentAlreadyProcess
 			}, nil
 		},
 	}
-	patternStore := &testFeedbackPatternStore{}
-	feedbackService := feedback.NewService(commentStore, patternStore, &testFeedbackJobStore{}, nil, zerolog.Nop())
+	memoryStore := &testFeedbackMemoryStore{}
+	feedbackService := feedback.NewService(commentStore, memoryStore, &testFeedbackJobStore{}, nil, zerolog.Nop())
 
 	services := &Services{Feedback: feedbackService}
 	handler := newProcessReviewCommentHandler(services, zerolog.Nop())
@@ -611,14 +611,14 @@ func TestProcessReviewCommentHandler_SkipsPatternUpdateWhenCommentAlreadyProcess
 
 	err := handler(context.Background(), "process_review_comment", payload)
 	require.NoError(t, err, "process_review_comment handler should succeed for already processed comments")
-	require.Equal(t, 0, patternStore.createCalls, "process_review_comment should not update patterns when comment was already processed")
+	require.Equal(t, 0, memoryStore.createCalls, "process_review_comment should not update memories when comment was already processed")
 }
 
 // ---------------------------------------------------------------------------
-// newUpdateReviewPatternsHandler tests
+// newUpdateMemoriesHandler tests
 // ---------------------------------------------------------------------------
 
-func TestUpdateReviewPatternsHandler(t *testing.T) {
+func TestUpdateMemoriesHandler(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -631,7 +631,7 @@ func TestUpdateReviewPatternsHandler(t *testing.T) {
 			name:      "invalid JSON returns unmarshal error",
 			payload:   json.RawMessage(`{bad json}`),
 			expectErr: true,
-			errSubstr: "unmarshal update_review_patterns payload",
+			errSubstr: "unmarshal update_memories payload",
 		},
 		{
 			name:      "missing org ID returns parse error",
@@ -652,12 +652,12 @@ func TestUpdateReviewPatternsHandler(t *testing.T) {
 			t.Parallel()
 
 			commentStore := &testFeedbackCommentStore{}
-			patternStore := &testFeedbackPatternStore{}
-			feedbackService := feedback.NewService(commentStore, patternStore, &testFeedbackJobStore{}, nil, zerolog.Nop())
+			memoryStore := &testFeedbackMemoryStore{}
+			feedbackService := feedback.NewService(commentStore, memoryStore, &testFeedbackJobStore{}, nil, zerolog.Nop())
 			services := &Services{Feedback: feedbackService}
 
-			handler := newUpdateReviewPatternsHandler(services, zerolog.Nop())
-			err := handler(context.Background(), "update_review_patterns", tt.payload)
+			handler := newUpdateMemoriesHandler(services, zerolog.Nop())
+			err := handler(context.Background(), "update_memories", tt.payload)
 
 			if tt.expectErr {
 				require.Error(t, err, "handler should return error")
@@ -669,43 +669,43 @@ func TestUpdateReviewPatternsHandler(t *testing.T) {
 	}
 }
 
-func TestUpdateReviewPatternsHandler_Success(t *testing.T) {
+func TestUpdateMemoriesHandler_Success(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
 	commentID := uuid.New()
 
 	commentStore := &testFeedbackCommentStore{}
-	patternStore := &testFeedbackPatternStore{}
-	feedbackService := feedback.NewService(commentStore, patternStore, &testFeedbackJobStore{}, nil, zerolog.Nop())
+	memoryStore := &testFeedbackMemoryStore{}
+	feedbackService := feedback.NewService(commentStore, memoryStore, &testFeedbackJobStore{}, nil, zerolog.Nop())
 
 	services := &Services{Feedback: feedbackService}
-	handler := newUpdateReviewPatternsHandler(services, zerolog.Nop())
+	handler := newUpdateMemoriesHandler(services, zerolog.Nop())
 
 	payload := json.RawMessage(`{"comment_id":"` + commentID.String() + `","org_id":"` + orgID.String() + `","repo":"org/repo","rule":"always use gofmt","category":"style"}`)
-	err := handler(context.Background(), "update_review_patterns", payload)
-	require.NoError(t, err, "update_review_patterns handler should succeed with valid payload")
-	require.Equal(t, 1, patternStore.createCalls, "should create a new pattern")
+	err := handler(context.Background(), "update_memories", payload)
+	require.NoError(t, err, "update_memories handler should succeed with valid payload")
+	require.Equal(t, 1, memoryStore.createCalls, "should create a new memory")
 }
 
-func TestUpdateReviewPatternsHandler_UsesJobOrgID(t *testing.T) {
+func TestUpdateMemoriesHandler_UsesJobOrgID(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
 	commentID := uuid.New()
 
 	commentStore := &testFeedbackCommentStore{}
-	patternStore := &testFeedbackPatternStore{}
-	feedbackService := feedback.NewService(commentStore, patternStore, &testFeedbackJobStore{}, nil, zerolog.Nop())
+	memoryStore := &testFeedbackMemoryStore{}
+	feedbackService := feedback.NewService(commentStore, memoryStore, &testFeedbackJobStore{}, nil, zerolog.Nop())
 
 	services := &Services{Feedback: feedbackService}
-	handler := newUpdateReviewPatternsHandler(services, zerolog.Nop())
+	handler := newUpdateMemoriesHandler(services, zerolog.Nop())
 
 	ctx := withJobOrgID(context.Background(), orgID)
 	payload := json.RawMessage(`{"comment_id":"` + commentID.String() + `","repo":"org/repo","rule":"always use gofmt","category":"style"}`)
-	err := handler(ctx, "update_review_patterns", payload)
-	require.NoError(t, err, "update_review_patterns should succeed using org ID from context")
-	require.Equal(t, 1, patternStore.createCalls, "should create a new pattern")
+	err := handler(ctx, "update_memories", payload)
+	require.NoError(t, err, "update_memories should succeed using org ID from context")
+	require.Equal(t, 1, memoryStore.createCalls, "should create a new memory")
 }
 
 // ---------------------------------------------------------------------------
@@ -846,7 +846,7 @@ func TestRegisterHandlers_WithAllServices(t *testing.T) {
 		Failure:         &agent.FailureService{},
 		SandboxProvider: &stubSandboxProvider{},
 		Prioritization:  &prioritization.Service{},
-		Feedback:        feedback.NewService(&testFeedbackCommentStore{}, &testFeedbackPatternStore{}, &testFeedbackJobStore{}, nil, zerolog.Nop()),
+		Feedback:        feedback.NewService(&testFeedbackCommentStore{}, &testFeedbackMemoryStore{}, &testFeedbackJobStore{}, nil, zerolog.Nop()),
 		PM:              &mockPMService{},
 	}
 
@@ -864,7 +864,7 @@ func TestRegisterHandlers_WithAllServices(t *testing.T) {
 		"open_pr",
 		"analyze_failure",
 		"process_review_comment",
-		"update_review_patterns",
+		"update_memories",
 	}
 	for _, name := range allExpected {
 		_, ok := w.handlers[name]
@@ -901,7 +901,7 @@ func TestRegisterHandlers_WithOnlyFeedback(t *testing.T) {
 	defer mock.Close()
 	logger := zerolog.Nop()
 
-	feedbackService := feedback.NewService(&testFeedbackCommentStore{}, &testFeedbackPatternStore{}, &testFeedbackJobStore{}, nil, zerolog.Nop())
+	feedbackService := feedback.NewService(&testFeedbackCommentStore{}, &testFeedbackMemoryStore{}, &testFeedbackJobStore{}, nil, zerolog.Nop())
 	services := &Services{
 		Feedback: feedbackService,
 	}
@@ -911,8 +911,8 @@ func TestRegisterHandlers_WithOnlyFeedback(t *testing.T) {
 
 	_, ok := w.handlers["process_review_comment"]
 	require.True(t, ok, "process_review_comment handler should be registered")
-	_, ok = w.handlers["update_review_patterns"]
-	require.True(t, ok, "update_review_patterns handler should be registered")
+	_, ok = w.handlers["update_memories"]
+	require.True(t, ok, "update_memories handler should be registered")
 	_, ok = w.handlers["prioritize"]
 	require.False(t, ok, "prioritize handler should not be registered without prioritization service")
 }
@@ -1066,7 +1066,7 @@ func TestPMAnalyzeHandler_ServiceError(t *testing.T) {
 func TestProcessReviewCommentHandler_InvalidJSON(t *testing.T) {
 	t.Parallel()
 
-	feedbackService := feedback.NewService(&testFeedbackCommentStore{}, &testFeedbackPatternStore{}, &testFeedbackJobStore{}, nil, zerolog.Nop())
+	feedbackService := feedback.NewService(&testFeedbackCommentStore{}, &testFeedbackMemoryStore{}, &testFeedbackJobStore{}, nil, zerolog.Nop())
 	services := &Services{Feedback: feedbackService}
 
 	handler := newProcessReviewCommentHandler(services, zerolog.Nop())
@@ -1078,7 +1078,7 @@ func TestProcessReviewCommentHandler_InvalidJSON(t *testing.T) {
 func TestProcessReviewCommentHandler_InvalidOrgID(t *testing.T) {
 	t.Parallel()
 
-	feedbackService := feedback.NewService(&testFeedbackCommentStore{}, &testFeedbackPatternStore{}, &testFeedbackJobStore{}, nil, zerolog.Nop())
+	feedbackService := feedback.NewService(&testFeedbackCommentStore{}, &testFeedbackMemoryStore{}, &testFeedbackJobStore{}, nil, zerolog.Nop())
 	services := &Services{Feedback: feedbackService}
 
 	handler := newProcessReviewCommentHandler(services, zerolog.Nop())
@@ -1091,7 +1091,7 @@ func TestProcessReviewCommentHandler_InvalidOrgID(t *testing.T) {
 func TestProcessReviewCommentHandler_InvalidCommentID(t *testing.T) {
 	t.Parallel()
 
-	feedbackService := feedback.NewService(&testFeedbackCommentStore{}, &testFeedbackPatternStore{}, &testFeedbackJobStore{}, nil, zerolog.Nop())
+	feedbackService := feedback.NewService(&testFeedbackCommentStore{}, &testFeedbackMemoryStore{}, &testFeedbackJobStore{}, nil, zerolog.Nop())
 	services := &Services{Feedback: feedbackService}
 
 	handler := newProcessReviewCommentHandler(services, zerolog.Nop())
@@ -1123,8 +1123,8 @@ func TestProcessReviewCommentHandler_WithPendingComment(t *testing.T) {
 			}, nil
 		},
 	}
-	patternStore := &testFeedbackPatternStore{}
-	feedbackService := feedback.NewService(commentStore, patternStore, &testFeedbackJobStore{}, nil, zerolog.Nop())
+	memoryStore := &testFeedbackMemoryStore{}
+	feedbackService := feedback.NewService(commentStore, memoryStore, &testFeedbackJobStore{}, nil, zerolog.Nop())
 
 	services := &Services{Feedback: feedbackService}
 	handler := newProcessReviewCommentHandler(services, zerolog.Nop())
@@ -1132,7 +1132,7 @@ func TestProcessReviewCommentHandler_WithPendingComment(t *testing.T) {
 
 	err := handler(context.Background(), "process_review_comment", payload)
 	require.NoError(t, err, "handler should succeed for pending comment")
-	require.Equal(t, 1, patternStore.createCalls, "should create a new pattern for pending generalizable comment")
+	require.Equal(t, 1, memoryStore.createCalls, "should create a new memory for pending generalizable comment")
 }
 
 func TestProcessReviewCommentHandler_NoRepoSkipsPatterns(t *testing.T) {
@@ -1150,8 +1150,8 @@ func TestProcessReviewCommentHandler_NoRepoSkipsPatterns(t *testing.T) {
 			}, nil
 		},
 	}
-	patternStore := &testFeedbackPatternStore{}
-	feedbackService := feedback.NewService(commentStore, patternStore, &testFeedbackJobStore{}, nil, zerolog.Nop())
+	memoryStore := &testFeedbackMemoryStore{}
+	feedbackService := feedback.NewService(commentStore, memoryStore, &testFeedbackJobStore{}, nil, zerolog.Nop())
 
 	services := &Services{Feedback: feedbackService}
 	handler := newProcessReviewCommentHandler(services, zerolog.Nop())
@@ -1159,7 +1159,7 @@ func TestProcessReviewCommentHandler_NoRepoSkipsPatterns(t *testing.T) {
 
 	err := handler(context.Background(), "process_review_comment", payload)
 	require.NoError(t, err, "handler should succeed without repo")
-	require.Equal(t, 0, patternStore.createCalls, "should not create patterns when no repo is provided")
+	require.Equal(t, 0, memoryStore.createCalls, "should not create memories when no repo is provided")
 }
 
 func TestProcessReviewCommentHandler_GetCommentError(t *testing.T) {
@@ -1173,8 +1173,8 @@ func TestProcessReviewCommentHandler_GetCommentError(t *testing.T) {
 			return models.ReviewComment{}, errors.New("db connection lost")
 		},
 	}
-	patternStore := &testFeedbackPatternStore{}
-	feedbackService := feedback.NewService(commentStore, patternStore, &testFeedbackJobStore{}, nil, zerolog.Nop())
+	memoryStore := &testFeedbackMemoryStore{}
+	feedbackService := feedback.NewService(commentStore, memoryStore, &testFeedbackJobStore{}, nil, zerolog.Nop())
 
 	services := &Services{Feedback: feedbackService}
 	handler := newProcessReviewCommentHandler(services, zerolog.Nop())
