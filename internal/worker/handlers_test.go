@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -826,6 +827,15 @@ func (s *stubSandboxProvider) Destroy(ctx context.Context, sb *agent.Sandbox) er
 }
 func (s *stubSandboxProvider) ConnectionInfo(ctx context.Context, sb *agent.Sandbox) (*agent.SandboxConnectionInfo, error) {
 	return nil, nil
+}
+func (s *stubSandboxProvider) Snapshot(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(nil)), nil
+}
+func (s *stubSandboxProvider) Restore(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+	return nil
+}
+func (s *stubSandboxProvider) ExecStream(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
+	return 0, nil
 }
 
 // ---------------------------------------------------------------------------

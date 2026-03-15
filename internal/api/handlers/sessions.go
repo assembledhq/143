@@ -28,6 +28,7 @@ type SessionHandler struct {
 	issueStore       *db.IssueStore
 	orgStore         *db.OrganizationStore
 	jobStore         *db.JobStore
+	messageStore     *db.SessionMessageStore
 	llmClient        llm.Client // optional, used for generating manual session titles
 	logger           zerolog.Logger
 	audit            *db.AuditEmitter
@@ -47,6 +48,7 @@ func NewSessionHandler(
 	issueStore *db.IssueStore,
 	orgStore *db.OrganizationStore,
 	jobStore *db.JobStore,
+	messageStore *db.SessionMessageStore,
 	llmClient llm.Client,
 	logger zerolog.Logger,
 ) *SessionHandler {
@@ -59,6 +61,7 @@ func NewSessionHandler(
 		issueStore:       issueStore,
 		orgStore:         orgStore,
 		jobStore:         jobStore,
+		messageStore:     messageStore,
 		llmClient:        llmClient,
 		logger:           logger,
 	}
@@ -207,7 +210,7 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 	// Enqueue the run_agent job.
 	payload := map[string]string{
 		"session_id": run.ID.String(),
-		"org_id":       orgID.String(),
+		"org_id":     orgID.String(),
 	}
 	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "run_agent", payload, 5, nil); err != nil {
 		writeError(w, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue agent run job")
@@ -454,6 +457,158 @@ func (h *SessionHandler) AnswerQuestion(w http.ResponseWriter, r *http.Request) 
 	}
 	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionQuestionAnswered, models.AuditResourceSession, &qIDStr, sessionIDPtr, nil, nil)
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionQuestion]{Data: question})
+}
+
+// SendMessage handles POST /sessions/{id}/messages — sends a follow-up message
+// to an idle multi-turn session and enqueues a continue_session job.
+func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+
+	if h.messageStore == nil {
+		writeError(w, http.StatusNotImplemented, "NOT_CONFIGURED", "multi-turn sessions not configured")
+		return
+	}
+
+	var body struct {
+		Message string   `json:"message"`
+		Images  []string `json:"images"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	body.Message = strings.TrimSpace(body.Message)
+	if body.Message == "" {
+		writeError(w, http.StatusBadRequest, "MISSING_MESSAGE", "message is required")
+		return
+	}
+
+	session, err := h.runStore.ClaimIdle(r.Context(), orgID, sessionID)
+	if err != nil {
+		if _, lookupErr := h.runStore.GetByID(r.Context(), orgID, sessionID); lookupErr != nil {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "session not found")
+			return
+		}
+		writeError(w, http.StatusConflict, "NOT_IDLE", "session must be idle to send a message")
+		return
+	}
+
+	user := middleware.UserFromContext(r.Context())
+	var userID *uuid.UUID
+	if user != nil {
+		userID = &user.ID
+	}
+
+	msg := &models.SessionMessage{
+		SessionID:  sessionID,
+		OrgID:      orgID,
+		UserID:     userID,
+		TurnNumber: session.CurrentTurn + 1,
+		Role:       string(models.MessageRoleUser),
+		Content:    body.Message,
+	}
+	if len(body.Images) > 0 {
+		msg.Attachments = body.Images
+	}
+
+	if err := h.messageStore.Create(r.Context(), msg); err != nil {
+		_ = h.runStore.UpdateStatus(r.Context(), orgID, sessionID, string(models.SessionStatusIdle))
+		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message")
+		return
+	}
+
+	// Enqueue continue_session job.
+	payload := map[string]string{
+		"session_id": sessionID.String(),
+		"org_id":     orgID.String(),
+	}
+	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "continue_session", payload, 5, nil); err != nil {
+		_ = h.runStore.UpdateStatus(r.Context(), orgID, sessionID, string(models.SessionStatusIdle))
+		writeError(w, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue continue_session job")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, models.SingleResponse[models.SessionMessage]{Data: *msg})
+}
+
+// ListMessages handles GET /sessions/{id}/messages — returns the conversation messages.
+func (h *SessionHandler) ListMessages(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+
+	if h.messageStore == nil {
+		writeJSON(w, http.StatusOK, models.ListResponse[models.SessionMessage]{Data: []models.SessionMessage{}})
+		return
+	}
+
+	// Verify session exists and belongs to org.
+	_, err = h.runStore.GetByID(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "session not found")
+		return
+	}
+
+	messages, err := h.messageStore.ListBySession(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list messages")
+		return
+	}
+	if messages == nil {
+		messages = []models.SessionMessage{}
+	}
+
+	writeJSON(w, http.StatusOK, models.ListResponse[models.SessionMessage]{Data: messages})
+}
+
+// EndSession handles POST /sessions/{id}/end — explicitly ends an idle session.
+func (h *SessionHandler) EndSession(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+
+	session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "session not found")
+		return
+	}
+
+	if session.Status != string(models.SessionStatusIdle) {
+		writeError(w, http.StatusConflict, "NOT_IDLE", "only idle sessions can be ended")
+		return
+	}
+
+	if err := h.runStore.UpdateStatus(r.Context(), orgID, sessionID, string(models.SessionStatusCompleted)); err != nil {
+		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to end session")
+		return
+	}
+
+	payload := map[string]string{
+		"session_id": sessionID.String(),
+		"org_id":     orgID.String(),
+	}
+	dedupeKey := fmt.Sprintf("validate:%s", sessionID)
+	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "validate", payload, 5, &dedupeKey); err != nil {
+		writeError(w, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue validation")
+		return
+	}
+
+	// Snapshot cleanup is handled by the reaper, which will find this session
+	// because it's now status=completed with sandbox_state=snapshotted.
+
+	session.Status = string(models.SessionStatusCompleted)
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.Session]{Data: session})
 }
 
 func isTerminalStatus(status string) bool {

@@ -111,6 +111,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, userStore, repoStore, integrationStore, prService)
 	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeAgentEnv(), cfg.SafeLLMEnv())
 	issueHandler := handlers.NewIssueHandler(issueStore)
+	sessionMessageStore := db.NewSessionMessageStore(pool)
 	sessionHandler := handlers.NewSessionHandler(
 		sessionStore,
 		sessionLogStore,
@@ -120,6 +121,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		issueStore,
 		orgStore,
 		jobStore,
+		sessionMessageStore,
 		llmClient,
 		logger,
 	)
@@ -222,6 +224,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/sessions/{id}/validation", sessionHandler.GetValidation)
 			r.Get("/api/v1/sessions/{id}/pr", sessionHandler.GetPullRequest)
 			r.Get("/api/v1/sessions/{id}/questions", sessionHandler.ListQuestions)
+			r.Get("/api/v1/sessions/{id}/messages", sessionHandler.ListMessages)
 			r.Get("/api/v1/settings", settingsHandler.Get)
 			r.Get("/api/v1/settings/agent-defaults", settingsHandler.GetAgentDefaults)
 			r.Get("/api/v1/settings/llm-defaults", settingsHandler.GetLLMDefaults)
@@ -269,6 +272,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Post("/api/v1/issues/{id}/fix", sessionHandler.TriggerFix)
 			r.Post("/api/v1/sessions/manual", sessionHandler.CreateManual)
 			r.Post("/api/v1/sessions/{id}/questions/{qid}/answer", sessionHandler.AnswerQuestion)
+			r.Post("/api/v1/sessions/{id}/messages", sessionHandler.SendMessage)
+			r.Post("/api/v1/sessions/{id}/end", sessionHandler.EndSession)
 			r.Post("/api/v1/projects", projectHandler.Create)
 			r.Patch("/api/v1/projects/{id}", projectHandler.Update)
 			r.Delete("/api/v1/projects/{id}", projectHandler.Delete)

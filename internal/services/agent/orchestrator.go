@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"path"
 	"sync"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/integration"
 	"github.com/assembledhq/143/internal/services/mcp"
+	"github.com/assembledhq/143/internal/services/storage"
 )
 
 const (
@@ -46,6 +48,10 @@ type SessionStore interface {
 	UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string) error
 	UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.SessionResult) error
 	CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error)
+	UpdateTurnComplete(ctx context.Context, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string) error
+	UpdateSnapshotInfo(ctx context.Context, orgID, sessionID uuid.UUID, agentSessionID, snapshotKey string) error
+	UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state string) error
+	GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 }
 
 // SessionLogStore defines the log persistence operations.
@@ -56,6 +62,12 @@ type SessionLogStore interface {
 // SessionQuestionStore defines the question persistence operations.
 type SessionQuestionStore interface {
 	Create(ctx context.Context, q *models.SessionQuestion) error
+}
+
+// SessionMessageStore defines the message persistence operations for multi-turn sessions.
+type SessionMessageStore interface {
+	Create(ctx context.Context, msg *models.SessionMessage) error
+	ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionMessage, error)
 }
 
 // DecisionLogStore updates PM decision log outcomes.
@@ -113,9 +125,10 @@ type ProjectTaskUpdater interface {
 type Orchestrator struct {
 	provider          SandboxProvider
 	adapters          map[models.AgentType]AgentAdapter
-	sessions         SessionStore
+	sessions          SessionStore
 	agentRunLogs      SessionLogStore
 	agentRunQuestions SessionQuestionStore
+	sessionMessages   SessionMessageStore
 	decisionLog       DecisionLogStore
 	projectTasks      ProjectTaskUpdater // can be nil
 	issues            IssueStore
@@ -127,17 +140,19 @@ type Orchestrator struct {
 	credentials       CredentialProvider
 	memory            MemoryService // can be nil
 	userCredentials   UserCredentialProvider // can be nil
+	snapshots         storage.SnapshotStore // can be nil — multi-turn disabled if nil
 	logger            zerolog.Logger
 	maxConcurrent     int
 }
 
 // OrchestratorConfig holds the dependencies for creating an Orchestrator.
 type OrchestratorConfig struct {
-	Provider          SandboxProvider
-	Adapters          map[models.AgentType]AgentAdapter
+	Provider         SandboxProvider
+	Adapters         map[models.AgentType]AgentAdapter
 	Sessions         SessionStore
 	SessionLogs      SessionLogStore
 	SessionQuestions SessionQuestionStore
+	SessionMessages   SessionMessageStore
 	DecisionLog       DecisionLogStore
 	ProjectTasks      ProjectTaskUpdater // optional — updates project tasks on run completion
 	Issues            IssueStore
@@ -149,6 +164,7 @@ type OrchestratorConfig struct {
 	Credentials       CredentialProvider
 	Memory            MemoryService // optional — injects learned memories into agent prompts
 	UserCredentials   UserCredentialProvider // optional — enables personal/team credential resolution
+	Snapshots         storage.SnapshotStore // optional — enables multi-turn snapshot/restore
 	Logger            zerolog.Logger
 	MaxConcurrent     int
 }
@@ -163,9 +179,10 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 	return &Orchestrator{
 		provider:          cfg.Provider,
 		adapters:          cfg.Adapters,
-		sessions:         cfg.Sessions,
+		sessions:          cfg.Sessions,
 		agentRunLogs:      cfg.SessionLogs,
 		agentRunQuestions: cfg.SessionQuestions,
+		sessionMessages:   cfg.SessionMessages,
 		decisionLog:       cfg.DecisionLog,
 		projectTasks:      cfg.ProjectTasks,
 		issues:            cfg.Issues,
@@ -177,6 +194,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		credentials:       cfg.Credentials,
 		memory:            cfg.Memory,
 		userCredentials:   cfg.UserCredentials,
+		snapshots:         cfg.Snapshots,
 		logger:            cfg.Logger,
 		maxConcurrent:     maxConcurrent,
 	}
@@ -346,7 +364,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	logWg.Add(1)
 	go func() {
 		defer logWg.Done()
-		o.streamLogs(ctx, run.ID, run.OrgID, logCh)
+		o.streamLogs(ctx, run.ID, run.OrgID, run.CurrentTurn, logCh)
 	}()
 
 	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
@@ -358,9 +376,15 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		o.failRun(ctx, run, err.Error())
 		o.enqueueJob(ctx, run.OrgID, "agent", "analyze_failure", map[string]interface{}{
 			"session_id": run.ID.String(),
-			"org_id":       run.OrgID.String(),
+			"org_id":     run.OrgID.String(),
 		})
 		return fmt.Errorf("execute agent: %w", err)
+	}
+
+	// 11b. Snapshot workspace for multi-turn support (does not change session status).
+	snapshotKey, snapshotErr := o.snapshotSession(ctx, run, sandbox, result)
+	if snapshotErr != nil {
+		log.Warn().Err(snapshotErr).Msg("failed to snapshot session, session will not support follow-up turns")
 	}
 
 	// Fetch org settings for confidence thresholds.
@@ -379,14 +403,48 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// Store the successful result.
 	runResult := o.buildRunResult(result)
 	status := "completed"
+	isInteractive := o.isInteractiveSession(&issue) && snapshotKey != ""
 
 	// 11. Confidence gating: use org-configured auto-proceed threshold.
 	if result.ConfidenceScore < confidenceThresholds.AutoProceed {
 		status = "needs_human_guidance"
 	}
 
+	if isInteractive {
+		turnNumber := run.CurrentTurn + 1
+		if err := o.createAssistantMessage(ctx, run.ID, run.OrgID, turnNumber, result); err != nil {
+			log.Warn().Err(err).Msg("failed to persist assistant message for interactive turn")
+		}
+
+		agentSessionID := result.AgentSessionID
+		if agentSessionID == "" && run.AgentSessionID != nil {
+			agentSessionID = *run.AgentSessionID
+		}
+		if err := o.sessions.UpdateTurnComplete(ctx, run.OrgID, run.ID, turnNumber, runResult, agentSessionID, snapshotKey); err != nil {
+			return fmt.Errorf("update interactive turn result: %w", err)
+		}
+
+		log.Info().
+			Int("turn", turnNumber).
+			Msg("interactive manual session turn completed and returned to idle")
+		return nil
+	}
+
 	if err := o.sessions.UpdateResult(ctx, run.OrgID, run.ID, status, runResult); err != nil {
 		return fmt.Errorf("update run result: %w", err)
+	}
+
+	// Persist snapshot metadata so the session can be continued later.
+	// Uses UpdateSnapshotInfo (not UpdateTurnComplete) to avoid overwriting
+	// the status set by UpdateResult above.
+	if snapshotKey != "" {
+		agentSessionID := result.AgentSessionID
+		if agentSessionID == "" && run.AgentSessionID != nil {
+			agentSessionID = *run.AgentSessionID
+		}
+		if err := o.sessions.UpdateSnapshotInfo(ctx, run.OrgID, run.ID, agentSessionID, snapshotKey); err != nil {
+			log.Warn().Err(err).Msg("failed to persist snapshot metadata")
+		}
 	}
 
 	log.Info().
@@ -399,7 +457,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if result.ConfidenceScore >= confidenceThresholds.AutoProceed {
 		o.enqueueJob(ctx, run.OrgID, "agent", "validate", map[string]interface{}{
 			"session_id": run.ID.String(),
-			"org_id":       run.OrgID.String(),
+			"org_id":     run.OrgID.String(),
 		})
 	}
 
@@ -423,6 +481,170 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 	}
 
+	return nil
+}
+
+// ContinueSession handles a follow-up turn in a multi-turn session.
+// It creates a fresh sandbox, restores the snapshot from the previous turn,
+// re-injects credentials, runs the agent with --resume, and snapshots again.
+func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Session) error {
+	log := o.logger.With().
+		Str("session_id", session.ID.String()).
+		Str("org_id", session.OrgID.String()).
+		Int("turn", session.CurrentTurn).
+		Logger()
+
+	if session.SnapshotKey == nil || *session.SnapshotKey == "" {
+		return fmt.Errorf("session has no snapshot to restore")
+	}
+	if o.snapshots == nil {
+		return fmt.Errorf("snapshot store not configured")
+	}
+
+	// 1. Update status to running.
+	if err := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, "running"); err != nil {
+		return fmt.Errorf("update session status to running: %w", err)
+	}
+	if err := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateRunning)); err != nil {
+		log.Warn().Err(err).Msg("failed to update sandbox state to running")
+	}
+
+	// 2. Get the adapter.
+	adapter, ok := o.adapters[session.AgentType]
+	if !ok {
+		o.failRun(ctx, session, fmt.Sprintf("unknown agent type: %s", session.AgentType))
+		return fmt.Errorf("unknown agent type: %s", session.AgentType)
+	}
+
+	// 3. Get the latest user message for this turn.
+	messages, err := o.sessionMessages.ListBySession(ctx, session.OrgID, session.ID)
+	if err != nil {
+		o.failRun(ctx, session, fmt.Sprintf("fetch session messages: %s", err))
+		return fmt.Errorf("fetch session messages: %w", err)
+	}
+
+	var userMessage string
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == string(models.MessageRoleUser) {
+			userMessage = messages[i].Content
+			break
+		}
+	}
+	if userMessage == "" {
+		o.failRun(ctx, session, "no user message found for continue_session")
+		return fmt.Errorf("no user message found")
+	}
+
+	// 4. Create sandbox and restore snapshot.
+	sandboxCfg := DefaultSandboxConfig()
+	sandboxCfg.Env = o.resolveAgentEnv(ctx, session.OrgID, session.AgentType)
+	if sandboxCfg.Env == nil {
+		sandboxCfg.Env = make(map[string]string)
+	}
+	if session.ModelOverride != nil && *session.ModelOverride != "" {
+		if envVar := models.ModelEnvVarForAgentType(session.AgentType); envVar != "" {
+			sandboxCfg.Env[envVar] = *session.ModelOverride
+		}
+	}
+	if _, ok := sandboxCfg.Env["HOME"]; !ok {
+		sandboxCfg.Env["HOME"] = sandboxCfg.WorkDir
+	}
+
+	sandbox, err := o.provider.Create(ctx, sandboxCfg)
+	if err != nil {
+		o.failRun(ctx, session, fmt.Sprintf("create sandbox: %s", err))
+		return fmt.Errorf("create sandbox: %w", err)
+	}
+	defer func() {
+		if destroyErr := o.provider.Destroy(ctx, sandbox); destroyErr != nil {
+			log.Error().Err(destroyErr).Msg("failed to destroy sandbox")
+		}
+	}()
+
+	// Restore snapshot from S3.
+	snapshotReader, snapshotWriter := io.Pipe()
+	var restoreErr error
+	var restoreWg sync.WaitGroup
+	restoreWg.Add(1)
+	go func() {
+		defer restoreWg.Done()
+		restoreErr = o.snapshots.Load(ctx, *session.SnapshotKey, snapshotWriter)
+		snapshotWriter.Close()
+	}()
+
+	if err := o.provider.Restore(ctx, sandbox, snapshotReader); err != nil {
+		o.failRun(ctx, session, fmt.Sprintf("restore snapshot: %s", err))
+		return fmt.Errorf("restore snapshot: %w", err)
+	}
+	restoreWg.Wait()
+	if restoreErr != nil {
+		o.failRun(ctx, session, fmt.Sprintf("load snapshot from storage: %s", restoreErr))
+		return fmt.Errorf("load snapshot: %w", restoreErr)
+	}
+
+	// 5. Re-inject Codex auth if needed.
+	if session.AgentType == models.AgentTypeCodex {
+		if _, err := o.injectCodexAuth(ctx, session.OrgID, sandbox); err != nil {
+			log.Warn().Err(err).Msg("codex auth injection failed on continue")
+		}
+	}
+
+	// 6. Build the resume prompt.
+	var resumeSessionID string
+	if session.AgentSessionID != nil {
+		resumeSessionID = *session.AgentSessionID
+	}
+	prompt := &AgentPrompt{
+		Continuation:    true,
+		ResumeSessionID: resumeSessionID,
+		UserMessage:     userMessage,
+		MaxTokens:       tokenLimitForMode(session.TokenMode),
+	}
+
+	// 7. Execute agent with log streaming.
+	turnNumber := session.CurrentTurn + 1
+	logCh := make(chan LogEntry, 100)
+	var logWg sync.WaitGroup
+	logWg.Add(1)
+	go func() {
+		defer logWg.Done()
+		o.streamLogs(ctx, session.ID, session.OrgID, turnNumber, logCh)
+	}()
+
+	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
+	close(logCh)
+	logWg.Wait()
+
+	if err != nil {
+		o.failRun(ctx, session, err.Error())
+		return fmt.Errorf("execute agent on continue: %w", err)
+	}
+
+	// 8. Create assistant message with result summary.
+	if err := o.createAssistantMessage(ctx, session.ID, session.OrgID, turnNumber, result); err != nil {
+		log.Warn().Err(err).Msg("failed to create assistant message")
+	}
+
+	// 9. Snapshot again.
+	newSnapshotKey, snapshotErr := o.snapshotSession(ctx, session, sandbox, result)
+	if snapshotErr != nil {
+		log.Warn().Err(snapshotErr).Msg("failed to snapshot session after continue")
+	}
+
+	// 10. Update turn complete — sets status to idle.
+	agentSessionID := result.AgentSessionID
+	if agentSessionID == "" && session.AgentSessionID != nil {
+		agentSessionID = *session.AgentSessionID
+	}
+	snapshotKey := newSnapshotKey
+	if snapshotKey == "" && session.SnapshotKey != nil {
+		snapshotKey = *session.SnapshotKey
+	}
+	if err := o.sessions.UpdateTurnComplete(ctx, session.OrgID, session.ID, turnNumber, o.buildRunResult(result), agentSessionID, snapshotKey); err != nil {
+		return fmt.Errorf("update turn complete: %w", err)
+	}
+
+	log.Info().Int("turn", turnNumber).Msg("session turn completed, now idle")
 	return nil
 }
 
@@ -453,7 +675,7 @@ func (o *Orchestrator) checkConcurrency(ctx context.Context, orgID uuid.UUID) er
 
 // streamLogs reads LogEntry values from the channel and persists them to the DB.
 // It also detects question-level log entries and creates SessionQuestion records.
-func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, logCh <-chan LogEntry) {
+func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, turnNumber int, logCh <-chan LogEntry) {
 	for entry := range logCh {
 		metadata, err := json.Marshal(entry.Metadata)
 		if err != nil {
@@ -462,10 +684,11 @@ func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, l
 		}
 
 		log := &models.SessionLog{
-			SessionID: runID,
+			SessionID:  runID,
 			Level:      entry.Level,
 			Message:    entry.Message,
 			Metadata:   metadata,
+			TurnNumber: turnNumber,
 		}
 		if err := o.agentRunLogs.Create(ctx, log); err != nil {
 			o.logger.Error().Err(err).Str("run_id", runID.String()).Msg("failed to persist log entry")
@@ -481,7 +704,7 @@ func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, l
 // handleQuestion creates an SessionQuestion and updates the run status to awaiting_input.
 func (o *Orchestrator) handleQuestion(ctx context.Context, runID, orgID uuid.UUID, entry LogEntry) {
 	q := &models.SessionQuestion{
-		SessionID:   runID,
+		SessionID:    runID,
 		OrgID:        orgID,
 		QuestionText: entry.Message,
 		Status:       "pending",
@@ -764,6 +987,68 @@ func (o *Orchestrator) buildIntegrationSkills(ctx context.Context, orgID uuid.UU
 
 	tr := mcp.NewToolRegistry(reg)
 	return mcp.GenerateSkillsDoc(tr)
+}
+
+// snapshotSession snapshots the sandbox workspace to object storage for multi-turn support.
+// If snapshots are not configured, this is a no-op. This only saves the snapshot
+// and updates sandbox state — it does NOT change session status or call UpdateTurnComplete.
+func (o *Orchestrator) snapshotSession(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult) (string, error) {
+	if o.snapshots == nil {
+		return "", nil
+	}
+
+	snapshotKey := fmt.Sprintf("snapshots/%s/%s/workspace.tar.zst", session.OrgID, session.ID)
+
+	reader, err := o.provider.Snapshot(ctx, sandbox)
+	if err != nil {
+		return "", fmt.Errorf("snapshot sandbox: %w", err)
+	}
+	defer reader.Close()
+
+	if err := o.snapshots.Save(ctx, snapshotKey, reader); err != nil {
+		return "", fmt.Errorf("save snapshot to storage: %w", err)
+	}
+
+	// Store the snapshot key on the session for subsequent use.
+	session.SnapshotKey = &snapshotKey
+
+	return snapshotKey, nil
+}
+
+func (o *Orchestrator) isInteractiveSession(issue *models.Issue) bool {
+	return issue != nil && issue.Source == "manual" && o.sessionMessages != nil && o.snapshots != nil
+}
+
+func (o *Orchestrator) createAssistantMessage(ctx context.Context, sessionID, orgID uuid.UUID, turnNumber int, result *AgentResult) error {
+	if o.sessionMessages == nil {
+		return nil
+	}
+
+	assistantMsg := &models.SessionMessage{
+		SessionID:  sessionID,
+		OrgID:      orgID,
+		TurnNumber: turnNumber,
+		Role:       string(models.MessageRoleAssistant),
+		Content:    result.Summary,
+	}
+	if result.TokenUsage.InputTokens > 0 || result.TokenUsage.OutputTokens > 0 {
+		tokenJSON, err := json.Marshal(result.TokenUsage)
+		if err != nil {
+			return fmt.Errorf("marshal token usage: %w", err)
+		}
+		assistantMsg.TokenUsage = tokenJSON
+	}
+	return o.sessionMessages.Create(ctx, assistantMsg)
+}
+
+// tokenLimitForMode returns the max token limit based on the session's token mode.
+func tokenLimitForMode(mode string) int {
+	switch mode {
+	case "high":
+		return 200000
+	default:
+		return 50000
+	}
 }
 
 func strPtr(s string) *string {

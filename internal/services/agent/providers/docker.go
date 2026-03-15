@@ -300,6 +300,177 @@ func (d *DockerProvider) ConnectionInfo(ctx context.Context, sb *agent.Sandbox) 
 	}, nil
 }
 
+// Snapshot tars the workspace and agent state directories from the container.
+// The returned reader streams a compressed tar archive; the caller must close it.
+func (d *DockerProvider) Snapshot(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+	d.logger.Info().
+		Str("container_id", sb.ID).
+		Msg("snapshotting sandbox")
+
+	// Tar workspace + agent state dirs. --ignore-failed-read handles missing dirs gracefully.
+	// Agent state dirs (e.g. .claude/, .codex/, .gemini/) live under WorkDir since
+	// HOME is set to WorkDir in the sandbox config.
+	workDirRel := strings.TrimPrefix(sb.WorkDir, "/")
+	cmd := fmt.Sprintf(
+		"tar czf - --ignore-failed-read -C / '%s' '%s/.claude' '%s/.codex' '%s/.gemini' 2>/dev/null",
+		workDirRel, workDirRel, workDirRel, workDirRel,
+	)
+
+	execCfg := container.ExecOptions{
+		Cmd:          []string{"sh", "-c", cmd},
+		AttachStdout: true,
+		AttachStderr: true,
+	}
+
+	execResp, err := d.client.ContainerExecCreate(ctx, sb.ID, execCfg)
+	if err != nil {
+		return nil, fmt.Errorf("create snapshot exec: %w", err)
+	}
+
+	attachResp, err := d.client.ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("attach snapshot exec: %w", err)
+	}
+
+	// Docker multiplexes stdout/stderr. We pipe into a buffer via StdCopy
+	// and return a reader over the stdout portion.
+	pr, pw := io.Pipe()
+	go func() {
+		defer attachResp.Close()
+		_, err := stdcopy.StdCopy(pw, io.Discard, attachResp.Reader)
+		pw.CloseWithError(err)
+	}()
+
+	return pr, nil
+}
+
+// Restore extracts a snapshot tarball into the sandbox container.
+func (d *DockerProvider) Restore(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+	d.logger.Info().
+		Str("container_id", sb.ID).
+		Msg("restoring snapshot into sandbox")
+
+	execCfg := container.ExecOptions{
+		Cmd:          []string{"tar", "xzf", "-", "-C", "/"},
+		AttachStdin:  true,
+		AttachStdout: true,
+		AttachStderr: true,
+	}
+
+	execResp, err := d.client.ContainerExecCreate(ctx, sb.ID, execCfg)
+	if err != nil {
+		return fmt.Errorf("create restore exec: %w", err)
+	}
+
+	attachResp, err := d.client.ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{})
+	if err != nil {
+		return fmt.Errorf("attach restore exec: %w", err)
+	}
+	defer attachResp.Close()
+
+	// Pipe the snapshot data into stdin.
+	if _, err := io.Copy(attachResp.Conn, reader); err != nil {
+		return fmt.Errorf("write snapshot to container: %w", err)
+	}
+	attachResp.CloseWrite()
+
+	// Drain stdout/stderr so the exec process can finish writing.
+	// Without this, the process may block on a full output buffer.
+	_, _ = stdcopy.StdCopy(io.Discard, io.Discard, attachResp.Reader)
+
+	// Poll until the exec process finishes. ContainerExecInspect may return
+	// Running=true if called immediately after CloseWrite.
+	for {
+		inspectResp, err := d.client.ContainerExecInspect(ctx, execResp.ID)
+		if err != nil {
+			return fmt.Errorf("inspect restore exec: %w", err)
+		}
+		if !inspectResp.Running {
+			if inspectResp.ExitCode != 0 {
+				return fmt.Errorf("restore tar exited with code %d", inspectResp.ExitCode)
+			}
+			return nil
+		}
+		// Context cancellation will break the loop.
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+	}
+}
+
+// ExecStream runs a command inside the sandbox and calls onLine for each
+// newline-delimited line of stdout as it arrives. This enables real-time
+// streaming of agent output to log channels.
+func (d *DockerProvider) ExecStream(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
+	d.logger.Debug().
+		Str("container_id", sb.ID).
+		Str("cmd", cmd).
+		Msg("exec-stream command in sandbox")
+
+	execCfg := container.ExecOptions{
+		Cmd:          []string{"sh", "-c", cmd},
+		AttachStdout: true,
+		AttachStderr: true,
+		WorkingDir:   sb.WorkDir,
+	}
+
+	execResp, err := d.client.ContainerExecCreate(ctx, sb.ID, execCfg)
+	if err != nil {
+		return -1, fmt.Errorf("create exec: %w", err)
+	}
+
+	attachResp, err := d.client.ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{})
+	if err != nil {
+		return -1, fmt.Errorf("attach exec: %w", err)
+	}
+	defer attachResp.Close()
+
+	// Use StdCopy with a line-splitting writer for stdout so onLine is
+	// called for each complete line as it arrives from Docker's stream.
+	lineWriter := &lineSplitter{onLine: onLine}
+	if _, err := stdcopy.StdCopy(lineWriter, stderr, attachResp.Reader); err != nil {
+		return -1, fmt.Errorf("read exec output: %w", err)
+	}
+	lineWriter.flush()
+
+	inspectResp, err := d.client.ContainerExecInspect(ctx, execResp.ID)
+	if err != nil {
+		return -1, fmt.Errorf("inspect exec: %w", err)
+	}
+
+	return inspectResp.ExitCode, nil
+}
+
+// lineSplitter is an io.Writer that buffers input and calls onLine for each
+// complete newline-delimited line.
+type lineSplitter struct {
+	onLine func(line []byte)
+	buf    bytes.Buffer
+}
+
+func (l *lineSplitter) Write(p []byte) (int, error) {
+	n := len(p)
+	l.buf.Write(p)
+	for {
+		line, err := l.buf.ReadBytes('\n')
+		if err != nil {
+			// Incomplete line — put it back.
+			l.buf.Write(line)
+			break
+		}
+		// Trim the trailing newline before calling back.
+		l.onLine(bytes.TrimRight(line, "\n"))
+	}
+	return n, nil
+}
+
+func (l *lineSplitter) flush() {
+	if l.buf.Len() > 0 {
+		l.onLine(l.buf.Bytes())
+		l.buf.Reset()
+	}
+}
+
 // shellEscape escapes single quotes in a string for safe use in shell commands.
 func shellEscape(s string) string {
 	return strings.ReplaceAll(s, "'", "'\\''")

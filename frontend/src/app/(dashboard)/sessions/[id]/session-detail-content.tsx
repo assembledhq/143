@@ -1,29 +1,34 @@
 "use client";
 
-import { useCallback, useEffect } from "react";
+import { useCallback, useRef, useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
+  AlertTriangle,
   ArrowLeft,
+  ArrowUp,
   ExternalLink,
   RefreshCw,
   CheckCircle2,
   XCircle,
   MinusCircle,
+  Square,
 } from "lucide-react";
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
 import { LogViewer } from "@/components/log-viewer";
 import { DiffViewer } from "@/components/diff-viewer";
 import { api } from "@/lib/api";
 import { SSE_EVENT, addSSEListener } from "@/lib/sse";
-import type { Session, User, Validation } from "@/lib/types";
+import type { Session, SessionMessage, User, Validation } from "@/lib/types";
 
 const statusConfig: Record<string, { color: string; label: string }> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
   running: { color: "bg-primary/10 text-primary", label: "Running" },
+  idle: { color: "bg-sky-50 text-sky-700 dark:bg-sky-950/30 dark:text-sky-400", label: "Idle" },
   awaiting_input: { color: "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400", label: "Awaiting input" },
   needs_human_guidance: { color: "bg-orange-50 text-orange-700 dark:bg-orange-950/30 dark:text-orange-400", label: "Needs guidance" },
   completed: { color: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400", label: "Completed" },
@@ -370,6 +375,157 @@ function ChangesTab({ session, sessionId }: { session: Session; sessionId: strin
   );
 }
 
+function ChatTab({ session, sessionId }: { session: Session; sessionId: string }) {
+  const queryClient = useQueryClient();
+  const [message, setMessage] = useState("");
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  const { data: messagesData } = useQuery({
+    queryKey: ["session", sessionId, "messages"],
+    queryFn: () => api.sessions.getMessages(sessionId),
+    refetchInterval: session.status === "running" ? 3000 : false,
+  });
+
+  const messages = messagesData?.data || [];
+  const isIdle = session.status === "idle";
+  const isRunning = session.status === "running";
+
+  const sendMutation = useMutation({
+    mutationFn: () => api.sessions.sendMessage(sessionId, message),
+    onSuccess: () => {
+      setMessage("");
+      if (textareaRef.current) {
+        textareaRef.current.style.height = "auto";
+      }
+      queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+      queryClient.invalidateQueries({ queryKey: ["session", sessionId, "messages"] });
+    },
+  });
+
+  const endMutation = useMutation({
+    mutationFn: () => api.sessions.endSession(sessionId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+    },
+  });
+
+  // Auto-resize textarea
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+  }, [message]);
+
+  // Scroll to bottom when messages update
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages]);
+
+  function handleKeyDown(e: React.KeyboardEvent) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      if (message.trim() && isIdle && !sendMutation.isPending) {
+        sendMutation.mutate();
+      }
+    }
+  }
+
+  return (
+    <div className="flex flex-col h-[600px]">
+      {/* Message thread */}
+      <div ref={scrollRef} className="flex-1 overflow-y-auto space-y-3 p-4 border rounded-t-md bg-muted/10">
+        {messages.length === 0 && !isRunning && (
+          <div className="text-center py-8 text-sm text-muted-foreground">
+            No messages yet. The session is processing its initial turn.
+          </div>
+        )}
+        {messages.map((msg: SessionMessage) => (
+          <div
+            key={msg.id}
+            className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+          >
+            <div
+              className={`max-w-[80%] rounded-lg px-3 py-2 text-sm ${
+                msg.role === "user"
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-muted"
+              }`}
+            >
+              <p className="whitespace-pre-wrap">{msg.content}</p>
+              <p className={`text-[10px] mt-1 ${msg.role === "user" ? "text-primary-foreground/70" : "text-muted-foreground"}`}>
+                Turn {msg.turn_number}
+              </p>
+            </div>
+          </div>
+        ))}
+        {isRunning && (
+          <div className="flex justify-start">
+            <div className="bg-muted rounded-lg px-3 py-2 text-sm">
+              <span className="flex items-center gap-2 text-muted-foreground">
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-primary" />
+                </span>
+                Agent is working...
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Error display */}
+      {(sendMutation.error || endMutation.error) && (
+        <div className="flex items-center gap-2 px-4 py-2 text-xs text-destructive border border-t-0 bg-destructive/5">
+          <AlertTriangle className="h-3 w-3 shrink-0" />
+          {sendMutation.error instanceof Error ? sendMutation.error.message : endMutation.error instanceof Error ? endMutation.error.message : "An error occurred"}
+        </div>
+      )}
+
+      {/* Input bar */}
+      <div className="border border-t-0 rounded-b-md p-3 bg-background">
+        <div className="flex items-end gap-2">
+          <Textarea
+            ref={textareaRef}
+            value={message}
+            onChange={(e) => setMessage(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder={isIdle ? "Send a follow-up message..." : isRunning ? "Agent is working..." : "Session is not active"}
+            disabled={!isIdle || sendMutation.isPending}
+            className="min-h-[44px] max-h-[200px] resize-none"
+          />
+          <div className="flex flex-col gap-1">
+            <Button
+              size="icon"
+              variant="default"
+              className="h-8 w-8 shrink-0"
+              disabled={!message.trim() || !isIdle || sendMutation.isPending}
+              onClick={() => sendMutation.mutate()}
+            >
+              <ArrowUp className="h-4 w-4" />
+            </Button>
+            {isIdle && (
+              <Button
+                size="icon"
+                variant="outline"
+                className="h-8 w-8 shrink-0"
+                title="End session"
+                disabled={endMutation.isPending}
+                onClick={() => endMutation.mutate()}
+              >
+                <Square className="h-3 w-3" />
+              </Button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function SessionDetailContent({ id }: { id: string }) {
   const terminalStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
   const queryClient = useQueryClient();
@@ -387,6 +543,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const session = data?.data;
   const members = membersData?.data ?? [];
   const isActive = session ? !terminalStatuses.has(session.status) : false;
+  const isMultiTurn = session && session.current_turn > 0;
 
   // Update the session query cache when we receive status updates via SSE.
   const handleSessionUpdate = useCallback(
@@ -463,16 +620,22 @@ export function SessionDetailContent({ id }: { id: string }) {
         </h1>
         <p className="mt-1 text-sm text-muted-foreground">
           {agentTypeLabels[session.agent_type] || session.agent_type} session
+          {isMultiTurn && ` \u00B7 Turn ${session.current_turn}`}
         </p>
       </div>
 
-      <Tabs defaultValue="overview">
+      <Tabs defaultValue={isMultiTurn || session.status === "idle" ? "chat" : "overview"}>
         <TabsList>
+          <TabsTrigger value="chat">Chat</TabsTrigger>
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="logs">Logs</TabsTrigger>
           <TabsTrigger value="changes">Changes</TabsTrigger>
           <TabsTrigger value="validation">Validation</TabsTrigger>
         </TabsList>
+
+        <TabsContent value="chat">
+          <ChatTab session={session} sessionId={id} />
+        </TabsContent>
 
         <TabsContent value="overview">
           <OverviewTab session={session} members={members} />

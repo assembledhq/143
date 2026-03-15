@@ -1,9 +1,11 @@
 package agent_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"sync"
 	"testing"
 	"time"
@@ -118,12 +120,20 @@ type mockSessionStore struct {
 	countRunning    int
 	statusUpdates   []string
 	resultUpdates   []resultUpdate
+	turnUpdates     []turnUpdate
 	countRunningErr error
 }
 
 type resultUpdate struct {
 	status string
 	result *models.SessionResult
+}
+
+type turnUpdate struct {
+	turn           int
+	result         *models.SessionResult
+	agentSessionID string
+	snapshotKey    string
 }
 
 func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string) error {
@@ -146,6 +156,30 @@ func (m *mockSessionStore) CountRunningByOrg(ctx context.Context, orgID uuid.UUI
 	return m.countRunning, m.countRunningErr
 }
 
+func (m *mockSessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.turnUpdates = append(m.turnUpdates, turnUpdate{
+		turn:           turn,
+		result:         result,
+		agentSessionID: agentSessionID,
+		snapshotKey:    snapshotKey,
+	})
+	return nil
+}
+
+func (m *mockSessionStore) UpdateSnapshotInfo(ctx context.Context, orgID, sessionID uuid.UUID, agentSessionID, snapshotKey string) error {
+	return nil
+}
+
+func (m *mockSessionStore) UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state string) error {
+	return nil
+}
+
+func (m *mockSessionStore) GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
+	return models.Session{}, nil
+}
+
 func (m *mockSessionStore) getStatusUpdates() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -159,6 +193,14 @@ func (m *mockSessionStore) getResultUpdates() []resultUpdate {
 	defer m.mu.Unlock()
 	out := make([]resultUpdate, len(m.resultUpdates))
 	copy(out, m.resultUpdates)
+	return out
+}
+
+func (m *mockSessionStore) getTurnUpdates() []turnUpdate {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]turnUpdate, len(m.turnUpdates))
+	copy(out, m.turnUpdates)
 	return out
 }
 
@@ -202,6 +244,78 @@ func (m *mockSessionQuestionStore) getQuestions() []models.SessionQuestion {
 	out := make([]models.SessionQuestion, len(m.questions))
 	copy(out, m.questions)
 	return out
+}
+
+type mockSessionMessageStore struct {
+	mu       sync.Mutex
+	messages []models.SessionMessage
+}
+
+func (m *mockSessionMessageStore) Create(ctx context.Context, msg *models.SessionMessage) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if msg.ID == 0 {
+		msg.ID = int64(len(m.messages) + 1)
+	}
+	if msg.CreatedAt.IsZero() {
+		msg.CreatedAt = time.Now()
+	}
+	m.messages = append(m.messages, *msg)
+	return nil
+}
+
+func (m *mockSessionMessageStore) ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionMessage, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []models.SessionMessage
+	for _, msg := range m.messages {
+		if msg.OrgID == orgID && msg.SessionID == sessionID {
+			out = append(out, msg)
+		}
+	}
+	return out, nil
+}
+
+func (m *mockSessionMessageStore) getMessages() []models.SessionMessage {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]models.SessionMessage, len(m.messages))
+	copy(out, m.messages)
+	return out
+}
+
+type mockSnapshotStore struct {
+	mu   sync.Mutex
+	data map[string][]byte
+}
+
+func (m *mockSnapshotStore) Save(ctx context.Context, key string, reader io.Reader) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.data == nil {
+		m.data = make(map[string][]byte)
+	}
+	payload, err := io.ReadAll(reader)
+	if err != nil {
+		return err
+	}
+	m.data[key] = payload
+	return nil
+}
+
+func (m *mockSnapshotStore) Load(ctx context.Context, key string, writer io.Writer) error {
+	m.mu.Lock()
+	payload := append([]byte(nil), m.data[key]...)
+	m.mu.Unlock()
+	_, err := writer.Write(payload)
+	return err
+}
+
+func (m *mockSnapshotStore) Delete(ctx context.Context, key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.data, key)
+	return nil
 }
 
 // mockDecisionLogStore implements agent.DecisionLogStore.
@@ -356,20 +470,26 @@ func testRun(orgID, issueID uuid.UUID) *models.Session {
 	}
 }
 
+func strPtr(s string) *string {
+	return &s
+}
+
 type testDeps struct {
 	provider  *testutil.MockSandboxProvider
 	adapter   *mockAgentAdapter
-	sessions *mockSessionStore
+	sessions  *mockSessionStore
 	projects  *mockProjectTaskUpdater
 	issues    *mockIssueStore
 	repos     *mockRepositoryStore
 	logs      *mockSessionLogStore
 	questions *mockSessionQuestionStore
+	messages  *mockSessionMessageStore
 	decisions *mockDecisionLogStore
 	jobs      *mockJobStore
 	github    *mockGitHubTokenProvider
 	codexAuth agent.CodexAuthProvider
 	creds     *mockCredentialProvider
+	snapshots *mockSnapshotStore
 }
 
 func defaultDeps() testDeps {
@@ -377,37 +497,41 @@ func defaultDeps() testDeps {
 	return testDeps{
 		provider:  testutil.NewMockSandboxProvider(),
 		adapter:   &mockAgentAdapter{name: models.AgentTypeClaudeCode},
-		sessions: &mockSessionStore{countRunning: 0},
+		sessions:  &mockSessionStore{countRunning: 0},
 		projects:  &mockProjectTaskUpdater{},
 		issues:    &mockIssueStore{issue: testIssue(orgID)},
 		repos:     &mockRepositoryStore{repo: testRepo(orgID)},
 		logs:      &mockSessionLogStore{},
 		questions: &mockSessionQuestionStore{},
+		messages:  &mockSessionMessageStore{},
 		decisions: &mockDecisionLogStore{},
 		jobs:      &mockJobStore{},
 		github:    &mockGitHubTokenProvider{token: "ghp_test123"},
 		codexAuth: nil,
 		creds:     &mockCredentialProvider{},
+		snapshots: &mockSnapshotStore{},
 	}
 }
 
 func buildOrchestrator(d testDeps) *agent.Orchestrator {
 	return agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:          d.provider,
-		Adapters:          map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		Provider:         d.provider,
+		Adapters:         map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
 		Sessions:         d.sessions,
 		SessionLogs:      d.logs,
 		SessionQuestions: d.questions,
-		DecisionLog:       d.decisions,
-		ProjectTasks:      d.projects,
-		Issues:            d.issues,
-		Repositories:      d.repos,
-		Jobs:              d.jobs,
-		GitHub:            d.github,
-		CodexAuth:         d.codexAuth,
-		Credentials:       d.creds,
-		Logger:            zerolog.Nop(),
-		MaxConcurrent:     3,
+		SessionMessages:  d.messages,
+		DecisionLog:      d.decisions,
+		ProjectTasks:     d.projects,
+		Issues:           d.issues,
+		Repositories:     d.repos,
+		Jobs:             d.jobs,
+		GitHub:           d.github,
+		CodexAuth:        d.codexAuth,
+		Credentials:      d.creds,
+		Snapshots:        d.snapshots,
+		Logger:           zerolog.Nop(),
+		MaxConcurrent:    3,
 	})
 }
 
@@ -525,18 +649,18 @@ func TestRunAgent_PopulatesPMContext(t *testing.T) {
 	capAdapter := &capturingAdapter{name: models.AgentTypeClaudeCode}
 
 	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:          sandboxProvider,
-		Adapters:          map[models.AgentType]agent.AgentAdapter{models.AgentTypeClaudeCode: capAdapter},
+		Provider:         sandboxProvider,
+		Adapters:         map[models.AgentType]agent.AgentAdapter{models.AgentTypeClaudeCode: capAdapter},
 		Sessions:         mockRuns,
 		SessionLogs:      mockLogs,
 		SessionQuestions: mockQuestions,
-		DecisionLog:       mockDecisions,
-		Issues:            mockIssues,
-		Repositories:      mockRepos,
-		Orgs:              mockOrgs,
-		Jobs:              mockJobs,
-		GitHub:            mockGH,
-		Logger:            zerolog.Nop(),
+		DecisionLog:      mockDecisions,
+		Issues:           mockIssues,
+		Repositories:     mockRepos,
+		Orgs:             mockOrgs,
+		Jobs:             mockJobs,
+		GitHub:           mockGH,
+		Logger:           zerolog.Nop(),
 	})
 
 	err := orchestrator.RunAgent(context.Background(), run)
@@ -864,19 +988,19 @@ func TestRunAgent_AgentCredentialsInjected(t *testing.T) {
 	}
 
 	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:          d.provider,
-		Adapters:          map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		Provider:         d.provider,
+		Adapters:         map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
 		Sessions:         d.sessions,
 		SessionLogs:      d.logs,
 		SessionQuestions: d.questions,
-		DecisionLog:       d.decisions,
-		Issues:            d.issues,
-		Repositories:      d.repos,
-		Jobs:              d.jobs,
-		GitHub:            d.github,
-		Credentials:       d.creds,
-		Logger:            zerolog.Nop(),
-		MaxConcurrent:     3,
+		DecisionLog:      d.decisions,
+		Issues:           d.issues,
+		Repositories:     d.repos,
+		Jobs:             d.jobs,
+		GitHub:           d.github,
+		Credentials:      d.creds,
+		Logger:           zerolog.Nop(),
+		MaxConcurrent:    3,
 	})
 
 	err := orch.RunAgent(context.Background(), run)
@@ -904,19 +1028,19 @@ func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
 
 	// No credential configured for "claude_code".
 	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:          d.provider,
-		Adapters:          map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		Provider:         d.provider,
+		Adapters:         map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
 		Sessions:         d.sessions,
 		SessionLogs:      d.logs,
 		SessionQuestions: d.questions,
-		DecisionLog:       d.decisions,
-		Issues:            d.issues,
-		Repositories:      d.repos,
-		Jobs:              d.jobs,
-		GitHub:            d.github,
-		Credentials:       d.creds,
-		Logger:            zerolog.Nop(),
-		MaxConcurrent:     3,
+		DecisionLog:      d.decisions,
+		Issues:           d.issues,
+		Repositories:     d.repos,
+		Jobs:             d.jobs,
+		GitHub:           d.github,
+		Credentials:      d.creds,
+		Logger:           zerolog.Nop(),
+		MaxConcurrent:    3,
 	})
 
 	err := orch.RunAgent(context.Background(), run)
@@ -1078,4 +1202,114 @@ func TestRunAgent_IssueWithoutRepository(t *testing.T) {
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1)
 	require.Equal(t, "completed", results[0].status)
+}
+
+func TestRunAgent_ManualSessionTransitionsToIdle(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = "manual"
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("snapshot-bytes"))), nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{
+			Diff:                "--- a/main.go\n+++ b/main.go",
+			Summary:             "Initial manual turn complete",
+			ConfidenceScore:     0.92,
+			ConfidenceReasoning: "straightforward fix",
+			ExitCode:            0,
+		}, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.NoError(t, err, "manual run should succeed")
+
+	require.Empty(t, d.sessions.getResultUpdates(), "manual interactive turn should not finalize the run result yet")
+	turnUpdates := d.sessions.getTurnUpdates()
+	require.Len(t, turnUpdates, 1, "manual interactive run should persist an idle turn update")
+	require.Equal(t, 1, turnUpdates[0].turn, "first manual turn should advance current_turn to 1")
+	require.NotNil(t, turnUpdates[0].result, "turn update should persist the turn result")
+	require.NotNil(t, turnUpdates[0].result.ResultSummary, "turn update should keep the assistant summary")
+	require.Equal(t, "Initial manual turn complete", *turnUpdates[0].result.ResultSummary, "turn update should store the assistant summary")
+	require.NotNil(t, turnUpdates[0].result.Diff, "turn update should store the latest diff")
+	require.NotEmpty(t, turnUpdates[0].snapshotKey, "manual interactive run should store a snapshot key")
+
+	messages := d.messages.getMessages()
+	require.Len(t, messages, 1, "manual interactive run should create an assistant message")
+	require.Equal(t, string(models.MessageRoleAssistant), messages[0].Role, "assistant reply should be stored in session_messages")
+	require.Equal(t, 1, messages[0].TurnNumber, "assistant reply should be recorded for turn 1")
+
+	require.NotContains(t, d.jobs.getEnqueued(), "validate", "manual interactive run should wait for explicit end before validation")
+}
+
+func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = "manual"
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	session.SnapshotKey = strPtr("snapshots/test/session.tar")
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       string(models.MessageRoleUser),
+			Content:    "Please add regression coverage too.",
+		},
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("next-snapshot"))), nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.True(t, prompt.Continuation, "continue_session should execute the adapter in continuation mode")
+		require.Equal(t, "Please add regression coverage too.", prompt.UserMessage, "continue_session should pass the latest user message")
+		return &agent.AgentResult{
+			Diff:                "--- a/main_test.go\n+++ b/main_test.go",
+			Summary:             "Added the regression test",
+			ConfidenceScore:     0.81,
+			ConfidenceReasoning: "small follow-up",
+			ExitCode:            0,
+		}, nil
+	}
+	d.snapshots.data = map[string][]byte{
+		*session.SnapshotKey: []byte("restored-snapshot"),
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session)
+	require.NoError(t, err, "continue_session should succeed")
+
+	turnUpdates := d.sessions.getTurnUpdates()
+	require.Len(t, turnUpdates, 1, "continue_session should persist the completed turn")
+	require.Equal(t, 2, turnUpdates[0].turn, "continue_session should advance the turn counter")
+	require.NotNil(t, turnUpdates[0].result, "continue_session should persist the latest result")
+	require.NotNil(t, turnUpdates[0].result.ResultSummary, "continue_session should persist the latest summary")
+	require.Equal(t, "Added the regression test", *turnUpdates[0].result.ResultSummary, "continue_session should store the latest assistant summary")
+	require.NotNil(t, turnUpdates[0].result.Diff, "continue_session should persist the latest diff")
+	require.Contains(t, d.sessions.getStatusUpdates(), "running", "continue_session should mark the session running while work is in progress")
+	require.NotContains(t, d.jobs.getEnqueued(), "validate", "continue_session should stay interactive until the user ends the session")
+
+	messages := d.messages.getMessages()
+	require.Len(t, messages, 2, "continue_session should append an assistant reply")
+	require.Equal(t, string(models.MessageRoleAssistant), messages[1].Role, "assistant reply should be stored for the continued turn")
+	require.Equal(t, 2, messages[1].TurnNumber, "assistant reply should use the new turn number")
 }

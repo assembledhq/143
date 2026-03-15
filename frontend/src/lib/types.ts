@@ -105,6 +105,11 @@ export interface Session {
   project_task_id?: string;
   model_override?: string;
   triggered_by_user_id?: string;
+  agent_session_id?: string;
+  current_turn: number;
+  last_activity_at?: string;
+  sandbox_state: string;
+  snapshot_key?: string;
   error?: string;
   result_summary?: string;
   diff?: string;
@@ -138,6 +143,20 @@ export interface SessionLog {
   level: string;
   message: string;
   metadata: Record<string, unknown> | null;
+  turn_number: number;
+  created_at: string;
+}
+
+export interface SessionMessage {
+  id: number;
+  session_id: string;
+  org_id: string;
+  user_id?: string;
+  turn_number: number;
+  role: 'user' | 'assistant';
+  content: string;
+  attachments?: string[];
+  token_usage?: Record<string, unknown>;
   created_at: string;
 }
 
@@ -299,7 +318,7 @@ export interface PMPlan {
   completed_at?: string;
 }
 
-export type SessionStatus = 'pending' | 'running' | 'awaiting_input' | 'needs_human_guidance' | 'completed' | 'pr_created' | 'failed' | 'cancelled' | 'skipped';
+export type SessionStatus = 'pending' | 'running' | 'idle' | 'awaiting_input' | 'needs_human_guidance' | 'completed' | 'pr_created' | 'failed' | 'cancelled' | 'skipped';
 export type PMTaskComplexity = 'trivial' | 'simple' | 'moderate' | 'complex';
 export type PMTaskConfidence = 'high' | 'medium' | 'low';
 export type PMTaskStatus = 'pending' | 'delegated' | 'skipped_capacity';
