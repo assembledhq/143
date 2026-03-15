@@ -285,10 +285,13 @@ func TestHandlePullRequestReviewEvent_ApprovedFlow(t *testing.T) {
 	now := time.Now()
 
 	prMock := newMockPool(t)
+	jobMock := newMockPool(t)
 	prStore := db.NewPullRequestStore(prMock)
+	jobStore := db.NewJobStore(jobMock)
 
 	svc := &PRService{
 		pullRequests: prStore,
+		jobs:         jobStore,
 		logger:       zerolog.Nop(),
 	}
 
@@ -306,6 +309,14 @@ func TestHandlePullRequestReviewEvent_ApprovedFlow(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
+	// Mock: Enqueue reinforce_memories job (triggered on approval).
+	jobMock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()),
+		)
+
 	event := PullRequestReviewEvent{
 		Action: "submitted",
 	}
@@ -317,6 +328,7 @@ func TestHandlePullRequestReviewEvent_ApprovedFlow(t *testing.T) {
 	err := svc.HandlePullRequestReviewEvent(context.Background(), event)
 	require.NoError(t, err, "HandlePullRequestReviewEvent should not return an error for approved review")
 	require.NoError(t, prMock.ExpectationsWereMet(), "all PR store expectations should be met")
+	require.NoError(t, jobMock.ExpectationsWereMet(), "all job store expectations should be met")
 }
 
 func TestHandlePullRequestReviewEvent_ChangesRequestedWithBody(t *testing.T) {

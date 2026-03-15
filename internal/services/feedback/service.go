@@ -1,6 +1,6 @@
 // Package feedback implements the review feedback loop: capturing PR review
-// comments, classifying them via LLM, deduplicating against existing patterns,
-// and managing the review patterns knowledge base.
+// comments, classifying them via LLM, deduplicating against existing memories,
+// and managing the learned memories knowledge base.
 package feedback
 
 import (
@@ -32,14 +32,14 @@ type ReviewCommentStore interface {
 	ListActionableByPullRequest(ctx context.Context, orgID, prID uuid.UUID) ([]models.ReviewComment, error)
 }
 
-// ReviewPatternStore defines the DB operations for review patterns.
-type ReviewPatternStore interface {
-	Create(ctx context.Context, p *models.ReviewPattern) error
-	GetByID(ctx context.Context, orgID, id uuid.UUID) (models.ReviewPattern, error)
-	FindMatchingRule(ctx context.Context, orgID uuid.UUID, repo, normalizedRule string) (models.ReviewPattern, error)
-	IncrementOccurrence(ctx context.Context, orgID, patternID, commentID uuid.UUID) error
-	ListActiveByRepo(ctx context.Context, orgID uuid.UUID, repo string) ([]models.ReviewPattern, error)
-	UpdatePattern(ctx context.Context, orgID, id uuid.UUID, rule *string, status *string) error
+// MemoryStore defines the DB operations for memories (learned conventions).
+type MemoryStore interface {
+	Create(ctx context.Context, m *models.Memory) error
+	GetByID(ctx context.Context, orgID, id uuid.UUID) (models.Memory, error)
+	FindMatchingRule(ctx context.Context, orgID uuid.UUID, repo, normalizedRule string) (models.Memory, error)
+	IncrementOccurrence(ctx context.Context, orgID, memoryID, commentID uuid.UUID) error
+	ListActiveByRepo(ctx context.Context, orgID uuid.UUID, repo string) ([]models.Memory, error)
+	UpdateMemory(ctx context.Context, orgID, id uuid.UUID, rule *string, status *string) error
 }
 
 // JobStore defines the job enqueue operations.
@@ -50,7 +50,7 @@ type JobStore interface {
 // Service implements the review feedback processing pipeline.
 type Service struct {
 	comments ReviewCommentStore
-	patterns ReviewPatternStore
+	memories MemoryStore
 	jobs     JobStore
 	llm      LLMClient
 	logger   zerolog.Logger
@@ -59,14 +59,14 @@ type Service struct {
 // NewService creates a new feedback service.
 func NewService(
 	comments ReviewCommentStore,
-	patterns ReviewPatternStore,
+	memories MemoryStore,
 	jobs JobStore,
 	llm LLMClient,
 	logger zerolog.Logger,
 ) *Service {
 	return &Service{
 		comments: comments,
-		patterns: patterns,
+		memories: memories,
 		jobs:     jobs,
 		llm:      llm,
 		logger:   logger,
@@ -110,7 +110,7 @@ func (s *Service) ProcessComment(ctx context.Context, commentID, orgID uuid.UUID
 		return fmt.Errorf("update comment classification: %w", err)
 	}
 
-	// Pattern dedup/creation is handled by UpdatePatterns, called by the worker
+	// Memory dedup/creation is handled by UpdateMemories, called by the worker
 	// handler which has the repo name from the job payload.
 
 	return nil
@@ -200,19 +200,19 @@ func extractJSON(s string) string {
 	return s
 }
 
-// UpdatePatterns performs dedup and creates/updates patterns for a classified comment.
+// UpdateMemories performs dedup and creates/updates memories for a classified comment.
 // This is called by the worker handler which has the repo name from the PR.
-func (s *Service) UpdatePatterns(ctx context.Context, orgID, commentID uuid.UUID, repo, rule, category string) error {
+func (s *Service) UpdateMemories(ctx context.Context, orgID, commentID uuid.UUID, repo, rule, category string) error {
 	normalized := normalizeRule(rule)
 
-	existing, err := s.patterns.FindMatchingRule(ctx, orgID, repo, normalized)
+	existing, err := s.memories.FindMatchingRule(ctx, orgID, repo, normalized)
 	if err == nil {
 		// Match found — increment occurrence count.
-		return s.patterns.IncrementOccurrence(ctx, orgID, existing.ID, commentID)
+		return s.memories.IncrementOccurrence(ctx, orgID, existing.ID, commentID)
 	}
 
-	// No match — create new candidate pattern.
-	pattern := &models.ReviewPattern{
+	// No match — create new candidate memory.
+	memory := &models.Memory{
 		OrgID:            orgID,
 		Repo:             repo,
 		Rule:             rule,
@@ -221,36 +221,36 @@ func (s *Service) UpdatePatterns(ctx context.Context, orgID, commentID uuid.UUID
 		OccurrenceCount:  1,
 		Status:           "candidate",
 	}
-	return s.patterns.Create(ctx, pattern)
+	return s.memories.Create(ctx, memory)
 }
 
 // GenerateConventionsDoc generates the .143/learned-conventions.md content
-// from all active patterns for a repo.
+// from all active memories for a repo.
 func (s *Service) GenerateConventionsDoc(ctx context.Context, orgID uuid.UUID, repo string) (string, error) {
-	patterns, err := s.patterns.ListActiveByRepo(ctx, orgID, repo)
+	memories, err := s.memories.ListActiveByRepo(ctx, orgID, repo)
 	if err != nil {
-		return "", fmt.Errorf("list active patterns: %w", err)
+		return "", fmt.Errorf("list active memories: %w", err)
 	}
 
-	if len(patterns) == 0 {
+	if len(memories) == 0 {
 		return "", nil
 	}
 
 	var b strings.Builder
 	b.WriteString("# 143 Learned Conventions\n")
 	b.WriteString("#\n")
-	b.WriteString("# This file is auto-generated from PR review patterns observed by 143.dev.\n")
+	b.WriteString("# This file is auto-generated from learned memories observed by 143.dev.\n")
 	b.WriteString("# Manual edits are preserved — the system will not overwrite lines you change.\n")
 	b.WriteString("#\n\n")
 
 	// Group by category.
-	grouped := make(map[string][]models.ReviewPattern)
+	grouped := make(map[string][]models.Memory)
 	var categories []string
-	for _, p := range patterns {
-		if _, exists := grouped[p.Category]; !exists {
-			categories = append(categories, p.Category)
+	for _, m := range memories {
+		if _, exists := grouped[m.Category]; !exists {
+			categories = append(categories, m.Category)
 		}
-		grouped[p.Category] = append(grouped[p.Category], p)
+		grouped[m.Category] = append(grouped[m.Category], m)
 	}
 
 	categoryTitles := map[string]string{
@@ -273,9 +273,9 @@ func (s *Service) GenerateConventionsDoc(ctx context.Context, orgID uuid.UUID, r
 			}
 		}
 		fmt.Fprintf(&b, "## %s\n", title)
-		for _, p := range grouped[cat] {
-			fmt.Fprintf(&b, "- %s\n", p.Rule)
-			fmt.Fprintf(&b, "  (%d occurrences)\n", p.OccurrenceCount)
+		for _, m := range grouped[cat] {
+			fmt.Fprintf(&b, "- %s\n", m.Rule)
+			fmt.Fprintf(&b, "  (%d occurrences)\n", m.OccurrenceCount)
 		}
 		b.WriteString("\n")
 	}
