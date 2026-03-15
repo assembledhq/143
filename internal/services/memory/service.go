@@ -284,14 +284,11 @@ func matchDoublestar(pattern, file string) bool {
 	parts := strings.Split(pattern, "**")
 
 	// Check prefix (before first **).
-	remaining := file
 	if prefix := parts[0]; prefix != "" {
 		prefix = strings.TrimSuffix(prefix, "/")
-		if !strings.HasPrefix(remaining, prefix) {
+		if !strings.HasPrefix(file, prefix) {
 			return false
 		}
-		remaining = remaining[len(prefix):]
-		remaining = strings.TrimPrefix(remaining, "/")
 	}
 
 	// Check suffix (after last **) — this is the most common case: "**/*.go".
