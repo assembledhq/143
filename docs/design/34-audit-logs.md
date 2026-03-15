@@ -44,7 +44,7 @@ We need a production-grade audit log that captures **all significant state chang
 4. **Optional user linkage** — When a human user is the actor, `user_id` provides a typed foreign key for joins. When the actor is a system process, `user_id` is NULL and `actor_type` + `actor_id` provide identification.
 5. **Structured but extensible** — Core fields use constrained vocabularies (enums for `actor_type`, `action`, `resource_type`). The `details` JSONB field captures action-specific context without schema changes.
 6. **Low-friction instrumentation** — Emitting audit entries should be a single function call. The audit store should accept context and extract org/user automatically where possible.
-7. **Query-first indexing** — Indexes are designed around the access patterns defined in section 6, not speculative.
+7. **Query-first indexing** — Indexes are designed around the access patterns defined in section 6 (API), not speculative.
 
 ---
 
@@ -93,7 +93,7 @@ CREATE TABLE audit_logs (
 );
 
 -- -----------------------------------------------------------------------
--- Indexes (designed for the query patterns in section 6)
+-- Indexes (designed for the query patterns in section 6, API)
 -- -----------------------------------------------------------------------
 
 -- Primary listing: "show me the audit trail for this org, newest first"
@@ -131,6 +131,7 @@ CREATE TRIGGER audit_logs_immutable
 ### 3.2 Down migration: `000019_audit_logs.down.sql`
 
 ```sql
+DROP FUNCTION IF EXISTS delete_expired_audit_logs(uuid, int);
 DROP TRIGGER IF EXISTS audit_logs_immutable ON audit_logs;
 DROP FUNCTION IF EXISTS prevent_audit_logs_modification();
 DROP TABLE IF EXISTS audit_logs;
@@ -394,6 +395,11 @@ import (
 )
 
 // AuditLog represents an immutable audit trail entry.
+//
+// Note on IPAddress: PostgreSQL's `inet` type includes a netmask, so pgx v5
+// natively scans it into netip.Prefix, not netip.Addr. During implementation,
+// either register a custom pgx type for netip.Addr, or change this field to
+// *netip.Prefix and extract the address via .Addr() where needed.
 type AuditLog struct {
     ID           int64             `db:"id" json:"id"`
     OrgID        uuid.UUID         `db:"org_id" json:"org_id"`
@@ -421,7 +427,6 @@ package db
 import (
     "context"
     "fmt"
-    "strconv"
     "time"
 
     "github.com/assembledhq/143/internal/models"
@@ -495,7 +500,8 @@ type AuditLogFilters struct {
     Since        *time.Time               // lower bound on created_at (parsed from ISO 8601 at the handler)
     Until        *time.Time               // upper bound on created_at (parsed from ISO 8601 at the handler)
     Limit        int
-    Cursor       string                   // cursor for keyset pagination (bigserial id)
+    CursorTime   *time.Time               // cursor: created_at of last item on previous page
+    CursorID     *int64                    // cursor: id of last item on previous page (tiebreaker)
 }
 
 // List returns audit log entries for an organization, filtered and paginated.
@@ -533,12 +539,9 @@ func (s *AuditLogStore) List(ctx context.Context, orgID uuid.UUID, filters Audit
     if filters.Until != nil {
         w.add("created_at <= @until", "until", *filters.Until)
     }
-    if filters.Cursor != "" {
-        cursorID, err := strconv.ParseInt(filters.Cursor, 10, 64)
-        if err != nil {
-            return nil, fmt.Errorf("invalid cursor %q: %w", filters.Cursor, err)
-        }
-        w.add("id < @cursor", "cursor", cursorID)
+    if filters.CursorTime != nil && filters.CursorID != nil {
+        w.add("(created_at, id) < (@cursor_time, @cursor_id)", "cursor_time", *filters.CursorTime)
+        w.args["cursor_id"] = *filters.CursorID
     }
 
     where, args := w.build()
@@ -548,7 +551,7 @@ func (s *AuditLogStore) List(ctx context.Context, orgID uuid.UUID, filters Audit
                action, resource_type, resource_id,
                details, request_id, ip_address, user_agent,
                session_id, project_id, created_at
-        FROM audit_logs` + where + ` ORDER BY id DESC`
+        FROM audit_logs` + where + ` ORDER BY created_at DESC, id DESC`
 
     limit := filters.Limit
     if limit <= 0 || limit > 200 {
@@ -561,6 +564,27 @@ func (s *AuditLogStore) List(ctx context.Context, orgID uuid.UUID, filters Audit
         return nil, fmt.Errorf("query audit logs: %w", err)
     }
     return pgx.CollectRows(rows, pgx.RowToStructByName[models.AuditLog])
+}
+
+// GetByID returns a single audit log entry by ID, scoped to an organization.
+func (s *AuditLogStore) GetByID(ctx context.Context, orgID uuid.UUID, id int64) (*models.AuditLog, error) {
+    query := `
+        SELECT id, org_id, actor_type, actor_id, user_id,
+               action, resource_type, resource_id,
+               details, request_id, ip_address, user_agent,
+               session_id, project_id, created_at
+        FROM audit_logs
+        WHERE org_id = @org_id AND id = @id`
+
+    rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "id": id})
+    if err != nil {
+        return nil, fmt.Errorf("query audit log by id: %w", err)
+    }
+    entry, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.AuditLog])
+    if err != nil {
+        return nil, fmt.Errorf("get audit log %d: %w", id, err)
+    }
+    return &entry, nil
 }
 ```
 
@@ -811,7 +835,7 @@ Audit log listing is restricted to **admin** role. This is sensitive data — or
 | `since` | ISO 8601 | Lower bound on `created_at` |
 | `until` | ISO 8601 | Upper bound on `created_at` |
 | `limit` | int | Page size (default 50, max 200) |
-| `cursor` | string | Cursor for keyset pagination (entry ID) |
+| `cursor` | string | Opaque cursor for keyset pagination (base64-encoded `created_at,id`) |
 
 ### 6.3 Response format
 
@@ -840,7 +864,7 @@ Audit log listing is restricted to **admin** role. This is sensitive data — or
     }
   ],
   "meta": {
-    "next_cursor": "12846"
+    "next_cursor": "MjAyNi0wMy0xNVQxNDozMDowMFosMTI4NDY="
   }
 }
 ```
