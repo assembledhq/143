@@ -1,7 +1,10 @@
 package handlers
 
 import (
+	"fmt"
+	"math"
 	"net/http"
+	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
@@ -14,10 +17,11 @@ type PMHandler struct {
 	planStore        *db.PMPlanStore
 	decisionLogStore *db.PMDecisionLogStore
 	jobStore         *db.JobStore
+	orgStore         *db.OrganizationStore
 }
 
-func NewPMHandler(planStore *db.PMPlanStore, decisionLogStore *db.PMDecisionLogStore, jobStore *db.JobStore) *PMHandler {
-	return &PMHandler{planStore: planStore, decisionLogStore: decisionLogStore, jobStore: jobStore}
+func NewPMHandler(planStore *db.PMPlanStore, decisionLogStore *db.PMDecisionLogStore, jobStore *db.JobStore, orgStore *db.OrganizationStore) *PMHandler {
+	return &PMHandler{planStore: planStore, decisionLogStore: decisionLogStore, jobStore: jobStore, orgStore: orgStore}
 }
 
 // Analyze enqueues a PM analysis job.
@@ -177,11 +181,35 @@ func (h *PMHandler) Status(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Estimate next run from org settings (pm_schedule_hours).
+	// Compute next automatic run time from org settings (pm_schedule_hours).
 	if status.LastRunAt != nil && !status.IsRunning {
-		// Default schedule is 4 hours; compute approximate next run.
-		nextRunIn := "in ~4h"
-		status.NextRunIn = &nextRunIn
+		scheduleHours := models.DefaultPMScheduleHours
+		if h.orgStore != nil {
+			org, err := h.orgStore.GetByID(r.Context(), orgID)
+			if err == nil {
+				settings := models.ParseOrgSettings(org.Settings)
+				scheduleHours = settings.PMScheduleHours
+			}
+		}
+
+		nextRunAt := status.LastRunAt.Add(time.Duration(scheduleHours) * time.Hour)
+		status.NextRunAt = &nextRunAt
+
+		remaining := time.Until(nextRunAt)
+		if remaining <= 0 {
+			nextRunIn := "soon"
+			status.NextRunIn = &nextRunIn
+		} else {
+			hours := int(math.Floor(remaining.Hours()))
+			mins := int(math.Floor(remaining.Minutes())) % 60
+			var nextRunIn string
+			if hours > 0 {
+				nextRunIn = fmt.Sprintf("in %dh %dm", hours, mins)
+			} else {
+				nextRunIn = fmt.Sprintf("in %dm", mins)
+			}
+			status.NextRunIn = &nextRunIn
+		}
 	}
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.PMStatus]{Data: status})
