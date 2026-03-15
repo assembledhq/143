@@ -285,7 +285,7 @@ func (s *MemoryStore) IncrementOccurrence(ctx context.Context, orgID, memoryID, 
 		"manually_curated":   existing.ManuallyCurated,
 		"scope":              existing.Scope,
 		"source":             existing.Source,
-		"times_reinforced":   existing.TimesReinforced + 1,
+		"times_reinforced":   existing.TimesReinforced, // preserved — only incremented by ReinforceBatch on PR approval
 		"file_patterns":      existing.FilePatterns,
 	})
 	if err != nil {

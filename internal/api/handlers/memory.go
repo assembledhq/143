@@ -207,8 +207,12 @@ func (h *MemoryHandler) Create(w http.ResponseWriter, r *http.Request) {
 		// support them, but our matchPattern function does.
 		testPattern := strings.ReplaceAll(pattern, "**/", "")
 		testPattern = strings.ReplaceAll(testPattern, "/**", "")
-		if testPattern == "**" || testPattern == "" {
+		if testPattern == "**" {
 			continue // pure recursive glob, always valid
+		}
+		if testPattern == "" {
+			writeError(w, http.StatusBadRequest, "INVALID_PATTERN", fmt.Sprintf("invalid glob pattern %q: trailing separator after **", pattern))
+			return
 		}
 		if _, err := filepath.Match(testPattern, ""); err != nil {
 			writeError(w, http.StatusBadRequest, "INVALID_PATTERN", fmt.Sprintf("invalid glob pattern %q: %v", pattern, err))

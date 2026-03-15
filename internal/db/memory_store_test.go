@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -376,6 +377,27 @@ func TestMemoryStore_ReinforceBatch_BatchCTE(t *testing.T) {
 
 	err = store.ReinforceBatch(context.Background(), orgID, ids)
 	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestMemoryStore_ReinforceBatch_ExecError(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewMemoryStore(mock)
+	orgID := uuid.New()
+	ids := []uuid.UUID{uuid.New()}
+
+	mock.ExpectExec("WITH deactivated AS").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(fmt.Errorf("connection refused"))
+
+	err = store.ReinforceBatch(context.Background(), orgID, ids)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "reinforce memories batch")
+	require.Contains(t, err.Error(), "connection refused")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

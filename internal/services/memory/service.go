@@ -179,9 +179,12 @@ func (s *Service) ReinforceMemories(ctx context.Context, orgID uuid.UUID, memory
 	if len(memoryIDs) == 0 {
 		return nil
 	}
+	if err := s.store.ReinforceBatch(ctx, orgID, memoryIDs); err != nil {
+		return err
+	}
 	memoriesReinforcedTotal.Inc()
 	memoriesReinforcedCount.Observe(float64(len(memoryIDs)))
-	return s.store.ReinforceBatch(ctx, orgID, memoryIDs)
+	return nil
 }
 
 // computeStrength calculates the composite strength score for a memory:
@@ -297,10 +300,6 @@ func matchDoublestar(pattern, file string) bool {
 		// The suffix may contain globs, so match the basename against it.
 		base := filepath.Base(file)
 		if matched, err := filepath.Match(suffix, base); err == nil && matched {
-			return true
-		}
-		// Also try matching the suffix against the remaining path tail.
-		if matched, err := filepath.Match(suffix, filepath.Base(remaining)); err == nil && matched {
 			return true
 		}
 		return false
