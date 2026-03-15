@@ -121,6 +121,48 @@ func TestProjectHandler_List(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestProjectHandler_List_WithRepositoryID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	orgID := uuid.New()
+	repoID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM projects WHERE org_id .+ AND repository_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(projectColumns()))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects?repository_id="+repoID.String(), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.List(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Contains(t, rr.Body.String(), `"data":[]`)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestProjectHandler_List_InvalidRepositoryID(t *testing.T) {
+	t.Parallel()
+
+	handler := NewProjectHandler(nil, nil, nil, nil, nil)
+	orgID := uuid.New()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects?repository_id=not-a-uuid", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.List(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+	require.Contains(t, rr.Body.String(), "INVALID_REPOSITORY_ID")
+}
+
 // --- Get handler tests ---
 
 func TestProjectHandler_Get_NotFound(t *testing.T) {

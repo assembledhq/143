@@ -68,6 +68,15 @@ type Repository struct {
 	UpdatedAt      time.Time       `db:"updated_at" json:"updated_at"`
 }
 
+// RepoSummary is the API model for repository summary data in the context switcher.
+type RepoSummary struct {
+	RepositoryID        uuid.UUID `json:"repository_id"`
+	FullName            string    `json:"full_name"`
+	ActiveSessionCount  int       `json:"active_session_count"`
+	LatestSessionStatus *string   `json:"latest_session_status"`
+	ActiveProjectCount  int       `json:"active_project_count"`
+}
+
 // Issue is the unified, normalized issue from any source.
 type Issue struct {
 	ID                    uuid.UUID       `db:"id" json:"id"`

@@ -81,6 +81,15 @@ func (h *ProjectHandler) List(w http.ResponseWriter, r *http.Request) {
 		Cursor: r.URL.Query().Get("cursor"),
 	}
 
+	if repoIDStr := r.URL.Query().Get("repository_id"); repoIDStr != "" {
+		repoID, err := uuid.Parse(repoIDStr)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "invalid repository_id")
+			return
+		}
+		filters.RepositoryID = repoID
+	}
+
 	projects, err := h.projectStore.ListByOrg(r.Context(), orgID, filters)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list projects")
