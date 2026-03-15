@@ -315,7 +315,7 @@ export function SessionsPageContent() {
             </div>
             <p className="mt-4 text-[13px] font-medium text-foreground">No sessions yet</p>
             <p className="mt-1 max-w-sm text-center text-[13px] text-muted-foreground">
-              Click <span className="font-medium text-foreground">Run PM agent</span> to review your issues and create sessions, or start a <span className="font-medium text-foreground">manual session</span> to fix a specific issue.
+              The PM agent runs automatically on a schedule. Click <span className="font-medium text-foreground">Run now</span> above to start it immediately, or create a <span className="font-medium text-foreground">manual session</span> for a specific issue.
             </p>
             <div className="flex items-center gap-2 mt-4">
               <Button variant="outline" size="sm" asChild>

@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -32,6 +33,7 @@ func newSessionHandler(t *testing.T, mock pgxmock.PgxPoolIface) *SessionHandler 
 		db.NewOrganizationStore(mock),
 		db.NewJobStore(mock),
 		nil, // llmClient — not needed in unit tests
+		zerolog.Nop(),
 	)
 }
 
@@ -1326,6 +1328,7 @@ func TestSessionHandler_CreateManual_WithLLMTitle(t *testing.T) {
 		db.NewOrganizationStore(mock),
 		db.NewJobStore(mock),
 		llmClient,
+		zerolog.Nop(),
 	)
 
 	now := time.Now()
@@ -1402,6 +1405,7 @@ func TestSessionHandler_CreateManual_LLMError_Returns500(t *testing.T) {
 		db.NewOrganizationStore(mock),
 		db.NewJobStore(mock),
 		llmClient,
+		zerolog.Nop(),
 	)
 
 	now := time.Now()

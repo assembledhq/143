@@ -34,7 +34,7 @@ func TestPMHandler_AnalyzeEnqueuesJob(t *testing.T) {
 	jobStore := db.NewJobStore(mock)
 	planStore := db.NewPMPlanStore(mock)
 	decisionLogStore := db.NewPMDecisionLogStore(mock)
-	handler := NewPMHandler(planStore, decisionLogStore, jobStore)
+	handler := NewPMHandler(planStore, decisionLogStore, jobStore, nil)
 
 	orgID := uuid.New()
 	jobID := uuid.New()
@@ -64,7 +64,7 @@ func TestPMHandler_ListPlans(t *testing.T) {
 	jobStore := db.NewJobStore(mock)
 	planStore := db.NewPMPlanStore(mock)
 	decisionLogStore := db.NewPMDecisionLogStore(mock)
-	handler := NewPMHandler(planStore, decisionLogStore, jobStore)
+	handler := NewPMHandler(planStore, decisionLogStore, jobStore, nil)
 
 	orgID := uuid.New()
 	now := time.Now()
@@ -102,7 +102,7 @@ func TestPMHandler_Decisions(t *testing.T) {
 	planStore := db.NewPMPlanStore(mock)
 	decisionLogStore := db.NewPMDecisionLogStore(mock)
 	jobStore := db.NewJobStore(mock)
-	handler := NewPMHandler(planStore, decisionLogStore, jobStore)
+	handler := NewPMHandler(planStore, decisionLogStore, jobStore, nil)
 
 	orgID := uuid.New()
 	planID := uuid.New()
@@ -159,7 +159,7 @@ func TestPMHandler_Status(t *testing.T) {
 	planStore := db.NewPMPlanStore(mock)
 	decisionLogStore := db.NewPMDecisionLogStore(mock)
 	jobStore := db.NewJobStore(mock)
-	handler := NewPMHandler(planStore, decisionLogStore, jobStore)
+	handler := NewPMHandler(planStore, decisionLogStore, jobStore, nil)
 
 	orgID := uuid.New()
 	now := time.Now()
@@ -218,7 +218,7 @@ func TestPMHandler_StatusWithJobError(t *testing.T) {
 	planStore := db.NewPMPlanStore(mock)
 	decisionLogStore := db.NewPMDecisionLogStore(mock)
 	jobStore := db.NewJobStore(mock)
-	handler := NewPMHandler(planStore, decisionLogStore, jobStore)
+	handler := NewPMHandler(planStore, decisionLogStore, jobStore, nil)
 
 	orgID := uuid.New()
 	now := time.Now()
