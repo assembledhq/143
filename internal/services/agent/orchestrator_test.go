@@ -1243,7 +1243,7 @@ func TestRunAgent_ManualSessionTransitionsToIdle(t *testing.T) {
 
 	messages := d.messages.getMessages()
 	require.Len(t, messages, 1, "manual interactive run should create an assistant message")
-	require.Equal(t, string(models.MessageRoleAssistant), messages[0].Role, "assistant reply should be stored in session_messages")
+	require.Equal(t, models.MessageRoleAssistant, messages[0].Role, "assistant reply should be stored in session_messages")
 	require.Equal(t, 1, messages[0].TurnNumber, "assistant reply should be recorded for turn 1")
 
 	require.NotContains(t, d.jobs.getEnqueued(), "validate", "manual interactive run should wait for explicit end before validation")
@@ -1268,7 +1268,7 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 			SessionID:  session.ID,
 			OrgID:      orgID,
 			TurnNumber: 2,
-			Role:       string(models.MessageRoleUser),
+			Role:       models.MessageRoleUser,
 			Content:    "Please add regression coverage too.",
 		},
 	}
@@ -1310,6 +1310,6 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 
 	messages := d.messages.getMessages()
 	require.Len(t, messages, 2, "continue_session should append an assistant reply")
-	require.Equal(t, string(models.MessageRoleAssistant), messages[1].Role, "assistant reply should be stored for the continued turn")
+	require.Equal(t, models.MessageRoleAssistant, messages[1].Role, "assistant reply should be stored for the continued turn")
 	require.Equal(t, 2, messages[1].TurnNumber, "assistant reply should use the new turn number")
 }

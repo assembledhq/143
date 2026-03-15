@@ -487,6 +487,10 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 // ContinueSession handles a follow-up turn in a multi-turn session.
 // It creates a fresh sandbox, restores the snapshot from the previous turn,
 // re-injects credentials, runs the agent with --resume, and snapshots again.
+//
+// Authorization: callers must verify the requesting user is authorized before
+// invoking this method. The SendMessage HTTP handler enforces this via org_id
+// scoping and ClaimIdle atomicity.
 func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Session) error {
 	log := o.logger.With().
 		Str("session_id", session.ID.String()).
@@ -525,7 +529,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 
 	var userMessage string
 	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == string(models.MessageRoleUser) {
+		if messages[i].Role == models.MessageRoleUser {
 			userMessage = messages[i].Content
 			break
 		}
@@ -573,6 +577,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}()
 
 	if err := o.provider.Restore(ctx, sandbox, snapshotReader); err != nil {
+		// Close the reader to unblock the goroutine writing to the pipe.
+		snapshotReader.Close()
+		restoreWg.Wait()
 		o.failRun(ctx, session, fmt.Sprintf("restore snapshot: %s", err))
 		return fmt.Errorf("restore snapshot: %w", err)
 	}
@@ -1028,7 +1035,7 @@ func (o *Orchestrator) createAssistantMessage(ctx context.Context, sessionID, or
 		SessionID:  sessionID,
 		OrgID:      orgID,
 		TurnNumber: turnNumber,
-		Role:       string(models.MessageRoleAssistant),
+		Role:       models.MessageRoleAssistant,
 		Content:    result.Summary,
 	}
 	if result.TokenUsage.InputTokens > 0 || result.TokenUsage.OutputTokens > 0 {

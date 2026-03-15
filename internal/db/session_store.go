@@ -303,7 +303,7 @@ func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID 
 		UPDATE sessions
 		SET status = 'idle', current_turn = @current_turn, last_activity_at = now(),
 		    agent_session_id = @agent_session_id, snapshot_key = @snapshot_key,
-		    sandbox_state = 'snapshotted', completed_at = NULL,
+		    sandbox_state = 'snapshotted',
 		    confidence_score = @confidence_score, confidence_reasoning = @confidence_reasoning,
 		    risk_factors = @risk_factors, token_usage = @token_usage,
 		    result_summary = @result_summary, diff = @diff, error = @error

@@ -24,8 +24,7 @@ CREATE TABLE session_messages (
     created_at  timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_session_messages_session ON session_messages (session_id, turn_number);
-CREATE INDEX idx_session_messages_org ON session_messages (org_id);
+CREATE INDEX idx_session_messages_session ON session_messages (org_id, session_id, turn_number);
 
 -- Track which turn each log entry belongs to.
 ALTER TABLE session_logs ADD COLUMN turn_number int NOT NULL DEFAULT 0;

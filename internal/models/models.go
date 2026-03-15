@@ -205,7 +205,7 @@ type SessionMessage struct {
 	OrgID       uuid.UUID       `db:"org_id" json:"org_id"`
 	UserID      *uuid.UUID      `db:"user_id" json:"user_id,omitempty"`
 	TurnNumber  int             `db:"turn_number" json:"turn_number"`
-	Role        string          `db:"role" json:"role"`
+	Role        MessageRole     `db:"role" json:"role"`
 	Content     string          `db:"content" json:"content"`
 	Attachments []string        `db:"attachments" json:"attachments,omitempty"`
 	TokenUsage  json.RawMessage `db:"token_usage" json:"token_usage,omitempty"`

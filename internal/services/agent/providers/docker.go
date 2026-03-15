@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types"
@@ -380,20 +381,23 @@ func (d *DockerProvider) Restore(ctx context.Context, sb *agent.Sandbox, reader 
 
 	// Poll until the exec process finishes. ContainerExecInspect may return
 	// Running=true if called immediately after CloseWrite.
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
 	for {
-		inspectResp, err := d.client.ContainerExecInspect(ctx, execResp.ID)
-		if err != nil {
-			return fmt.Errorf("inspect restore exec: %w", err)
-		}
-		if !inspectResp.Running {
-			if inspectResp.ExitCode != 0 {
-				return fmt.Errorf("restore tar exited with code %d", inspectResp.ExitCode)
-			}
-			return nil
-		}
-		// Context cancellation will break the loop.
-		if ctx.Err() != nil {
+		select {
+		case <-ctx.Done():
 			return ctx.Err()
+		case <-ticker.C:
+			inspectResp, err := d.client.ContainerExecInspect(ctx, execResp.ID)
+			if err != nil {
+				return fmt.Errorf("inspect restore exec: %w", err)
+			}
+			if !inspectResp.Running {
+				if inspectResp.ExitCode != 0 {
+					return fmt.Errorf("restore tar exited with code %d", inspectResp.ExitCode)
+				}
+				return nil
+			}
 		}
 	}
 }

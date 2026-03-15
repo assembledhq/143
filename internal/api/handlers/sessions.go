@@ -509,7 +509,7 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		OrgID:      orgID,
 		UserID:     userID,
 		TurnNumber: session.CurrentTurn + 1,
-		Role:       string(models.MessageRoleUser),
+		Role:       models.MessageRoleUser,
 		Content:    body.Message,
 	}
 	if len(body.Images) > 0 {
@@ -517,7 +517,9 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.messageStore.Create(r.Context(), msg); err != nil {
-		_ = h.runStore.UpdateStatus(r.Context(), orgID, sessionID, string(models.SessionStatusIdle))
+		if revertErr := h.runStore.UpdateStatus(r.Context(), orgID, sessionID, string(models.SessionStatusIdle)); revertErr != nil {
+			zerolog.Ctx(r.Context()).Error().Err(revertErr).Str("session_id", sessionID.String()).Msg("failed to revert session to idle after message creation failure")
+		}
 		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message")
 		return
 	}
@@ -528,7 +530,9 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		"org_id":     orgID.String(),
 	}
 	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "continue_session", payload, 5, nil); err != nil {
-		_ = h.runStore.UpdateStatus(r.Context(), orgID, sessionID, string(models.SessionStatusIdle))
+		if revertErr := h.runStore.UpdateStatus(r.Context(), orgID, sessionID, string(models.SessionStatusIdle)); revertErr != nil {
+			zerolog.Ctx(r.Context()).Error().Err(revertErr).Str("session_id", sessionID.String()).Msg("failed to revert session to idle after enqueue failure")
+		}
 		writeError(w, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue continue_session job")
 		return
 	}

@@ -18,6 +18,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { LogViewer } from "@/components/log-viewer";
 import { DiffViewer } from "@/components/diff-viewer";
@@ -272,28 +273,28 @@ function ValidationTab({ sessionId }: { sessionId: string }) {
 
       <Card>
         <CardContent className="p-0">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border/50 bg-muted/20">
-                <th className="text-left px-4 py-2.5 text-[11px] font-semibold text-muted-foreground/70 uppercase tracking-widest">Check</th>
-                <th className="text-left px-4 py-2.5 text-[11px] font-semibold text-muted-foreground/70 uppercase tracking-widest">Result</th>
-                <th className="text-left px-4 py-2.5 text-[11px] font-semibold text-muted-foreground/70 uppercase tracking-widest">Details</th>
-              </tr>
-            </thead>
-            <tbody>
+          <Table>
+            <TableHeader>
+              <TableRow className="bg-muted/20">
+                <TableHead>Check</TableHead>
+                <TableHead>Result</TableHead>
+                <TableHead>Details</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {validationChecks.map(({ key, label }) => {
                 const result = validation[key as keyof Validation] as string | null;
                 const details = validation[`${key}_details` as keyof Validation] as string | null;
                 return (
-                  <tr key={key} className="border-b border-border/50 last:border-b-0 hover:bg-muted/30 transition-colors">
-                    <td className="px-4 py-2 font-medium">{label}</td>
-                    <td className="px-4 py-2">{checkResultBadge(result)}</td>
-                    <td className="px-4 py-2 text-muted-foreground">{details || "-"}</td>
-                  </tr>
+                  <TableRow key={key}>
+                    <TableCell className="font-medium">{label}</TableCell>
+                    <TableCell>{checkResultBadge(result)}</TableCell>
+                    <TableCell className="text-muted-foreground">{details || "-"}</TableCell>
+                  </TableRow>
                 );
               })}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         </CardContent>
       </Card>
     </div>
