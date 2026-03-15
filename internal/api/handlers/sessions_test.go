@@ -1456,7 +1456,7 @@ func TestSessionHandler_CreateManual_WithLLMTitle(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestSessionHandler_CreateManual_LLMError_Returns500(t *testing.T) {
+func TestSessionHandler_CreateManual_LLMError_StillReturns201(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -1519,8 +1519,8 @@ func TestSessionHandler_CreateManual_LLMError_Returns500(t *testing.T) {
 	// WaitGroup confirms the LLM was called synchronously.
 	llmClient.wg.Wait()
 
-	require.Equal(t, http.StatusInternalServerError, w.Code)
-	require.Contains(t, w.Body.String(), "TITLE_GENERATION_FAILED")
+	require.Equal(t, http.StatusCreated, w.Code)
+	require.Contains(t, w.Body.String(), "id")
 
 	require.NoError(t, mock.ExpectationsWereMet())
 }
