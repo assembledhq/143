@@ -22,13 +22,14 @@ Today, all sessions and projects live in a single flat list. As users connect mo
 
 ## User Personas to Consider
 
-| Persona | Repos | Session Volume | Primary Need |
-|---------|-------|---------------|--------------|
-| **Solo dev, single repo** | 1 | Low-medium | Simplicity. No overhead from repo organization. |
-| **Solo dev, multi-repo** | 3-8 | Medium | Quick switching between repos. Clear separation. |
-| **Small team, monorepo** | 1 | High | Status-based filtering is more important than repo filtering. |
-| **Small team, multi-repo** | 5-15 | High | Repo-scoped views. Possibly different team members own different repos. |
-| **Org/enterprise, many repos** | 15-50+ | Very high | Must have repo scoping or it's unusable. Search, favorites, recent repos. |
+> **Key insight (updated 2025-03-15):** Most users will realistically have **1-2 repos**. Power users may reach **3-5 repos**. Having 6+ repos is a rare outlier, not a design target. This dramatically changes which approaches make sense — we should optimize for what feels great at 1-2 repos and still works at 5, rather than designing for 50.
+
+| Persona | Repos | % of Users (est.) | Session Volume | Primary Need |
+|---------|-------|--------------------|---------------|--------------|
+| **Solo dev, single repo** | 1 | ~50% | Low-medium | Simplicity. Zero overhead from repo organization. |
+| **Solo dev or small team, 2 repos** | 2 | ~25% | Medium | Clear separation without ceremony. See both at a glance. |
+| **Multi-repo user** | 3-5 | ~20% | Medium-high | Quick switching, ambient awareness across repos. |
+| **Heavy multi-repo (outlier)** | 6+ | ~5% | High | Scalable navigation. But we should NOT over-index on this persona. |
 
 ---
 
@@ -71,7 +72,7 @@ Left Nav:
 - Collapse repos by default, expand on click
 - Truncate long repo names with tooltip on hover
 
-**Verdict:** Strong for 2-8 repo users. Needs escape hatches for 1-repo and 15+ repo users.
+**Verdict:** **Strong — now the top recommendation.** With a realistic max of ~5 repos, the scaling concern (the main knock against this approach) evaporates. Five repos with nested Sessions/Projects fits comfortably in a sidebar. For 1-repo users, simply don't show the repo section — their experience is unchanged. This is the sweet spot for the actual user base.
 
 ---
 
@@ -112,7 +113,7 @@ Sessions Page:
 - Add a "sticky" repo filter that persists across Sessions ↔ Projects navigation
 - Show repo counts in the dropdown so users can spot active repos quickly
 
-**Verdict:** Safe, scalable, low-risk. But less powerful for users who live in multi-repo workflows.
+**Verdict:** **Weakened by the repo count reality.** A dropdown filter is overkill for 2-3 repos — it's an extra click to open a menu that shows two items. It hides repos behind an interaction when you could just show them all in the nav. This approach screams "enterprise software" when the reality is much simpler. Still viable as a secondary mechanism on list pages, but not recommended as the primary approach.
 
 ---
 
@@ -153,7 +154,7 @@ Left Nav:
 - Show a subtle "viewing 3 of 12 sessions (filtered to repo-a)" message
 - Keyboard shortcut to toggle scope (Cmd+K style repo switcher)
 
-**Verdict:** Best for power users and teams. Clean UX. But risks "where did my stuff go?" confusion if not carefully communicated.
+**Verdict:** **Over-abstracted for the typical user.** A dropdown that toggles between "repo-a" and "repo-b" works but feels like ceremony — you can see both repos at once in the nav, so why hide one behind a selector? The "where did my stuff go?" risk is real and the payoff (hiding 1-4 other repos) isn't worth the UX cost. Not recommended as primary approach.
 
 ---
 
@@ -198,7 +199,7 @@ Repo-A Dashboard:
 - Auto-redirect single-repo users directly to their repo dashboard
 - Add quick-action buttons on cards (e.g., "View active sessions" badge is clickable)
 
-**Verdict:** Excellent for situational awareness. Works best as a complement to another approach, not standalone.
+**Verdict:** **Not recommended.** With only 1-2 repos, a dashboard of repo cards is a useless landing page showing one or two cards. The drill-down adds navigation depth (3 clicks to a session) for no real benefit. Even at 5 repos, the Overview page can surface this information more efficiently inline rather than as a dedicated card grid.
 
 ---
 
@@ -235,7 +236,7 @@ Repo-A Dashboard:
 - Overflow menu for additional repos
 - Tab order reflects recency or activity
 
-**Verdict:** Fast and familiar, but adds UI complexity. Better suited as a feature within Sessions/Projects pages rather than a global concept.
+**Verdict:** **Not recommended.** At 2-5 repos the tabs work visually, but they create two competing navigation axes (tabs for repos + sidebar for sections) that are confusing. The sidebar ribbons (Idea 1) give the same one-click switching without the cognitive overhead of a second nav layer.
 
 ---
 
@@ -267,7 +268,7 @@ Repo-A Dashboard:
 - Smooth transitions between tiers (e.g., animate in the repo filter)
 - Feature flags for early adopters
 
-**Verdict:** Best long-term UX philosophy, but higher engineering cost and test surface.
+**Verdict:** **Interesting but unnecessary.** The progressive tiers (1 repo, 2-5, 6+, 15+) are elegant in theory, but if 95% of users land in the 1-5 range, you're building and maintaining 4 UI modes for a distribution that barely spans two of them. The simpler approach: build one UI that works for 1-5 (Idea 1 with auto-hide for single repo) and don't worry about the other tiers until real usage demands it.
 
 ---
 
@@ -310,39 +311,81 @@ Sessions Page (repo-a selected):
 - Two mental models to learn (global scope vs. inline groups)
 - URL/state management is more involved
 
-**Verdict:** Highest ceiling. This is the "Linear/Notion" approach — powerful but polished.
+**Verdict:** **Over-engineered for the actual user base.** This is the "Linear/Notion" approach and it's powerful, but it's solving for a scale that doesn't exist. Two mental models (global scope vs. inline groups), complex state management, and a repo switcher dropdown — all to manage 2-3 repos. The nav ribbons (Idea 1) give you the same scoping with far less machinery.
 
 ---
 
 ## Recommendation
 
-### For MVP (ship fast, learn):
+> **Updated 2025-03-15** — Revised based on the insight that most users have 1-2 repos, with a realistic ceiling of ~5. The original recommendation (filter dropdown + repo switcher) was over-built for this reality.
 
-**Go with Idea 2 (Filter/Group-By) + lightweight elements of Idea 3 (Repo Switcher).**
+### Primary Recommendation: Idea 1 (Repo Ribbons in Left Nav)
 
-Specifically:
-1. Add a **repo filter dropdown** to both Sessions and Projects pages, next to existing status filters
-2. When a repo is selected, **persist it in URL params** (`?repo=repo-id`) using the existing `nuqs` setup
-3. In "All repos" mode, add **repo badges** on each session/project row (the `full_name` from the repository)
-4. Optionally add a **"Group by repo"** toggle that sections the list by repo with collapsible headers
-5. On the **Overview page**, add per-repo summary cards showing active session count, project count, and health status
+**Go with Idea 1 (Repo Ribbons)** as the primary and likely only approach needed.
 
-This gives you:
-- **Zero overhead** for single-repo users (dropdown shows one option, badges are redundant, so hide both)
-- **Useful filtering** for multi-repo users
-- **Low implementation cost** (you already have repo data on projects via `repository_id`, and sessions via their linked issues)
-- **Data to inform the next step** (track which repos people filter to most, whether they use group-by, etc.)
+The main concern with nav ribbons was always scaling — but that concern evaporates when the realistic max is 5 repos. Five repos with nested Sessions/Projects is ~15 lines of sidebar nav, which is completely comfortable.
 
-### For V2 (after learning from MVP):
+#### How it works by repo count:
 
-If usage data shows that users frequently filter to one repo and stay there, upgrade to **Idea 7 (Hybrid)** with a proper global repo switcher in the sidebar. This is a natural evolution: the filter dropdown graduates to a first-class navigation element.
+**For 1 repo (majority of users):**
+- No change to current UI whatsoever
+- No repo section in the nav
+- Sessions and Projects show everything (already scoped to one repo implicitly)
+- These users never even know repo organization exists
 
-If usage data shows users prefer the birds-eye view, lean into **Idea 4 (Repo Cards)** on the Overview page and keep the flat lists with filters on Sessions/Projects.
+**For 2-5 repos:**
+- Repos appear in the sidebar below the main nav items
+- Each repo expands/collapses to show Sessions and Projects counts
+- Clicking a repo's Sessions shows a scoped list
+- Top-level "Sessions" and "Projects" nav items remain as the "all repos" view
+- Status dots/counts on each repo give ambient awareness without clicking
 
-### What I'd avoid:
+```
+├── Overview
+├── Sessions (7)         ← all repos
+├── Projects (4)         ← all repos
+├── ─────────────
+├── owner/repo-a    ● 3
+│   ├── Sessions
+│   └── Projects
+├── owner/repo-b      1
+│   ├── Sessions
+│   └── Projects
+```
 
-- **Idea 1 (Nav Ribbons)** as the primary approach — it front-loads complexity and doesn't scale. Fine as a complement for pinned/favorite repos later.
-- **Idea 5 (Tabs)** — creates two competing navigation axes and is hard to evolve.
+The status dots and counts give ambient awareness ("repo-a has 3 active sessions, one needs attention") without clicking into anything.
+
+**On the list pages themselves:** Add a subtle repo badge on each session/project row so users in the "all repos" view can tell which repo an item belongs to. No dropdown filter needed — the nav handles scoping.
+
+#### Why this wins now:
+
+- **Simplest possible change** for the actual user base
+- **Zero overhead** for single-repo users (auto-hidden)
+- **One-click scoping** for multi-repo users (no dropdown ceremony)
+- **Ambient awareness** across repos without navigating anywhere
+- **Familiar pattern** (GitHub sidebar, Slack channels, VS Code explorer)
+- **Low implementation cost** — just nav items with filtered list views
+- **No complex state management** — scoping is just a route/URL, not global state
+
+### What I would NOT recommend (given ~1-5 repos reality):
+
+| Idea | Why it's now a poor fit |
+|------|------------------------|
+| **Idea 2: Filter Dropdown** | Overkill. A dropdown that shows 2 items feels like enterprise software. Hides repos behind an interaction when you could just show them all. |
+| **Idea 3: Global Repo Switcher** | Over-abstracted. A selector toggling between 2 repos is ceremony, not efficiency. You can see both repos in the nav — why hide one? Also risks "where did my stuff go?" confusion. |
+| **Idea 4: Repo Cards Dashboard** | A dashboard showing 1-2 cards is a useless landing page. Adds navigation depth for no benefit. |
+| **Idea 5: Tabs/Workspaces** | Creates two competing navigation axes. The sidebar ribbons give the same one-click switching without the cognitive overhead. |
+| **Idea 6: Progressive Disclosure** | Building 4 UI modes for a distribution that barely spans 2 of them. Just build one UI that works for 1-5. |
+| **Idea 7: Hybrid Switcher + Grouping** | Two mental models, complex state management, and a repo switcher dropdown — all to manage 2-3 repos. The nav ribbons give the same scoping with far less machinery. |
+
+### If we're wrong about repo counts:
+
+If usage data eventually shows a meaningful segment of users with 6+ repos, the nav ribbons degrade gracefully:
+- Add a **"pinned repos"** concept so users curate which repos appear expanded
+- Collapse non-pinned repos into a compact list
+- Add a small search/filter within the repo section
+
+This is a natural evolution of Idea 1, not a rewrite. But don't build it until the data says you need it.
 
 ---
 
