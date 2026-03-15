@@ -1,6 +1,6 @@
-# 34 - Repo Ribbons: Repository-Scoped Navigation
+# 34 - Repo Context Switcher: Repository-Scoped Navigation
 
-> Give multi-repo users one-click access to repo-scoped Sessions and Projects in the sidebar, while keeping single-repo users' experience unchanged.
+> Give multi-repo users a global repo context selector that scopes all navigation, while keeping single-repo users' experience unchanged.
 
 **Status:** Proposal
 **Depends on:** [03-frontend.md](03-frontend.md), [29-projects.md](29-projects.md), [30-pm-agent-ux-elevation.md](30-pm-agent-ux-elevation.md)
@@ -20,31 +20,99 @@ This matters now because the product is growing beyond single-repo usage — but
 | Multi-repo | 3-5 | ~20% |
 | Heavy multi-repo | 6+ | ~5% |
 
-**The key constraint:** most users have 1-2 repos. We need a design that adds zero overhead for single-repo users, feels great at 2-3 repos, and still works at 5. We are explicitly NOT designing for 50-repo enterprise scale — if that becomes real, we'll evolve from this foundation.
+**The key constraint:** most users have 1-2 repos. We need a design that adds zero overhead for single-repo users, feels great at 2-3 repos, and still works at 10+. We are explicitly NOT designing for 50-repo enterprise scale — if that becomes real, we'll evolve from this foundation.
 
 ---
 
 ## 2. Design Principles
 
-1. **Invisible for one** — Single-repo users should see zero change. No repo section, no badges, no new concepts.
-2. **Visible for two+** — The moment a second repo is connected, repo-scoped navigation appears automatically.
-3. **One click, not two** — Scoping to a repo should be a single nav click, not "open dropdown → select repo."
-4. **Ambient awareness** — Users should see which repos have active work without clicking into anything.
-5. **Additive, not restructuring** — The top-level Sessions and Projects nav items stay as "all repos" views. Repo ribbons add scoped shortcuts below them.
+1. **Invisible for one** — Single-repo users should see zero change. No repo selector, no badges, no new concepts.
+2. **Visible for two+** — The moment a second repo is connected, the repo context selector appears automatically.
+3. **Set once, navigate freely** — Selecting a repo scopes all pages. Users don't re-select per page.
+4. **Ambient awareness** — The context selector shows which repos have active work via status indicators.
+5. **Additive, not restructuring** — The sidebar nav items (Overview, Sessions, Projects) are unchanged. The context selector is a new, orthogonal control. "All repositories" is the default context and always available.
 
 ---
 
 ## 3. What Changes
 
-### 3.1 Sidebar Navigation
+### 3.1 Repo Context Selector in the Header
 
-When the org has **2+ connected repositories**, a repo section appears in the sidebar below the main nav items, separated by a divider.
+When the org has **2+ connected repositories**, a repo context selector appears in the header bar, next to the org name. This is a global control — selecting a repo scopes Sessions, Projects, and Overview to that repository.
 
-**Current sidebar (unchanged for 1 repo):**
+**Current header (unchanged for 1 repo):**
+```
+┌──────────────────────────────────────────────────────┐
+│  143.dev                                              │
+├──────────────────────────────────────────────────────┤
+```
+
+**New header (2+ repos):**
+```
+┌──────────────────────────────────────────────────────┐
+│  143.dev  ·  All repositories ▾                       │
+├──────────────────────────────────────────────────────┤
+```
+
+Clicking "All repositories ▾" opens a dropdown:
+
+```
+┌──────────────────────────────┐
+│  🔍 Search repos...          │
+├──────────────────────────────┤
+│  ✓ All repositories          │
+│  ─────────────────────────── │
+│  acme/api-server      ● 3   │
+│  acme/web-app          1    │
+│  acme/mobile-app             │
+│  acme/infra-tools            │
+└──────────────────────────────┘
+```
+
+When a repo is selected, the header updates to reflect the active context:
+
+```
+┌──────────────────────────────────────────────────────┐
+│  143.dev  ·  api-server ▾  ●                          │
+├──────────────────────────────────────────────────────┤
+```
+
+#### Dropdown anatomy
+
+Each row in the dropdown contains:
+
+```
+[icon] owner/repo-name    [status-indicator] [active-count]
+```
+
+- **Icon:** `GitBranch` from lucide-react (14px, muted)
+- **Repo name:** `full_name` from the Repository model, displayed as `owner/repo`.
+- **Status indicator:** A colored dot conveying the most urgent state for this repo:
+  - Pulsing blue: a session for this repo is currently `running`
+  - Solid amber: a session is in `needs_human_guidance` or `awaiting_input`
+  - Solid red: most recent session `failed` or `cancelled`
+  - No dot: idle (no active or recently-failed sessions)
+- **Active count:** Number of sessions in `running`, `pending`, `needs_human_guidance`, or `awaiting_input` status. Hidden when 0.
+- **Search input:** Visible at the top of the dropdown when the org has 4+ repos. For 2-3 repos, the list is short enough that search adds clutter. The search filters by repo name as the user types.
+
+> **Status dot simplification:** Unlike a 4-state system (blue/green/amber/red), we drop the "green = most recent completed" state. "Nothing is wrong" is the default — it doesn't need a dot. The active count already conveys "work is happening." This reduces visual noise and avoids ambiguity when a repo has both completed and running sessions simultaneously.
+
+#### Keyboard shortcut
+
+`Cmd+K` (or a dedicated shortcut like `Cmd+R`) opens the dropdown with the search input focused, allowing power users to switch repos without touching the mouse: `Cmd+R → type "api" → Enter`.
+
+#### Selected state persistence
+
+The selected repo context is stored in `localStorage` (key: `selected-repo-context`) and persists across page loads and browser sessions. It is also reflected in the URL via a `repo` query parameter so that links are shareable and bookmarkable.
+
+When a user navigates to a URL with a `?repo=` param, the context selector updates to match. When they navigate to a URL without it, the selector resets to "All repositories."
+
+### 3.2 Sidebar Navigation
+
+The sidebar is **unchanged**. No repo rows, no sub-nav items, no expand/collapse. The existing nav items work exactly as before:
+
 ```
 ┌──────────────────────────┐
-│  143.dev                 │
-├──────────────────────────┤
 │  Overview                │
 │  Sessions  ●             │
 │  Projects                │
@@ -55,112 +123,61 @@ When the org has **2+ connected repositories**, a repo section appears in the si
 └──────────────────────────┘
 ```
 
-**New sidebar (2+ repos):**
-```
-┌──────────────────────────┐
-│  143.dev                 │
-├──────────────────────────┤
-│  Overview                │
-│  Sessions (7) ●          │  ← all repos, unchanged
-│  Projects (4)            │  ← all repos, unchanged
-│  ────────────────────    │  ← divider (new)
-│  acme/api-server    ● 3  │  ← repo row: name, dot, active count
-│    Sessions              │    ← scoped sub-nav (collapsed by default)
-│    Projects              │
-│  acme/web-app        1   │
-│    Sessions              │
-│    Projects              │
-│                          │
-│  ┌──────────────────┐    │
-│  │ 👤 User ▾        │    │
-│  └──────────────────┘    │
-└──────────────────────────┘
-```
+The counts on Sessions (e.g., `Sessions (3) ●`) reflect the currently selected repo context. When "All repositories" is selected, counts are org-wide. When a specific repo is selected, counts are scoped to that repo.
 
-#### Repo row anatomy
+### 3.3 Scoped Page Behavior
 
-Each repo row in the sidebar contains:
+When a repo is selected in the context switcher, **all list pages automatically filter** to that repository. The behavior per page:
 
-```
-[icon] owner/repo-name    [status-dot] [active-count]
-```
+#### Sessions page (`/sessions?repo={repository_id}`)
 
-- **Icon:** `GitBranch` from lucide-react (14px, muted)
-- **Repo name:** `full_name` from the Repository model, displayed as `owner/repo`. Truncated with `text-ellipsis` if longer than available width; full name shown on hover via `title` attribute.
-- **Status dot:** Same dot system as the Sessions nav item:
-  - Pulsing blue: a session for this repo is currently `running`
-  - Solid green: most recent session `completed` successfully
-  - Solid amber: a session is in `needs_human_guidance` or `awaiting_input`
-  - Solid red: most recent session `failed` or `cancelled`
-  - No dot: idle (no recent activity)
-- **Active count:** Number of sessions in `running`, `pending`, `needs_human_guidance`, or `awaiting_input` status. Hidden when 0.
+- **URL param:** `repo` query parameter, managed with `nuqs` (already used for `status` filtering).
+- **Page title:** Shows `Sessions — {repo short name}` instead of just `Sessions`.
+- **Filter tabs:** All existing status filter tabs (All, Active, Needs Guidance, Failed, Done, Decisions) still work — they compose with the repo filter.
+- **Filter banner:** A visible banner at the top of the list makes the scoped state unambiguous:
+  ```
+  ┌─────────────────────────────────────────────┐
+  │ Filtered to: acme/api-server    [Show all ×]│
+  └─────────────────────────────────────────────┘
+  ```
+  Clicking "Show all" clears the repo context (both the URL param and the header selector).
 
-#### Expand/collapse behavior
+#### Projects page (`/projects?repo={repository_id}`)
 
-- Repos are **collapsed by default** — only the repo row is visible, not the sub-nav items.
-- Clicking the repo row **toggles expand/collapse**, revealing Sessions and Projects sub-links.
-- Clicking a sub-link (Sessions or Projects) navigates to the repo-scoped list.
-- Expand/collapse state is stored in `localStorage` so it persists across page loads (key: `sidebar-repo-expanded-{repoId}`).
-- If a user is currently on a repo-scoped page (e.g., `/sessions?repo=abc`), that repo auto-expands in the sidebar.
+Same pattern as Sessions.
 
-#### Ordering
+#### Overview page
 
-Repos are sorted by:
-1. Active session count (descending) — repos with active work surface first
-2. Alphabetical by `full_name` (ascending) — stable fallback
+When a repo is selected, the Overview page shows stats scoped to that repo. When "All repositories" is selected, Overview shows org-wide stats (current behavior). This is a natural benefit of the context-based approach — scoping is automatic across all pages.
 
-This means the "hottest" repo is always at the top of the repo section.
+> **Naming note:** The user-facing URL param is `repo` (short, readable). The backend API query param is `repository_id` (matches the DB column). The frontend translates between them: `useQueryState('repo')` provides the value, which is passed as `repository_id` to the API client.
 
-### 3.2 List Pages: Repo Badge on Rows
+### 3.4 List Pages: Repo Badge on Rows
 
-When the org has 2+ repos, add a subtle repo badge to each row on the Sessions and Projects list pages. This helps users scanning the "all repos" view understand which repo an item belongs to.
+When the org has 2+ repos **and** the user is viewing "All repositories" context, add a subtle repo badge to each row on the Sessions and Projects list pages. This helps users scanning the unfiltered view understand which repo an item belongs to.
 
 **Sessions list row (current):**
 ```
 ● Active  PM Analysis · 3 tasks · 1 running                    2h ago
 ```
 
-**Sessions list row (new, 2+ repos):**
+**Sessions list row (new, 2+ repos, "All repositories" context):**
 ```
 ● Active  PM Analysis · 3 tasks · 1 running       api-server   2h ago
 ```
 
 - Badge shows the **repo short name** (just the repo portion of `owner/repo`, e.g., `api-server` not `acme/api-server`). Full name on hover.
 - Styled as muted text, `text-xs`, positioned to the left of the timestamp.
-- Hidden when org has only 1 repo.
+- Hidden when: org has only 1 repo, OR user has a specific repo selected (redundant since all rows are the same repo).
 
 **Projects list row** follows the same pattern. The project already has a `repository_id` so the data is trivially available.
-
-### 3.3 Repo-Scoped List Views
-
-When a user clicks "Sessions" under a specific repo in the sidebar, they navigate to:
-
-```
-/sessions?repo={repository_id}
-```
-
-This is the same Sessions page, but filtered to only show sessions linked to that repository. The page behavior:
-
-- **URL param:** `repo` query parameter, managed with `nuqs` (already used for `status` filtering).
-- **Page title:** Shows `Sessions — {repo short name}` instead of just `Sessions`.
-- **Filter tabs:** All existing status filter tabs (All, Active, Needs Guidance, Failed, Done, Decisions) still work — they compose with the repo filter.
-- **Breadcrumb/context:** No breadcrumb needed. The sidebar's expanded repo and highlighted sub-link make the context clear.
-- **"Clear filter" affordance:** A small `×` button or "Viewing repo-name — show all" link at the top of the list, so users can easily return to the unfiltered view.
-
-Same pattern for Projects: `/projects?repo={repository_id}`.
-
-> **Naming note:** The user-facing URL param is `repo` (short, readable). The backend API query param is `repository_id` (matches the DB column). The frontend translates between them: `useQueryState('repo')` provides the value, which is passed as `repository_id` to the API client.
-
-### 3.4 Overview Page
-
-No changes to the Overview page in this iteration. The sidebar repo ribbons already provide ambient awareness (active counts, status dots). A per-repo overview dashboard can be explored later if usage data supports it.
 
 ---
 
 ## 4. What Does NOT Change
 
-- **Single-repo users** see zero UI changes. The repo section, badges, and scoped views all require 2+ repos to appear.
-- **Top-level Sessions and Projects nav items** remain as the "all repos" entry point. They are not removed or demoted.
+- **Single-repo users** see zero UI changes. The context selector, badges, and scoped views all require 2+ repos to appear.
+- **Sidebar structure** is completely unchanged. No new nav items, no repo rows, no expand/collapse.
 - **Session detail pages** are unchanged. The `/sessions/{id}` page shows the same content regardless of how you got there.
 - **Repo settings pages** (`/repositories/[id]`) remain in their current location, accessed through the settings flow.
 - **PM agent behavior** is unaffected. The PM still analyzes across all repos.
@@ -180,7 +197,7 @@ sessions.issue_id → issues.repository_id → repositories.id
 
 **Decision: Join through issues, don't denormalize (yet).**
 
-For the sidebar counts and list filtering, we need to resolve session → repo. Two options:
+For the context switcher counts and list filtering, we need to resolve session → repo. Two options:
 
 | Approach | Pros | Cons |
 |----------|------|------|
@@ -232,7 +249,7 @@ ORDER BY priority ASC, created_at DESC, id DESC
 
 #### `GET /api/v1/repositories/summary` — New endpoint
 
-Returns per-repo session counts for the sidebar. This powers the active count badges and status dots without the frontend needing to fetch all sessions.
+Returns per-repo session counts for the context switcher dropdown. This powers the active count badges and status indicators without the frontend needing to fetch all sessions.
 
 **Request:** `GET /api/v1/repositories/summary`
 
@@ -286,7 +303,7 @@ ORDER BY active_session_count DESC, r.full_name ASC;
 
 > **Scaling note:** The `latest_session_status` correlated subquery runs once per repository row. At 5 repos this is negligible, but if repo count grows significantly, rewrite as a window function or `LATERAL JOIN` to avoid per-row scans.
 
-**Caching:** This endpoint is polled alongside PM status (every 30s). At our scale the query is fast, but if needed, results can be cached server-side with a 30s TTL.
+**Caching:** This endpoint is polled every 10s (lightweight aggregation query). At our scale the query is fast, but if needed, results can be cached server-side with a 10s TTL.
 
 ### 5.3 Frontend API Client Changes
 
@@ -328,44 +345,78 @@ export interface RepoSummary {
 
 ## 6. Frontend Implementation
 
-### 6.1 Sidebar Component Changes
+### 6.1 Repo Context Switcher Component
+
+**New file:** `frontend/src/components/repo-context-switcher.tsx`
+
+A self-contained component rendered in the header area of `AuthenticatedLayout`. Responsibilities:
+
+1. **Fetch repo summary data** — `useQuery` for `api.repositories.summary()`, polled every 10s.
+2. **Conditionally render** — only when `repoSummaries.length >= 2`. Returns `null` for single-repo orgs.
+3. **Manage selected state** — syncs between URL `repo` query param and `localStorage`.
+4. **Render dropdown** — with search (4+ repos), status dots, and active counts.
+
+```typescript
+// In repo-context-switcher.tsx
+export function RepoContextSwitcher() {
+  const { data: summaries } = useQuery({
+    queryKey: ['repositories', 'summary'],
+    queryFn: () => api.repositories.summary(),
+    refetchInterval: 10_000,
+  });
+
+  const [repo, setRepo] = useQueryState('repo');
+
+  // Don't render for single-repo orgs
+  if (!summaries?.data || summaries.data.length < 2) return null;
+
+  const selectedRepo = summaries.data.find(r => r.repository_id === repo);
+  const label = selectedRepo
+    ? selectedRepo.full_name.split('/')[1]
+    : 'All repositories';
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger>
+        <span>{label}</span>
+        <ChevronDown />
+        {selectedRepo && /* status dot */}
+      </DropdownMenuTrigger>
+      <DropdownMenuContent>
+        {summaries.data.length >= 4 && <SearchInput />}
+        <DropdownMenuItem onClick={() => setRepo(null)}>
+          All repositories
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        {summaries.data.map(repo => (
+          <DropdownMenuItem
+            key={repo.repository_id}
+            onClick={() => setRepo(repo.repository_id)}
+          >
+            <GitBranch size={14} />
+            <span>{repo.full_name}</span>
+            {repo.active_session_count > 0 && <Badge>{repo.active_session_count}</Badge>}
+            <StatusDot status={repo.latest_session_status} />
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+```
+
+### 6.2 Integrating with AuthenticatedLayout
 
 **File:** `frontend/src/components/authenticated-layout.tsx`
 
-This is the main change. The `AuthenticatedLayout` component needs to:
+Minimal changes:
 
-1. **Fetch repo summary data** — new `useQuery` for `api.repositories.summary()`, polled every 30s (same interval as PM status).
-2. **Conditionally render repo section** — only when `repoSummaries.length >= 2`.
-3. **Render repo rows** — with expand/collapse, status dots, and active counts.
-4. **Render sub-nav items** — Sessions and Projects links scoped to each repo.
+1. **Render `<RepoContextSwitcher />`** in the header, after the org name.
+2. **Pass `repo` to sidebar counts** — the Sessions nav item count should reflect the selected repo context. Read the `repo` query param and pass it to the sessions count query.
 
-**Expand/collapse state:**
+No structural changes to the sidebar. No new nav items.
 
-```typescript
-// In AuthenticatedLayout
-const [expandedRepos, setExpandedRepos] = useState<Set<string>>(() => {
-  // Initialize from localStorage
-  const stored = localStorage.getItem('sidebar-expanded-repos');
-  return stored ? new Set(JSON.parse(stored)) : new Set();
-});
-
-// Auto-expand repo when on a repo-scoped page
-const currentRepoId = searchParams.get('repo');
-useEffect(() => {
-  if (currentRepoId && !expandedRepos.has(currentRepoId)) {
-    setExpandedRepos(prev => new Set(prev).add(currentRepoId));
-  }
-}, [currentRepoId]);
-```
-
-**Active state highlighting:**
-
-A repo's sub-nav "Sessions" link is highlighted when:
-- `pathname === '/sessions'` AND `searchParams.get('repo') === repoId`
-
-Same logic for Projects.
-
-### 6.2 Sessions & Projects List Pages
+### 6.3 Sessions & Projects List Pages
 
 **Repo filter via URL param:**
 
@@ -384,18 +435,28 @@ const { data } = useQuery({
 **Page title:**
 
 ```typescript
-// Fetch repo name for title
 const repoName = repoSummaries?.find(r => r.repository_id === repo)?.full_name;
 const pageTitle = repo && repoName
   ? `Sessions — ${repoName.split('/')[1]}`
   : 'Sessions';
 ```
 
-**Repo badge on rows:**
+**Filter banner:**
 
-Add a `<span>` to each session/project row showing the repo short name. The session row component needs the repo name, which can be resolved client-side by joining `session.issue_id` → issues data, or more practically by including `repository_full_name` in the session list API response (see section 6.3).
+When `repo` is set, render a prominent banner above the list:
 
-### 6.3 Enriching Session List Response
+```typescript
+{repo && repoName && (
+  <div className="flex items-center gap-2 rounded-md bg-muted px-3 py-2 text-sm">
+    <span>Filtered to: <strong>{repoName}</strong></span>
+    <button onClick={() => setRepo(null)} className="ml-auto text-muted-foreground hover:text-foreground">
+      Show all ×
+    </button>
+  </div>
+)}
+```
+
+### 6.4 Enriching Session List Response
 
 To show repo badges on session rows without N+1 lookups, the `GET /api/v1/sessions` response should include the repository name.
 
@@ -425,24 +486,33 @@ This is preferable to a separate lookup because:
 ### Manual sessions without issues
 
 Some sessions (manual "Fix This" sessions) may be created without a pre-existing issue, or the issue might not have a `repository_id`. These sessions:
-- Won't appear under any repo ribbon (they have no repo association)
-- Will still appear in the top-level "Sessions" view (all repos)
+- Won't appear when a specific repo is selected in the context switcher
+- Will still appear when "All repositories" is selected
 - The repo badge on the row will be absent — that's fine, it degrades gracefully
 
 ### Repo gets disconnected
 
 If a user disconnects a repository:
-- Its ribbon disappears from the sidebar
-- Sessions and Projects linked to it still appear in the "all repos" views
-- The `?repo=` filter for that repo returns an empty list (no special handling needed)
+- It disappears from the context switcher dropdown
+- If it was the currently selected context, the selector resets to "All repositories"
+- Sessions and Projects linked to it still appear in the "All repositories" view
+- Direct URL access via `?repo=` for that repo returns an empty list (no special handling needed)
 
 ### User has exactly 1 repo
 
-The entire feature is invisible. No repo section, no badges, no scoped views. The existing UI is 100% unchanged. The `repositories/summary` endpoint still returns data (1 item), but the sidebar component simply doesn't render the repo section when `repoSummaries.length < 2`.
+The entire feature is invisible. No context selector, no badges, no scoped views. The existing UI is 100% unchanged. The `repositories/summary` endpoint still returns data (1 item), but the `RepoContextSwitcher` component returns `null` when `summaries.length < 2`.
 
 ### Long repo names
 
-The sidebar is `w-64` (256px). Repo names like `my-organization/my-very-long-repository-name` will be truncated with `truncate` (text-overflow: ellipsis). The full name is available on hover via the `title` attribute. The active count and status dot are always visible (they're positioned with `ml-auto` and don't get truncated).
+The context selector in the header shows the **short name** (repo portion only, e.g., `api-server`). The dropdown shows the full `owner/repo` name. Long names in the dropdown are truncated with `text-ellipsis`; full name is available on hover via `title` attribute. The header short name keeps the top bar compact.
+
+### Stale context after repo deletion
+
+If a user's `localStorage` has a `selected-repo-context` value for a repo that no longer exists (deleted or disconnected), the component detects this when the summary data loads (selected ID not in the list) and resets to "All repositories."
+
+### Shared URLs
+
+A URL like `/sessions?repo=abc` works regardless of the recipient's `localStorage` state. The context switcher reads the URL param and updates accordingly. This means shared links always show the intended repo context.
 
 ---
 
@@ -456,13 +526,14 @@ The sidebar is `w-64` (256px). Repo names like `my-organization/my-very-long-rep
 | 4 | Create `/api/v1/repositories/summary` endpoint | `internal/api/handlers/repositories.go`, `internal/db/repository_store.go` | — |
 | 5 | Enrich session list response with `repository_full_name` | `internal/db/session_store.go`, `internal/api/handlers/sessions.go` | Step 1 |
 | 6 | Add `RepoSummary` type and API methods to frontend | `frontend/src/lib/types.ts`, `frontend/src/lib/api.ts` | Steps 3-5 |
-| 7 | Add repo ribbon section to sidebar | `frontend/src/components/authenticated-layout.tsx` | Step 6 |
-| 8 | Add `repo` query param support to Sessions page | `frontend/src/app/(dashboard)/sessions/page.tsx` | Step 6 |
-| 9 | Add `repo` query param support to Projects page | `frontend/src/app/(dashboard)/projects/page.tsx` | Step 6 |
-| 10 | Add repo badge to session and project list rows | Session/project row components | Steps 5, 8-9 |
+| 7 | Build `RepoContextSwitcher` component | `frontend/src/components/repo-context-switcher.tsx` | Step 6 |
+| 8 | Integrate context switcher into `AuthenticatedLayout` header | `frontend/src/components/authenticated-layout.tsx` | Step 7 |
+| 9 | Add `repo` query param support + filter banner to Sessions page | `frontend/src/app/(dashboard)/sessions/page.tsx` | Step 6 |
+| 10 | Add `repo` query param support + filter banner to Projects page | `frontend/src/app/(dashboard)/projects/page.tsx` | Step 6 |
+| 11 | Add repo badge to session and project list rows | Session/project row components | Steps 5, 9-10 |
 
 **Steps 1, 2, and 4 can be done in parallel** (independent backend work).
-**Steps 8 and 9 can be done in parallel** (independent page work).
+**Steps 9 and 10 can be done in parallel** (independent page work).
 
 Estimated scope: ~2-3 days of focused work for one full-stack engineer.
 
@@ -472,35 +543,52 @@ Estimated scope: ~2-3 days of focused work for one full-stack engineer.
 
 These are explicitly out of scope but worth noting as natural evolutions:
 
-- **Per-repo Overview dashboard** — if users frequently scope to one repo and stay, the Overview page could become repo-aware.
-- **Pinned/starred repos** — if a user reaches 6+ repos, let them pin favorites to the top of the repo section. The ribbon UI supports this naturally.
-- **Repo-scoped notifications** — "repo-a has a failing session" instead of generic "a session failed."
-- **Repo search in sidebar** — for the rare 10+ repo user, add a small search input above the repo list.
+- **Keyboard shortcut for repo switching** — `Cmd+R` to open the context switcher with search focused. Natural extension once the component exists.
+- **Per-repo Overview dashboard** — with the context switcher in place, the Overview page can trivially become repo-aware by reading the `repo` query param.
+- **Repo-scoped notifications** — "api-server has a failing session" instead of generic "a session failed."
+- **Repo grouping/favorites** — if a user reaches 10+ repos, let them star favorites to pin them at the top of the dropdown.
 - **Denormalizing `repository_id` onto sessions** — if the JOIN through issues becomes a performance issue, add the column with a migration + backfill.
+- **Multi-repo selection** — the dropdown could support selecting multiple repos (shift-click) to view a subset. The URL would become `?repo=abc,def`.
 
 ---
 
 ## 10. Non-Goals
 
-- **Repo tabs or horizontal nav** — creates two competing navigation axes. The sidebar handles scoping.
-- **Global repo context switcher** — over-abstracted for 2-5 repos. You can see all repos in the nav; no need to hide them behind a dropdown.
-- **Filter dropdown on list pages** — overkill at this scale. An extra click to open a menu showing 2 items isn't good UX.
-- **Progressive disclosure / adaptive UI** — building 4 UI modes for a user distribution that spans 2 of them. One UI that works for 1-5 is simpler.
+- **Sidebar repo rows or ribbons** — duplicates "Sessions" and "Projects" labels N times, clutters the sidebar at 3+ repos. The context switcher avoids this entirely.
+- **Horizontal repo tabs** — creates two competing navigation axes and doesn't scale past 5 repos.
+- **Filter dropdown on list pages** — per-page filtering means re-selecting on every page navigation. A global context is fewer total clicks.
+- **Progressive disclosure / adaptive UI** — building 4 UI modes for a user distribution that spans 2 of them. One UI that works for 1-10 is simpler.
 - **Changes to the PM agent** — this is purely a navigation/presentation change.
 
 ---
 
-## 11. Summary
+## 11. Why Context Switcher Over Sidebar Ribbons
+
+The original proposal added per-repo rows with expand/collapse sub-nav items to the sidebar. The context switcher approach was chosen instead for these reasons:
+
+| Concern | Sidebar ribbons | Context switcher |
+|---------|----------------|-----------------|
+| Sidebar clutter | "Sessions" appears N+1 times (once top-level, once per repo) | Sidebar unchanged, "Sessions" appears once |
+| Scales to 10+ repos | Sidebar becomes unusably long | Dropdown with search handles any count |
+| Clicks to scope | 1 click (expand) + 1 click (sub-link) = 2 clicks, then repeat per page | 2 clicks to set context (open dropdown + select), then 0 clicks as you navigate |
+| Net clicks per workflow | Higher (re-select per page) | Lower (set once, navigate freely) |
+| Implementation complexity | Expand/collapse state, localStorage per repo, sidebar layout changes | One dropdown component, one URL param |
+| Overview page scoping | Deferred to future iteration | Works automatically |
+
+---
+
+## 12. Summary
 
 | Area | Current | Proposed |
 |------|---------|----------|
-| Sidebar nav | Overview, Sessions, Projects | Same + repo ribbons section below divider (2+ repos only) |
-| Repo visibility | None in nav | Each repo shown with status dot + active count |
-| Scoping to a repo | Not possible | Click repo → Sessions in sidebar |
-| All-repos view | Default (only option) | Still default, still top-level nav items |
-| Session list rows | No repo indicator | Repo badge (short name) on each row (2+ repos only) |
-| Project list rows | No repo indicator | Repo badge (short name) on each row (2+ repos only) |
+| Header | Org name only | Org name + repo context selector (2+ repos only) |
+| Sidebar nav | Overview, Sessions, Projects | Unchanged — counts reflect selected context |
+| Repo visibility | None | Context selector dropdown shows all repos with status + counts |
+| Scoping to a repo | Not possible | Select repo in header, all pages filter automatically |
+| All-repos view | Default (only option) | Still default, labeled "All repositories" |
+| Session list rows | No repo indicator | Repo badge (short name) when viewing all repos (2+ repos only) |
+| Project list rows | No repo indicator | Repo badge (short name) when viewing all repos (2+ repos only) |
 | Single-repo users | Current UI | Identical — zero changes |
 | API: sessions | No repo filter | Optional `repository_id` query param |
 | API: projects | No repo filter | Optional `repository_id` query param |
-| API: new endpoint | — | `GET /api/v1/repositories/summary` for sidebar data |
+| API: new endpoint | — | `GET /api/v1/repositories/summary` for context switcher data |
