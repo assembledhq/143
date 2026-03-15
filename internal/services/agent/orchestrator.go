@@ -246,7 +246,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			Repo:  repoFullName,
 		})
 		if memErr != nil {
-			log.Warn().Err(memErr).Msg("failed to retrieve memories for agent context")
+			log.Warn().Err(memErr).Str("repo", repoFullName).Msg("failed to retrieve memories for agent context")
 		} else if memResult != nil && memResult.Formatted != "" {
 			input.ContextDocs = append(input.ContextDocs, memResult.Formatted)
 		}

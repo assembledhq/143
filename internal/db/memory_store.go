@@ -338,63 +338,41 @@ func (s *MemoryStore) ListActiveByOrg(ctx context.Context, orgID uuid.UUID) ([]m
 }
 
 // ReinforceBatch updates last_used_at and increments times_reinforced for
-// multiple memories. Used when a PR is approved after memories were injected
-// into the agent context. Uses insert-only versioning for each memory.
+// multiple memories in two bulk queries (deactivate + insert). Used when a PR
+// is approved after memories were injected into the agent context. Uses
+// insert-only versioning: deactivates current rows and inserts new ones with
+// updated counters. Memories that were deactivated between selection and
+// reinforcement are silently skipped (the CTE's WHERE clause filters them out).
 func (s *MemoryStore) ReinforceBatch(ctx context.Context, orgID uuid.UUID, memoryIDs []uuid.UUID) error {
 	if len(memoryIDs) == 0 {
 		return nil
 	}
 
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	for _, memID := range memoryIDs {
-		inactivateQuery := `
+	query := `
+		WITH deactivated AS (
 			UPDATE memories SET active = false
-			WHERE id = @id AND org_id = @org_id AND active = true
-			RETURNING org_id, repo, rule, category, source_comment_ids, occurrence_count, status, manually_curated, scope, source, last_used_at, times_reinforced, file_patterns`
-
-		var existing models.Memory
-		err := tx.QueryRow(ctx, inactivateQuery, pgx.NamedArgs{
-			"id":     memID,
-			"org_id": orgID,
-		}).Scan(
-			&existing.OrgID, &existing.Repo, &existing.Rule, &existing.Category,
-			&existing.SourceCommentIDs, &existing.OccurrenceCount, &existing.Status,
-			&existing.ManuallyCurated, &existing.Scope, &existing.Source,
-			&existing.LastUsedAt, &existing.TimesReinforced, &existing.FilePatterns,
+			WHERE id = ANY(@ids) AND org_id = @org_id AND active = true
+			RETURNING org_id, repo, rule, category, source_comment_ids,
+			          occurrence_count, status, manually_curated, scope,
+			          source, times_reinforced, file_patterns
 		)
-		if err != nil {
-			// Memory may have been deactivated between selection and reinforcement.
-			// This is expected in concurrent scenarios — skip silently.
-			continue
-		}
+		INSERT INTO memories (
+			org_id, repo, rule, category, source_comment_ids, occurrence_count,
+			status, manually_curated, active, scope, source, last_used_at,
+			times_reinforced, file_patterns
+		)
+		SELECT org_id, repo, rule, category, source_comment_ids, occurrence_count,
+		       status, manually_curated, true, scope, source, now(),
+		       times_reinforced + 1, file_patterns
+		FROM deactivated`
 
-		insertQuery := `
-			INSERT INTO memories (org_id, repo, rule, category, source_comment_ids, occurrence_count, status, manually_curated, active, scope, source, last_used_at, times_reinforced, file_patterns)
-			VALUES (@org_id, @repo, @rule, @category, @source_comment_ids, @occurrence_count, @status, @manually_curated, true, @scope, @source, now(), @times_reinforced, @file_patterns)`
-
-		_, err = tx.Exec(ctx, insertQuery, pgx.NamedArgs{
-			"org_id":             existing.OrgID,
-			"repo":               existing.Repo,
-			"rule":               existing.Rule,
-			"category":           existing.Category,
-			"source_comment_ids": existing.SourceCommentIDs,
-			"occurrence_count":   existing.OccurrenceCount,
-			"status":             existing.Status,
-			"manually_curated":   existing.ManuallyCurated,
-			"scope":              existing.Scope,
-			"source":             existing.Source,
-			"times_reinforced":   existing.TimesReinforced + 1,
-			"file_patterns":      existing.FilePatterns,
-		})
-		if err != nil {
-			return fmt.Errorf("insert reinforced memory %s: %w", memID, err)
-		}
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"ids":    memoryIDs,
+		"org_id": orgID,
+	})
+	if err != nil {
+		return fmt.Errorf("reinforce memories batch: %w", err)
 	}
 
-	return tx.Commit(ctx)
+	return nil
 }

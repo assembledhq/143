@@ -13,8 +13,31 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 
 	"github.com/assembledhq/143/internal/models"
+)
+
+var (
+	memoriesInjectedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "memory_context_injections_total",
+		Help: "Total number of times memories were injected into agent context",
+	})
+	memoriesInjectedCount = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "memory_context_injected_count",
+		Help:    "Number of memories selected per context injection",
+		Buckets: []float64{0, 1, 2, 5, 10, 20, 50},
+	})
+	memoriesReinforcedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "memory_reinforcements_total",
+		Help: "Total number of memory reinforcement operations (on PR approval)",
+	})
+	memoriesReinforcedCount = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "memory_reinforced_count",
+		Help:    "Number of memories reinforced per PR approval",
+		Buckets: []float64{0, 1, 2, 5, 10, 20, 50},
+	})
 )
 
 // MemoryStore defines the DB operations needed by the memory service.
@@ -112,13 +135,22 @@ func (s *Service) GetContextMemoriesWithBudget(ctx context.Context, req ContextR
 	var selected []ScoredMemory
 	var memoryIDs []uuid.UUID
 
+	seenCategories := make(map[string]bool)
 	for _, sm := range scored {
-		// Each memory needs its rule text + a category header (amortized) + bullet formatting.
 		cost := sm.TokenEstimate + 5 // 5 tokens for "- " prefix and newline overhead
+		// Account for category header ("### category\n") on first memory per category.
+		cat := sm.Memory.Category
+		if cat == "" {
+			cat = "general"
+		}
+		if !seenCategories[cat] {
+			cost += estimateTokens("### "+cat+"\n", "")
+		}
 		if remaining < cost {
 			continue // skip this one, try smaller memories
 		}
 		remaining -= cost
+		seenCategories[cat] = true
 		selected = append(selected, sm)
 		memoryIDs = append(memoryIDs, sm.Memory.ID)
 	}
@@ -126,6 +158,9 @@ func (s *Service) GetContextMemoriesWithBudget(ctx context.Context, req ContextR
 	if len(selected) == 0 {
 		return &ContextResult{}, nil
 	}
+
+	memoriesInjectedTotal.Inc()
+	memoriesInjectedCount.Observe(float64(len(selected)))
 
 	formatted := formatMemories(selected)
 	tokensUsed := tokenBudget - remaining
@@ -144,6 +179,8 @@ func (s *Service) ReinforceMemories(ctx context.Context, orgID uuid.UUID, memory
 	if len(memoryIDs) == 0 {
 		return nil
 	}
+	memoriesReinforcedTotal.Inc()
+	memoriesReinforcedCount.Observe(float64(len(memoryIDs)))
 	return s.store.ReinforceBatch(ctx, orgID, memoryIDs)
 }
 
@@ -198,18 +235,79 @@ func computeRelevance(memoryPatterns, currentFiles []string) float64 {
 
 	for _, pattern := range memoryPatterns {
 		for _, file := range currentFiles {
-			matched, err := filepath.Match(pattern, file)
-			if err == nil && matched {
-				return 1.0
-			}
-			// Also check if the pattern matches the base name or directory.
-			if matched, err := filepath.Match(pattern, filepath.Base(file)); err == nil && matched {
+			if matchPattern(pattern, file) {
 				return 1.0
 			}
 		}
 	}
 
 	return 0.1 // patterns exist but don't match
+}
+
+// matchPattern matches a file path against a pattern, supporting both standard
+// filepath.Match globs (e.g. "*.go") and "**" for recursive directory matching
+// (e.g. "src/**/*.go"). filepath.Match alone doesn't handle "**" or cross-
+// directory matching, so we:
+//  1. If the pattern contains "**", split on "**" and match segments.
+//  2. Try the full path match — handles patterns like "src/*.go".
+//  3. Try matching against just the basename — handles extension-only patterns
+//     like "*.go" against paths like "internal/handler.go".
+func matchPattern(pattern, file string) bool {
+	if strings.Contains(pattern, "**") {
+		return matchDoublestar(pattern, file)
+	}
+
+	// Full path match.
+	if matched, err := filepath.Match(pattern, file); err == nil && matched {
+		return true
+	}
+	// Basename match: allows "*.go" to match "src/internal/handler.go".
+	if matched, err := filepath.Match(pattern, filepath.Base(file)); err == nil && matched {
+		return true
+	}
+	return false
+}
+
+// matchDoublestar handles "**" glob patterns by splitting the pattern on "**"
+// and checking that all segments appear in the file path in order. This is a
+// lightweight alternative to importing a doublestar library.
+//
+// Examples:
+//
+//	"src/**/*.go"   matches "src/pkg/handler.go"
+//	"**/*.test.ts"  matches "frontend/src/utils/api.test.ts"
+//	"**/models/**"  matches "internal/models/user.go"
+func matchDoublestar(pattern, file string) bool {
+	parts := strings.Split(pattern, "**")
+
+	// Check prefix (before first **).
+	remaining := file
+	if prefix := parts[0]; prefix != "" {
+		prefix = strings.TrimSuffix(prefix, "/")
+		if !strings.HasPrefix(remaining, prefix) {
+			return false
+		}
+		remaining = remaining[len(prefix):]
+		remaining = strings.TrimPrefix(remaining, "/")
+	}
+
+	// Check suffix (after last **) — this is the most common case: "**/*.go".
+	if suffix := parts[len(parts)-1]; suffix != "" {
+		suffix = strings.TrimPrefix(suffix, "/")
+		// The suffix may contain globs, so match the basename against it.
+		base := filepath.Base(file)
+		if matched, err := filepath.Match(suffix, base); err == nil && matched {
+			return true
+		}
+		// Also try matching the suffix against the remaining path tail.
+		if matched, err := filepath.Match(suffix, filepath.Base(remaining)); err == nil && matched {
+			return true
+		}
+		return false
+	}
+
+	// Pattern ends with "**" — matches everything under the prefix.
+	return true
 }
 
 // estimateTokens returns a rough token count for a memory's contribution to

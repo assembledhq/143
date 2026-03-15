@@ -82,6 +82,39 @@ func TestComputeRelevance_NoFiles(t *testing.T) {
 	require.Equal(t, 0.5, score, "no file context should return neutral 0.5")
 }
 
+func TestMatchPattern_DoublestarPrefix(t *testing.T) {
+	t.Parallel()
+	require.True(t, matchPattern("**/*.go", "internal/services/memory/service.go"))
+	require.True(t, matchPattern("**/*.go", "main.go"))
+	require.False(t, matchPattern("**/*.go", "README.md"))
+}
+
+func TestMatchPattern_DoublestarMiddle(t *testing.T) {
+	t.Parallel()
+	require.True(t, matchPattern("src/**/*.ts", "src/components/Button.ts"))
+	require.True(t, matchPattern("src/**/*.ts", "src/lib/utils/api.ts"))
+	require.False(t, matchPattern("src/**/*.ts", "internal/main.go"))
+}
+
+func TestMatchPattern_DoublestarSuffix(t *testing.T) {
+	t.Parallel()
+	require.True(t, matchPattern("internal/models/**", "internal/models/user.go"))
+	require.True(t, matchPattern("internal/models/**", "internal/models/sub/deep.go"))
+}
+
+func TestMatchPattern_StandardGlob(t *testing.T) {
+	t.Parallel()
+	require.True(t, matchPattern("*.go", "handler.go"))
+	require.True(t, matchPattern("*.go", "internal/handler.go"), "basename match")
+	require.False(t, matchPattern("*.py", "handler.go"))
+}
+
+func TestComputeRelevance_DoublestarPattern(t *testing.T) {
+	t.Parallel()
+	score := computeRelevance([]string{"**/*.go"}, []string{"internal/services/memory/service.go"})
+	require.Equal(t, 1.0, score, "doublestar pattern should match nested go files")
+}
+
 func TestGetContextMemories_EmptyStore(t *testing.T) {
 	t.Parallel()
 

@@ -318,6 +318,111 @@ func TestMemoryStore_IncrementOccurrence_PromotesAtTwo(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestMemoryStore_ListForContext_IncludesRepoAndOrgScope(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewMemoryStore(mock)
+	orgID := uuid.New()
+	repoMemID := uuid.New()
+	orgMemID := uuid.New()
+	now := time.Now()
+
+	repoRow := []any{
+		repoMemID, orgID, "org/repo", "Use gofmt", "style",
+		[]uuid.UUID{}, 2, "active", false, true,
+		"repo", "review", &now, 3, []string(nil), now,
+	}
+	orgRow := []any{
+		orgMemID, orgID, "", "Always add tests", "testing",
+		[]uuid.UUID{}, 1, "active", true, true,
+		"org", "manual", &now, 1, []string(nil), now,
+	}
+
+	mock.ExpectQuery("SELECT .+ FROM memories WHERE org_id .+ AND active = true AND status = 'active'").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(memoryColumns).
+				AddRow(repoRow...).
+				AddRow(orgRow...),
+		)
+
+	memories, err := store.ListForContext(context.Background(), orgID, "org/repo")
+	require.NoError(t, err)
+	require.Len(t, memories, 2, "should return both repo-scoped and org-scoped memories")
+	require.Equal(t, repoMemID, memories[0].ID)
+	require.Equal(t, orgMemID, memories[1].ID)
+	require.Equal(t, "repo", memories[0].Scope)
+	require.Equal(t, "org", memories[1].Scope)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestMemoryStore_ReinforceBatch_BatchCTE(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewMemoryStore(mock)
+	orgID := uuid.New()
+	ids := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
+
+	// The batch CTE is a single Exec — deactivates and inserts in one statement.
+	mock.ExpectExec("WITH deactivated AS").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 3))
+
+	err = store.ReinforceBatch(context.Background(), orgID, ids)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestMemoryStore_ReinforceBatch_EmptyIDs(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewMemoryStore(mock)
+
+	// Should return immediately without any DB calls.
+	err = store.ReinforceBatch(context.Background(), uuid.New(), nil)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestMemoryStore_ListActiveByOrg_Success(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewMemoryStore(mock)
+	orgID := uuid.New()
+	id := uuid.New()
+	now := time.Now()
+
+	orgRow := []any{
+		id, orgID, "", "Always add tests", "testing",
+		[]uuid.UUID{}, 1, "active", true, true,
+		"org", "manual", &now, 1, []string(nil), now,
+	}
+
+	mock.ExpectQuery("SELECT .+ FROM memories WHERE org_id .+ AND active = true AND status = 'active' AND scope = 'org'").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(memoryColumns).AddRow(orgRow...),
+		)
+
+	memories, err := store.ListActiveByOrg(context.Background(), orgID)
+	require.NoError(t, err)
+	require.Len(t, memories, 1)
+	require.Equal(t, "org", memories[0].Scope)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestMemoryStore_MultiTenancy_OrgIDFilter(t *testing.T) {
 	t.Parallel()
 

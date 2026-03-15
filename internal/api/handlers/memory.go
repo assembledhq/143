@@ -2,7 +2,10 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"path/filepath"
+	"strings"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
@@ -192,6 +195,25 @@ func (h *MemoryHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if req.Scope == "repo" && req.Repo == "" {
 		writeError(w, http.StatusBadRequest, "MISSING_REPO", "repo is required for repo-scoped memories")
 		return
+	}
+
+	// Validate file patterns are syntactically valid globs.
+	for _, pattern := range req.FilePatterns {
+		if pattern == "" {
+			writeError(w, http.StatusBadRequest, "INVALID_PATTERN", "file patterns must not be empty")
+			return
+		}
+		// Strip "**" segments before validation since filepath.Match doesn't
+		// support them, but our matchPattern function does.
+		testPattern := strings.ReplaceAll(pattern, "**/", "")
+		testPattern = strings.ReplaceAll(testPattern, "/**", "")
+		if testPattern == "**" || testPattern == "" {
+			continue // pure recursive glob, always valid
+		}
+		if _, err := filepath.Match(testPattern, ""); err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_PATTERN", fmt.Sprintf("invalid glob pattern %q: %v", pattern, err))
+			return
+		}
 	}
 
 	memory := &models.Memory{

@@ -436,6 +436,11 @@ func (s *PRService) enqueueProcessReviewComment(ctx context.Context, orgID uuid.
 	}
 }
 
+// enqueueReinforceMemories enqueues a job to reinforce memories for a repo.
+// The dedupe key is per-repo (not per-PR) so that rapid successive approvals
+// for the same repo collapse into a single reinforcement pass. This is correct
+// because the handler re-derives which memories are active for the repo rather
+// than tracking the specific memories injected into each PR.
 func (s *PRService) enqueueReinforceMemories(ctx context.Context, orgID uuid.UUID, repo string) {
 	dedupeKey := fmt.Sprintf("reinforce_memories:%s:%s", orgID, repo)
 	if _, err := s.jobs.Enqueue(ctx, orgID, "feedback", "reinforce_memories", map[string]string{
