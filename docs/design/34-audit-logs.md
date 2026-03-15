@@ -227,7 +227,114 @@ This taxonomy is **not enforced at the database level** (it's `text`, not an enu
 
 ## 5. Go Model & Store
 
-### 5.1 Model (`internal/models/audit.go`)
+### 5.1 Enums (`internal/models/audit_enums.go`)
+
+Following the codebase convention (see `session_enums.go`, `pm_enums.go`), all categorical fields use typed strings with validation.
+
+```go
+package models
+
+import "fmt"
+
+// AuditActorType identifies who or what performed an audited action.
+type AuditActorType string
+
+const (
+    AuditActorUser    AuditActorType = "user"
+    AuditActorAgent   AuditActorType = "agent"
+    AuditActorSystem  AuditActorType = "system"
+    AuditActorWebhook AuditActorType = "webhook"
+)
+
+func (t AuditActorType) Validate() error {
+    switch t {
+    case AuditActorUser, AuditActorAgent, AuditActorSystem, AuditActorWebhook:
+        return nil
+    default:
+        return fmt.Errorf("invalid AuditActorType: %q", t)
+    }
+}
+
+// AuditAction identifies the specific action that was performed.
+// Follows a resource.verb naming convention.
+type AuditAction string
+
+const (
+    // Session actions
+    AuditActionSessionCreated          AuditAction = "session.created"
+    AuditActionSessionStarted          AuditAction = "session.started"
+    AuditActionSessionCompleted        AuditAction = "session.completed"
+    AuditActionSessionFailed           AuditAction = "session.failed"
+    AuditActionSessionCancelled        AuditAction = "session.cancelled"
+    AuditActionSessionStatusChanged    AuditAction = "session.status_changed"
+    AuditActionSessionQuestionCreated  AuditAction = "session.question.created"
+    AuditActionSessionQuestionAnswered AuditAction = "session.question.answered"
+    AuditActionSessionResumedLocally   AuditAction = "session.resumed_locally"
+
+    // Project actions
+    AuditActionProjectCreated        AuditAction = "project.created"
+    AuditActionProjectUpdated        AuditAction = "project.updated"
+    AuditActionProjectDeleted        AuditAction = "project.deleted"
+    AuditActionProjectStarted        AuditAction = "project.started"
+    AuditActionProjectPaused         AuditAction = "project.paused"
+    AuditActionProjectResumed        AuditAction = "project.resumed"
+    AuditActionProjectApproved       AuditAction = "project.approved"
+    AuditActionProjectDismissed      AuditAction = "project.dismissed"
+    AuditActionProjectRunTriggered   AuditAction = "project.run_triggered"
+    AuditActionProjectCycleCompleted AuditAction = "project.cycle_completed"
+    AuditActionProjectTaskCreated    AuditAction = "project.task.created"
+    AuditActionProjectTaskUpdated    AuditAction = "project.task.updated"
+    AuditActionProjectTaskDeleted    AuditAction = "project.task.deleted"
+    AuditActionProjectTaskRetried    AuditAction = "project.task.retried"
+
+    // Issue actions
+    AuditActionIssueCreated       AuditAction = "issue.created"
+    AuditActionIssueReprioritized AuditAction = "issue.reprioritized"
+
+    // PM actions
+    AuditActionPMAnalysisTriggered AuditAction = "pm.analysis_triggered"
+    AuditActionPMPlanCreated       AuditAction = "pm.plan_created"
+    AuditActionPMDecisionMade      AuditAction = "pm.decision_made"
+
+    // Team & settings actions
+    AuditActionSettingsUpdated        AuditAction = "settings.updated"
+    AuditActionTeamMemberInvited      AuditAction = "team.member_invited"
+    AuditActionTeamMemberRoleChanged  AuditAction = "team.member_role_changed"
+    AuditActionTeamMemberRemoved      AuditAction = "team.member_removed"
+    AuditActionTeamInvitationRevoked  AuditAction = "team.invitation_revoked"
+    AuditActionTeamInvitationAccepted AuditAction = "team.invitation_accepted"
+
+    // Integration & credential actions
+    AuditActionIntegrationConnected AuditAction = "integration.connected"
+    AuditActionCredentialUpdated    AuditAction = "credential.updated"
+    AuditActionCredentialDeleted    AuditAction = "credential.deleted"
+
+    // Auth actions
+    AuditActionAuthLogin    AuditAction = "auth.login"
+    AuditActionAuthLogout   AuditAction = "auth.logout"
+    AuditActionAuthRegister AuditAction = "auth.register"
+)
+
+// AuditResourceType identifies the type of resource an action targets.
+type AuditResourceType string
+
+const (
+    AuditResourceSession     AuditResourceType = "session"
+    AuditResourceProject     AuditResourceType = "project"
+    AuditResourceProjectTask AuditResourceType = "project_task"
+    AuditResourceIssue       AuditResourceType = "issue"
+    AuditResourcePMPlan      AuditResourceType = "pm_plan"
+    AuditResourcePMDecision  AuditResourceType = "pm_decision"
+    AuditResourceSettings    AuditResourceType = "settings"
+    AuditResourceTeamMember  AuditResourceType = "team_member"
+    AuditResourceInvitation  AuditResourceType = "invitation"
+    AuditResourceIntegration AuditResourceType = "integration"
+    AuditResourceCredential  AuditResourceType = "credential"
+    AuditResourceUser        AuditResourceType = "user"
+)
+```
+
+### 5.2 Model (`internal/models/audit.go`)
 
 ```go
 package models
@@ -242,33 +349,25 @@ import (
 
 // AuditLog represents an immutable audit trail entry.
 type AuditLog struct {
-    ID           int64           `db:"id" json:"id"`
-    OrgID        uuid.UUID       `db:"org_id" json:"org_id"`
-    ActorType    string          `db:"actor_type" json:"actor_type"`
-    ActorID      string          `db:"actor_id" json:"actor_id"`
-    UserID       *uuid.UUID      `db:"user_id" json:"user_id,omitempty"`
-    Action       string          `db:"action" json:"action"`
-    ResourceType string          `db:"resource_type" json:"resource_type"`
-    ResourceID   *string         `db:"resource_id" json:"resource_id,omitempty"`
-    Details      json.RawMessage `db:"details" json:"details,omitempty"`
-    RequestID    *string         `db:"request_id" json:"request_id,omitempty"`
-    IPAddress    net.IP          `db:"ip_address" json:"ip_address,omitempty"`
-    UserAgent    *string         `db:"user_agent" json:"user_agent,omitempty"`
-    SessionID    *uuid.UUID      `db:"session_id" json:"session_id,omitempty"`
-    ProjectID    *uuid.UUID      `db:"project_id" json:"project_id,omitempty"`
-    CreatedAt    time.Time       `db:"created_at" json:"created_at"`
+    ID           int64             `db:"id" json:"id"`
+    OrgID        uuid.UUID         `db:"org_id" json:"org_id"`
+    ActorType    AuditActorType    `db:"actor_type" json:"actor_type"`
+    ActorID      string            `db:"actor_id" json:"actor_id"`
+    UserID       *uuid.UUID        `db:"user_id" json:"user_id,omitempty"`
+    Action       AuditAction       `db:"action" json:"action"`
+    ResourceType AuditResourceType `db:"resource_type" json:"resource_type"`
+    ResourceID   *string           `db:"resource_id" json:"resource_id,omitempty"`
+    Details      json.RawMessage   `db:"details" json:"details,omitempty"`
+    RequestID    *string           `db:"request_id" json:"request_id,omitempty"`
+    IPAddress    net.IP            `db:"ip_address" json:"ip_address,omitempty"`
+    UserAgent    *string           `db:"user_agent" json:"user_agent,omitempty"`
+    SessionID    *uuid.UUID        `db:"session_id" json:"session_id,omitempty"`
+    ProjectID    *uuid.UUID        `db:"project_id" json:"project_id,omitempty"`
+    CreatedAt    time.Time         `db:"created_at" json:"created_at"`
 }
-
-// Actor type constants.
-const (
-    ActorTypeUser    = "user"
-    ActorTypeAgent   = "agent"
-    ActorTypeSystem  = "system"
-    ActorTypeWebhook = "webhook"
-)
 ```
 
-### 5.2 Store (`internal/db/audit_log_store.go`)
+### 5.3 Store (`internal/db/audit_log_store.go`)
 
 ```go
 package db
@@ -276,6 +375,7 @@ package db
 import (
     "context"
     "fmt"
+    "strings"
 
     "github.com/assembledhq/143/internal/models"
     "github.com/google/uuid"
@@ -327,78 +427,95 @@ func (s *AuditLogStore) Create(ctx context.Context, entry *models.AuditLog) erro
 
 // AuditLogFilters controls listing/search behavior.
 type AuditLogFilters struct {
-    ActorType    string     // filter by actor type
-    UserID       *uuid.UUID // filter by specific user
-    Action       string     // filter by action (exact match)
-    ActionPrefix string     // filter by action prefix (e.g. "session." matches all session actions)
-    ResourceType string     // filter by resource type
-    ResourceID   string     // filter by specific resource
-    SessionID    *uuid.UUID // filter by correlated session
-    ProjectID    *uuid.UUID // filter by correlated project
-    Since        *string    // ISO 8601 timestamp lower bound
-    Until        *string    // ISO 8601 timestamp upper bound
+    ActorType    models.AuditActorType    // filter by actor type
+    UserID       *uuid.UUID               // filter by specific user
+    Action       models.AuditAction       // filter by action (exact match)
+    ActionPrefix string                   // filter by action prefix (e.g. "session." matches all session actions)
+    ResourceType models.AuditResourceType // filter by resource type
+    ResourceID   string                   // filter by specific resource
+    SessionID    *uuid.UUID               // filter by correlated session
+    ProjectID    *uuid.UUID               // filter by correlated project
+    Since        *string                  // ISO 8601 timestamp lower bound
+    Until        *string                  // ISO 8601 timestamp upper bound
     Limit        int
-    Cursor       string     // cursor for keyset pagination (bigserial id)
+    Cursor       string                   // cursor for keyset pagination (bigserial id)
+}
+
+// whereClause is a small helper that accumulates WHERE conditions and named args.
+// It eliminates the error-prone pattern of manually concatenating " AND ..." fragments
+// and ensures every condition is joined consistently.
+type whereClause struct {
+    conditions []string
+    args       pgx.NamedArgs
+}
+
+func newWhereClause() *whereClause {
+    return &whereClause{args: pgx.NamedArgs{}}
+}
+
+func (w *whereClause) add(condition string, name string, value interface{}) {
+    w.conditions = append(w.conditions, condition)
+    w.args[name] = value
+}
+
+func (w *whereClause) addRaw(condition string) {
+    w.conditions = append(w.conditions, condition)
+}
+
+func (w *whereClause) build() (string, pgx.NamedArgs) {
+    if len(w.conditions) == 0 {
+        return "", w.args
+    }
+    return " WHERE " + strings.Join(w.conditions, " AND "), w.args
 }
 
 // List returns audit log entries for an organization, filtered and paginated.
 func (s *AuditLogStore) List(ctx context.Context, orgID uuid.UUID, filters AuditLogFilters) ([]models.AuditLog, error) {
+    w := newWhereClause()
+    w.add("org_id = @org_id", "org_id", orgID)
+
+    if filters.ActorType != "" {
+        w.add("actor_type = @actor_type", "actor_type", filters.ActorType)
+    }
+    if filters.UserID != nil {
+        w.add("user_id = @user_id", "user_id", *filters.UserID)
+    }
+    if filters.Action != "" {
+        w.add("action = @action", "action", filters.Action)
+    }
+    if filters.ActionPrefix != "" {
+        w.add("action LIKE @action_prefix", "action_prefix", filters.ActionPrefix+"%")
+    }
+    if filters.ResourceType != "" {
+        w.add("resource_type = @resource_type", "resource_type", filters.ResourceType)
+    }
+    if filters.ResourceID != "" {
+        w.add("resource_id = @resource_id", "resource_id", filters.ResourceID)
+    }
+    if filters.SessionID != nil {
+        w.add("session_id = @session_id", "session_id", *filters.SessionID)
+    }
+    if filters.ProjectID != nil {
+        w.add("project_id = @project_id", "project_id", *filters.ProjectID)
+    }
+    if filters.Since != nil {
+        w.add("created_at >= @since", "since", *filters.Since)
+    }
+    if filters.Until != nil {
+        w.add("created_at <= @until", "until", *filters.Until)
+    }
+    if filters.Cursor != "" {
+        w.add("id < @cursor", "cursor", filters.Cursor)
+    }
+
+    where, args := w.build()
+
     query := `
         SELECT id, org_id, actor_type, actor_id, user_id,
                action, resource_type, resource_id,
                details, request_id, ip_address, user_agent,
                session_id, project_id, created_at
-        FROM audit_logs
-        WHERE org_id = @org_id`
-
-    args := pgx.NamedArgs{"org_id": orgID}
-
-    if filters.ActorType != "" {
-        query += ` AND actor_type = @actor_type`
-        args["actor_type"] = filters.ActorType
-    }
-    if filters.UserID != nil {
-        query += ` AND user_id = @user_id`
-        args["user_id"] = *filters.UserID
-    }
-    if filters.Action != "" {
-        query += ` AND action = @action`
-        args["action"] = filters.Action
-    }
-    if filters.ActionPrefix != "" {
-        query += ` AND action LIKE @action_prefix`
-        args["action_prefix"] = filters.ActionPrefix + "%"
-    }
-    if filters.ResourceType != "" {
-        query += ` AND resource_type = @resource_type`
-        args["resource_type"] = filters.ResourceType
-    }
-    if filters.ResourceID != "" {
-        query += ` AND resource_id = @resource_id`
-        args["resource_id"] = filters.ResourceID
-    }
-    if filters.SessionID != nil {
-        query += ` AND session_id = @session_id`
-        args["session_id"] = *filters.SessionID
-    }
-    if filters.ProjectID != nil {
-        query += ` AND project_id = @project_id`
-        args["project_id"] = *filters.ProjectID
-    }
-    if filters.Since != nil {
-        query += ` AND created_at >= @since`
-        args["since"] = *filters.Since
-    }
-    if filters.Until != nil {
-        query += ` AND created_at <= @until`
-        args["until"] = *filters.Until
-    }
-    if filters.Cursor != "" {
-        query += ` AND id < @cursor`
-        args["cursor"] = filters.Cursor
-    }
-
-    query += ` ORDER BY id DESC`
+        FROM audit_logs` + where + ` ORDER BY id DESC`
 
     limit := filters.Limit
     if limit <= 0 || limit > 200 {
@@ -414,7 +531,7 @@ func (s *AuditLogStore) List(ctx context.Context, orgID uuid.UUID, filters Audit
 }
 ```
 
-### 5.3 Emitter helper (`internal/db/audit_emitter.go`)
+### 5.4 Emitter helper (`internal/db/audit_emitter.go`)
 
 To reduce boilerplate at call sites, provide a convenience layer:
 
@@ -424,6 +541,7 @@ package db
 import (
     "context"
     "encoding/json"
+    "net"
 
     "github.com/assembledhq/143/internal/models"
     "github.com/google/uuid"
@@ -439,11 +557,10 @@ func NewAuditEmitter(store *AuditLogStore) *AuditEmitter {
 }
 
 // EmitUserAction logs an action performed by an authenticated user.
-// Extracts request context (request ID, IP, user-agent) from the provided values.
 func (e *AuditEmitter) EmitUserAction(ctx context.Context, params UserActionParams) error {
     entry := &models.AuditLog{
         OrgID:        params.OrgID,
-        ActorType:    models.ActorTypeUser,
+        ActorType:    models.AuditActorUser,
         ActorID:      params.UserID.String(),
         UserID:       &params.UserID,
         Action:       params.Action,
@@ -462,8 +579,8 @@ func (e *AuditEmitter) EmitUserAction(ctx context.Context, params UserActionPara
 type UserActionParams struct {
     OrgID        uuid.UUID
     UserID       uuid.UUID
-    Action       string
-    ResourceType string
+    Action       models.AuditAction
+    ResourceType models.AuditResourceType
     ResourceID   *string
     Details      json.RawMessage
     RequestID    *string
@@ -477,7 +594,7 @@ type UserActionParams struct {
 func (e *AuditEmitter) EmitSystemAction(ctx context.Context, params SystemActionParams) error {
     entry := &models.AuditLog{
         OrgID:        params.OrgID,
-        ActorType:    models.ActorTypeSystem,
+        ActorType:    models.AuditActorSystem,
         ActorID:      params.ActorID,
         Action:       params.Action,
         ResourceType: params.ResourceType,
@@ -492,8 +609,8 @@ func (e *AuditEmitter) EmitSystemAction(ctx context.Context, params SystemAction
 type SystemActionParams struct {
     OrgID        uuid.UUID
     ActorID      string // e.g. "pm_agent", "scheduler", "validator"
-    Action       string
-    ResourceType string
+    Action       models.AuditAction
+    ResourceType models.AuditResourceType
     ResourceID   *string
     Details      json.RawMessage
     SessionID    *uuid.UUID
@@ -520,11 +637,11 @@ Audit log listing is restricted to **admin** role. This is sensitive data — or
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `actor_type` | string | Filter by actor type (`user`, `agent`, `system`, `webhook`) |
+| `actor_type` | `AuditActorType` | Filter by actor type (`user`, `agent`, `system`, `webhook`) |
 | `user_id` | uuid | Filter by specific user |
-| `action` | string | Exact action match (e.g. `session.created`) |
+| `action` | `AuditAction` | Exact action match (e.g. `session.created`) |
 | `action_prefix` | string | Action prefix match (e.g. `session.` returns all session actions) |
-| `resource_type` | string | Filter by resource type |
+| `resource_type` | `AuditResourceType` | Filter by resource type |
 | `resource_id` | string | Filter by specific resource |
 | `session_id` | uuid | Filter by correlated session |
 | `project_id` | uuid | Filter by correlated project |
@@ -616,8 +733,8 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
     _ = h.auditEmitter.EmitUserAction(r.Context(), db.UserActionParams{
         OrgID:        orgID,
         UserID:       user.ID,
-        Action:       "session.created",
-        ResourceType: "session",
+        Action:       models.AuditActionSessionCreated,
+        ResourceType: models.AuditResourceSession,
         ResourceID:   &resID,
         Details:      json.RawMessage(`{"issue_id":"` + issueID.String() + `"}`),
         RequestID:    requestIDFromContext(r.Context()),
