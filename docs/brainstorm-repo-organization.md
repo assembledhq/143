@@ -391,30 +391,12 @@ This is a natural evolution of Idea 1, not a rewrite. But don't build it until t
 
 ## Implementation Considerations
 
-### Data availability
-- **Projects** already have `repository_id` — grouping/filtering is straightforward
-- **Sessions** link to repos through `issue_id → issue.repository_id` — you may need to denormalize `repository_id` onto sessions, or join through issues in the API
-
-### API changes needed
-- Add `repository_id` filter param to `GET /api/v1/sessions`
-- Add `repository_id` filter param to `GET /api/v1/projects` (if not already supported)
-- Consider a `GET /api/v1/repositories/summary` endpoint that returns per-repo counts (active sessions, projects, etc.) for the overview cards
-
-### URL state
-- Extend `nuqs` usage: `?status=active&repo=abc123`
-- Consider using repo `full_name` slug in URL for readability: `?repo=owner/repo-name`
-
-### Performance
-- Repo list should be cached/memoized (it changes rarely)
-- Group-by-repo rendering should use virtualization if >50 items
-- Per-repo counts can be derived client-side from existing list data initially, then moved to a dedicated API if performance becomes an issue
+See [34-repo-ribbons-nav.md](design/34-repo-ribbons-nav.md) for the full PRD with API specs, SQL queries, frontend implementation details, and edge cases.
 
 ---
 
 ## Open Questions
 
-1. Should the repo filter be **cross-page persistent** (selecting repo-a on Sessions also filters Projects)? This is more powerful but adds global state complexity.
-2. Should the **Overview page** become repo-aware? Per-repo dashboards could be very valuable but are a bigger lift.
-3. How do **issues** fit in? Today they're accessed through the PM decisions flow. Should they also be repo-grouped?
-4. Should repo organization also affect **notifications/alerts**? (e.g., "repo-a has a failing session" vs. generic "a session failed")
-5. For teams: should repo scoping intersect with **team member assignment**? (e.g., "show me sessions for repos I own")
+1. How do **issues** fit in? Today they're accessed through the PM decisions flow. Should they also be repo-grouped?
+2. Should repo organization also affect **notifications/alerts**? (e.g., "repo-a has a failing session" vs. generic "a session failed")
+3. For teams: should repo scoping intersect with **team member assignment**? (e.g., "show me sessions for repos I own")

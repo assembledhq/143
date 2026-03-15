@@ -91,6 +91,7 @@ Each repo row in the sidebar contains:
   - Pulsing blue: a session for this repo is currently `running`
   - Solid green: most recent session `completed` successfully
   - Solid amber: a session is in `needs_human_guidance` or `awaiting_input`
+  - Solid red: most recent session `failed` or `cancelled`
   - No dot: idle (no recent activity)
 - **Active count:** Number of sessions in `running`, `pending`, `needs_human_guidance`, or `awaiting_input` status. Hidden when 0.
 
@@ -147,6 +148,8 @@ This is the same Sessions page, but filtered to only show sessions linked to tha
 - **"Clear filter" affordance:** A small `×` button or "Viewing repo-name — show all" link at the top of the list, so users can easily return to the unfiltered view.
 
 Same pattern for Projects: `/projects?repo={repository_id}`.
+
+> **Naming note:** The user-facing URL param is `repo` (short, readable). The backend API query param is `repository_id` (matches the DB column). The frontend translates between them: `useQueryState('repo')` provides the value, which is passed as `repository_id` to the API client.
 
 ### 3.4 Overview Page
 
@@ -280,6 +283,8 @@ WHERE r.org_id = @org_id AND r.status = 'active'
 GROUP BY r.id, r.full_name
 ORDER BY active_session_count DESC, r.full_name ASC;
 ```
+
+> **Scaling note:** The `latest_session_status` correlated subquery runs once per repository row. At 5 repos this is negligible, but if repo count grows significantly, rewrite as a window function or `LATERAL JOIN` to avoid per-row scans.
 
 **Caching:** This endpoint is polled alongside PM status (every 30s). At our scale the query is fast, but if needed, results can be cached server-side with a 30s TTL.
 
