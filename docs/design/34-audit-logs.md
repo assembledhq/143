@@ -428,21 +428,12 @@ import (
     "context"
     "fmt"
     "strconv"
-    "strings"
+    "time"
 
     "github.com/assembledhq/143/internal/models"
     "github.com/google/uuid"
     "github.com/jackc/pgx/v5"
 )
-
-// escapeLike escapes SQL LIKE meta-characters (%, _) so that user-supplied
-// values are matched literally.
-func escapeLike(s string) string {
-    s = strings.ReplaceAll(s, `\`, `\\`)
-    s = strings.ReplaceAll(s, `%`, `\%`)
-    s = strings.ReplaceAll(s, `_`, `\_`)
-    return s
-}
 
 type AuditLogStore struct {
     db DBTX
@@ -455,6 +446,16 @@ func NewAuditLogStore(db DBTX) *AuditLogStore {
 // Create inserts a new audit log entry. This is the only write operation —
 // the table is append-only (enforced by DB trigger).
 func (s *AuditLogStore) Create(ctx context.Context, entry *models.AuditLog) error {
+    if err := entry.ActorType.Validate(); err != nil {
+        return err
+    }
+    if err := entry.Action.Validate(); err != nil {
+        return err
+    }
+    if err := entry.ResourceType.Validate(); err != nil {
+        return err
+    }
+
     query := `
         INSERT INTO audit_logs (
             org_id, actor_type, actor_id, user_id,
@@ -497,16 +498,19 @@ type AuditLogFilters struct {
     ResourceID   string                   // filter by specific resource
     SessionID    *uuid.UUID               // filter by correlated session
     ProjectID    *uuid.UUID               // filter by correlated project
-    Since        *string                  // ISO 8601 timestamp lower bound
-    Until        *string                  // ISO 8601 timestamp upper bound
+    Since        *time.Time               // lower bound on created_at (parsed from ISO 8601 at the handler)
+    Until        *time.Time               // upper bound on created_at (parsed from ISO 8601 at the handler)
     Limit        int
     Cursor       string                   // cursor for keyset pagination (bigserial id)
 }
 
-// whereClause is a shared helper (internal/db/where_clause.go) that accumulates
-// WHERE conditions and named args. It eliminates the error-prone pattern of
-// manually concatenating " AND ..." fragments and ensures every condition is
-// joined consistently. Other stores should adopt this instead of ad-hoc concatenation.
+// The following types and functions live in the shared file
+// internal/db/where_clause.go (not in audit_log_store.go).
+
+// whereClause accumulates WHERE conditions and named args. It eliminates the
+// error-prone pattern of manually concatenating " AND ..." fragments and
+// ensures every condition is joined consistently. Other stores should adopt
+// this instead of ad-hoc concatenation.
 type whereClause struct {
     conditions []string
     args       pgx.NamedArgs
@@ -527,6 +531,17 @@ func (w *whereClause) build() (string, pgx.NamedArgs) {
     }
     return " WHERE " + strings.Join(w.conditions, " AND "), w.args
 }
+
+// escapeLike escapes SQL LIKE meta-characters (%, _) so that user-supplied
+// values are matched literally.
+func escapeLike(s string) string {
+    s = strings.ReplaceAll(s, `\`, `\\`)
+    s = strings.ReplaceAll(s, `%`, `\%`)
+    s = strings.ReplaceAll(s, `_`, `\_`)
+    return s
+}
+
+// --- end of internal/db/where_clause.go ---
 
 // List returns audit log entries for an organization, filtered and paginated.
 func (s *AuditLogStore) List(ctx context.Context, orgID uuid.UUID, filters AuditLogFilters) ([]models.AuditLog, error) {
@@ -695,6 +710,72 @@ type SystemActionParams struct {
     SessionID    *uuid.UUID
     ProjectID    *uuid.UUID
 }
+
+// EmitAgentAction logs an action performed by an agent (e.g. session completion, question creation).
+func (e *AuditEmitter) EmitAgentAction(ctx context.Context, params AgentActionParams) {
+    entry := &models.AuditLog{
+        OrgID:        params.OrgID,
+        ActorType:    models.AuditActorAgent,
+        ActorID:      params.AgentRunID,
+        Action:       params.Action,
+        ResourceType: params.ResourceType,
+        ResourceID:   params.ResourceID,
+        Details:      params.Details,
+        SessionID:    params.SessionID,
+        ProjectID:    params.ProjectID,
+    }
+    if err := e.store.Create(ctx, entry); err != nil {
+        e.logger.ErrorContext(ctx, "failed to emit audit log",
+            "action", params.Action,
+            "actor_id", params.AgentRunID,
+            "error", err,
+        )
+    }
+}
+
+type AgentActionParams struct {
+    OrgID        uuid.UUID
+    AgentRunID   string // the agent run UUID
+    Action       models.AuditAction
+    ResourceType models.AuditResourceType
+    ResourceID   *string
+    Details      json.RawMessage
+    SessionID    *uuid.UUID
+    ProjectID    *uuid.UUID
+}
+
+// EmitWebhookAction logs an action triggered by an external webhook (e.g. issue ingestion).
+func (e *AuditEmitter) EmitWebhookAction(ctx context.Context, params WebhookActionParams) {
+    entry := &models.AuditLog{
+        OrgID:        params.OrgID,
+        ActorType:    models.AuditActorWebhook,
+        ActorID:      params.ProviderName,
+        Action:       params.Action,
+        ResourceType: params.ResourceType,
+        ResourceID:   params.ResourceID,
+        Details:      params.Details,
+        RequestID:    params.RequestID,
+        IPAddress:    params.IPAddress,
+    }
+    if err := e.store.Create(ctx, entry); err != nil {
+        e.logger.ErrorContext(ctx, "failed to emit audit log",
+            "action", params.Action,
+            "actor_id", params.ProviderName,
+            "error", err,
+        )
+    }
+}
+
+type WebhookActionParams struct {
+    OrgID        uuid.UUID
+    ProviderName string // e.g. "linear", "sentry", "github"
+    Action       models.AuditAction
+    ResourceType models.AuditResourceType
+    ResourceID   *string
+    Details      json.RawMessage
+    RequestID    *string
+    IPAddress    *netip.Addr
+}
 ```
 
 ---
@@ -798,7 +879,36 @@ Audit entries should be emitted at the **handler/service boundary** — the poin
 - **Worker job handlers**: For system-initiated actions (e.g. PM plan creation, session completion)
 - **Webhook handlers**: For externally-triggered actions (e.g. issue ingestion)
 
-### 7.2 Emission pattern
+### 7.2 Helper functions
+
+Two small helpers are used at call sites to extract request context:
+
+```go
+// requestIDFromContext returns the chi middleware.RequestID value, if present.
+func requestIDFromContext(ctx context.Context) *string {
+    id, ok := ctx.Value(middleware.RequestIDKey).(string)
+    if !ok || id == "" {
+        return nil
+    }
+    return &id
+}
+
+// addrFromRequest parses the client IP from r.RemoteAddr (which may include
+// a port, e.g. "192.168.1.1:54321") and returns it as a *netip.Addr.
+func addrFromRequest(r *http.Request) *netip.Addr {
+    host, _, err := net.SplitHostPort(r.RemoteAddr)
+    if err != nil {
+        host = r.RemoteAddr // no port suffix
+    }
+    addr, err := netip.ParseAddr(host)
+    if err != nil {
+        return nil
+    }
+    return &addr
+}
+```
+
+### 7.3 Emission pattern
 
 Audit entries are emitted **after** the primary operation succeeds. If the operation fails, no audit entry is written. This prevents phantom entries.
 
@@ -809,26 +919,27 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 
     // Emit audit entry (fire-and-forget; the emitter logs errors internally)
     resID := session.ID.String()
+    details, _ := json.Marshal(map[string]string{"issue_id": issueID.String()})
     h.auditEmitter.EmitUserAction(r.Context(), db.UserActionParams{
         OrgID:        orgID,
         UserID:       user.ID,
         Action:       models.AuditActionSessionCreated,
         ResourceType: models.AuditResourceSession,
         ResourceID:   &resID,
-        Details:      json.RawMessage(`{"issue_id":"` + issueID.String() + `"}`),
+        Details:      details,
         RequestID:    requestIDFromContext(r.Context()),
-        IPAddress:    addrFromRequest(r), // returns *netip.Addr parsed from r.RemoteAddr
+        IPAddress:    addrFromRequest(r),
         UserAgent:    stringPtr(r.UserAgent()),
         SessionID:    &session.ID,
     })
 }
 ```
 
-### 7.3 Fire-and-forget semantics
+### 7.4 Fire-and-forget semantics
 
 Audit log emission **must not** block or fail the primary operation. If the audit insert fails (e.g. DB connection issue), the error is logged via the structured logger but the API response is unaffected. This is a deliberate trade-off: we prefer occasional missing audit entries over degraded user experience.
 
-### 7.4 Priority instrumentation order
+### 7.5 Priority instrumentation order
 
 Instrument these high-value actions first:
 
@@ -880,7 +991,42 @@ Default retention: **90 days**. Configurable per org via `organizations.settings
 }
 ```
 
-A scheduled job (`audit_log_cleanup`) runs daily, deletes entries older than the retention period. The immutability trigger allows deletes only through a superuser/migration path — the cleanup job would bypass the trigger via a session-level `SET LOCAL` or a dedicated cleanup function.
+A scheduled job (`audit_log_cleanup`) runs daily, deleting entries older than the retention period. Because the immutability trigger blocks `DELETE`, the cleanup uses a `SECURITY DEFINER` function that temporarily disables the trigger within a transaction:
+
+```sql
+-- Included in the 000019 migration alongside the table creation.
+CREATE OR REPLACE FUNCTION delete_expired_audit_logs(retention_days int)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    deleted bigint;
+BEGIN
+    -- Temporarily disable the immutability trigger for this transaction.
+    ALTER TABLE audit_logs DISABLE TRIGGER audit_logs_immutable;
+
+    DELETE FROM audit_logs
+    WHERE created_at < now() - make_interval(days => retention_days);
+
+    GET DIAGNOSTICS deleted = ROW_COUNT;
+
+    -- Re-enable the trigger before committing.
+    ALTER TABLE audit_logs ENABLE TRIGGER audit_logs_immutable;
+
+    RETURN deleted;
+END;
+$$;
+```
+
+The Go cleanup job calls this function per-org using the configured retention:
+
+```go
+// In the scheduled cleanup worker:
+_, err := db.Exec(ctx, `SELECT delete_expired_audit_logs(@retention)`,
+    pgx.NamedArgs{"retention": org.Settings.AuditLogRetentionDays})
+```
 
 ---
 
