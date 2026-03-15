@@ -232,11 +232,12 @@ function buildColumns(members: User[]): ColumnDef<Session>[] {
 export function SessionsPageContent() {
   const router = useRouter();
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
+  const [repo] = useQueryState("repo");
   const [sorting, setSorting] = useState<SortingState>([]);
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["sessions"],
-    queryFn: () => api.sessions.list({ limit: 50 }),
+    queryKey: ["sessions", repo],
+    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined }),
     refetchInterval: 10000,
   });
 

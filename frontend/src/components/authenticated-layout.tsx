@@ -29,6 +29,7 @@ import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/use-auth";
 import { api } from "@/lib/api";
 import { useEffect } from "react";
+import { RepoContextSwitcher } from "@/components/repo-context-switcher";
 
 const navItems = [
   { label: "Overview", icon: LayoutDashboard, href: "/overview" },
@@ -108,10 +109,11 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
     <div className="flex h-screen">
       <aside className="w-64 border-r border-border bg-sidebar flex flex-col relative">
         <div className="absolute inset-0 bg-gradient-to-b from-primary/[0.03] to-transparent pointer-events-none" />
-        <div className="relative px-5 py-5">
+        <div className="relative px-5 py-5 flex items-center gap-2">
           <Link href="/overview" className="text-base font-bold tracking-tight text-sidebar-foreground">
             143.dev
           </Link>
+          <RepoContextSwitcher />
         </div>
         <nav className="relative flex-1 px-2.5 space-y-0.5">
           {navItems.map((item) => {

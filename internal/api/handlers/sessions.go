@@ -68,6 +68,15 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 		Cursor: r.URL.Query().Get("cursor"),
 	}
 
+	if repoIDStr := r.URL.Query().Get("repository_id"); repoIDStr != "" {
+		repoID, err := uuid.Parse(repoIDStr)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "invalid repository_id")
+			return
+		}
+		filters.RepositoryID = repoID
+	}
+
 	runs, err := h.runStore.ListByOrg(r.Context(), orgID, filters)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list runs")
@@ -582,8 +591,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	// with the generated title before returning the response.
 	if h.llmClient != nil {
 		if err := h.generateSessionTitle(r.Context(), session, orgID, body.Message); err != nil {
-			writeError(w, http.StatusInternalServerError, "TITLE_GENERATION_FAILED", fmt.Sprintf("failed to generate session title: %v", err))
-			return
+			zerolog.Ctx(r.Context()).Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to generate session title")
 		}
 	}
 

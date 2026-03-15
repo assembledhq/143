@@ -119,6 +119,7 @@ export const api = {
     update: (id: string, data: Record<string, unknown>) =>
       patch<import('./types').SingleResponse<import('./types').Repository>>(`/api/v1/repositories/${id}`, data),
     delete: (id: string) => del(`/api/v1/repositories/${id}`),
+    summary: () => get<import('./types').ListResponse<import('./types').RepoSummary>>('/api/v1/repositories/summary'),
   },
   issues: {
     list: (params?: { status?: string; source?: string; severity?: string; sort?: string; cursor?: string; limit?: number }) => {
@@ -169,11 +170,12 @@ export const api = {
       del(`/api/v1/pm/documents/${docId}`),
   },
   sessions: {
-    list: (params?: { status?: string; cursor?: string; limit?: number }) => {
+    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string }) => {
       const searchParams = new URLSearchParams();
       if (params?.status) searchParams.set('status', params.status);
       if (params?.cursor) searchParams.set('cursor', params.cursor);
       if (params?.limit) searchParams.set('limit', String(params.limit));
+      if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
       const qs = searchParams.toString();
       return get<import('./types').ListResponse<import('./types').Session>>(`/api/v1/sessions${qs ? `?${qs}` : ''}`);
     },
@@ -292,11 +294,12 @@ export const api = {
     revokeInvitation: (id: string) => del<void>(`/api/v1/team/invitations/${id}`),
   },
   projects: {
-    list: (params?: { status?: string; cursor?: string; limit?: number }) => {
+    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string }) => {
       const searchParams = new URLSearchParams();
       if (params?.status) searchParams.set('status', params.status);
       if (params?.cursor) searchParams.set('cursor', params.cursor);
       if (params?.limit) searchParams.set('limit', String(params.limit));
+      if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
       const qs = searchParams.toString();
       return get<import('./types').ListResponse<import('./types').Project>>(`/api/v1/projects${qs ? `?${qs}` : ''}`);
     },

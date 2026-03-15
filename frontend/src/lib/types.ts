@@ -407,6 +407,14 @@ export interface ResolvedCredential {
   masked_key?: string;
 }
 
+export interface RepoSummary {
+  repository_id: string;
+  full_name: string;
+  active_session_count: number;
+  latest_session_status: string | null;
+  active_project_count: number;
+}
+
 export interface ListResponse<T> {
   data: T[];
   meta: {

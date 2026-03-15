@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
-import { renderWithProviders, screen, userEvent } from "@/test/test-utils";
+import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { AuthenticatedLayout } from "./authenticated-layout";
+import { http, HttpResponse } from "msw";
+import { server } from "@/test/mocks/server";
 
 const { pushMock, replaceMock, logoutMock } = vi.hoisted(() => ({
   pushMock: vi.fn(),
@@ -95,5 +97,35 @@ describe("AuthenticatedLayout", () => {
     await user.click(await screen.findByRole("menuitem", { name: "Coding Agent" }));
 
     expect(pushMock).toHaveBeenCalledWith("/agent");
+  });
+
+  it("does not show repo context switcher when org has only 1 repo", async () => {
+    server.use(
+      http.get("/api/v1/repositories/summary", () => {
+        return HttpResponse.json({
+          data: [
+            {
+              repository_id: "repo-1",
+              full_name: "acme/api-server",
+              active_session_count: 0,
+              latest_session_status: null,
+              active_project_count: 0,
+            },
+          ],
+          meta: {},
+        });
+      })
+    );
+
+    const { container } = renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
+
+    // Wait for the query to settle, then verify the switcher is NOT rendered
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="repo-context-switcher"]')).not.toBeInTheDocument();
+    });
   });
 });
