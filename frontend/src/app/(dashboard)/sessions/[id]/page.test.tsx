@@ -2,8 +2,9 @@ import { describe, it, expect, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { renderWithProviders, screen } from '@/test/test-utils';
 import { server } from '@/test/mocks/server';
-import { mockSessions } from '@/test/mocks/handlers';
+import { mockSessions, mockMembers } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
+import type { Session, User, SingleResponse, ListResponse } from '@/lib/types';
 
 // Mock next/link to render a plain anchor
 vi.mock('next/link', () => ({
@@ -89,5 +90,35 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
     expect(screen.getByText('Result')).toBeInTheDocument();
+  });
+
+  it('shows triggered by user name when triggered_by_user_id is set', async () => {
+    const sessionWithTrigger: Session = {
+      ...mockSessions[0],
+      triggered_by_user_id: 'user-1',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithTrigger } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/team/members', () => {
+        return HttpResponse.json({
+          data: mockMembers,
+          meta: {},
+        } satisfies ListResponse<User>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    expect(await screen.findByText('Triggered by')).toBeInTheDocument();
+    expect(screen.getByText('Alice Smith')).toBeInTheDocument();
+  });
+
+  it('does not show triggered by when triggered_by_user_id is not set', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    expect(screen.queryByText('Triggered by')).not.toBeInTheDocument();
   });
 });
