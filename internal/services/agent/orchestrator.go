@@ -541,7 +541,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 
 	// 4. Create sandbox and restore snapshot.
 	sandboxCfg := DefaultSandboxConfig()
-	sandboxCfg.Env = o.resolveAgentEnv(ctx, session.OrgID, session.AgentType)
+	sandboxCfg.Env = o.resolveAgentEnv(ctx, session.OrgID, session.AgentType, session.TriggeredByUserID)
 	if sandboxCfg.Env == nil {
 		sandboxCfg.Env = make(map[string]string)
 	}
