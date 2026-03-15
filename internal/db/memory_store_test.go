@@ -304,11 +304,13 @@ func TestMemoryStore_IncrementOccurrence_PromotesAtTwo(t *testing.T) {
 		)
 
 	// Step 2: Expect insert of new row with occurrence_count=2 and auto-promoted status='active'
+	// 12 named args: org_id, repo, rule, category, source_comment_ids, occurrence_count,
+	// status, manually_curated, scope, source, times_reinforced, file_patterns
+	// (active=true and last_used_at=now() are hardcoded in the query)
 	mock.ExpectExec("INSERT INTO memories").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	// Transaction: Commit
