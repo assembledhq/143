@@ -162,6 +162,48 @@ func (s *RepositoryStore) DisconnectByInstallationID(ctx context.Context, instal
 	return err
 }
 
+// RepoSummary contains aggregated counts for the repo context switcher.
+type RepoSummary struct {
+	RepositoryID        uuid.UUID `db:"repository_id"`
+	FullName            string    `db:"full_name"`
+	ActiveSessionCount  int       `db:"active_session_count"`
+	LatestSessionStatus *string   `db:"latest_session_status"`
+	ActiveProjectCount  int       `db:"active_project_count"`
+}
+
+func (s *RepositoryStore) GetSummary(ctx context.Context, orgID uuid.UUID) ([]RepoSummary, error) {
+	query := `
+		SELECT
+			r.id AS repository_id,
+			r.full_name,
+			COUNT(DISTINCT s.id) FILTER (
+				WHERE s.status IN ('running', 'pending', 'needs_human_guidance', 'awaiting_input')
+			) AS active_session_count,
+			latest_s.status AS latest_session_status,
+			COUNT(DISTINCT p.id) FILTER (
+				WHERE p.status IN ('active', 'planning')
+			) AS active_project_count
+		FROM repositories r
+		LEFT JOIN issues i ON i.repository_id = r.id AND i.org_id = r.org_id
+		LEFT JOIN sessions s ON s.issue_id = i.id AND s.org_id = r.org_id
+		LEFT JOIN projects p ON p.repository_id = r.id AND p.org_id = r.org_id
+		LEFT JOIN LATERAL (
+			SELECT s2.status FROM sessions s2
+			JOIN issues i2 ON s2.issue_id = i2.id
+			WHERE i2.repository_id = r.id AND s2.org_id = r.org_id
+			ORDER BY s2.created_at DESC LIMIT 1
+		) latest_s ON true
+		WHERE r.org_id = @org_id AND r.status = 'active'
+		GROUP BY r.id, r.full_name, latest_s.status
+		ORDER BY active_session_count DESC, r.full_name ASC`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID})
+	if err != nil {
+		return nil, fmt.Errorf("query repository summary: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[RepoSummary])
+}
+
 func (s *RepositoryStore) DisconnectByGitHubID(ctx context.Context, installationID, githubID int64) error {
 	query := `
 		UPDATE repositories

@@ -224,14 +224,15 @@ const columns: ColumnDef<Project>[] = [
 export function ProjectsPageContent() {
   const router = useRouter();
   const [statusFilter, setStatusFilter] = useQueryState("status", parseAsString);
+  const [repo] = useQueryState("repo");
   const [sorting, setSorting] = useState<SortingState>([]);
 
   const isScheduledFilter = statusFilter === "scheduled";
   const apiStatus = statusFilter && statusFilter !== "all" && !isScheduledFilter ? statusFilter : undefined;
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["projects", apiStatus],
-    queryFn: () => api.projects.list({ status: apiStatus }),
+    queryKey: ["projects", apiStatus, repo],
+    queryFn: () => api.projects.list({ status: apiStatus, repository_id: repo ?? undefined }),
     refetchInterval: 10000,
   });
 

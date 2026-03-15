@@ -21,9 +21,10 @@ func NewProjectStore(db DBTX) *ProjectStore {
 }
 
 type ProjectFilters struct {
-	Status string
-	Limit  int
-	Cursor string
+	Status       string
+	Limit        int
+	Cursor       string
+	RepositoryID uuid.UUID
 }
 
 // projectColumns is the column list shared across all project queries.
@@ -187,6 +188,10 @@ func (s *ProjectStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters P
 	if filters.Status != "" {
 		query += ` AND status = @status`
 		args["status"] = filters.Status
+	}
+	if filters.RepositoryID != uuid.Nil {
+		query += ` AND repository_id = @repository_id`
+		args["repository_id"] = filters.RepositoryID
 	}
 	if filters.Cursor != "" {
 		cursorID, err := uuid.Parse(filters.Cursor)
