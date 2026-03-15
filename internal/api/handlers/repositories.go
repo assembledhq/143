@@ -50,15 +50,22 @@ func (h *RepositoryHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 func (h *RepositoryHandler) Summary(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
-	summaries, err := h.repoStore.GetSummary(r.Context(), orgID)
+	dbSummaries, err := h.repoStore.GetSummary(r.Context(), orgID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "SUMMARY_FAILED", "failed to get repository summary")
 		return
 	}
-	if summaries == nil {
-		summaries = []db.RepoSummary{}
+	summaries := make([]models.RepoSummary, len(dbSummaries))
+	for i, s := range dbSummaries {
+		summaries[i] = models.RepoSummary{
+			RepositoryID:        s.RepositoryID,
+			FullName:            s.FullName,
+			ActiveSessionCount:  s.ActiveSessionCount,
+			LatestSessionStatus: s.LatestSessionStatus,
+			ActiveProjectCount:  s.ActiveProjectCount,
+		}
 	}
-	writeJSON(w, http.StatusOK, models.ListResponse[db.RepoSummary]{Data: summaries})
+	writeJSON(w, http.StatusOK, models.ListResponse[models.RepoSummary]{Data: summaries})
 }
 
 func (h *RepositoryHandler) Update(w http.ResponseWriter, r *http.Request) {

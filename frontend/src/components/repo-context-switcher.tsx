@@ -94,13 +94,17 @@ export function RepoContextSwitcher() {
             />
           </div>
         )}
-        <DropdownMenuItem
-          onClick={() => setRepo(null)}
-          className={cn(!repo && "font-medium")}
-        >
-          All repositories
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
+        {!search && (
+          <>
+            <DropdownMenuItem
+              onClick={() => setRepo(null)}
+              className={cn(!repo && "font-medium")}
+            >
+              All repositories
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+          </>
+        )}
         {filtered.map((r) => (
           <DropdownMenuItem
             key={r.repository_id}

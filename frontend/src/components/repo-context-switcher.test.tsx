@@ -141,6 +141,9 @@ describe("RepoContextSwitcher", () => {
     await waitFor(() => {
       expect(screen.getByText("acme/mobile-app")).toBeInTheDocument();
       expect(screen.queryByText("acme/api-server")).not.toBeInTheDocument();
+      // "All repositories" menu item is hidden during search (only the trigger label remains)
+      const allReposElements = screen.getAllByText("All repositories");
+      expect(allReposElements).toHaveLength(1); // only the trigger, not the menu item
     });
   });
 

@@ -312,7 +312,7 @@ func TestRepositoryHandler_Summary(t *testing.T) {
 			handler.Summary(w, req)
 			require.Equal(t, tt.expectedCode, w.Code, "should return expected status code")
 
-			var resp models.ListResponse[db.RepoSummary]
+			var resp models.ListResponse[models.RepoSummary]
 			err = json.Unmarshal(w.Body.Bytes(), &resp)
 			require.NoError(t, err, "response body should be valid JSON")
 			require.Equal(t, tt.expectedLen, len(resp.Data), "should return expected number of summaries")
