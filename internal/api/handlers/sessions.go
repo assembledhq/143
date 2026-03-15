@@ -136,7 +136,11 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "DEFAULT_AGENT_LOOKUP_FAILED", "failed to load organization settings")
 			return
 		}
-		agentType = models.ParseOrgSettings(org.Settings).DefaultAgentType
+		orgSettings, parseErr := models.ParseOrgSettings(org.Settings)
+		if parseErr != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(parseErr).Msg("failed to parse org settings, using defaults")
+		}
+		agentType = orgSettings.DefaultAgentType
 		if agentType == "" {
 			agentType = models.DefaultDefaultAgentType
 		}
@@ -461,7 +465,11 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "DEFAULT_AGENT_LOOKUP_FAILED", "failed to load organization settings")
 			return
 		}
-		agentType = models.ParseOrgSettings(org.Settings).DefaultAgentType
+		orgSettings, parseErr := models.ParseOrgSettings(org.Settings)
+		if parseErr != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(parseErr).Msg("failed to parse org settings, using defaults")
+		}
+		agentType = orgSettings.DefaultAgentType
 		if agentType == "" {
 			agentType = models.DefaultDefaultAgentType
 		}

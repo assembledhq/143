@@ -35,11 +35,17 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 	if err != nil {
 		return nil, err
 	}
-	settings := models.ParseOrgSettings(org.Settings)
+	settings, parseErr := models.ParseOrgSettings(org.Settings)
+	if parseErr != nil {
+		return nil, fmt.Errorf("parse org settings: %w", parseErr)
+	}
 
 	// Apply repo-level PM overrides when running for a specific repository.
 	if repo != nil {
-		repoSettings := models.ParseRepoSettings(repo.Settings)
+		repoSettings, repoParseErr := models.ParseRepoSettings(repo.Settings)
+		if repoParseErr != nil {
+			return nil, fmt.Errorf("parse repo settings: %w", repoParseErr)
+		}
 		settings = models.MergeRepoPMSettings(settings, repoSettings)
 	}
 

@@ -11,6 +11,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 )
 
 type ProjectHandler struct {
@@ -584,7 +585,9 @@ func (h *ProjectHandler) CreateTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Update project progress counts
-	_ = h.projectStore.UpdateProgress(r.Context(), orgID, projectID)
+	if err := h.projectStore.UpdateProgress(r.Context(), orgID, projectID); err != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to update project progress")
+	}
 
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.ProjectTask]{Data: task})
 }
@@ -651,7 +654,9 @@ func (h *ProjectHandler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = h.projectStore.UpdateProgress(r.Context(), orgID, task.ProjectID)
+	if err := h.projectStore.UpdateProgress(r.Context(), orgID, task.ProjectID); err != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to update project progress")
+	}
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.ProjectTask]{Data: task})
 }
@@ -684,7 +689,9 @@ func (h *ProjectHandler) DeleteTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = h.projectStore.UpdateProgress(r.Context(), orgID, task.ProjectID)
+	if err := h.projectStore.UpdateProgress(r.Context(), orgID, task.ProjectID); err != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to update project progress")
+	}
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -725,7 +732,9 @@ func (h *ProjectHandler) RetryTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = h.projectStore.UpdateProgress(r.Context(), orgID, task.ProjectID)
+	if err := h.projectStore.UpdateProgress(r.Context(), orgID, task.ProjectID); err != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to update project progress")
+	}
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.ProjectTask]{Data: task})
 }

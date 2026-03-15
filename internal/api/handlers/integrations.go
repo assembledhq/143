@@ -14,6 +14,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 )
 
 const (
@@ -515,10 +516,17 @@ func (h *IntegrationHandler) HandleGitHubAppInstalled(w http.ResponseWriter, r *
 	if installIDStr := r.URL.Query().Get("installation_id"); installIDStr != "" {
 		installationID, parseErr := strconv.ParseInt(installIDStr, 10, 64)
 		if parseErr == nil {
-			configJSON, _ := json.Marshal(map[string]any{
+			configJSON, marshalErr := json.Marshal(map[string]any{
 				"installation_id": installationID,
 			})
-			_ = h.integrationStore.UpdateConfig(ctx, orgID, integration.ID, configJSON)
+			if marshalErr != nil {
+				zerolog.Ctx(r.Context()).Warn().Err(marshalErr).Msg("failed to marshal installation config")
+				http.Redirect(w, r, h.frontendURL+"/integrations?github=connected", http.StatusTemporaryRedirect)
+				return
+			}
+			if err := h.integrationStore.UpdateConfig(ctx, orgID, integration.ID, configJSON); err != nil {
+				zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to update integration config")
+			}
 
 			// Fetch and upsert repos from the GitHub API.
 			if h.githubService != nil && h.repoStore != nil {
@@ -563,7 +571,10 @@ func (h *IntegrationHandler) syncInstallationRepos(ctx context.Context, orgID uu
 		if repo.CloneURL == "" {
 			repo.CloneURL = "https://github.com/" + ghRepo.FullName + ".git"
 		}
-		_ = h.repoStore.UpsertFromGitHub(ctx, repo)
+		if err := h.repoStore.UpsertFromGitHub(ctx, repo); err != nil {
+			zerolog.Ctx(ctx).Warn().Err(err).Str("repo", ghRepo.FullName).Msg("failed to upsert repo from GitHub")
+			continue
+		}
 	}
 }
 

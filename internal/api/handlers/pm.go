@@ -11,6 +11,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 )
 
 type PMHandler struct {
@@ -187,7 +188,10 @@ func (h *PMHandler) Status(w http.ResponseWriter, r *http.Request) {
 		if h.orgStore != nil {
 			org, err := h.orgStore.GetByID(r.Context(), orgID)
 			if err == nil {
-				settings := models.ParseOrgSettings(org.Settings)
+				settings, parseErr := models.ParseOrgSettings(org.Settings)
+				if parseErr != nil {
+					zerolog.Ctx(r.Context()).Warn().Err(parseErr).Msg("failed to parse org settings, using defaults")
+				}
 				scheduleHours = settings.PMScheduleHours
 			}
 		}

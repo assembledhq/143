@@ -14,7 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/rs/zerolog/log"
+	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/models"
@@ -190,7 +190,9 @@ func (h *TeamHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Invalidate all sessions for the removed user.
-	_ = h.sessions.DeleteByUserID(r.Context(), memberID)
+	if err := h.sessions.DeleteByUserID(r.Context(), memberID); err != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to delete sessions for removed user")
+	}
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -259,7 +261,7 @@ func (h *TeamHandler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 
 	// Log the invitation link to console (SMTP delivery is future work).
 	acceptURL := h.frontendURL + "/invite/accept?token=" + token
-	log.Info().
+	zerolog.Ctx(r.Context()).Info().
 		Str("email", body.Email).
 		Str("role", body.Role).
 		Str("accept_url", acceptURL).

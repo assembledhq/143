@@ -65,7 +65,11 @@ func RunCLI(ctx context.Context, tr *ToolRegistry, args []string, stdout, stderr
 	}
 
 	// Dispatch to the integration layer.
-	rawJSON, _ := json.Marshal(argsJSON)
+	rawJSON, err := json.Marshal(argsJSON)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: failed to marshal arguments: %s\n", err)
+		return 1
+	}
 	result := tr.CallTool(ctx, toolName, rawJSON)
 
 	// Print output.

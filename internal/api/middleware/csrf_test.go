@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -179,7 +180,7 @@ func TestCSRF(t *testing.T) {
 				signingKey = ""
 			}
 
-			handler := CSRF(signingKey)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handler := CSRF(signingKey, zerolog.Nop())(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusOK)
 			}))
 
