@@ -18,7 +18,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestReviewPatternHandler_ListByRepo_Success(t *testing.T) {
+var memoryColumns = []string{
+	"id", "org_id", "repo", "rule", "category", "source_comment_ids",
+	"occurrence_count", "status", "manually_curated", "active",
+	"scope", "source", "last_used_at", "times_reinforced", "file_patterns", "created_at",
+}
+
+func TestMemoryHandler_ListByRepo_Success(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -26,27 +32,25 @@ func TestReviewPatternHandler_ListByRepo_Success(t *testing.T) {
 	defer mock.Close()
 
 	orgID := uuid.New()
-	patternID := uuid.New()
+	memoryID := uuid.New()
 	createdAt := time.Now()
 	sourceCommentID := uuid.New()
 
-	mock.ExpectQuery("SELECT .+ FROM review_patterns WHERE org_id").
+	mock.ExpectQuery("SELECT .+ FROM memories WHERE org_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows([]string{
-				"id", "org_id", "repo", "rule", "category", "source_comment_ids",
-				"occurrence_count", "status", "manually_curated", "active", "created_at",
-			}).AddRow(
-				patternID, orgID, "org/repo", "Check nil pointers", "bug_risk", []uuid.UUID{sourceCommentID},
-				3, "active", false, true, createdAt,
+			pgxmock.NewRows(memoryColumns).AddRow(
+				memoryID, orgID, "org/repo", "Check nil pointers", "bug_risk", []uuid.UUID{sourceCommentID},
+				3, "active", false, true,
+				"repo", "review", &createdAt, 3, []string(nil), createdAt,
 			),
 		)
 
-	patternStore := db.NewReviewPatternStore(mock)
+	memoryStore := db.NewMemoryStore(mock)
 	commentStore := db.NewReviewCommentStore(mock)
-	handler := NewReviewPatternHandler(patternStore, commentStore)
+	handler := NewMemoryHandler(memoryStore, commentStore)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/review/patterns/org/repo", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/memories/org/repo", nil)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("*", "org/repo")
 	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
@@ -57,15 +61,15 @@ func TestReviewPatternHandler_ListByRepo_Success(t *testing.T) {
 	handler.ListByRepo(w, req)
 	require.Equal(t, http.StatusOK, w.Code, "should return 200")
 
-	var resp models.ListResponse[models.ReviewPattern]
+	var resp models.ListResponse[models.Memory]
 	err = json.Unmarshal(w.Body.Bytes(), &resp)
 	require.NoError(t, err, "response body should be valid JSON")
-	require.Equal(t, 1, len(resp.Data), "should return one pattern")
+	require.Equal(t, 1, len(resp.Data), "should return one memory")
 	require.Equal(t, "Check nil pointers", resp.Data[0].Rule)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestReviewPatternHandler_ListByRepo_MissingRepo(t *testing.T) {
+func TestMemoryHandler_ListByRepo_MissingRepo(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -73,11 +77,11 @@ func TestReviewPatternHandler_ListByRepo_MissingRepo(t *testing.T) {
 	defer mock.Close()
 
 	orgID := uuid.New()
-	patternStore := db.NewReviewPatternStore(mock)
+	memoryStore := db.NewMemoryStore(mock)
 	commentStore := db.NewReviewCommentStore(mock)
-	handler := NewReviewPatternHandler(patternStore, commentStore)
+	handler := NewMemoryHandler(memoryStore, commentStore)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/review/patterns/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/memories/", nil)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("*", "")
 	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
@@ -90,7 +94,7 @@ func TestReviewPatternHandler_ListByRepo_MissingRepo(t *testing.T) {
 	require.Contains(t, w.Body.String(), "MISSING_REPO")
 }
 
-func TestReviewPatternHandler_ListComments_Success(t *testing.T) {
+func TestMemoryHandler_ListComments_Success(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -116,9 +120,9 @@ func TestReviewPatternHandler_ListComments_Success(t *testing.T) {
 			),
 		)
 
-	patternStore := db.NewReviewPatternStore(mock)
+	memoryStore := db.NewMemoryStore(mock)
 	commentStore := db.NewReviewCommentStore(mock)
-	handler := NewReviewPatternHandler(patternStore, commentStore)
+	handler := NewMemoryHandler(memoryStore, commentStore)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/review/comments", nil)
 	ctx := middleware.WithOrgID(req.Context(), orgID)
@@ -135,7 +139,7 @@ func TestReviewPatternHandler_ListComments_Success(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestReviewPatternHandler_UpdateStatus_InvalidID(t *testing.T) {
+func TestMemoryHandler_UpdateStatus_InvalidID(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -143,11 +147,11 @@ func TestReviewPatternHandler_UpdateStatus_InvalidID(t *testing.T) {
 	defer mock.Close()
 
 	orgID := uuid.New()
-	patternStore := db.NewReviewPatternStore(mock)
+	memoryStore := db.NewMemoryStore(mock)
 	commentStore := db.NewReviewCommentStore(mock)
-	handler := NewReviewPatternHandler(patternStore, commentStore)
+	handler := NewMemoryHandler(memoryStore, commentStore)
 
-	req := httptest.NewRequest(http.MethodPatch, "/api/v1/review/patterns/bad-id/status", strings.NewReader(`{"status":"active"}`))
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/memories/bad-id/status", strings.NewReader(`{"status":"active"}`))
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", "bad-id")
 	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
@@ -160,7 +164,7 @@ func TestReviewPatternHandler_UpdateStatus_InvalidID(t *testing.T) {
 	require.Contains(t, w.Body.String(), "INVALID_ID")
 }
 
-func TestReviewPatternHandler_UpdateStatus_InvalidStatus(t *testing.T) {
+func TestMemoryHandler_UpdateStatus_InvalidStatus(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -168,14 +172,14 @@ func TestReviewPatternHandler_UpdateStatus_InvalidStatus(t *testing.T) {
 	defer mock.Close()
 
 	orgID := uuid.New()
-	patternID := uuid.New()
-	patternStore := db.NewReviewPatternStore(mock)
+	memoryID := uuid.New()
+	memoryStore := db.NewMemoryStore(mock)
 	commentStore := db.NewReviewCommentStore(mock)
-	handler := NewReviewPatternHandler(patternStore, commentStore)
+	handler := NewMemoryHandler(memoryStore, commentStore)
 
-	req := httptest.NewRequest(http.MethodPatch, "/api/v1/review/patterns/"+patternID.String()+"/status", strings.NewReader(`{"status":"invalid"}`))
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/memories/"+memoryID.String()+"/status", strings.NewReader(`{"status":"invalid"}`))
 	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("id", patternID.String())
+	rctx.URLParams.Add("id", memoryID.String())
 	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
 	ctx = middleware.WithOrgID(ctx, orgID)
 	req = req.WithContext(ctx)
@@ -186,7 +190,7 @@ func TestReviewPatternHandler_UpdateStatus_InvalidStatus(t *testing.T) {
 	require.Contains(t, w.Body.String(), "INVALID_STATUS")
 }
 
-func TestReviewPatternHandler_UpdateRule_MissingRule(t *testing.T) {
+func TestMemoryHandler_UpdateRule_MissingRule(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -194,14 +198,14 @@ func TestReviewPatternHandler_UpdateRule_MissingRule(t *testing.T) {
 	defer mock.Close()
 
 	orgID := uuid.New()
-	patternID := uuid.New()
-	patternStore := db.NewReviewPatternStore(mock)
+	memoryID := uuid.New()
+	memoryStore := db.NewMemoryStore(mock)
 	commentStore := db.NewReviewCommentStore(mock)
-	handler := NewReviewPatternHandler(patternStore, commentStore)
+	handler := NewMemoryHandler(memoryStore, commentStore)
 
-	req := httptest.NewRequest(http.MethodPatch, "/api/v1/review/patterns/"+patternID.String()+"/rule", strings.NewReader(`{"rule":""}`))
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/memories/"+memoryID.String()+"/rule", strings.NewReader(`{"rule":""}`))
 	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("id", patternID.String())
+	rctx.URLParams.Add("id", memoryID.String())
 	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
 	ctx = middleware.WithOrgID(ctx, orgID)
 	req = req.WithContext(ctx)
@@ -212,32 +216,32 @@ func TestReviewPatternHandler_UpdateRule_MissingRule(t *testing.T) {
 	require.Contains(t, w.Body.String(), "MISSING_RULE")
 }
 
-func TestReviewPatternHandler_UpdateEndpointsReturnNewActivePattern(t *testing.T) {
+func TestMemoryHandler_UpdateEndpointsReturnNewActiveMemory(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name      string
 		reqBody   string
-		setupPath func(patternID string) string
-		call      func(handler *ReviewPatternHandler, w *httptest.ResponseRecorder, req *http.Request)
+		setupPath func(memoryID string) string
+		call      func(handler *MemoryHandler, w *httptest.ResponseRecorder, req *http.Request)
 	}{
 		{
 			name:    "UpdateStatus returns inserted active version",
 			reqBody: `{"status":"dismissed"}`,
-			setupPath: func(patternID string) string {
-				return "/api/v1/review/patterns/" + patternID + "/status"
+			setupPath: func(memoryID string) string {
+				return "/api/v1/memories/" + memoryID + "/status"
 			},
-			call: func(handler *ReviewPatternHandler, w *httptest.ResponseRecorder, req *http.Request) {
+			call: func(handler *MemoryHandler, w *httptest.ResponseRecorder, req *http.Request) {
 				handler.UpdateStatus(w, req)
 			},
 		},
 		{
 			name:    "UpdateRule returns inserted active version",
 			reqBody: `{"rule":"Always check nil before dereference"}`,
-			setupPath: func(patternID string) string {
-				return "/api/v1/review/patterns/" + patternID + "/rule"
+			setupPath: func(memoryID string) string {
+				return "/api/v1/memories/" + memoryID + "/rule"
 			},
-			call: func(handler *ReviewPatternHandler, w *httptest.ResponseRecorder, req *http.Request) {
+			call: func(handler *MemoryHandler, w *httptest.ResponseRecorder, req *http.Request) {
 				handler.UpdateRule(w, req)
 			},
 		},
@@ -252,41 +256,44 @@ func TestReviewPatternHandler_UpdateEndpointsReturnNewActivePattern(t *testing.T
 			defer mock.Close()
 
 			orgID := uuid.New()
-			patternID := uuid.New()
+			memoryID := uuid.New()
 			insertedID := uuid.New()
 			createdAt := time.Now()
 			sourceCommentID := uuid.New()
 
 			mock.ExpectBegin()
-			mock.ExpectQuery("UPDATE review_patterns SET active = false WHERE id .+ AND org_id .+ AND active = true RETURNING").
+			mock.ExpectQuery("UPDATE memories SET active = false WHERE id .+ AND org_id .+ AND active = true RETURNING").
 				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 				WillReturnRows(
 					pgxmock.NewRows([]string{
 						"org_id", "repo", "rule", "category", "source_comment_ids",
 						"occurrence_count", "status", "manually_curated",
-					}).AddRow(orgID, "org/repo", "Original rule", "nit", []uuid.UUID{sourceCommentID}, 1, "candidate", false),
+						"scope", "source", "last_used_at", "times_reinforced", "file_patterns",
+					}).AddRow(orgID, "org/repo", "Original rule", "nit", []uuid.UUID{sourceCommentID}, 1, "candidate", false,
+						"repo", "review", &createdAt, 0, []string(nil)),
 				)
-			mock.ExpectQuery("INSERT INTO review_patterns").
-				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			mock.ExpectQuery("INSERT INTO memories").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+					pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+					pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+					pgxmock.AnyArg()).
 				WillReturnRows(
-					pgxmock.NewRows([]string{
-						"id", "org_id", "repo", "rule", "category", "source_comment_ids",
-						"occurrence_count", "status", "manually_curated", "active", "created_at",
-					}).AddRow(
+					pgxmock.NewRows(memoryColumns).AddRow(
 						insertedID, orgID, "org/repo", "Always check nil before dereference", "nit", []uuid.UUID{sourceCommentID},
-						1, "dismissed", true, true, createdAt,
+						1, "dismissed", true, true,
+						"repo", "review", &createdAt, 0, []string(nil), createdAt,
 					),
 				)
 			mock.ExpectCommit()
 
-			patternStore := db.NewReviewPatternStore(mock)
+			memoryStore := db.NewMemoryStore(mock)
 			commentStore := db.NewReviewCommentStore(mock)
-			handler := NewReviewPatternHandler(patternStore, commentStore)
+			handler := NewMemoryHandler(memoryStore, commentStore)
 
-			path := tt.setupPath(patternID.String())
+			path := tt.setupPath(memoryID.String())
 			req := httptest.NewRequest(http.MethodPatch, path, strings.NewReader(tt.reqBody))
 			rctx := chi.NewRouteContext()
-			rctx.URLParams.Add("id", patternID.String())
+			rctx.URLParams.Add("id", memoryID.String())
 			ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
 			ctx = middleware.WithOrgID(ctx, orgID)
 			req = req.WithContext(ctx)
@@ -295,12 +302,12 @@ func TestReviewPatternHandler_UpdateEndpointsReturnNewActivePattern(t *testing.T
 			tt.call(handler, w, req)
 			require.Equal(t, http.StatusOK, w.Code, "update endpoint should return status 200")
 
-			var resp models.SingleResponse[models.ReviewPattern]
+			var resp models.SingleResponse[models.Memory]
 			err = json.Unmarshal(w.Body.Bytes(), &resp)
-			require.NoError(t, err, "update endpoint should return a single review pattern response body")
-			require.Equal(t, insertedID, resp.Data.ID, "update endpoint should return the newly inserted pattern ID")
+			require.NoError(t, err, "update endpoint should return a single memory response body")
+			require.Equal(t, insertedID, resp.Data.ID, "update endpoint should return the newly inserted memory ID")
 			require.Equal(t, orgID, resp.Data.OrgID, "update endpoint should return the same org ID")
-			require.True(t, resp.Data.Active, "update endpoint should return the new active pattern version")
+			require.True(t, resp.Data.Active, "update endpoint should return the new active memory version")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
