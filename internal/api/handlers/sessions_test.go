@@ -1304,6 +1304,7 @@ func TestSessionHandler_EndSession_EnqueuesValidation(t *testing.T) {
 				nil, nil, nil, nil, nil,
 				nil, nil, nil,
 				nil, nil,
+				nil, // triggered_by_user_id
 				nil, 1, &now, "snapshotted", stringPtr("snapshots/test.tar"),
 				now,
 			),

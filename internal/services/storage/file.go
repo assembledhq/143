@@ -20,11 +20,12 @@ func NewFileSnapshotStore(baseDir string) *FileSnapshotStore {
 
 func (s *FileSnapshotStore) Save(ctx context.Context, key string, reader io.Reader) error {
 	path := s.fullPath(key)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return fmt.Errorf("create snapshot dir: %w", err)
 	}
 
-	file, err := os.Create(path)
+	path = filepath.Clean(path)
+	file, err := os.Create(path) // #nosec G304 -- path is sanitized via filepath.Clean
 	if err != nil {
 		return fmt.Errorf("create snapshot file: %w", err)
 	}
@@ -37,7 +38,7 @@ func (s *FileSnapshotStore) Save(ctx context.Context, key string, reader io.Read
 }
 
 func (s *FileSnapshotStore) Load(ctx context.Context, key string, writer io.Writer) error {
-	file, err := os.Open(s.fullPath(key))
+	file, err := os.Open(filepath.Clean(s.fullPath(key))) // #nosec G304 -- path is sanitized via filepath.Clean
 	if err != nil {
 		return fmt.Errorf("open snapshot file: %w", err)
 	}

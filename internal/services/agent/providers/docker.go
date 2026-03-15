@@ -373,7 +373,7 @@ func (d *DockerProvider) Restore(ctx context.Context, sb *agent.Sandbox, reader 
 	if _, err := io.Copy(attachResp.Conn, reader); err != nil {
 		return fmt.Errorf("write snapshot to container: %w", err)
 	}
-	attachResp.CloseWrite()
+	_ = attachResp.CloseWrite()
 
 	// Drain stdout/stderr so the exec process can finish writing.
 	// Without this, the process may block on a full output buffer.

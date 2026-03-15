@@ -573,12 +573,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	go func() {
 		defer restoreWg.Done()
 		restoreErr = o.snapshots.Load(ctx, *session.SnapshotKey, snapshotWriter)
-		snapshotWriter.Close()
+		_ = snapshotWriter.Close()
 	}()
 
 	if err := o.provider.Restore(ctx, sandbox, snapshotReader); err != nil {
 		// Close the reader to unblock the goroutine writing to the pipe.
-		snapshotReader.Close()
+		_ = snapshotReader.Close()
 		restoreWg.Wait()
 		o.failRun(ctx, session, fmt.Sprintf("restore snapshot: %s", err))
 		return fmt.Errorf("restore snapshot: %w", err)

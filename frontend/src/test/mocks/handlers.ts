@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import type { Issue, Session, SessionLog, User, Validation, PullRequest, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, ProjectDetail } from '@/lib/types';
+import type { Issue, Session, SessionLog, SessionMessage, User, Validation, PullRequest, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, ProjectDetail } from '@/lib/types';
 
 export const mockIssues: Issue[] = [
   {
@@ -202,6 +202,34 @@ export const handlers = [
 
   http.get('/api/v1/sessions/:id/pr', () => {
     return HttpResponse.json({ data: mockPR } satisfies SingleResponse<PullRequest>);
+  }),
+
+  http.get('/api/v1/sessions/:id/messages', () => {
+    return HttpResponse.json({
+      data: [] as SessionMessage[],
+      meta: {},
+    } satisfies ListResponse<SessionMessage>);
+  }),
+
+  http.post('/api/v1/sessions/:id/messages', () => {
+    return HttpResponse.json({
+      data: {
+        id: 1,
+        session_id: 'session-abcdef12-3456-7890',
+        org_id: 'org-1',
+        user_id: 'user-1',
+        turn_number: 1,
+        role: 'user' as const,
+        content: 'test message',
+        created_at: '2026-02-17T07:10:00Z',
+      },
+    } satisfies SingleResponse<SessionMessage>);
+  }),
+
+  http.post('/api/v1/sessions/:id/end', () => {
+    return HttpResponse.json({
+      data: { ...mockSessions[0], status: 'completed' },
+    } satisfies SingleResponse<Session>);
   }),
 
   http.get('/api/v1/sessions/:id/questions', () => {
