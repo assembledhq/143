@@ -250,17 +250,18 @@ func TestRepositoryHandler_Update(t *testing.T) {
 func TestRepositoryHandler_Summary(t *testing.T) {
 	t.Parallel()
 
+	repoID := uuid.MustParse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+	latestStatus := "running"
+
 	tests := []struct {
 		name         string
 		setupMock    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID)
 		expectedCode int
-		expectedLen  int
+		expected     []models.RepoSummary
 	}{
 		{
 			name: "returns summary successfully",
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
-				repoID := uuid.New()
-				latestStatus := "running"
 				cols := []string{
 					"repository_id", "full_name", "active_session_count",
 					"latest_session_status", "active_project_count",
@@ -272,7 +273,15 @@ func TestRepositoryHandler_Summary(t *testing.T) {
 					)
 			},
 			expectedCode: http.StatusOK,
-			expectedLen:  1,
+			expected: []models.RepoSummary{
+				{
+					RepositoryID:        repoID,
+					FullName:            "org/repo",
+					ActiveSessionCount:  2,
+					LatestSessionStatus: &latestStatus,
+					ActiveProjectCount:  1,
+				},
+			},
 		},
 		{
 			name: "returns empty list when no repositories",
@@ -286,7 +295,7 @@ func TestRepositoryHandler_Summary(t *testing.T) {
 					WillReturnRows(pgxmock.NewRows(cols))
 			},
 			expectedCode: http.StatusOK,
-			expectedLen:  0,
+			expected:     []models.RepoSummary{},
 		},
 	}
 
@@ -315,7 +324,7 @@ func TestRepositoryHandler_Summary(t *testing.T) {
 			var resp models.ListResponse[models.RepoSummary]
 			err = json.Unmarshal(w.Body.Bytes(), &resp)
 			require.NoError(t, err, "response body should be valid JSON")
-			require.Equal(t, tt.expectedLen, len(resp.Data), "should return expected number of summaries")
+			require.Equal(t, tt.expected, resp.Data, "should return expected summaries")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}

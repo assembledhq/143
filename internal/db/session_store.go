@@ -44,7 +44,7 @@ func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters S
 		WHERE org_id = @org_id`
 
 	if filters.RepositoryID != uuid.Nil {
-		query += ` AND issue_id IN (SELECT id FROM issues WHERE repository_id = @repository_id)`
+		query += ` AND issue_id IN (SELECT id FROM issues WHERE repository_id = @repository_id AND org_id = @org_id)`
 		args["repository_id"] = filters.RepositoryID
 	}
 

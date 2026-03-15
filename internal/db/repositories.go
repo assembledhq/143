@@ -184,8 +184,8 @@ func (s *RepositoryStore) GetSummary(ctx context.Context, orgID uuid.UUID) ([]Re
 				WHERE p.status IN ('active', 'planning')
 			) AS active_project_count
 		FROM repositories r
-		LEFT JOIN issues i ON i.repository_id = r.id
-		LEFT JOIN sessions s ON s.issue_id = i.id
+		LEFT JOIN issues i ON i.repository_id = r.id AND i.org_id = r.org_id
+		LEFT JOIN sessions s ON s.issue_id = i.id AND s.org_id = r.org_id
 		LEFT JOIN projects p ON p.repository_id = r.id AND p.org_id = r.org_id
 		LEFT JOIN LATERAL (
 			SELECT s2.status FROM sessions s2

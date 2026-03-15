@@ -9,6 +9,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 )
 
 type RepositoryHandler struct {
@@ -52,6 +53,7 @@ func (h *RepositoryHandler) Summary(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	dbSummaries, err := h.repoStore.GetSummary(r.Context(), orgID)
 	if err != nil {
+		zerolog.Ctx(r.Context()).Error().Err(err).Msg("failed to get repository summary")
 		writeError(w, http.StatusInternalServerError, "SUMMARY_FAILED", "failed to get repository summary")
 		return
 	}

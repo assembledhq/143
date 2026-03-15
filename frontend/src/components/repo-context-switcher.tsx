@@ -11,13 +11,14 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
 import { useEffect, useState } from "react";
 
 function StatusDot({ status }: { status: string | null }) {
   if (!status) return null;
 
-  if (status === "running") {
+  if (status === "running" || status === "pending") {
     return (
       <span className="relative flex h-2 w-2">
         <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
@@ -84,12 +85,11 @@ export function RepoContextSwitcher() {
       <DropdownMenuContent align="start" className="w-64">
         {showSearch && (
           <div className="px-2 pb-1.5">
-            <input
+            <Input
               type="text"
               placeholder="Search repos..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-[13px] placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
               onClick={(e) => e.stopPropagation()}
             />
           </div>
