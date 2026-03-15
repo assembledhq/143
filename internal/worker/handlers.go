@@ -48,6 +48,9 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, logger zero
 	if services != nil && services.Memory != nil {
 		w.Register("reinforce_memories", newReinforceMemoriesHandler(services, logger))
 	}
+	if stores.AuditLogs != nil && stores.Organizations != nil {
+		w.Register("audit_retention_cleanup", newAuditRetentionCleanupHandler(stores, logger))
+	}
 }
 
 func hasServiceHandlersDependencies(services *Services) bool {
@@ -73,6 +76,8 @@ type Stores struct {
 	Projects            *db.ProjectStore      // nil-safe: projects feature disabled if nil
 	ProjectTasks        *db.ProjectTaskStore  // nil-safe
 	Credentials         *db.OrgCredentialStore // nil-safe: needed for sync_slack
+	AuditLogs           *db.AuditLogStore     // nil-safe: audit retention cleanup
+	Organizations       *db.OrganizationStore // nil-safe: needed for audit retention
 }
 
 // MemoryReinforcer retrieves and reinforces memories for a repo.
@@ -784,6 +789,53 @@ func newReinforceMemoriesHandler(services *Services, logger zerolog.Logger) JobH
 			Msg("reinforcing memories after PR approval")
 
 		return services.Memory.ReinforceMemories(ctx, orgID, memResult.MemoryIDs)
+	}
+}
+
+// audit_retention_cleanup handler deletes audit log entries older than the
+// org-configured retention period using the SECURITY DEFINER function.
+func newAuditRetentionCleanupHandler(stores *Stores, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID string `json:"org_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal audit_retention_cleanup payload: %w", err)
+		}
+
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+
+		org, err := stores.Organizations.GetByID(ctx, orgID)
+		if err != nil {
+			return fmt.Errorf("fetch organization: %w", err)
+		}
+
+		settings, err := models.ParseOrgSettings(org.Settings)
+		if err != nil {
+			logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to parse org settings, using default retention")
+			settings.AuditRetentionDays = models.DefaultAuditRetentionDays
+		}
+
+		retentionDays := settings.AuditRetentionDays
+		if retentionDays <= 0 {
+			retentionDays = models.DefaultAuditRetentionDays
+		}
+
+		deleted, err := stores.AuditLogs.DeleteExpired(ctx, orgID, retentionDays)
+		if err != nil {
+			return fmt.Errorf("delete expired audit logs: %w", err)
+		}
+
+		logger.Info().
+			Str("org_id", orgID.String()).
+			Int("retention_days", retentionDays).
+			Int64("deleted", deleted).
+			Msg("audit retention cleanup complete")
+
+		return nil
 	}
 }
 

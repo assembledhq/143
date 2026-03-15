@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
@@ -30,6 +31,12 @@ type AuthHandler struct {
 	userStore       *db.UserStore
 	sessionStore    *db.AuthSessionStore
 	invitationStore *db.InvitationStore
+	audit           *db.AuditEmitter
+}
+
+// SetAuditEmitter injects the audit emitter for logging auth events.
+func (h *AuthHandler) SetAuditEmitter(audit *db.AuditEmitter) {
+	h.audit = audit
 }
 
 func NewAuthHandler(cfg *config.Config, orgStore *db.OrganizationStore, userStore *db.UserStore, sessionStore *db.AuthSessionStore, invitationStore *db.InvitationStore) *AuthHandler {
@@ -121,6 +128,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "USER_CREATE_FAILED", "failed to create user")
 			return
 		}
+		h.emitAuthEvent(r, user, models.AuditActionAuthRegister)
 		h.createSessionAndRespond(w, r, user)
 		return
 	}
@@ -147,6 +155,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.emitAuthEvent(r, user, models.AuditActionAuthRegister)
 	h.createSessionAndRespond(w, r, user)
 }
 
@@ -179,6 +188,7 @@ func (h *AuthHandler) EmailLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.emitAuthEvent(r, &user, models.AuditActionAuthLogin)
 	h.createSessionAndRespond(w, r, &user)
 }
 
@@ -269,6 +279,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "USER_UPSERT_FAILED", "failed to upsert user")
 			return
 		}
+		h.emitAuthEvent(r, &existingUser, models.AuditActionAuthLogin)
 		h.createSessionAndRedirect(w, r, &existingUser)
 		return
 	}
@@ -279,6 +290,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "LINK_FAILED", "failed to link GitHub account")
 			return
 		}
+		h.emitAuthEvent(r, &emailUser, models.AuditActionAuthLogin)
 		h.createSessionAndRedirect(w, r, &emailUser)
 		return
 	}
@@ -339,6 +351,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "USER_UPSERT_FAILED", "failed to upsert user")
 			return
 		}
+		h.emitAuthEvent(r, createdUser, models.AuditActionAuthRegister)
 		h.createSessionAndRedirect(w, r, createdUser)
 		return
 	}
@@ -348,6 +361,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.emitAuthEvent(r, user, models.AuditActionAuthRegister)
 	h.createSessionAndRedirect(w, r, user)
 }
 
@@ -416,6 +430,7 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Account linking: try Google ID → email → create new
 	if existingUser, googleErr := h.userStore.GetByGoogleID(r.Context(), gUser.Sub); googleErr == nil {
+		h.emitAuthEvent(r, &existingUser, models.AuditActionAuthLogin)
 		h.createSessionAndRedirect(w, r, &existingUser)
 		return
 	}
@@ -425,6 +440,7 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "LINK_FAILED", "failed to link Google account")
 			return
 		}
+		h.emitAuthEvent(r, &emailUser, models.AuditActionAuthLogin)
 		h.createSessionAndRedirect(w, r, &emailUser)
 		return
 	}
@@ -488,6 +504,7 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "USER_UPSERT_FAILED", "failed to upsert user")
 			return
 		}
+		h.emitAuthEvent(r, createdUser, models.AuditActionAuthRegister)
 		h.createSessionAndRedirect(w, r, createdUser)
 		return
 	}
@@ -497,6 +514,7 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.emitAuthEvent(r, user, models.AuditActionAuthRegister)
 	h.createSessionAndRedirect(w, r, user)
 }
 
@@ -528,10 +546,9 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 
 	user := middleware.UserFromContext(r.Context())
 	if user != nil {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "logged out"})
-	} else {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "logged out"})
+		h.emitAuthEvent(r, user, models.AuditActionAuthLogout)
 	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "logged out"})
 }
 
 // --- shared helpers ---
@@ -894,6 +911,32 @@ func (h *AuthHandler) validateInvitationWithStore(ctx context.Context, invitatio
 	}
 
 	return inv, inv.OrgID, inv.Role, nil
+}
+
+// emitAuthEvent emits an audit log entry for an authentication event.
+// It works even before org context middleware runs (e.g., during registration/login).
+func (h *AuthHandler) emitAuthEvent(r *http.Request, user *models.User, action models.AuditAction) {
+	if h.audit == nil || user == nil {
+		return
+	}
+	userIDStr := user.ID.String()
+	params := db.UserActionParams{
+		OrgID:        user.OrgID,
+		UserID:       user.ID,
+		Action:       action,
+		ResourceType: models.AuditResourceUser,
+		ResourceID:   &userIDStr,
+	}
+	if reqID := chiMiddleware.GetReqID(r.Context()); reqID != "" {
+		params.RequestID = &reqID
+	}
+	if ua := r.UserAgent(); ua != "" {
+		params.UserAgent = &ua
+	}
+	if ip := parseClientIP(r); ip != nil {
+		params.IPAddress = ip
+	}
+	h.audit.EmitUserAction(r.Context(), params)
 }
 
 func generateRandomString(n int) (string, error) {

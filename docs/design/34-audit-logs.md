@@ -1,6 +1,6 @@
 # Design: Audit Logs
 
-**Status**: Proposal
+**Status**: Implemented
 **Depends on**: [01-database-schema.md](01-database-schema.md), [02-api-server.md](02-api-server.md)
 
 ---
@@ -50,7 +50,7 @@ We need a production-grade audit log that captures **all significant state chang
 
 ## 3. Schema
 
-### 3.1 Migration: `000019_audit_logs.up.sql`
+### 3.1 Migration: `000021_audit_logs.up.sql`
 
 The new `audit_logs` table replaces the existing `audit_log` table. A migration renames the old table for data preservation, then creates the new one.
 
@@ -130,7 +130,7 @@ CREATE TRIGGER audit_logs_immutable
     EXECUTE FUNCTION prevent_audit_logs_modification();
 ```
 
-### 3.2 Down migration: `000019_audit_logs.down.sql`
+### 3.2 Down migration: `000021_audit_logs.down.sql`
 
 ```sql
 DROP FUNCTION IF EXISTS delete_expired_audit_logs(uuid, int);
@@ -398,10 +398,9 @@ import (
 
 // AuditLog represents an immutable audit trail entry.
 //
-// Note on IPAddress: PostgreSQL's `inet` type includes a netmask, so pgx v5
-// natively scans it into netip.Prefix, not netip.Addr. During implementation,
-// either register a custom pgx type for netip.Addr, or change this field to
-// *netip.Prefix and extract the address via .Addr() where needed.
+// IPAddress uses netip.Prefix because PostgreSQL's inet type includes a netmask
+// and pgx v5 natively scans it into netip.Prefix. Use .Addr() to extract the
+// address when needed.
 type AuditLog struct {
     ID           int64             `db:"id" json:"id"`
     OrgID        uuid.UUID         `db:"org_id" json:"org_id"`
@@ -413,7 +412,7 @@ type AuditLog struct {
     ResourceID   *string           `db:"resource_id" json:"resource_id,omitempty"`
     Details      json.RawMessage   `db:"details" json:"details,omitempty"`
     RequestID    *string           `db:"request_id" json:"request_id,omitempty"`
-    IPAddress    *netip.Addr       `db:"ip_address" json:"ip_address,omitempty"`
+    IPAddress    *netip.Prefix     `db:"ip_address" json:"ip_address,omitempty"`
     UserAgent    *string           `db:"user_agent" json:"user_agent,omitempty"`
     SessionID    *uuid.UUID        `db:"session_id" json:"session_id,omitempty"`
     ProjectID    *uuid.UUID        `db:"project_id" json:"project_id,omitempty"`
@@ -662,11 +661,11 @@ package db
 import (
     "context"
     "encoding/json"
-    "log/slog"
     "net/netip"
 
     "github.com/assembledhq/143/internal/models"
     "github.com/google/uuid"
+    "github.com/rs/zerolog"
 )
 
 // AuditEmitter provides convenience methods for emitting audit log entries.
@@ -674,10 +673,10 @@ import (
 // can treat emission as fire-and-forget without discarding errors silently.
 type AuditEmitter struct {
     store  *AuditLogStore
-    logger *slog.Logger
+    logger zerolog.Logger
 }
 
-func NewAuditEmitter(store *AuditLogStore, logger *slog.Logger) *AuditEmitter {
+func NewAuditEmitter(store *AuditLogStore, logger zerolog.Logger) *AuditEmitter {
     return &AuditEmitter{store: store, logger: logger}
 }
 
@@ -699,11 +698,10 @@ func (e *AuditEmitter) EmitUserAction(ctx context.Context, params UserActionPara
         ProjectID:    params.ProjectID,
     }
     if err := e.store.Create(ctx, entry); err != nil {
-        e.logger.ErrorContext(ctx, "failed to emit audit log",
-            "action", params.Action,
-            "actor_id", params.UserID,
-            "error", err,
-        )
+        e.logger.Error().Err(err).
+            Str("action", string(params.Action)).
+            Str("actor_id", params.UserID.String()).
+            Msg("failed to emit audit log")
     }
 }
 
@@ -715,7 +713,7 @@ type UserActionParams struct {
     ResourceID   *string
     Details      json.RawMessage
     RequestID    *string
-    IPAddress    *netip.Addr
+    IPAddress    *netip.Prefix
     UserAgent    *string
     SessionID    *uuid.UUID
     ProjectID    *uuid.UUID
@@ -735,11 +733,10 @@ func (e *AuditEmitter) EmitSystemAction(ctx context.Context, params SystemAction
         ProjectID:    params.ProjectID,
     }
     if err := e.store.Create(ctx, entry); err != nil {
-        e.logger.ErrorContext(ctx, "failed to emit audit log",
-            "action", params.Action,
-            "actor_id", params.ActorID,
-            "error", err,
-        )
+        e.logger.Error().Err(err).
+            Str("action", string(params.Action)).
+            Str("actor_id", params.ActorID).
+            Msg("failed to emit audit log")
     }
 }
 
@@ -768,11 +765,10 @@ func (e *AuditEmitter) EmitAgentAction(ctx context.Context, params AgentActionPa
         ProjectID:    params.ProjectID,
     }
     if err := e.store.Create(ctx, entry); err != nil {
-        e.logger.ErrorContext(ctx, "failed to emit audit log",
-            "action", params.Action,
-            "actor_id", params.AgentRunID,
-            "error", err,
-        )
+        e.logger.Error().Err(err).
+            Str("action", string(params.Action)).
+            Str("actor_id", params.AgentRunID).
+            Msg("failed to emit audit log")
     }
 }
 
@@ -801,11 +797,10 @@ func (e *AuditEmitter) EmitWebhookAction(ctx context.Context, params WebhookActi
         IPAddress:    params.IPAddress,
     }
     if err := e.store.Create(ctx, entry); err != nil {
-        e.logger.ErrorContext(ctx, "failed to emit audit log",
-            "action", params.Action,
-            "actor_id", params.ProviderName,
-            "error", err,
-        )
+        e.logger.Error().Err(err).
+            Str("action", string(params.Action)).
+            Str("actor_id", params.ProviderName).
+            Msg("failed to emit audit log")
     }
 }
 
@@ -817,7 +812,7 @@ type WebhookActionParams struct {
     ResourceID   *string
     Details      json.RawMessage
     RequestID    *string
-    IPAddress    *netip.Addr
+    IPAddress    *netip.Prefix
 }
 ```
 
@@ -1150,7 +1145,7 @@ Default retention: **90 days**. Configurable per org via `organizations.settings
 A scheduled job (`audit_log_cleanup`) runs daily, deleting entries older than the retention period. Because the immutability trigger blocks `DELETE`, the cleanup uses a `SECURITY DEFINER` function that temporarily disables the trigger within a transaction:
 
 ```sql
--- Included in the 000019 migration alongside the table creation.
+-- Included in the 000021 migration alongside the table creation.
 CREATE OR REPLACE FUNCTION delete_expired_audit_logs(target_org_id uuid, retention_days int)
 RETURNS bigint
 LANGUAGE plpgsql

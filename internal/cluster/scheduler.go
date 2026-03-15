@@ -192,8 +192,23 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 		}
 	}
 
+	// Enqueue daily audit retention cleanup for each org (deduplicated per day).
+	s.scheduleAuditRetentionCleanup(ctx, orgIDs, now)
+
 	// Second pass: enqueue project_cycle jobs for scheduled projects that are due.
 	s.scheduleProjectCycles(ctx, now)
+}
+
+func (s *Scheduler) scheduleAuditRetentionCleanup(ctx context.Context, orgIDs []uuid.UUID, now time.Time) {
+	// Use the current date as part of the dedupe key so the job runs at most once per day per org.
+	dateKey := now.UTC().Format("2006-01-02")
+	for _, orgID := range orgIDs {
+		dedupeKey := fmt.Sprintf("audit_retention_cleanup:%s:%s", orgID.String(), dateKey)
+		payload := map[string]string{"org_id": orgID.String()}
+		if _, err := s.jobs.Enqueue(ctx, orgID, "default", "audit_retention_cleanup", payload, 1, &dedupeKey); err != nil {
+			s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to enqueue audit_retention_cleanup job")
+		}
+	}
 }
 
 func (s *Scheduler) scheduleProjectCycles(ctx context.Context, now time.Time) {

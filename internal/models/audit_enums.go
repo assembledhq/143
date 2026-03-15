@@ -1,0 +1,135 @@
+package models
+
+import "fmt"
+
+// AuditActorType identifies who or what performed an audited action.
+type AuditActorType string
+
+const (
+	AuditActorUser    AuditActorType = "user"
+	AuditActorAgent   AuditActorType = "agent"
+	AuditActorSystem  AuditActorType = "system"
+	AuditActorWebhook AuditActorType = "webhook"
+)
+
+func (t AuditActorType) Validate() error {
+	switch t {
+	case AuditActorUser, AuditActorAgent, AuditActorSystem, AuditActorWebhook:
+		return nil
+	default:
+		return fmt.Errorf("invalid AuditActorType: %q", t)
+	}
+}
+
+// AuditAction identifies the specific action that was performed.
+// Follows a resource.verb naming convention.
+type AuditAction string
+
+const (
+	// Session actions
+	AuditActionSessionCreated          AuditAction = "session.created"
+	AuditActionSessionStarted          AuditAction = "session.started"
+	AuditActionSessionCompleted        AuditAction = "session.completed"
+	AuditActionSessionFailed           AuditAction = "session.failed"
+	AuditActionSessionCancelled        AuditAction = "session.cancelled"
+	AuditActionSessionStatusChanged    AuditAction = "session.status_changed"
+	AuditActionSessionQuestionCreated  AuditAction = "session.question.created"
+	AuditActionSessionQuestionAnswered AuditAction = "session.question.answered"
+	AuditActionSessionResumedLocally   AuditAction = "session.resumed_locally"
+
+	// Project actions
+	AuditActionProjectCreated        AuditAction = "project.created"
+	AuditActionProjectUpdated        AuditAction = "project.updated"
+	AuditActionProjectDeleted        AuditAction = "project.deleted"
+	AuditActionProjectStarted        AuditAction = "project.started"
+	AuditActionProjectPaused         AuditAction = "project.paused"
+	AuditActionProjectResumed        AuditAction = "project.resumed"
+	AuditActionProjectApproved       AuditAction = "project.approved"
+	AuditActionProjectDismissed      AuditAction = "project.dismissed"
+	AuditActionProjectRunTriggered   AuditAction = "project.run_triggered"
+	AuditActionProjectCycleCompleted AuditAction = "project.cycle_completed"
+	AuditActionProjectTaskCreated    AuditAction = "project.task.created"
+	AuditActionProjectTaskUpdated    AuditAction = "project.task.updated"
+	AuditActionProjectTaskDeleted    AuditAction = "project.task.deleted"
+	AuditActionProjectTaskRetried    AuditAction = "project.task.retried"
+
+	// Issue actions
+	AuditActionIssueCreated       AuditAction = "issue.created"
+	AuditActionIssueReprioritized AuditAction = "issue.reprioritized"
+
+	// PM actions
+	AuditActionPMAnalysisTriggered AuditAction = "pm.analysis_triggered"
+	AuditActionPMPlanCreated       AuditAction = "pm.plan_created"
+	AuditActionPMDecisionMade      AuditAction = "pm.decision_made"
+
+	// Team & settings actions
+	AuditActionSettingsUpdated        AuditAction = "settings.updated"
+	AuditActionTeamMemberInvited      AuditAction = "team.member_invited"
+	AuditActionTeamMemberRoleChanged  AuditAction = "team.member_role_changed"
+	AuditActionTeamMemberRemoved      AuditAction = "team.member_removed"
+	AuditActionTeamInvitationRevoked  AuditAction = "team.invitation_revoked"
+	AuditActionTeamInvitationAccepted AuditAction = "team.invitation_accepted"
+
+	// Integration & credential actions
+	AuditActionIntegrationConnected AuditAction = "integration.connected"
+	AuditActionCredentialUpdated    AuditAction = "credential.updated"
+	AuditActionCredentialDeleted    AuditAction = "credential.deleted"
+
+	// Auth actions
+	AuditActionAuthLogin    AuditAction = "auth.login"
+	AuditActionAuthLogout   AuditAction = "auth.logout"
+	AuditActionAuthRegister AuditAction = "auth.register"
+)
+
+// Validate checks that the action is a known value.
+func (a AuditAction) Validate() error {
+	switch a {
+	case AuditActionSessionCreated, AuditActionSessionStarted, AuditActionSessionCompleted,
+		AuditActionSessionFailed, AuditActionSessionCancelled, AuditActionSessionStatusChanged,
+		AuditActionSessionQuestionCreated, AuditActionSessionQuestionAnswered, AuditActionSessionResumedLocally,
+		AuditActionProjectCreated, AuditActionProjectUpdated, AuditActionProjectDeleted,
+		AuditActionProjectStarted, AuditActionProjectPaused, AuditActionProjectResumed,
+		AuditActionProjectApproved, AuditActionProjectDismissed, AuditActionProjectRunTriggered,
+		AuditActionProjectCycleCompleted, AuditActionProjectTaskCreated, AuditActionProjectTaskUpdated,
+		AuditActionProjectTaskDeleted, AuditActionProjectTaskRetried,
+		AuditActionIssueCreated, AuditActionIssueReprioritized,
+		AuditActionPMAnalysisTriggered, AuditActionPMPlanCreated, AuditActionPMDecisionMade,
+		AuditActionSettingsUpdated, AuditActionTeamMemberInvited, AuditActionTeamMemberRoleChanged,
+		AuditActionTeamMemberRemoved, AuditActionTeamInvitationRevoked, AuditActionTeamInvitationAccepted,
+		AuditActionIntegrationConnected, AuditActionCredentialUpdated, AuditActionCredentialDeleted,
+		AuditActionAuthLogin, AuditActionAuthLogout, AuditActionAuthRegister:
+		return nil
+	default:
+		return fmt.Errorf("invalid AuditAction: %q", a)
+	}
+}
+
+// AuditResourceType identifies the type of resource an action targets.
+type AuditResourceType string
+
+const (
+	AuditResourceSession     AuditResourceType = "session"
+	AuditResourceProject     AuditResourceType = "project"
+	AuditResourceProjectTask AuditResourceType = "project_task"
+	AuditResourceIssue       AuditResourceType = "issue"
+	AuditResourcePMPlan      AuditResourceType = "pm_plan"
+	AuditResourcePMDecision  AuditResourceType = "pm_decision"
+	AuditResourceSettings    AuditResourceType = "settings"
+	AuditResourceTeamMember  AuditResourceType = "team_member"
+	AuditResourceInvitation  AuditResourceType = "invitation"
+	AuditResourceIntegration AuditResourceType = "integration"
+	AuditResourceCredential  AuditResourceType = "credential"
+	AuditResourceUser        AuditResourceType = "user"
+)
+
+func (t AuditResourceType) Validate() error {
+	switch t {
+	case AuditResourceSession, AuditResourceProject, AuditResourceProjectTask,
+		AuditResourceIssue, AuditResourcePMPlan, AuditResourcePMDecision,
+		AuditResourceSettings, AuditResourceTeamMember, AuditResourceInvitation,
+		AuditResourceIntegration, AuditResourceCredential, AuditResourceUser:
+		return nil
+	default:
+		return fmt.Errorf("invalid AuditResourceType: %q", t)
+	}
+}

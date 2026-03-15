@@ -21,6 +21,12 @@ type ProjectHandler struct {
 	attachmentStore   *db.ProjectAttachmentStore
 	specStore         *db.ProjectSpecStore
 	jobStore          *db.JobStore
+	audit             *db.AuditEmitter
+}
+
+// SetAuditEmitter injects the audit emitter for logging project events.
+func (h *ProjectHandler) SetAuditEmitter(audit *db.AuditEmitter) {
+	h.audit = audit
 }
 
 func NewProjectHandler(
@@ -312,6 +318,8 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	projIDStr := project.ID.String()
+	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectCreated, models.AuditResourceProject, &projIDStr, nil, &project.ID, nil)
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.Project]{Data: project})
 }
 
@@ -433,6 +441,8 @@ func (h *ProjectHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	updatedProjIDStr := projectID.String()
+	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectUpdated, models.AuditResourceProject, &updatedProjIDStr, nil, &projectID, nil)
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Project]{Data: project})
 }
 
@@ -449,6 +459,8 @@ func (h *ProjectHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	deletedProjIDStr := projectID.String()
+	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectDeleted, models.AuditResourceProject, &deletedProjIDStr, nil, &projectID, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -508,6 +520,8 @@ func (h *ProjectHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	runNowProjIDStr := projectID.String()
+	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectRunTriggered, models.AuditResourceProject, &runNowProjIDStr, nil, &projectID, nil)
 	writeJSON(w, http.StatusOK, models.SingleResponse[map[string]string]{
 		Data: map[string]string{"job_id": jobID.String()},
 	})
@@ -535,6 +549,27 @@ func (h *ProjectHandler) transitionStatus(w http.ResponseWriter, r *http.Request
 	if err := h.projectStore.UpdateStatus(r.Context(), orgID, projectID, string(target)); err != nil {
 		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update project status")
 		return
+	}
+
+	// Map status transitions to audit actions.
+	var auditAction models.AuditAction
+	switch target {
+	case models.ProjectStatusActive:
+		if project.Status == models.ProjectStatusPaused {
+			auditAction = models.AuditActionProjectResumed
+		} else {
+			auditAction = models.AuditActionProjectStarted
+		}
+	case models.ProjectStatusPaused:
+		auditAction = models.AuditActionProjectPaused
+	case models.ProjectStatusDraft:
+		auditAction = models.AuditActionProjectUpdated
+	case models.ProjectStatusCancelled:
+		auditAction = models.AuditActionProjectDismissed
+	}
+	if auditAction != "" {
+		transitionProjIDStr := projectID.String()
+		emitUserAuditWithSession(h.audit, r, auditAction, models.AuditResourceProject, &transitionProjIDStr, nil, &projectID, nil)
 	}
 
 	project.Status = target
@@ -592,6 +627,9 @@ func (h *ProjectHandler) CreateTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create task")
 		return
 	}
+
+	createTaskIDStr := task.ID.String()
+	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectTaskCreated, models.AuditResourceProjectTask, &createTaskIDStr, nil, &projectID, nil)
 
 	// Update project progress counts
 	if err := h.projectStore.UpdateProgress(r.Context(), orgID, projectID); err != nil {
@@ -663,6 +701,9 @@ func (h *ProjectHandler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	updateTaskIDStr := taskID.String()
+	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectTaskUpdated, models.AuditResourceProjectTask, &updateTaskIDStr, nil, &projectID, nil)
+
 	if err := h.projectStore.UpdateProgress(r.Context(), orgID, task.ProjectID); err != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to update project progress")
 	}
@@ -697,6 +738,9 @@ func (h *ProjectHandler) DeleteTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "DELETE_FAILED", "failed to delete task")
 		return
 	}
+
+	deleteTaskIDStr := taskID.String()
+	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectTaskDeleted, models.AuditResourceProjectTask, &deleteTaskIDStr, nil, &projectID, nil)
 
 	if err := h.projectStore.UpdateProgress(r.Context(), orgID, task.ProjectID); err != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to update project progress")
@@ -740,6 +784,9 @@ func (h *ProjectHandler) RetryTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to retry task")
 		return
 	}
+
+	retryTaskIDStr := taskID.String()
+	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectTaskRetried, models.AuditResourceProjectTask, &retryTaskIDStr, nil, &projectID, nil)
 
 	if err := h.projectStore.UpdateProgress(r.Context(), orgID, task.ProjectID); err != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to update project progress")
