@@ -37,6 +37,7 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, logger zero
 	}
 	if hasServiceHandlersDependencies(services) {
 		w.Register("run_agent", newRunAgentHandler(stores, services, logger))
+		w.Register("continue_session", newContinueSessionHandler(stores, services, logger))
 		w.Register("validate", newValidateHandler(stores, services, logger))
 		w.Register("open_pr", newOpenPRHandler(stores, services, logger))
 		w.Register("analyze_failure", newAnalyzeFailureHandler(stores, services, logger))
@@ -527,6 +528,41 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			Msg("starting run_agent job")
 
 		return services.Orchestrator.RunAgent(ctx, &run)
+	}
+}
+
+// continue_session handler continues a multi-turn session with a follow-up message.
+func newContinueSessionHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			SessionID string `json:"session_id"`
+			OrgID     string `json:"org_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal continue_session payload: %w", err)
+		}
+
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		sessionID, err := uuid.Parse(input.SessionID)
+		if err != nil {
+			return fmt.Errorf("parse session ID: %w", err)
+		}
+
+		session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
+		if err != nil {
+			return fmt.Errorf("fetch session: %w", err)
+		}
+
+		logger.Info().
+			Str("session_id", sessionID.String()).
+			Str("org_id", orgID.String()).
+			Int("current_turn", session.CurrentTurn).
+			Msg("starting continue_session job")
+
+		return services.Orchestrator.ContinueSession(ctx, &session)
 	}
 }
 

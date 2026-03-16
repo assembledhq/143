@@ -426,7 +426,7 @@ func TestParseGeminiStreamOutput(t *testing.T) {
 			},
 		},
 		{
-			name: "tool_call with name field instead of tool",
+			name:   "tool_call with name field instead of tool",
 			output: `{"type":"tool_call","name":"shell","input":{"command":"go test ./..."}}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
 				t.Helper()
@@ -499,7 +499,7 @@ func TestParseGeminiStreamOutput(t *testing.T) {
 			},
 		},
 		{
-			name: "confidence extraction from stream",
+			name:   "confidence extraction from stream",
 			output: `{"type":"text","content":"Fixed it.\n{\"confidence_score\": 0.85, \"confidence_reasoning\": \"Simple fix\", \"risk_factors\": [\"edge case\"]}"}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
 				t.Helper()
@@ -666,6 +666,41 @@ func TestGeminiCLIAdapter_Execute_StreamingOutput(t *testing.T) {
 		}
 	}
 	require.Equal(t, 1, toolUseCount, "should have 1 tool_use log entry")
+}
+
+func TestGeminiCLIAdapter_Execute_ContinuationWithoutSessionIDUsesResumeMode(t *testing.T) {
+	t.Parallel()
+
+	provider := newMockProvider()
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if strings.HasPrefix(cmd, "gemini --resume") {
+			_, _ = stdout.Write([]byte(`{"type":"text","content":"continuing gemini session"}`))
+			return 0, nil
+		}
+		if strings.HasPrefix(cmd, "git diff") {
+			_, _ = stdout.Write([]byte("diff --git a/main.go b/main.go\n"))
+			return 0, nil
+		}
+		return 0, nil
+	}
+
+	adapter := NewGeminiCLIAdapter(zerolog.Nop())
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
+	prompt := &agent.AgentPrompt{
+		UserMessage:  "Please include a regression test.",
+		MaxTokens:    50_000,
+		Continuation: true,
+	}
+
+	logCh := make(chan agent.LogEntry, 10)
+	ctx := WithSandboxProvider(context.Background(), provider)
+
+	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
+	require.NoError(t, err, "continuation should succeed without an explicit Gemini session ID")
+	require.NotNil(t, result, "continuation should return a result")
+	require.Contains(t, provider.ExecCalls[0], "gemini --resume", "continuation without a session ID should still use Gemini resume mode")
+	_, exists := provider.Files["/workspace/.143-prompt.md"]
+	require.False(t, exists, "continuation should not write a fresh prompt file")
 }
 
 func TestShellEscapeGemini(t *testing.T) {

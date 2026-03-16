@@ -155,3 +155,43 @@ func TestParseOrgSettings_InvalidJSON(t *testing.T) {
 	require.Error(t, err, "should return error on invalid JSON")
 	require.Contains(t, err.Error(), "unmarshal org settings", "should wrap error")
 }
+
+func TestAutonomyLevel_Validate(t *testing.T) {
+	t.Parallel()
+
+	require.NoError(t, AutonomyLevelManual.Validate())
+	require.NoError(t, AutonomyLevelAutoSimple.Validate())
+	require.NoError(t, AutonomyLevelAutoAll.Validate())
+	require.Error(t, AutonomyLevel("invalid").Validate())
+	require.Error(t, AutonomyLevel("").Validate())
+}
+
+func TestAgentType_Validate(t *testing.T) {
+	t.Parallel()
+
+	require.NoError(t, AgentTypeClaudeCode.Validate())
+	require.NoError(t, AgentTypeGeminiCLI.Validate())
+	require.NoError(t, AgentTypeCodex.Validate())
+	require.Error(t, AgentType("pm_agent").Validate())
+	require.Error(t, AgentType("").Validate())
+}
+
+func TestConfidenceThresholdsForAutonomy(t *testing.T) {
+	t.Parallel()
+
+	conservative := ConfidenceThresholdsForAutonomy(AgentAutonomyConservative)
+	require.Equal(t, 1.0, conservative.AutoProceed)
+	require.Equal(t, 0.8, conservative.HumanReview)
+
+	balanced := ConfidenceThresholdsForAutonomy(AgentAutonomyBalanced)
+	require.Equal(t, 0.85, balanced.AutoProceed)
+	require.Equal(t, 0.5, balanced.HumanReview)
+
+	aggressive := ConfidenceThresholdsForAutonomy(AgentAutonomyAggressive)
+	require.Equal(t, 0.4, aggressive.AutoProceed)
+	require.Equal(t, 0.2, aggressive.HumanReview)
+
+	// unknown defaults to balanced
+	unknown := ConfidenceThresholdsForAutonomy("unknown")
+	require.Equal(t, balanced, unknown)
+}

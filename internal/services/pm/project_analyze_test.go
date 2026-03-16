@@ -48,6 +48,15 @@ func (m *mockSandbox) Destroy(ctx context.Context, sb *agent.Sandbox) error { re
 func (m *mockSandbox) ConnectionInfo(ctx context.Context, sb *agent.Sandbox) (*agent.SandboxConnectionInfo, error) {
 	return nil, nil
 }
+func (m *mockSandbox) Snapshot(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+	return io.NopCloser(nil), nil
+}
+func (m *mockSandbox) Restore(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+	return nil
+}
+func (m *mockSandbox) ExecStream(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
+	return 0, nil
+}
 
 func TestParseProjectPlan_ValidJSON(t *testing.T) {
 	t.Parallel()

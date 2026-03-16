@@ -19,8 +19,8 @@ import (
 	"github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/llm"
-	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/logging"
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/agent/adapters"
 	"github.com/assembledhq/143/internal/services/agent/providers"
@@ -29,6 +29,7 @@ import (
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/pm"
 	"github.com/assembledhq/143/internal/services/prioritization"
+	"github.com/assembledhq/143/internal/services/storage"
 	"github.com/assembledhq/143/internal/services/validation"
 	"github.com/assembledhq/143/internal/worker"
 )
@@ -84,6 +85,7 @@ func main() {
 		validationStore := db.NewValidationStore(pool)
 		pullRequestStore := db.NewPullRequestStore(pool)
 		deployStore := db.NewDeployStore(pool)
+		sessionMessageStore := db.NewSessionMessageStore(pool)
 		priorityScoreStore := db.NewPriorityScoreStore(pool)
 		complexityEstimateStore := db.NewComplexityEstimateStore(pool)
 		pmPlanStore := db.NewPMPlanStore(pool)
@@ -92,12 +94,13 @@ func main() {
 		projectTaskStore := db.NewProjectTaskStore(pool)
 		projectCycleStore := db.NewProjectCycleStore(pool)
 		pmDocumentStore := db.NewPMDocumentStore(pool)
+		snapshotStore := storage.NewFileSnapshotStore(cfg.SnapshotStorageDir)
 
 		auditLogStore := db.NewAuditLogStore(pool)
 
 		stores := &worker.Stores{
 			Issues:              issueStore,
-			Sessions:           sessionStore,
+			Sessions:            sessionStore,
 			Jobs:                jobStore,
 			Integrations:        integrationStore,
 			Webhooks:            db.NewWebhookDeliveryStore(pool),
@@ -116,11 +119,15 @@ func main() {
 			services = buildServices(cfg, pool, logger, codexAuthSvc, credentialStore, userCredentialStore, issueStore, sessionStore,
 				jobStore, orgStore, repoStore, validationStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
-				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore)
+				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
+				sessionMessageStore, snapshotStore)
 		}
 		worker.RegisterHandlers(w, stores, services, logger)
 		go w.Start(ctx)
 		logger.Info().Msg("worker started with registered handlers")
+
+		reaper := agent.NewSessionReaper(sessionStore, snapshotStore, cfg.SessionMaxIdleAge, cfg.SessionReaperInterval, logger)
+		go reaper.Run(ctx)
 
 		scheduler := cluster.NewScheduler(
 			cluster.NewSchedulerLock(pool),
@@ -199,6 +206,8 @@ func buildServices(
 	projectCycleStore *db.ProjectCycleStore,
 	pmDocumentStore *db.PMDocumentStore,
 	integrationStore *db.IntegrationStore,
+	sessionMessageStore *db.SessionMessageStore,
+	snapshotStore storage.SnapshotStore,
 ) *worker.Services {
 	// GitHub App service (for installation tokens, PR creation).
 	ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
@@ -233,11 +242,12 @@ func buildServices(
 	sessionQuestionStore := db.NewSessionQuestionStore(pool)
 	projectTaskUpdater := pm.NewProjectHooks(projectTaskStore, projectStore, logger)
 	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:          sandboxProvider,
-		Adapters:          agentAdapters,
+		Provider:         sandboxProvider,
+		Adapters:         agentAdapters,
 		Sessions:         sessionStore,
 		SessionLogs:      sessionLogStore,
 		SessionQuestions: sessionQuestionStore,
+		SessionMessages:   sessionMessageStore,
 		DecisionLog:       pmDecisionLogStore,
 		ProjectTasks:      projectTaskUpdater,
 		Issues:            issueStore,
@@ -248,6 +258,7 @@ func buildServices(
 		CodexAuth:         codexAuthSvc,
 		Credentials:       credentialStore,
 		UserCredentials:   userCredentialStore,
+		Snapshots:         snapshotStore,
 		Logger:            logger,
 	})
 

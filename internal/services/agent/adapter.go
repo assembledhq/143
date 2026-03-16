@@ -67,10 +67,13 @@ type ComplexityEstimate struct {
 
 // AgentPrompt is the prepared instruction set passed to the agent CLI.
 type AgentPrompt struct {
-	SystemPrompt string
-	UserPrompt   string
-	MaxTokens    int
-	Files        []string // relevant files to focus on
+	SystemPrompt    string
+	UserPrompt      string
+	MaxTokens       int
+	Files           []string // relevant files to focus on
+	Continuation    bool     // true when resuming an existing interactive session
+	ResumeSessionID string   // agent's session ID for --resume/--continue (set on subsequent turns)
+	UserMessage     string   // follow-up message from the user (set on subsequent turns)
 }
 
 // AgentResult is the outcome of an agent execution.
@@ -83,6 +86,7 @@ type AgentResult struct {
 	ConfidenceScore     float64 // 0.0-1.0, self-assessed by the agent
 	ConfidenceReasoning string
 	RiskFactors         []string
+	AgentSessionID      string // agent's internal session ID, used for --resume on subsequent turns
 }
 
 // TokenUsage tracks LLM token consumption and cost for an agent run.
@@ -127,6 +131,19 @@ type SandboxProvider interface {
 
 	// ConnectionInfo returns provider-specific connection details for local resume.
 	ConnectionInfo(ctx context.Context, sb *Sandbox) (*SandboxConnectionInfo, error)
+
+	// Snapshot tars the workspace and agent state directories, returning a
+	// reader for the compressed archive. Caller must close the reader.
+	Snapshot(ctx context.Context, sb *Sandbox) (io.ReadCloser, error)
+
+	// Restore extracts a snapshot tarball into the sandbox, restoring
+	// workspace and agent state from a previous turn.
+	Restore(ctx context.Context, sb *Sandbox, reader io.Reader) error
+
+	// ExecStream runs a command inside the sandbox and calls onLine for
+	// each newline-delimited chunk of stdout as it arrives, enabling
+	// real-time streaming. Returns the command's exit code.
+	ExecStream(ctx context.Context, sb *Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error)
 }
 
 // SandboxConfig holds the resource limits and settings for creating a sandbox.

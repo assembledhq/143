@@ -71,39 +71,126 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 		return nil, fmt.Errorf("sandbox provider not found in context")
 	}
 
-	// Write the prompt to a file in the sandbox.
-	promptContent := fmt.Sprintf("%s\n\n---\n\n%s", prompt.SystemPrompt, prompt.UserPrompt)
-	promptPath := fmt.Sprintf("%s/.143-prompt.md", sandbox.WorkDir)
-	if err := provider.WriteFile(ctx, sandbox, promptPath, []byte(promptContent)); err != nil {
-		return nil, fmt.Errorf("write prompt file: %w", err)
+	var cmd string
+	if prompt.Continuation {
+		// Subsequent turn: resume the latest session with --continue.
+		msg := shellEscapeDouble(prompt.UserMessage)
+		cmd = fmt.Sprintf(
+			"claude --print --output-format stream-json --continue --max-tokens %d --prompt \"%s\"",
+			prompt.MaxTokens,
+			msg,
+		)
+	} else {
+		// First turn: write prompt file and run fresh.
+		promptContent := fmt.Sprintf("%s\n\n---\n\n%s", prompt.SystemPrompt, prompt.UserPrompt)
+		promptPath := fmt.Sprintf("%s/.143-prompt.md", sandbox.WorkDir)
+		if err := provider.WriteFile(ctx, sandbox, promptPath, []byte(promptContent)); err != nil {
+			return nil, fmt.Errorf("write prompt file: %w", err)
+		}
+		cmd = fmt.Sprintf(
+			"claude --print --output-format stream-json --max-tokens %d --prompt-file %s",
+			prompt.MaxTokens,
+			promptPath,
+		)
 	}
-
-	// Build the CLI command.
-	cmd := fmt.Sprintf(
-		"claude --print --output-format stream-json --max-tokens %d --prompt-file %s",
-		prompt.MaxTokens,
-		promptPath,
-	)
 
 	logCh <- agent.LogEntry{
 		Timestamp: time.Now(),
 		Level:     "info",
 		Message:   "starting Claude Code CLI",
-		Metadata:  map[string]interface{}{"max_tokens": prompt.MaxTokens},
+		Metadata:  map[string]interface{}{"max_tokens": prompt.MaxTokens, "resume": prompt.Continuation},
 	}
 
-	// Execute the CLI and capture output.
-	var stdout, stderr bytes.Buffer
-	exitCode, err := provider.Exec(ctx, sandbox, cmd, &stdout, &stderr)
+	// Execute with real-time streaming.
+	result := &agent.AgentResult{}
+	var stderr bytes.Buffer
+	var summaryParts []string
+
+	exitCode, err := provider.ExecStream(ctx, sandbox, cmd, func(line []byte) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			return
+		}
+
+		var event claudeStreamEvent
+		if err := json.Unmarshal(line, &event); err != nil {
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "output",
+				Message:   string(line),
+			}
+			return
+		}
+
+		switch event.Type {
+		case "assistant":
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "output",
+				Message:   event.Content,
+			}
+			summaryParts = append(summaryParts, event.Content)
+			tryExtractConfidence(event.Content, result)
+
+		case "tool_use":
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "tool_use",
+				Message:   fmt.Sprintf("using tool: %s", event.Tool),
+				Metadata:  map[string]interface{}{"tool": event.Tool},
+			}
+
+		case "tool_result":
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "output",
+				Message:   string(event.Result),
+				Metadata:  map[string]interface{}{"type": "tool_result"},
+			}
+
+		case "error":
+			msg := event.Message
+			if msg == "" {
+				msg = event.Content
+			}
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "error",
+				Message:   msg,
+			}
+
+		case "result":
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "info",
+				Message:   event.Content,
+			}
+			summaryParts = append(summaryParts, event.Content)
+			tryExtractConfidence(event.Content, result)
+			if len(event.Result) > 0 {
+				var usage agent.TokenUsage
+				if err := json.Unmarshal(event.Result, &usage); err == nil && usage.InputTokens > 0 {
+					result.TokenUsage = usage
+				}
+			}
+			// Extract session ID from result event if present.
+			if event.SessionID != "" {
+				result.AgentSessionID = event.SessionID
+			}
+
+		default:
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "debug",
+				Message:   string(line),
+			}
+		}
+	}, &stderr)
 	if err != nil {
 		return nil, fmt.Errorf("exec claude CLI: %w", err)
 	}
 
-	// Parse the streaming JSON output line by line and send log entries.
-	result := &agent.AgentResult{
-		ExitCode: exitCode,
-	}
-	parseStreamOutput(stdout.Bytes(), result, logCh)
+	result.ExitCode = exitCode
+	result.Summary = strings.Join(summaryParts, "\n")
 
 	if stderr.Len() > 0 {
 		logCh <- agent.LogEntry{
@@ -383,11 +470,12 @@ func extractStackTrace(rawData json.RawMessage) string {
 
 // claudeStreamEvent represents a single line of Claude Code's stream-json output.
 type claudeStreamEvent struct {
-	Type    string          `json:"type"`
-	Content string          `json:"content,omitempty"`
-	Message string          `json:"message,omitempty"`
-	Tool    string          `json:"tool,omitempty"`
-	Result  json.RawMessage `json:"result,omitempty"`
+	Type      string          `json:"type"`
+	Content   string          `json:"content,omitempty"`
+	Message   string          `json:"message,omitempty"`
+	Tool      string          `json:"tool,omitempty"`
+	Result    json.RawMessage `json:"result,omitempty"`
+	SessionID string          `json:"session_id,omitempty"`
 }
 
 // parseStreamOutput processes the streaming JSON output line by line,
@@ -510,6 +598,20 @@ func tryExtractConfidence(text string, result *agent.AgentResult) {
 		result.ConfidenceReasoning = confidence.Reasoning
 		result.RiskFactors = confidence.Risks
 	}
+}
+
+// shellEscapeDouble escapes characters for safe use inside double-quoted shell strings.
+// Handles backslash, double quote, dollar sign, backtick, and exclamation mark
+// (history expansion in bash, harmless in POSIX sh but escaped for safety).
+func shellEscapeDouble(s string) string {
+	r := strings.NewReplacer(
+		`\`, `\\`,
+		`"`, `\"`,
+		`$`, `\$`,
+		"`", "\\`",
+		`!`, `\!`,
+	)
+	return r.Replace(s)
 }
 
 // collectDiff runs git diff inside the sandbox to capture changes.

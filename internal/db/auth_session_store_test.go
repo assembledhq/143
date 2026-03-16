@@ -22,6 +22,8 @@ var sessionColumns = []string{
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
+	"agent_session_id", "current_turn", "last_activity_at",
+	"sandbox_state", "snapshot_key",
 	"created_at",
 }
 
@@ -36,6 +38,11 @@ func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 		nil, // project_task_id
 		nil, // model_override
 		nil, // triggered_by_user_id
+		nil, // agent_session_id
+		0,   // current_turn
+		nil, // last_activity_at
+		"none", // sandbox_state
+		nil,    // snapshot_key
 		now,
 	}
 }
