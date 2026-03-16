@@ -8,13 +8,27 @@ import { SessionDetailContent } from './session-detail-content';
 import type { Session, SessionMessage, User, SingleResponse, ListResponse } from '@/lib/types';
 
 // Mock EventSource (not available in jsdom)
+class MockEventSource {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSED = 2;
+  readonly CONNECTING = 0;
+  readonly OPEN = 1;
+  readonly CLOSED = 2;
+  readyState = 0;
+  url: string;
+  withCredentials = false;
+  onopen: ((ev: Event) => void) | null = null;
+  onmessage: ((ev: MessageEvent) => void) | null = null;
+  onerror: ((ev: Event) => void) | null = null;
+  constructor(url: string | URL) { this.url = String(url); }
+  addEventListener = vi.fn();
+  removeEventListener = vi.fn();
+  close = vi.fn();
+  dispatchEvent = vi.fn(() => true);
+}
 beforeAll(() => {
-  global.EventSource = vi.fn().mockImplementation(() => ({
-    addEventListener: vi.fn(),
-    removeEventListener: vi.fn(),
-    close: vi.fn(),
-    onerror: null,
-  })) as unknown as typeof EventSource;
+  global.EventSource = MockEventSource as unknown as typeof EventSource;
 });
 
 // Mock next/link to render a plain anchor

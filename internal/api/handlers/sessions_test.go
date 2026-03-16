@@ -153,7 +153,9 @@ func TestSessionHandler_List_WithRepositoryID(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil,
-				nil, nil, nil,
+				nil, nil,
+				nil, // triggered_by_user_id
+				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 				now,
 			),
 		)
