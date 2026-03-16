@@ -262,6 +262,40 @@ func TestClaudeCodeAdapter_Execute_MissingSandboxProvider(t *testing.T) {
 	require.Contains(t, err.Error(), "sandbox provider not found")
 }
 
+func TestClaudeCodeAdapter_Execute_ContinuationUsesContinueMode(t *testing.T) {
+	t.Parallel()
+
+	provider := testutil.NewMockSandboxProvider()
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if strings.HasPrefix(cmd, "claude") {
+			_, _ = stdout.Write([]byte(`{"type":"assistant","content":"continuing the session"}`))
+			return 0, nil
+		}
+		if strings.HasPrefix(cmd, "git diff") {
+			_, _ = stdout.Write([]byte("diff --git a/main.go b/main.go\n"))
+			return 0, nil
+		}
+		return 0, nil
+	}
+
+	adapter := NewClaudeCodeAdapter(zerolog.Nop())
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
+	prompt := &agent.AgentPrompt{
+		UserMessage:  "Please tighten the guard clause.",
+		MaxTokens:    50_000,
+		Continuation: true,
+	}
+	logCh := make(chan agent.LogEntry, 10)
+	ctx := WithSandboxProvider(context.Background(), provider)
+
+	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
+	require.NoError(t, err, "continuation should succeed")
+	require.NotNil(t, result, "continuation should return a result")
+	require.Contains(t, provider.ExecCalls[0], "--continue", "continuation should use Claude's continue mode")
+	_, exists := provider.Files["/workspace/.143-prompt.md"]
+	require.False(t, exists, "continuation should not write a fresh prompt file")
+}
+
 // ---------------------------------------------------------------------------
 // parseStreamOutput (Claude Code streaming JSON)
 // ---------------------------------------------------------------------------
@@ -880,11 +914,11 @@ func TestTryExtractConfidence(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name           string
-		text           string
-		wantScore      float64
-		wantReasoning  string
-		wantRisks      []string
+		name          string
+		text          string
+		wantScore     float64
+		wantReasoning string
+		wantRisks     []string
 	}{
 		{
 			name:      "no confidence block",
@@ -934,12 +968,12 @@ func TestCollectDiff(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		stdout    string
-		exitCode  int
-		execErr   error
-		wantDiff  string
-		wantErr   bool
+		name     string
+		stdout   string
+		exitCode int
+		execErr  error
+		wantDiff string
+		wantErr  bool
 	}{
 		{
 			name:     "successful diff",

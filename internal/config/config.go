@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/assembledhq/143/internal/llm"
 	"github.com/caarlos0/env/v11"
@@ -21,9 +22,9 @@ type Config struct {
 	Mode               string   `env:"MODE"                  envDefault:"all"`
 
 	// GitHub OAuth
-	GitHubOAuthClientID      string `env:"GITHUB_OAUTH_CLIENT_ID"`
-	GitHubOAuthClientSecret  string `env:"GITHUB_OAUTH_CLIENT_SECRET"`
-	GitHubOAuthRedirectURI   string `env:"GITHUB_OAUTH_REDIRECT_URI"`
+	GitHubOAuthClientID     string `env:"GITHUB_OAUTH_CLIENT_ID"`
+	GitHubOAuthClientSecret string `env:"GITHUB_OAUTH_CLIENT_SECRET"`
+	GitHubOAuthRedirectURI  string `env:"GITHUB_OAUTH_REDIRECT_URI"`
 
 	// Google OAuth
 	GoogleOAuthClientID     string `env:"GOOGLE_OAUTH_CLIENT_ID"`
@@ -71,6 +72,11 @@ type Config struct {
 	// Gemini CLI
 	GeminiAPIKey string `env:"GEMINI_API_KEY"`
 	GeminiModel  string `env:"GEMINI_MODEL"`
+
+	// Interactive session snapshots
+	SnapshotStorageDir    string        `env:"SNAPSHOT_STORAGE_DIR"    envDefault:".data/snapshots"`
+	SessionMaxIdleAge     time.Duration `env:"SESSION_MAX_IDLE_AGE"    envDefault:"2h"`
+	SessionReaperInterval time.Duration `env:"SESSION_REAPER_INTERVAL" envDefault:"5m"`
 }
 
 // Load reads configuration from env files and environment variables.

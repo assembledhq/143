@@ -247,7 +247,7 @@ func TestParseCodexStreamOutput(t *testing.T) {
 			},
 		},
 		{
-			name: "double-encoded arguments string",
+			name:   "double-encoded arguments string",
 			output: `{"type":"function_call","name":"shell","arguments":"{\"command\":\"ls -la\"}","call_id":"call_1"}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
 				t.Helper()
@@ -308,7 +308,7 @@ func TestParseCodexStreamOutput(t *testing.T) {
 			},
 		},
 		{
-			name: "confidence extraction from stream",
+			name:   "confidence extraction from stream",
 			output: `{"type":"message","content":"Done.\n{\"confidence_score\": 0.92, \"confidence_reasoning\": \"Straightforward fix\", \"risk_factors\": [\"none\"]}"}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
 				t.Helper()
@@ -368,7 +368,7 @@ func TestParseCodexStreamOutput(t *testing.T) {
 			},
 		},
 		{
-			name: "assistant event type variant",
+			name:   "assistant event type variant",
 			output: `{"type":"assistant","content":"Working on it..."}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
 				t.Helper()
@@ -376,7 +376,7 @@ func TestParseCodexStreamOutput(t *testing.T) {
 			},
 		},
 		{
-			name: "text event type variant",
+			name:   "text event type variant",
 			output: `{"type":"text","content":"Some text output"}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
 				t.Helper()
@@ -456,14 +456,14 @@ func TestCodexAdapter_Execute(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name           string
-		codexOutput    string
-		codexExitCode  int
-		stderrOutput   string
-		diffOutput     string
-		diffExitCode   int
-		expectErr      bool
-		checkResult    func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry)
+		name          string
+		codexOutput   string
+		codexExitCode int
+		stderrOutput  string
+		diffOutput    string
+		diffExitCode  int
+		expectErr     bool
+		checkResult   func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry)
 	}{
 		{
 			name: "successful run with streaming JSON",
@@ -637,6 +637,40 @@ func TestCodexAdapter_Execute_MissingSandboxProvider(t *testing.T) {
 	require.Error(t, err)
 	require.Nil(t, result)
 	require.Contains(t, err.Error(), "sandbox provider not found")
+}
+
+func TestCodexAdapter_Execute_ContinuationWithoutSessionIDUsesResumeLast(t *testing.T) {
+	t.Parallel()
+
+	provider := testutil.NewMockSandboxProvider()
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if strings.HasPrefix(cmd, "codex resume") {
+			_, _ = stdout.Write([]byte(`{"type":"message","content":"continuing prior session"}`))
+			return 0, nil
+		}
+		if strings.HasPrefix(cmd, "git diff") {
+			_, _ = stdout.Write([]byte("diff --git a/main.go b/main.go\n"))
+			return 0, nil
+		}
+		return 0, nil
+	}
+
+	adapter := NewCodexAdapter(zerolog.Nop())
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
+	prompt := &agent.AgentPrompt{
+		UserMessage:  "Please tighten the test case.",
+		MaxTokens:    50_000,
+		Continuation: true,
+	}
+	logCh := make(chan agent.LogEntry, 10)
+	ctx := WithSandboxProvider(context.Background(), provider)
+
+	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
+	require.NoError(t, err, "continuation should succeed without an explicit session ID")
+	require.NotNil(t, result, "continuation should return a result")
+	require.Contains(t, provider.ExecCalls[0], "codex resume --last", "continuation without a session ID should resume the latest restored Codex session")
+	_, exists := provider.Files["/workspace/.143-prompt.md"]
+	require.False(t, exists, "continuation should not write a fresh prompt file")
 }
 
 func TestShellEscapeCodex(t *testing.T) {

@@ -132,6 +132,11 @@ type Session struct {
 	ProjectTaskID        *uuid.UUID      `db:"project_task_id" json:"project_task_id,omitempty"`
 	ModelOverride        *string         `db:"model_override" json:"model_override,omitempty"`
 	TriggeredByUserID    *uuid.UUID      `db:"triggered_by_user_id" json:"triggered_by_user_id,omitempty"`
+	AgentSessionID       *string         `db:"agent_session_id" json:"agent_session_id,omitempty"`
+	CurrentTurn          int             `db:"current_turn" json:"current_turn"`
+	LastActivityAt       *time.Time      `db:"last_activity_at" json:"last_activity_at,omitempty"`
+	SandboxState         string          `db:"sandbox_state" json:"sandbox_state"`
+	SnapshotKey          *string         `db:"snapshot_key" json:"snapshot_key,omitempty"`
 	CreatedAt            time.Time       `db:"created_at" json:"created_at"`
 }
 
@@ -185,11 +190,26 @@ type PullRequest struct {
 // SessionLog represents a log line emitted during an agent run.
 type SessionLog struct {
 	ID         int64           `db:"id" json:"id"`
-	SessionID uuid.UUID       `db:"session_id" json:"session_id"`
+	SessionID  uuid.UUID       `db:"session_id" json:"session_id"`
 	Timestamp  time.Time       `db:"timestamp" json:"created_at"`
 	Level      string          `db:"level" json:"level"`
 	Message    string          `db:"message" json:"message"`
 	Metadata   json.RawMessage `db:"metadata" json:"metadata,omitempty"`
+	TurnNumber int             `db:"turn_number" json:"turn_number"`
+}
+
+// SessionMessage represents a chat message in a multi-turn session.
+type SessionMessage struct {
+	ID          int64           `db:"id" json:"id"`
+	SessionID   uuid.UUID       `db:"session_id" json:"session_id"`
+	OrgID       uuid.UUID       `db:"org_id" json:"org_id"`
+	UserID      *uuid.UUID      `db:"user_id" json:"user_id,omitempty"`
+	TurnNumber  int             `db:"turn_number" json:"turn_number"`
+	Role        MessageRole     `db:"role" json:"role"`
+	Content     string          `db:"content" json:"content"`
+	Attachments []string        `db:"attachments" json:"attachments,omitempty"`
+	TokenUsage  json.RawMessage `db:"token_usage" json:"token_usage,omitempty"`
+	CreatedAt   time.Time       `db:"created_at" json:"created_at"`
 }
 
 // SessionQuestion represents a question the agent asks a human during a run.

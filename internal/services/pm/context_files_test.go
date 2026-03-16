@@ -1,6 +1,7 @@
 package pm
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -57,6 +58,18 @@ func (m *pmSandboxMock) Destroy(ctx context.Context, sb *agent.Sandbox) error {
 
 func (m *pmSandboxMock) ConnectionInfo(ctx context.Context, sb *agent.Sandbox) (*agent.SandboxConnectionInfo, error) {
 	return nil, nil
+}
+
+func (m *pmSandboxMock) Snapshot(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(nil)), nil
+}
+
+func (m *pmSandboxMock) Restore(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+	return nil
+}
+
+func (m *pmSandboxMock) ExecStream(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
+	return 0, nil
 }
 
 func TestWriteProductContextToAgentsMD(t *testing.T) {

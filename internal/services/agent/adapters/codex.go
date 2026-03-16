@@ -63,41 +63,59 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 		return nil, fmt.Errorf("sandbox provider not found in context")
 	}
 
-	// Write the prompt to a file in the sandbox.
-	promptContent := fmt.Sprintf("%s\n\n---\n\n%s", prompt.SystemPrompt, prompt.UserPrompt)
-	promptPath := fmt.Sprintf("%s/.143-prompt.md", sandbox.WorkDir)
-	if err := provider.WriteFile(ctx, sandbox, promptPath, []byte(promptContent)); err != nil {
-		return nil, fmt.Errorf("write prompt file: %w", err)
+	var cmd string
+	if prompt.Continuation {
+		// Subsequent turn: resume the latest restored session state.
+		msg := shellEscapeDouble(prompt.UserMessage)
+		if prompt.ResumeSessionID != "" {
+			cmd = fmt.Sprintf(
+				"codex resume --full-auto --output-format stream-json %s -q \"%s\"",
+				shellEscapeCodex(prompt.ResumeSessionID),
+				msg,
+			)
+		} else {
+			cmd = fmt.Sprintf(
+				"codex resume --last --full-auto --output-format stream-json -q \"%s\"",
+				msg,
+			)
+		}
+	} else {
+		// First turn: write prompt file and run fresh.
+		promptContent := fmt.Sprintf("%s\n\n---\n\n%s", prompt.SystemPrompt, prompt.UserPrompt)
+		promptPath := fmt.Sprintf("%s/.143-prompt.md", sandbox.WorkDir)
+		if err := provider.WriteFile(ctx, sandbox, promptPath, []byte(promptContent)); err != nil {
+			return nil, fmt.Errorf("write prompt file: %w", err)
+		}
+		cmd = fmt.Sprintf(
+			"codex --full-auto --output-format stream-json -q \"$(cat '%s')\"",
+			shellEscapeCodex(promptPath),
+		)
 	}
-
-	// Build the CLI command.
-	// --full-auto: auto-approve all tool calls (non-interactive)
-	// --output-format stream-json: streaming JSONL with tool use detail
-	// -q: pass the prompt as a string
-	cmd := fmt.Sprintf(
-		"codex --full-auto --output-format stream-json -q \"$(cat '%s')\"",
-		shellEscapeCodex(promptPath),
-	)
 
 	logCh <- agent.LogEntry{
 		Timestamp: time.Now(),
 		Level:     "info",
 		Message:   "starting Codex CLI",
-		Metadata:  map[string]interface{}{"max_tokens": prompt.MaxTokens},
+		Metadata:  map[string]interface{}{"max_tokens": prompt.MaxTokens, "resume": prompt.Continuation},
 	}
 
-	// Execute the CLI and capture output.
-	var stdout, stderr bytes.Buffer
-	exitCode, err := provider.Exec(ctx, sandbox, cmd, &stdout, &stderr)
+	// Execute with real-time streaming.
+	result := &agent.AgentResult{}
+	var stderr bytes.Buffer
+	var summaryParts []string
+
+	exitCode, err := provider.ExecStream(ctx, sandbox, cmd, func(line []byte) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			return
+		}
+		parseCodexStreamLine(line, result, logCh, &summaryParts)
+	}, &stderr)
 	if err != nil {
 		return nil, fmt.Errorf("exec codex CLI: %w", err)
 	}
 
-	// Parse the output.
-	result := &agent.AgentResult{
-		ExitCode: exitCode,
-	}
-	parseCodexStreamOutput(stdout.Bytes(), result, logCh)
+	result.ExitCode = exitCode
+	result.Summary = strings.Join(summaryParts, "\n")
 
 	if stderr.Len() > 0 {
 		logCh <- agent.LogEntry{
@@ -133,6 +151,159 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 	}
 
 	return result, nil
+}
+
+// parseCodexStreamLine processes a single line of Codex streaming output.
+func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- agent.LogEntry, summaryParts *[]string) {
+	var event codexStreamEvent
+	if err := json.Unmarshal(line, &event); err != nil {
+		text := string(line)
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "output",
+			Message:   text,
+		}
+		*summaryParts = append(*summaryParts, text)
+		tryExtractConfidence(text, result)
+		return
+	}
+
+	// Handle legacy single-object JSON format (no type field).
+	if event.Type == "" {
+		var legacy codexJSONOutput
+		if err := json.Unmarshal(line, &legacy); err == nil && legacy.Response != "" {
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "output",
+				Message:   legacy.Response,
+			}
+			*summaryParts = append(*summaryParts, legacy.Response)
+			tryExtractConfidence(legacy.Response, result)
+			if legacy.Stats != nil {
+				result.TokenUsage = agent.TokenUsage{
+					InputTokens:  legacy.Stats.InputTokens,
+					OutputTokens: legacy.Stats.OutputTokens,
+				}
+			}
+			return
+		}
+	}
+
+	switch event.Type {
+	case "message", "text", "assistant":
+		content := event.Content
+		if content == "" {
+			content = event.Message
+		}
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "output",
+			Message:   content,
+		}
+		*summaryParts = append(*summaryParts, content)
+		tryExtractConfidence(content, result)
+
+	case "function_call", "tool_use", "tool_call":
+		toolName := event.Name
+		metadata := map[string]interface{}{"tool": toolName}
+		if len(event.Arguments) > 0 {
+			var argsMap map[string]interface{}
+			if err := json.Unmarshal(event.Arguments, &argsMap); err == nil {
+				metadata["input"] = argsMap
+			} else {
+				var argsStr string
+				if err := json.Unmarshal(event.Arguments, &argsStr); err == nil {
+					var innerArgs map[string]interface{}
+					if err := json.Unmarshal([]byte(argsStr), &innerArgs); err == nil {
+						metadata["input"] = innerArgs
+					} else {
+						metadata["input"] = argsStr
+					}
+				}
+			}
+		}
+		if event.CallID != "" {
+			metadata["call_id"] = event.CallID
+		}
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "tool_use",
+			Message:   fmt.Sprintf("using tool: %s", toolName),
+			Metadata:  metadata,
+		}
+
+	case "function_call_output", "tool_result":
+		metadata := map[string]interface{}{"type": "tool_result"}
+		if event.Name != "" {
+			metadata["tool"] = event.Name
+		}
+		if event.CallID != "" {
+			metadata["call_id"] = event.CallID
+		}
+		outputMsg := event.Output
+		if outputMsg == "" && len(event.Result) > 0 {
+			outputMsg = string(event.Result)
+		}
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "output",
+			Message:   outputMsg,
+			Metadata:  metadata,
+		}
+
+	case "thinking":
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "debug",
+			Message:   event.Content,
+			Metadata:  map[string]interface{}{"type": "thinking"},
+		}
+
+	case "error":
+		msg := event.Error
+		if msg == "" {
+			msg = event.Message
+		}
+		if msg == "" {
+			msg = event.Content
+		}
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "error",
+			Message:   msg,
+		}
+
+	case "usage", "result":
+		content := event.Content
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "info",
+			Message:   content,
+		}
+		if content != "" {
+			*summaryParts = append(*summaryParts, content)
+			tryExtractConfidence(content, result)
+		}
+		if event.Stats != nil {
+			result.TokenUsage = agent.TokenUsage{
+				InputTokens:  event.Stats.InputTokens,
+				OutputTokens: event.Stats.OutputTokens,
+			}
+		}
+		if len(event.Result) > 0 {
+			var usage agent.TokenUsage
+			if err := json.Unmarshal(event.Result, &usage); err == nil && usage.InputTokens > 0 {
+				result.TokenUsage = usage
+			}
+		}
+
+	default:
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "debug",
+			Message:   string(line),
+		}
+	}
 }
 
 // codexJSONOutput represents Codex CLI's JSON output format.

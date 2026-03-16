@@ -513,6 +513,33 @@ func TestParseProviderConfig_Slack_Invalid(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestIsCodingAgentProvider(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		provider ProviderName
+		expected bool
+	}{
+		{"anthropic is coding agent", ProviderAnthropic, true},
+		{"openai is coding agent", ProviderOpenAI, true},
+		{"gemini is coding agent", ProviderGemini, true},
+		{"openrouter is coding agent", ProviderOpenRouter, true},
+		{"github_app is not coding agent", ProviderGitHubApp, false},
+		{"github_oauth is not coding agent", ProviderGitHubOAuth, false},
+		{"sentry is not coding agent", ProviderSentry, false},
+		{"linear is not coding agent", ProviderLinear, false},
+		{"slack is not coding agent", ProviderSlack, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, tt.provider.IsCodingAgentProvider(), "IsCodingAgentProvider should return expected result")
+		})
+	}
+}
+
 func TestIsLLMProvider(t *testing.T) {
 	t.Parallel()
 

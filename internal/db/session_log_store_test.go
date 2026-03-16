@@ -13,12 +13,12 @@ import (
 )
 
 var logColumns = []string{
-	"id", "session_id", "timestamp", "level", "message", "metadata",
+	"id", "session_id", "timestamp", "level", "message", "metadata", "turn_number",
 }
 
 func newLogRow(id int64, sessionID uuid.UUID, now time.Time) []any {
 	return []any{
-		id, sessionID, now, "info", "doing something", json.RawMessage(`{}`),
+		id, sessionID, now, "info", "doing something", json.RawMessage(`{}`), 0,
 	}
 }
 
@@ -39,7 +39,7 @@ func TestSessionLogStore_Create_Success(t *testing.T) {
 	}
 
 	mock.ExpectQuery("INSERT INTO session_logs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "timestamp"}).
 				AddRow(int64(1), now),
