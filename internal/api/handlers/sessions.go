@@ -30,6 +30,12 @@ type SessionHandler struct {
 	jobStore         *db.JobStore
 	llmClient        llm.Client // optional, used for generating manual session titles
 	logger           zerolog.Logger
+	audit            *db.AuditEmitter
+}
+
+// SetAuditEmitter injects the audit emitter for logging session events.
+func (h *SessionHandler) SetAuditEmitter(audit *db.AuditEmitter) {
+	h.audit = audit
 }
 
 func NewSessionHandler(
@@ -208,6 +214,8 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	sessionIDStr := run.ID.String()
+	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionCreated, models.AuditResourceSession, &sessionIDStr, &run.ID, nil, nil)
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.Session]{Data: *run})
 }
 
@@ -439,6 +447,12 @@ func (h *SessionHandler) AnswerQuestion(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	qIDStr := qID.String()
+	var sessionIDPtr *uuid.UUID
+	if sessionID, parseErr := uuid.Parse(chi.URLParam(r, "id")); parseErr == nil {
+		sessionIDPtr = &sessionID
+	}
+	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionQuestionAnswered, models.AuditResourceSession, &qIDStr, sessionIDPtr, nil, nil)
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionQuestion]{Data: question})
 }
 
@@ -587,14 +601,16 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Generate a concise session title via LLM (with a short timeout so the
-	// request doesn't block for too long). If it succeeds, update the session
-	// with the generated title before returning the response.
+	// request doesn't block for too long).
 	if h.llmClient != nil {
 		if err := h.generateSessionTitle(r.Context(), session, orgID, body.Message); err != nil {
-			zerolog.Ctx(r.Context()).Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to generate session title")
+			writeError(w, http.StatusInternalServerError, "TITLE_GENERATION_FAILED", "failed to generate session title")
+			return
 		}
 	}
 
+	manualSessionIDStr := session.ID.String()
+	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionCreated, models.AuditResourceSession, &manualSessionIDStr, &session.ID, nil, nil)
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.Session]{Data: *session})
 }
 

@@ -65,6 +65,7 @@ type OrgSettings struct {
 	LLMModel             string               `json:"llm_model"`
 	AgentConfig          AgentEnvConfig       `json:"agent_config,omitempty"`
 	DefaultAgentType     AgentType            `json:"default_agent_type,omitempty"`
+	AuditRetentionDays   int                  `json:"audit_retention_days,omitempty"`
 }
 
 // Agent autonomy mode constants.
@@ -111,6 +112,7 @@ const (
 	DefaultDefaultAgentType     AgentType     = AgentTypeCodex
 	DefaultPMScheduleHours      = 4
 	DefaultPMModel              = PMModelSonnet
+	DefaultAuditRetentionDays   = 90
 
 	DefaultWeightCustomerImpact = 0.35
 	DefaultWeightSeverity       = 0.25
@@ -172,6 +174,9 @@ func ParseOrgSettings(raw json.RawMessage) (OrgSettings, error) {
 	}
 	if s.DefaultAgentType == "" {
 		s.DefaultAgentType = DefaultDefaultAgentType
+	}
+	if s.AuditRetentionDays == 0 {
+		s.AuditRetentionDays = DefaultAuditRetentionDays
 	}
 	if s.ProductContext == nil && s.ProductDirection != "" {
 		s.ProductContext = &ProductContext{
