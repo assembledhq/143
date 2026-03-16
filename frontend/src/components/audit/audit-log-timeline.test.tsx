@@ -41,7 +41,7 @@ describe('AuditLogTimeline', () => {
     renderWithProviders(<AuditLogTimeline members={mockMembers} />);
 
     await waitFor(() => {
-      expect(screen.getByText('No activity yet.')).toBeInTheDocument();
+      expect(screen.getByText('No activity yet')).toBeInTheDocument();
     });
   });
 

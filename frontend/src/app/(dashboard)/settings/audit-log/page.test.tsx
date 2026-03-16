@@ -79,7 +79,7 @@ describe('AuditLogPage', () => {
     renderWithProviders(<AuditLogPage />);
 
     await waitFor(() => {
-      expect(screen.getByText('Audit Log')).toBeInTheDocument();
+      expect(screen.getByText('Audit log')).toBeInTheDocument();
     });
   });
 
@@ -98,7 +98,7 @@ describe('AuditLogPage', () => {
     renderWithProviders(<AuditLogPage />);
 
     await waitFor(() => {
-      expect(screen.getByText('No audit log entries found.')).toBeInTheDocument();
+      expect(screen.getByText('No audit log entries found')).toBeInTheDocument();
     });
   });
 

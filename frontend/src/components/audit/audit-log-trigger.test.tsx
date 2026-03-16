@@ -15,6 +15,13 @@ vi.mock('@/lib/api', () => ({
   },
 }));
 
+vi.mock('@/hooks/use-auth', () => ({
+  useAuth: () => ({
+    user: { id: 'user-1', role: 'admin' },
+    isLoading: false,
+  }),
+}));
+
 const mockMembers: User[] = [
   {
     id: 'user-1',
