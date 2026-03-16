@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeAll } from 'vitest';
-import { fireEvent } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
-import { renderWithProviders, screen } from '@/test/test-utils';
+import { renderWithProviders, screen, userEvent } from '@/test/test-utils';
 import { server } from '@/test/mocks/server';
 import { mockSessions, mockMembers } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
@@ -221,8 +220,9 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
     // Click the Validation tab
+    const user = userEvent.setup();
     const validationTab = screen.getByRole('tab', { name: 'Validation' });
-    fireEvent.click(validationTab);
+    await user.click(validationTab);
     expect(await screen.findByText('Direction check')).toBeInTheDocument();
     expect(screen.getByText('Correctness check')).toBeInTheDocument();
     expect(screen.getByText('Changes align with issue description')).toBeInTheDocument();
@@ -242,8 +242,9 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
+    const user = userEvent.setup();
     const changesTab = screen.getByRole('tab', { name: 'Changes' });
-    fireEvent.click(changesTab);
+    await user.click(changesTab);
     expect(await screen.findByText('View on GitHub')).toBeInTheDocument();
     expect(screen.getByText('example/repo #42')).toBeInTheDocument();
   });
