@@ -10,6 +10,38 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestFileSnapshotStore_LoadNotFound(t *testing.T) {
+	t.Parallel()
+
+	store := NewFileSnapshotStore(t.TempDir())
+	var buf bytes.Buffer
+	err := store.Load(context.Background(), "nonexistent/key", &buf)
+	require.Error(t, err, "Load should fail for a missing snapshot")
+	require.Contains(t, err.Error(), "open snapshot file")
+}
+
+func TestFileSnapshotStore_DeleteNotFound(t *testing.T) {
+	t.Parallel()
+
+	store := NewFileSnapshotStore(t.TempDir())
+	err := store.Delete(context.Background(), "nonexistent/key")
+	require.NoError(t, err, "Delete should succeed for a missing snapshot")
+}
+
+func TestFileSnapshotStore_SaveMkdirFails(t *testing.T) {
+	t.Parallel()
+
+	// Use a file as base dir so MkdirAll fails.
+	tmp := t.TempDir()
+	filePath := filepath.Join(tmp, "not-a-dir")
+	require.NoError(t, os.WriteFile(filePath, []byte("x"), 0o600))
+
+	store := NewFileSnapshotStore(filePath)
+	err := store.Save(context.Background(), "sub/key", bytes.NewReader([]byte("data")))
+	require.Error(t, err, "Save should fail when MkdirAll fails")
+	require.Contains(t, err.Error(), "create snapshot dir")
+}
+
 func TestFileSnapshotStore_SaveLoadDelete(t *testing.T) {
 	t.Parallel()
 

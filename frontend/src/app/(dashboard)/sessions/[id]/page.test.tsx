@@ -1,10 +1,21 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeAll } from 'vitest';
+import { fireEvent } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { renderWithProviders, screen } from '@/test/test-utils';
 import { server } from '@/test/mocks/server';
 import { mockSessions, mockMembers } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
 import type { Session, SessionMessage, User, SingleResponse, ListResponse } from '@/lib/types';
+
+// Mock EventSource (not available in jsdom)
+beforeAll(() => {
+  global.EventSource = vi.fn().mockImplementation(() => ({
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    close: vi.fn(),
+    onerror: null,
+  })) as unknown as typeof EventSource;
+});
 
 // Mock next/link to render a plain anchor
 vi.mock('next/link', () => ({
@@ -197,7 +208,7 @@ describe('SessionDetailPage', () => {
     await screen.findAllByText('Fixed TypeError by adding null check');
     // Click the Validation tab
     const validationTab = screen.getByRole('tab', { name: 'Validation' });
-    validationTab.click();
+    fireEvent.click(validationTab);
     expect(await screen.findByText('Direction check')).toBeInTheDocument();
     expect(screen.getByText('Correctness check')).toBeInTheDocument();
     expect(screen.getByText('Changes align with issue description')).toBeInTheDocument();
@@ -218,7 +229,7 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
     const changesTab = screen.getByRole('tab', { name: 'Changes' });
-    changesTab.click();
+    fireEvent.click(changesTab);
     expect(await screen.findByText('View on GitHub')).toBeInTheDocument();
     expect(screen.getByText('example/repo #42')).toBeInTheDocument();
   });
