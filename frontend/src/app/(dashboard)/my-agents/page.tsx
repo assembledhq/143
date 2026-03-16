@@ -150,7 +150,7 @@ export default function MyAgentsPage() {
     <PageContainer size="default">
       <div className="space-y-6">
         <PageHeader
-          title="My Agents"
+          title="My agents"
           description="Manage your personal coding agent API keys. Your keys are used first, falling back to team defaults, then organization keys."
         />
 
