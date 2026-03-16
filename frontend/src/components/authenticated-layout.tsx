@@ -187,11 +187,11 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => router.push("/agent")}>
                   <Bot className="h-4 w-4" />
-                  Coding Agent
+                  Coding agent
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => router.push("/my-agents")}>
                   <KeyRound className="h-4 w-4" />
-                  My Agents
+                  My agents
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => router.push("/llm")}>
                   <Sparkles className="h-4 w-4" />
