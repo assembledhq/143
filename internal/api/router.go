@@ -48,6 +48,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	projectAttachmentStore := db.NewProjectAttachmentStore(pool)
 	projectSpecStore := db.NewProjectSpecStore(pool)
 	pmDocumentStore := db.NewPMDocumentStore(pool)
+	auditLogStore := db.NewAuditLogStore(pool)
+	auditEmitter := db.NewAuditEmitter(auditLogStore, logger)
 
 	// Create credential store with optional encryption.
 	var cryptoSvc *crypto.Service
@@ -131,12 +133,22 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 
 	projectHandler := handlers.NewProjectHandler(projectStore, projectTaskStore, projectCycleStore, projectAttachmentStore, projectSpecStore)
 	projectHandler.SetJobStore(jobStore)
+
+	// Wire audit emitter into all handlers that perform state changes.
+	authHandler.SetAuditEmitter(auditEmitter)
+	sessionHandler.SetAuditEmitter(auditEmitter)
+	teamHandler.SetAuditEmitter(auditEmitter)
+	settingsHandler.SetAuditEmitter(auditEmitter)
+	credentialHandler.SetAuditEmitter(auditEmitter)
+	projectHandler.SetAuditEmitter(auditEmitter)
+	pmHandler.SetAuditEmitter(auditEmitter)
 	projectAttachmentHandler := handlers.NewProjectAttachmentHandler(projectAttachmentStore, projectStore)
 	projectSpecHandler := handlers.NewProjectSpecHandler(projectSpecStore, projectStore)
 	projectAnalysisHandler := handlers.NewProjectAnalysisHandler(projectStore, projectSpecStore, projectAttachmentStore, projectTaskStore)
 	projectGenerateHandler := handlers.NewProjectGenerateHandler(llmClient)
 	codexAuthHandler := handlers.NewCodexAuthHandler(codexAuthSvc, logger)
 	pmDocumentHandler := handlers.NewPMDocumentHandler(pmDocumentStore)
+	auditLogHandler := handlers.NewAuditLogHandler(auditLogStore)
 
 	r := chi.NewRouter()
 
@@ -308,6 +320,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Post("/api/v1/settings/codex-auth/initiate", codexAuthHandler.Initiate)
 			r.Get("/api/v1/settings/codex-auth/status", codexAuthHandler.Status)
 			r.Post("/api/v1/settings/codex-auth/disconnect", codexAuthHandler.Disconnect)
+
+			// Audit logs
+			r.Get("/api/v1/audit-logs", auditLogHandler.List)
+			r.Get("/api/v1/audit-logs/{id}", auditLogHandler.Get)
 
 			// Team management
 			r.Get("/api/v1/team/members", teamHandler.ListMembers)

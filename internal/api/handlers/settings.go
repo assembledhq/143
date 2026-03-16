@@ -13,6 +13,12 @@ type SettingsHandler struct {
 	orgStore      *db.OrganizationStore
 	agentDefaults map[string]map[string]string
 	llmDefaults   map[string]string // provider name → masked key (from server env)
+	audit         *db.AuditEmitter
+}
+
+// SetAuditEmitter injects the audit emitter for logging settings events.
+func (h *SettingsHandler) SetAuditEmitter(audit *db.AuditEmitter) {
+	h.audit = audit
 }
 
 func NewSettingsHandler(orgStore *db.OrganizationStore, agentDefaults map[string]map[string]string, llmDefaults map[string]string) *SettingsHandler {
@@ -89,5 +95,8 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update organization")
 		return
 	}
+
+	orgIDStr := orgID.String()
+	emitUserAudit(h.audit, r, models.AuditActionSettingsUpdated, models.AuditResourceSettings, &orgIDStr, nil)
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Organization]{Data: org})
 }

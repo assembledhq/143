@@ -17,6 +17,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -58,6 +59,12 @@ type TeamHandler struct {
 	invitations teamInvitationStore
 	orgs        teamOrgStore
 	frontendURL string
+	audit       *db.AuditEmitter
+}
+
+// SetAuditEmitter injects the audit emitter for logging team events.
+func (h *TeamHandler) SetAuditEmitter(audit *db.AuditEmitter) {
+	h.audit = audit
 }
 
 // NewTeamHandler creates a new team management handler.
@@ -145,6 +152,13 @@ func (h *TeamHandler) ChangeRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	memberIDStr := memberID.String()
+	details, marshalErr := json.Marshal(map[string]string{"new_role": body.Role, "previous_role": member.Role})
+	if marshalErr != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(marshalErr).Msg("failed to marshal audit details for role change")
+	}
+	emitUserAudit(h.audit, r, models.AuditActionTeamMemberRoleChanged, models.AuditResourceTeamMember, &memberIDStr, details)
+
 	member.Role = body.Role
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.User]{Data: member})
 }
@@ -188,6 +202,13 @@ func (h *TeamHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "DELETE_FAILED", "failed to remove member")
 		return
 	}
+
+	removedIDStr := memberID.String()
+	details, marshalErr := json.Marshal(map[string]string{"removed_email": member.Email})
+	if marshalErr != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(marshalErr).Msg("failed to marshal audit details for member removal")
+	}
+	emitUserAudit(h.audit, r, models.AuditActionTeamMemberRemoved, models.AuditResourceTeamMember, &removedIDStr, details)
 
 	// Invalidate all sessions for the removed user.
 	if err := h.sessions.DeleteByUserID(r.Context(), memberID); err != nil {
@@ -258,6 +279,13 @@ func (h *TeamHandler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create invitation")
 		return
 	}
+
+	invIDStr := inv.ID.String()
+	invDetails, marshalErr := json.Marshal(map[string]string{"email": body.Email, "role": body.Role})
+	if marshalErr != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(marshalErr).Msg("failed to marshal audit details for invitation")
+	}
+	emitUserAudit(h.audit, r, models.AuditActionTeamMemberInvited, models.AuditResourceInvitation, &invIDStr, invDetails)
 
 	// Log the invitation link to console (SMTP delivery is future work).
 	acceptURL := h.frontendURL + "/invite/accept?token=" + token
@@ -331,6 +359,8 @@ func (h *TeamHandler) RevokeInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	revokedIDStr := invID.String()
+	emitUserAudit(h.audit, r, models.AuditActionTeamInvitationRevoked, models.AuditResourceInvitation, &revokedIDStr, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 

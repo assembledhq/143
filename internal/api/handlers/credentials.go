@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -23,6 +24,12 @@ type credentialStore interface {
 // CredentialHandler serves the /api/v1/settings/credentials endpoints.
 type CredentialHandler struct {
 	store credentialStore
+	audit *db.AuditEmitter
+}
+
+// SetAuditEmitter injects the audit emitter for logging credential events.
+func (h *CredentialHandler) SetAuditEmitter(audit *db.AuditEmitter) {
+	h.audit = audit
 }
 
 // NewCredentialHandler creates a new credential handler.
@@ -79,6 +86,7 @@ func (h *CredentialHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	emitUserAudit(h.audit, r, models.AuditActionCredentialUpdated, models.AuditResourceCredential, &providerStr, nil)
 	summary := cfg.MaskedSummary()
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.CredentialSummary]{Data: summary})
 }
@@ -99,5 +107,6 @@ func (h *CredentialHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	emitUserAudit(h.audit, r, models.AuditActionCredentialDeleted, models.AuditResourceCredential, &providerStr, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
