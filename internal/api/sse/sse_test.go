@@ -1,0 +1,96 @@
+package sse
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+func TestNewWriter_SupportsFlusher(t *testing.T) {
+	t.Parallel()
+
+	rec := httptest.NewRecorder()
+	sw := NewWriter(rec)
+	require.NotNil(t, sw, "NewWriter should return a non-nil writer for httptest.ResponseRecorder")
+	require.Equal(t, "text/event-stream", rec.Header().Get("Content-Type"))
+	require.Equal(t, "no-cache", rec.Header().Get("Cache-Control"))
+	require.Equal(t, "keep-alive", rec.Header().Get("Connection"))
+}
+
+// nonFlushWriter is an http.ResponseWriter that does NOT implement http.Flusher.
+type nonFlushWriter struct{ http.ResponseWriter }
+
+func TestNewWriter_NoFlusher(t *testing.T) {
+	t.Parallel()
+
+	sw := NewWriter(nonFlushWriter{httptest.NewRecorder()})
+	require.Nil(t, sw, "NewWriter should return nil when ResponseWriter does not support Flusher")
+}
+
+func TestWriteEvent_DefaultEvent(t *testing.T) {
+	t.Parallel()
+
+	rec := httptest.NewRecorder()
+	sw := NewWriter(rec)
+	require.NotNil(t, sw)
+
+	err := sw.WriteEvent(EventLog, map[string]string{"msg": "hello"})
+	require.NoError(t, err)
+
+	body := rec.Body.String()
+	require.NotContains(t, body, "event:")
+	require.Contains(t, body, `data: {"msg":"hello"}`)
+}
+
+func TestWriteEvent_NamedEvent(t *testing.T) {
+	t.Parallel()
+
+	rec := httptest.NewRecorder()
+	sw := NewWriter(rec)
+	require.NotNil(t, sw)
+
+	err := sw.WriteEvent(EventStatus, map[string]string{"status": "running"})
+	require.NoError(t, err)
+
+	body := rec.Body.String()
+	require.Contains(t, body, "event: status\n")
+	require.Contains(t, body, `data: {"status":"running"}`)
+}
+
+func TestWriteData(t *testing.T) {
+	t.Parallel()
+
+	rec := httptest.NewRecorder()
+	sw := NewWriter(rec)
+	require.NotNil(t, sw)
+
+	err := sw.WriteData(map[string]int{"count": 1})
+	require.NoError(t, err)
+	require.Contains(t, rec.Body.String(), `data: {"count":1}`)
+}
+
+func TestWriteEvent_MarshalError(t *testing.T) {
+	t.Parallel()
+
+	rec := httptest.NewRecorder()
+	sw := NewWriter(rec)
+	require.NotNil(t, sw)
+
+	// channels cannot be marshaled to JSON
+	err := sw.WriteEvent(EventLog, make(chan int))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "sse: marshal")
+}
+
+func TestFlush(t *testing.T) {
+	t.Parallel()
+
+	rec := httptest.NewRecorder()
+	sw := NewWriter(rec)
+	require.NotNil(t, sw)
+
+	// Should not panic
+	sw.Flush()
+}

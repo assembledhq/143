@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -33,7 +34,8 @@ const sessionSelectColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-00
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, pm_approach, pm_reasoning, project_task_id,
-	model_override, triggered_by_user_id, created_at`
+	model_override, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
+	sandbox_state, snapshot_key, created_at`
 
 func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters SessionFilters) ([]models.Session, error) {
 	args := pgx.NamedArgs{"org_id": orgID}
@@ -114,21 +116,21 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 	}
 
 	args := pgx.NamedArgs{
-		"issue_id":         issueID,
-		"org_id":           run.OrgID,
-		"agent_type":       run.AgentType,
-		"status":           run.Status,
-		"autonomy_level":   run.AutonomyLevel,
-		"token_mode":       run.TokenMode,
-		"complexity_tier":  run.ComplexityTier,
-		"parent_session_id":    run.ParentSessionID,
-		"revision_context": run.RevisionContext,
-		"pm_plan_id":       run.PMPlanID,
-		"pm_approach":      run.PMApproach,
-		"pm_reasoning":     run.PMReasoning,
-		"project_task_id":  run.ProjectTaskID,
-		"model_override":          run.ModelOverride,
-		"triggered_by_user_id":    run.TriggeredByUserID,
+		"issue_id":              issueID,
+		"org_id":                run.OrgID,
+		"agent_type":            run.AgentType,
+		"status":                run.Status,
+		"autonomy_level":        run.AutonomyLevel,
+		"token_mode":            run.TokenMode,
+		"complexity_tier":       run.ComplexityTier,
+		"parent_session_id":     run.ParentSessionID,
+		"revision_context":      run.RevisionContext,
+		"pm_plan_id":            run.PMPlanID,
+		"pm_approach":           run.PMApproach,
+		"pm_reasoning":          run.PMReasoning,
+		"project_task_id":       run.ProjectTaskID,
+		"model_override":        run.ModelOverride,
+		"triggered_by_user_id":  run.TriggeredByUserID,
 	}
 
 	row := s.db.QueryRow(ctx, query, args)
@@ -153,7 +155,12 @@ func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID,
 func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.SessionResult) error {
 	query := `
 		UPDATE sessions
-		SET status = @status, completed_at = now(),
+		SET status = @status,
+		    completed_at = CASE
+		        WHEN @status IN ('completed', 'failed', 'cancelled', 'needs_human_guidance', 'pr_created', 'skipped')
+		            THEN now()
+		        ELSE completed_at
+		    END,
 		    confidence_score = @confidence_score, confidence_reasoning = @confidence_reasoning,
 		    risk_factors = @risk_factors, token_usage = @token_usage,
 		    result_summary = @result_summary, diff = @diff, error = @error
@@ -172,6 +179,26 @@ func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 		"error":                result.Error,
 	})
 	return err
+}
+
+// ClaimIdle atomically transitions an idle session to running and returns the
+// claimed session row. Used when a user sends a follow-up message so only one
+// continuation can be queued at a time.
+func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
+	query := `
+		UPDATE sessions
+		SET status = 'running'
+		WHERE id = @id AND org_id = @org_id AND status = 'idle'
+		RETURNING ` + sessionSelectColumns
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	})
+	if err != nil {
+		return models.Session{}, fmt.Errorf("claim idle session: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
 }
 
 func (s *SessionStore) UpdateFailure(ctx context.Context, orgID, runID uuid.UUID, explanation, category string, nextSteps []string, retryAdvised bool) error {
@@ -265,6 +292,90 @@ func (s *SessionStore) ListByIDs(ctx context.Context, orgID uuid.UUID, ids []uui
 	})
 	if err != nil {
 		return nil, fmt.Errorf("query sessions by ids: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+}
+
+// UpdateTurnComplete sets the session to idle, persists the latest turn result,
+// and updates multi-turn metadata.
+func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string) error {
+	query := `
+		UPDATE sessions
+		SET status = 'idle', current_turn = @current_turn, last_activity_at = now(),
+		    agent_session_id = @agent_session_id, snapshot_key = @snapshot_key,
+		    sandbox_state = 'snapshotted',
+		    confidence_score = @confidence_score, confidence_reasoning = @confidence_reasoning,
+		    risk_factors = @risk_factors, token_usage = @token_usage,
+		    result_summary = @result_summary, diff = @diff, error = @error
+		WHERE id = @id AND org_id = @org_id`
+
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":                   sessionID,
+		"org_id":               orgID,
+		"current_turn":         turn,
+		"agent_session_id":     agentSessionID,
+		"snapshot_key":         snapshotKey,
+		"confidence_score":     result.ConfidenceScore,
+		"confidence_reasoning": result.ConfidenceReasoning,
+		"risk_factors":         result.RiskFactors,
+		"token_usage":          result.TokenUsage,
+		"result_summary":       result.ResultSummary,
+		"diff":                 result.Diff,
+		"error":                result.Error,
+	})
+	return err
+}
+
+// UpdateSnapshotInfo persists snapshot metadata without changing the session status.
+// Used after the first run to store snapshot data while letting the normal
+// completion flow control the status.
+func (s *SessionStore) UpdateSnapshotInfo(ctx context.Context, orgID, sessionID uuid.UUID, agentSessionID, snapshotKey string) error {
+	query := `
+		UPDATE sessions
+		SET last_activity_at = now(),
+		    agent_session_id = @agent_session_id, snapshot_key = @snapshot_key,
+		    sandbox_state = 'snapshotted'
+		WHERE id = @id AND org_id = @org_id`
+
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":               sessionID,
+		"org_id":           orgID,
+		"agent_session_id": agentSessionID,
+		"snapshot_key":     snapshotKey,
+	})
+	return err
+}
+
+func (s *SessionStore) UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state string) error {
+	query := `UPDATE sessions SET sandbox_state = @sandbox_state WHERE id = @id AND org_id = @org_id`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":            sessionID,
+		"org_id":        orgID,
+		"sandbox_state": state,
+	})
+	return err
+}
+
+// ListStaleSessions returns sessions whose snapshots should be cleaned up:
+// idle sessions that have been inactive too long, OR completed/failed sessions
+// that still have snapshots (e.g. after EndSession or normal completion).
+func (s *SessionStore) ListStaleSessions(ctx context.Context, olderThan time.Time) ([]models.Session, error) {
+	query := `
+		SELECT ` + sessionSelectColumns + `
+		FROM sessions
+		WHERE sandbox_state = 'snapshotted'
+		  AND (
+		    (status = 'idle' AND last_activity_at < @older_than)
+		    OR status IN ('completed', 'failed', 'cancelled')
+		  )
+		ORDER BY last_activity_at ASC NULLS FIRST
+		LIMIT 100`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"older_than": olderThan,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query stale sessions: %w", err)
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
 }

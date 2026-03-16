@@ -64,39 +64,59 @@ func (a *GeminiCLIAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, 
 		return nil, fmt.Errorf("sandbox provider not found in context")
 	}
 
-	// Write the prompt to a file in the sandbox so we can reference it.
-	promptContent := fmt.Sprintf("%s\n\n---\n\n%s", prompt.SystemPrompt, prompt.UserPrompt)
-	promptPath := fmt.Sprintf("%s/.143-prompt.md", sandbox.WorkDir)
-	if err := provider.WriteFile(ctx, sandbox, promptPath, []byte(promptContent)); err != nil {
-		return nil, fmt.Errorf("write prompt file: %w", err)
+	var cmd string
+	if prompt.Continuation {
+		// Subsequent turn: resume the latest restored session state.
+		msg := shellEscapeDouble(prompt.UserMessage)
+		if prompt.ResumeSessionID != "" {
+			cmd = fmt.Sprintf(
+				"gemini --resume %s --yolo --output-format stream-json -p \"%s\"",
+				shellEscapeGemini(prompt.ResumeSessionID),
+				msg,
+			)
+		} else {
+			cmd = fmt.Sprintf(
+				"gemini --resume --yolo --output-format stream-json -p \"%s\"",
+				msg,
+			)
+		}
+	} else {
+		// First turn: write prompt file and run fresh.
+		promptContent := fmt.Sprintf("%s\n\n---\n\n%s", prompt.SystemPrompt, prompt.UserPrompt)
+		promptPath := fmt.Sprintf("%s/.143-prompt.md", sandbox.WorkDir)
+		if err := provider.WriteFile(ctx, sandbox, promptPath, []byte(promptContent)); err != nil {
+			return nil, fmt.Errorf("write prompt file: %w", err)
+		}
+		cmd = fmt.Sprintf(
+			"gemini -p \"$(cat '%s')\" --yolo --output-format stream-json",
+			shellEscapeGemini(promptPath),
+		)
 	}
-
-	// Gemini CLI headless: -p for non-interactive, --yolo to auto-approve,
-	// --output-format stream-json for streaming JSONL with tool use detail.
-	cmd := fmt.Sprintf(
-		"gemini -p \"$(cat '%s')\" --yolo --output-format stream-json",
-		shellEscapeGemini(promptPath),
-	)
 
 	logCh <- agent.LogEntry{
 		Timestamp: time.Now(),
 		Level:     "info",
 		Message:   "starting Gemini CLI",
-		Metadata:  map[string]interface{}{"max_tokens": prompt.MaxTokens},
+		Metadata:  map[string]interface{}{"max_tokens": prompt.MaxTokens, "resume": prompt.Continuation},
 	}
 
-	// Execute the CLI and capture output.
-	var stdout, stderr bytes.Buffer
-	exitCode, err := provider.Exec(ctx, sandbox, cmd, &stdout, &stderr)
+	// Execute with real-time streaming.
+	result := &agent.AgentResult{}
+	var stderr bytes.Buffer
+	var summaryParts []string
+
+	exitCode, err := provider.ExecStream(ctx, sandbox, cmd, func(line []byte) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			return
+		}
+		parseGeminiStreamLine(line, result, logCh, &summaryParts)
+	}, &stderr)
 	if err != nil {
 		return nil, fmt.Errorf("exec gemini CLI: %w", err)
 	}
 
-	// Parse the JSON output.
-	result := &agent.AgentResult{
-		ExitCode: exitCode,
-	}
-	parseGeminiStreamOutput(stdout.Bytes(), result, logCh)
+	result.ExitCode = exitCode
+	result.Summary = strings.Join(summaryParts, "\n")
 
 	if stderr.Len() > 0 {
 		logCh <- agent.LogEntry{
@@ -132,6 +152,157 @@ func (a *GeminiCLIAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, 
 	}
 
 	return result, nil
+}
+
+// parseGeminiStreamLine processes a single line of Gemini streaming output.
+func parseGeminiStreamLine(line []byte, result *agent.AgentResult, logCh chan<- agent.LogEntry, summaryParts *[]string) {
+	var event geminiStreamEvent
+	if err := json.Unmarshal(line, &event); err != nil {
+		text := string(line)
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "output",
+			Message:   text,
+		}
+		*summaryParts = append(*summaryParts, text)
+		tryExtractConfidence(text, result)
+		return
+	}
+
+	// Handle legacy single-object JSON format (no type field).
+	if event.Type == "" {
+		var legacy geminiJSONOutput
+		if err := json.Unmarshal(line, &legacy); err == nil && legacy.Response != "" {
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "output",
+				Message:   legacy.Response,
+			}
+			*summaryParts = append(*summaryParts, legacy.Response)
+			tryExtractConfidence(legacy.Response, result)
+			if legacy.Stats != nil {
+				result.TokenUsage = agent.TokenUsage{
+					InputTokens:  legacy.Stats.InputTokens,
+					OutputTokens: legacy.Stats.OutputTokens,
+				}
+			}
+			if legacy.Error != "" {
+				logCh <- agent.LogEntry{
+					Timestamp: time.Now(),
+					Level:     "error",
+					Message:   legacy.Error,
+				}
+			}
+			return
+		}
+	}
+
+	switch event.Type {
+	case "text", "assistant":
+		content := event.Content
+		if content == "" {
+			content = event.Message
+		}
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "output",
+			Message:   content,
+		}
+		*summaryParts = append(*summaryParts, content)
+		tryExtractConfidence(content, result)
+
+	case "tool_call", "tool_use":
+		toolName := event.Tool
+		if toolName == "" {
+			toolName = event.Name
+		}
+		metadata := map[string]interface{}{"tool": toolName}
+		if len(event.Input) > 0 {
+			var inputMap map[string]interface{}
+			if err := json.Unmarshal(event.Input, &inputMap); err == nil {
+				metadata["input"] = inputMap
+			}
+		}
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "tool_use",
+			Message:   fmt.Sprintf("using tool: %s", toolName),
+			Metadata:  metadata,
+		}
+
+	case "tool_result":
+		toolName := event.Tool
+		if toolName == "" {
+			toolName = event.Name
+		}
+		metadata := map[string]interface{}{"type": "tool_result"}
+		if toolName != "" {
+			metadata["tool"] = toolName
+		}
+		outputMsg := event.Output
+		if outputMsg == "" && len(event.Result) > 0 {
+			outputMsg = string(event.Result)
+		}
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "output",
+			Message:   outputMsg,
+			Metadata:  metadata,
+		}
+
+	case "thinking":
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "debug",
+			Message:   event.Content,
+			Metadata:  map[string]interface{}{"type": "thinking"},
+		}
+
+	case "error":
+		msg := event.Error
+		if msg == "" {
+			msg = event.Message
+		}
+		if msg == "" {
+			msg = event.Content
+		}
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "error",
+			Message:   msg,
+		}
+
+	case "usage", "result":
+		content := event.Content
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "info",
+			Message:   content,
+		}
+		if content != "" {
+			*summaryParts = append(*summaryParts, content)
+			tryExtractConfidence(content, result)
+		}
+		if event.Stats != nil {
+			result.TokenUsage = agent.TokenUsage{
+				InputTokens:  event.Stats.InputTokens,
+				OutputTokens: event.Stats.OutputTokens,
+			}
+		}
+		if len(event.Result) > 0 {
+			var usage agent.TokenUsage
+			if err := json.Unmarshal(event.Result, &usage); err == nil && usage.InputTokens > 0 {
+				result.TokenUsage = usage
+			}
+		}
+
+	default:
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "debug",
+			Message:   string(line),
+		}
+	}
 }
 
 // geminiJSONOutput represents Gemini CLI's --output-format json response.

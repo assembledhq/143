@@ -188,6 +188,12 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions/${questionId}/answer`, { answer }),
     createManual: (body: { message: string; images?: string[]; agent_type?: string; model?: string; autonomy_level?: string; token_mode?: string }) =>
       post<import('./types').SingleResponse<import('./types').Session>>('/api/v1/sessions/manual', body),
+    getMessages: (sessionId: string) =>
+      get<import('./types').ListResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/messages`),
+    sendMessage: (sessionId: string, message: string, images?: string[]) =>
+      post<import('./types').SingleResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/messages`, { message, images }),
+    endSession: (sessionId: string) =>
+      post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${sessionId}/end`),
   },
   settings: {
     get: () => get<import('./types').SingleResponse<import('./types').Organization>>('/api/v1/settings'),
