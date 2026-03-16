@@ -362,7 +362,7 @@ export function SessionsPageContent() {
         <div className="rounded-lg border border-border bg-card overflow-hidden">
           {/* Count header */}
           <div className="flex items-center justify-between px-4 py-2.5 border-b border-border/50 bg-muted/30">
-            <span className="text-[11px] font-semibold text-muted-foreground/70 uppercase tracking-widest">
+            <span className="text-[11px] font-semibold text-muted-foreground/70 tracking-widest">
               {filteredSessions.length} session{filteredSessions.length !== 1 ? "s" : ""}
             </span>
           </div>

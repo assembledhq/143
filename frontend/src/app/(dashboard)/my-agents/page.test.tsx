@@ -75,7 +75,7 @@ describe('MyAgentsPage', () => {
 
   it('renders page header', async () => {
     renderWithProviders(<MyAgentsPage />);
-    expect(screen.getByText('My Agents')).toBeInTheDocument();
+    expect(screen.getByText('My agents')).toBeInTheDocument();
   });
 
   it('shows all four provider cards in My Keys tab', async () => {
