@@ -72,10 +72,10 @@ CREATE TRIGGER audit_logs_immutable
 
 -- -----------------------------------------------------------------------
 -- Retention cleanup function (SECURITY DEFINER to bypass immutability trigger)
--- IMPORTANT: This function's owner must have ALTER TABLE privileges on
--- audit_logs because it uses DISABLE/ENABLE TRIGGER. The migration user
--- (typically the DB superuser/owner) becomes the owner. Do not reassign
--- ownership to a lesser-privileged role.
+-- Uses SET LOCAL session_replication_role = 'replica' to suppress triggers
+-- for this transaction only, avoiding the ACCESS EXCLUSIVE lock that
+-- ALTER TABLE DISABLE TRIGGER would require and keeping the immutability
+-- guarantee intact for all concurrent connections.
 -- -----------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION delete_expired_audit_logs(target_org_id uuid, retention_days int)
 RETURNS bigint
@@ -85,25 +85,25 @@ SET search_path = public
 AS $$
 DECLARE
     deleted bigint;
+    original_role text;
 BEGIN
     IF retention_days <= 0 THEN
         RAISE EXCEPTION 'retention_days must be positive, got %', retention_days;
     END IF;
 
-    ALTER TABLE audit_logs DISABLE TRIGGER audit_logs_immutable;
+    -- Save the current role and suppress triggers for this transaction only.
+    original_role := current_setting('session_replication_role');
+    SET LOCAL session_replication_role = 'replica';
 
-    BEGIN
-        DELETE FROM audit_logs
-        WHERE org_id = target_org_id
-          AND created_at < now() - make_interval(days => retention_days);
+    DELETE FROM audit_logs
+    WHERE org_id = target_org_id
+      AND created_at < now() - make_interval(days => retention_days);
 
-        GET DIAGNOSTICS deleted = ROW_COUNT;
-    EXCEPTION WHEN OTHERS THEN
-        ALTER TABLE audit_logs ENABLE TRIGGER audit_logs_immutable;
-        RAISE;
-    END;
+    GET DIAGNOSTICS deleted = ROW_COUNT;
 
-    ALTER TABLE audit_logs ENABLE TRIGGER audit_logs_immutable;
+    -- Restore original role (SET LOCAL is transaction-scoped, but this is
+    -- belt-and-suspenders for clarity).
+    PERFORM set_config('session_replication_role', original_role, true);
 
     RETURN deleted;
 END;

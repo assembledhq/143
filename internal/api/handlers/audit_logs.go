@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -17,11 +18,18 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-type AuditLogHandler struct {
-	store *db.AuditLogStore
+// auditLogReader abstracts the read operations on audit logs so the handler
+// can be tested with a simple mock instead of pgxmock.
+type auditLogReader interface {
+	List(ctx context.Context, orgID uuid.UUID, filters db.AuditLogFilters) ([]models.AuditLog, error)
+	GetByID(ctx context.Context, orgID uuid.UUID, id int64) (*models.AuditLog, error)
 }
 
-func NewAuditLogHandler(store *db.AuditLogStore) *AuditLogHandler {
+type AuditLogHandler struct {
+	store auditLogReader
+}
+
+func NewAuditLogHandler(store auditLogReader) *AuditLogHandler {
 	return &AuditLogHandler{store: store}
 }
 

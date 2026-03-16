@@ -55,8 +55,8 @@ func TestWhereClause_Build(t *testing.T) {
 			w := newWhereClause()
 			tt.setup(w)
 			sql, args := w.build()
-			require.Equal(t, tt.expectedSQL, sql)
-			require.Len(t, args, tt.expectedArgLen)
+			require.Equal(t, tt.expectedSQL, sql, "should produce the expected SQL WHERE clause")
+			require.Len(t, args, tt.expectedArgLen, "should produce the expected number of named args")
 		})
 	}
 }
@@ -78,7 +78,7 @@ func TestEscapeLike(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, tt.expected, escapeLike(tt.input))
+			require.Equal(t, tt.expected, escapeLike(tt.input), "should correctly escape LIKE meta-characters")
 		})
 	}
 }

@@ -53,6 +53,8 @@ type Scheduler struct {
 	repos        schedulerRepoStore
 	projects     schedulerProjectStore // nil-safe: project scheduling disabled if nil
 	logger       zerolog.Logger
+
+	lastAuditCleanupDate string // tracks the UTC date of last audit cleanup scheduling
 }
 
 func NewScheduler(
@@ -200,8 +202,16 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 }
 
 func (s *Scheduler) scheduleAuditRetentionCleanup(ctx context.Context, orgIDs []uuid.UUID, now time.Time) {
-	// Use the current date as part of the dedupe key so the job runs at most once per day per org.
 	dateKey := now.UTC().Format("2006-01-02")
+
+	// Skip if we already enqueued cleanup jobs for today's date. This avoids
+	// N redundant Enqueue calls (one per org) on every scheduler tick after
+	// the first tick of the day — matching the selective-query pattern used
+	// by scheduleProjectCycles.
+	if s.lastAuditCleanupDate == dateKey {
+		return
+	}
+
 	for _, orgID := range orgIDs {
 		dedupeKey := fmt.Sprintf("audit_retention_cleanup:%s:%s", orgID.String(), dateKey)
 		payload := map[string]string{"org_id": orgID.String()}
@@ -209,6 +219,8 @@ func (s *Scheduler) scheduleAuditRetentionCleanup(ctx context.Context, orgIDs []
 			s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to enqueue audit_retention_cleanup job")
 		}
 	}
+
+	s.lastAuditCleanupDate = dateKey
 }
 
 func (s *Scheduler) scheduleProjectCycles(ctx context.Context, now time.Time) {

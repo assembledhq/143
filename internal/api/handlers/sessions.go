@@ -601,11 +601,11 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Generate a concise session title via LLM (with a short timeout so the
-	// request doesn't block for too long). Non-fatal: session and job are
-	// already committed, so a title generation failure must not return 500.
+	// request doesn't block for too long).
 	if h.llmClient != nil {
 		if err := h.generateSessionTitle(r.Context(), session, orgID, body.Message); err != nil {
-			zerolog.Ctx(r.Context()).Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to generate session title")
+			writeError(w, http.StatusInternalServerError, "TITLE_GENERATION_FAILED", "failed to generate session title")
+			return
 		}
 	}
 

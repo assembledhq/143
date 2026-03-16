@@ -564,6 +564,8 @@ func (h *ProjectHandler) transitionStatus(w http.ResponseWriter, r *http.Request
 		auditAction = models.AuditActionProjectPaused
 	case models.ProjectStatusDraft:
 		auditAction = models.AuditActionProjectUpdated
+	case models.ProjectStatusCompleted:
+		auditAction = models.AuditActionProjectCompleted
 	case models.ProjectStatusCancelled:
 		auditAction = models.AuditActionProjectDismissed
 	}

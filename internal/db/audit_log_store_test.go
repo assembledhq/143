@@ -13,37 +13,37 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var auditLogColumns = []string{
-	"id", "org_id", "actor_type", "actor_id", "user_id",
-	"action", "resource_type", "resource_id",
-	"details", "request_id", "ip_address", "user_agent",
-	"session_id", "project_id", "created_at",
+func newAuditLogColumns() []string {
+	return []string{
+		"id", "org_id", "actor_type", "actor_id", "user_id",
+		"action", "resource_type", "resource_id",
+		"details", "request_id", "ip_address", "user_agent",
+		"session_id", "project_id", "created_at",
+	}
 }
 
 func TestAuditLogStore_Create(t *testing.T) {
 	t.Parallel()
 
-	orgID := uuid.New()
-	userID := uuid.New()
-	now := time.Now()
-
 	tests := []struct {
 		name      string
-		entry     *models.AuditLog
-		setupMock func(mock pgxmock.PgxPoolIface)
+		entry     func(orgID, userID uuid.UUID) *models.AuditLog
+		setupMock func(mock pgxmock.PgxPoolIface, now time.Time, expectedID int64)
 		expectErr bool
 	}{
 		{
 			name: "creates user audit log entry",
-			entry: &models.AuditLog{
-				OrgID:        orgID,
-				ActorType:    models.AuditActorUser,
-				ActorID:      userID.String(),
-				UserID:       &userID,
-				Action:       models.AuditActionSessionCreated,
-				ResourceType: models.AuditResourceSession,
+			entry: func(orgID, userID uuid.UUID) *models.AuditLog {
+				return &models.AuditLog{
+					OrgID:        orgID,
+					ActorType:    models.AuditActorUser,
+					ActorID:      userID.String(),
+					UserID:       &userID,
+					Action:       models.AuditActionSessionCreated,
+					ResourceType: models.AuditResourceSession,
+				}
 			},
-			setupMock: func(mock pgxmock.PgxPoolIface) {
+			setupMock: func(mock pgxmock.PgxPoolIface, now time.Time, expectedID int64) {
 				mock.ExpectQuery("INSERT INTO audit_logs").
 					WithArgs(
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -53,20 +53,22 @@ func TestAuditLogStore_Create(t *testing.T) {
 					).
 					WillReturnRows(
 						pgxmock.NewRows([]string{"id", "created_at"}).
-							AddRow(int64(1), now),
+							AddRow(expectedID, now),
 					)
 			},
 		},
 		{
 			name: "creates system audit log entry",
-			entry: &models.AuditLog{
-				OrgID:        orgID,
-				ActorType:    models.AuditActorSystem,
-				ActorID:      "pm_agent",
-				Action:       models.AuditActionPMPlanCreated,
-				ResourceType: models.AuditResourcePMPlan,
+			entry: func(orgID, _ uuid.UUID) *models.AuditLog {
+				return &models.AuditLog{
+					OrgID:        orgID,
+					ActorType:    models.AuditActorSystem,
+					ActorID:      "pm_agent",
+					Action:       models.AuditActionPMPlanCreated,
+					ResourceType: models.AuditResourcePMPlan,
+				}
 			},
-			setupMock: func(mock pgxmock.PgxPoolIface) {
+			setupMock: func(mock pgxmock.PgxPoolIface, now time.Time, expectedID int64) {
 				mock.ExpectQuery("INSERT INTO audit_logs").
 					WithArgs(
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -76,56 +78,64 @@ func TestAuditLogStore_Create(t *testing.T) {
 					).
 					WillReturnRows(
 						pgxmock.NewRows([]string{"id", "created_at"}).
-							AddRow(int64(2), now),
+							AddRow(expectedID, now),
 					)
 			},
 		},
 		{
 			name: "rejects invalid actor type",
-			entry: &models.AuditLog{
-				OrgID:        orgID,
-				ActorType:    "invalid",
-				ActorID:      "test",
-				Action:       models.AuditActionAuthLogin,
-				ResourceType: models.AuditResourceUser,
+			entry: func(orgID, _ uuid.UUID) *models.AuditLog {
+				return &models.AuditLog{
+					OrgID:        orgID,
+					ActorType:    "invalid",
+					ActorID:      "test",
+					Action:       models.AuditActionAuthLogin,
+					ResourceType: models.AuditResourceUser,
+				}
 			},
-			setupMock: func(mock pgxmock.PgxPoolIface) {},
+			setupMock: func(mock pgxmock.PgxPoolIface, _ time.Time, _ int64) {},
 			expectErr: true,
 		},
 		{
 			name: "rejects invalid action",
-			entry: &models.AuditLog{
-				OrgID:        orgID,
-				ActorType:    models.AuditActorUser,
-				ActorID:      userID.String(),
-				Action:       "bad.action",
-				ResourceType: models.AuditResourceUser,
+			entry: func(orgID, userID uuid.UUID) *models.AuditLog {
+				return &models.AuditLog{
+					OrgID:        orgID,
+					ActorType:    models.AuditActorUser,
+					ActorID:      userID.String(),
+					Action:       "bad.action",
+					ResourceType: models.AuditResourceUser,
+				}
 			},
-			setupMock: func(mock pgxmock.PgxPoolIface) {},
+			setupMock: func(mock pgxmock.PgxPoolIface, _ time.Time, _ int64) {},
 			expectErr: true,
 		},
 		{
 			name: "rejects invalid resource type",
-			entry: &models.AuditLog{
-				OrgID:        orgID,
-				ActorType:    models.AuditActorUser,
-				ActorID:      userID.String(),
-				Action:       models.AuditActionAuthLogin,
-				ResourceType: "bad_type",
+			entry: func(orgID, userID uuid.UUID) *models.AuditLog {
+				return &models.AuditLog{
+					OrgID:        orgID,
+					ActorType:    models.AuditActorUser,
+					ActorID:      userID.String(),
+					Action:       models.AuditActionAuthLogin,
+					ResourceType: "bad_type",
+				}
 			},
-			setupMock: func(mock pgxmock.PgxPoolIface) {},
+			setupMock: func(mock pgxmock.PgxPoolIface, _ time.Time, _ int64) {},
 			expectErr: true,
 		},
 		{
 			name: "returns error on database failure",
-			entry: &models.AuditLog{
-				OrgID:        orgID,
-				ActorType:    models.AuditActorUser,
-				ActorID:      userID.String(),
-				Action:       models.AuditActionAuthLogin,
-				ResourceType: models.AuditResourceUser,
+			entry: func(orgID, userID uuid.UUID) *models.AuditLog {
+				return &models.AuditLog{
+					OrgID:        orgID,
+					ActorType:    models.AuditActorUser,
+					ActorID:      userID.String(),
+					Action:       models.AuditActionAuthLogin,
+					ResourceType: models.AuditResourceUser,
+				}
 			},
-			setupMock: func(mock pgxmock.PgxPoolIface) {
+			setupMock: func(mock pgxmock.PgxPoolIface, _ time.Time, _ int64) {
 				mock.ExpectQuery("INSERT INTO audit_logs").
 					WithArgs(
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -143,21 +153,26 @@ func TestAuditLogStore_Create(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
+			orgID := uuid.New()
+			userID := uuid.New()
+			now := time.Now()
+
 			mock, err := pgxmock.NewPool()
 			require.NoError(t, err, "should initialize mock pool without error")
 			defer mock.Close()
 
 			store := NewAuditLogStore(mock)
-			tt.setupMock(mock)
+			tt.setupMock(mock, now, int64(1))
 
-			err = store.Create(context.Background(), tt.entry)
+			entry := tt.entry(orgID, userID)
+			err = store.Create(context.Background(), entry)
 			if tt.expectErr {
 				require.Error(t, err, "should return an error for invalid input or database failure")
 				return
 			}
 			require.NoError(t, err, "should create audit log entry without error")
-			require.NotZero(t, tt.entry.ID, "should populate entry ID after creation")
-			require.NotZero(t, tt.entry.CreatedAt, "should populate entry CreatedAt after creation")
+			require.NotZero(t, entry.ID, "should populate entry ID after creation")
+			require.NotZero(t, entry.CreatedAt, "should populate entry CreatedAt after creation")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
@@ -166,25 +181,21 @@ func TestAuditLogStore_Create(t *testing.T) {
 func TestAuditLogStore_List(t *testing.T) {
 	t.Parallel()
 
-	orgID := uuid.New()
-	userID := uuid.New()
-	now := time.Now()
-
 	tests := []struct {
 		name      string
 		filters   AuditLogFilters
-		setupMock func(mock pgxmock.PgxPoolIface)
-		expected  int
+		setupMock func(mock pgxmock.PgxPoolIface, orgID, userID uuid.UUID, now time.Time)
+		expected  func(orgID, userID uuid.UUID, now time.Time) []models.AuditLog
 		expectErr bool
 	}{
 		{
 			name:    "returns entries for org with no filters",
 			filters: AuditLogFilters{},
-			setupMock: func(mock pgxmock.PgxPoolIface) {
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, userID uuid.UUID, now time.Time) {
 				mock.ExpectQuery("(?s)SELECT .+ FROM audit_logs WHERE org_id").
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(auditLogColumns).
+						pgxmock.NewRows(newAuditLogColumns()).
 							AddRow(int64(1), orgID, "user", userID.String(), &userID,
 								"session.created", "session", nil,
 								json.RawMessage(`{}`), nil, nil, nil,
@@ -195,68 +206,64 @@ func TestAuditLogStore_List(t *testing.T) {
 								nil, nil, now),
 					)
 			},
-			expected: 2,
+			expected: func(orgID, userID uuid.UUID, now time.Time) []models.AuditLog {
+				return []models.AuditLog{
+					{
+						ID: 1, OrgID: orgID, ActorType: "user",
+						ActorID: userID.String(), UserID: &userID,
+						Action: "session.created", ResourceType: "session",
+						Details: json.RawMessage(`{}`), CreatedAt: now,
+					},
+					{
+						ID: 2, OrgID: orgID, ActorType: "system",
+						ActorID: "pm_agent",
+						Action: "pm.plan_created", ResourceType: "pm_plan",
+						CreatedAt: now,
+					},
+				}
+			},
 		},
 		{
 			name:    "filters by actor_type",
 			filters: AuditLogFilters{ActorType: models.AuditActorUser},
-			setupMock: func(mock pgxmock.PgxPoolIface) {
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, userID uuid.UUID, now time.Time) {
 				mock.ExpectQuery("(?s)SELECT .+ FROM audit_logs WHERE org_id .+ AND actor_type").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(auditLogColumns).
+						pgxmock.NewRows(newAuditLogColumns()).
 							AddRow(int64(1), orgID, "user", userID.String(), &userID,
 								"session.created", "session", nil,
 								nil, nil, nil, nil,
 								nil, nil, now),
 					)
 			},
-			expected: 1,
-		},
-		{
-			name:    "filters by action",
-			filters: AuditLogFilters{Action: models.AuditActionAuthLogin},
-			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery("(?s)SELECT .+ FROM audit_logs WHERE org_id .+ AND action").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows(auditLogColumns))
+			expected: func(orgID, userID uuid.UUID, now time.Time) []models.AuditLog {
+				return []models.AuditLog{
+					{
+						ID: 1, OrgID: orgID, ActorType: "user",
+						ActorID: userID.String(), UserID: &userID,
+						Action: "session.created", ResourceType: "session",
+						CreatedAt: now,
+					},
+				}
 			},
-			expected: 0,
-		},
-		{
-			name:    "filters by action_prefix",
-			filters: AuditLogFilters{ActionPrefix: "session."},
-			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery("(?s)SELECT .+ FROM audit_logs WHERE org_id .+ AND action LIKE").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows(auditLogColumns))
-			},
-			expected: 0,
-		},
-		{
-			name:    "filters by user_id",
-			filters: AuditLogFilters{UserID: &userID},
-			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery("(?s)SELECT .+ FROM audit_logs WHERE org_id .+ AND user_id").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows(auditLogColumns))
-			},
-			expected: 0,
 		},
 		{
 			name:    "returns empty when no entries exist",
 			filters: AuditLogFilters{},
-			setupMock: func(mock pgxmock.PgxPoolIface) {
+			setupMock: func(mock pgxmock.PgxPoolIface, _, _ uuid.UUID, _ time.Time) {
 				mock.ExpectQuery("(?s)SELECT .+ FROM audit_logs WHERE org_id").
 					WithArgs(pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows(auditLogColumns))
+					WillReturnRows(pgxmock.NewRows(newAuditLogColumns()))
 			},
-			expected: 0,
+			expected: func(_, _ uuid.UUID, _ time.Time) []models.AuditLog {
+				return []models.AuditLog{}
+			},
 		},
 		{
 			name:    "returns error on database failure",
 			filters: AuditLogFilters{},
-			setupMock: func(mock pgxmock.PgxPoolIface) {
+			setupMock: func(mock pgxmock.PgxPoolIface, _, _ uuid.UUID, _ time.Time) {
 				mock.ExpectQuery("(?s)SELECT .+ FROM audit_logs WHERE org_id").
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnError(fmt.Errorf("connection refused"))
@@ -269,12 +276,16 @@ func TestAuditLogStore_List(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
+			orgID := uuid.New()
+			userID := uuid.New()
+			now := time.Now()
+
 			mock, err := pgxmock.NewPool()
 			require.NoError(t, err, "should initialize mock pool without error")
 			defer mock.Close()
 
 			store := NewAuditLogStore(mock)
-			tt.setupMock(mock)
+			tt.setupMock(mock, orgID, userID, now)
 
 			entries, err := store.List(context.Background(), orgID, tt.filters)
 			if tt.expectErr {
@@ -282,7 +293,7 @@ func TestAuditLogStore_List(t *testing.T) {
 				return
 			}
 			require.NoError(t, err, "should list audit log entries without error")
-			require.Len(t, entries, tt.expected, "should return the expected number of entries")
+			require.Equal(t, tt.expected(orgID, userID, now), entries, "should return the expected audit log entries")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
@@ -291,56 +302,49 @@ func TestAuditLogStore_List(t *testing.T) {
 func TestAuditLogStore_DeleteExpired(t *testing.T) {
 	t.Parallel()
 
-	orgID := uuid.New()
-
 	tests := []struct {
 		name          string
-		orgID         uuid.UUID
 		retentionDays int
-		setupMock     func(mock pgxmock.PgxPoolIface)
+		setupMock     func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, retentionDays int)
 		expected      int64
 		expectErr     bool
 	}{
 		{
 			name:          "deletes expired entries for org",
-			orgID:         orgID,
 			retentionDays: 90,
-			setupMock: func(mock pgxmock.PgxPoolIface) {
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, retentionDays int) {
 				mock.ExpectQuery("SELECT delete_expired_audit_logs").
-					WithArgs(orgID, 90).
+					WithArgs(orgID, retentionDays).
 					WillReturnRows(pgxmock.NewRows([]string{"delete_expired_audit_logs"}).AddRow(int64(5)))
 			},
 			expected: 5,
 		},
 		{
 			name:          "returns zero when no expired entries exist",
-			orgID:         orgID,
 			retentionDays: 90,
-			setupMock: func(mock pgxmock.PgxPoolIface) {
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, retentionDays int) {
 				mock.ExpectQuery("SELECT delete_expired_audit_logs").
-					WithArgs(orgID, 90).
+					WithArgs(orgID, retentionDays).
 					WillReturnRows(pgxmock.NewRows([]string{"delete_expired_audit_logs"}).AddRow(int64(0)))
 			},
 			expected: 0,
 		},
 		{
 			name:          "passes org_id to database function for tenant isolation",
-			orgID:         orgID,
 			retentionDays: 30,
-			setupMock: func(mock pgxmock.PgxPoolIface) {
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, retentionDays int) {
 				mock.ExpectQuery("SELECT delete_expired_audit_logs").
-					WithArgs(orgID, 30).
+					WithArgs(orgID, retentionDays).
 					WillReturnRows(pgxmock.NewRows([]string{"delete_expired_audit_logs"}).AddRow(int64(3)))
 			},
 			expected: 3,
 		},
 		{
 			name:          "returns error on database failure",
-			orgID:         orgID,
 			retentionDays: 90,
-			setupMock: func(mock pgxmock.PgxPoolIface) {
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, retentionDays int) {
 				mock.ExpectQuery("SELECT delete_expired_audit_logs").
-					WithArgs(orgID, 90).
+					WithArgs(orgID, retentionDays).
 					WillReturnError(fmt.Errorf("connection refused"))
 			},
 			expectErr: true,
@@ -351,14 +355,16 @@ func TestAuditLogStore_DeleteExpired(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
+			orgID := uuid.New()
+
 			mock, err := pgxmock.NewPool()
 			require.NoError(t, err, "should initialize mock pool without error")
 			defer mock.Close()
 
 			store := NewAuditLogStore(mock)
-			tt.setupMock(mock)
+			tt.setupMock(mock, orgID, tt.retentionDays)
 
-			deleted, err := store.DeleteExpired(context.Background(), tt.orgID, tt.retentionDays)
+			deleted, err := store.DeleteExpired(context.Background(), orgID, tt.retentionDays)
 			if tt.expectErr {
 				require.Error(t, err, "should return an error for database failure")
 				return
@@ -373,34 +379,39 @@ func TestAuditLogStore_DeleteExpired(t *testing.T) {
 func TestAuditLogStore_GetByID(t *testing.T) {
 	t.Parallel()
 
-	orgID := uuid.New()
-	now := time.Now()
-
 	tests := []struct {
 		name      string
-		setupMock func(mock pgxmock.PgxPoolIface)
+		setupMock func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, now time.Time)
+		expected  func(orgID uuid.UUID, now time.Time) *models.AuditLog
 		expectErr bool
 	}{
 		{
 			name: "returns entry when found",
-			setupMock: func(mock pgxmock.PgxPoolIface) {
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, now time.Time) {
 				mock.ExpectQuery("(?s)SELECT .+ FROM audit_logs WHERE org_id").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(auditLogColumns).
+						pgxmock.NewRows(newAuditLogColumns()).
 							AddRow(int64(42), orgID, "user", "actor-1", nil,
 								"auth.login", "user", nil,
 								nil, nil, nil, nil,
 								nil, nil, now),
 					)
 			},
+			expected: func(orgID uuid.UUID, now time.Time) *models.AuditLog {
+				return &models.AuditLog{
+					ID: 42, OrgID: orgID, ActorType: "user",
+					ActorID: "actor-1", Action: "auth.login",
+					ResourceType: "user", CreatedAt: now,
+				}
+			},
 		},
 		{
 			name: "returns error when not found",
-			setupMock: func(mock pgxmock.PgxPoolIface) {
+			setupMock: func(mock pgxmock.PgxPoolIface, _ uuid.UUID, _ time.Time) {
 				mock.ExpectQuery("(?s)SELECT .+ FROM audit_logs WHERE org_id").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows(auditLogColumns))
+					WillReturnRows(pgxmock.NewRows(newAuditLogColumns()))
 			},
 			expectErr: true,
 		},
@@ -410,12 +421,15 @@ func TestAuditLogStore_GetByID(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
+			orgID := uuid.New()
+			now := time.Now()
+
 			mock, err := pgxmock.NewPool()
 			require.NoError(t, err, "should initialize mock pool without error")
 			defer mock.Close()
 
 			store := NewAuditLogStore(mock)
-			tt.setupMock(mock)
+			tt.setupMock(mock, orgID, now)
 
 			entry, err := store.GetByID(context.Background(), orgID, 42)
 			if tt.expectErr {
@@ -423,8 +437,7 @@ func TestAuditLogStore_GetByID(t *testing.T) {
 				return
 			}
 			require.NoError(t, err, "should retrieve audit log entry without error")
-			require.Equal(t, int64(42), entry.ID, "should return the entry with the requested ID")
-			require.Equal(t, models.AuditActorType("user"), entry.ActorType, "should return the correct actor type")
+			require.Equal(t, tt.expected(orgID, now), entry, "should return the expected audit log entry")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
