@@ -28,6 +28,7 @@ import {
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { useAuth } from "@/hooks/use-auth";
+import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import type { User, InvitationResponse, ListResponse } from "@/lib/types";
 
 export default function TeamSettingsPage() {
@@ -129,6 +130,11 @@ export default function TeamSettingsPage() {
         <PageHeader
           title="Team"
           description="Manage your team members and roles."
+        />
+        <AuditLogTrigger
+          filters={{ resource_type: "team_member" }}
+          members={members}
+          title="Team activity"
         />
       {actionError && (
         <div className="rounded-md bg-destructive/10 px-3 py-2 text-[13px] text-destructive">

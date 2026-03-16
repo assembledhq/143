@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
+import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import type { Organization, SingleResponse } from "@/lib/types";
 
 export default function SettingsPage() {
@@ -15,12 +16,23 @@ export default function SettingsPage() {
     queryFn: () => api.settings.get(),
   });
 
+  const { data: membersData } = useQuery({
+    queryKey: ["team", "members"],
+    queryFn: () => api.team.listMembers(),
+  });
+  const members = membersData?.data ?? [];
+
   return (
     <PageContainer size="default">
       <div className="space-y-6">
         <PageHeader
           title="General settings"
           description="Manage your organization."
+        />
+        <AuditLogTrigger
+          filters={{ resource_type: "settings" }}
+          members={members}
+          title="Settings activity"
         />
         <section className="space-y-3">
           <h2 className="text-[13px] font-medium text-foreground">General</h2>
