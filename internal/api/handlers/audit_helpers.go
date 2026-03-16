@@ -1,0 +1,108 @@
+package handlers
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/netip"
+	"strings"
+
+	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/models"
+	chiMiddleware "github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
+)
+
+// emitUserAudit is a fire-and-forget helper for emitting audit log entries
+// from HTTP handlers. It extracts request context (IP, user-agent, request ID)
+// automatically. If the emitter is nil, it's a no-op.
+func emitUserAudit(emitter *db.AuditEmitter, r *http.Request, action models.AuditAction, resourceType models.AuditResourceType, resourceID *string, details json.RawMessage) {
+	if emitter == nil {
+		return
+	}
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+
+	params := db.UserActionParams{
+		OrgID:        orgID,
+		UserID:       user.ID,
+		Action:       action,
+		ResourceType: resourceType,
+		ResourceID:   resourceID,
+		Details:      details,
+	}
+
+	if reqID := chiMiddleware.GetReqID(r.Context()); reqID != "" {
+		params.RequestID = &reqID
+	}
+	if ip := parseClientIP(r); ip != nil {
+		params.IPAddress = ip
+	}
+	if ua := r.UserAgent(); ua != "" {
+		params.UserAgent = &ua
+	}
+
+	emitter.EmitUserAction(r.Context(), params)
+}
+
+// emitUserAuditWithSession is like emitUserAudit but also sets the session correlation ID.
+func emitUserAuditWithSession(emitter *db.AuditEmitter, r *http.Request, action models.AuditAction, resourceType models.AuditResourceType, resourceID *string, sessionID *uuid.UUID, projectID *uuid.UUID, details json.RawMessage) {
+	if emitter == nil {
+		return
+	}
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+
+	params := db.UserActionParams{
+		OrgID:        orgID,
+		UserID:       user.ID,
+		Action:       action,
+		ResourceType: resourceType,
+		ResourceID:   resourceID,
+		Details:      details,
+		SessionID:    sessionID,
+		ProjectID:    projectID,
+	}
+
+	if reqID := chiMiddleware.GetReqID(r.Context()); reqID != "" {
+		params.RequestID = &reqID
+	}
+	if ip := parseClientIP(r); ip != nil {
+		params.IPAddress = ip
+	}
+	if ua := r.UserAgent(); ua != "" {
+		params.UserAgent = &ua
+	}
+
+	emitter.EmitUserAction(r.Context(), params)
+}
+
+// parseClientIP extracts the client IP from the request as a netip.Prefix
+// suitable for PostgreSQL inet storage.
+func parseClientIP(r *http.Request) *netip.Prefix {
+	// Try X-Forwarded-For first (reverse proxy), then RemoteAddr.
+	// X-Forwarded-For may contain a comma-separated list; use the first (client) IP.
+	ip := r.Header.Get("X-Forwarded-For")
+	if ip != "" {
+		ip = strings.TrimSpace(strings.SplitN(ip, ",", 2)[0])
+	} else {
+		ip = r.RemoteAddr
+	}
+	// Strip port if present.
+	if host, err := netip.ParseAddrPort(ip); err == nil {
+		prefix := netip.PrefixFrom(host.Addr(), host.Addr().BitLen())
+		return &prefix
+	}
+	if addr, err := netip.ParseAddr(ip); err == nil {
+		prefix := netip.PrefixFrom(addr, addr.BitLen())
+		return &prefix
+	}
+	return nil
+}
+

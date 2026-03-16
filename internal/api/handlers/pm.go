@@ -19,6 +19,12 @@ type PMHandler struct {
 	decisionLogStore *db.PMDecisionLogStore
 	jobStore         *db.JobStore
 	orgStore         *db.OrganizationStore
+	audit            *db.AuditEmitter
+}
+
+// SetAuditEmitter injects the audit emitter for logging PM events.
+func (h *PMHandler) SetAuditEmitter(audit *db.AuditEmitter) {
+	h.audit = audit
 }
 
 func NewPMHandler(planStore *db.PMPlanStore, decisionLogStore *db.PMDecisionLogStore, jobStore *db.JobStore, orgStore *db.OrganizationStore) *PMHandler {
@@ -39,6 +45,7 @@ func (h *PMHandler) Analyze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	emitUserAudit(h.audit, r, models.AuditActionPMAnalysisTriggered, models.AuditResourcePMPlan, nil, nil)
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"data": map[string]string{"job_id": jobID.String()},
 	})

@@ -93,6 +93,8 @@ func main() {
 		projectCycleStore := db.NewProjectCycleStore(pool)
 		pmDocumentStore := db.NewPMDocumentStore(pool)
 
+		auditLogStore := db.NewAuditLogStore(pool)
+
 		stores := &worker.Stores{
 			Issues:              issueStore,
 			Sessions:           sessionStore,
@@ -104,6 +106,8 @@ func main() {
 			Projects:            projectStore,
 			ProjectTasks:        projectTaskStore,
 			Credentials:         credentialStore,
+			AuditLogs:           auditLogStore,
+			Organizations:       orgStore,
 		}
 
 		// Build Phase 3+ services if runtime dependencies are available.
