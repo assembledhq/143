@@ -24,7 +24,8 @@ func TestSessionMessageStore_Create(t *testing.T) {
 	now := time.Now()
 
 	mock.ExpectQuery("INSERT INTO session_messages").
-		WithArgs(pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at"}).
 				AddRow(int64(1), now),
@@ -58,7 +59,7 @@ func TestSessionMessageStore_ListBySession(t *testing.T) {
 	now := time.Now()
 
 	mock.ExpectQuery("SELECT .+ FROM session_messages WHERE org_id").
-		WithArgs(pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "session_id", "org_id", "user_id", "turn_number", "role", "content", "attachments", "token_usage", "created_at"}).
 				AddRow(int64(1), sessionID, orgID, nil, 1, "user", "Fix the bug", nil, nil, now).
@@ -83,7 +84,7 @@ func TestSessionMessageStore_ListBySession_QueryError(t *testing.T) {
 	store := NewSessionMessageStore(mock)
 
 	mock.ExpectQuery("SELECT .+ FROM session_messages WHERE org_id").
-		WithArgs(pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(fmt.Errorf("db connection lost"))
 
 	_, err = store.ListBySession(context.Background(), uuid.New(), uuid.New())
