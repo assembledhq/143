@@ -104,7 +104,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
         <CardContent className="pt-6">
           <div className="grid grid-cols-2 gap-5 text-sm">
             <div>
-              <span className="text-xs font-medium text-muted-foreground/70 uppercase tracking-wider">Status</span>
+              <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Status</span>
               <div className="mt-1">
                 <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${status.color}`}>
                   {isActive && (
@@ -118,12 +118,12 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
               </div>
             </div>
             <div>
-              <span className="text-xs font-medium text-muted-foreground/70 uppercase tracking-wider">Agent Type</span>
+              <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Agent Type</span>
               <p className="mt-1 font-medium">{agentTypeLabels[session.agent_type] || session.agent_type}</p>
             </div>
             {session.triggered_by_user_id && (
               <div>
-                <span className="text-xs font-medium text-muted-foreground/70 uppercase tracking-wider">Triggered by</span>
+                <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Triggered by</span>
                 <p className="mt-1 font-medium">
                   {members.find((m) => m.id === session.triggered_by_user_id)?.name || "Unknown user"}
                 </p>
@@ -131,22 +131,22 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
             )}
             {session.confidence_score != null && (
               <div>
-                <span className="text-xs font-medium text-muted-foreground/70 uppercase tracking-wider">Confidence</span>
+                <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Confidence</span>
                 <p className={`mt-1 font-medium ${confidenceColor(session.confidence_score)}`}>
                   {(session.confidence_score * 100).toFixed(0)}%
                 </p>
               </div>
             )}
             <div>
-              <span className="text-xs font-medium text-muted-foreground/70 uppercase tracking-wider">Duration</span>
+              <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Duration</span>
               <p className="mt-1 font-medium">{formatDuration(session.started_at, session.completed_at)}</p>
             </div>
             <div>
-              <span className="text-xs font-medium text-muted-foreground/70 uppercase tracking-wider">Started</span>
+              <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Started</span>
               <p className="mt-1">{formatTimestamp(session.started_at)}</p>
             </div>
             <div>
-              <span className="text-xs font-medium text-muted-foreground/70 uppercase tracking-wider">Completed</span>
+              <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Completed</span>
               <p className="mt-1">{formatTimestamp(session.completed_at)}</p>
             </div>
           </div>
