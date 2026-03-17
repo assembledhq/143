@@ -28,6 +28,7 @@ import {
 import { api } from "@/lib/api";
 import { projectStatusConfig } from "@/lib/types";
 import { ProgressBar } from "./shared";
+import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { PlanTab } from "./plan-tab";
 import { WorkTab } from "./work-tab";
 
@@ -330,6 +331,12 @@ export function ProjectDetailContent({ id }: { id: string }) {
           {specs.length > 0 && <span>{specs.length} specs</span>}
           {attachments.length > 0 && <span>{attachments.length} designs</span>}
           {project.current_phase && <span>Phase: {project.current_phase}</span>}
+        </div>
+        <div className="mt-1.5">
+          <AuditLogTrigger
+            filters={{ project_id: project.id }}
+            title="Project activity"
+          />
         </div>
       </div>
 
