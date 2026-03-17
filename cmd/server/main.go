@@ -222,7 +222,7 @@ func buildServices(
 		logger.Error().Err(err).Msg("Docker not available — all Phase 3+ services disabled")
 		return nil
 	}
-	sandboxProvider := providers.NewDockerProvider(dockerCli, logger)
+	sandboxProvider := providers.NewDockerProvider(dockerCli, logger, providers.WithRuntime(cfg.SandboxRuntime))
 
 	// LLM client (optional — validation/prioritization degrade gracefully without it).
 	llmClient, err := llm.NewClient(cfg.LLMConfig(), logger)
