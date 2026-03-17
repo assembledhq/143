@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -331,25 +330,36 @@ func (s *Service) PollForToken(ctx context.Context, orgID uuid.UUID) (*AuthStatu
 		}
 	}
 
-	// Success — parse tokens.
-	var tokenResp struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		ExpiresIn    int    `json:"expires_in"`
-		TokenType    string `json:"token_type"`
+	// Success — the device code poll returns an authorization_code + code_verifier
+	// that must be exchanged at /oauth/token for the actual access/refresh tokens.
+	var pollResp struct {
+		Status            string `json:"status"`
+		AuthorizationCode string `json:"authorization_code"`
+		CodeVerifier      string `json:"code_verifier"`
 	}
-	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		return nil, fmt.Errorf("parse token response: %w", err)
+	if err := json.Unmarshal(body, &pollResp); err != nil {
+		return nil, fmt.Errorf("parse poll response: %w", err)
 	}
 
-	// Store the credential.
-	cfg := models.OpenAIChatGPTConfig{
+	if pollResp.AuthorizationCode == "" {
+		return &AuthStatus{Status: "error", Message: "device auth response missing authorization_code"}, nil
+	}
+
+	// Exchange the authorization code for access + refresh tokens (PKCE flow).
+	tokenResp, err := s.exchangeAuthCode(ctx, pollResp.AuthorizationCode, pollResp.CodeVerifier)
+	if err != nil {
+		return &AuthStatus{Status: "error", Message: fmt.Sprintf("token exchange failed: %s", err)}, nil
+	}
+
+	storedCfg := models.OpenAIChatGPTConfig{
 		AccessToken:  tokenResp.AccessToken,
 		RefreshToken: tokenResp.RefreshToken,
-		ExpiresAt:    time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
+	}
+	if tokenResp.ExpiresIn > 0 {
+		storedCfg.ExpiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 	}
 
-	if err := s.credentials.Upsert(ctx, orgID, cfg); err != nil {
+	if err := s.credentials.Upsert(ctx, orgID, storedCfg); err != nil {
 		return nil, fmt.Errorf("store credential: %w", err)
 	}
 
@@ -358,12 +368,69 @@ func (s *Service) PollForToken(ctx context.Context, orgID uuid.UUID) (*AuthStatu
 
 	s.logger.Info().
 		Str("org_id", orgID.String()).
+		Bool("has_refresh_token", tokenResp.RefreshToken != "").
+		Int("expires_in", tokenResp.ExpiresIn).
 		Msg("ChatGPT OAuth completed successfully")
 
 	return &AuthStatus{
 		Status:      "completed",
-		AccountType: cfg.AccountType,
+		AccountType: storedCfg.AccountType,
 	}, nil
+}
+
+// tokenExchangeResponse holds the parsed tokens from /oauth/token.
+type tokenExchangeResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int    `json:"expires_in"`
+}
+
+// exchangeAuthCode exchanges an authorization_code + code_verifier for
+// access and refresh tokens via the standard OAuth2 PKCE token endpoint.
+func (s *Service) exchangeAuthCode(ctx context.Context, authCode, codeVerifier string) (*tokenExchangeResponse, error) {
+	endpoint := s.issuer + "/oauth/token"
+
+	reqBody, err := json.Marshal(map[string]string{
+		"client_id":     s.clientID,
+		"grant_type":    "authorization_code",
+		"code":          authCode,
+		"code_verifier": codeVerifier,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal token exchange request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("create token exchange request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("token exchange request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read token exchange response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("token exchange failed (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	var tokenResp tokenExchangeResponse
+	if err := json.Unmarshal(body, &tokenResp); err != nil {
+		return nil, fmt.Errorf("parse token exchange response: %w", err)
+	}
+
+	if tokenResp.AccessToken == "" {
+		return nil, fmt.Errorf("token exchange returned empty access_token")
+	}
+
+	return &tokenResp, nil
 }
 
 func parsePollInterval(raw any) (int, error) {
@@ -397,18 +464,25 @@ func (s *Service) RefreshToken(ctx context.Context, orgID uuid.UUID) (*models.Op
 		return nil, fmt.Errorf("credential is not OpenAIChatGPTConfig")
 	}
 
-	endpoint := s.issuer + "/api/accounts/deviceauth/token"
-	form := url.Values{
-		"client_id":     {s.clientID},
-		"grant_type":    {refreshGrantType},
-		"refresh_token": {cfg.RefreshToken},
+	if cfg.RefreshToken == "" {
+		return nil, fmt.Errorf("no refresh token available — user must re-authenticate")
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	endpoint := s.issuer + "/oauth/token"
+	reqBody, err := json.Marshal(map[string]string{
+		"client_id":     s.clientID,
+		"grant_type":    refreshGrantType,
+		"refresh_token": cfg.RefreshToken,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal refresh request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(reqBody))
 	if err != nil {
 		return nil, fmt.Errorf("create refresh request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
@@ -484,6 +558,20 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.O
 	cfg, ok := cred.Config.(models.OpenAIChatGPTConfig)
 	if !ok {
 		return nil, fmt.Errorf("credential is not OpenAIChatGPTConfig")
+	}
+
+	// A credential with an empty access token means the device code flow
+	// was initiated but hasn't completed yet (pending state).
+	if cfg.AccessToken == "" {
+		return nil, nil
+	}
+
+	// If no refresh token is available (device code flow doesn't always
+	// return one), skip the expiry check and use the access token as-is.
+	// The token may be long-lived or the agent will get a clear 401 if
+	// it's actually expired.
+	if cfg.RefreshToken == "" {
+		return &cfg, nil
 	}
 
 	// Refresh if expiring within the refresh window.
