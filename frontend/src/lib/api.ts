@@ -362,6 +362,39 @@ export const api = {
     aiGenerate: (body: { description: string }) =>
       post<{ data: import('./types').GeneratedProject }>('/api/v1/projects/ai/generate', body),
   },
+  auditLogs: {
+    list: (params?: {
+      actor_type?: string;
+      action?: string;
+      action_prefix?: string;
+      resource_type?: string;
+      resource_id?: string;
+      user_id?: string;
+      session_id?: string;
+      project_id?: string;
+      since?: string;
+      until?: string;
+      cursor?: string;
+      limit?: number;
+    }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.actor_type) searchParams.set('actor_type', params.actor_type);
+      if (params?.action) searchParams.set('action', params.action);
+      if (params?.action_prefix) searchParams.set('action_prefix', params.action_prefix);
+      if (params?.resource_type) searchParams.set('resource_type', params.resource_type);
+      if (params?.resource_id) searchParams.set('resource_id', params.resource_id);
+      if (params?.user_id) searchParams.set('user_id', params.user_id);
+      if (params?.session_id) searchParams.set('session_id', params.session_id);
+      if (params?.project_id) searchParams.set('project_id', params.project_id);
+      if (params?.since) searchParams.set('since', params.since);
+      if (params?.until) searchParams.set('until', params.until);
+      if (params?.cursor) searchParams.set('cursor', params.cursor);
+      if (params?.limit) searchParams.set('limit', String(params.limit));
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').AuditLog>>(`/api/v1/audit-logs${qs ? `?${qs}` : ''}`);
+    },
+    get: (id: number) => get<import('./types').SingleResponse<import('./types').AuditLog>>(`/api/v1/audit-logs/${id}`),
+  },
   reviewComments: {
     list: (params?: { pull_request_id?: string; filter_status?: string; cursor?: string }) => {
       const searchParams = new URLSearchParams();

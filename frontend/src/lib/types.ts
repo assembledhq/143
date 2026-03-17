@@ -638,6 +638,28 @@ export interface AIImprovementResponse {
   summary: string;
 }
 
+// Audit log types
+export type AuditActorType = 'user' | 'agent' | 'system' | 'webhook';
+export type AuditResourceType = 'session' | 'project' | 'project_task' | 'issue' | 'pm_plan' | 'pm_decision' | 'settings' | 'team_member' | 'invitation' | 'integration' | 'credential' | 'user';
+
+export interface AuditLog {
+  id: number;
+  org_id: string;
+  actor_type: AuditActorType;
+  actor_id: string;
+  user_id?: string;
+  action: string;
+  resource_type: AuditResourceType;
+  resource_id?: string;
+  details?: Record<string, unknown>;
+  request_id?: string;
+  ip_address?: string;
+  user_agent?: string;
+  session_id?: string;
+  project_id?: string;
+  created_at: string;
+}
+
 export interface ProjectDetail {
   project: Project;
   tasks: ProjectTask[];

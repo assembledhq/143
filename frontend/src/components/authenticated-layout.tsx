@@ -13,6 +13,7 @@ import {
   Target,
   Sparkles,
   KeyRound,
+  ScrollText,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
@@ -205,6 +206,12 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                   <Users className="h-4 w-4" />
                   Team
                 </DropdownMenuItem>
+                {user.role === "admin" && (
+                  <DropdownMenuItem onClick={() => router.push("/settings/audit-log")}>
+                    <ScrollText className="h-4 w-4" />
+                    Audit log
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={logout}>
                   <LogOut className="h-4 w-4" />
