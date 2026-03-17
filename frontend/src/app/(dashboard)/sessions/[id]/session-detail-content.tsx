@@ -4,7 +4,6 @@ import { useCallback, useRef, useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
-  ArrowLeft,
   ArrowUp,
   ExternalLink,
   RefreshCw,
@@ -12,12 +11,12 @@ import {
   XCircle,
   MinusCircle,
   Square,
+  PanelRightOpen,
+  PanelRightClose,
 } from "lucide-react";
-import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { LogViewer } from "@/components/log-viewer";
@@ -26,6 +25,7 @@ import { api } from "@/lib/api";
 import { SSE_EVENT, addSSEListener } from "@/lib/sse";
 import type { Session, SessionMessage, User, Validation } from "@/lib/types";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
+import { cn } from "@/lib/utils";
 
 const statusConfig: Record<string, { color: string; label: string }> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
@@ -85,6 +85,12 @@ function checkResultBadge(result: string | null) {
   if (result === "fail") return <Badge variant="secondary" className="bg-destructive/10 text-destructive border-destructive/20 text-[11px]">fail</Badge>;
   return <Badge variant="secondary" className="text-[11px]">{result}</Badge>;
 }
+
+// ---------------------------------------------------------------------------
+// Detail panel tabs (shown in right sidebar)
+// ---------------------------------------------------------------------------
+
+type DetailTab = "overview" | "changes" | "validation" | "logs";
 
 function OverviewTab({ session, members }: { session: Session; members: User[] }) {
   const queryClient = useQueryClient();
@@ -377,7 +383,11 @@ function ChangesTab({ session, sessionId }: { session: Session; sessionId: strin
   );
 }
 
-function ChatTab({ session, sessionId }: { session: Session; sessionId: string }) {
+// ---------------------------------------------------------------------------
+// Main chat panel
+// ---------------------------------------------------------------------------
+
+function ChatPanel({ session, sessionId }: { session: Session; sessionId: string }) {
   const queryClient = useQueryClient();
   const [message, setMessage] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -437,9 +447,9 @@ function ChatTab({ session, sessionId }: { session: Session; sessionId: string }
   }
 
   return (
-    <div className="flex flex-col h-[600px]">
+    <div className="flex flex-col h-full">
       {/* Message thread */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto space-y-3 p-4 border rounded-t-md bg-muted/10">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto space-y-3 p-4">
         {messages.length === 0 && !isRunning && (
           <div className="text-center py-8 text-sm text-muted-foreground">
             No messages yet. The session is processing its initial turn.
@@ -451,14 +461,18 @@ function ChatTab({ session, sessionId }: { session: Session; sessionId: string }
             className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
           >
             <div
-              className={`max-w-[80%] rounded-lg px-3 py-2 text-sm ${
+              className={cn(
+                "max-w-[80%] rounded-lg px-3 py-2 text-sm",
                 msg.role === "user"
                   ? "bg-primary text-primary-foreground"
                   : "bg-muted"
-              }`}
+              )}
             >
               <p className="whitespace-pre-wrap">{msg.content}</p>
-              <p className={`text-[10px] mt-1 ${msg.role === "user" ? "text-primary-foreground/70" : "text-muted-foreground"}`}>
+              <p className={cn(
+                "text-[10px] mt-1",
+                msg.role === "user" ? "text-primary-foreground/70" : "text-muted-foreground"
+              )}>
                 Turn {msg.turn_number}
               </p>
             </div>
@@ -481,14 +495,14 @@ function ChatTab({ session, sessionId }: { session: Session; sessionId: string }
 
       {/* Error display */}
       {(sendMutation.error || endMutation.error) && (
-        <div className="flex items-center gap-2 px-4 py-2 text-xs text-destructive border border-t-0 bg-destructive/5">
+        <div className="flex items-center gap-2 px-4 py-2 text-xs text-destructive border-t bg-destructive/5">
           <AlertTriangle className="h-3 w-3 shrink-0" />
           {sendMutation.error instanceof Error ? sendMutation.error.message : endMutation.error instanceof Error ? endMutation.error.message : "An error occurred"}
         </div>
       )}
 
       {/* Input bar */}
-      <div className="border border-t-0 rounded-b-md p-3 bg-background">
+      <div className="border-t border-border p-3 bg-background">
         <div className="flex items-end gap-2">
           <Textarea
             ref={textareaRef}
@@ -528,9 +542,15 @@ function ChatTab({ session, sessionId }: { session: Session; sessionId: string }
   );
 }
 
+// ---------------------------------------------------------------------------
+// Main component
+// ---------------------------------------------------------------------------
+
 export function SessionDetailContent({ id }: { id: string }) {
   const terminalStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
   const queryClient = useQueryClient();
+  const [detailTab, setDetailTab] = useState<DetailTab>("overview");
+  const [showDetailPanel, setShowDetailPanel] = useState(true);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["session", id],
@@ -582,86 +602,106 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   if (isLoading) {
     return (
-      <div className="space-y-6">
-        <Link href="/sessions" className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
-          <ArrowLeft className="h-3 w-3" /> Back to sessions
-        </Link>
-        <Card>
-          <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            Loading session...
-          </CardContent>
-        </Card>
+      <div className="flex items-center justify-center h-full">
+        <div className="text-sm text-muted-foreground">Loading session...</div>
       </div>
     );
   }
 
   if (error || !session) {
     return (
-      <div className="space-y-6">
-        <Link href="/sessions" className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
-          <ArrowLeft className="h-3 w-3" /> Back to sessions
-        </Link>
-        <Card>
-          <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            Failed to load session details.
-          </CardContent>
-        </Card>
+      <div className="flex items-center justify-center h-full">
+        <div className="text-sm text-muted-foreground">Failed to load session details.</div>
       </div>
     );
   }
 
-  return (
-    <div className="space-y-6">
-      <Link href="/sessions" className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
-        <ArrowLeft className="h-3 w-3" /> Back to sessions
-      </Link>
+  const status = statusConfig[session.status] || statusConfig.pending;
 
-      <div>
-        <h1 className="text-sm font-semibold text-foreground">
-          {session.result_summary || `Session ${session.id.slice(0, 8)}`}
-        </h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          {agentTypeLabels[session.agent_type] || session.agent_type} session
-          {isMultiTurn && ` \u00B7 Turn ${session.current_turn}`}
-        </p>
-        <div className="mt-1.5">
-          <AuditLogTrigger
-            filters={{ session_id: session.id }}
-            members={members}
-            title="Session activity"
-          />
+  const detailTabs: { value: DetailTab; label: string }[] = [
+    { value: "overview", label: "Overview" },
+    { value: "changes", label: "Changes" },
+    { value: "validation", label: "Validation" },
+    { value: "logs", label: "Logs" },
+  ];
+
+  return (
+    <div className="flex h-full">
+      {/* Main chat area */}
+      <div className="flex-1 min-w-0 flex flex-col">
+        {/* Session header bar */}
+        <div className="border-b border-border px-4 py-3 bg-background flex items-center justify-between shrink-0">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <h1 className="text-sm font-semibold text-foreground truncate">
+                {session.result_summary || `Session ${session.id.slice(0, 8)}`}
+              </h1>
+              <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium shrink-0 ${status.color}`}>
+                {status.label}
+              </span>
+            </div>
+            <p className="text-[12px] text-muted-foreground mt-0.5">
+              {agentTypeLabels[session.agent_type] || session.agent_type}
+              {isMultiTurn && ` \u00B7 Turn ${session.current_turn}`}
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <AuditLogTrigger
+              filters={{ session_id: session.id }}
+              members={members}
+              title="Session activity"
+            />
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              onClick={() => setShowDetailPanel(!showDetailPanel)}
+              title={showDetailPanel ? "Hide details" : "Show details"}
+            >
+              {showDetailPanel ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
+            </Button>
+          </div>
+        </div>
+
+        {/* Chat panel */}
+        <div className="flex-1 min-h-0">
+          <ChatPanel session={session} sessionId={id} />
         </div>
       </div>
 
-      <Tabs defaultValue={isMultiTurn || session.status === "idle" ? "chat" : "overview"}>
-        <TabsList>
-          <TabsTrigger value="chat">Chat</TabsTrigger>
-          <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="logs">Logs</TabsTrigger>
-          <TabsTrigger value="changes">Changes</TabsTrigger>
-          <TabsTrigger value="validation">Validation</TabsTrigger>
-        </TabsList>
+      {/* Detail panel (collapsible right sidebar) */}
+      {showDetailPanel && (
+        <div className="w-96 border-l border-border bg-muted/20 flex flex-col shrink-0 overflow-hidden">
+          {/* Detail tabs */}
+          <div className="flex items-center gap-0 border-b border-border px-2 shrink-0">
+            {detailTabs.map((tab) => (
+              <button
+                key={tab.value}
+                className={cn(
+                  "relative px-3 py-2.5 text-[12px] font-medium transition-colors",
+                  detailTab === tab.value
+                    ? "text-foreground"
+                    : "text-muted-foreground hover:text-foreground/80"
+                )}
+                onClick={() => setDetailTab(tab.value)}
+              >
+                {tab.label}
+                {detailTab === tab.value && (
+                  <span className="absolute bottom-0 left-3 right-3 h-0.5 bg-[image:var(--gradient-primary)] rounded-full" />
+                )}
+              </button>
+            ))}
+          </div>
 
-        <TabsContent value="chat">
-          <ChatTab session={session} sessionId={id} />
-        </TabsContent>
-
-        <TabsContent value="overview">
-          <OverviewTab session={session} members={members} />
-        </TabsContent>
-
-        <TabsContent value="logs">
-          <LogViewer runId={id} isActive={isActive} />
-        </TabsContent>
-
-        <TabsContent value="changes">
-          <ChangesTab session={session} sessionId={id} />
-        </TabsContent>
-
-        <TabsContent value="validation">
-          <ValidationTab sessionId={id} />
-        </TabsContent>
-      </Tabs>
+          {/* Detail content */}
+          <div className="flex-1 overflow-y-auto p-4">
+            {detailTab === "overview" && <OverviewTab session={session} members={members} />}
+            {detailTab === "changes" && <ChangesTab session={session} sessionId={id} />}
+            {detailTab === "validation" && <ValidationTab sessionId={id} />}
+            {detailTab === "logs" && <LogViewer runId={id} isActive={isActive} />}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
