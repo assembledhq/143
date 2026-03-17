@@ -73,6 +73,9 @@ type Config struct {
 	GeminiAPIKey string `env:"GEMINI_API_KEY"`
 	GeminiModel  string `env:"GEMINI_MODEL"`
 
+	// Sandbox
+	SandboxRuntime string `env:"SANDBOX_RUNTIME" envDefault:"runc"`
+
 	// Interactive session snapshots
 	SnapshotStorageDir    string        `env:"SNAPSHOT_STORAGE_DIR"    envDefault:".data/snapshots"`
 	SessionMaxIdleAge     time.Duration `env:"SESSION_MAX_IDLE_AGE"    envDefault:"2h"`
