@@ -16,12 +16,6 @@ export default function SettingsPage() {
     queryFn: () => api.settings.get(),
   });
 
-  const { data: membersData } = useQuery({
-    queryKey: ["team", "members"],
-    queryFn: () => api.team.listMembers(),
-  });
-  const members = membersData?.data ?? [];
-
   return (
     <PageContainer size="default">
       <div className="space-y-6">
@@ -31,7 +25,6 @@ export default function SettingsPage() {
         />
         <AuditLogTrigger
           filters={{ resource_type: "settings" }}
-          members={members}
           title="Settings activity"
         />
         <section className="space-y-3">

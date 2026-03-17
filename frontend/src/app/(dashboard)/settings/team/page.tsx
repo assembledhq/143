@@ -43,7 +43,7 @@ export default function TeamSettingsPage() {
   const [removingMember, setRemovingMember] = useState<User | null>(null);
 
   const { data: membersData, isLoading: membersLoading } = useQuery<ListResponse<User>>({
-    queryKey: ["team-members"],
+    queryKey: ["team", "members"],
     queryFn: () => api.team.listMembers(),
   });
 
@@ -56,7 +56,7 @@ export default function TeamSettingsPage() {
     mutationFn: ({ id, role }: { id: string; role: string }) =>
       api.team.changeRole(id, role),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["team-members"] });
+      queryClient.invalidateQueries({ queryKey: ["team", "members"] });
       setActionError("");
     },
     onError: (error: Error) => {
@@ -67,7 +67,7 @@ export default function TeamSettingsPage() {
   const removeMemberMutation = useMutation({
     mutationFn: (id: string) => api.team.removeMember(id),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["team-members"] });
+      queryClient.invalidateQueries({ queryKey: ["team", "members"] });
       setActionError("");
     },
     onError: (error: Error) => {

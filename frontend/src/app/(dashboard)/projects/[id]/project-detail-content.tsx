@@ -265,13 +265,7 @@ export function ProjectDetailContent({ id }: { id: string }) {
     },
   });
 
-  const { data: membersData } = useQuery({
-    queryKey: ["team", "members"],
-    queryFn: () => api.team.listMembers(),
-  });
-
   const detail = data?.data;
-  const members = membersData?.data ?? [];
 
   if (isLoading) {
     return (
@@ -341,7 +335,6 @@ export function ProjectDetailContent({ id }: { id: string }) {
         <div className="mt-1.5">
           <AuditLogTrigger
             filters={{ project_id: project.id }}
-            members={members}
             title="Project activity"
           />
         </div>

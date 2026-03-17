@@ -12,6 +12,9 @@ vi.mock('@/lib/api', () => ({
     auditLogs: {
       list: auditLogListMock,
     },
+    team: {
+      listMembers: vi.fn().mockResolvedValue({ data: [], meta: {} }),
+    },
   },
 }));
 

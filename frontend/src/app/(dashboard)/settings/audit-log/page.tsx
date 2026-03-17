@@ -53,7 +53,7 @@ export default function AuditLogPage() {
   const [selectedEntry, setSelectedEntry] = useState<AuditLog | null>(null);
   const currentCursor = cursors[cursors.length - 1];
 
-  const isAdmin = !user || user.role === "admin";
+  const isAdmin = user?.role === "admin";
 
   const filters: Record<string, string> = {};
   if (resourceType) filters.resource_type = resourceType;

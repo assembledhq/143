@@ -24,16 +24,24 @@ function formatRelativeTime(dateStr: string): string {
 interface AuditLogTriggerProps {
   /** Filters to scope the audit log query (e.g., { session_id: "..." }). */
   filters: Record<string, string>;
-  /** Team members for resolving actor names. */
-  members: User[];
+  /** Team members for resolving actor names. If omitted, fetched internally. */
+  members?: User[];
   /** Sidesheet title. */
   title?: string;
 }
 
-export function AuditLogTrigger({ filters, members, title }: AuditLogTriggerProps) {
+export function AuditLogTrigger({ filters, members: membersProp, title }: AuditLogTriggerProps) {
   const [open, setOpen] = useState(false);
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
+
+  // Fetch members internally when not provided by parent
+  const { data: membersData } = useQuery({
+    queryKey: ["team", "members"],
+    queryFn: () => api.team.listMembers(),
+    enabled: isAdmin && !membersProp,
+  });
+  const members = membersProp ?? membersData?.data ?? [];
 
   // Fetch just the latest entry to show "Updated X ago by Y"
   const { data, error } = useQuery({
