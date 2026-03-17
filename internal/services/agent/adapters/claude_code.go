@@ -66,8 +66,8 @@ func (a *ClaudeCodeAdapter) PreparePrompt(ctx context.Context, input *agent.Agen
 
 // Execute runs the Claude Code CLI inside the sandbox and streams output.
 func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
-	provider, ok := ctx.Value(sandboxProviderKey{}).(agent.SandboxProvider)
-	if !ok {
+	provider := agent.SandboxProviderFromContext(ctx)
+	if provider == nil {
 		return nil, fmt.Errorf("sandbox provider not found in context")
 	}
 
@@ -228,14 +228,10 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 	return result, nil
 }
 
-// sandboxProviderKey is the context key for injecting a SandboxProvider.
-type sandboxProviderKey struct{}
-
-// WithSandboxProvider returns a context with the given SandboxProvider attached.
-// The Execute method retrieves the provider from context to write files
-// and run commands in the sandbox.
+// WithSandboxProvider re-exports agent.WithSandboxProvider for backward compatibility.
+// Callers should prefer agent.WithSandboxProvider directly.
 func WithSandboxProvider(ctx context.Context, p agent.SandboxProvider) context.Context {
-	return context.WithValue(ctx, sandboxProviderKey{}, p)
+	return agent.WithSandboxProvider(ctx, p)
 }
 
 // buildSystemPrompt constructs the system prompt with instructions and context.
