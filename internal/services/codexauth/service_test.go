@@ -199,14 +199,24 @@ func TestPollForToken_HTTP404Pending(t *testing.T) {
 }
 
 func TestPollForToken_Success(t *testing.T) {
+	// The test server handles two requests:
+	// 1. Device code poll → returns authorization_code + code_verifier
+	// 2. Token exchange at /oauth/token → returns access_token + refresh_token
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"access_token":  "cha_test_access_token_12345",
-			"refresh_token": "chr_test_refresh_token_12345",
-			"expires_in":    3600,
-			"token_type":    "Bearer",
-		})
+		if r.URL.Path == "/oauth/token" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token":  "cha_test_access_token_12345",
+				"refresh_token": "chr_test_refresh_token_12345",
+				"expires_in":    3600,
+			})
+		} else {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"status":             "success",
+				"authorization_code": "ac_test_auth_code",
+				"code_verifier":      "test_code_verifier",
+			})
+		}
 	}))
 	defer server.Close()
 
@@ -228,7 +238,7 @@ func TestPollForToken_Success(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if status.Status != "completed" {
-		t.Errorf("expected completed status, got %s", status.Status)
+		t.Errorf("expected completed status, got %s (%s)", status.Status, status.Message)
 	}
 
 	// Verify credential was stored.
@@ -239,6 +249,9 @@ func TestPollForToken_Success(t *testing.T) {
 	cfg := cred.Config.(models.OpenAIChatGPTConfig)
 	if cfg.AccessToken != "cha_test_access_token_12345" {
 		t.Errorf("unexpected access token: %s", cfg.AccessToken)
+	}
+	if cfg.RefreshToken != "chr_test_refresh_token_12345" {
+		t.Errorf("unexpected refresh token: %s", cfg.RefreshToken)
 	}
 }
 

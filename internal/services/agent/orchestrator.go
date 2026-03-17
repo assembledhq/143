@@ -946,8 +946,12 @@ func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, san
 	mkdirCmd := fmt.Sprintf("mkdir -p %s", authDir)
 
 	var mkdirOut, mkdirErr bytes.Buffer
-	if _, err := o.provider.Exec(ctx, sandbox, mkdirCmd, &mkdirOut, &mkdirErr); err != nil {
+	exitCode, err := o.provider.Exec(ctx, sandbox, mkdirCmd, &mkdirOut, &mkdirErr)
+	if err != nil {
 		return false, fmt.Errorf("create .codex dir: %w", err)
+	}
+	if exitCode != 0 {
+		return false, fmt.Errorf("create .codex dir: mkdir exited with code %d: %s", exitCode, mkdirErr.String())
 	}
 
 	authPath := authDir + "/auth.json"
