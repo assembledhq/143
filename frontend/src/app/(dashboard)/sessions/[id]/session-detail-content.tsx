@@ -25,6 +25,7 @@ import { DiffViewer } from "@/components/diff-viewer";
 import { api } from "@/lib/api";
 import { SSE_EVENT, addSSEListener } from "@/lib/sse";
 import type { Session, SessionMessage, User, Validation } from "@/lib/types";
+import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 
 const statusConfig: Record<string, { color: string; label: string }> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
@@ -623,6 +624,13 @@ export function SessionDetailContent({ id }: { id: string }) {
           {agentTypeLabels[session.agent_type] || session.agent_type} session
           {isMultiTurn && ` \u00B7 Turn ${session.current_turn}`}
         </p>
+        <div className="mt-1.5">
+          <AuditLogTrigger
+            filters={{ session_id: session.id }}
+            members={members}
+            title="Session activity"
+          />
+        </div>
       </div>
 
       <Tabs defaultValue={isMultiTurn || session.status === "idle" ? "chat" : "overview"}>

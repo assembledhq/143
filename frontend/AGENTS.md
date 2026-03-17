@@ -345,7 +345,7 @@ Always use an `AlertDialog` confirmation for destructive actions (delete, remove
 </div>
 ```
 
-Always include `dark:` variants for colored banners.
+Always include `dark:` variants for banners that use **hardcoded Tailwind color classes** (e.g., `bg-blue-50`, `border-green-200`, `text-blue-800`). Semantic theme tokens like `bg-destructive/10`, `bg-primary/10`, `text-destructive` already adapt to dark mode automatically and do **not** need explicit `dark:` overrides.
 
 ## Component Reference
 
@@ -394,6 +394,6 @@ Always include `dark:` variants for colored banners.
 5. **Missing PageContainer** — Every dashboard page must be wrapped in `PageContainer`.
 6. **Inconsistent container sizes** — All dashboard pages MUST use `size="default"`. Never use `size="wide"` or `size="narrow"` for regular pages — this creates different margins between pages.
 7. **Inconsistent row padding** — Always `py-3.5 px-4` for list rows.
-8. **Missing dark mode** — All colored banners/alerts need `dark:` variant classes.
+8. **Missing dark mode** — Banners/alerts using hardcoded Tailwind colors (e.g., `bg-blue-50`, `border-green-200`) need `dark:` variant classes. Semantic tokens (`bg-destructive/10`, `bg-primary/10`) adapt automatically.
 9. **Flat cards** — Cards should always have `shadow-sm` (provided by the Card component). Don't override with `shadow-none`.
 10. **Missing transitions** — Interactive elements (radio cards, buttons, rows) need `transition-all duration-150`.
