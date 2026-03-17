@@ -108,7 +108,7 @@ export function AuditLogEntry({ entry, members, onSelect }: AuditLogEntryProps) 
             setExpanded(!expanded);
           }
         }}
-        className="flex w-full items-start gap-2 px-4 py-3.5 text-left text-sm hover:bg-muted/30 transition-all duration-150 h-auto rounded-none"
+        className="flex w-full items-start gap-2 px-6 py-3.5 text-left text-sm hover:bg-muted/30 transition-all duration-150 h-auto rounded-none"
         disabled={!onSelect && !hasDetails}
       >
         <span className="shrink-0 w-14 text-xs text-muted-foreground/70 pt-0.5 tabular-nums">
@@ -130,7 +130,7 @@ export function AuditLogEntry({ entry, members, onSelect }: AuditLogEntryProps) 
         )}
       </Button>
       {expanded && hasDetails && (
-        <div className="px-3 pb-3 pl-[4.5rem]">
+        <div className="px-6 pb-3 pl-[4.5rem]">
           <div className="rounded-md bg-muted/30 border border-border/50 p-3 text-xs">
             <div className="space-y-1.5">
               {Object.entries(entry.details!).map(([key, value]) => (

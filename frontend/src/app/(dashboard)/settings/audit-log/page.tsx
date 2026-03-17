@@ -210,7 +210,7 @@ export default function AuditLogPage() {
                   />
                 ))}
               </div>
-              <div className="flex items-center justify-between border-t border-border/50 px-3 py-2">
+              <div className="flex items-center justify-between border-t border-border/50 px-6 py-2">
                 {cursors.length > 0 ? (
                   <Button
                     variant="ghost"
