@@ -160,10 +160,8 @@ describe('AgentPage', () => {
   it('disables Save key button when input is empty', async () => {
     renderWithProviders(<AgentPage />);
 
-    await screen.findAllByText('Claude Code');
-
-    // Auto-defaults to Claude Code (first configured agent)
-    const saveButton = screen.getByText('Save key');
+    // Wait for credential card to appear (gated on query loading)
+    const saveButton = await screen.findByText('Save key');
     expect(saveButton).toBeDisabled();
   });
 
@@ -285,10 +283,8 @@ describe('AgentPage', () => {
 
     renderWithProviders(<AgentPage />);
 
-    await screen.findAllByText('Claude Code');
-
-    // Only 1 save button visible (for the selected agent in personal section)
-    const saveButton = screen.getByText('Save key');
+    // Wait for credential card to appear (gated on query loading)
+    const saveButton = await screen.findByText('Save key');
     expect(saveButton).toBeDisabled();
   });
 

@@ -186,7 +186,7 @@ export default function AgentPage() {
 
   /* ---------- Personal credentials queries ---------- */
 
-  const { data: personalResp } = useQuery<ListResponse<UserCredentialSummary>>({
+  const { data: personalResp, isSuccess: personalCredsLoaded } = useQuery<ListResponse<UserCredentialSummary>>({
     queryKey: ["user-credentials", "personal"],
     queryFn: () => api.userCredentials.listPersonal(),
   });
@@ -207,21 +207,25 @@ export default function AgentPage() {
 
   /* ---------- Personal credentials state ---------- */
 
-  // Default to the first agent that already has a configured key, or claude_code
+  // Default to the first agent that already has a configured key, or claude_code.
+  // Returns null until credentials have loaded to avoid a flash of the wrong agent.
   const initialPersonalAgent = useMemo(() => {
+    if (!personalCredsLoaded) return null;
     const configured = ORG_AGENT_TYPES.find((a) =>
       personalCreds.some((c) => c.provider === a.providerKey && c.configured),
     );
     return configured?.key ?? "claude_code";
-  }, [personalCreds]);
+  }, [personalCreds, personalCredsLoaded]);
 
   const [personalAgentType, setPersonalAgentType] = useState<string | null>(null);
-  const effectivePersonalAgentType = personalAgentType ?? initialPersonalAgent;
+  const effectivePersonalAgentType = personalAgentType ?? initialPersonalAgent ?? "claude_code";
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
   const [keySaveStatus, setKeySaveStatus] = useState<Record<string, "idle" | "saving" | "success" | "error">>({});
   const [removingProvider, setRemovingProvider] = useState<string | null>(null);
   const [removingTeamProvider, setRemovingTeamProvider] = useState<string | null>(null);
+  const [personalCodexMethodOverride, setPersonalCodexMethodOverride] = useState<"chatgpt" | "api_key" | null>(null);
+  const [showPersonalDeviceCodeModal, setShowPersonalDeviceCodeModal] = useState(false);
 
   const upsertMutation = useMutation({
     mutationFn: ({ provider, apiKey }: { provider: string; apiKey: string }) =>
@@ -262,6 +266,18 @@ export default function AgentPage() {
     },
   });
 
+  const { data: codexAuthStatusResp } = useQuery({
+    queryKey: ["codex-auth-status"],
+    queryFn: () => api.codexAuth.status(),
+    refetchInterval: false,
+  });
+  const codexAuthStatus = codexAuthStatusResp?.data;
+
+  const hasCodexChatGPTConnection = codexAuthStatus?.status === "completed";
+  const inferredPersonalCodexMethod: "chatgpt" | "api_key" =
+    hasCodexChatGPTConnection ? "chatgpt" : "api_key";
+  const personalCodexMethod = personalCodexMethodOverride ?? inferredPersonalCodexMethod;
+
   function handleSavePersonalKey(provider: string) {
     const key = apiKeys[provider]?.trim();
     if (!key) return;
@@ -282,14 +298,6 @@ export default function AgentPage() {
     queryFn: () => api.settings.getAgentDefaults(),
     enabled: isAdmin,
   });
-
-  const { data: codexAuthStatusResp } = useQuery({
-    queryKey: ["codex-auth-status"],
-    queryFn: () => api.codexAuth.status(),
-    refetchInterval: false,
-    enabled: isAdmin,
-  });
-  const codexAuthStatus = codexAuthStatusResp?.data;
 
   const orgSettings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
 
@@ -383,6 +391,360 @@ export default function AgentPage() {
     });
   }
 
+  /* ---------- Render helpers ---------- */
+
+  function renderPersonalCredentialCard(): ReactNode {
+    const agent = ORG_AGENT_TYPES.find((a) => a.key === effectivePersonalAgentType) ?? ORG_AGENT_TYPES[0];
+    const providerKey = agent.providerKey;
+    const cred = personalCreds.find((c) => c.provider === providerKey);
+    const status = keySaveStatus[providerKey] ?? "idle";
+    const r = resolved.find((c) => c.provider === providerKey);
+    const source = r?.source ?? "none";
+    const isCodex = agent.key === "codex";
+    const hideApiKey = isCodex && personalCodexMethod === "chatgpt";
+
+    return (
+      <div className="space-y-3 border-t pt-3 mt-1">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium">{agent.label}</span>
+            {cred?.configured && (
+              <Badge variant="success" className="text-[10px] px-1.5 py-0">
+                <Check className="mr-0.5 h-3 w-3" />
+                Configured
+              </Badge>
+            )}
+            <Badge variant={sourceBadgeVariant(source)} className="text-[10px] px-1.5 py-0">
+              {sourceLabel(source)}
+            </Badge>
+          </div>
+          {cred?.configured && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-xs text-muted-foreground"
+              onClick={() => setRemovingProvider(providerKey)}
+              disabled={deleteMutation.isPending}
+            >
+              Remove
+            </Button>
+          )}
+        </div>
+
+        {/* Codex ChatGPT sign-in option */}
+        {isCodex && (
+          <div className="space-y-3">
+            <Label className="text-xs text-muted-foreground">Credential method</Label>
+            <RadioGroup
+              value={personalCodexMethod}
+              onValueChange={(value) => setPersonalCodexMethodOverride(value as "chatgpt" | "api_key")}
+              className="grid gap-3 md:grid-cols-2"
+            >
+              <RadioCard
+                value="chatgpt"
+                label="Sign in with ChatGPT"
+                description="Best for gpt-5.3-codex model access."
+                selected={personalCodexMethod === "chatgpt"}
+                icon={<Sparkles className="h-4 w-4 text-primary" />}
+                ariaLabel="Sign in with ChatGPT"
+              />
+              <RadioCard
+                value="api_key"
+                label="Use API key"
+                description="Pay-as-you-go credentials with configurable model/base URL."
+                selected={personalCodexMethod === "api_key"}
+                icon={<KeyRound className="h-4 w-4 text-muted-foreground" />}
+                ariaLabel="Use API key"
+              />
+            </RadioGroup>
+
+            {personalCodexMethod === "chatgpt" && (
+              <div className="flex items-center gap-2">
+                {codexAuthStatus?.status === "completed" ? (
+                  <>
+                    <Badge variant="outline" className="border-green-600 text-green-600">
+                      <CheckCircle2 className="mr-1 h-3.5 w-3.5" />
+                      Connected
+                    </Badge>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => disconnectMutation.mutate()}
+                      disabled={disconnectMutation.isPending}
+                    >
+                      {disconnectMutation.isPending ? "Disconnecting..." : "Disconnect"}
+                    </Button>
+                  </>
+                ) : (
+                  <Button size="sm" onClick={() => setShowPersonalDeviceCodeModal(true)}>
+                    Sign in with ChatGPT
+                  </Button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {cred?.configured && cred.masked_key && !hideApiKey && (
+          <p className="text-xs text-muted-foreground font-mono">
+            Key: {cred.masked_key}
+          </p>
+        )}
+
+        {!hideApiKey && (
+          <div className="flex gap-2">
+            <div className="relative flex-1">
+              <Input
+                type={showKeys[providerKey] ? "text" : "password"}
+                placeholder={cred?.configured ? "Replace existing key..." : KEY_PLACEHOLDERS[providerKey] ?? "API key"}
+                value={apiKeys[providerKey] ?? ""}
+                onChange={(e) =>
+                  setApiKeys((prev) => ({ ...prev, [providerKey]: e.target.value }))
+                }
+                className="pr-9 font-mono text-xs"
+              />
+              <button
+                type="button"
+                onClick={() =>
+                  setShowKeys((prev) => ({ ...prev, [providerKey]: !prev[providerKey] }))
+                }
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              >
+                {showKeys[providerKey] ? (
+                  <EyeOff className="h-3.5 w-3.5" />
+                ) : (
+                  <Eye className="h-3.5 w-3.5" />
+                )}
+              </button>
+            </div>
+            <Button
+              size="sm"
+              onClick={() => handleSavePersonalKey(providerKey)}
+              disabled={!apiKeys[providerKey]?.trim() || status === "saving"}
+            >
+              {status === "saving" ? "Saving..." : "Save key"}
+            </Button>
+          </div>
+        )}
+
+        {hideApiKey && (
+          <p className="text-xs text-muted-foreground">
+            API key fields are hidden while ChatGPT sign-in is selected.
+          </p>
+        )}
+
+        {status === "success" && (
+          <p className="text-xs text-emerald-600 dark:text-emerald-400">Key saved successfully.</p>
+        )}
+        {status === "error" && (
+          <p className="text-xs text-destructive">Failed to save key.</p>
+        )}
+
+        {isAdmin && cred?.configured && !cred.is_team_default && user && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="text-xs"
+            onClick={() => setTeamDefaultMutation.mutate({ provider: providerKey, userId: user.id })}
+            disabled={setTeamDefaultMutation.isPending}
+          >
+            <Shield className="mr-1 h-3 w-3" />
+            Set as team default
+          </Button>
+        )}
+        {cred?.is_team_default && (
+          <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+            <Shield className="mr-0.5 h-3 w-3" />
+            Team default
+          </Badge>
+        )}
+      </div>
+    );
+  }
+
+  function renderOrgAgentConfigCard(): ReactNode {
+    const agent = ORG_AGENT_TYPES.find((a) => a.key === defaultAgentType) ?? ORG_AGENT_TYPES[0];
+    const serverVars = (agentDefaultsResponse?.data ?? {})[agent.key] ?? {};
+    const teamCred = teamDefaults.find((c) => c.provider === agent.providerKey);
+    const showAdvanced = showAdvancedPerAgent[agent.key] ?? false;
+    const envVarsToRender =
+      agent.key === "codex" && codexCredentialMethod === "chatgpt"
+        ? []
+        : agent.envVars.filter((v) => !v.advanced || showAdvanced);
+    const hasAdvanced = agent.envVars.some((v) => v.advanced);
+
+    return (
+      <div className="space-y-3 border-t pt-3 mt-1">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium">{agent.label} settings</span>
+                {teamCred && (
+                  <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+                    <Shield className="mr-0.5 h-3 w-3" />
+                    Team default set
+                  </Badge>
+                )}
+              </div>
+              {teamCred && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-xs text-muted-foreground"
+                  onClick={() => setRemovingTeamProvider(agent.providerKey)}
+                  disabled={removeTeamMutation.isPending}
+                >
+                  Remove team default
+                </Button>
+              )}
+            </div>
+
+            {teamCred?.masked_key && (
+              <p className="text-xs text-muted-foreground font-mono">
+                Team key: {teamCred.masked_key}
+                {teamCred.set_by_user_name && <span> &middot; Set by {teamCred.set_by_user_name}</span>}
+              </p>
+            )}
+
+            {/* Codex ChatGPT sign-in option */}
+            {agent.key === "codex" && (
+              <div className="space-y-3">
+                <Label className="text-xs text-muted-foreground">Credential method</Label>
+                <RadioGroup
+                  value={codexCredentialMethod}
+                  onValueChange={(value) => setCodexCredentialMethodOverride(value as "chatgpt" | "api_key")}
+                  className="grid gap-3 md:grid-cols-2"
+                >
+                  <RadioCard
+                    value="chatgpt"
+                    label="Sign in with ChatGPT"
+                    description="Best for gpt-5.3-codex model access."
+                    selected={codexCredentialMethod === "chatgpt"}
+                    icon={<Sparkles className="h-4 w-4 text-primary" />}
+                    ariaLabel="Sign in with ChatGPT"
+                  />
+                  <RadioCard
+                    value="api_key"
+                    label="Use API key"
+                    description="Pay-as-you-go credentials with configurable model/base URL."
+                    selected={codexCredentialMethod === "api_key"}
+                    icon={<KeyRound className="h-4 w-4 text-muted-foreground" />}
+                    ariaLabel="Use API key"
+                  />
+                </RadioGroup>
+
+                {codexCredentialMethod === "chatgpt" && (
+                  <div className="flex items-center gap-2">
+                    {codexAuthStatus?.status === "completed" ? (
+                      <>
+                        <Badge variant="outline" className="border-green-600 text-green-600">
+                          <CheckCircle2 className="mr-1 h-3.5 w-3.5" />
+                          Connected
+                        </Badge>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => disconnectMutation.mutate()}
+                          disabled={disconnectMutation.isPending}
+                        >
+                          {disconnectMutation.isPending ? "Disconnecting..." : "Disconnect"}
+                        </Button>
+                      </>
+                    ) : (
+                      <Button size="sm" onClick={() => setShowDeviceCodeModal(true)}>
+                        Sign in with ChatGPT
+                      </Button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Env var fields */}
+            {envVarsToRender.map((envVar) => {
+              const serverDefault = serverVars[envVar.name] ?? "";
+              const orgOverride = agentConfig[agent.key]?.[envVar.name] ?? "";
+              const displayValue = orgOverride || serverDefault;
+              const isServerDefault = !orgOverride && !!serverDefault;
+
+              return (
+                <div key={envVar.name} className="space-y-1">
+                  <div className="flex items-center justify-between">
+                    <Label htmlFor={`org-${agent.key}-${envVar.name}`} className="text-xs text-muted-foreground">
+                      {envVar.label}
+                    </Label>
+                    {isServerDefault && (
+                      <span className="text-[10px] text-muted-foreground">server default</span>
+                    )}
+                  </div>
+                  {envVar.options ? (
+                    <Select
+                      value={displayValue || undefined}
+                      onValueChange={(value) => {
+                        setAgentConfigOverride({
+                          ...(agentConfigOverride ?? agentConfig),
+                          [agent.key]: {
+                            ...(agentConfigOverride ?? agentConfig)[agent.key],
+                            [envVar.name]: value,
+                          },
+                        });
+                      }}
+                    >
+                      <SelectTrigger
+                        id={`org-${agent.key}-${envVar.name}`}
+                        aria-label={envVar.label}
+                        className={isServerDefault ? "text-muted-foreground" : ""}
+                      >
+                        <SelectValue placeholder="Select a model" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {envVar.options.map((option) => (
+                          <SelectItem key={option} value={option}>
+                            {option}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  ) : (
+                    <Input
+                      id={`org-${agent.key}-${envVar.name}`}
+                      type={envVar.sensitive ? "password" : "text"}
+                      placeholder={envVar.placeholder ?? "Not set"}
+                      value={displayValue}
+                      className={`font-mono text-xs ${isServerDefault ? "text-muted-foreground" : ""}`}
+                      onChange={(e) => {
+                        setAgentConfigOverride({
+                          ...(agentConfigOverride ?? agentConfig),
+                          [agent.key]: {
+                            ...(agentConfigOverride ?? agentConfig)[agent.key],
+                            [envVar.name]: e.target.value,
+                          },
+                        });
+                      }}
+                    />
+                  )}
+                </div>
+              );
+            })}
+            {agent.key === "codex" && codexCredentialMethod === "chatgpt" && (
+              <p className="text-xs text-muted-foreground">
+                API key fields are hidden while ChatGPT sign-in is selected.
+              </p>
+            )}
+            {hasAdvanced && codexCredentialMethod !== "chatgpt" && (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="text-xs text-muted-foreground"
+                onClick={() => setShowAdvancedPerAgent((prev) => ({ ...prev, [agent.key]: !prev[agent.key] }))}
+              >
+                {showAdvanced ? "Hide advanced settings" : "Advanced settings"}
+              </Button>
+            )}
+      </div>
+    );
+  }
+
   /* ---------- Render ---------- */
 
   return (
@@ -427,119 +789,12 @@ export default function AgentPage() {
                     );
                   })}
                 </RadioGroup>
+
+                {/* Credential details for the selected personal agent */}
+                {personalCredsLoaded && renderPersonalCredentialCard()}
               </div>
             </CardContent>
           </Card>
-
-          {/* Credential card for the selected personal agent */}
-          {(() => {
-            const agent = ORG_AGENT_TYPES.find((a) => a.key === effectivePersonalAgentType) ?? ORG_AGENT_TYPES[0];
-            const providerKey = agent.providerKey;
-            const cred = personalCreds.find((c) => c.provider === providerKey);
-            const status = keySaveStatus[providerKey] ?? "idle";
-            const r = resolved.find((c) => c.provider === providerKey);
-            const source = r?.source ?? "none";
-
-            return (
-              <Card>
-                <CardContent>
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium">{agent.label}</span>
-                        {cred?.configured && (
-                          <Badge variant="success" className="text-[10px] px-1.5 py-0">
-                            <Check className="mr-0.5 h-3 w-3" />
-                            Configured
-                          </Badge>
-                        )}
-                        <Badge variant={sourceBadgeVariant(source)} className="text-[10px] px-1.5 py-0">
-                          {sourceLabel(source)}
-                        </Badge>
-                      </div>
-                      {cred?.configured && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="text-xs text-muted-foreground"
-                          onClick={() => setRemovingProvider(providerKey)}
-                          disabled={deleteMutation.isPending}
-                        >
-                          Remove
-                        </Button>
-                      )}
-                    </div>
-
-                    {cred?.configured && cred.masked_key && (
-                      <p className="text-xs text-muted-foreground font-mono">
-                        Key: {cred.masked_key}
-                      </p>
-                    )}
-
-                    <div className="flex gap-2">
-                      <div className="relative flex-1">
-                        <Input
-                          type={showKeys[providerKey] ? "text" : "password"}
-                          placeholder={cred?.configured ? "Replace existing key..." : KEY_PLACEHOLDERS[providerKey] ?? "API key"}
-                          value={apiKeys[providerKey] ?? ""}
-                          onChange={(e) =>
-                            setApiKeys((prev) => ({ ...prev, [providerKey]: e.target.value }))
-                          }
-                          className="pr-9 font-mono text-xs"
-                        />
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setShowKeys((prev) => ({ ...prev, [providerKey]: !prev[providerKey] }))
-                          }
-                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                        >
-                          {showKeys[providerKey] ? (
-                            <EyeOff className="h-3.5 w-3.5" />
-                          ) : (
-                            <Eye className="h-3.5 w-3.5" />
-                          )}
-                        </button>
-                      </div>
-                      <Button
-                        size="sm"
-                        onClick={() => handleSavePersonalKey(providerKey)}
-                        disabled={!apiKeys[providerKey]?.trim() || status === "saving"}
-                      >
-                        {status === "saving" ? "Saving..." : "Save key"}
-                      </Button>
-                    </div>
-
-                    {status === "success" && (
-                      <p className="text-xs text-emerald-600 dark:text-emerald-400">Key saved successfully.</p>
-                    )}
-                    {status === "error" && (
-                      <p className="text-xs text-destructive">Failed to save key.</p>
-                    )}
-
-                    {isAdmin && cred?.configured && !cred.is_team_default && user && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="text-xs"
-                        onClick={() => setTeamDefaultMutation.mutate({ provider: providerKey, userId: user.id })}
-                        disabled={setTeamDefaultMutation.isPending}
-                      >
-                        <Shield className="mr-1 h-3 w-3" />
-                        Set as team default
-                      </Button>
-                    )}
-                    {cred?.is_team_default && (
-                      <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
-                        <Shield className="mr-0.5 h-3 w-3" />
-                        Team default
-                      </Badge>
-                    )}
-                  </div>
-                </CardContent>
-              </Card>
-            );
-          })()}
         </section>
 
         {/* ============================================================ */}
@@ -556,7 +811,6 @@ export default function AgentPage() {
               </p>
             </div>
 
-            {/* Default agent selector */}
             <Card>
               <CardContent>
                 <div className="space-y-3">
@@ -576,197 +830,12 @@ export default function AgentPage() {
                       />
                     ))}
                   </RadioGroup>
+
+                  {/* Config details for the selected agent */}
+                  {renderOrgAgentConfigCard()}
                 </div>
               </CardContent>
             </Card>
-
-            {/* Config card for the selected agent only */}
-            {(() => {
-              const agent = ORG_AGENT_TYPES.find((a) => a.key === defaultAgentType) ?? ORG_AGENT_TYPES[0];
-              const serverVars = (agentDefaultsResponse?.data ?? {})[agent.key] ?? {};
-              const teamCred = teamDefaults.find((c) => c.provider === agent.providerKey);
-              const showAdvanced = showAdvancedPerAgent[agent.key] ?? false;
-              const envVarsToRender =
-                agent.key === "codex" && codexCredentialMethod === "chatgpt"
-                  ? []
-                  : agent.envVars.filter((v) => !v.advanced || showAdvanced);
-              const hasAdvanced = agent.envVars.some((v) => v.advanced);
-
-              return (
-                <Card>
-                  <CardContent>
-                    <div className="space-y-3">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium">{agent.label} settings</span>
-                          {teamCred && (
-                            <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
-                              <Shield className="mr-0.5 h-3 w-3" />
-                              Team default set
-                            </Badge>
-                          )}
-                        </div>
-                        {teamCred && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="text-xs text-muted-foreground"
-                            onClick={() => setRemovingTeamProvider(agent.providerKey)}
-                            disabled={removeTeamMutation.isPending}
-                          >
-                            Remove team default
-                          </Button>
-                        )}
-                      </div>
-
-                      {teamCred?.masked_key && (
-                        <p className="text-xs text-muted-foreground font-mono">
-                          Team key: {teamCred.masked_key}
-                          {teamCred.set_by_user_name && <span> &middot; Set by {teamCred.set_by_user_name}</span>}
-                        </p>
-                      )}
-
-                      {/* Codex ChatGPT sign-in option */}
-                      {agent.key === "codex" && (
-                        <div className="space-y-3">
-                          <Label className="text-xs text-muted-foreground">Credential method</Label>
-                          <RadioGroup
-                            value={codexCredentialMethod}
-                            onValueChange={(value) => setCodexCredentialMethodOverride(value as "chatgpt" | "api_key")}
-                            className="grid gap-3 md:grid-cols-2"
-                          >
-                            <RadioCard
-                              value="chatgpt"
-                              label="Sign in with ChatGPT"
-                              description="Best for gpt-5.3-codex model access."
-                              selected={codexCredentialMethod === "chatgpt"}
-                              icon={<Sparkles className="h-4 w-4 text-primary" />}
-                              ariaLabel="Sign in with ChatGPT"
-                            />
-                            <RadioCard
-                              value="api_key"
-                              label="Use API key"
-                              description="Pay-as-you-go credentials with configurable model/base URL."
-                              selected={codexCredentialMethod === "api_key"}
-                              icon={<KeyRound className="h-4 w-4 text-muted-foreground" />}
-                              ariaLabel="Use API key"
-                            />
-                          </RadioGroup>
-
-                          {codexCredentialMethod === "chatgpt" && (
-                            <div className="flex items-center gap-2">
-                              {codexAuthStatus?.status === "completed" ? (
-                                <>
-                                  <Badge variant="outline" className="border-green-600 text-green-600">
-                                    <CheckCircle2 className="mr-1 h-3.5 w-3.5" />
-                                    Connected
-                                  </Badge>
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    onClick={() => disconnectMutation.mutate()}
-                                    disabled={disconnectMutation.isPending}
-                                  >
-                                    {disconnectMutation.isPending ? "Disconnecting..." : "Disconnect"}
-                                  </Button>
-                                </>
-                              ) : (
-                                <Button size="sm" onClick={() => setShowDeviceCodeModal(true)}>
-                                  Sign in with ChatGPT
-                                </Button>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      {/* Env var fields */}
-                      {envVarsToRender.map((envVar) => {
-                        const serverDefault = serverVars[envVar.name] ?? "";
-                        const orgOverride = agentConfig[agent.key]?.[envVar.name] ?? "";
-                        const displayValue = orgOverride || serverDefault;
-                        const isServerDefault = !orgOverride && !!serverDefault;
-
-                        return (
-                          <div key={envVar.name} className="space-y-1">
-                            <div className="flex items-center justify-between">
-                              <Label htmlFor={`org-${agent.key}-${envVar.name}`} className="text-xs text-muted-foreground">
-                                {envVar.label}
-                              </Label>
-                              {isServerDefault && (
-                                <span className="text-[10px] text-muted-foreground">server default</span>
-                              )}
-                            </div>
-                            {envVar.options ? (
-                              <Select
-                                value={displayValue || undefined}
-                                onValueChange={(value) => {
-                                  setAgentConfigOverride({
-                                    ...(agentConfigOverride ?? agentConfig),
-                                    [agent.key]: {
-                                      ...(agentConfigOverride ?? agentConfig)[agent.key],
-                                      [envVar.name]: value,
-                                    },
-                                  });
-                                }}
-                              >
-                                <SelectTrigger
-                                  id={`org-${agent.key}-${envVar.name}`}
-                                  aria-label={envVar.label}
-                                  className={isServerDefault ? "text-muted-foreground" : ""}
-                                >
-                                  <SelectValue placeholder="Select a model" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  {envVar.options.map((option) => (
-                                    <SelectItem key={option} value={option}>
-                                      {option}
-                                    </SelectItem>
-                                  ))}
-                                </SelectContent>
-                              </Select>
-                            ) : (
-                              <Input
-                                id={`org-${agent.key}-${envVar.name}`}
-                                type={envVar.sensitive ? "password" : "text"}
-                                placeholder={envVar.placeholder ?? "Not set"}
-                                value={displayValue}
-                                className={`font-mono text-xs ${isServerDefault ? "text-muted-foreground" : ""}`}
-                                onChange={(e) => {
-                                  setAgentConfigOverride({
-                                    ...(agentConfigOverride ?? agentConfig),
-                                    [agent.key]: {
-                                      ...(agentConfigOverride ?? agentConfig)[agent.key],
-                                      [envVar.name]: e.target.value,
-                                    },
-                                  });
-                                }}
-                              />
-                            )}
-                          </div>
-                        );
-                      })}
-                      {agent.key === "codex" && codexCredentialMethod === "chatgpt" && (
-                        <p className="text-xs text-muted-foreground">
-                          API key fields are hidden while ChatGPT sign-in is selected.
-                        </p>
-                      )}
-                      {hasAdvanced && codexCredentialMethod !== "chatgpt" && (
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="ghost"
-                          className="text-xs text-muted-foreground"
-                          onClick={() => setShowAdvancedPerAgent((prev) => ({ ...prev, [agent.key]: !prev[agent.key] }))}
-                        >
-                          {showAdvanced ? "Hide advanced settings" : "Advanced settings"}
-                        </Button>
-                      )}
-                    </div>
-                  </CardContent>
-                </Card>
-              );
-            })()}
           </section>
         )}
 
@@ -917,13 +986,24 @@ export default function AgentPage() {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Codex Device Code Modal */}
+      {/* Codex Device Code Modal (org) */}
       {showDeviceCodeModal && (
         <CodexDeviceCodeModal
           onClose={() => setShowDeviceCodeModal(false)}
           onConnected={() => {
             queryClient.invalidateQueries({ queryKey: ["codex-auth-status"] });
             setShowDeviceCodeModal(false);
+          }}
+        />
+      )}
+
+      {/* Codex Device Code Modal (personal) */}
+      {showPersonalDeviceCodeModal && (
+        <CodexDeviceCodeModal
+          onClose={() => setShowPersonalDeviceCodeModal(false)}
+          onConnected={() => {
+            queryClient.invalidateQueries({ queryKey: ["codex-auth-status"] });
+            setShowPersonalDeviceCodeModal(false);
           }}
         />
       )}

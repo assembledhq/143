@@ -156,7 +156,13 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                   size="sm"
                   className={cn(
                     "h-8 w-full justify-start gap-2 rounded-lg px-2.5 text-[13px] font-medium transition-colors duration-150",
-                    pathname.startsWith("/settings") || pathname.startsWith("/team") || pathname.startsWith("/integrations") || pathname.startsWith("/agent") || pathname.startsWith("/prioritization") || pathname.startsWith("/llm")                      ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                    pathname.startsWith("/settings") ||
+                    pathname.startsWith("/team") ||
+                    pathname.startsWith("/integrations") ||
+                    pathname.startsWith("/agent") ||
+                    pathname.startsWith("/prioritization") ||
+                    pathname.startsWith("/llm")
+                      ? "bg-sidebar-accent text-sidebar-accent-foreground"
                       : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
                   )}
                 >
