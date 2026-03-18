@@ -560,6 +560,8 @@ export default function AgentPage() {
     const agent = ORG_AGENT_TYPES.find((a) => a.key === defaultAgentType) ?? ORG_AGENT_TYPES[0];
     const serverVars = (agentDefaultsResponse?.data ?? {})[agent.key] ?? {};
     const teamCred = teamDefaults.find((c) => c.provider === agent.providerKey);
+    const r = resolved.find((c) => c.provider === agent.providerKey);
+    const source = r?.source ?? "none";
     const showAdvanced = showAdvancedPerAgent[agent.key] ?? false;
     const envVarsToRender =
       agent.key === "codex" && codexCredentialMethod === "chatgpt"
@@ -572,10 +574,14 @@ export default function AgentPage() {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span className="text-sm font-medium">{agent.label} settings</span>
-            {teamCred && (
+            {teamCred ? (
               <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
                 <Shield className="mr-0.5 h-3 w-3" />
                 Team default set
+              </Badge>
+            ) : (
+              <Badge variant={sourceBadgeVariant(source)} className="text-[10px] px-1.5 py-0">
+                {sourceLabel(source)}
               </Badge>
             )}
           </div>

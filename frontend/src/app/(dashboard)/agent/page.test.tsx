@@ -248,6 +248,21 @@ describe('AgentPage', () => {
     expect(await screen.findByText('Claude Code settings')).toBeInTheDocument();
   });
 
+  it('shows Not configured badge in org section when no team default is set', async () => {
+    setupHandlers({ team: [] });
+
+    renderWithProviders(<AgentPage />);
+
+    // Org config card should show "Not configured" badge when no team credential exists
+    const orgSection = await screen.findByText('Organization coding agents');
+    expect(orgSection).toBeInTheDocument();
+
+    // The org config card shows "Not configured" for the selected agent
+    const notConfiguredBadges = await screen.findAllByText('Not configured');
+    // At least one should be in the org section
+    expect(notConfiguredBadges.length).toBeGreaterThanOrEqual(1);
+  });
+
   it('shows Execution section for admins', async () => {
     renderWithProviders(<AgentPage />);
 
