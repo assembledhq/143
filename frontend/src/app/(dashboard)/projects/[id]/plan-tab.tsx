@@ -26,11 +26,11 @@ import type {
   ProjectSpec,
   AISuggestion,
 } from "@/lib/types";
+import { formatTimeAgo } from "@/lib/utils";
 import {
   CollapsibleSection,
   specTypeConfig,
   attachmentCategoryConfig,
-  formatRelativeTime,
 } from "./shared";
 
 export function SpecsSection({
@@ -222,7 +222,7 @@ export function SpecsSection({
                     {spec.content || "(empty)"}
                   </pre>
                 )}
-                <p className="text-[10px] text-muted-foreground mt-2">Updated {formatRelativeTime(spec.updated_at)}</p>
+                <p className="text-[10px] text-muted-foreground mt-2">Updated {formatTimeAgo(spec.updated_at)}</p>
               </CardContent>
             </Card>
           );

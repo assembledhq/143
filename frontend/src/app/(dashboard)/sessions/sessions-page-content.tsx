@@ -28,6 +28,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { api } from "@/lib/api";
+import { formatTimeAgo } from "@/lib/utils";
+import { StatusDot } from "@/components/status-dot";
 import type { Session, User } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
@@ -67,20 +69,6 @@ function isActive(s: Session): boolean {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function formatTimeAgo(dateStr: string): string {
-  const date = new Date(dateStr);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffMins = Math.floor(diffMs / 60000);
-  if (diffMins < 1) return "just now";
-  if (diffMins < 60) return `${diffMins}m ago`;
-  const diffHours = Math.floor(diffMins / 60);
-  if (diffHours < 24) return `${diffHours}h ago`;
-  const diffDays = Math.floor(diffHours / 24);
-  if (diffDays < 30) return `${diffDays}d ago`;
-  return date.toLocaleDateString();
-}
-
 function filterSessions(sessions: Session[], filter: string | null): Session[] {
   if (!filter || filter === "all") return sessions;
   if (filter === "active") return sessions.filter(isActive);
@@ -98,19 +86,13 @@ function sessionTitle(session: Session): string {
 // Inline cell components
 // ---------------------------------------------------------------------------
 
-function StatusDot({ status }: { status: string }) {
+function SessionStatusDot({ status }: { status: string }) {
   const active = activeStatuses.has(status);
   const cfg = statusConfig[status] || statusConfig.pending;
-
   if (active) {
-    return (
-      <span className="relative flex h-2 w-2">
-        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary/60 opacity-75" />
-        <span className="relative inline-flex rounded-full h-2 w-2 bg-primary" />
-      </span>
-    );
+    return <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />;
   }
-  return <span className={`inline-flex rounded-full h-2 w-2 ${cfg.dot}`} />;
+  return <StatusDot color={cfg.dot} />;
 }
 
 function SortableHeader({ label, column }: { label: string; column: { toggleSorting: (desc?: boolean) => void; getIsSorted: () => false | "asc" | "desc" } }) {
@@ -141,7 +123,7 @@ function buildColumns(members: User[]): ColumnDef<Session>[] {
         const cfg = statusConfig[status] || statusConfig.pending;
         return (
           <div className="flex items-center gap-2">
-            <StatusDot status={status} />
+            <SessionStatusDot status={status} />
             <span className={`text-[12px] font-medium ${cfg.text}`}>{cfg.label}</span>
           </div>
         );

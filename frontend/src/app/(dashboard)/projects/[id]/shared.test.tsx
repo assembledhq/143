@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { fireEvent } from "@testing-library/react";
 import { renderWithProviders, screen } from "@/test/test-utils";
-import { formatTimestamp, formatRelativeTime, ProgressBar, CollapsibleSection, taskStatusConfig, specTypeConfig, attachmentCategoryConfig } from "./shared";
+import { formatTimestamp, ProgressBar, CollapsibleSection, taskStatusConfig, specTypeConfig, attachmentCategoryConfig } from "./shared";
 import { FileText } from "lucide-react";
 
 // Mock lucide-react icons
@@ -38,25 +38,6 @@ describe("formatTimestamp", () => {
     const result = formatTimestamp("2024-01-15T10:30:00Z");
     expect(result).toBeTruthy();
     expect(result).not.toBe("-");
-  });
-});
-
-describe("formatRelativeTime", () => {
-  it("returns 'just now' for recent times", () => {
-    const now = new Date().toISOString();
-    expect(formatRelativeTime(now)).toBe("just now");
-  });
-  it("returns minutes ago", () => {
-    const fiveMinAgo = new Date(Date.now() - 5 * 60000).toISOString();
-    expect(formatRelativeTime(fiveMinAgo)).toBe("5m ago");
-  });
-  it("returns hours ago", () => {
-    const twoHoursAgo = new Date(Date.now() - 2 * 3600000).toISOString();
-    expect(formatRelativeTime(twoHoursAgo)).toBe("2h ago");
-  });
-  it("returns days ago", () => {
-    const threeDaysAgo = new Date(Date.now() - 3 * 86400000).toISOString();
-    expect(formatRelativeTime(threeDaysAgo)).toBe("3d ago");
   });
 });
 
