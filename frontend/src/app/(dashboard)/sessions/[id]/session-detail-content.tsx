@@ -362,11 +362,9 @@ function ChangesTab({ session, sessionId }: { session: Session; sessionId: strin
         </Card>
       )}
 
-      {prLoading && (
+      {prLoading ? (
         <div className="text-center text-sm text-muted-foreground py-2">Loading PR details...</div>
-      )}
-
-      {session.diff ? (
+      ) : session.diff ? (
         <DiffViewer diff={session.diff} />
       ) : (
         <div className="py-8 text-center text-sm text-muted-foreground">
