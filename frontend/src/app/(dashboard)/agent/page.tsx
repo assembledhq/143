@@ -119,11 +119,15 @@ function RadioCard({
   label,
   description,
   selected,
+  icon,
+  ariaLabel,
 }: {
   value: string;
   label: string;
   description?: string;
   selected: boolean;
+  icon?: React.ReactNode;
+  ariaLabel?: string;
 }) {
   return (
     <label
@@ -134,7 +138,8 @@ function RadioCard({
       }`}
     >
       <div className="flex items-center gap-2">
-        <RadioGroupItem value={value} />
+        <RadioGroupItem value={value} aria-label={ariaLabel} />
+        {icon}
         <span className="text-[13px] font-medium">{label}</span>
       </div>
       {description && (
@@ -310,7 +315,7 @@ export default function AgentPage() {
     setMaxConcurrent(String(s.max_concurrent_runs ?? DEFAULT_EXECUTION_SETTINGS.max_concurrent_runs));
     // Agent config
     if (s.default_agent_type) setDefaultAgentTypeOverride(s.default_agent_type);
-    if (s.agent_config) setAgentConfigOverride(s.agent_config);
+    setAgentConfigOverride(s.agent_config ?? {});
   }
 
   const defaultAgentType = defaultAgentTypeOverride ?? orgSettings?.default_agent_type ?? "codex";
@@ -610,34 +615,22 @@ export default function AgentPage() {
                             onValueChange={(value) => setCodexCredentialMethodOverride(value as "chatgpt" | "api_key")}
                             className="grid gap-3 md:grid-cols-2"
                           >
-                            <label
-                              className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 shadow-sm transition-all duration-150 ${
-                                codexCredentialMethod === "chatgpt" ? "border-primary bg-primary/5 ring-1 ring-primary/20" : "border-input hover:bg-muted/40 hover:border-border"
-                              }`}
-                            >
-                              <RadioGroupItem value="chatgpt" aria-label="Sign in with ChatGPT" />
-                              <div className="space-y-1">
-                                <div className="flex items-center gap-2">
-                                  <Sparkles className="h-4 w-4 text-primary" />
-                                  <p className="text-sm font-medium">Sign in with ChatGPT</p>
-                                </div>
-                                <p className="text-xs text-muted-foreground">Best for gpt-5.3-codex model access.</p>
-                              </div>
-                            </label>
-                            <label
-                              className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 shadow-sm transition-all duration-150 ${
-                                codexCredentialMethod === "api_key" ? "border-primary bg-primary/5 ring-1 ring-primary/20" : "border-input hover:bg-muted/40 hover:border-border"
-                              }`}
-                            >
-                              <RadioGroupItem value="api_key" aria-label="Use API key" />
-                              <div className="space-y-1">
-                                <div className="flex items-center gap-2">
-                                  <KeyRound className="h-4 w-4 text-muted-foreground" />
-                                  <p className="text-sm font-medium">Use API key</p>
-                                </div>
-                                <p className="text-xs text-muted-foreground">Pay-as-you-go credentials with configurable model/base URL.</p>
-                              </div>
-                            </label>
+                            <RadioCard
+                              value="chatgpt"
+                              label="Sign in with ChatGPT"
+                              description="Best for gpt-5.3-codex model access."
+                              selected={codexCredentialMethod === "chatgpt"}
+                              icon={<Sparkles className="h-4 w-4 text-primary" />}
+                              ariaLabel="Sign in with ChatGPT"
+                            />
+                            <RadioCard
+                              value="api_key"
+                              label="Use API key"
+                              description="Pay-as-you-go credentials with configurable model/base URL."
+                              selected={codexCredentialMethod === "api_key"}
+                              icon={<KeyRound className="h-4 w-4 text-muted-foreground" />}
+                              ariaLabel="Use API key"
+                            />
                           </RadioGroup>
 
                           {codexCredentialMethod === "chatgpt" && (
@@ -835,21 +828,26 @@ export default function AgentPage() {
               </CardContent>
             </Card>
 
-            {/* Single save for all org settings */}
-            <div className="flex items-center justify-end gap-3">
-              <Button onClick={handleSaveOrgSettings} disabled={orgMutation.isPending}>
-                {orgMutation.isPending ? "Saving..." : "Save organization settings"}
-              </Button>
-              {orgSaveStatus === "success" && (
-                <span className="text-[13px] text-emerald-600 dark:text-emerald-400">Settings saved.</span>
-              )}
-              {orgSaveStatus === "error" && (
-                <span className="text-[13px] text-destructive">Failed to save settings.</span>
-              )}
-            </div>
           </section>
         )}
       </div>
+
+      {/* Sticky save bar for org settings (admin only) */}
+      {isAdmin && (
+        <div className="sticky bottom-0 -mx-4 mt-6 border-t bg-background/95 px-4 py-3 backdrop-blur supports-[backdrop-filter]:bg-background/80">
+          <div className="flex items-center justify-end gap-3">
+            <Button onClick={handleSaveOrgSettings} disabled={orgMutation.isPending}>
+              {orgMutation.isPending ? "Saving..." : "Save organization settings"}
+            </Button>
+            {orgSaveStatus === "success" && (
+              <span className="text-[13px] text-emerald-600 dark:text-emerald-400">Settings saved.</span>
+            )}
+            {orgSaveStatus === "error" && (
+              <span className="text-[13px] text-destructive">Failed to save settings.</span>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Remove Personal Key Dialog */}
       <AlertDialog open={!!removingProvider} onOpenChange={(open) => !open && setRemovingProvider(null)}>
