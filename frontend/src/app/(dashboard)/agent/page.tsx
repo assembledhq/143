@@ -45,17 +45,12 @@ import type {
 /*  Constants                                                         */
 /* ------------------------------------------------------------------ */
 
-const PERSONAL_PROVIDERS: {
-  key: string;
-  name: string;
-  description: string;
-  keyPlaceholder: string;
-}[] = [
-  { key: "anthropic", name: "Anthropic", description: "Claude Code (Opus, Sonnet, Haiku)", keyPlaceholder: "sk-ant-..." },
-  { key: "openai", name: "OpenAI", description: "Codex (GPT-5 models)", keyPlaceholder: "sk-..." },
-  { key: "gemini", name: "Google Gemini", description: "Gemini CLI (Pro, Flash)", keyPlaceholder: "AIza..." },
-  { key: "openrouter", name: "OpenRouter", description: "Access all coding agents with a single key", keyPlaceholder: "sk-or-..." },
-];
+/** Key placeholder strings keyed by provider. */
+const KEY_PLACEHOLDERS: Record<string, string> = {
+  anthropic: "sk-ant-...",
+  openai: "sk-...",
+  gemini: "AIza...",
+};
 
 interface AgentEnvVar {
   name: string;
@@ -174,13 +169,10 @@ function sourceBadgeVariant(source: string): "success" | "secondary" | "outline"
   }
 }
 
-/** Resolve a provider key to a display name, checking both provider lists. */
+/** Resolve a provider key to a display name. */
 function providerDisplayName(providerKey: string): string {
-  const personal = PERSONAL_PROVIDERS.find((p) => p.key === providerKey);
-  if (personal) return personal.name;
-  const org = ORG_AGENT_TYPES.find((a) => a.providerKey === providerKey);
-  if (org) return org.label;
-  return providerKey;
+  const agent = ORG_AGENT_TYPES.find((a) => a.providerKey === providerKey);
+  return agent?.label ?? providerKey;
 }
 
 /* ------------------------------------------------------------------ */
@@ -215,7 +207,16 @@ export default function AgentPage() {
 
   /* ---------- Personal credentials state ---------- */
 
-  const [personalAgentType, setPersonalAgentType] = useState<string>("claude_code");
+  // Default to the first agent that already has a configured key, or claude_code
+  const initialPersonalAgent = useMemo(() => {
+    const configured = ORG_AGENT_TYPES.find((a) =>
+      personalCreds.some((c) => c.provider === a.providerKey && c.configured),
+    );
+    return configured?.key ?? "claude_code";
+  }, [personalCreds]);
+
+  const [personalAgentType, setPersonalAgentType] = useState<string | null>(null);
+  const effectivePersonalAgentType = personalAgentType ?? initialPersonalAgent;
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
   const [keySaveStatus, setKeySaveStatus] = useState<Record<string, "idle" | "saving" | "success" | "error">>({});
@@ -409,7 +410,7 @@ export default function AgentPage() {
             <CardContent>
               <div className="space-y-3">
                 <RadioGroup
-                  value={personalAgentType}
+                  value={effectivePersonalAgentType}
                   onValueChange={setPersonalAgentType}
                   className="grid grid-cols-3 gap-3"
                 >
@@ -420,7 +421,7 @@ export default function AgentPage() {
                         key={agent.key}
                         value={agent.key}
                         label={agent.label}
-                        selected={personalAgentType === agent.key}
+                        selected={effectivePersonalAgentType === agent.key}
                         icon={cred?.configured ? <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" /> : undefined}
                       />
                     );
@@ -432,11 +433,11 @@ export default function AgentPage() {
 
           {/* Credential card for the selected personal agent */}
           {(() => {
-            const agent = ORG_AGENT_TYPES.find((a) => a.key === personalAgentType)!;
-            const provider = PERSONAL_PROVIDERS.find((p) => p.key === agent.providerKey)!;
-            const cred = personalCreds.find((c) => c.provider === provider.key);
-            const status = keySaveStatus[provider.key] ?? "idle";
-            const r = resolved.find((c) => c.provider === provider.key);
+            const agent = ORG_AGENT_TYPES.find((a) => a.key === effectivePersonalAgentType) ?? ORG_AGENT_TYPES[0];
+            const providerKey = agent.providerKey;
+            const cred = personalCreds.find((c) => c.provider === providerKey);
+            const status = keySaveStatus[providerKey] ?? "idle";
+            const r = resolved.find((c) => c.provider === providerKey);
             const source = r?.source ?? "none";
 
             return (
@@ -461,7 +462,7 @@ export default function AgentPage() {
                           variant="ghost"
                           size="sm"
                           className="text-xs text-muted-foreground"
-                          onClick={() => setRemovingProvider(provider.key)}
+                          onClick={() => setRemovingProvider(providerKey)}
                           disabled={deleteMutation.isPending}
                         >
                           Remove
@@ -478,22 +479,22 @@ export default function AgentPage() {
                     <div className="flex gap-2">
                       <div className="relative flex-1">
                         <Input
-                          type={showKeys[provider.key] ? "text" : "password"}
-                          placeholder={cred?.configured ? "Replace existing key..." : provider.keyPlaceholder}
-                          value={apiKeys[provider.key] ?? ""}
+                          type={showKeys[providerKey] ? "text" : "password"}
+                          placeholder={cred?.configured ? "Replace existing key..." : KEY_PLACEHOLDERS[providerKey] ?? "API key"}
+                          value={apiKeys[providerKey] ?? ""}
                           onChange={(e) =>
-                            setApiKeys((prev) => ({ ...prev, [provider.key]: e.target.value }))
+                            setApiKeys((prev) => ({ ...prev, [providerKey]: e.target.value }))
                           }
                           className="pr-9 font-mono text-xs"
                         />
                         <button
                           type="button"
                           onClick={() =>
-                            setShowKeys((prev) => ({ ...prev, [provider.key]: !prev[provider.key] }))
+                            setShowKeys((prev) => ({ ...prev, [providerKey]: !prev[providerKey] }))
                           }
                           className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
                         >
-                          {showKeys[provider.key] ? (
+                          {showKeys[providerKey] ? (
                             <EyeOff className="h-3.5 w-3.5" />
                           ) : (
                             <Eye className="h-3.5 w-3.5" />
@@ -502,8 +503,8 @@ export default function AgentPage() {
                       </div>
                       <Button
                         size="sm"
-                        onClick={() => handleSavePersonalKey(provider.key)}
-                        disabled={!apiKeys[provider.key]?.trim() || status === "saving"}
+                        onClick={() => handleSavePersonalKey(providerKey)}
+                        disabled={!apiKeys[providerKey]?.trim() || status === "saving"}
                       >
                         {status === "saving" ? "Saving..." : "Save key"}
                       </Button>
@@ -521,7 +522,7 @@ export default function AgentPage() {
                         variant="outline"
                         size="sm"
                         className="text-xs"
-                        onClick={() => setTeamDefaultMutation.mutate({ provider: provider.key, userId: user.id })}
+                        onClick={() => setTeamDefaultMutation.mutate({ provider: providerKey, userId: user.id })}
                         disabled={setTeamDefaultMutation.isPending}
                       >
                         <Shield className="mr-1 h-3 w-3" />
@@ -581,7 +582,7 @@ export default function AgentPage() {
 
             {/* Config card for the selected agent only */}
             {(() => {
-              const agent = ORG_AGENT_TYPES.find((a) => a.key === defaultAgentType)!;
+              const agent = ORG_AGENT_TYPES.find((a) => a.key === defaultAgentType) ?? ORG_AGENT_TYPES[0];
               const serverVars = (agentDefaultsResponse?.data ?? {})[agent.key] ?? {};
               const teamCred = teamDefaults.find((c) => c.provider === agent.providerKey);
               const showAdvanced = showAdvancedPerAgent[agent.key] ?? false;
@@ -847,14 +848,13 @@ export default function AgentPage() {
                 </div>
               </CardContent>
             </Card>
-
           </section>
         )}
       </div>
 
       {/* Sticky save bar for org settings (admin only) */}
       {isAdmin && (
-        <div className="sticky bottom-0 z-10 -mx-4 mt-6 border-t bg-background/95 px-4 py-3 backdrop-blur supports-[backdrop-filter]:bg-background/80">
+        <div className="sticky bottom-0 z-50 -mx-4 mt-6 border-t bg-background/95 px-4 py-3 backdrop-blur supports-[backdrop-filter]:bg-background/80">
           <div className="flex items-center justify-end gap-3">
             <Button onClick={handleSaveOrgSettings} disabled={orgMutation.isPending}>
               {orgMutation.isPending ? "Saving..." : "Save organization settings"}

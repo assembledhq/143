@@ -38,7 +38,6 @@ const mockResolved: ResolvedCredential[] = [
   { provider: 'anthropic', source: 'personal', masked_key: 'sk-ant-...abc' },
   { provider: 'openai', source: 'team_default', masked_key: 'sk-...def' },
   { provider: 'gemini', source: 'none' },
-  { provider: 'openrouter', source: 'none' },
 ];
 
 const mockOrgSettings: SingleResponse<Organization> = {
@@ -163,7 +162,7 @@ describe('AgentPage', () => {
 
     await screen.findAllByText('Claude Code');
 
-    // Default view shows Claude Code, which has a configured key
+    // Auto-defaults to Claude Code (first configured agent)
     const saveButton = screen.getByText('Save key');
     expect(saveButton).toBeDisabled();
   });
@@ -291,6 +290,43 @@ describe('AgentPage', () => {
     // Only 1 save button visible (for the selected agent in personal section)
     const saveButton = screen.getByText('Save key');
     expect(saveButton).toBeDisabled();
+  });
+
+  it('switches personal agent credential card when selecting a different radio', async () => {
+    renderWithProviders(<AgentPage />);
+
+    // Default shows Claude Code credential card (auto-selected because anthropic key is configured)
+    expect(await screen.findByText('Key: sk-ant-...abc')).toBeInTheDocument();
+
+    // Click on Codex radio card
+    const user = userEvent.setup();
+    const codexLabels = screen.getAllByText('Codex');
+    // The first Codex label is in the personal RadioGroup
+    await user.click(codexLabels[0]);
+
+    // Should now show Codex placeholder, not Claude Code key
+    await waitFor(() => {
+      expect(screen.queryByText('Key: sk-ant-...abc')).not.toBeInTheDocument();
+    });
+    expect(screen.getByPlaceholderText('sk-...')).toBeInTheDocument();
+  });
+
+  it('auto-defaults personal agent to the first configured provider', async () => {
+    // Only openai is configured — should auto-select Codex
+    setupHandlers({
+      personal: [
+        { provider: 'openai', configured: true, is_team_default: false, masked_key: 'sk-...xyz', status: 'active' },
+      ],
+      team: [],
+      resolved: [
+        { provider: 'openai', source: 'personal', masked_key: 'sk-...xyz' },
+      ],
+    });
+
+    renderWithProviders(<AgentPage />);
+
+    // Should show the openai masked key in the credential card (Codex auto-selected)
+    expect(await screen.findByText('Key: sk-...xyz')).toBeInTheDocument();
   });
 
   it('saves org settings with single mutation', async () => {
