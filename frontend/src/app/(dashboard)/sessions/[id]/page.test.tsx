@@ -1,13 +1,14 @@
-import { describe, it, expect, vi, beforeAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
-import { renderWithProviders, screen, userEvent } from '@/test/test-utils';
+import { renderWithProviders, screen, userEvent, waitFor } from '@/test/test-utils';
 import { server } from '@/test/mocks/server';
 import { mockSessions, mockMembers } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
-import type { Session, SessionMessage, User, SingleResponse, ListResponse } from '@/lib/types';
+import type { Session, SessionLog, SessionMessage, User, SingleResponse, ListResponse } from '@/lib/types';
 
 // Mock EventSource (not available in jsdom)
 class MockEventSource {
+  static instances: MockEventSource[] = [];
   static readonly CONNECTING = 0;
   static readonly OPEN = 1;
   static readonly CLOSED = 2;
@@ -20,7 +21,10 @@ class MockEventSource {
   onopen: ((ev: Event) => void) | null = null;
   onmessage: ((ev: MessageEvent) => void) | null = null;
   onerror: ((ev: Event) => void) | null = null;
-  constructor(url: string | URL) { this.url = String(url); }
+  constructor(url: string | URL) {
+    this.url = String(url);
+    MockEventSource.instances.push(this);
+  }
   addEventListener = vi.fn();
   removeEventListener = vi.fn();
   close = vi.fn();
@@ -28,6 +32,10 @@ class MockEventSource {
 }
 beforeAll(() => {
   global.EventSource = MockEventSource as unknown as typeof EventSource;
+});
+
+afterEach(() => {
+  MockEventSource.instances = [];
 });
 
 // Mock next/link to render a plain anchor
@@ -185,7 +193,7 @@ describe('SessionDetailPage', () => {
     );
 
     renderWithProviders(<SessionDetailContent id={idleSession.id} />);
-    expect(await screen.findByText('No messages yet. The session is processing its initial turn.')).toBeInTheDocument();
+    expect(await screen.findByText('No activity yet. The session is processing its initial turn.')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('Send a follow-up message...')).toBeInTheDocument();
   });
 
@@ -207,6 +215,60 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id={runningSession.id} />);
     expect(await screen.findByText('Agent is working...')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('Agent is working...')).toBeDisabled();
+  });
+
+  it('keeps polling logs and reconnects after an SSE error while the session is active', async () => {
+    const runningSession: Session = {
+      ...mockSessions[0],
+      id: 'session-running-reconnect',
+      status: 'running',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'running',
+    };
+
+    let logFetchCount = 0;
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: runningSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/logs', () => {
+        logFetchCount += 1;
+        return HttpResponse.json({
+          data: logFetchCount >= 2
+            ? [{
+                id: 101,
+                session_id: runningSession.id,
+                level: 'error',
+                message: 'late log after reconnect',
+                metadata: null,
+                turn_number: 1,
+                created_at: '2026-02-17T07:03:00Z',
+              }]
+            : [],
+          meta: {},
+        } satisfies ListResponse<SessionLog>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={runningSession.id} />);
+
+    expect(await screen.findByText('Agent is working...')).toBeInTheDocument();
+    expect(logFetchCount).toBe(1);
+    expect(MockEventSource.instances).toHaveLength(1);
+
+    MockEventSource.instances[0].onerror?.(new Event('error'));
+
+    await waitFor(() => {
+      expect(MockEventSource.instances).toHaveLength(2);
+    }, { timeout: 2500 });
+
+    expect(await screen.findByText('late log after reconnect')).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(logFetchCount).toBeGreaterThanOrEqual(2);
+    });
   });
 
   it('shows validation tab with check results', async () => {
