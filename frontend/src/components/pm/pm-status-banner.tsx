@@ -6,37 +6,23 @@ import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 import { useAnalyze } from "@/hooks/use-analyze";
+import { formatTimeAgo } from "@/lib/utils";
+import { StatusDot } from "@/components/status-dot";
 import type { PMStatus } from "@/lib/types";
 
-function formatTimeAgo(dateStr: string): string {
-  const date = new Date(dateStr);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffMins = Math.floor(diffMs / 60000);
-  if (diffMins < 1) return "just now";
-  if (diffMins < 60) return `${diffMins}m ago`;
-  const diffHours = Math.floor(diffMins / 60);
-  if (diffHours < 24) return `${diffHours}h ago`;
-  const diffDays = Math.floor(diffHours / 24);
-  return `${diffDays}d ago`;
-}
+const pmDotColors: Record<string, string> = {
+  running: "bg-primary",
+  completed: "bg-green-500",
+  failed: "bg-red-500",
+  idle: "bg-muted-foreground/30",
+};
 
-function StatusDot({ status }: { status: "running" | "completed" | "failed" | "idle" }) {
+function PMStatusDot({ status }: { status: "running" | "completed" | "failed" | "idle" }) {
+  const color = pmDotColors[status] || "bg-muted-foreground/30";
   if (status === "running") {
-    return (
-      <span className="relative flex h-2 w-2">
-        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary/60 opacity-75" />
-        <span className="relative inline-flex rounded-full h-2 w-2 bg-primary" />
-      </span>
-    );
+    return <StatusDot animate color={color} pingColor="bg-primary/60" />;
   }
-  if (status === "completed") {
-    return <span className="inline-flex rounded-full h-2 w-2 bg-green-500" />;
-  }
-  if (status === "failed") {
-    return <span className="inline-flex rounded-full h-2 w-2 bg-red-500" />;
-  }
-  return <span className="inline-flex rounded-full h-2 w-2 bg-muted-foreground/30" />;
+  return <StatusDot color={color} />;
 }
 
 function deriveAgentStatus(pmStatus: PMStatus | undefined, isAnalyzing: boolean): "running" | "completed" | "failed" | "idle" {
@@ -79,7 +65,7 @@ export function PMStatusBanner({ hasActivePlanSession }: PMStatusBannerProps) {
             : "border-border bg-muted/30"
         }`}
       >
-        <StatusDot status={agentStatus} />
+        <PMStatusDot status={agentStatus} />
 
         <span className="text-[13px] font-medium text-foreground">PM Agent</span>
 
