@@ -1,12 +1,11 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { Plus, Search, MessageSquare } from "lucide-react";
+import { Plus, Search } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
 import { useMemo, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
-import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
 import type { Session } from "@/lib/types";
@@ -106,18 +105,21 @@ export function SessionSidebar() {
     return filteredSessions.filter((s) => sessionTitle(s).toLowerCase().includes(q));
   }, [filteredSessions, search]);
 
+  const isNewSession = pathname === "/sessions/new";
+
   return (
     <div className="w-full h-full border-r border-border bg-muted/30 flex flex-col">
+      {/* New session button */}
+      <Link
+        href="/sessions/new"
+        className="flex items-center gap-2.5 px-4 py-3 border-b border-border/50 text-[13px] font-medium text-muted-foreground hover:text-foreground transition-colors"
+      >
+        <Plus className="h-4 w-4" />
+        New session
+      </Link>
+
       {/* Header */}
-      <div className="px-4 pt-4 pb-2 space-y-3">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-foreground">Sessions</h2>
-          <Button variant="ghost" size="icon" className="h-7 w-7" asChild>
-            <Link href="/sessions/new">
-              <Plus className="h-4 w-4" />
-            </Link>
-          </Button>
-        </div>
+      <div className="px-4 pt-3 pb-2 space-y-3">
 
         {/* Search */}
         <div className="relative">
@@ -168,6 +170,23 @@ export function SessionSidebar() {
 
       {/* Session list */}
       <div className="flex-1 overflow-y-auto px-2 pb-2">
+        {/* Ghost "New session" entry when creating */}
+        {isNewSession && (
+          <Link
+            href="/sessions/new"
+            className="block rounded-lg px-3 py-2.5 mb-0.5 bg-background shadow-sm border border-border/50"
+          >
+            <div className="flex items-start gap-2.5 min-w-0">
+              <div className="mt-1.5 shrink-0">
+                <span className="inline-flex rounded-full h-2 w-2 border border-muted-foreground/30" />
+              </div>
+              <p className="text-[13px] font-medium text-muted-foreground/60 italic">
+                New session
+              </p>
+            </div>
+          </Link>
+        )}
+
         {isLoading && (
           <div className="px-2 py-8 text-center text-[12px] text-muted-foreground">
             Loading...

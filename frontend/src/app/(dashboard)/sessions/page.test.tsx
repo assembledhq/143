@@ -13,15 +13,21 @@ vi.mock('next/link', () => ({
   ),
 }));
 
+let mockPathname = '/sessions';
+
 // Mock next/navigation
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn() }),
   useSearchParams: () => new URLSearchParams(),
-  usePathname: () => '/sessions',
+  usePathname: () => mockPathname,
   useParams: () => ({}),
 }));
 
 describe('SessionSidebar', () => {
+  beforeEach(() => {
+    mockPathname = '/sessions';
+  });
+
   it('shows loading state initially', () => {
     renderWithProviders(<SessionSidebar />);
     expect(screen.getByText('Loading...')).toBeInTheDocument();
@@ -35,10 +41,11 @@ describe('SessionSidebar', () => {
     ).toBeInTheDocument();
   });
 
-  it('displays page header with Sessions title', async () => {
+  it('displays New session link at top', async () => {
     renderWithProviders(<SessionSidebar />);
 
-    expect(screen.getByText('Sessions')).toBeInTheDocument();
+    const newSessionLink = screen.getByRole('link', { name: /New session/ });
+    expect(newSessionLink).toHaveAttribute('href', '/sessions/new');
   });
 
   it('shows empty state when API returns no sessions', async () => {
@@ -82,13 +89,16 @@ describe('SessionSidebar', () => {
     expect(screen.getByPlaceholderText('Search sessions...')).toBeInTheDocument();
   });
 
-  it('has new session button', async () => {
+  it('shows ghost New session entry when on /sessions/new', async () => {
+    mockPathname = '/sessions/new';
+
     renderWithProviders(<SessionSidebar />);
 
     await screen.findByText('Fixed TypeError by adding null check');
 
-    // Plus button links to /sessions/new
-    const link = screen.getByRole('link', { name: '' });
-    expect(link).toHaveAttribute('href', '/sessions/new');
+    // Ghost entry should be visible in the list (italic "New session" text)
+    const newSessionTexts = screen.getAllByText('New session');
+    // At least 2: the top "+ New session" link + the ghost entry in the list
+    expect(newSessionTexts.length).toBeGreaterThanOrEqual(2);
   });
 });
