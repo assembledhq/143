@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowUp, Mic, Plus, X, ImagePlus, Paperclip } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
@@ -24,7 +24,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import { AGENT_TYPE_OPTIONS } from "@/lib/model-constants";
-import type { OrgSettings, Organization, SingleResponse } from "@/lib/types";
+import type { OrgSettings, Organization, Session, SessionsListResponse, SingleResponse } from "@/lib/types";
 
 type DictationResult = {
   transcript: string;
@@ -58,6 +58,7 @@ function readFileAsDataURL(file: File): Promise<string> {
 
 export function ManualSessionCreatePageContent() {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const messageInputRef = useRef<HTMLTextAreaElement>(null);
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
@@ -69,6 +70,7 @@ export function ManualSessionCreatePageContent() {
   const [isDictating, setIsDictating] = useState(false);
   const [dictationError, setDictationError] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState("");
+  const [creationError, setCreationError] = useState<string | null>(null);
 
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
     queryKey: ["settings"],
@@ -90,8 +92,71 @@ export function ManualSessionCreatePageContent() {
         images: attachments,
         ...(selectedModel ? { model: selectedModel } : {}),
       }),
+    onMutate: async () => {
+      setCreationError(null);
+
+      // Cancel in-flight session list fetches so they don't overwrite our optimistic update
+      await queryClient.cancelQueries({ queryKey: ["sessions"] });
+
+      // Snapshot the previous session list for rollback
+      const previousSessions = queryClient.getQueriesData<SessionsListResponse>({ queryKey: ["sessions"] });
+
+      // Build an optimistic session entry
+      const optimisticSession: Session = {
+        id: `optimistic-${Date.now()}`,
+        issue_id: "",
+        org_id: "",
+        agent_type: defaultAgentType,
+        status: "pending",
+        autonomy_level: "full",
+        token_mode: "low",
+        current_turn: 0,
+        sandbox_state: "",
+        pm_approach: message.trim().length > 80 ? message.trim().slice(0, 80) + "..." : message.trim(),
+        created_at: new Date().toISOString(),
+      };
+
+      // Prepend optimistic session to all session list query caches
+      queryClient.setQueriesData<SessionsListResponse>(
+        { queryKey: ["sessions"] },
+        (old) => {
+          if (!old) return { data: [optimisticSession], meta: {} };
+          return { ...old, data: [optimisticSession, ...old.data] };
+        },
+      );
+
+      return { previousSessions };
+    },
     onSuccess: (response) => {
+      // Replace the optimistic entry with the real session data
+      queryClient.setQueriesData<SessionsListResponse>(
+        { queryKey: ["sessions"] },
+        (old) => {
+          if (!old) return old;
+          return {
+            ...old,
+            data: old.data.map((s) =>
+              s.id.startsWith("optimistic-") ? response.data : s,
+            ),
+          };
+        },
+      );
       router.push(`/sessions/${response.data.id}`);
+    },
+    onError: (_error, _variables, context) => {
+      // Roll back to the previous session list
+      if (context?.previousSessions) {
+        for (const [queryKey, data] of context.previousSessions) {
+          queryClient.setQueryData(queryKey, data);
+        }
+      }
+      setCreationError(
+        _error instanceof Error ? _error.message : "Could not start session. Please try again.",
+      );
+    },
+    onSettled: () => {
+      // Refetch to ensure we're in sync with the server
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
     },
   });
 
@@ -326,8 +391,8 @@ export function ManualSessionCreatePageContent() {
             {dictationError && (
               <p className="pt-2 text-xs text-destructive">{dictationError}</p>
             )}
-            {createManualSessionMutation.isError && (
-              <p className="pt-2 text-xs text-destructive">Could not start session. Please try again.</p>
+            {(createManualSessionMutation.isError || creationError) && (
+              <p className="pt-2 text-xs text-destructive">{creationError || "Could not start session. Please try again."}</p>
             )}
           </CardContent>
         </Card>
