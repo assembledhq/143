@@ -417,18 +417,18 @@ function ChatPanel({ session, sessionId, isActive }: { session: Session; session
     refetchInterval: isActive ? 3000 : false,
   });
 
-  const messages = messagesData?.data || [];
-  const fetchedLogs = logsData?.data || [];
-
   // Merge fetched logs with streamed logs, deduplicating by ID.
   const allLogs = useMemo(() => {
-    const idSet = new Set(fetchedLogs.map((l) => l.id));
+    const fetched = logsData?.data || [];
+    const idSet = new Set(fetched.map((l) => l.id));
     const extra = streamedLogs.filter((l) => !idSet.has(l.id));
-    return [...fetchedLogs, ...extra];
-  }, [fetchedLogs, streamedLogs]);
+    return [...fetched, ...extra];
+  }, [logsData?.data, streamedLogs]);
+
+  const messages = messagesData?.data;
 
   const timelineEntries = useMemo(
-    () => buildTimeline(messages, allLogs),
+    () => buildTimeline(messages || [], allLogs),
     [messages, allLogs]
   );
 
