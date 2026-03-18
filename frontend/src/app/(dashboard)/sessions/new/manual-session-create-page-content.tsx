@@ -63,7 +63,6 @@ export function ManualSessionCreatePageContent() {
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const messageInputRef = useRef<HTMLTextAreaElement>(null);
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
-  const optimisticIdRef = useRef<string | null>(null);
 
   const [message, setMessage] = useState("");
   const [attachments, setAttachments] = useState<string[]>([]);
@@ -101,19 +100,15 @@ export function ManualSessionCreatePageContent() {
       const title = message.trim().length > 80
         ? message.trim().slice(0, 80) + "..."
         : message.trim();
-      optimisticIdRef.current = addOptimisticSession(title);
+      return { optimisticId: addOptimisticSession(title) };
     },
-    onSuccess: (response) => {
-      if (optimisticIdRef.current) {
-        removeOptimisticSession(optimisticIdRef.current);
-        optimisticIdRef.current = null;
-      }
+    onSuccess: (response, _variables, context) => {
+      removeOptimisticSession(context.optimisticId);
       router.push(`/sessions/${response.data.id}`);
     },
-    onError: (error) => {
-      if (optimisticIdRef.current) {
-        removeOptimisticSession(optimisticIdRef.current);
-        optimisticIdRef.current = null;
+    onError: (error, _variables, context) => {
+      if (context?.optimisticId) {
+        removeOptimisticSession(context.optimisticId);
       }
       setCreationError(
         error instanceof Error ? error.message : "Could not start session. Please try again.",
@@ -352,8 +347,8 @@ export function ManualSessionCreatePageContent() {
             {dictationError && (
               <p className="pt-2 text-xs text-destructive">{dictationError}</p>
             )}
-            {(createManualSessionMutation.isError || creationError) && (
-              <p className="pt-2 text-xs text-destructive">{creationError || "Could not start session. Please try again."}</p>
+            {creationError && (
+              <p className="pt-2 text-xs text-destructive">{creationError}</p>
             )}
           </CardContent>
         </Card>

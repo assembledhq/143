@@ -32,7 +32,7 @@ export function OptimisticSessionsProvider({ children }: { children: React.React
   const [sessions, setSessions] = useState<OptimisticSession[]>([]);
 
   const addOptimisticSession = useCallback((title: string) => {
-    const id = `optimistic-${Date.now()}`;
+    const id = `optimistic-${crypto.randomUUID()}`;
     setSessions((prev) => [
       { id, title, status: "pending" as const, created_at: new Date().toISOString() },
       ...prev,

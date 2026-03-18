@@ -3,6 +3,9 @@
  *
  * Using a single source of truth for query keys prevents typo-based bugs and
  * makes it easy to invalidate related caches consistently.
+ *
+ * NOTE: Adoption is incremental — many files still use inline string arrays.
+ * When touching a file that uses hardcoded query keys, migrate them here.
  */
 export const queryKeys = {
   sessions: {

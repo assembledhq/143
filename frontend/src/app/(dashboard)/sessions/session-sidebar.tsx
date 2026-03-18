@@ -218,9 +218,10 @@ export function SessionSidebar() {
           </Link>
         )}
 
-        {optimisticSessions.map((os) => (
-          <OptimisticSessionRow key={os.id} session={os} />
-        ))}
+        {(currentFilter === "all" || currentFilter === "active") &&
+          optimisticSessions.map((os) => (
+            <OptimisticSessionRow key={os.id} session={os} />
+          ))}
 
         {isLoading && (
           <div className="px-2 py-8 text-center text-[12px] text-muted-foreground">
