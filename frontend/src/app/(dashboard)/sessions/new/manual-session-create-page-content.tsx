@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { ArrowUp, Mic, Plus, X, ImagePlus, Paperclip } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
@@ -23,8 +23,10 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
+import { queryKeys } from "@/lib/query-keys";
 import { AGENT_TYPE_OPTIONS } from "@/lib/model-constants";
-import type { OrgSettings, Organization, Session, SessionsListResponse, SingleResponse } from "@/lib/types";
+import { useOptimisticSessions } from "@/contexts/optimistic-sessions";
+import type { OrgSettings, Organization, SingleResponse } from "@/lib/types";
 
 type DictationResult = {
   transcript: string;
@@ -58,10 +60,10 @@ function readFileAsDataURL(file: File): Promise<string> {
 
 export function ManualSessionCreatePageContent() {
   const router = useRouter();
-  const queryClient = useQueryClient();
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const messageInputRef = useRef<HTMLTextAreaElement>(null);
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
+  const optimisticIdRef = useRef<string | null>(null);
 
   const [message, setMessage] = useState("");
   const [attachments, setAttachments] = useState<string[]>([]);
@@ -72,8 +74,10 @@ export function ManualSessionCreatePageContent() {
   const [selectedModel, setSelectedModel] = useState("");
   const [creationError, setCreationError] = useState<string | null>(null);
 
+  const { addOptimisticSession, removeOptimisticSession } = useOptimisticSessions();
+
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
-    queryKey: ["settings"],
+    queryKey: queryKeys.settings.all,
     queryFn: () => api.settings.get(),
   });
 
@@ -92,71 +96,28 @@ export function ManualSessionCreatePageContent() {
         images: attachments,
         ...(selectedModel ? { model: selectedModel } : {}),
       }),
-    onMutate: async () => {
+    onMutate: () => {
       setCreationError(null);
-
-      // Cancel in-flight session list fetches so they don't overwrite our optimistic update
-      await queryClient.cancelQueries({ queryKey: ["sessions"] });
-
-      // Snapshot the previous session list for rollback
-      const previousSessions = queryClient.getQueriesData<SessionsListResponse>({ queryKey: ["sessions"] });
-
-      // Build an optimistic session entry
-      const optimisticSession: Session = {
-        id: `optimistic-${Date.now()}`,
-        issue_id: "",
-        org_id: "",
-        agent_type: defaultAgentType,
-        status: "pending",
-        autonomy_level: "full",
-        token_mode: "low",
-        current_turn: 0,
-        sandbox_state: "",
-        pm_approach: message.trim().length > 80 ? message.trim().slice(0, 80) + "..." : message.trim(),
-        created_at: new Date().toISOString(),
-      };
-
-      // Prepend optimistic session to all session list query caches
-      queryClient.setQueriesData<SessionsListResponse>(
-        { queryKey: ["sessions"] },
-        (old) => {
-          if (!old) return { data: [optimisticSession], meta: {} };
-          return { ...old, data: [optimisticSession, ...old.data] };
-        },
-      );
-
-      return { previousSessions };
+      const title = message.trim().length > 80
+        ? message.trim().slice(0, 80) + "..."
+        : message.trim();
+      optimisticIdRef.current = addOptimisticSession(title);
     },
     onSuccess: (response) => {
-      // Replace the optimistic entry with the real session data
-      queryClient.setQueriesData<SessionsListResponse>(
-        { queryKey: ["sessions"] },
-        (old) => {
-          if (!old) return old;
-          return {
-            ...old,
-            data: old.data.map((s) =>
-              s.id.startsWith("optimistic-") ? response.data : s,
-            ),
-          };
-        },
-      );
+      if (optimisticIdRef.current) {
+        removeOptimisticSession(optimisticIdRef.current);
+        optimisticIdRef.current = null;
+      }
       router.push(`/sessions/${response.data.id}`);
     },
-    onError: (_error, _variables, context) => {
-      // Roll back to the previous session list
-      if (context?.previousSessions) {
-        for (const [queryKey, data] of context.previousSessions) {
-          queryClient.setQueryData(queryKey, data);
-        }
+    onError: (error) => {
+      if (optimisticIdRef.current) {
+        removeOptimisticSession(optimisticIdRef.current);
+        optimisticIdRef.current = null;
       }
       setCreationError(
-        _error instanceof Error ? _error.message : "Could not start session. Please try again.",
+        error instanceof Error ? error.message : "Could not start session. Please try again.",
       );
-    },
-    onSettled: () => {
-      // Refetch to ensure we're in sync with the server
-      queryClient.invalidateQueries({ queryKey: ["sessions"] });
     },
   });
 
