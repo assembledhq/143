@@ -66,11 +66,12 @@ interface AgentEnvVar {
   advanced?: boolean;
 }
 
-const ORG_AGENT_TYPES: { key: string; label: string; description: string; envVars: AgentEnvVar[] }[] = [
+const ORG_AGENT_TYPES: { key: string; label: string; description: string; providerKey: string; envVars: AgentEnvVar[] }[] = [
   {
     key: "codex",
     label: "Codex",
     description: "OpenAI Codex (GPT-5 models)",
+    providerKey: "openai",
     envVars: [
       { name: "OPENAI_API_KEY", label: "API Key", sensitive: true },
       { name: "OPENAI_MODEL", label: "Default model", options: [...AVAILABLE_CODEX_MODELS] },
@@ -81,6 +82,7 @@ const ORG_AGENT_TYPES: { key: string; label: string; description: string; envVar
     key: "claude_code",
     label: "Claude Code",
     description: "Anthropic Claude (Opus, Sonnet, Haiku)",
+    providerKey: "anthropic",
     envVars: [
       { name: "ANTHROPIC_API_KEY", label: "API Key", sensitive: true },
       { name: "ANTHROPIC_MODEL", label: "Default model", options: [...AVAILABLE_CLAUDE_CODE_MODELS] },
@@ -91,6 +93,7 @@ const ORG_AGENT_TYPES: { key: string; label: string; description: string; envVar
     key: "gemini_cli",
     label: "Gemini CLI",
     description: "Google Gemini (Pro, Flash)",
+    providerKey: "gemini",
     envVars: [
       { name: "GEMINI_API_KEY", label: "API Key", sensitive: true },
       { name: "GEMINI_MODEL", label: "Default model", options: [...AVAILABLE_GEMINI_CLI_MODELS] },
@@ -106,6 +109,42 @@ const DEFAULT_EXECUTION_SETTINGS: Pick<
   execution_aggressiveness: 2,
   max_concurrent_runs: 5,
 };
+
+/* ------------------------------------------------------------------ */
+/*  Shared RadioCard component                                        */
+/* ------------------------------------------------------------------ */
+
+function RadioCard({
+  value,
+  label,
+  description,
+  selected,
+}: {
+  value: string;
+  label: string;
+  description?: string;
+  selected: boolean;
+}) {
+  return (
+    <label
+      className={`relative flex cursor-pointer flex-col rounded-lg border p-3 shadow-sm transition-all duration-150 ${
+        selected
+          ? "border-primary bg-primary/5 ring-1 ring-primary/20 dark:shadow-[var(--glow-primary-sm)]"
+          : "border-input hover:bg-muted/40 hover:border-border"
+      }`}
+    >
+      <div className="flex items-center gap-2">
+        <RadioGroupItem value={value} />
+        <span className="text-[13px] font-medium">{label}</span>
+      </div>
+      {description && (
+        <span className="mt-1 pl-6 text-xs text-muted-foreground">
+          {description}
+        </span>
+      )}
+    </label>
+  );
+}
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                           */
@@ -127,6 +166,15 @@ function sourceBadgeVariant(source: string): "success" | "secondary" | "outline"
     case "org": return "secondary";
     default: return "outline";
   }
+}
+
+/** Resolve a provider key to a display name, checking both provider lists. */
+function providerDisplayName(providerKey: string): string {
+  const personal = PERSONAL_PROVIDERS.find((p) => p.key === providerKey);
+  if (personal) return personal.name;
+  const org = ORG_AGENT_TYPES.find((a) => a.providerKey === providerKey);
+  if (org) return org.label;
+  return providerKey;
 }
 
 /* ------------------------------------------------------------------ */
@@ -213,35 +261,57 @@ export default function AgentPage() {
     upsertMutation.mutate({ provider, apiKey: key });
   }
 
-  /* ---------- Org settings queries ---------- */
+  /* ---------- Org settings queries (admin-gated) ---------- */
 
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
     queryKey: ["settings"],
     queryFn: () => api.settings.get(),
+    enabled: isAdmin,
   });
 
   const { data: agentDefaultsResponse } = useQuery({
     queryKey: ["agent-defaults"],
     queryFn: () => api.settings.getAgentDefaults(),
+    enabled: isAdmin,
   });
 
   const { data: codexAuthStatusResp } = useQuery({
     queryKey: ["codex-auth-status"],
     queryFn: () => api.codexAuth.status(),
     refetchInterval: false,
+    enabled: isAdmin,
   });
   const codexAuthStatus = codexAuthStatusResp?.data;
 
   const orgSettings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
 
-  /* ---------- Org agent config state ---------- */
+  /* ---------- Org settings state (agent config + execution combined) ---------- */
 
   const [defaultAgentTypeOverride, setDefaultAgentTypeOverride] = useState<OrgSettings["default_agent_type"] | null>(null);
   const [agentConfigOverride, setAgentConfigOverride] = useState<Record<string, Record<string, string>> | null>(null);
   const [codexCredentialMethodOverride, setCodexCredentialMethodOverride] = useState<"chatgpt" | "api_key" | null>(null);
-  const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
+  const [showAdvancedPerAgent, setShowAdvancedPerAgent] = useState<Record<string, boolean>>({});
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
   const [orgSaveStatus, setOrgSaveStatus] = useState<"idle" | "success" | "error">("idle");
+
+  const [autonomyLevel, setAutonomyLevel] = useState(DEFAULT_EXECUTION_SETTINGS.autonomy_level);
+  const [aggressiveness, setAggressiveness] = useState(String(DEFAULT_EXECUTION_SETTINGS.execution_aggressiveness));
+  const [maxConcurrent, setMaxConcurrent] = useState(String(DEFAULT_EXECUTION_SETTINGS.max_concurrent_runs));
+
+  // Sync server data into all org form state (agent config + execution)
+  const [prevSettingsRef, setPrevSettingsRef] = useState<unknown>(undefined);
+  const settingsData = settingsResponse?.data?.settings;
+  if (settingsData && settingsData !== prevSettingsRef) {
+    setPrevSettingsRef(settingsData);
+    const s = orgSettings;
+    // Execution
+    setAutonomyLevel(s.autonomy_level ?? DEFAULT_EXECUTION_SETTINGS.autonomy_level);
+    setAggressiveness(String(s.execution_aggressiveness ?? DEFAULT_EXECUTION_SETTINGS.execution_aggressiveness));
+    setMaxConcurrent(String(s.max_concurrent_runs ?? DEFAULT_EXECUTION_SETTINGS.max_concurrent_runs));
+    // Agent config
+    if (s.default_agent_type) setDefaultAgentTypeOverride(s.default_agent_type);
+    if (s.agent_config) setAgentConfigOverride(s.agent_config);
+  }
 
   const defaultAgentType = defaultAgentTypeOverride ?? orgSettings?.default_agent_type ?? "codex";
   const agentConfig = agentConfigOverride ?? orgSettings?.agent_config ?? {};
@@ -256,6 +326,7 @@ export default function AgentPage() {
     hasCodexAPIKey && codexAuthStatus?.status !== "completed" ? "api_key" : "chatgpt";
   const codexCredentialMethod = codexCredentialMethodOverride ?? inferredCodexCredentialMethod;
 
+  // Single mutation for all org settings (agent config + execution)
   const orgMutation = useMutation({
     mutationFn: (payload: Record<string, unknown>) => api.settings.update(payload),
     onSuccess: () => {
@@ -276,7 +347,7 @@ export default function AgentPage() {
     },
   });
 
-  function handleSaveOrgAgentConfig() {
+  function handleSaveOrgSettings() {
     const serverAgentDefaults = agentDefaultsResponse?.data ?? {};
     const cleanedAgentConfig: Record<string, Record<string, string>> = {};
 
@@ -297,44 +368,6 @@ export default function AgentPage() {
       settings: {
         default_agent_type: defaultAgentType,
         ...(Object.keys(cleanedAgentConfig).length > 0 && { agent_config: cleanedAgentConfig }),
-      },
-    });
-  }
-
-  /* ---------- Execution settings state ---------- */
-
-  const [autonomyLevel, setAutonomyLevel] = useState(DEFAULT_EXECUTION_SETTINGS.autonomy_level);
-  const [aggressiveness, setAggressiveness] = useState(String(DEFAULT_EXECUTION_SETTINGS.execution_aggressiveness));
-  const [maxConcurrent, setMaxConcurrent] = useState(String(DEFAULT_EXECUTION_SETTINGS.max_concurrent_runs));
-  const [execSaveStatus, setExecSaveStatus] = useState<"idle" | "success" | "error">("idle");
-
-  // Sync server data into execution form state
-  const [prevSettingsRef, setPrevSettingsRef] = useState<unknown>(undefined);
-  const settingsData = settingsResponse?.data?.settings;
-  if (settingsData && settingsData !== prevSettingsRef) {
-    setPrevSettingsRef(settingsData);
-    const s = orgSettings;
-    setAutonomyLevel(s.autonomy_level ?? DEFAULT_EXECUTION_SETTINGS.autonomy_level);
-    setAggressiveness(String(s.execution_aggressiveness ?? DEFAULT_EXECUTION_SETTINGS.execution_aggressiveness));
-    setMaxConcurrent(String(s.max_concurrent_runs ?? DEFAULT_EXECUTION_SETTINGS.max_concurrent_runs));
-  }
-
-  const execMutation = useMutation({
-    mutationFn: (data: Record<string, unknown>) => api.settings.update(data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["settings"] });
-      setExecSaveStatus("success");
-      setTimeout(() => setExecSaveStatus("idle"), 2000);
-    },
-    onError: () => {
-      setExecSaveStatus("error");
-      setTimeout(() => setExecSaveStatus("idle"), 3000);
-    },
-  });
-
-  function handleSaveExecution() {
-    execMutation.mutate({
-      settings: {
         autonomy_level: autonomyLevel,
         execution_aggressiveness: parseInt(aggressiveness, 10),
         max_concurrent_runs: parseInt(maxConcurrent, 10),
@@ -503,22 +536,13 @@ export default function AgentPage() {
                     className="grid grid-cols-3 gap-3"
                   >
                     {ORG_AGENT_TYPES.map((agent) => (
-                      <label
+                      <RadioCard
                         key={agent.key}
-                        className={`relative flex cursor-pointer flex-col rounded-lg border p-3 shadow-sm transition-all duration-150 ${
-                          defaultAgentType === agent.key
-                            ? "border-primary bg-primary/5 ring-1 ring-primary/20"
-                            : "border-input hover:bg-muted/40 hover:border-border"
-                        }`}
-                      >
-                        <div className="flex items-center gap-2">
-                          <RadioGroupItem value={agent.key} />
-                          <span className="text-sm font-medium">{agent.label}</span>
-                        </div>
-                        <span className="mt-1 pl-6 text-xs text-muted-foreground">
-                          {agent.description}
-                        </span>
-                      </label>
+                        value={agent.key}
+                        label={agent.label}
+                        description={agent.description}
+                        selected={defaultAgentType === agent.key}
+                      />
                     ))}
                   </RadioGroup>
                 </div>
@@ -529,17 +553,12 @@ export default function AgentPage() {
             {ORG_AGENT_TYPES.map((agent) => {
               const isSelected = defaultAgentType === agent.key;
               const serverVars = (agentDefaultsResponse?.data ?? {})[agent.key] ?? {};
-              const teamCred = teamDefaults.find((c) => {
-                if (agent.key === "codex") return c.provider === "openai";
-                if (agent.key === "claude_code") return c.provider === "anthropic";
-                if (agent.key === "gemini_cli") return c.provider === "gemini";
-                return false;
-              });
-              const teamProviderKey = agent.key === "codex" ? "openai" : agent.key === "claude_code" ? "anthropic" : "gemini";
+              const teamCred = teamDefaults.find((c) => c.provider === agent.providerKey);
+              const showAdvanced = showAdvancedPerAgent[agent.key] ?? false;
               const envVarsToRender =
                 agent.key === "codex" && codexCredentialMethod === "chatgpt"
                   ? []
-                  : agent.envVars.filter((v) => !v.advanced || showAdvancedSettings);
+                  : agent.envVars.filter((v) => !v.advanced || showAdvanced);
               const hasAdvanced = agent.envVars.some((v) => v.advanced);
 
               return (
@@ -566,7 +585,7 @@ export default function AgentPage() {
                             variant="ghost"
                             size="sm"
                             className="text-xs text-muted-foreground"
-                            onClick={() => setRemovingTeamProvider(teamProviderKey)}
+                            onClick={() => setRemovingTeamProvider(agent.providerKey)}
                             disabled={removeTeamMutation.isPending}
                           >
                             Remove team default
@@ -654,9 +673,9 @@ export default function AgentPage() {
                           type="button"
                           size="sm"
                           variant="outline"
-                          onClick={() => setShowAdvancedSettings((c) => !c)}
+                          onClick={() => setShowAdvancedPerAgent((prev) => ({ ...prev, [agent.key]: !prev[agent.key] }))}
                         >
-                          {showAdvancedSettings ? "Hide advanced settings" : "Show advanced settings"}
+                          {showAdvanced ? "Hide advanced settings" : "Show advanced settings"}
                         </Button>
                       )}
                       {envVarsToRender.map((envVar) => {
@@ -734,18 +753,6 @@ export default function AgentPage() {
                 </Card>
               );
             })}
-
-            <div className="flex items-center justify-end gap-3">
-              <Button onClick={handleSaveOrgAgentConfig} disabled={orgMutation.isPending}>
-                {orgMutation.isPending ? "Saving..." : "Save agent configuration"}
-              </Button>
-              {orgSaveStatus === "success" && (
-                <span className="text-[13px] text-emerald-600 dark:text-emerald-400">Saved.</span>
-              )}
-              {orgSaveStatus === "error" && (
-                <span className="text-[13px] text-destructive">Failed to save.</span>
-              )}
-            </div>
           </section>
         )}
 
@@ -778,22 +785,13 @@ export default function AgentPage() {
                         { value: "auto_simple", label: "Auto (simple)", description: "Auto-run simple issues" },
                         { value: "auto_all", label: "Auto (all)", description: "Auto-run all eligible" },
                       ].map((option) => (
-                        <label
+                        <RadioCard
                           key={option.value}
-                          className={`relative flex cursor-pointer flex-col rounded-lg border p-3 shadow-sm transition-all duration-150 ${
-                            autonomyLevel === option.value
-                              ? "border-primary bg-primary/5 ring-1 ring-primary/20 dark:shadow-[var(--glow-primary-sm)]"
-                              : "border-input hover:bg-muted/40 hover:border-border"
-                          }`}
-                        >
-                          <div className="flex items-center gap-2">
-                            <RadioGroupItem value={option.value} />
-                            <span className="text-[13px] font-medium">{option.label}</span>
-                          </div>
-                          <span className="mt-1 pl-6 text-xs text-muted-foreground">
-                            {option.description}
-                          </span>
-                        </label>
+                          value={option.value}
+                          label={option.label}
+                          description={option.description}
+                          selected={autonomyLevel === option.value}
+                        />
                       ))}
                     </RadioGroup>
                   </div>
@@ -811,22 +809,13 @@ export default function AgentPage() {
                         { value: "3", label: "Aggressive", description: "More changes" },
                         { value: "4", label: "Maximum", description: "Full autonomy" },
                       ].map((option) => (
-                        <label
+                        <RadioCard
                           key={option.value}
-                          className={`relative flex cursor-pointer flex-col rounded-lg border p-3 shadow-sm transition-all duration-150 ${
-                            aggressiveness === option.value
-                              ? "border-primary bg-primary/5 ring-1 ring-primary/20 dark:shadow-[var(--glow-primary-sm)]"
-                              : "border-input hover:bg-muted/40 hover:border-border"
-                          }`}
-                        >
-                          <div className="flex items-center gap-2">
-                            <RadioGroupItem value={option.value} />
-                            <span className="text-[13px] font-medium">{option.label}</span>
-                          </div>
-                          <span className="mt-1 pl-6 text-xs text-muted-foreground">
-                            {option.description}
-                          </span>
-                        </label>
+                          value={option.value}
+                          label={option.label}
+                          description={option.description}
+                          selected={aggressiveness === option.value}
+                        />
                       ))}
                     </RadioGroup>
                   </div>
@@ -846,14 +835,15 @@ export default function AgentPage() {
               </CardContent>
             </Card>
 
+            {/* Single save for all org settings */}
             <div className="flex items-center justify-end gap-3">
-              <Button onClick={handleSaveExecution} disabled={execMutation.isPending}>
-                {execMutation.isPending ? "Saving..." : "Save execution settings"}
+              <Button onClick={handleSaveOrgSettings} disabled={orgMutation.isPending}>
+                {orgMutation.isPending ? "Saving..." : "Save organization settings"}
               </Button>
-              {execSaveStatus === "success" && (
+              {orgSaveStatus === "success" && (
                 <span className="text-[13px] text-emerald-600 dark:text-emerald-400">Settings saved.</span>
               )}
-              {execSaveStatus === "error" && (
+              {orgSaveStatus === "error" && (
                 <span className="text-[13px] text-destructive">Failed to save settings.</span>
               )}
             </div>
@@ -867,7 +857,7 @@ export default function AgentPage() {
           <AlertDialogHeader>
             <AlertDialogTitle>Remove API key</AlertDialogTitle>
             <AlertDialogDescription>
-              Are you sure you want to remove your {removingProvider ? PERSONAL_PROVIDERS.find((p) => p.key === removingProvider)?.name : ""} API key?
+              Are you sure you want to remove your {providerDisplayName(removingProvider ?? "")} API key?
               Sessions will fall back to the team default or organization key.
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -891,7 +881,7 @@ export default function AgentPage() {
           <AlertDialogHeader>
             <AlertDialogTitle>Remove team default</AlertDialogTitle>
             <AlertDialogDescription>
-              Are you sure you want to remove the team default for {removingTeamProvider ? PERSONAL_PROVIDERS.find((p) => p.key === removingTeamProvider)?.name : ""}?
+              Are you sure you want to remove the team default for {providerDisplayName(removingTeamProvider ?? "")}?
               Team members without personal keys will fall back to the organization credential.
             </AlertDialogDescription>
           </AlertDialogHeader>
