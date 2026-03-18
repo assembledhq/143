@@ -1027,7 +1027,7 @@ func TestWithSandboxProvider(t *testing.T) {
 	provider := testutil.NewMockSandboxProvider()
 	ctx := WithSandboxProvider(context.Background(), provider)
 
-	retrieved, ok := ctx.Value(sandboxProviderKey{}).(agent.SandboxProvider)
-	require.True(t, ok)
+	retrieved := agent.SandboxProviderFromContext(ctx)
+	require.NotNil(t, retrieved)
 	require.Equal(t, provider, retrieved)
 }

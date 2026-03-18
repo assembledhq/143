@@ -185,3 +185,22 @@ type SandboxConnectionInfo struct {
 	AgentSession string            // agent-specific session ID for --resume
 	Environment  map[string]string // env vars needed for the local CLI
 }
+
+// sandboxProviderKey is the context key for injecting a SandboxProvider.
+// It lives in the agent package so both the orchestrator and adapters can
+// share it without circular imports.
+type sandboxProviderKey struct{}
+
+// WithSandboxProvider returns a context carrying the given SandboxProvider.
+// The orchestrator injects the provider before calling adapter.Execute,
+// and adapters retrieve it via SandboxProviderFromContext.
+func WithSandboxProvider(ctx context.Context, p SandboxProvider) context.Context {
+	return context.WithValue(ctx, sandboxProviderKey{}, p)
+}
+
+// SandboxProviderFromContext retrieves the SandboxProvider from the context.
+// Returns nil if no provider is set.
+func SandboxProviderFromContext(ctx context.Context) SandboxProvider {
+	p, _ := ctx.Value(sandboxProviderKey{}).(SandboxProvider)
+	return p
+}

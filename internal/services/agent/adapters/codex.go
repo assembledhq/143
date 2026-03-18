@@ -58,8 +58,8 @@ func (a *CodexAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInpu
 
 // Execute runs the Codex CLI inside the sandbox and streams output.
 func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
-	provider, ok := ctx.Value(sandboxProviderKey{}).(agent.SandboxProvider)
-	if !ok {
+	provider := agent.SandboxProviderFromContext(ctx)
+	if provider == nil {
 		return nil, fmt.Errorf("sandbox provider not found in context")
 	}
 

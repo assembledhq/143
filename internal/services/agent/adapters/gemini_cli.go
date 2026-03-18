@@ -59,8 +59,8 @@ func (a *GeminiCLIAdapter) PreparePrompt(ctx context.Context, input *agent.Agent
 
 // Execute runs the Gemini CLI inside the sandbox and streams output.
 func (a *GeminiCLIAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
-	provider, ok := ctx.Value(sandboxProviderKey{}).(agent.SandboxProvider)
-	if !ok {
+	provider := agent.SandboxProviderFromContext(ctx)
+	if provider == nil {
 		return nil, fmt.Errorf("sandbox provider not found in context")
 	}
 
