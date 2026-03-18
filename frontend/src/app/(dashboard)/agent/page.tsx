@@ -410,6 +410,66 @@ export default function AgentPage() {
     );
   }
 
+  /** Shared header row for agent config sections. */
+  function renderAgentConfigHeader({
+    title,
+    badges,
+    action,
+  }: {
+    title: string;
+    badges: ReactNode;
+    action?: ReactNode;
+  }): ReactNode {
+    return (
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium">{title}</span>
+          {badges}
+        </div>
+        {action}
+      </div>
+    );
+  }
+
+  /** Shared Codex credential method toggle (ChatGPT vs API key). */
+  function renderCodexCredentialToggle({
+    method,
+    onMethodChange,
+  }: {
+    method: "chatgpt" | "api_key";
+    onMethodChange: (value: "chatgpt" | "api_key") => void;
+  }): ReactNode {
+    return (
+      <div className="space-y-3">
+        <Label className="text-xs text-muted-foreground">Credential method</Label>
+        <RadioGroup
+          value={method}
+          onValueChange={(value) => onMethodChange(value as "chatgpt" | "api_key")}
+          className="grid gap-3 md:grid-cols-2"
+        >
+          <RadioCard
+            value="chatgpt"
+            label="Sign in with ChatGPT"
+            description="Best for gpt-5.3-codex model access."
+            selected={method === "chatgpt"}
+            icon={<Sparkles className="h-4 w-4 text-primary" />}
+            ariaLabel="Sign in with ChatGPT"
+          />
+          <RadioCard
+            value="api_key"
+            label="Use API key"
+            description="Pay-as-you-go credentials with configurable model/base URL."
+            selected={method === "api_key"}
+            icon={<KeyRound className="h-4 w-4 text-muted-foreground" />}
+            ariaLabel="Use API key"
+          />
+        </RadioGroup>
+
+        {method === "chatgpt" && renderChatGPTAuthStatus()}
+      </div>
+    );
+  }
+
   function renderPersonalCredentialCard(): ReactNode {
     const agent = ORG_AGENT_TYPES.find((a) => a.key === effectivePersonalAgentType) ?? ORG_AGENT_TYPES[0];
     const providerKey = agent.providerKey;
@@ -422,20 +482,22 @@ export default function AgentPage() {
 
     return (
       <div className="space-y-3 border-t pt-3 mt-1">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-medium">{agent.label}</span>
-            {cred?.configured && (
-              <Badge variant="success" className="text-[10px] px-1.5 py-0">
-                <Check className="mr-0.5 h-3 w-3" />
-                Configured
+        {renderAgentConfigHeader({
+          title: agent.label,
+          badges: (
+            <>
+              {cred?.configured && (
+                <Badge variant="success" className="text-[10px] px-1.5 py-0">
+                  <Check className="mr-0.5 h-3 w-3" />
+                  Configured
+                </Badge>
+              )}
+              <Badge variant={sourceBadgeVariant(source)} className="text-[10px] px-1.5 py-0">
+                {sourceLabel(source)}
               </Badge>
-            )}
-            <Badge variant={sourceBadgeVariant(source)} className="text-[10px] px-1.5 py-0">
-              {sourceLabel(source)}
-            </Badge>
-          </div>
-          {cred?.configured && (
+            </>
+          ),
+          action: cred?.configured ? (
             <Button
               variant="ghost"
               size="sm"
@@ -445,39 +507,13 @@ export default function AgentPage() {
             >
               Remove
             </Button>
-          )}
-        </div>
+          ) : undefined,
+        })}
 
-        {/* Codex ChatGPT sign-in option */}
-        {isCodex && (
-          <div className="space-y-3">
-            <Label className="text-xs text-muted-foreground">Credential method</Label>
-            <RadioGroup
-              value={personalCodexMethod}
-              onValueChange={(value) => setPersonalCodexMethodOverride(value as "chatgpt" | "api_key")}
-              className="grid gap-3 md:grid-cols-2"
-            >
-              <RadioCard
-                value="chatgpt"
-                label="Sign in with ChatGPT"
-                description="Best for gpt-5.3-codex model access."
-                selected={personalCodexMethod === "chatgpt"}
-                icon={<Sparkles className="h-4 w-4 text-primary" />}
-                ariaLabel="Sign in with ChatGPT"
-              />
-              <RadioCard
-                value="api_key"
-                label="Use API key"
-                description="Pay-as-you-go credentials with configurable model/base URL."
-                selected={personalCodexMethod === "api_key"}
-                icon={<KeyRound className="h-4 w-4 text-muted-foreground" />}
-                ariaLabel="Use API key"
-              />
-            </RadioGroup>
-
-            {personalCodexMethod === "chatgpt" && renderChatGPTAuthStatus()}
-          </div>
-        )}
+        {isCodex && renderCodexCredentialToggle({
+          method: personalCodexMethod,
+          onMethodChange: setPersonalCodexMethodOverride,
+        })}
 
         {cred?.configured && cred.masked_key && !hideApiKey && (
           <p className="text-xs text-muted-foreground font-mono">
@@ -563,29 +599,28 @@ export default function AgentPage() {
     const r = resolved.find((c) => c.provider === agent.providerKey);
     const source = r?.source ?? "none";
     const showAdvanced = showAdvancedPerAgent[agent.key] ?? false;
-    const envVarsToRender =
-      agent.key === "codex" && codexCredentialMethod === "chatgpt"
-        ? []
-        : agent.envVars.filter((v) => !v.advanced || showAdvanced);
+    const isCodex = agent.key === "codex";
+    const hideEnvVars = isCodex && codexCredentialMethod === "chatgpt";
+    const envVarsToRender = hideEnvVars
+      ? []
+      : agent.envVars.filter((v) => !v.advanced || showAdvanced);
     const hasAdvanced = agent.envVars.some((v) => v.advanced);
 
     return (
       <div className="space-y-3 border-t pt-3 mt-1">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-medium">{agent.label} settings</span>
-            {teamCred ? (
-              <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
-                <Shield className="mr-0.5 h-3 w-3" />
-                Team default set
-              </Badge>
-            ) : (
-              <Badge variant={sourceBadgeVariant(source)} className="text-[10px] px-1.5 py-0">
-                {sourceLabel(source)}
-              </Badge>
-            )}
-          </div>
-          {teamCred && (
+        {renderAgentConfigHeader({
+          title: `${agent.label} settings`,
+          badges: teamCred ? (
+            <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+              <Shield className="mr-0.5 h-3 w-3" />
+              Team default set
+            </Badge>
+          ) : (
+            <Badge variant={sourceBadgeVariant(source)} className="text-[10px] px-1.5 py-0">
+              {sourceLabel(source)}
+            </Badge>
+          ),
+          action: teamCred ? (
             <Button
               variant="ghost"
               size="sm"
@@ -595,8 +630,8 @@ export default function AgentPage() {
             >
               Remove team default
             </Button>
-          )}
-        </div>
+          ) : undefined,
+        })}
 
         {teamCred?.masked_key && (
           <p className="text-xs text-muted-foreground font-mono">
@@ -605,36 +640,10 @@ export default function AgentPage() {
           </p>
         )}
 
-        {/* Codex ChatGPT sign-in option */}
-        {agent.key === "codex" && (
-          <div className="space-y-3">
-            <Label className="text-xs text-muted-foreground">Credential method</Label>
-            <RadioGroup
-              value={codexCredentialMethod}
-              onValueChange={(value) => setCodexCredentialMethodOverride(value as "chatgpt" | "api_key")}
-              className="grid gap-3 md:grid-cols-2"
-            >
-              <RadioCard
-                value="chatgpt"
-                label="Sign in with ChatGPT"
-                description="Best for gpt-5.3-codex model access."
-                selected={codexCredentialMethod === "chatgpt"}
-                icon={<Sparkles className="h-4 w-4 text-primary" />}
-                ariaLabel="Sign in with ChatGPT"
-              />
-              <RadioCard
-                value="api_key"
-                label="Use API key"
-                description="Pay-as-you-go credentials with configurable model/base URL."
-                selected={codexCredentialMethod === "api_key"}
-                icon={<KeyRound className="h-4 w-4 text-muted-foreground" />}
-                ariaLabel="Use API key"
-              />
-            </RadioGroup>
-
-            {codexCredentialMethod === "chatgpt" && renderChatGPTAuthStatus()}
-          </div>
-        )}
+        {isCodex && renderCodexCredentialToggle({
+          method: codexCredentialMethod,
+          onMethodChange: setCodexCredentialMethodOverride,
+        })}
 
         {/* Env var fields */}
         {envVarsToRender.map((envVar) => {
@@ -702,12 +711,13 @@ export default function AgentPage() {
             </div>
           );
         })}
-        {agent.key === "codex" && codexCredentialMethod === "chatgpt" && (
+
+        {hideEnvVars && (
           <p className="text-xs text-muted-foreground">
             API key fields are hidden while ChatGPT sign-in is selected.
           </p>
         )}
-        {hasAdvanced && codexCredentialMethod !== "chatgpt" && (
+        {hasAdvanced && !hideEnvVars && (
           <Button
             type="button"
             size="sm"
