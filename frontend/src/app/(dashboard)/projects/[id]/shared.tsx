@@ -48,9 +48,6 @@ export function formatTimestamp(dateStr?: string): string {
   return new Date(dateStr).toLocaleString();
 }
 
-/** @deprecated Use formatTimeAgo from "@/lib/utils" instead */
-export { formatTimeAgo as formatRelativeTime } from "@/lib/utils";
-
 export function ProgressBar({ completed, total }: { completed: number; total: number }) {
   const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
   return (

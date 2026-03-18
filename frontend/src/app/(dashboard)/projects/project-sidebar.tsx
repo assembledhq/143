@@ -46,7 +46,7 @@ export function ProjectSidebar() {
   const [repo] = useQueryState("repo");
 
   const { data, isLoading } = useQuery({
-    queryKey: ["projects", repo],
+    queryKey: ["projects", activeFilter, repo],
     queryFn: () => api.projects.list({ limit: 50, repository_id: repo ?? undefined }),
     refetchInterval: 10000,
   });
