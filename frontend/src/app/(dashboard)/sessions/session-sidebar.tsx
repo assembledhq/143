@@ -174,7 +174,7 @@ export function SessionSidebar() {
         {isNewSession && (
           <Link
             href="/sessions/new"
-            className="block rounded-lg px-3 py-2.5 mb-0.5 bg-background/80"
+            className="block rounded-lg px-3 py-2.5 mb-0.5 bg-background shadow-sm border border-border/50"
           >
             <div className="flex items-center gap-2.5 min-w-0">
               <span className="inline-flex rounded-full h-2 w-2 border border-muted-foreground/30 shrink-0" />
