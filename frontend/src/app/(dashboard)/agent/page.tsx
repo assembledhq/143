@@ -215,6 +215,7 @@ export default function AgentPage() {
 
   /* ---------- Personal credentials state ---------- */
 
+  const [personalAgentType, setPersonalAgentType] = useState<string>("claude_code");
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
   const [keySaveStatus, setKeySaveStatus] = useState<Record<string, "idle" | "saving" | "success" | "error">>({});
@@ -387,7 +388,7 @@ export default function AgentPage() {
     <PageContainer size="default">
       <div className="space-y-8">
         <PageHeader
-          title="Coding agent"
+          title="Coding agents"
           description="Configure coding agent credentials and execution behavior."
         />
 
@@ -400,121 +401,144 @@ export default function AgentPage() {
               My coding agents
             </h2>
             <p className="text-xs text-muted-foreground mt-1">
-              Your personal API keys for coding agents. Personal keys are used first, falling back to organization defaults.
+              Your personal API keys. Personal keys are used first, falling back to organization defaults.
             </p>
           </div>
 
-          <div className="space-y-3">
-            {PERSONAL_PROVIDERS.map((provider) => {
-              const cred = personalCreds.find((c) => c.provider === provider.key);
-              const status = keySaveStatus[provider.key] ?? "idle";
-              const r = resolved.find((c) => c.provider === provider.key);
-              const source = r?.source ?? "none";
+          <Card>
+            <CardContent>
+              <div className="space-y-3">
+                <RadioGroup
+                  value={personalAgentType}
+                  onValueChange={setPersonalAgentType}
+                  className="grid grid-cols-3 gap-3"
+                >
+                  {ORG_AGENT_TYPES.map((agent) => {
+                    const cred = personalCreds.find((c) => c.provider === agent.providerKey);
+                    return (
+                      <RadioCard
+                        key={agent.key}
+                        value={agent.key}
+                        label={agent.label}
+                        selected={personalAgentType === agent.key}
+                        icon={cred?.configured ? <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" /> : undefined}
+                      />
+                    );
+                  })}
+                </RadioGroup>
+              </div>
+            </CardContent>
+          </Card>
 
-              return (
-                <Card key={provider.key}>
-                  <CardContent>
-                    <div className="space-y-3">
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-sm font-medium">{provider.name}</span>
-                            {cred?.configured && (
-                              <Badge variant="success" className="text-[10px] px-1.5 py-0">
-                                <Check className="mr-0.5 h-3 w-3" />
-                                Configured
-                              </Badge>
-                            )}
-                            <Badge variant={sourceBadgeVariant(source)} className="text-[10px] px-1.5 py-0">
-                              {sourceLabel(source)}
-                            </Badge>
-                          </div>
-                          <p className="text-xs text-muted-foreground mt-0.5">{provider.description}</p>
-                        </div>
+          {/* Credential card for the selected personal agent */}
+          {(() => {
+            const agent = ORG_AGENT_TYPES.find((a) => a.key === personalAgentType)!;
+            const provider = PERSONAL_PROVIDERS.find((p) => p.key === agent.providerKey)!;
+            const cred = personalCreds.find((c) => c.provider === provider.key);
+            const status = keySaveStatus[provider.key] ?? "idle";
+            const r = resolved.find((c) => c.provider === provider.key);
+            const source = r?.source ?? "none";
+
+            return (
+              <Card>
+                <CardContent>
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium">{agent.label}</span>
                         {cred?.configured && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="text-xs text-muted-foreground"
-                            onClick={() => setRemovingProvider(provider.key)}
-                            disabled={deleteMutation.isPending}
-                          >
-                            Remove
-                          </Button>
+                          <Badge variant="success" className="text-[10px] px-1.5 py-0">
+                            <Check className="mr-0.5 h-3 w-3" />
+                            Configured
+                          </Badge>
                         )}
-                      </div>
-
-                      {cred?.configured && cred.masked_key && (
-                        <p className="text-xs text-muted-foreground font-mono">
-                          Key: {cred.masked_key}
-                        </p>
-                      )}
-
-                      <div className="flex gap-2">
-                        <div className="relative flex-1">
-                          <Input
-                            type={showKeys[provider.key] ? "text" : "password"}
-                            placeholder={cred?.configured ? "Replace existing key..." : provider.keyPlaceholder}
-                            value={apiKeys[provider.key] ?? ""}
-                            onChange={(e) =>
-                              setApiKeys((prev) => ({ ...prev, [provider.key]: e.target.value }))
-                            }
-                            className="pr-9 font-mono text-xs"
-                          />
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setShowKeys((prev) => ({ ...prev, [provider.key]: !prev[provider.key] }))
-                            }
-                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                          >
-                            {showKeys[provider.key] ? (
-                              <EyeOff className="h-3.5 w-3.5" />
-                            ) : (
-                              <Eye className="h-3.5 w-3.5" />
-                            )}
-                          </button>
-                        </div>
-                        <Button
-                          size="sm"
-                          onClick={() => handleSavePersonalKey(provider.key)}
-                          disabled={!apiKeys[provider.key]?.trim() || status === "saving"}
-                        >
-                          {status === "saving" ? "Saving..." : "Save key"}
-                        </Button>
-                      </div>
-
-                      {status === "success" && (
-                        <p className="text-xs text-emerald-600 dark:text-emerald-400">Key saved successfully.</p>
-                      )}
-                      {status === "error" && (
-                        <p className="text-xs text-destructive">Failed to save key.</p>
-                      )}
-
-                      {isAdmin && cred?.configured && !cred.is_team_default && user && (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="text-xs"
-                          onClick={() => setTeamDefaultMutation.mutate({ provider: provider.key, userId: user.id })}
-                          disabled={setTeamDefaultMutation.isPending}
-                        >
-                          <Shield className="mr-1 h-3 w-3" />
-                          Set as team default
-                        </Button>
-                      )}
-                      {cred?.is_team_default && (
-                        <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
-                          <Shield className="mr-0.5 h-3 w-3" />
-                          Team default
+                        <Badge variant={sourceBadgeVariant(source)} className="text-[10px] px-1.5 py-0">
+                          {sourceLabel(source)}
                         </Badge>
+                      </div>
+                      {cred?.configured && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-xs text-muted-foreground"
+                          onClick={() => setRemovingProvider(provider.key)}
+                          disabled={deleteMutation.isPending}
+                        >
+                          Remove
+                        </Button>
                       )}
                     </div>
-                  </CardContent>
-                </Card>
-              );
-            })}
-          </div>
+
+                    {cred?.configured && cred.masked_key && (
+                      <p className="text-xs text-muted-foreground font-mono">
+                        Key: {cred.masked_key}
+                      </p>
+                    )}
+
+                    <div className="flex gap-2">
+                      <div className="relative flex-1">
+                        <Input
+                          type={showKeys[provider.key] ? "text" : "password"}
+                          placeholder={cred?.configured ? "Replace existing key..." : provider.keyPlaceholder}
+                          value={apiKeys[provider.key] ?? ""}
+                          onChange={(e) =>
+                            setApiKeys((prev) => ({ ...prev, [provider.key]: e.target.value }))
+                          }
+                          className="pr-9 font-mono text-xs"
+                        />
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setShowKeys((prev) => ({ ...prev, [provider.key]: !prev[provider.key] }))
+                          }
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                        >
+                          {showKeys[provider.key] ? (
+                            <EyeOff className="h-3.5 w-3.5" />
+                          ) : (
+                            <Eye className="h-3.5 w-3.5" />
+                          )}
+                        </button>
+                      </div>
+                      <Button
+                        size="sm"
+                        onClick={() => handleSavePersonalKey(provider.key)}
+                        disabled={!apiKeys[provider.key]?.trim() || status === "saving"}
+                      >
+                        {status === "saving" ? "Saving..." : "Save key"}
+                      </Button>
+                    </div>
+
+                    {status === "success" && (
+                      <p className="text-xs text-emerald-600 dark:text-emerald-400">Key saved successfully.</p>
+                    )}
+                    {status === "error" && (
+                      <p className="text-xs text-destructive">Failed to save key.</p>
+                    )}
+
+                    {isAdmin && cred?.configured && !cred.is_team_default && user && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="text-xs"
+                        onClick={() => setTeamDefaultMutation.mutate({ provider: provider.key, userId: user.id })}
+                        disabled={setTeamDefaultMutation.isPending}
+                      >
+                        <Shield className="mr-1 h-3 w-3" />
+                        Set as team default
+                      </Button>
+                    )}
+                    {cred?.is_team_default && (
+                      <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+                        <Shield className="mr-0.5 h-3 w-3" />
+                        Team default
+                      </Badge>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })()}
         </section>
 
         {/* ============================================================ */}
@@ -555,9 +579,9 @@ export default function AgentPage() {
               </CardContent>
             </Card>
 
-            {/* Per-agent credential cards */}
-            {ORG_AGENT_TYPES.map((agent) => {
-              const isSelected = defaultAgentType === agent.key;
+            {/* Config card for the selected agent only */}
+            {(() => {
+              const agent = ORG_AGENT_TYPES.find((a) => a.key === defaultAgentType)!;
               const serverVars = (agentDefaultsResponse?.data ?? {})[agent.key] ?? {};
               const teamCred = teamDefaults.find((c) => c.provider === agent.providerKey);
               const showAdvanced = showAdvancedPerAgent[agent.key] ?? false;
@@ -568,17 +592,12 @@ export default function AgentPage() {
               const hasAdvanced = agent.envVars.some((v) => v.advanced);
 
               return (
-                <Card key={agent.key} className={!isSelected ? "opacity-60" : ""}>
+                <Card>
                   <CardContent>
                     <div className="space-y-3">
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium">{agent.label}</span>
-                          {isSelected && (
-                            <Badge variant="success" className="text-[10px] px-1.5 py-0">
-                              Default
-                            </Badge>
-                          )}
+                          <span className="text-sm font-medium">{agent.label} settings</span>
                           {teamCred && (
                             <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
                               <Shield className="mr-0.5 h-3 w-3" />
@@ -598,7 +617,6 @@ export default function AgentPage() {
                           </Button>
                         )}
                       </div>
-                      <p className="text-xs text-muted-foreground">{agent.description}</p>
 
                       {teamCred?.masked_key && (
                         <p className="text-xs text-muted-foreground font-mono">
@@ -662,16 +680,6 @@ export default function AgentPage() {
                       )}
 
                       {/* Env var fields */}
-                      {hasAdvanced && (
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          onClick={() => setShowAdvancedPerAgent((prev) => ({ ...prev, [agent.key]: !prev[agent.key] }))}
-                        >
-                          {showAdvanced ? "Hide advanced settings" : "Show advanced settings"}
-                        </Button>
-                      )}
                       {envVarsToRender.map((envVar) => {
                         const serverDefault = serverVars[envVar.name] ?? "";
                         const orgOverride = agentConfig[agent.key]?.[envVar.name] ?? "";
@@ -742,11 +750,22 @@ export default function AgentPage() {
                           API key fields are hidden while ChatGPT sign-in is selected.
                         </p>
                       )}
+                      {hasAdvanced && codexCredentialMethod !== "chatgpt" && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          className="text-xs text-muted-foreground"
+                          onClick={() => setShowAdvancedPerAgent((prev) => ({ ...prev, [agent.key]: !prev[agent.key] }))}
+                        >
+                          {showAdvanced ? "Hide advanced settings" : "Advanced settings"}
+                        </Button>
+                      )}
                     </div>
                   </CardContent>
                 </Card>
               );
-            })}
+            })()}
           </section>
         )}
 

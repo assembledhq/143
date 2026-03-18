@@ -99,16 +99,19 @@ describe('AgentPage', () => {
 
   it('renders page header', async () => {
     renderWithProviders(<AgentPage />);
-    expect(screen.getByText('Coding agent')).toBeInTheDocument();
+    expect(screen.getByText('Coding agents')).toBeInTheDocument();
   });
 
-  it('shows all four provider cards in My coding agents section', async () => {
+  it('shows 3 agent type radio cards in My coding agents section', async () => {
     renderWithProviders(<AgentPage />);
 
-    expect(await screen.findByText('Anthropic')).toBeInTheDocument();
-    expect(screen.getByText('OpenAI')).toBeInTheDocument();
-    expect(screen.getByText('Google Gemini')).toBeInTheDocument();
-    expect(screen.getByText('OpenRouter')).toBeInTheDocument();
+    // Both personal and org sections use the same 3 agent types
+    const claudeLabels = await screen.findAllByText('Claude Code');
+    expect(claudeLabels.length).toBeGreaterThanOrEqual(1);
+    const codexLabels = screen.getAllByText('Codex');
+    expect(codexLabels.length).toBeGreaterThanOrEqual(1);
+    const geminiLabels = screen.getAllByText('Gemini CLI');
+    expect(geminiLabels.length).toBeGreaterThanOrEqual(1);
   });
 
   it('shows Configured badge for providers with keys', async () => {
@@ -123,26 +126,10 @@ describe('AgentPage', () => {
     expect(await screen.findByText('Key: sk-ant-...abc')).toBeInTheDocument();
   });
 
-  it('shows provider descriptions', async () => {
-    renderWithProviders(<AgentPage />);
-
-    expect(await screen.findByText('Claude Code (Opus, Sonnet, Haiku)')).toBeInTheDocument();
-    expect(screen.getByText('Codex (GPT-5 models)')).toBeInTheDocument();
-  });
-
   it('shows resolution source badges', async () => {
     renderWithProviders(<AgentPage />);
 
     expect(await screen.findByText('Your key')).toBeInTheDocument();
-    expect(screen.getByText('Team default')).toBeInTheDocument();
-  });
-
-  it('shows Not configured for unconfigured providers', async () => {
-    renderWithProviders(<AgentPage />);
-
-    await screen.findByText('Anthropic');
-    const notConfigured = screen.getAllByText('Not configured');
-    expect(notConfigured.length).toBeGreaterThanOrEqual(1);
   });
 
   it('saves a new API key', async () => {
@@ -160,11 +147,11 @@ describe('AgentPage', () => {
     // Wait for personal creds to load
     await screen.findByText('Key: sk-ant-...abc');
 
-    const inputs = screen.getAllByPlaceholderText('Replace existing key...');
-    await user.type(inputs[0], 'sk-ant-newkey123');
+    const input = screen.getByPlaceholderText('Replace existing key...');
+    await user.type(input, 'sk-ant-newkey123');
 
-    const saveButtons = screen.getAllByText('Save key');
-    await user.click(saveButtons[0]);
+    const saveButton = screen.getByText('Save key');
+    await user.click(saveButton);
 
     await waitFor(() => {
       expect(capturedBody).toBeDefined();
@@ -174,10 +161,11 @@ describe('AgentPage', () => {
   it('disables Save key button when input is empty', async () => {
     renderWithProviders(<AgentPage />);
 
-    await screen.findByText('Anthropic');
+    await screen.findAllByText('Claude Code');
 
-    const saveButtons = screen.getAllByText('Save key');
-    expect(saveButtons[0]).toBeDisabled();
+    // Default view shows Claude Code, which has a configured key
+    const saveButton = screen.getByText('Save key');
+    expect(saveButton).toBeDisabled();
   });
 
   it('shows Remove button for configured providers', async () => {
@@ -215,11 +203,11 @@ describe('AgentPage', () => {
     // Wait for personal creds to load
     await screen.findByText('Key: sk-ant-...abc');
 
-    const inputs = screen.getAllByPlaceholderText('Replace existing key...');
-    await user.type(inputs[0], 'sk-ant-newkey');
+    const input = screen.getByPlaceholderText('Replace existing key...');
+    await user.type(input, 'sk-ant-newkey');
 
-    const saveButtons = screen.getAllByText('Save key');
-    await user.click(saveButtons[0]);
+    const saveButton = screen.getByText('Save key');
+    await user.click(saveButton);
 
     expect(await screen.findByText('Key saved successfully.')).toBeInTheDocument();
   });
@@ -240,11 +228,11 @@ describe('AgentPage', () => {
     // Wait for personal creds to load
     await screen.findByText('Key: sk-ant-...abc');
 
-    const inputs = screen.getAllByPlaceholderText('Replace existing key...');
-    await user.type(inputs[0], 'sk-ant-badkey');
+    const input = screen.getByPlaceholderText('Replace existing key...');
+    await user.type(input, 'sk-ant-badkey');
 
-    const saveButtons = screen.getAllByText('Save key');
-    await user.click(saveButtons[0]);
+    const saveButton = screen.getByText('Save key');
+    await user.click(saveButton);
 
     expect(await screen.findByText('Failed to save key.')).toBeInTheDocument();
   });
@@ -254,6 +242,13 @@ describe('AgentPage', () => {
 
     expect(await screen.findByText('Organization coding agents')).toBeInTheDocument();
     expect(screen.getByText('Default coding agent')).toBeInTheDocument();
+  });
+
+  it('shows only the selected agent config card in org section', async () => {
+    renderWithProviders(<AgentPage />);
+
+    // default_agent_type is claude_code, so only Claude Code settings should appear
+    expect(await screen.findByText('Claude Code settings')).toBeInTheDocument();
   });
 
   it('shows Execution section for admins', async () => {
@@ -273,7 +268,7 @@ describe('AgentPage', () => {
 
     renderWithProviders(<AgentPage />);
 
-    await screen.findByText('Anthropic');
+    await screen.findAllByText('Claude Code');
     expect(screen.queryByText('Organization coding agents')).not.toBeInTheDocument();
     expect(screen.queryByText('Autonomy level')).not.toBeInTheDocument();
     expect(screen.queryByText('Execution aggressiveness')).not.toBeInTheDocument();
@@ -282,20 +277,20 @@ describe('AgentPage', () => {
   it('shows single save button for all org settings', async () => {
     renderWithProviders(<AgentPage />);
 
-    await screen.findByText('Anthropic');
+    await screen.findAllByText('Claude Code');
     expect(screen.getByText('Save organization settings')).toBeInTheDocument();
   });
 
-  it('shows empty state for unconfigured providers without keys', async () => {
+  it('shows empty state for unconfigured providers', async () => {
     setupHandlers({ personal: [], team: [], resolved: [] });
 
     renderWithProviders(<AgentPage />);
 
-    await screen.findByText('Anthropic');
+    await screen.findAllByText('Claude Code');
 
-    const saveButtons = screen.getAllByText('Save key');
-    expect(saveButtons.length).toBe(4);
-    saveButtons.forEach((btn) => expect(btn).toBeDisabled());
+    // Only 1 save button visible (for the selected agent in personal section)
+    const saveButton = screen.getByText('Save key');
+    expect(saveButton).toBeDisabled();
   });
 
   it('saves org settings with single mutation', async () => {
