@@ -325,6 +325,74 @@ describe('AgentPage', () => {
     expect(await screen.findByText('Key: sk-...xyz')).toBeInTheDocument();
   });
 
+  it('defaults to Codex when no provider has a configured key', async () => {
+    setupHandlers({ personal: [], team: [], resolved: [] });
+
+    renderWithProviders(<AgentPage />);
+
+    // Codex is the default agent; its credential method toggle should appear
+    expect(await screen.findByText('Credential method')).toBeInTheDocument();
+    expect(screen.getByLabelText('Use API key')).toBeInTheDocument();
+    expect(screen.getByLabelText('Sign in with ChatGPT')).toBeInTheDocument();
+  });
+
+  it('shows ChatGPT credential method toggle when Codex is selected in personal section', async () => {
+    renderWithProviders(<AgentPage />);
+
+    // Default auto-selects Claude Code because the anthropic key is configured
+    expect(await screen.findByText('Key: sk-ant-...abc')).toBeInTheDocument();
+
+    // Switch to Codex
+    const user = userEvent.setup();
+    const codexLabels = screen.getAllByText('Codex');
+    await user.click(codexLabels[0]);
+
+    // Should show credential method toggle for Codex
+    await waitFor(() => {
+      expect(screen.getByText('Credential method')).toBeInTheDocument();
+    });
+    expect(screen.getByLabelText('Sign in with ChatGPT')).toBeInTheDocument();
+    expect(screen.getByLabelText('Use API key')).toBeInTheDocument();
+  });
+
+  it('hides API key input when ChatGPT method is selected for personal Codex', async () => {
+    // No configured keys — defaults to Codex
+    setupHandlers({ personal: [], team: [], resolved: [] });
+
+    renderWithProviders(<AgentPage />);
+
+    // Default is api_key since no ChatGPT connection exists
+    const apiKeyInput = await screen.findByPlaceholderText('sk-...');
+    expect(apiKeyInput).toBeInTheDocument();
+
+    // Switch to ChatGPT method
+    const user = userEvent.setup();
+    await user.click(screen.getByLabelText('Sign in with ChatGPT'));
+
+    // API key input should be hidden
+    await waitFor(() => {
+      expect(screen.queryByPlaceholderText('sk-...')).not.toBeInTheDocument();
+    });
+    expect(screen.getByText('API key fields are hidden while ChatGPT sign-in is selected.')).toBeInTheDocument();
+    // Sign in button should appear
+    expect(screen.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument();
+  });
+
+  it('shows Connected badge when ChatGPT auth is completed', async () => {
+    setupHandlers({ personal: [], team: [], resolved: [] });
+    server.use(
+      http.get('/api/v1/settings/codex-auth/status', () => {
+        return HttpResponse.json({ data: { status: 'completed' } });
+      }),
+    );
+
+    renderWithProviders(<AgentPage />);
+
+    // With completed auth, ChatGPT method is auto-selected and shows Connected
+    expect(await screen.findByText('Connected')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Disconnect' })).toBeInTheDocument();
+  });
+
   it('saves org settings with single mutation', async () => {
     let capturedBody: unknown;
     server.use(
