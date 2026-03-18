@@ -23,7 +23,9 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
+import { queryKeys } from "@/lib/query-keys";
 import { AGENT_TYPE_OPTIONS } from "@/lib/model-constants";
+import { useOptimisticSessions } from "@/contexts/optimistic-sessions";
 import type { OrgSettings, Organization, SingleResponse } from "@/lib/types";
 
 type DictationResult = {
@@ -69,9 +71,12 @@ export function ManualSessionCreatePageContent() {
   const [isDictating, setIsDictating] = useState(false);
   const [dictationError, setDictationError] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState("");
+  const [creationError, setCreationError] = useState<string | null>(null);
+
+  const { addOptimisticSession, removeOptimisticSession } = useOptimisticSessions();
 
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
-    queryKey: ["settings"],
+    queryKey: queryKeys.settings.all,
     queryFn: () => api.settings.get(),
   });
 
@@ -90,8 +95,24 @@ export function ManualSessionCreatePageContent() {
         images: attachments,
         ...(selectedModel ? { model: selectedModel } : {}),
       }),
-    onSuccess: (response) => {
+    onMutate: () => {
+      setCreationError(null);
+      const title = message.trim().length > 80
+        ? message.trim().slice(0, 80) + "..."
+        : message.trim();
+      return { optimisticId: addOptimisticSession(title) };
+    },
+    onSuccess: (response, _variables, context) => {
+      removeOptimisticSession(context.optimisticId);
       router.push(`/sessions/${response.data.id}`);
+    },
+    onError: (error, _variables, context) => {
+      if (context?.optimisticId) {
+        removeOptimisticSession(context.optimisticId);
+      }
+      setCreationError(
+        error instanceof Error ? error.message : "Could not start session. Please try again.",
+      );
     },
   });
 
@@ -326,8 +347,8 @@ export function ManualSessionCreatePageContent() {
             {dictationError && (
               <p className="pt-2 text-xs text-destructive">{dictationError}</p>
             )}
-            {createManualSessionMutation.isError && (
-              <p className="pt-2 text-xs text-destructive">Could not start session. Please try again.</p>
+            {creationError && (
+              <p className="pt-2 text-xs text-destructive">{creationError}</p>
             )}
           </CardContent>
         </Card>
