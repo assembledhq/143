@@ -437,26 +437,203 @@ Existing single-agent sessions continue to work. The API auto-creates a single t
 
 ---
 
-## Integration with PM Plans
+## How PM Plans, Projects, and Threads Intersect
 
-PM plans continue to create sessions. For multi-agent plans, the PM agent can specify threads in the session creation:
+### Current architecture (without threads)
+
+```
+Projects (persistent)              PM Plans (ephemeral, per-cycle)
+────────────────────               ─────────────────────────────
+User creates project    ──────▶   PM agent sees active projects
+  "Migrate to GraphQL"            during analysis cycle
+                                         │
+                                         ▼
+                                  Plan output contains:
+                                  ├─ Tasks[]        (reactive: fix issues)
+                                  ├─ ProjectPlans[] (proactive: advance projects)
+                                  ├─ Clusters[]     (root cause groupings)
+                                  └─ NewProjects[]  (suggestions for user)
+                                         │
+                          ┌──────────────┴──────────────┐
+                          ▼                              ▼
+                    Reactive Tasks               Project Tasks
+                    1 Task → 1 Session           1 ProjectTask → 1 Session
+                    (session.pm_plan_id)         (session.project_task_id)
+                                                 (session.pm_plan_id)
+```
+
+**The binding is always: 1 task → 1 session → 1 agent.** That's what changes with threads.
+
+### With threads: what changes, what stays the same
+
+**PM Plans don't change.** They remain the analytical layer — the PM agent decides *what* to work on and *how many* tasks to create. Plans are ephemeral snapshots.
+
+**Projects don't change.** They remain persistent goal containers with execution_mode and max_concurrent. ProjectTasks are still created per PM cycle, tracked across cycles.
+
+**What changes is the session layer.** Instead of 1 task → 1 session → 1 agent, we get:
+
+```
+1 task → 1 session → N threads (each thread = 1 agent)
+```
+
+### When does the PM create multi-threaded sessions?
+
+The PM agent decides based on the nature of the work:
+
+**Single-thread session (today's default):**
+- Simple bug fix in one domain
+- Documentation update
+- Small refactor
+- Most reactive tasks
+
+**Multi-thread session (new):**
+- **Clustered issues with shared root cause** — PM groups 3 related Sentry errors into one session, spins up one Claude thread for the fix and one Codex thread for regression tests
+- **Cross-domain features** — PM sees a feature needs backend + frontend work, creates one session with a thread per domain
+- **Fix + verify pattern** — one thread writes the fix (Claude), another thread independently tries to reproduce and verify (Codex)
+
+The PM's `Task` struct gains an optional `Threads` field:
 
 ```go
-session := &models.Session{
-    IssueID: issueID,
-    OrgID:   orgID,
-    Status:  "pending",
-    PMPlanID: &plan.ID,
+type Task struct {
+    Title       string
+    IssueIDs    []string
+    Approach    string
+    Confidence  float64
+    // ...existing fields...
+
+    // NEW: if nil, session gets one thread with the task's agent_type.
+    // If set, session gets one thread per entry.
+    Threads     []TaskThread `json:"threads,omitempty"`
 }
 
-// PM agent decided this issue needs two agents
-threads := []models.SessionThread{
-    {Label: "Backend fix", AgentType: "claude_code", Instructions: "..."},
-    {Label: "Test coverage", AgentType: "codex", Instructions: "..."},
+type TaskThread struct {
+    Label        string   `json:"label"`
+    AgentType    string   `json:"agent_type"`
+    Instructions string   `json:"instructions"`
+    FileScope    []string `json:"file_scope,omitempty"`
 }
 ```
 
-This keeps PM plans as the orchestration layer while sessions handle the multi-agent execution.
+### How projects interact with threads
+
+Projects control **how many sessions run in parallel** via `execution_mode` and `max_concurrent`. Threads are *within* a session, so they don't change the project's concurrency model.
+
+```
+Project (execution_mode: parallel, max_concurrent: 3)
+│
+├─ ProjectTask A → Session 1 (2 threads: claude + codex)  ← counts as 1 session
+├─ ProjectTask B → Session 2 (1 thread: claude)           ← counts as 1 session
+├─ ProjectTask C → Session 3 (1 thread: codex)            ← counts as 1 session
+│
+└─ ProjectTask D → waiting (max_concurrent reached)
+```
+
+**Key insight: threads don't consume additional concurrency slots.** A session with 3 threads still counts as 1 session toward `max_concurrent`. This is intentional — threads are parallel *within* a unit of work, not parallel units of work.
+
+However, threads do consume resources (containers, API costs). So we add:
+
+```go
+type Project struct {
+    // ...existing fields...
+    MaxThreadsPerSession int `json:"max_threads_per_session"` // default: 3
+}
+```
+
+### The clean layering
+
+```
+┌─────────────────────────────────────────────────┐
+│  Projects                                        │
+│  "What are we building long-term?"               │
+│  Controls: execution_mode, max_concurrent,       │
+│            lifecycle (draft → active → done)     │
+├─────────────────────────────────────────────────┤
+│  PM Plans                                        │
+│  "What should we work on right now?"             │
+│  Controls: which issues, which projects get      │
+│            slots, task decomposition, agent       │
+│            selection, thread specification        │
+├─────────────────────────────────────────────────┤
+│  Sessions                                        │
+│  "A workspace for producing one PR."             │
+│  Contains: threads, branch, combined diff,       │
+│            validation results                    │
+├─────────────────────────────────────────────────┤
+│  Threads                                         │
+│  "One agent doing one piece of the work."        │
+│  Contains: chat, container, agent state,         │
+│            individual diff                       │
+└─────────────────────────────────────────────────┘
+```
+
+Each layer has a clear responsibility:
+
+| Layer | Decides | Persists? | Scope |
+|-------|---------|-----------|-------|
+| **Project** | What goals to pursue, how many sessions can run in parallel | Yes (across cycles) | Long-lived |
+| **PM Plan** | What to work on this cycle, which agents, whether to use threads | No (ephemeral JSON) | One cycle |
+| **Session** | Nothing — it's the execution container | Yes | One PR |
+| **Thread** | Nothing — it executes instructions | Yes | One agent's work |
+
+### What doesn't change
+
+- **PM plan creation flow** (`pm/service.go` → `Analyze()`) — same, but plan output can now include thread specs
+- **PM plan execution flow** (`pm/execute.go` → `executePlan()`) — same, but `createSession()` now optionally creates multiple threads
+- **Project task dispatch** (`pm/project_execute.go`) — same, but dispatched sessions can have threads
+- **Project execution_mode** — still controls session-level parallelism, not thread-level
+- **Decision log** — still tracks PM decisions at the task level, not thread level
+- **Slot allocation** — still counts sessions, not threads
+- **The PM agent prompt** — gains a new capability (specifying threads) but the overall analysis flow is unchanged
+
+### What the PM agent prompt change looks like
+
+The PM agent's output schema adds an optional `threads` array to tasks:
+
+```
+For each task, you may optionally specify multiple agent threads
+if the work benefits from parallel execution by different agents.
+Use threads when:
+- The task spans backend + frontend (different agents per domain)
+- You want one agent to fix and another to independently verify
+- A clustered root cause has multiple fix sites best handled separately
+
+If you don't specify threads, the task runs as a single agent session
+(same as today).
+```
+
+### Example: PM creates a multi-threaded session for a project
+
+```
+PM Analysis Cycle:
+  Project: "Add Audit Logging" (active, parallel, max_concurrent: 2)
+
+PM Output:
+  ProjectPlan for "Add Audit Logging":
+    NewTasks:
+      - title: "Add audit log infrastructure"
+        approach: "Create store, handler, and viewer page"
+        confidence: 0.85
+        threads:
+          - label: "Backend"
+            agent_type: "claude_code"
+            instructions: "Create audit_store.go, audit handler, and model.
+                          Follow patterns in sessions handler."
+            file_scope: ["internal/"]
+          - label: "Frontend"
+            agent_type: "codex"
+            instructions: "Create audit log viewer page with DataTable
+                          and FilterTabs. Follow sessions page patterns."
+            file_scope: ["frontend/"]
+
+Execution:
+  1. Create ProjectTask (title: "Add audit log infrastructure")
+  2. Create Session (project_task_id → task, pm_plan_id → plan)
+  3. Create 2 SessionThreads:
+     - Thread "Backend" (claude_code, runs in container 1)
+     - Thread "Frontend" (codex, runs in container 2)
+  4. Both threads run in parallel within the session
+  5. Combined diff → validation → PR
+```
 
 ---
 
@@ -467,3 +644,5 @@ This keeps PM plans as the orchestration layer while sessions handle the multi-a
 3. **Cost controls**: Multiple threads = multiple agent runs = higher costs. Should we show estimated cost before starting? Should there be a max threads-per-session limit?
 4. **Thread dependencies**: Should threads support "wait for thread X to complete before starting"? The PLAN.md format had `Depends on` — do we carry that into threads?
 5. **Validation**: Run validation per-thread (each thread's diff independently) or once on the combined result? Per-thread catches issues earlier; combined catches integration issues.
+6. **PM agent learning**: How does the PM agent learn when to use multi-threaded sessions vs single-threaded? Track success rates by thread count and adjust the prompt context?
+7. **Thread failure handling**: If one thread fails but another succeeds, does the session fail? Can we ship the successful thread's diff and retry the failed one?
