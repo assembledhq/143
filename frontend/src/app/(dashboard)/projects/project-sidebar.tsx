@@ -6,7 +6,8 @@ import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
 import { useMemo, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
-import { cn } from "@/lib/utils";
+import { cn, formatTimeAgo } from "@/lib/utils";
+import { StatusDot } from "@/components/status-dot";
 import { api } from "@/lib/api";
 import { projectStatusConfig } from "@/lib/types";
 import type { Project } from "@/lib/types";
@@ -44,20 +45,6 @@ function filterProjects(projects: Project[], filter: string | null): Project[] {
   if (!filter || filter === "all") return projects;
   if (filter === "scheduled") return projects.filter((p) => p.schedule_enabled);
   return projects.filter((p) => p.status === filter);
-}
-
-function formatTimeAgo(dateStr: string): string {
-  const date = new Date(dateStr);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffMins = Math.floor(diffMs / 60000);
-  if (diffMins < 1) return "just now";
-  if (diffMins < 60) return `${diffMins}m ago`;
-  const diffHours = Math.floor(diffMins / 60);
-  if (diffHours < 24) return `${diffHours}h ago`;
-  const diffDays = Math.floor(diffHours / 24);
-  if (diffDays < 30) return `${diffDays}d ago`;
-  return date.toLocaleDateString();
 }
 
 // ---------------------------------------------------------------------------
@@ -222,14 +209,11 @@ export function ProjectSidebar() {
               <div className="flex items-start gap-2.5 min-w-0">
                 {/* Status dot */}
                 <div className="mt-1.5 shrink-0">
-                  {isActiveProject ? (
-                    <span className="relative flex h-2 w-2">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400/60 opacity-75" />
-                      <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
-                    </span>
-                  ) : (
-                    <span className={cn("inline-flex rounded-full h-2 w-2", dotColorMap[project.status] || "bg-muted-foreground/50")} />
-                  )}
+                  <StatusDot
+                    animate={isActiveProject}
+                    color={isActiveProject ? "bg-blue-500" : (dotColorMap[project.status] || "bg-muted-foreground/50")}
+                    pingColor="bg-blue-400/60"
+                  />
                 </div>
 
                 {/* Content */}

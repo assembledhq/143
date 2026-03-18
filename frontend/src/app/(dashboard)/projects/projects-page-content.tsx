@@ -26,6 +26,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { api } from "@/lib/api";
+import { formatTimeAgo } from "@/lib/utils";
+import { StatusDot } from "@/components/status-dot";
 import { projectStatusConfig } from "@/lib/types";
 import type { Project } from "@/lib/types";
 
@@ -42,20 +44,6 @@ const statusFilterTabs = [
   { value: "paused", label: "Paused" },
 ];
 
-function formatTimeAgo(dateStr: string): string {
-  const date = new Date(dateStr);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffMins = Math.floor(diffMs / 60000);
-  if (diffMins < 1) return "just now";
-  if (diffMins < 60) return `${diffMins}m ago`;
-  const diffHours = Math.floor(diffMins / 60);
-  if (diffHours < 24) return `${diffHours}h ago`;
-  const diffDays = Math.floor(diffHours / 24);
-  if (diffDays < 30) return `${diffDays}d ago`;
-  return date.toLocaleDateString();
-}
-
 function priorityLabel(priority: number): { label: string; color: string } {
   if (priority <= 12) return { label: "Critical", color: "text-red-600 dark:text-red-400" };
   if (priority <= 37) return { label: "High", color: "text-orange-600 dark:text-orange-400" };
@@ -67,31 +55,25 @@ function priorityLabel(priority: number): { label: string; color: string } {
 // Inline cell components
 // ---------------------------------------------------------------------------
 
-function StatusDot({ status }: { status: string }) {
+const projectDotColorMap: Record<string, string> = {
+  proposed: "bg-purple-500",
+  draft: "bg-muted-foreground/50",
+  planning: "bg-yellow-500",
+  active: "bg-blue-500",
+  paused: "bg-orange-500",
+  completed: "bg-emerald-500",
+  cancelled: "bg-red-500",
+};
+
+function ProjectStatusDot({ status }: { status: string }) {
   const isActive = status === "active";
-  const cfg = projectStatusConfig[status] || projectStatusConfig.draft;
-
-  if (isActive) {
-    return (
-      <span className="relative flex h-2 w-2">
-        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-        <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
-      </span>
-    );
-  }
-
-  // Derive dot color from the config color string
-  const dotColorMap: Record<string, string> = {
-    proposed: "bg-purple-500",
-    draft: "bg-muted-foreground/50",
-    planning: "bg-yellow-500",
-    active: "bg-blue-500",
-    paused: "bg-orange-500",
-    completed: "bg-emerald-500",
-    cancelled: "bg-red-500",
-  };
-
-  return <span className={`inline-flex rounded-full h-2 w-2 ${dotColorMap[status] || "bg-muted-foreground/50"}`} />;
+  return (
+    <StatusDot
+      animate={isActive}
+      color={projectDotColorMap[status] || "bg-muted-foreground/50"}
+      pingColor="bg-blue-400"
+    />
+  );
 }
 
 function ProgressBar({ completed, total }: { completed: number; total: number }) {
@@ -138,7 +120,7 @@ const columns: ColumnDef<Project>[] = [
       const cfg = projectStatusConfig[status] || projectStatusConfig.draft;
       return (
         <div className="flex items-center gap-2">
-          <StatusDot status={status} />
+          <ProjectStatusDot status={status} />
           <span className={`text-[12px] font-medium ${cfg.color.split(" ").filter(c => c.startsWith("text-")).join(" ")}`}>
             {cfg.label}
           </span>

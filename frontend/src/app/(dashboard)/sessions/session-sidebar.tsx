@@ -6,7 +6,8 @@ import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
 import { useMemo, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
-import { cn } from "@/lib/utils";
+import { cn, formatTimeAgo } from "@/lib/utils";
+import { StatusDot } from "@/components/status-dot";
 import { api } from "@/lib/api";
 import type { Session } from "@/lib/types";
 
@@ -53,20 +54,6 @@ function sessionTitle(session: Session): string {
   if (session.result_summary) return session.result_summary;
   if (session.pm_approach) return session.pm_approach;
   return `Session ${session.id.slice(0, 8)}`;
-}
-
-function formatTimeAgo(dateStr: string): string {
-  const date = new Date(dateStr);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffMins = Math.floor(diffMs / 60000);
-  if (diffMins < 1) return "just now";
-  if (diffMins < 60) return `${diffMins}m ago`;
-  const diffHours = Math.floor(diffMins / 60);
-  if (diffHours < 24) return `${diffHours}h ago`;
-  const diffDays = Math.floor(diffHours / 24);
-  if (diffDays < 30) return `${diffDays}d ago`;
-  return date.toLocaleDateString();
 }
 
 // ---------------------------------------------------------------------------
@@ -217,14 +204,7 @@ export function SessionSidebar() {
               <div className="flex items-start gap-2.5 min-w-0">
                 {/* Status dot */}
                 <div className="mt-1.5 shrink-0">
-                  {isActiveSession ? (
-                    <span className="relative flex h-2 w-2">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary/60 opacity-75" />
-                      <span className="relative inline-flex rounded-full h-2 w-2 bg-primary" />
-                    </span>
-                  ) : (
-                    <span className={cn("inline-flex rounded-full h-2 w-2", cfg.dot)} />
-                  )}
+                  <StatusDot animate={isActiveSession} color={isActiveSession ? "bg-primary" : cfg.dot} />
                 </div>
 
                 {/* Content */}
