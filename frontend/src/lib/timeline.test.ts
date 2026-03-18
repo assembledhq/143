@@ -1,0 +1,132 @@
+import { describe, it, expect } from "vitest";
+import { buildTimeline } from "./timeline";
+import type { SessionMessage, SessionLog } from "./types";
+
+function makeMessage(overrides: Partial<SessionMessage> & { id: number; created_at: string }): SessionMessage {
+  return {
+    session_id: "s1",
+    org_id: "o1",
+    turn_number: 1,
+    role: "assistant",
+    content: "hello",
+    ...overrides,
+  };
+}
+
+function makeLog(overrides: Partial<SessionLog> & { id: number; created_at: string; level: string }): SessionLog {
+  return {
+    session_id: "s1",
+    message: "log msg",
+    metadata: null,
+    turn_number: 1,
+    ...overrides,
+  };
+}
+
+describe("buildTimeline", () => {
+  it("returns message entries for messages only", () => {
+    const messages = [makeMessage({ id: 1, created_at: "2026-01-01T00:00:01Z" })];
+    const result = buildTimeline(messages, []);
+    expect(result).toHaveLength(1);
+    expect(result[0].kind).toBe("message");
+  });
+
+  it("pairs tool_use with subsequent tool_result into tool_group", () => {
+    const logs = [
+      makeLog({ id: 1, created_at: "2026-01-01T00:00:01Z", level: "tool_use", message: "using tool: Read", metadata: { tool: "Read" } }),
+      makeLog({ id: 2, created_at: "2026-01-01T00:00:02Z", level: "output", message: "file contents here", metadata: { type: "tool_result" } }),
+    ];
+    const result = buildTimeline([], logs);
+    expect(result).toHaveLength(1);
+    expect(result[0].kind).toBe("tool_group");
+    if (result[0].kind === "tool_group") {
+      expect(result[0].toolUse.id).toBe(1);
+      expect(result[0].toolResult?.id).toBe(2);
+    }
+  });
+
+  it("handles tool_use without a following tool_result", () => {
+    const logs = [
+      makeLog({ id: 1, created_at: "2026-01-01T00:00:01Z", level: "tool_use", message: "using tool: Write", metadata: { tool: "Write" } }),
+      makeLog({ id: 2, created_at: "2026-01-01T00:00:02Z", level: "info", message: "done" }),
+    ];
+    const result = buildTimeline([], logs);
+    expect(result).toHaveLength(2);
+    expect(result[0].kind).toBe("tool_group");
+    if (result[0].kind === "tool_group") {
+      expect(result[0].toolResult).toBeUndefined();
+    }
+    expect(result[1].kind).toBe("log");
+  });
+
+  it("classifies error-level logs as error entries", () => {
+    const logs = [
+      makeLog({ id: 1, created_at: "2026-01-01T00:00:01Z", level: "error", message: "something broke" }),
+    ];
+    const result = buildTimeline([], logs);
+    expect(result).toHaveLength(1);
+    expect(result[0].kind).toBe("error");
+  });
+
+  it("keeps streamed assistant output logs until a persisted assistant message exists", () => {
+    const logs = [
+      makeLog({ id: 1, created_at: "2026-01-01T00:00:01Z", level: "output", message: "assistant text" }),
+    ];
+    const result = buildTimeline([], logs);
+    expect(result).toHaveLength(1);
+    expect(result[0].kind).toBe("log");
+  });
+
+  it("filters duplicate output-level logs after the assistant message is persisted", () => {
+    const messages = [
+      makeMessage({ id: 1, created_at: "2026-01-01T00:00:02Z", content: "assistant text" }),
+    ];
+    const logs = [
+      makeLog({ id: 1, created_at: "2026-01-01T00:00:01Z", level: "output", message: "assistant text" }),
+    ];
+    const result = buildTimeline(messages, logs);
+    expect(result).toHaveLength(1);
+    expect(result[0].kind).toBe("message");
+  });
+
+  it("keeps output-level logs with metadata.type as log entries", () => {
+    const logs = [
+      makeLog({ id: 1, created_at: "2026-01-01T00:00:01Z", level: "output", message: "tool result", metadata: { type: "tool_result" } }),
+    ];
+    // This would normally be consumed by a tool_group, but without a preceding tool_use it stays as a log entry.
+    const result = buildTimeline([], logs);
+    expect(result).toHaveLength(1);
+    expect(result[0].kind).toBe("log");
+  });
+
+  it("sorts all items by created_at timestamp", () => {
+    const messages = [makeMessage({ id: 1, created_at: "2026-01-01T00:00:03Z", content: "msg" })];
+    const logs = [
+      makeLog({ id: 1, created_at: "2026-01-01T00:00:01Z", level: "info", message: "first" }),
+      makeLog({ id: 2, created_at: "2026-01-01T00:00:05Z", level: "info", message: "last" }),
+    ];
+    const result = buildTimeline(messages, logs);
+    expect(result).toHaveLength(3);
+    expect(result[0].kind).toBe("log"); // info at :01
+    expect(result[1].kind).toBe("message"); // msg at :03
+    expect(result[2].kind).toBe("log"); // info at :05
+  });
+
+  it("handles interleaved messages and logs correctly", () => {
+    const messages = [
+      makeMessage({ id: 1, created_at: "2026-01-01T00:00:00Z", role: "user", content: "fix the bug" }),
+      makeMessage({ id: 2, created_at: "2026-01-01T00:00:10Z", role: "assistant", content: "done" }),
+    ];
+    const logs = [
+      makeLog({ id: 1, created_at: "2026-01-01T00:00:02Z", level: "tool_use", message: "using tool: Read", metadata: { tool: "Read" } }),
+      makeLog({ id: 2, created_at: "2026-01-01T00:00:03Z", level: "output", message: "file contents", metadata: { type: "tool_result" } }),
+      makeLog({ id: 3, created_at: "2026-01-01T00:00:05Z", level: "error", message: "oops" }),
+    ];
+    const result = buildTimeline(messages, logs);
+    expect(result.map((e) => e.kind)).toEqual(["message", "tool_group", "error", "message"]);
+  });
+
+  it("returns empty for empty inputs", () => {
+    expect(buildTimeline([], [])).toEqual([]);
+  });
+});
