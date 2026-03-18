@@ -3,13 +3,11 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowLeft,
   FileText,
   GitPullRequest,
   Play,
   Settings,
 } from "lucide-react";
-import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -269,10 +267,7 @@ export function ProjectDetailContent({ id }: { id: string }) {
 
   if (isLoading) {
     return (
-      <div className="space-y-6">
-        <Link href="/projects" className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
-          <ArrowLeft className="h-3 w-3" /> Back to projects
-        </Link>
+      <div className="p-6">
         <Card>
           <CardContent className="py-12 text-center text-sm text-muted-foreground">Loading project...</CardContent>
         </Card>
@@ -282,10 +277,7 @@ export function ProjectDetailContent({ id }: { id: string }) {
 
   if (error || !detail) {
     return (
-      <div className="space-y-6">
-        <Link href="/projects" className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
-          <ArrowLeft className="h-3 w-3" /> Back to projects
-        </Link>
+      <div className="p-6">
         <Card>
           <CardContent className="py-12 text-center text-sm text-muted-foreground">Failed to load project details.</CardContent>
         </Card>
@@ -301,11 +293,7 @@ export function ProjectDetailContent({ id }: { id: string }) {
   const prCount = tasks.filter((t) => t.pr_url).length;
 
   return (
-    <div className="space-y-6">
-      <Link href="/projects" className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
-        <ArrowLeft className="h-3 w-3" /> Back to projects
-      </Link>
-
+    <div className="p-6 space-y-6">
       <div>
         <div className="flex items-center gap-3">
           <h1 className="text-xl font-bold text-foreground">{project.title}</h1>

@@ -2,11 +2,8 @@
 
 import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Sparkles, PenLine, Timer, Bot, ShieldCheck, TestTube2, Wrench, CalendarClock, Target } from "lucide-react";
-import Link from "next/link";
+import { Sparkles, PenLine, Timer, Bot, ShieldCheck, TestTube2, Wrench, CalendarClock, Target } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { PageHeader } from "@/components/page-header";
-import { PageContainer } from "@/components/page-container";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -185,20 +182,12 @@ export default function NewProjectPage() {
     title.trim().length > 0 && goal.trim().length > 0 && repositoryId.length > 0;
 
   return (
-    <PageContainer size="default">
+    <div className="p-6 max-w-2xl mx-auto">
     <div className="space-y-6">
-      <PageHeader
-        title="New project"
-        description="Create a project for the PM agent to manage."
-        action={
-          <Button variant="outline" asChild>
-            <Link href="/projects">
-              <ArrowLeft className="mr-2 h-4 w-4" />
-              Back to projects
-            </Link>
-          </Button>
-        }
-      />
+      <div>
+        <h1 className="text-xl font-bold text-foreground">New project</h1>
+        <p className="text-sm text-muted-foreground mt-1">Create a project for the PM agent to manage.</p>
+      </div>
 
       {/* Project Type Selector */}
       <div className="flex gap-3">
@@ -573,6 +562,6 @@ export default function NewProjectPage() {
         </Card>
       )}
     </div>
-    </PageContainer>
+    </div>
   );
 }

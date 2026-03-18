@@ -4,12 +4,6 @@ import { server } from "@/test/mocks/server";
 import { http, HttpResponse } from "msw";
 import { ProjectDetailContent } from "./project-detail-content";
 
-vi.mock("next/link", () => ({
-  default: ({ children, href, ...props }: React.ComponentProps<"a"> & { href: string }) => (
-    <a href={href} {...props}>{children}</a>
-  ),
-}));
-
 vi.mock("lucide-react", () => {
   const icon = (name: string) => {
     const Component = (props: Record<string, unknown>) => (
@@ -19,7 +13,6 @@ vi.mock("lucide-react", () => {
     return Component;
   };
   return {
-    ArrowLeft: icon("ArrowLeft"),
     FileText: icon("FileText"),
     GitPullRequest: icon("GitPullRequest"),
     Settings: icon("Settings"),
@@ -60,7 +53,6 @@ describe("ProjectDetailContent", () => {
 
     renderWithProviders(<ProjectDetailContent id="proj-1" />);
     expect(screen.getByText("Loading project...")).toBeInTheDocument();
-    expect(screen.getByText("Back to projects")).toBeInTheDocument();
   });
 
   it("shows error state on failure", async () => {
