@@ -9,22 +9,8 @@ import { useQueryState, parseAsString } from "nuqs";
 import { cn, formatTimeAgo } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
 import { api } from "@/lib/api";
-import { projectStatusConfig } from "@/lib/types";
+import { projectStatusConfig, projectStatusDotColor } from "@/lib/types";
 import type { Project } from "@/lib/types";
-
-// ---------------------------------------------------------------------------
-// Status config – dots for sidebar items
-// ---------------------------------------------------------------------------
-
-const dotColorMap: Record<string, string> = {
-  proposed: "bg-purple-500",
-  draft: "bg-muted-foreground/50",
-  planning: "bg-yellow-500",
-  active: "bg-blue-500",
-  paused: "bg-orange-500",
-  completed: "bg-emerald-500",
-  cancelled: "bg-red-500",
-};
 
 const filterTabs = [
   { value: "all", label: "All" },
@@ -209,11 +195,11 @@ export function ProjectSidebar() {
               <div className="flex items-start gap-2.5 min-w-0">
                 {/* Status dot */}
                 <div className="mt-1.5 shrink-0">
-                  <StatusDot
-                    animate={isActiveProject}
-                    color={isActiveProject ? "bg-blue-500" : (dotColorMap[project.status] || "bg-muted-foreground/50")}
-                    pingColor="bg-blue-400/60"
-                  />
+                  {isActiveProject ? (
+                    <StatusDot animate color="bg-blue-500" pingColor="bg-blue-400/60" />
+                  ) : (
+                    <StatusDot color={projectStatusDotColor[project.status] || "bg-muted-foreground/50"} />
+                  )}
                 </div>
 
                 {/* Content */}

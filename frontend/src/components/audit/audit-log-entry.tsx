@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import type { AuditLog, User } from "@/lib/types";
+import { formatTimeAgo } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
 /** Human-readable labels for audit actions. */
@@ -57,18 +58,6 @@ const actorTypeLabels: Record<string, string> = {
   webhook: "Webhook",
 };
 
-function formatRelativeTime(dateStr: string): string {
-  const diff = Date.now() - new Date(dateStr).getTime();
-  const minutes = Math.floor(diff / 60000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 30) return `${days}d ago`;
-  return new Date(dateStr).toLocaleDateString();
-}
-
 function getActorName(entry: AuditLog, members: User[]): string {
   if (entry.actor_type === "user" && entry.user_id) {
     const member = members.find((m) => m.id === entry.user_id);
@@ -112,7 +101,7 @@ export function AuditLogEntry({ entry, members, onSelect }: AuditLogEntryProps) 
         disabled={!onSelect && !hasDetails}
       >
         <span className="shrink-0 w-14 text-xs text-muted-foreground/70 pt-0.5 tabular-nums">
-          {formatRelativeTime(entry.created_at)}
+          {formatTimeAgo(entry.created_at)}
         </span>
         <span className="flex-1 min-w-0">
           <span className="font-medium text-foreground">{actorName}</span>
@@ -159,4 +148,4 @@ export function AuditLogEntry({ entry, members, onSelect }: AuditLogEntryProps) 
   );
 }
 
-export { formatRelativeTime, getActorName, getActionLabel };
+export { getActorName, getActionLabel };

@@ -18,12 +18,11 @@ const pmDotColors: Record<string, string> = {
 };
 
 function PMStatusDot({ status }: { status: "running" | "completed" | "failed" | "idle" }) {
-  return (
-    <StatusDot
-      animate={status === "running"}
-      color={pmDotColors[status] || "bg-muted-foreground/30"}
-    />
-  );
+  const color = pmDotColors[status] || "bg-muted-foreground/30";
+  if (status === "running") {
+    return <StatusDot animate color={color} pingColor="bg-primary/60" />;
+  }
+  return <StatusDot color={color} />;
 }
 
 function deriveAgentStatus(pmStatus: PMStatus | undefined, isAnalyzing: boolean): "running" | "completed" | "failed" | "idle" {

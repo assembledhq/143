@@ -4,6 +4,12 @@ import { server } from "@/test/mocks/server";
 import { http, HttpResponse } from "msw";
 import { ProjectDetailContent } from "./project-detail-content";
 
+vi.mock("next/link", () => ({
+  default: ({ children, href, ...props }: React.ComponentProps<"a"> & { href: string }) => (
+    <a href={href} {...props}>{children}</a>
+  ),
+}));
+
 vi.mock("lucide-react", () => {
   const icon = (name: string) => {
     const Component = (props: Record<string, unknown>) => (

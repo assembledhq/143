@@ -204,7 +204,11 @@ export function SessionSidebar() {
               <div className="flex items-start gap-2.5 min-w-0">
                 {/* Status dot */}
                 <div className="mt-1.5 shrink-0">
-                  <StatusDot animate={isActiveSession} color={isActiveSession ? "bg-primary" : cfg.dot} />
+                  {isActiveSession ? (
+                    <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />
+                  ) : (
+                    <StatusDot color={cfg.dot} />
+                  )}
                 </div>
 
                 {/* Content */}

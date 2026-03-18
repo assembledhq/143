@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import type { Issue, Session, SessionLog, SessionMessage, User, Validation, PullRequest, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, ProjectDetail } from '@/lib/types';
+import type { Issue, Session, SessionLog, SessionMessage, User, Validation, PullRequest, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail } from '@/lib/types';
 
 export const mockIssues: Issue[] = [
   {
@@ -144,6 +144,56 @@ export const mockProjectDetail: ProjectDetail = {
   specs: [],
 };
 
+export const mockProjects: Project[] = [
+  {
+    id: 'proj-1',
+    org_id: 'org-1',
+    repository_id: 'repo-1',
+    title: 'Test Project',
+    goal: 'Build something great',
+    status: 'active',
+    priority: 50,
+    execution_mode: 'sequential',
+    max_concurrent: 1,
+    auto_merge: false,
+    base_branch: 'main',
+    total_tasks: 3,
+    completed_tasks: 1,
+    failed_tasks: 0,
+    proposed_by_pm: false,
+    source_issue_ids: [],
+    schedule_enabled: false,
+    schedule_interval: 1,
+    schedule_unit: 'days',
+    created_at: '2026-02-17T08:00:00Z',
+    updated_at: '2026-02-17T08:00:00Z',
+  },
+  {
+    id: 'proj-2',
+    org_id: 'org-1',
+    repository_id: 'repo-1',
+    title: 'Security Sweep',
+    goal: 'Fix vulnerabilities',
+    status: 'completed',
+    priority: 25,
+    execution_mode: 'parallel',
+    max_concurrent: 2,
+    auto_merge: false,
+    base_branch: 'main',
+    total_tasks: 5,
+    completed_tasks: 5,
+    failed_tasks: 0,
+    proposed_by_pm: true,
+    source_issue_ids: [],
+    schedule_enabled: true,
+    schedule_interval: 7,
+    schedule_unit: 'days',
+    created_at: '2026-02-10T08:00:00Z',
+    updated_at: '2026-02-15T08:00:00Z',
+    completed_at: '2026-02-15T08:00:00Z',
+  },
+];
+
 export const mockPMStatus: PMStatus = {
   is_running: false,
   issues_reviewed: 0,
@@ -240,6 +290,13 @@ export const handlers = [
     return HttpResponse.json({
       data: mockSessions[0],
     } satisfies SingleResponse<Session>);
+  }),
+
+  http.get('/api/v1/projects', () => {
+    return HttpResponse.json({
+      data: mockProjects,
+      meta: {},
+    } satisfies ListResponse<Project>);
   }),
 
   http.get('/api/v1/projects/:id', () => {

@@ -29,7 +29,7 @@ import {
 } from "@/components/ui/table";
 import { api } from "@/lib/api";
 import { formatTimeAgo } from "@/lib/utils";
-import { StatusDot as StatusDotBase } from "@/components/status-dot";
+import { StatusDot } from "@/components/status-dot";
 import type { Session, User } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
@@ -89,7 +89,10 @@ function sessionTitle(session: Session): string {
 function SessionStatusDot({ status }: { status: string }) {
   const active = activeStatuses.has(status);
   const cfg = statusConfig[status] || statusConfig.pending;
-  return <StatusDotBase animate={active} color={active ? "bg-primary" : cfg.dot} />;
+  if (active) {
+    return <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />;
+  }
+  return <StatusDot color={cfg.dot} />;
 }
 
 function SortableHeader({ label, column }: { label: string; column: { toggleSorting: (desc?: boolean) => void; getIsSorted: () => false | "asc" | "desc" } }) {
