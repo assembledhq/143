@@ -120,187 +120,142 @@ Single-agent sessions still work. When a session has exactly one thread, the UX 
 └─────────────────────────────────────────────────────────┘
 ```
 
-### Multi-agent: Three approaches for the session detail page
+### Multi-agent: Split-pane layout
 
----
+The session detail page splits into columns when multiple threads are active. Each column is a self-contained chat with its own status, input, and scroll. A persistent `[+]` button in the thread header bar lets users add threads at any time.
 
-#### Approach A: Thread tabs (horizontal tabs per agent)
+#### Single-thread (default — identical to today)
 
-Each thread gets a tab within the Chat panel. You switch between agent conversations like browser tabs.
-
-```
-┌────────────────────────────────────────────────────────────────┐
-│  Session: Add audit logging                                    │
-│  Status: ● 2/3 threads active    Branch: feat/audit-logs      │
-│                                                                │
-│  [Chat] [Overview] [Logs] [Changes] [Validation]               │
-│                                                                │
-│  Chat:                                                         │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │ [Backend API ●] [Frontend UI ●] [Tests ○]               │  │
-│  │                                                          │  │
-│  │  User: Build the audit log API endpoints.                │  │
-│  │        Follow the patterns in handlers/sessions.go.      │  │
-│  │                                                          │  │
-│  │  Claude: I'll create the handler, store, and model...    │  │
-│  │                                                          │  │
-│  │  Claude: Done. Created:                                  │  │
-│  │    - internal/api/handlers/audit.go                      │  │
-│  │    - internal/db/audit_store.go                          │  │
-│  │    - internal/models/audit.go                            │  │
-│  │                                                          │  │
-│  │  [Send message...]                                       │  │
-│  └──────────────────────────────────────────────────────────┘  │
-│                                                                │
-│  Changes (combined):                                           │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │ + internal/api/handlers/audit.go  (Backend API, claude)  │  │
-│  │ + internal/db/audit_store.go      (Backend API, claude)  │  │
-│  │ ~ frontend/src/app/audit/page.tsx (Frontend UI, codex)   │  │
-│  │                                                          │  │
-│  │ Filter: [All threads ▾]                                  │  │
-│  └──────────────────────────────────────────────────────────┘  │
-└────────────────────────────────────────────────────────────────┘
-```
-
-**Pros:**
-- Familiar tab pattern. Each thread has a focused conversation.
-- Easy to send a message to a specific agent — you're already on their tab.
-- Changes tab can show combined diff with per-thread attribution.
-- Minimal visual complexity — only one chat visible at a time.
-
-**Cons:**
-- You can't see what multiple agents are doing at the same time — you have to click between tabs.
-- For 2-3 threads this is fine, but doesn't scale to 5+ (tab bar overflows).
-- Doesn't give the "command center" feeling of monitoring parallel work.
-
----
-
-#### Approach B: Split-pane columns (side-by-side agent chats)
-
-The session detail page splits into columns, one per active thread. Each column is a self-contained chat + status view.
-
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│  Session: Add audit logging                                            │
-│  Status: ● 2/3 threads active    Branch: feat/audit-logs              │
-│  [Overview] [Changes] [Validation]                                     │
-│                                                                        │
-│  ┌──────────────────────┐ ┌──────────────────────┐ ┌─────────────────┐│
-│  │ Backend API          │ │ Frontend UI          │ │ Tests           ││
-│  │ ● claude · running   │ │ ● codex · running    │ │ ○ claude · pend ││
-│  │─────────────────────│ │─────────────────────│ │                 ││
-│  │                      │ │                      │ │  Waiting for    ││
-│  │ User: Build the      │ │ User: Build the      │ │  Backend API    ││
-│  │ audit log API...     │ │ audit log viewer...  │ │  to complete    ││
-│  │                      │ │                      │ │                 ││
-│  │ Claude: Looking at   │ │ Codex: I'll create   │ │                 ││
-│  │ the patterns in      │ │ the page component   │ │                 ││
-│  │ handlers/sessions... │ │ with the data table  │ │                 ││
-│  │                      │ │ pattern...           │ │                 ││
-│  │ Claude: Created      │ │                      │ │                 ││
-│  │ 3 files...           │ │ Codex: Working on    │ │                 ││
-│  │                      │ │ the filter tabs...   │ │                 ││
-│  │                      │ │                      │ │                 ││
-│  │ [Send message...]    │ │ [Send message...]    │ │                 ││
-│  └──────────────────────┘ └──────────────────────┘ └─────────────────┘│
-│                                                                        │
-└────────────────────────────────────────────────────────────────────────┘
-```
-
-**Pros:**
-- You see all agents working simultaneously — the "command center" feel.
-- Each thread has its own chat input — you can message any agent without switching.
-- Visually clear which agent is doing what, which is done, which is blocked.
-- The "wow" factor — this is what makes multi-agent feel real.
-
-**Cons:**
-- Horizontal space is limited. 3 columns is fine on a wide screen, 4+ gets cramped.
-- Each column has less room for chat content than a full-width view.
-- Mobile/narrow screens need a fallback (probably Approach A's tab pattern).
-- More complex to implement — responsive layout, scroll sync, etc.
-
----
-
-#### Approach C: Unified timeline (interleaved chat with agent badges)
-
-All threads share one chat timeline. Messages are tagged with which agent/thread they belong to. The user can @-mention a specific thread or broadcast to all.
+Every session starts with one thread. The layout is unchanged from the current single-agent experience. The only addition is a subtle `[+]` affordance in the header that signals "you can add another agent here."
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│  Session: Add audit logging                                    │
-│  Status: ● 2/3 threads active    Branch: feat/audit-logs      │
-│                                                                │
-│  [Chat] [Overview] [Changes] [Validation]                      │
-│                                                                │
-│  Threads: [Backend API ●] [Frontend UI ●] [Tests ○]           │
-│                                                                │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │                                                          │  │
-│  │  You (to all):                                           │  │
-│  │  Build audit logging. Backend: API endpoints following   │  │
-│  │  existing patterns. Frontend: viewer page with filters.  │  │
-│  │  Tests: after both are done.                             │  │
-│  │                                                          │  │
-│  │  ┌─ Backend API · claude ─────────────────────────────┐  │  │
-│  │  │ Looking at handlers/sessions.go for patterns...    │  │  │
-│  │  └───────────────────────────────────────────────────┘  │  │
-│  │                                                          │  │
-│  │  ┌─ Frontend UI · codex ──────────────────────────────┐  │  │
-│  │  │ Creating audit log viewer with DataTable pattern.  │  │  │
-│  │  └───────────────────────────────────────────────────┘  │  │
-│  │                                                          │  │
-│  │  ┌─ Backend API · claude ─────────────────────────────┐  │  │
-│  │  │ Created 3 files. Endpoints: GET /audit-logs,       │  │  │
-│  │  │ GET /audit-logs/:id. Running tests...              │  │  │
-│  │  └───────────────────────────────────────────────────┘  │  │
-│  │                                                          │  │
-│  │  You (to Frontend UI):                                   │  │
-│  │  Use the same filter tab pattern from the sessions page. │  │
-│  │                                                          │  │
-│  │  ┌─ Frontend UI · codex ──────────────────────────────┐  │  │
-│  │  │ Got it, switching to FilterTabs component...       │  │  │
-│  │  └───────────────────────────────────────────────────┘  │  │
-│  │                                                          │  │
-│  │  [Send to: All threads ▾] [Message...]          [Send]  │  │
-│  └──────────────────────────────────────────────────────────┘  │
+│  Session: Fix null pointer in parser                            │
+│  Status: ● running    Branch: fix/null-pointer                  │
+│  [Overview] [Changes] [Validation]                               │
+│                                                                  │
+│  ┌────────────────────────────────────────────────────────┐ [+] │
+│  │ claude · running                                       │     │
+│  │──────────────────────────────────────────────────────── │     │
+│  │                                                        │     │
+│  │ User: Fix the null pointer in parser.go line 42        │     │
+│  │                                                        │     │
+│  │ Claude: I'll look at parser.go...                      │     │
+│  │                                                        │     │
+│  │ Claude: Fixed. Added nil check before dereference.     │     │
+│  │                                                        │     │
+│  │ [Send message...]                                      │     │
+│  └────────────────────────────────────────────────────────┘     │
 └────────────────────────────────────────────────────────────────┘
 ```
 
-**Pros:**
-- Single scrolling timeline — you see the full story of what happened, in order.
-- Natural for monitoring: you just scroll and see what all agents are doing.
-- Easy to broadcast instructions to all threads or target one.
-- Works well on any screen width — no column layout needed.
-- Feels like a team group chat where each agent is a team member.
+The `[+]` button sits at the far right of the thread header row — visually quiet but always discoverable. Clicking it opens the "Add thread" popover (see below).
 
-**Cons:**
-- Gets noisy with many active threads — messages interleave in confusing ways.
-- Harder to follow one agent's train of thought — it's broken up by other agents' messages.
-- The "Send to" dropdown adds friction vs. just typing in a thread's input box.
-- Need clear visual differentiation per thread (colors, borders) or it becomes unreadable.
+#### Multi-thread (2-3 threads, wide screen)
 
----
+When the user adds a thread, the layout splits into side-by-side columns. Each column scrolls independently.
 
-### Recommendation
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│  Session: Add audit logging                                                │
+│  Status: ● 2 running    Branch: feat/audit-logs                            │
+│  [Overview] [Changes] [Validation]                                          │
+│                                                                             │
+│  ┌──────────────────────────┐ ┌──────────────────────────┐ ┌──────┐        │
+│  │ Backend API              │ │ Frontend UI              │ │ [+]  │        │
+│  │ ● claude · running       │ │ ● codex · running        │ │      │        │
+│  │──────────────────────────│ │──────────────────────────│ │      │        │
+│  │                          │ │                          │ │      │        │
+│  │ User: Build the audit    │ │ User: Build the audit    │ │      │        │
+│  │ log API endpoints.       │ │ log viewer page.         │ │      │        │
+│  │                          │ │                          │ │      │        │
+│  │ Claude: Looking at       │ │ Codex: I'll create the   │ │      │        │
+│  │ handlers/sessions.go     │ │ page with DataTable...   │ │      │        │
+│  │ for patterns...          │ │                          │ │      │        │
+│  │                          │ │ Codex: Working on the    │ │      │        │
+│  │ Claude: Created 3 files: │ │ filter tabs now...       │ │      │        │
+│  │ audit.go, audit_store.go │ │                          │ │      │        │
+│  │ audit_model.go           │ │                          │ │      │        │
+│  │                          │ │                          │ │      │        │
+│  │ [Send message...]        │ │ [Send message...]        │ │      │        │
+│  └──────────────────────────┘ └──────────────────────────┘ └──────┘        │
+└────────────────────────────────────────────────────────────────────────────┘
+```
 
-**Approach B (split-pane) as the primary view, with Approach A (tabs) as the narrow-screen fallback.**
+The `[+]` button becomes a narrow column at the right edge — always visible, always in the same position regardless of thread count. It visually rhymes with the thread columns but is clearly a different element (muted background, dashed border, centered `+` icon). This follows the same pattern as Trello's "+ Add another list" column or Notion's "+ New column" — users intuitively understand it means "add another one of these."
 
-Rationale:
+#### The "Add thread" popover
 
-1. **The core value of multi-agent is seeing agents work in parallel.** If you can only see one at a time (Approach A), it doesn't feel like multi-agent — it feels like switching between sessions, which is what we already have.
+Clicking `[+]` opens a compact popover anchored to the button:
 
-2. **Split-pane is the conductor.build insight.** What makes conductor feel powerful is seeing multiple agents side-by-side. We can do this within a session detail page instead of requiring a separate app.
+```
+┌──────────────────────────────────┐
+│  Add agent thread                │
+│                                  │
+│  Agent:  [Claude Code ▾]        │
+│                                  │
+│  Label:  [                    ]  │
+│          e.g. "Backend", "Tests" │
+│                                  │
+│  Instructions (optional):        │
+│  ┌──────────────────────────┐    │
+│  │                          │    │
+│  │                          │    │
+│  └──────────────────────────┘    │
+│                                  │
+│  [Cancel]            [Add ↵]    │
+└──────────────────────────────────┘
+```
 
-3. **Approach C (unified timeline) gets unreadable fast.** Two agents posting messages simultaneously creates a messy interleaved timeline. It works for Slack because humans have natural pauses. Agents don't — they'll flood the timeline.
+Design details:
+- **Agent selector** defaults to the same agent type as the existing thread. If the user wants to compare agents, they pick a different one.
+- **Label** is required — it names the column. Placeholder text gives examples.
+- **Instructions** are optional. If blank, the thread inherits the session's original instructions. If provided, the thread gets those specific instructions.
+- **Keyboard shortcut**: `Cmd+Shift+T` opens the popover from anywhere on the session page.
+- The popover closes on `Esc` or clicking outside.
 
-4. **Responsive fallback to tabs.** On screens narrower than ~1200px, collapse columns into tabs. Same data, different layout. The tab pattern (Approach A) is the mobile/narrow fallback, not the primary experience.
+#### Thread column header details
 
-### Layout breakpoints
+Each thread column has a compact header showing status and controls:
 
-- **≥ 1200px**: Side-by-side columns (Approach B)
-- **< 1200px**: Thread tabs (Approach A)
-- **Session with 1 thread**: Current single-agent layout (no change)
+```
+┌──────────────────────────────────────┐
+│ Backend API                      [⋯] │
+│ ● claude · running · 3m              │
+│──────────────────────────────────────│
+```
+
+The `[⋯]` menu contains:
+- **End thread** — stops the agent, marks thread as completed
+- **Cancel thread** — aborts immediately, marks as cancelled
+- **View diff** — shows only this thread's changes
+
+No rename, no reorder, no drag-and-drop — keep it simple. Thread order is creation order.
+
+#### Responsive behavior
+
+- **≥ 1200px**: Side-by-side columns. Up to 3 threads fit comfortably; 4 threads work but columns get narrow.
+- **< 1200px**: Columns collapse to horizontal tabs at the top of the chat area. Each tab shows the thread label and a status dot. The `[+]` becomes a `[+]` tab at the end.
+- **Session with 1 thread**: Full-width single-agent layout. No tabs, no columns. Just the `[+]` button in the header.
+
+```
+Narrow screen (< 1200px):
+┌────────────────────────────────────────────────────┐
+│  Session: Add audit logging                         │
+│  [Overview] [Changes] [Validation]                   │
+│                                                      │
+│  [Backend API ●] [Frontend UI ●] [+]                │
+│  ┌──────────────────────────────────────────────┐   │
+│  │ ● claude · running                           │   │
+│  │                                              │   │
+│  │ User: Build the audit log API endpoints.     │   │
+│  │                                              │   │
+│  │ Claude: Looking at handlers/sessions.go...   │   │
+│  │                                              │   │
+│  │ [Send message...]                            │   │
+│  └──────────────────────────────────────────────┘   │
+└────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -329,55 +284,23 @@ Single-thread sessions look identical to today. No visual noise for users who do
 
 ### Creating threads
 
-Threads are created when the session starts. The user specifies the split:
+Every session starts with exactly one thread — the default agent working on the issue. This is identical to today's behavior. The session creation flow doesn't change at all.
 
-**Option 1: Chat-based creation (interactive)**
-```
-User: "I need to add audit logging. Use Claude for the backend
-       and Codex for the frontend."
+Users add threads to a **running or idle session** via the `[+]` button described in the UX section above. The flow:
 
-System creates session with 2 threads:
-  - Thread "Backend" (claude_code)
-  - Thread "Frontend" (codex)
-```
+1. User starts a normal single-agent session (no change from today)
+2. While watching the agent work, user decides they want a second agent — maybe to compare approaches, or to work on a different part of the problem
+3. User clicks `[+]`, picks an agent type, writes a label and optional instructions
+4. New thread starts immediately in its own container, on the same branch
+5. The layout splits into side-by-side columns
 
-**Option 2: Explicit thread creation in the new-session form**
-The `/sessions/new` page gets a "Add thread" button:
-```
-┌──────────────────────────────────────────────────┐
-│  New Session                                      │
-│                                                   │
-│  Thread 1:                                        │
-│  Label: [Backend API        ]                     │
-│  Agent: [Claude Code ▾]                           │
-│  Instructions: [Build audit log endpoints...  ]   │
-│                                                   │
-│  Thread 2:                                        │
-│  Label: [Frontend UI         ]                    │
-│  Agent: [Codex ▾]                                 │
-│  Instructions: [Build audit log viewer page...]   │
-│                                                   │
-│  [+ Add thread]                                   │
-│                                                   │
-│  [Start session]                                  │
-└──────────────────────────────────────────────────┘
-```
+This is intentionally the *only* way to create multi-thread sessions. We don't add multi-thread options to the session creation form, and we don't have the system auto-create threads. The mental model is simple: **start with one agent, add more if you want.**
 
-**Option 3: Add threads to a running session**
-While a session is active (or idle), the user can add a new thread:
-```
-[+ Add agent thread]  →  picks agent type, writes instructions, starts it
-```
+#### Why this matters
 
-This is the most flexible: start with one agent, add more as needed.
+The most common use case for multiple threads is **comparing agents** — "let me see how Claude and Codex each approach this." That's a decision the user makes *after* seeing the first agent's approach, not upfront. Forcing users to plan threads before they've even started watching defeats the purpose.
 
-### Recommendation: Support all three, start with Option 3
-
-Option 3 is the most natural and lowest-friction. You start a normal session. If you realize you want a second agent working in parallel, you add a thread. No upfront planning required.
-
-Option 2 is the power-user path for when you know upfront you want multiple agents.
-
-Option 1 (chat-based) is a future enhancement — the system parses your intent and auto-creates threads.
+Less common but also supported: adding a second thread to handle a different part of the work (backend + frontend), or adding a "verification" thread that independently checks the first agent's output.
 
 ### Thread status transitions
 
@@ -462,80 +385,53 @@ User creates project    ──────▶   PM agent sees active projects
                                                  (session.pm_plan_id)
 ```
 
-**The binding is always: 1 task → 1 session → 1 agent.** That's what changes with threads.
+**The binding is always: 1 task → 1 session → 1 agent.**
 
 ### With threads: what changes, what stays the same
 
-**PM Plans don't change.** They remain the analytical layer — the PM agent decides *what* to work on and *how many* tasks to create. Plans are ephemeral snapshots.
+**PM Plans don't change at all.** They remain the analytical layer — the PM agent decides *what* to work on and *how many* tasks to create. The PM always creates single-threaded sessions. No `Threads` field on `Task`, no multi-agent logic in the PM prompt.
 
 **Projects don't change.** They remain persistent goal containers with execution_mode and max_concurrent. ProjectTasks are still created per PM cycle, tracked across cycles.
 
-**What changes is the session layer.** Instead of 1 task → 1 session → 1 agent, we get:
+**The only change is at the session layer.** Sessions now *support* multiple threads, but they're always created with one. The user adds threads manually via the `[+]` button if they want to compare agents or parallelize work.
 
 ```
-1 task → 1 session → N threads (each thread = 1 agent)
+PM/Project creates:   1 task → 1 session → 1 thread (always)
+User can then add:    same session → 2nd thread, 3rd thread, etc.
 ```
 
-### When does the PM create multi-threaded sessions?
+### Why the PM doesn't create multi-threaded sessions
 
-The PM agent decides based on the nature of the work:
+Multi-thread sessions are a **user-initiated comparison and exploration tool**, not an automated optimization. The primary use case is "let me see how Claude and Codex each approach this problem" — that's an inherently human decision that requires watching the first agent and making a judgment call.
 
-**Single-thread session (today's default):**
-- Simple bug fix in one domain
-- Documentation update
-- Small refactor
-- Most reactive tasks
-
-**Multi-thread session (new):**
-- **Clustered issues with shared root cause** — PM groups 3 related Sentry errors into one session, spins up one Claude thread for the fix and one Codex thread for regression tests
-- **Cross-domain features** — PM sees a feature needs backend + frontend work, creates one session with a thread per domain
-- **Fix + verify pattern** — one thread writes the fix (Claude), another thread independently tries to reproduce and verify (Codex)
-
-The PM's `Task` struct gains an optional `Threads` field:
-
-```go
-type Task struct {
-    Title       string
-    IssueIDs    []string
-    Approach    string
-    Confidence  float64
-    // ...existing fields...
-
-    // NEW: if nil, session gets one thread with the task's agent_type.
-    // If set, session gets one thread per entry.
-    Threads     []TaskThread `json:"threads,omitempty"`
-}
-
-type TaskThread struct {
-    Label        string   `json:"label"`
-    AgentType    string   `json:"agent_type"`
-    Instructions string   `json:"instructions"`
-    FileScope    []string `json:"file_scope,omitempty"`
-}
-```
+Reasons to keep PM single-threaded:
+1. **Simplicity** — the PM's job is hard enough (triage, prioritize, plan). Adding thread-planning complexity increases failure modes without clear ROI.
+2. **Cost predictability** — automated multi-threading could silently double or triple agent costs. Users should opt in to that.
+3. **The PM already parallelizes at the session level.** If the PM wants 3 things done in parallel, it creates 3 tasks → 3 sessions. That's the right abstraction for automated parallelism.
+4. **Threads are for human judgment calls** — comparing agents, adding a verification pass, splitting work mid-session. These are reactive decisions, not plannable ones.
 
 ### How projects interact with threads
 
-Projects control **how many sessions run in parallel** via `execution_mode` and `max_concurrent`. Threads are *within* a session, so they don't change the project's concurrency model.
+Projects control **how many sessions run in parallel** via `execution_mode` and `max_concurrent`. Threads are *within* a session, so they don't affect the project's concurrency model at all.
 
 ```
 Project (execution_mode: parallel, max_concurrent: 3)
 │
-├─ ProjectTask A → Session 1 (2 threads: claude + codex)  ← counts as 1 session
-├─ ProjectTask B → Session 2 (1 thread: claude)           ← counts as 1 session
-├─ ProjectTask C → Session 3 (1 thread: codex)            ← counts as 1 session
+├─ ProjectTask A → Session 1 (user added 2nd thread)  ← still counts as 1 session
+├─ ProjectTask B → Session 2 (single thread)           ← counts as 1 session
+├─ ProjectTask C → Session 3 (single thread)           ← counts as 1 session
 │
 └─ ProjectTask D → waiting (max_concurrent reached)
 ```
 
-**Key insight: threads don't consume additional concurrency slots.** A session with 3 threads still counts as 1 session toward `max_concurrent`. This is intentional — threads are parallel *within* a unit of work, not parallel units of work.
+**Threads don't consume concurrency slots.** A session with 3 threads counts as 1 session toward `max_concurrent`. This is intentional — threads are user-initiated exploration within a unit of work, not additional units of work.
 
-However, threads do consume resources (containers, API costs). So we add:
+To prevent cost sprawl, we cap threads per session at the org level:
 
 ```go
-type Project struct {
+type Organization struct {
     // ...existing fields...
-    MaxThreadsPerSession int `json:"max_threads_per_session"` // default: 3
+    MaxThreadsPerSession int `json:"max_threads_per_session"` // default: 4
 }
 ```
 
@@ -552,7 +448,7 @@ type Project struct {
 │  "What should we work on right now?"             │
 │  Controls: which issues, which projects get      │
 │            slots, task decomposition, agent       │
-│            selection, thread specification        │
+│            selection                             │
 ├─────────────────────────────────────────────────┤
 │  Sessions                                        │
 │  "A workspace for producing one PR."             │
@@ -561,8 +457,8 @@ type Project struct {
 ├─────────────────────────────────────────────────┤
 │  Threads                                         │
 │  "One agent doing one piece of the work."        │
-│  Contains: chat, container, agent state,         │
-│            individual diff                       │
+│  User-initiated. Contains: chat, container,      │
+│  agent state, individual diff                    │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -571,69 +467,44 @@ Each layer has a clear responsibility:
 | Layer | Decides | Persists? | Scope |
 |-------|---------|-----------|-------|
 | **Project** | What goals to pursue, how many sessions can run in parallel | Yes (across cycles) | Long-lived |
-| **PM Plan** | What to work on this cycle, which agents, whether to use threads | No (ephemeral JSON) | One cycle |
-| **Session** | Nothing — it's the execution container | Yes | One PR |
-| **Thread** | Nothing — it executes instructions | Yes | One agent's work |
+| **PM Plan** | What to work on this cycle, which agent, task decomposition | No (ephemeral JSON) | One cycle |
+| **Session** | Nothing — it's the execution container, starts with 1 thread | Yes | One PR |
+| **Thread** | Nothing — user-created, executes instructions | Yes | One agent's work |
 
 ### What doesn't change
 
-- **PM plan creation flow** (`pm/service.go` → `Analyze()`) — same, but plan output can now include thread specs
-- **PM plan execution flow** (`pm/execute.go` → `executePlan()`) — same, but `createSession()` now optionally creates multiple threads
-- **Project task dispatch** (`pm/project_execute.go`) — same, but dispatched sessions can have threads
-- **Project execution_mode** — still controls session-level parallelism, not thread-level
-- **Decision log** — still tracks PM decisions at the task level, not thread level
+- **PM plan creation flow** (`pm/service.go` → `Analyze()`) — unchanged, no thread awareness needed
+- **PM plan execution flow** (`pm/execute.go` → `executePlan()`) — unchanged, creates single-thread sessions as before
+- **Project task dispatch** (`pm/project_execute.go`) — unchanged, creates single-thread sessions as before
+- **Project execution_mode** — still controls session-level parallelism
+- **Decision log** — still tracks PM decisions at the task level
 - **Slot allocation** — still counts sessions, not threads
-- **The PM agent prompt** — gains a new capability (specifying threads) but the overall analysis flow is unchanged
+- **The PM agent prompt** — no changes needed
+- **The Task struct** — no changes needed
 
-### What the PM agent prompt change looks like
-
-The PM agent's output schema adds an optional `threads` array to tasks:
-
-```
-For each task, you may optionally specify multiple agent threads
-if the work benefits from parallel execution by different agents.
-Use threads when:
-- The task spans backend + frontend (different agents per domain)
-- You want one agent to fix and another to independently verify
-- A clustered root cause has multiple fix sites best handled separately
-
-If you don't specify threads, the task runs as a single agent session
-(same as today).
-```
-
-### Example: PM creates a multi-threaded session for a project
+### Example: user adds a thread to a PM-created session
 
 ```
-PM Analysis Cycle:
-  Project: "Add Audit Logging" (active, parallel, max_concurrent: 2)
+1. PM creates a reactive task:
+   Task: "Fix auth token expiry" → Session (claude_code, single thread)
 
-PM Output:
-  ProjectPlan for "Add Audit Logging":
-    NewTasks:
-      - title: "Add audit log infrastructure"
-        approach: "Create store, handler, and viewer page"
-        confidence: 0.85
-        threads:
-          - label: "Backend"
-            agent_type: "claude_code"
-            instructions: "Create audit_store.go, audit handler, and model.
-                          Follow patterns in sessions handler."
-            file_scope: ["internal/"]
-          - label: "Frontend"
-            agent_type: "codex"
-            instructions: "Create audit log viewer page with DataTable
-                          and FilterTabs. Follow sessions page patterns."
-            file_scope: ["frontend/"]
+2. User opens the session, watches Claude working on the fix
 
-Execution:
-  1. Create ProjectTask (title: "Add audit log infrastructure")
-  2. Create Session (project_task_id → task, pm_plan_id → plan)
-  3. Create 2 SessionThreads:
-     - Thread "Backend" (claude_code, runs in container 1)
-     - Thread "Frontend" (codex, runs in container 2)
-  4. Both threads run in parallel within the session
-  5. Combined diff → validation → PR
+3. User thinks: "I wonder if Codex would approach this differently"
+   → Clicks [+], selects Codex, labels it "Codex approach"
+   → New thread starts in its own container, same branch
+
+4. Both agents work in parallel. User compares approaches
+   in the split-pane view.
+
+5. User decides Claude's approach is better:
+   → Ends the Codex thread (changes discarded)
+   → Claude's thread continues → PR
+
+6. Alternatively, user could end Claude's thread and keep Codex's.
 ```
+
+This keeps the PM simple and predictable while giving users the power to explore when they want to.
 
 ---
 
@@ -641,8 +512,8 @@ Execution:
 
 1. **File scope enforcement**: Should we enforce that threads only modify files in their `file_scope`, or keep it advisory? Enforcement prevents conflicts but limits flexibility.
 2. **Thread-to-thread communication**: Can thread A read what thread B has done? Currently no (separate containers). Should we add a "sync" step where a thread pulls the latest from the branch?
-3. **Cost controls**: Multiple threads = multiple agent runs = higher costs. Should we show estimated cost before starting? Should there be a max threads-per-session limit?
-4. **Thread dependencies**: Should threads support "wait for thread X to complete before starting"? The PLAN.md format had `Depends on` — do we carry that into threads?
+3. **Cost visibility**: Multiple threads = multiple agent runs = higher costs. Should we show per-thread cost in the column header? Should the `[+]` popover show an estimated cost warning?
+4. **Discarding a thread's changes**: When the user ends a thread whose changes they don't want (the "compare and pick" flow), how do we cleanly discard that thread's commits from the branch? Revert commits? Separate branches per thread?
 5. **Validation**: Run validation per-thread (each thread's diff independently) or once on the combined result? Per-thread catches issues earlier; combined catches integration issues.
-6. **PM agent learning**: How does the PM agent learn when to use multi-threaded sessions vs single-threaded? Track success rates by thread count and adjust the prompt context?
-7. **Thread failure handling**: If one thread fails but another succeeds, does the session fail? Can we ship the successful thread's diff and retry the failed one?
+6. **Thread limit**: Default `max_threads_per_session` is 4. Is that right? Too low limits the compare-3-agents use case. Too high risks cost surprise.
+7. **Future: PM-initiated threads**: If we later decide the PM should create multi-threaded sessions (e.g., for cross-domain features), the data model supports it — we just add a `Threads` field to `Task`. But we're explicitly deferring this.
