@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState, useEffect, type CSSProperties } from "react";
+import { useCallback, useMemo, useRef, useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -21,9 +21,11 @@ import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { LogViewer } from "@/components/log-viewer";
 import { DiffViewer } from "@/components/diff-viewer";
+import { ChatTimeline } from "@/components/chat-timeline";
 import { api } from "@/lib/api";
 import { SSE_EVENT, addSSEListener } from "@/lib/sse";
-import type { Session, SessionMessage, User, Validation } from "@/lib/types";
+import { buildTimeline } from "@/lib/timeline";
+import type { Session, SessionLog, User, Validation } from "@/lib/types";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
 import { cn } from "@/lib/utils";
@@ -386,21 +388,122 @@ function ChangesTab({ session, sessionId }: { session: Session; sessionId: strin
 // Main chat panel
 // ---------------------------------------------------------------------------
 
-function ChatPanel({ session, sessionId }: { session: Session; sessionId: string }) {
+const MAX_SSE_RECONNECT_ATTEMPTS = 5;
+const BASE_SSE_RECONNECT_DELAY_MS = 1000;
+
+function ChatPanel({ session, sessionId, isActive }: { session: Session; sessionId: string; isActive: boolean }) {
   const queryClient = useQueryClient();
   const [message, setMessage] = useState("");
+  const [streamedLogs, setStreamedLogs] = useState<SessionLog[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const seenLogIds = useRef<Set<number>>(new Set());
+  const reconnectAttempts = useRef(0);
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(null);
+  const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
+
+  const isIdle = session.status === "idle";
+  const isRunning = session.status === "running";
 
   const { data: messagesData } = useQuery({
     queryKey: ["session", sessionId, "messages"],
     queryFn: () => api.sessions.getMessages(sessionId),
-    refetchInterval: session.status === "running" ? 3000 : false,
+    refetchInterval: isRunning ? 3000 : false,
+  });
+
+  const { data: logsData } = useQuery({
+    queryKey: ["session", sessionId, "logs"],
+    queryFn: () => api.sessions.getLogs(sessionId),
+    refetchInterval: isActive ? 3000 : false,
   });
 
   const messages = messagesData?.data || [];
-  const isIdle = session.status === "idle";
-  const isRunning = session.status === "running";
+  const fetchedLogs = logsData?.data || [];
+
+  // Merge fetched logs with streamed logs, deduplicating by ID.
+  const allLogs = useMemo(() => {
+    const idSet = new Set(fetchedLogs.map((l) => l.id));
+    const extra = streamedLogs.filter((l) => !idSet.has(l.id));
+    return [...fetchedLogs, ...extra];
+  }, [fetchedLogs, streamedLogs]);
+
+  const timelineEntries = useMemo(
+    () => buildTimeline(messages, allLogs),
+    [messages, allLogs]
+  );
+
+  // SSE streaming for real-time logs when the session is active.
+  const mergeLogs = useCallback((newLogs: SessionLog[]) => {
+    setStreamedLogs((prev) => {
+      const toAdd: SessionLog[] = [];
+      for (const log of newLogs) {
+        if (!seenLogIds.current.has(log.id)) {
+          seenLogIds.current.add(log.id);
+          toAdd.push(log);
+        }
+      }
+      if (toAdd.length === 0) return prev;
+      return [...prev, ...toAdd];
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!isActive) return;
+
+    let eventSource: EventSource | null = null;
+    let cancelled = false;
+
+    function connect() {
+      if (cancelled) return;
+
+      eventSource = new EventSource(
+        `${apiBase}/api/v1/sessions/${sessionId}/logs/stream`,
+        { withCredentials: true }
+      );
+
+      eventSource.onopen = () => {
+        reconnectAttempts.current = 0;
+      };
+
+      addSSEListener(eventSource, SSE_EVENT.LOG, (log) => {
+        mergeLogs([log]);
+      });
+
+      addSSEListener(eventSource, SSE_EVENT.STATUS, (updated) => {
+        queryClient.setQueryData(["session", sessionId], { data: updated });
+      });
+
+      addSSEListener(eventSource, SSE_EVENT.DONE, (updated) => {
+        queryClient.setQueryData(["session", sessionId], { data: updated });
+        eventSource?.close();
+        queryClient.invalidateQueries({ queryKey: ["session", sessionId, "logs"] });
+        queryClient.invalidateQueries({ queryKey: ["session", sessionId, "messages"] });
+      });
+
+      eventSource.onerror = () => {
+        eventSource?.close();
+        queryClient.invalidateQueries({ queryKey: ["session", sessionId, "logs"] });
+
+        if (!cancelled && reconnectAttempts.current < MAX_SSE_RECONNECT_ATTEMPTS) {
+          const delay =
+            BASE_SSE_RECONNECT_DELAY_MS *
+            Math.pow(2, reconnectAttempts.current);
+          reconnectAttempts.current += 1;
+          reconnectTimer.current = setTimeout(connect, delay);
+        }
+      };
+    }
+
+    connect();
+
+    return () => {
+      cancelled = true;
+      eventSource?.close();
+      if (reconnectTimer.current) {
+        clearTimeout(reconnectTimer.current);
+      }
+    };
+  }, [sessionId, apiBase, isActive, mergeLogs, queryClient]);
 
   const sendMutation = useMutation({
     mutationFn: () => api.sessions.sendMessage(sessionId, message),
@@ -429,12 +532,12 @@ function ChatPanel({ session, sessionId }: { session: Session; sessionId: string
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
   }, [message]);
 
-  // Scroll to bottom when messages update
+  // Scroll to bottom when timeline updates
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages]);
+  }, [timelineEntries.length]);
 
   function handleKeyDown(e: React.KeyboardEvent) {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -447,49 +550,14 @@ function ChatPanel({ session, sessionId }: { session: Session; sessionId: string
 
   return (
     <div className="flex flex-col h-full">
-      {/* Message thread */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto space-y-3 p-4">
-        {messages.length === 0 && !isRunning && (
+      {/* Unified timeline */}
+      <div ref={scrollRef} className="flex-1 overflow-y-auto space-y-2 p-4">
+        {timelineEntries.length === 0 && !isRunning && (
           <div className="text-center py-8 text-sm text-muted-foreground">
-            No messages yet. The session is processing its initial turn.
+            No activity yet. The session is processing its initial turn.
           </div>
         )}
-        {messages.map((msg: SessionMessage) => (
-          <div
-            key={msg.id}
-            className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-          >
-            <div
-              className={cn(
-                "max-w-[80%] rounded-lg px-3 py-2 text-sm",
-                msg.role === "user"
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-muted"
-              )}
-            >
-              <p className="whitespace-pre-wrap">{msg.content}</p>
-              <p className={cn(
-                "text-[10px] mt-1",
-                msg.role === "user" ? "text-primary-foreground/70" : "text-muted-foreground"
-              )}>
-                Turn {msg.turn_number}
-              </p>
-            </div>
-          </div>
-        ))}
-        {isRunning && (
-          <div className="flex justify-start">
-            <div className="bg-muted rounded-lg px-3 py-2 text-sm">
-              <span className="flex items-center gap-2 text-muted-foreground">
-                <span className="relative flex h-2 w-2">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75" />
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-primary" />
-                </span>
-                Agent is working...
-              </span>
-            </div>
-          </div>
-        )}
+        <ChatTimeline entries={timelineEntries} isRunning={isRunning} />
       </div>
 
       {/* Error display */}
@@ -551,7 +619,6 @@ const DEFAULT_DETAIL = 384;
 
 export function SessionDetailContent({ id }: { id: string }) {
   const terminalStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
-  const queryClient = useQueryClient();
   const [detailTab, setDetailTab] = useState<DetailTab>("overview");
   const [showDetailPanel, setShowDetailPanel] = useState(true);
   const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL);
@@ -575,39 +642,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   const members = membersData?.data ?? [];
   const isActive = session ? !terminalStatuses.has(session.status) : false;
   const isMultiTurn = session && session.current_turn > 0;
-
-  // Update the session query cache when we receive status updates via SSE.
-  const handleSessionUpdate = useCallback(
-    (updated: Session) => {
-      queryClient.setQueryData(["session", id], { data: updated });
-    },
-    [queryClient, id]
-  );
-
-  // Subscribe to session status changes via SSE.
-  const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
-  useEffect(() => {
-    if (!isActive) return;
-
-    const eventSource = new EventSource(
-      `${apiBase}/api/v1/sessions/${id}/logs/stream`,
-      { withCredentials: true }
-    );
-
-    addSSEListener(eventSource, SSE_EVENT.STATUS, handleSessionUpdate);
-    addSSEListener(eventSource, SSE_EVENT.DONE, (session) => {
-      handleSessionUpdate(session);
-      eventSource.close();
-    });
-
-    eventSource.onerror = () => {
-      eventSource.close();
-    };
-
-    return () => {
-      eventSource.close();
-    };
-  }, [id, apiBase, isActive, handleSessionUpdate]);
 
   if (isLoading) {
     return (
@@ -674,7 +708,7 @@ export function SessionDetailContent({ id }: { id: string }) {
 
         {/* Chat panel */}
         <div className="flex-1 min-h-0">
-          <ChatPanel session={session} sessionId={id} />
+          <ChatPanel session={session} sessionId={id} isActive={isActive} />
         </div>
       </div>
 
