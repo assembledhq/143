@@ -1,6 +1,6 @@
 "use client";
 
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, KeyRound, Sparkles, Check, Eye, EyeOff, Shield } from "lucide-react";
 import { api } from "@/lib/api";
@@ -302,6 +302,8 @@ export default function AgentPage() {
 
   /* ---------- Org settings state (agent config + execution combined) ---------- */
 
+  // Override-only state: null until the user edits, then holds the user's value.
+  // Effective values are derived as: override ?? serverValue ?? default.
   const [defaultAgentTypeOverride, setDefaultAgentTypeOverride] = useState<OrgSettings["default_agent_type"] | null>(null);
   const [agentConfigOverride, setAgentConfigOverride] = useState<Record<string, Record<string, string>> | null>(null);
   const [codexCredentialMethodOverride, setCodexCredentialMethodOverride] = useState<"chatgpt" | "api_key" | null>(null);
@@ -309,26 +311,15 @@ export default function AgentPage() {
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
   const [orgSaveStatus, setOrgSaveStatus] = useState<"idle" | "success" | "error">("idle");
 
-  const [autonomyLevel, setAutonomyLevel] = useState(DEFAULT_EXECUTION_SETTINGS.autonomy_level);
-  const [aggressiveness, setAggressiveness] = useState(String(DEFAULT_EXECUTION_SETTINGS.execution_aggressiveness));
-  const [maxConcurrent, setMaxConcurrent] = useState(String(DEFAULT_EXECUTION_SETTINGS.max_concurrent_runs));
-
-  // Sync server data into all org form state (agent config + execution)
-  const settingsData = settingsResponse?.data?.settings;
-  useEffect(() => {
-    if (!settingsData) return;
-    const s = settingsData as OrgSettings;
-    // Execution
-    setAutonomyLevel(s.autonomy_level ?? DEFAULT_EXECUTION_SETTINGS.autonomy_level);
-    setAggressiveness(String(s.execution_aggressiveness ?? DEFAULT_EXECUTION_SETTINGS.execution_aggressiveness));
-    setMaxConcurrent(String(s.max_concurrent_runs ?? DEFAULT_EXECUTION_SETTINGS.max_concurrent_runs));
-    // Agent config
-    if (s.default_agent_type) setDefaultAgentTypeOverride(s.default_agent_type);
-    setAgentConfigOverride(s.agent_config ?? {});
-  }, [settingsData]);
+  const [autonomyLevelOverride, setAutonomyLevelOverride] = useState<string | null>(null);
+  const [aggressivenessOverride, setAggressivenessOverride] = useState<string | null>(null);
+  const [maxConcurrentOverride, setMaxConcurrentOverride] = useState<string | null>(null);
 
   const defaultAgentType = defaultAgentTypeOverride ?? orgSettings?.default_agent_type ?? "codex";
   const agentConfig = agentConfigOverride ?? orgSettings?.agent_config ?? {};
+  const autonomyLevel = autonomyLevelOverride ?? orgSettings?.autonomy_level ?? DEFAULT_EXECUTION_SETTINGS.autonomy_level;
+  const aggressiveness = aggressivenessOverride ?? String(orgSettings?.execution_aggressiveness ?? DEFAULT_EXECUTION_SETTINGS.execution_aggressiveness);
+  const maxConcurrent = maxConcurrentOverride ?? String(orgSettings?.max_concurrent_runs ?? DEFAULT_EXECUTION_SETTINGS.max_concurrent_runs);
 
   const hasCodexAPIKey = useMemo(() => {
     const codexServerDefaults = (agentDefaultsResponse?.data ?? {}).codex ?? {};
@@ -840,7 +831,7 @@ export default function AgentPage() {
                     <Label>Autonomy level</Label>
                     <RadioGroup
                       value={autonomyLevel}
-                      onValueChange={(v) => setAutonomyLevel(v as OrgSettings["autonomy_level"] & string)}
+                      onValueChange={(v) => setAutonomyLevelOverride(v)}
                       className="grid grid-cols-3 gap-3"
                     >
                       {[
@@ -863,7 +854,7 @@ export default function AgentPage() {
                     <Label>Execution aggressiveness</Label>
                     <RadioGroup
                       value={aggressiveness}
-                      onValueChange={setAggressiveness}
+                      onValueChange={setAggressivenessOverride}
                       className="grid grid-cols-4 gap-3"
                     >
                       {[
@@ -891,7 +882,7 @@ export default function AgentPage() {
                       min={1}
                       max={10}
                       value={maxConcurrent}
-                      onChange={(e) => setMaxConcurrent(e.target.value)}
+                      onChange={(e) => setMaxConcurrentOverride(e.target.value)}
                     />
                   </div>
                 </div>
