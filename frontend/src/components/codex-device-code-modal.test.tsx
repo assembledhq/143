@@ -1,0 +1,117 @@
+import { describe, expect, it, vi } from "vitest";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { server } from "@/test/mocks/server";
+import { CodexDeviceCodeModal } from "./codex-device-code-modal";
+
+const INITIATE_URL = "/api/v1/settings/codex-auth/initiate";
+const STATUS_URL = "/api/v1/settings/codex-auth/status";
+
+const mockDeviceAuth = {
+  user_code: "ABCD-1234",
+  verification_uri: "https://auth.example.com/device",
+  expires_in: 600,
+};
+
+describe("CodexDeviceCodeModal", () => {
+  it("shows initiating state then device code on success", async () => {
+    server.use(
+      http.post(INITIATE_URL, () => {
+        return HttpResponse.json({ data: mockDeviceAuth });
+      }),
+      http.get(STATUS_URL, () => {
+        return HttpResponse.json({ data: { status: "pending" } });
+      }),
+    );
+
+    render(<CodexDeviceCodeModal onClose={vi.fn()} />);
+
+    expect(screen.getByText(/starting authentication/i)).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(screen.getByText("ABCD-1234")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("https://auth.example.com/device")).toBeInTheDocument();
+    expect(screen.getByText(/waiting for authentication/i)).toBeInTheDocument();
+  });
+
+  it("shows error state when initiation fails", async () => {
+    server.use(
+      http.post(INITIATE_URL, () => {
+        return HttpResponse.json({ error: { code: "FAIL", message: "Nope" } }, { status: 500 });
+      }),
+    );
+
+    render(<CodexDeviceCodeModal onClose={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/failed to start authentication/i)).toBeInTheDocument();
+    });
+  });
+
+  it("calls onClose when Cancel is clicked", async () => {
+    const onClose = vi.fn();
+
+    server.use(
+      http.post(INITIATE_URL, () => {
+        return HttpResponse.json({ data: mockDeviceAuth });
+      }),
+      http.get(STATUS_URL, () => {
+        return HttpResponse.json({ data: { status: "pending" } });
+      }),
+    );
+
+    render(<CodexDeviceCodeModal onClose={onClose} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("ABCD-1234")).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: /cancel/i }));
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("shows success state when auth completes", async () => {
+    server.use(
+      http.post(INITIATE_URL, () => {
+        return HttpResponse.json({ data: mockDeviceAuth });
+      }),
+      http.get(STATUS_URL, () => {
+        return HttpResponse.json({ data: { status: "completed" } });
+      }),
+    );
+
+    render(<CodexDeviceCodeModal onClose={vi.fn()} />);
+
+    await waitFor(
+      () => {
+        expect(screen.getByText(/connected successfully/i)).toBeInTheDocument();
+      },
+      { timeout: 5000 },
+    );
+  });
+
+  it("shows expired state and Try again button", async () => {
+    server.use(
+      http.post(INITIATE_URL, () => {
+        return HttpResponse.json({ data: mockDeviceAuth });
+      }),
+      http.get(STATUS_URL, () => {
+        return HttpResponse.json({ data: { status: "expired" } });
+      }),
+    );
+
+    render(<CodexDeviceCodeModal onClose={vi.fn()} />);
+
+    await waitFor(
+      () => {
+        expect(screen.getByText(/code expired/i)).toBeInTheDocument();
+      },
+      { timeout: 5000 },
+    );
+
+    expect(screen.getByRole("button", { name: /try again/i })).toBeInTheDocument();
+  });
+});
