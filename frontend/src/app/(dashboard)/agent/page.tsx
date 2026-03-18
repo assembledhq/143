@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { type ReactNode, useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, KeyRound, Sparkles, Check, Eye, EyeOff, Shield } from "lucide-react";
 import { api } from "@/lib/api";
@@ -126,9 +126,10 @@ function RadioCard({
   label: string;
   description?: string;
   selected: boolean;
-  icon?: React.ReactNode;
+  icon?: ReactNode;
   ariaLabel?: string;
 }) {
+  const indent = icon ? "pl-10" : "pl-6";
   return (
     <label
       className={`relative flex cursor-pointer flex-col rounded-lg border p-3 shadow-sm transition-all duration-150 ${
@@ -138,12 +139,12 @@ function RadioCard({
       }`}
     >
       <div className="flex items-center gap-2">
-        <RadioGroupItem value={value} aria-label={ariaLabel} />
+        <RadioGroupItem value={value} {...(ariaLabel ? { "aria-label": ariaLabel } : {})} />
         {icon}
         <span className="text-[13px] font-medium">{label}</span>
       </div>
       {description && (
-        <span className="mt-1 pl-6 text-xs text-muted-foreground">
+        <span className={`mt-1 ${indent} text-xs text-muted-foreground`}>
           {description}
         </span>
       )}
@@ -834,7 +835,7 @@ export default function AgentPage() {
 
       {/* Sticky save bar for org settings (admin only) */}
       {isAdmin && (
-        <div className="sticky bottom-0 -mx-4 mt-6 border-t bg-background/95 px-4 py-3 backdrop-blur supports-[backdrop-filter]:bg-background/80">
+        <div className="sticky bottom-0 z-10 -mx-4 mt-6 border-t bg-background/95 px-4 py-3 backdrop-blur supports-[backdrop-filter]:bg-background/80">
           <div className="flex items-center justify-end gap-3">
             <Button onClick={handleSaveOrgSettings} disabled={orgMutation.isPending}>
               {orgMutation.isPending ? "Saving..." : "Save organization settings"}
