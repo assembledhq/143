@@ -9,6 +9,8 @@ import { useQueryState, parseAsString } from "nuqs";
 import { cn, formatTimeAgo } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
 import { api } from "@/lib/api";
+import { queryKeys } from "@/lib/query-keys";
+import { useOptimisticSessions, type OptimisticSession } from "@/contexts/optimistic-sessions";
 import type { Session } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
@@ -57,6 +59,35 @@ function sessionTitle(session: Session): string {
 }
 
 // ---------------------------------------------------------------------------
+// Optimistic (unsaved) session row
+// ---------------------------------------------------------------------------
+
+function OptimisticSessionRow({ session }: { session: OptimisticSession }) {
+  const cfg = statusConfig.pending;
+  return (
+    <div className="block rounded-lg px-3 py-2.5 mb-0.5">
+      <div className="flex items-start gap-2.5 min-w-0">
+        <div className="mt-1.5 shrink-0">
+          <span className="relative flex h-2 w-2">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary/60 opacity-75" />
+            <span className="relative inline-flex rounded-full h-2 w-2 bg-primary" />
+          </span>
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="text-[13px] font-medium text-foreground truncate leading-snug">
+            {session.title}
+          </p>
+          <div className="flex items-center gap-2 mt-0.5">
+            <span className="text-[11px] text-muted-foreground">{cfg.label}</span>
+            <span className="text-[11px] text-muted-foreground/50">just now</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Sidebar component
 // ---------------------------------------------------------------------------
 
@@ -68,8 +99,10 @@ export function SessionSidebar() {
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
   const [repo] = useQueryState("repo");
 
+  const { optimisticSessions } = useOptimisticSessions();
+
   const { data, isLoading } = useQuery({
-    queryKey: ["sessions", repo],
+    queryKey: queryKeys.sessions.list(repo),
     queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined }),
     refetchInterval: 10000,
   });
@@ -171,6 +204,11 @@ export function SessionSidebar() {
             </div>
           </Link>
         )}
+
+        {(currentFilter === "all" || currentFilter === "active") &&
+          optimisticSessions.map((os) => (
+            <OptimisticSessionRow key={os.id} session={os} />
+          ))}
 
         {isLoading && (
           <div className="px-2 py-8 text-center text-[12px] text-muted-foreground">

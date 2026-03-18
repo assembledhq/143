@@ -169,7 +169,7 @@ describe('ManualSessionCreatePage', () => {
     await user.click(screen.getByRole('button', { name: 'Start session' }));
 
     await waitFor(() => {
-      expect(screen.getByText('Could not start session. Please try again.')).toBeInTheDocument();
+      expect(screen.getByText('server error')).toBeInTheDocument();
     });
   });
 

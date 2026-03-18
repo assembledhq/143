@@ -2,6 +2,7 @@ import React from 'react';
 import { render, type RenderOptions } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { NuqsTestingAdapter } from 'nuqs/adapters/testing';
+import { OptimisticSessionsProvider } from '@/contexts/optimistic-sessions';
 
 function createTestQueryClient() {
   return new QueryClient({
@@ -19,7 +20,9 @@ function TestProviders({ children }: { children: React.ReactNode }) {
   return (
     <NuqsTestingAdapter>
       <QueryClientProvider client={queryClient}>
-        {children}
+        <OptimisticSessionsProvider>
+          {children}
+        </OptimisticSessionsProvider>
       </QueryClientProvider>
     </NuqsTestingAdapter>
   );
@@ -41,7 +44,9 @@ function renderWithProviders(
       return (
         <NuqsTestingAdapter searchParams={searchParams}>
           <QueryClientProvider client={queryClient}>
-            {children}
+            <OptimisticSessionsProvider>
+              {children}
+            </OptimisticSessionsProvider>
           </QueryClientProvider>
         </NuqsTestingAdapter>
       );
