@@ -1313,3 +1313,96 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 	require.Equal(t, models.MessageRoleAssistant, messages[1].Role, "assistant reply should be stored for the continued turn")
 	require.Equal(t, 2, messages[1].TurnNumber, "assistant reply should use the new turn number")
 }
+
+// ---------------------------------------------------------------------------
+// WithSandboxProvider / SandboxProviderFromContext
+// ---------------------------------------------------------------------------
+
+func TestWithSandboxProvider_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	provider := testutil.NewMockSandboxProvider()
+	ctx := agent.WithSandboxProvider(context.Background(), provider)
+
+	got := agent.SandboxProviderFromContext(ctx)
+	require.NotNil(t, got, "provider should be retrievable from context")
+	require.Equal(t, provider, got)
+}
+
+func TestSandboxProviderFromContext_ReturnsNilWhenMissing(t *testing.T) {
+	t.Parallel()
+
+	got := agent.SandboxProviderFromContext(context.Background())
+	require.Nil(t, got, "should return nil when no provider is set")
+}
+
+func TestRunAgent_InjectsSandboxProviderIntoContext(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		p := agent.SandboxProviderFromContext(ctx)
+		require.NotNil(t, p, "RunAgent must inject the SandboxProvider into the adapter's context")
+		return &agent.AgentResult{
+			Summary:         "ok",
+			ConfidenceScore: 0.9,
+			ExitCode:        0,
+		}, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.NoError(t, err)
+}
+
+func TestContinueSession_InjectsSandboxProviderIntoContext(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = "manual"
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	session.SnapshotKey = strPtr("snapshots/test/session.tar")
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Follow up",
+		},
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("snap"))), nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		p := agent.SandboxProviderFromContext(ctx)
+		require.NotNil(t, p, "ContinueSession must inject the SandboxProvider into the adapter's context")
+		return &agent.AgentResult{
+			Summary:         "continued",
+			ConfidenceScore: 0.85,
+			ExitCode:        0,
+		}, nil
+	}
+	d.snapshots.data = map[string][]byte{
+		*session.SnapshotKey: []byte("restored-snapshot"),
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session)
+	require.NoError(t, err)
+}

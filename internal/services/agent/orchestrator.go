@@ -367,7 +367,8 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		o.streamLogs(ctx, run.ID, run.OrgID, run.CurrentTurn, logCh)
 	}()
 
-	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
+	execCtx := WithSandboxProvider(ctx, o.provider)
+	result, err := adapter.Execute(execCtx, sandbox, prompt, logCh)
 	close(logCh)
 	logWg.Wait()
 
@@ -618,7 +619,8 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		o.streamLogs(ctx, session.ID, session.OrgID, turnNumber, logCh)
 	}()
 
-	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
+	execCtx := WithSandboxProvider(ctx, o.provider)
+	result, err := adapter.Execute(execCtx, sandbox, prompt, logCh)
 	close(logCh)
 	logWg.Wait()
 
