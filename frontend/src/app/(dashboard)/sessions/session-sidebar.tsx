@@ -107,7 +107,7 @@ export function SessionSidebar() {
   }, [filteredSessions, search]);
 
   return (
-    <div className="w-80 border-r border-border bg-muted/30 flex flex-col shrink-0">
+    <div className="w-full h-full border-r border-border bg-muted/30 flex flex-col">
       {/* Header */}
       <div className="px-4 pt-4 pb-2 space-y-3">
         <div className="flex items-center justify-between">

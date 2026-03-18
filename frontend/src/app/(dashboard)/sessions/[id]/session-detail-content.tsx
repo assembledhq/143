@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState, useEffect } from "react";
+import { useCallback, useRef, useState, useEffect, type CSSProperties } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -25,6 +25,7 @@ import { api } from "@/lib/api";
 import { SSE_EVENT, addSSEListener } from "@/lib/sse";
 import type { Session, SessionMessage, User, Validation } from "@/lib/types";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
+import { ResizeHandle } from "@/components/resize-handle";
 import { cn } from "@/lib/utils";
 
 const statusConfig: Record<string, { color: string; label: string }> = {
@@ -546,11 +547,21 @@ function ChatPanel({ session, sessionId }: { session: Session; sessionId: string
 // Main component
 // ---------------------------------------------------------------------------
 
+const MIN_DETAIL = 280;
+const MAX_DETAIL = 600;
+const DEFAULT_DETAIL = 384;
+
 export function SessionDetailContent({ id }: { id: string }) {
   const terminalStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
   const queryClient = useQueryClient();
   const [detailTab, setDetailTab] = useState<DetailTab>("overview");
   const [showDetailPanel, setShowDetailPanel] = useState(true);
+  const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL);
+
+  const handleDetailResize = useCallback((delta: number) => {
+    // Negative delta = dragging left = panel gets wider
+    setDetailWidth((w) => Math.min(MAX_DETAIL, Math.max(MIN_DETAIL, w - delta)));
+  }, []);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["session", id],
@@ -671,7 +682,9 @@ export function SessionDetailContent({ id }: { id: string }) {
 
       {/* Detail panel (collapsible right sidebar) */}
       {showDetailPanel && (
-        <div className="w-96 border-l border-border bg-muted/20 flex flex-col shrink-0 overflow-hidden">
+        <>
+        <ResizeHandle onResize={handleDetailResize} />
+        <div style={{ width: detailWidth }} className="border-l border-border bg-muted/20 flex flex-col shrink-0 overflow-hidden">
           {/* Detail tabs */}
           <div className="flex items-center gap-0 border-b border-border px-2 shrink-0">
             {detailTabs.map((tab) => (
@@ -701,6 +714,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             {detailTab === "logs" && <LogViewer runId={id} isActive={isActive} />}
           </div>
         </div>
+        </>
       )}
     </div>
   );
