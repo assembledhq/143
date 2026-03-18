@@ -1,4 +1,4 @@
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-coverage migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate plan plan-execute plan-status multi-review
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-coverage migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -213,45 +213,3 @@ secrets-rotate:
 		sops updatekeys --yes "$$f"; \
 	done
 	@echo "Done. Commit the updated .enc files."
-
-# ── Multi-agent orchestration ────────────────────────────────────────
-# Run multiple coding agents (Claude Code, Codex, etc.) in parallel on
-# the same codebase using git worktrees for isolation.
-#
-# Quick start:
-#   1. cp scripts/multi-agent/PLAN.template.md PLAN.md
-#   2. Edit PLAN.md with your tasks and agent assignments
-#   3. make plan-execute
-#
-# See docs/design/35-multi-agent-planning.md for the full design.
-
-# Create a new PLAN.md from the template
-plan:
-	@if [ -f PLAN.md ]; then \
-		echo "PLAN.md already exists. Edit it or remove it first."; \
-	else \
-		cp scripts/multi-agent/PLAN.template.md PLAN.md; \
-		echo "Created PLAN.md from template. Edit it with your tasks."; \
-	fi
-
-# Execute a plan: parse PLAN.md, create worktrees, dispatch to agents
-plan-execute:
-	@test -f PLAN.md || { echo "No PLAN.md found. Run 'make plan' first."; exit 1; }
-	./scripts/multi-agent/plan-execute.sh PLAN.md
-
-# Show status of all plan branches and worktrees
-plan-status:
-	./scripts/multi-agent/plan-status.sh
-
-# Run parallel PR reviews from multiple agents
-# Usage: make multi-review PR=42
-multi-review:
-	@if [ -z "$(PR)" ]; then \
-		echo "Usage: make multi-review PR=<number>"; \
-		echo ""; \
-		echo "Examples:"; \
-		echo "  make multi-review PR=42"; \
-		echo "  make multi-review PR=42 AGENTS='claude codex'"; \
-		exit 1; \
-	fi
-	./scripts/multi-agent/multi-review.sh $(PR) $(AGENTS)

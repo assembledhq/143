@@ -22,6 +22,82 @@ The goal: **a single session can have multiple coding agents running at the same
 
 ---
 
+## Data Model
+
+### New: `session_threads` table
+
+A session can have one or more threads. Each thread is one agent doing one piece of work.
+
+```sql
+CREATE TABLE session_threads (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id      UUID NOT NULL REFERENCES sessions(id),
+    org_id          UUID NOT NULL REFERENCES organizations(id),
+
+    -- Agent identity
+    agent_type      TEXT NOT NULL,             -- claude_code, codex, gemini_cli, custom
+    model_override  TEXT,                      -- optional model override
+
+    -- Thread metadata
+    label           TEXT NOT NULL,             -- "Backend API", "Frontend UI", "Tests"
+    instructions    TEXT,                      -- what this thread should do
+    file_scope      TEXT[],                    -- files this thread owns (advisory, not enforced)
+
+    -- Execution state
+    status          TEXT NOT NULL DEFAULT 'pending',
+    -- pending, running, idle, awaiting_input, completed, failed, cancelled
+    container_id    TEXT,
+    agent_session_id TEXT,                     -- external agent session ID
+    sandbox_state   TEXT NOT NULL DEFAULT 'none',
+    snapshot_key    TEXT,
+    current_turn    INT NOT NULL DEFAULT 0,
+    last_activity_at TIMESTAMPTZ,
+
+    -- Results
+    confidence_score    FLOAT,
+    result_summary      TEXT,
+    diff                TEXT,
+    failure_explanation TEXT,
+    failure_category    TEXT,
+
+    -- Timestamps
+    started_at     TIMESTAMPTZ,
+    completed_at   TIMESTAMPTZ,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT fk_session FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_session_threads_session ON session_threads(session_id);
+CREATE INDEX idx_session_threads_org_status ON session_threads(org_id, status);
+```
+
+### Modified: `session_messages` table
+
+Add `thread_id` so messages belong to a specific thread's conversation.
+
+```sql
+ALTER TABLE session_messages ADD COLUMN thread_id UUID REFERENCES session_threads(id);
+CREATE INDEX idx_session_messages_thread ON session_messages(thread_id);
+```
+
+Messages with `thread_id = NULL` are session-level messages (e.g., the initial instructions).
+
+### Modified: `sessions` table
+
+Sessions get lighter. Per-agent fields (`agent_session_id`, `sandbox_state`, `snapshot_key`, `container_id`) move to threads. The session keeps:
+
+- Identity: `id`, `org_id`, `issue_id`
+- Lifecycle: `status` (derived from thread statuses — active if any thread is active)
+- Metadata: `triggered_by_user_id`, `pm_plan_id`, `project_task_id`
+- The existing `agent_type` field becomes the "default" agent type (used for single-thread sessions for backwards compatibility)
+
+### Backwards compatibility
+
+Single-agent sessions still work. When a session has exactly one thread, the UX is identical to today. The thread is implicit — the API can auto-create it. Existing sessions are migrated to have one thread each.
+
+---
+
 ## Session Detail Page
 
 ### Single-thread (default — identical to today)
@@ -305,6 +381,34 @@ All threads in a session work on the **same branch**. Each thread's container st
 3. Conflicts are flagged to the user (thread goes to `awaiting_input`)
 
 This is the simplest model. If conflicts are common, we can add file-scope enforcement (thread A can only touch files in `internal/`, thread B only in `frontend/`), but start without it.
+
+---
+
+## API Changes
+
+### New endpoints
+
+```
+POST   /api/v1/sessions/{id}/threads              -- Create a new thread
+GET    /api/v1/sessions/{id}/threads              -- List threads for a session
+GET    /api/v1/sessions/{id}/threads/{tid}        -- Get thread detail
+POST   /api/v1/sessions/{id}/threads/{tid}/messages  -- Send message to a thread
+GET    /api/v1/sessions/{id}/threads/{tid}/messages  -- Get thread messages
+POST   /api/v1/sessions/{id}/threads/{tid}/end    -- End a specific thread
+GET    /api/v1/sessions/{id}/threads/{tid}/logs   -- Get thread logs
+```
+
+### Modified endpoints
+
+```
+GET    /api/v1/sessions/{id}                      -- Now includes threads[] in response
+POST   /api/v1/sessions/manual                    -- Accepts optional threads[] array
+GET    /api/v1/sessions/{id}/changes              -- Combined diff across all threads
+```
+
+### Backwards compatibility
+
+Existing single-agent sessions continue to work. The API auto-creates a single thread when none is specified. Existing `POST /sessions/{id}/messages` sends to the default (first) thread.
 
 ---
 
