@@ -677,3 +677,13 @@ export const projectStatusConfig: Record<string, { color: string; label: string 
   completed: { color: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400", label: "Completed" },
   cancelled: { color: "bg-red-500/10 text-red-700 dark:text-red-400", label: "Cancelled" },
 };
+
+export const projectStatusDotColor: Record<string, string> = {
+  proposed: "bg-purple-500",
+  draft: "bg-muted-foreground/50",
+  planning: "bg-yellow-500",
+  active: "bg-blue-500",
+  paused: "bg-orange-500",
+  completed: "bg-emerald-500",
+  cancelled: "bg-red-500",
+};

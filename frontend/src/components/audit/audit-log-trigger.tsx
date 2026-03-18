@@ -4,22 +4,11 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Clock } from "lucide-react";
 import { api } from "@/lib/api";
+import { formatTimeAgo } from "@/lib/utils";
 import { useAuth } from "@/hooks/use-auth";
 import type { User } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { AuditLogSidesheet } from "./audit-log-sidesheet";
-
-function formatRelativeTime(dateStr: string): string {
-  const diff = Date.now() - new Date(dateStr).getTime();
-  const minutes = Math.floor(diff / 60000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 30) return `${days}d ago`;
-  return new Date(dateStr).toLocaleDateString();
-}
 
 interface AuditLogTriggerProps {
   /** Filters to scope the audit log query (e.g., { session_id: "..." }). */
@@ -81,7 +70,7 @@ export function AuditLogTrigger({ filters, members: membersProp, title }: AuditL
       >
         <Clock className="h-3 w-3" />
         <span>
-          Updated {formatRelativeTime(latestEntry.created_at)} by {actorName}
+          Updated {formatTimeAgo(latestEntry.created_at)} by {actorName}
         </span>
       </Button>
       <AuditLogSidesheet
