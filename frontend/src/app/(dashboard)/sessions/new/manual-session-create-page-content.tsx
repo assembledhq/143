@@ -2,10 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { ArrowUp, Mic, Plus, X, ImagePlus, Paperclip, ArrowLeft } from "lucide-react";
-import Link from "next/link";
+import { ArrowUp, Mic, Plus, X, ImagePlus, Paperclip } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -193,32 +191,19 @@ export function ManualSessionCreatePageContent() {
   }
 
   return (
-    <div className="space-y-6">
-      <PageHeader
-        title="New manual session"
-        description="Describe the task, attach files or photos, then start the session."
-        action={
-          <Button variant="outline" asChild>
-            <Link href="/sessions">
-              <ArrowLeft className="mr-2 h-4 w-4" />
-              Back to sessions
-            </Link>
-          </Button>
-        }
-      />
-
-      <div className="relative mx-auto flex min-h-[calc(100vh-15rem)] w-full flex-col justify-end">
-        <div className="pointer-events-none absolute inset-x-0 flex items-center justify-center" style={{ top: "45%", transform: "translateY(-50%)" }}>
-          <div className="text-center">
-            <p className="text-3xl font-bold tracking-tight bg-[image:var(--gradient-primary)] bg-clip-text text-transparent">Let&apos;s build</p>
-            <p className="mt-2 text-sm text-muted-foreground">Start a manual session with text, files, photos, or dictation.</p>
-          </div>
+    <div className="flex flex-col h-full">
+      {/* Centered hero + composer */}
+      <div className="flex-1 flex flex-col items-center justify-center px-6 pb-4">
+        <div className="text-center mb-8">
+          <p className="text-3xl font-bold tracking-tight bg-[image:var(--gradient-primary)] bg-clip-text text-transparent">Let&apos;s build</p>
+          <p className="mt-2 text-sm text-muted-foreground">Start a manual session with text, files, photos, or dictation.</p>
         </div>
+      </div>
 
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-40 bg-gradient-to-t from-background via-background/80 to-transparent" />
-
-        <Card className="relative w-full border-border/60 bg-card shadow-lg rounded-2xl dark:shadow-[0_0_20px_oklch(0.6_0.15_270_/_6%)]">
-          <CardContent className="space-y-0 p-5 md:p-6">
+      {/* Composer pinned to bottom */}
+      <div className="shrink-0 px-4 pb-4">
+        <Card className="w-full max-w-3xl mx-auto border-border/60 bg-card shadow-lg rounded-2xl dark:shadow-[0_0_20px_oklch(0.6_0.15_270_/_6%)]">
+          <CardContent className="space-y-0 p-4">
             <Textarea
               ref={messageInputRef}
               value={message}
@@ -274,7 +259,7 @@ export function ManualSessionCreatePageContent() {
               </div>
             )}
 
-            <div className="flex items-center gap-1 pt-3">
+            <div className="flex items-center gap-1 pt-2">
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button variant="ghost" size="icon" aria-label="Add files or photos" className="h-8 w-8 rounded-full text-muted-foreground hover:text-foreground">

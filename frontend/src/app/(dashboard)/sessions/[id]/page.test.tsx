@@ -49,32 +49,26 @@ describe('SessionDetailPage', () => {
     expect(elements.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('shows back to sessions link', async () => {
-    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
-    await screen.findAllByText('Fixed TypeError by adding null check');
-    expect(screen.getByText('Back to sessions')).toBeInTheDocument();
-  });
-
   it('shows agent type label', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
-    expect(screen.getByText('Claude Code session')).toBeInTheDocument();
+    expect(screen.getAllByText(/Claude Code/).length).toBeGreaterThanOrEqual(1);
   });
 
-  it('shows overview tab with status and confidence', async () => {
+  it('shows overview tab with status and confidence in detail panel', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
     expect(screen.getAllByText('Completed').length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText('92%')).toBeInTheDocument();
   });
 
-  it('shows tabs for Overview, Logs, Changes, Validation', async () => {
+  it('shows detail panel tabs for Overview, Logs, Changes, Validation', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
-    expect(screen.getByRole('tab', { name: 'Overview' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'Logs' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'Changes' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'Validation' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Overview' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Logs' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Changes' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Validation' })).toBeInTheDocument();
   });
 
   it('renders failed session with failure details', async () => {
@@ -110,7 +104,7 @@ describe('SessionDetailPage', () => {
     ).toBeInTheDocument();
   });
 
-  it('shows result summary card', async () => {
+  it('shows result summary card in overview', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
     expect(screen.getByText('Result')).toBeInTheDocument();
@@ -146,7 +140,7 @@ describe('SessionDetailPage', () => {
     expect(screen.queryByText('Triggered by')).not.toBeInTheDocument();
   });
 
-  it('shows Chat tab and defaults to it for idle multi-turn session', async () => {
+  it('shows chat messages for idle multi-turn session', async () => {
     const idleSession: Session = {
       ...mockSessions[0],
       status: 'idle',
@@ -169,14 +163,13 @@ describe('SessionDetailPage', () => {
     );
 
     renderWithProviders(<SessionDetailContent id={idleSession.id} />);
-    expect(await screen.findByRole('tab', { name: 'Chat' })).toBeInTheDocument();
     expect(await screen.findByText('Fix the bug')).toBeInTheDocument();
     expect(screen.getByText('Done fixing')).toBeInTheDocument();
-    // Turn indicator shown in subtitle
+    // Turn indicator shown in header
     expect(screen.getByText(/Turn 2/)).toBeInTheDocument();
   });
 
-  it('shows empty message state in Chat tab when no messages', async () => {
+  it('shows empty message state when no messages', async () => {
     const idleSession: Session = {
       ...mockSessions[0],
       status: 'idle',
@@ -196,7 +189,7 @@ describe('SessionDetailPage', () => {
     expect(screen.getByPlaceholderText('Send a follow-up message...')).toBeInTheDocument();
   });
 
-  it('shows running indicator in Chat tab for running session', async () => {
+  it('shows running indicator for running session', async () => {
     const runningSession: Session = {
       ...mockSessions[0],
       status: 'running',
@@ -219,9 +212,9 @@ describe('SessionDetailPage', () => {
   it('shows validation tab with check results', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
-    // Click the Validation tab
+    // Click the Validation tab button
     const user = userEvent.setup();
-    const validationTab = screen.getByRole('tab', { name: 'Validation' });
+    const validationTab = screen.getByRole('button', { name: 'Validation' });
     await user.click(validationTab);
     expect(await screen.findByText('Direction check')).toBeInTheDocument();
     expect(screen.getByText('Correctness check')).toBeInTheDocument();
@@ -243,7 +236,7 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
     const user = userEvent.setup();
-    const changesTab = screen.getByRole('tab', { name: 'Changes' });
+    const changesTab = screen.getByRole('button', { name: 'Changes' });
     await user.click(changesTab);
     expect(await screen.findByText('View on GitHub')).toBeInTheDocument();
     expect(screen.getByText('example/repo #42')).toBeInTheDocument();

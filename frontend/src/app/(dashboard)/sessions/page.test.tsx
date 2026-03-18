@@ -1,9 +1,9 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { renderWithProviders, screen } from '@/test/test-utils';
 import { server } from '@/test/mocks/server';
 import { mockSessions, mockMembers } from '@/test/mocks/handlers';
-import { SessionsPageContent } from './sessions-page-content';
+import { SessionSidebar } from './session-sidebar';
 import type { Session, User, ListResponse } from '@/lib/types';
 
 // Mock next/link to render a plain anchor
@@ -13,43 +13,39 @@ vi.mock('next/link', () => ({
   ),
 }));
 
-// Mock next/navigation — SessionsPageContent uses useRouter for row clicks
+let mockPathname = '/sessions';
+
+// Mock next/navigation
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn() }),
   useSearchParams: () => new URLSearchParams(),
-  usePathname: () => '/sessions',
+  usePathname: () => mockPathname,
+  useParams: () => ({}),
 }));
 
-describe('SessionsPage', () => {
+describe('SessionSidebar', () => {
+  beforeEach(() => {
+    mockPathname = '/sessions';
+  });
+
   it('shows loading state initially', () => {
-    renderWithProviders(<SessionsPageContent />);
-    expect(screen.getByText('Loading sessions...')).toBeInTheDocument();
+    renderWithProviders(<SessionSidebar />);
+    expect(screen.getByText('Loading...')).toBeInTheDocument();
   });
 
   it('renders sessions returned from the API', async () => {
-    renderWithProviders(<SessionsPageContent />);
+    renderWithProviders(<SessionSidebar />);
 
     expect(
       await screen.findByText('Fixed TypeError by adding null check'),
     ).toBeInTheDocument();
   });
 
-  it('shows agent type badges', async () => {
-    renderWithProviders(<SessionsPageContent />);
+  it('displays New session link at top', async () => {
+    renderWithProviders(<SessionSidebar />);
 
-    await screen.findByText('Fixed TypeError by adding null check');
-
-    expect(screen.getByText('claude code')).toBeInTheDocument();
-    expect(screen.getByText('codex')).toBeInTheDocument();
-  });
-
-  it('displays page header with title and description', async () => {
-    renderWithProviders(<SessionsPageContent />);
-
-    expect(screen.getByText('Sessions')).toBeInTheDocument();
-    expect(
-      screen.getByText('Each agent execution creates a session.'),
-    ).toBeInTheDocument();
+    const newSessionLink = screen.getByRole('link', { name: /New session/ });
+    expect(newSessionLink).toHaveAttribute('href', '/sessions/new');
   });
 
   it('shows empty state when API returns no sessions', async () => {
@@ -59,32 +55,13 @@ describe('SessionsPage', () => {
       }),
     );
 
-    renderWithProviders(<SessionsPageContent />);
+    renderWithProviders(<SessionSidebar />);
 
     expect(await screen.findByText('No sessions yet')).toBeInTheDocument();
   });
 
-  it('shows error state when API request fails', async () => {
-    server.use(
-      http.get('/api/v1/sessions', () => {
-        return HttpResponse.json(
-          { error: { code: 'INTERNAL', message: 'Server error' } },
-          { status: 500 },
-        );
-      }),
-    );
-
-    renderWithProviders(<SessionsPageContent />);
-
-    expect(
-      await screen.findByText(
-        'Failed to load sessions. Make sure the backend is running.',
-      ),
-    ).toBeInTheDocument();
-  });
-
   it('shows status filter tabs', async () => {
-    renderWithProviders(<SessionsPageContent />);
+    renderWithProviders(<SessionSidebar />);
 
     await screen.findByText('Fixed TypeError by adding null check');
 
@@ -95,7 +72,7 @@ describe('SessionsPage', () => {
   });
 
   it('shows status indicators for sessions', async () => {
-    renderWithProviders(<SessionsPageContent />);
+    renderWithProviders(<SessionSidebar />);
 
     await screen.findByText('Fixed TypeError by adding null check');
 
@@ -104,69 +81,24 @@ describe('SessionsPage', () => {
     expect(screen.getAllByText('Failed').length).toBeGreaterThanOrEqual(1);
   });
 
-  it('shows Triggered by column header', async () => {
-    renderWithProviders(<SessionsPageContent />);
+  it('has search input', async () => {
+    renderWithProviders(<SessionSidebar />);
 
     await screen.findByText('Fixed TypeError by adding null check');
 
-    expect(screen.getByText('Triggered by')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Search sessions...')).toBeInTheDocument();
   });
 
-  it('displays triggered-by user name for sessions with triggered_by_user_id', async () => {
-    const sessionsWithTriggeredBy: Session[] = [
-      {
-        ...mockSessions[0],
-        triggered_by_user_id: 'user-1',
-      },
-    ];
+  it('shows ghost New session entry when on /sessions/new', async () => {
+    mockPathname = '/sessions/new';
 
-    server.use(
-      http.get('/api/v1/sessions', () => {
-        return HttpResponse.json({
-          data: sessionsWithTriggeredBy,
-          meta: {},
-        } satisfies ListResponse<Session>);
-      }),
-      http.get('/api/v1/team/members', () => {
-        return HttpResponse.json({
-          data: mockMembers,
-          meta: {},
-        } satisfies ListResponse<User>);
-      }),
-    );
-
-    renderWithProviders(<SessionsPageContent />);
-
-    // Alice Smith -> shows first name "Alice"
-    expect(await screen.findByText('Alice')).toBeInTheDocument();
-  });
-
-  it('shows dash when session has no triggered_by_user_id', async () => {
-    renderWithProviders(<SessionsPageContent />);
+    renderWithProviders(<SessionSidebar />);
 
     await screen.findByText('Fixed TypeError by adding null check');
 
-    // Mock sessions don't have triggered_by_user_id, so should show dashes
-    const dashes = screen.getAllByText('—');
-    expect(dashes.length).toBeGreaterThanOrEqual(1);
-  });
-
-  it('shows sortable column headers', async () => {
-    renderWithProviders(<SessionsPageContent />);
-
-    await screen.findByText('Fixed TypeError by adding null check');
-
-    expect(screen.getByText('Status')).toBeInTheDocument();
-    expect(screen.getByText('Agent')).toBeInTheDocument();
-    expect(screen.getByText('Confidence')).toBeInTheDocument();
-    expect(screen.getByText('Last modified')).toBeInTheDocument();
-  });
-
-  it('shows session count', async () => {
-    renderWithProviders(<SessionsPageContent />);
-
-    await screen.findByText('Fixed TypeError by adding null check');
-
-    expect(screen.getByText('2 sessions')).toBeInTheDocument();
+    // Ghost entry should be visible in the list (italic "New session" text)
+    const newSessionTexts = screen.getAllByText('New session');
+    // At least 2: the top "+ New session" link + the ghost entry in the list
+    expect(newSessionTexts.length).toBeGreaterThanOrEqual(2);
   });
 });
