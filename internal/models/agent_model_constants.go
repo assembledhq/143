@@ -23,12 +23,13 @@ func init() {
 }
 
 const (
-	ClaudeCodeModelOpus   = "claude-opus-4-6"
-	ClaudeCodeModelSonnet = "claude-sonnet-4-5"
-	ClaudeCodeModelHaiku  = "claude-haiku-4-5"
+	ClaudeCodeModelOpus      = "claude-opus-4-6"
+	ClaudeCodeModelSonnet46  = "claude-sonnet-4-6"
+	ClaudeCodeModelSonnet    = "claude-sonnet-4-5"
+	ClaudeCodeModelHaiku     = "claude-haiku-4-5"
 )
 
-var AvailableClaudeCodeModels = []string{ClaudeCodeModelOpus, ClaudeCodeModelSonnet, ClaudeCodeModelHaiku}
+var AvailableClaudeCodeModels = []string{ClaudeCodeModelOpus, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet, ClaudeCodeModelHaiku}
 
 const (
 	GeminiCLIModelGemini3ProPreview   = "gemini-3-pro-preview"
@@ -45,6 +46,8 @@ var AvailableGeminiCLIModels = []string{
 }
 
 const (
+	CodexModelGPT54           = "gpt-5.4"
+	CodexModelGPT54Mini       = "gpt-5.4-mini"
 	CodexModelGPT53Codex      = "gpt-5.3-codex"
 	CodexModelGPT52Codex      = "gpt-5.2-codex"
 	CodexModelGPT5Codex       = "gpt-5-codex"
@@ -52,6 +55,8 @@ const (
 )
 
 var AvailableCodexModels = []string{
+	CodexModelGPT54,
+	CodexModelGPT54Mini,
 	CodexModelGPT53Codex,
 	CodexModelGPT52Codex,
 	CodexModelGPT5Codex,
