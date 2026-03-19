@@ -167,6 +167,7 @@ func TestDockerProvider_Create(t *testing.T) {
 		require.Equal(t, []string(capturedHostConfig.SecurityOpt), []string{"no-new-privileges:true"}, "container should set no-new-privileges")
 		require.True(t, capturedHostConfig.ReadonlyRootfs, "container should have read-only rootfs")
 		require.Contains(t, capturedHostConfig.Tmpfs, "/tmp", "container should have tmpfs at /tmp")
+		require.Contains(t, capturedHostConfig.Tmpfs, "/workspace", "container should have writable tmpfs at /workspace")
 
 		// Verify resource limits
 		require.Equal(t, int64(2e9), capturedHostConfig.Resources.NanoCPUs, "container should have 2 CPU cores")

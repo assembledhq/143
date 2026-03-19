@@ -121,7 +121,8 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 		SecurityOpt:    []string{"no-new-privileges:true"},
 		ReadonlyRootfs: true,
 		Tmpfs: map[string]string{
-			"/tmp": "rw,noexec,nosuid,size=1073741824",
+			"/tmp":      "rw,noexec,nosuid,size=1073741824",
+			cfg.WorkDir: "rw,nosuid,size=5368709120", // 5GB writable workspace
 		},
 	}
 
