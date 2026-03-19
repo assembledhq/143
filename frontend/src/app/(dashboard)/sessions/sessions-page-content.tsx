@@ -57,6 +57,7 @@ const filterTabs = [
   { value: "decisions", label: "Decisions" },
 ];
 
+// Status groups — keep in sync with models.NeedsAttentionStatuses / WorkingStatuses / DoneStatuses.
 const needsAttentionStatuses = ["awaiting_input", "needs_human_guidance", "failed"];
 const workingStatuses = ["pending", "running"];
 const doneStatuses = ["completed", "pr_created", "cancelled", "skipped", "idle"];
@@ -219,7 +220,13 @@ export function SessionsPageContent() {
   const showDecisions = currentFilter === "decisions";
   const statusParam = filterToStatusParam(currentFilter);
 
-  // Fetch all sessions (for tab counts and the "all" view).
+  // Fetch all sessions (for tab badge counts and the "all" view).
+  // We also fetch a filtered query below when a tab is active. The two queries
+  // run in parallel on a 10s interval. The "all" query is cheap (limit 50) and
+  // needed for accurate badge counts; the filtered query ensures the displayed
+  // list reflects the correct server-side results even when total sessions exceed
+  // the limit. If polling cost becomes a concern, consider a dedicated
+  // /sessions/counts endpoint.
   const { data: allData, isLoading, error } = useQuery({
     queryKey: ["sessions", repo],
     queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined }),

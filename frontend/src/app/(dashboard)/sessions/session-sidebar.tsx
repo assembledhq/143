@@ -38,6 +38,7 @@ const filterTabs = [
   { value: "done", label: "Done" },
 ];
 
+// Status groups — keep in sync with models.NeedsAttentionStatuses / WorkingStatuses / DoneStatuses.
 const needsAttentionStatuses = ["awaiting_input", "needs_human_guidance", "failed"];
 const workingStatuses = ["pending", "running"];
 const doneStatuses = ["completed", "pr_created", "cancelled", "skipped", "idle"];
@@ -106,7 +107,9 @@ export function SessionSidebar() {
   const currentFilter = activeFilter ?? "all";
   const statusParam = filterToStatusParam(currentFilter);
 
-  // Fetch all sessions (for tab counts and the "all" view).
+  // Fetch all sessions (for tab badge counts and the "all" view).
+  // Also fetches a filtered query when a tab is active — see sessions-page-content
+  // for the rationale on the double-fetch tradeoff.
   const { data: allData, isLoading } = useQuery({
     queryKey: queryKeys.sessions.list(repo),
     queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined }),

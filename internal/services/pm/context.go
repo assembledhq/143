@@ -66,6 +66,8 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 		issueSummaries = append(issueSummaries, summarizeIssue(issue))
 	}
 
+	// Fetch pending + running sessions in a single query. Results are ordered by
+	// created_at DESC (interleaved), which is fine since we only summarize them.
 	inFlight, err := s.sessions.ListByOrg(ctx, orgID, db.SessionFilters{
 		Statuses: []models.SessionStatus{models.SessionStatusPending, models.SessionStatusRunning},
 		Limit:    50,
