@@ -8,6 +8,7 @@ import { useMemo, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { cn, formatTimeAgo } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
 import { projectStatusConfig, projectStatusDotColor } from "@/lib/types";
 import type { Project } from "@/lib/types";
@@ -101,39 +102,35 @@ export function ProjectSidebar() {
         </div>
 
         {/* Filter tabs */}
-        <div className="flex items-center gap-0.5 overflow-x-auto">
-          {filterTabs.map((tab) => {
-            const isSelected = currentFilter === tab.value;
-            const count =
-              tab.value === "active" ? activeCount
-              : tab.value === "paused" ? pausedCount
-              : tab.value === "scheduled" ? scheduledCount
-              : 0;
-            return (
-              <button
-                key={tab.value}
-                className={cn(
-                  "px-2 py-1 rounded-md text-[11px] font-medium transition-colors whitespace-nowrap",
-                  isSelected
-                    ? "bg-background text-foreground shadow-sm border border-border/50"
-                    : "text-muted-foreground hover:text-foreground hover:bg-background/50"
-                )}
-                onClick={() => setActiveFilter(tab.value === "all" ? null : tab.value)}
-              >
-                {tab.label}
-                {count > 0 && (
-                  <span className={cn(
-                    "ml-1 rounded-full text-white text-[9px] leading-none px-1.5 py-0.5",
-                    tab.value === "active" ? "bg-primary"
-                    : tab.value === "scheduled" ? "bg-purple-500"
-                    : tab.value === "paused" ? "bg-orange-500"
-                    : "bg-primary"
-                  )}>{count}</span>
-                )}
-              </button>
-            );
-          })}
-        </div>
+        <Tabs
+          value={currentFilter}
+          onValueChange={(v) => setActiveFilter(v === "all" ? null : v)}
+          className="gap-0"
+        >
+          <TabsList size="sm" className="overflow-x-auto">
+            {filterTabs.map((tab) => {
+              const count =
+                tab.value === "active" ? activeCount
+                : tab.value === "paused" ? pausedCount
+                : tab.value === "scheduled" ? scheduledCount
+                : 0;
+              return (
+                <TabsTrigger key={tab.value} value={tab.value}>
+                  {tab.label}
+                  {count > 0 && (
+                    <span className={cn(
+                      "rounded-full text-white text-[9px] leading-none px-1.5 py-0.5",
+                      tab.value === "active" ? "bg-primary"
+                      : tab.value === "scheduled" ? "bg-purple-500"
+                      : tab.value === "paused" ? "bg-orange-500"
+                      : "bg-primary"
+                    )}>{count}</span>
+                  )}
+                </TabsTrigger>
+              );
+            })}
+          </TabsList>
+        </Tabs>
       </div>
 
       {/* Project list */}
