@@ -79,7 +79,7 @@ func TestSessionStore_ListByOrg(t *testing.T) {
 		},
 		{
 			name:    "returns filtered agent runs by status",
-			filters: SessionFilters{Status: models.SessionStatusRunning},
+			filters: SessionFilters{Statuses: []models.SessionStatus{models.SessionStatusRunning}},
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id .+ AND status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -89,6 +89,20 @@ func TestSessionStore_ListByOrg(t *testing.T) {
 					)
 			},
 			expected: 1,
+		},
+		{
+			name:    "returns filtered agent runs by multiple statuses",
+			filters: SessionFilters{Statuses: []models.SessionStatus{models.SessionStatusPending, models.SessionStatusRunning}},
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id .+ AND status = ANY").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionColumns).
+							AddRow(newSessionRow(runID1, issueID, orgID, now)...).
+							AddRow(newSessionRow(runID2, issueID, orgID, now)...),
+					)
+			},
+			expected: 2,
 		},
 		{
 			name:    "returns only ad-hoc runs when AdHocOnly is true",

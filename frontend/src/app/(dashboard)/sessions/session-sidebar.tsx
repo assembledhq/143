@@ -33,24 +33,26 @@ const statusConfig: Record<string, { dot: string; label: string }> = {
 
 const filterTabs = [
   { value: "all", label: "All" },
-  { value: "active", label: "Active" },
-  { value: "needs_human_guidance", label: "Guidance" },
-  { value: "failed", label: "Failed" },
+  { value: "needs_attention", label: "Needs attention" },
+  { value: "working", label: "Working" },
   { value: "done", label: "Done" },
 ];
 
-const activeStatuses = new Set(["pending", "running", "awaiting_input"]);
-const doneStatuses = new Set(["completed", "pr_created"]);
+// Status groups — keep in sync with models.NeedsAttentionStatuses / WorkingStatuses / DoneStatuses.
+const needsAttentionStatuses = ["awaiting_input", "needs_human_guidance", "failed"];
+const workingStatuses = ["pending", "running"];
+const doneStatuses = ["completed", "pr_created", "cancelled", "skipped", "idle"];
 
-function isActive(s: Session): boolean {
-  return activeStatuses.has(s.status);
-}
+const needsAttentionSet = new Set(needsAttentionStatuses);
+const workingSet = new Set(workingStatuses);
 
-function filterSessions(sessions: Session[], filter: string | null): Session[] {
-  if (!filter || filter === "all") return sessions;
-  if (filter === "active") return sessions.filter(isActive);
-  if (filter === "done") return sessions.filter((s) => doneStatuses.has(s.status));
-  return sessions.filter((s) => s.status === filter);
+/** Map a filter tab value to the comma-separated status string for the API. */
+function filterToStatusParam(filter: string | null): string | undefined {
+  if (!filter || filter === "all") return undefined;
+  if (filter === "needs_attention") return needsAttentionStatuses.join(",");
+  if (filter === "working") return workingStatuses.join(",");
+  if (filter === "done") return doneStatuses.join(",");
+  return filter;
 }
 
 function sessionTitle(session: Session): string {
@@ -102,22 +104,37 @@ export function SessionSidebar() {
 
   const { optimisticSessions } = useOptimisticSessions();
 
-  const { data, isLoading } = useQuery({
+  const currentFilter = activeFilter ?? "all";
+  const statusParam = filterToStatusParam(currentFilter);
+
+  // Fetch all sessions (for tab badge counts and the "all" view).
+  // Also fetches a filtered query when a tab is active — see sessions-page-content
+  // for the rationale on the double-fetch tradeoff.
+  const { data: allData, isLoading } = useQuery({
     queryKey: queryKeys.sessions.list(repo),
     queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined }),
     refetchInterval: 10000,
   });
 
-  const allSessions = data?.data ?? [];
-  const currentFilter = activeFilter ?? "all";
+  // Fetch filtered sessions from the backend when a specific tab is selected.
+  const { data: filteredData } = useQuery({
+    queryKey: [...queryKeys.sessions.list(repo), statusParam],
+    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, status: statusParam }),
+    refetchInterval: 10000,
+    enabled: !!statusParam,
+  });
 
-  const activeSessions = allSessions.filter(isActive);
-  const failedSessions = allSessions.filter((s) => s.status === "failed");
-  const guidanceSessions = allSessions.filter((s) => s.status === "needs_human_guidance");
+  const allSessions = allData?.data ?? [];
+
+  const needsAttentionSessions = allSessions.filter((s) => needsAttentionSet.has(s.status));
+  const workingSessions = allSessions.filter((s) => workingSet.has(s.status));
 
   const filteredSessions = useMemo(
-    () => filterSessions(allSessions, activeFilter),
-    [allSessions, activeFilter],
+    () => {
+      if (statusParam && filteredData) return filteredData.data;
+      return allSessions;
+    },
+    [allSessions, filteredData, statusParam],
   );
 
   const displayedSessions = useMemo(() => {
@@ -163,9 +180,8 @@ export function SessionSidebar() {
           <TabsList size="sm" className="overflow-x-auto">
             {filterTabs.map((tab) => {
               const count =
-                tab.value === "active" ? activeSessions.length
-                : tab.value === "failed" ? failedSessions.length
-                : tab.value === "needs_human_guidance" ? guidanceSessions.length
+                tab.value === "needs_attention" ? needsAttentionSessions.length
+                : tab.value === "working" ? workingSessions.length
                 : 0;
               return (
                 <TabsTrigger key={tab.value} value={tab.value}>
@@ -173,8 +189,7 @@ export function SessionSidebar() {
                   {count > 0 && (
                     <span className={cn(
                       "rounded-full text-white text-[9px] leading-none px-1.5 py-0.5",
-                      tab.value === "failed" ? "bg-destructive"
-                      : tab.value === "needs_human_guidance" ? "bg-orange-500"
+                      tab.value === "needs_attention" ? "bg-orange-500"
                       : "bg-primary"
                     )}>{count}</span>
                   )}
@@ -202,7 +217,7 @@ export function SessionSidebar() {
           </Link>
         )}
 
-        {(currentFilter === "all" || currentFilter === "active") &&
+        {(currentFilter === "all" || currentFilter === "working") &&
           optimisticSessions.map((os) => (
             <OptimisticSessionRow key={os.id} session={os} />
           ))}
@@ -222,7 +237,7 @@ export function SessionSidebar() {
         {displayedSessions.map((session) => {
           const isSelected = selectedId === session.id;
           const cfg = statusConfig[session.status] || statusConfig.pending;
-          const isActiveSession = activeStatuses.has(session.status);
+          const isWorkingSession = workingSet.has(session.status);
           const ts = session.completed_at || session.started_at || session.created_at;
 
           return (
@@ -239,7 +254,7 @@ export function SessionSidebar() {
               <div className="flex items-start gap-2.5 min-w-0">
                 {/* Status dot */}
                 <div className="mt-1.5 shrink-0">
-                  {isActiveSession ? (
+                  {isWorkingSession ? (
                     <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />
                   ) : (
                     <StatusDot color={cfg.dot} />

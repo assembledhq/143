@@ -36,6 +36,17 @@ func (s SessionStatus) Validate() error {
 	}
 }
 
+// Status groups used by the frontend filter tabs. Defined here so the backend
+// is the source of truth; the frontend arrays must stay in sync.
+var (
+	// NeedsAttentionStatuses are statuses where user action is required.
+	NeedsAttentionStatuses = []SessionStatus{SessionStatusAwaitingInput, SessionStatusNeedsHumanGuidance, SessionStatusFailed}
+	// WorkingStatuses are statuses where the agent is actively executing.
+	WorkingStatuses = []SessionStatus{SessionStatusPending, SessionStatusRunning}
+	// DoneStatuses are terminal or parked statuses.
+	DoneStatuses = []SessionStatus{SessionStatusCompleted, SessionStatusPRCreated, SessionStatusCancelled, SessionStatusSkipped, SessionStatusIdle}
+)
+
 // SandboxState tracks the lifecycle of a session's sandbox.
 type SandboxState string
 
