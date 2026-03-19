@@ -32,7 +32,7 @@ func TestGeminiCLIAdapter_PreparePrompt(t *testing.T) {
 		{
 			name: "low token mode",
 			input: &agent.AgentInput{
-				Issue:     newTestIssue("sentry", true),
+				Issue:     newTestIssue(models.IssueSourceSentry, true),
 				TokenMode: "low",
 			},
 			expectedMaxTokens: 50_000,
@@ -40,7 +40,7 @@ func TestGeminiCLIAdapter_PreparePrompt(t *testing.T) {
 		{
 			name: "high token mode",
 			input: &agent.AgentInput{
-				Issue:     newTestIssue("linear", true),
+				Issue:     newTestIssue(models.IssueSourceLinear, true),
 				TokenMode: "high",
 			},
 			expectedMaxTokens: 200_000,
@@ -80,7 +80,7 @@ func TestGeminiCLIAdapter_PreparePrompt(t *testing.T) {
 	}
 }
 
-func newTestIssue(source string, hasDescription bool) *models.Issue {
+func newTestIssue(source models.IssueSource, hasDescription bool) *models.Issue {
 	issue := &models.Issue{
 		Source: source,
 		Title:  "Test issue",

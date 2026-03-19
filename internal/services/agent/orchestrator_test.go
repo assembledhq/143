@@ -435,7 +435,7 @@ func testIssue(orgID uuid.UUID) models.Issue {
 		ID:           uuid.MustParse("00000000-0000-0000-0000-000000000002"),
 		OrgID:        orgID,
 		ExternalID:   "SENTRY-123",
-		Source:       "sentry",
+		Source:       models.IssueSourceSentry,
 		RepositoryID: &repoID,
 		Title:        "NullPointerException in handler",
 		Description:  &desc,
@@ -1250,7 +1250,7 @@ func TestRunAgent_ManualSessionTransitionsToIdle(t *testing.T) {
 
 	orgID := testOrg()
 	issue := testIssue(orgID)
-	issue.Source = "manual"
+	issue.Source = models.IssueSourceManual
 	run := testRun(orgID, issue.ID)
 
 	d := defaultDeps()
@@ -1295,7 +1295,7 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 
 	orgID := testOrg()
 	issue := testIssue(orgID)
-	issue.Source = "manual"
+	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
 	session.Status = string(models.SessionStatusIdle)
 	session.CurrentTurn = 1
@@ -1405,7 +1405,7 @@ func TestContinueSession_InjectsSandboxProviderIntoContext(t *testing.T) {
 
 	orgID := testOrg()
 	issue := testIssue(orgID)
-	issue.Source = "manual"
+	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
 	session.Status = string(models.SessionStatusIdle)
 	session.CurrentTurn = 1

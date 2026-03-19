@@ -199,7 +199,7 @@ func TestIssueStore_Upsert(t *testing.T) {
 	issue := &models.Issue{
 		OrgID:                 uuid.New(),
 		ExternalID:            "ext-upsert",
-		Source:                "sentry",
+		Source:                models.IssueSourceSentry,
 		Title:                 "Upsert Issue",
 		Status:                "open",
 		RawData:               json.RawMessage(`{"key":"value"}`),

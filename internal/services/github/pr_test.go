@@ -27,7 +27,7 @@ func TestFormatPRTitle(t *testing.T) {
 		{
 			name: "linear source uses external ID prefix",
 			issue: models.Issue{
-				Source:     "linear",
+				Source:     models.IssueSourceLinear,
 				ExternalID: "ENG-1234",
 				Title:      "Fix null pointer in user API",
 			},
@@ -36,7 +36,7 @@ func TestFormatPRTitle(t *testing.T) {
 		{
 			name: "sentry source uses fix prefix",
 			issue: models.Issue{
-				Source: "sentry",
+				Source: models.IssueSourceSentry,
 				Title:  "TypeError in payment handler",
 			},
 			expect: "fix: TypeError in payment handler",
@@ -44,7 +44,7 @@ func TestFormatPRTitle(t *testing.T) {
 		{
 			name: "support source uses fix prefix",
 			issue: models.Issue{
-				Source: "support",
+				Source: models.IssueSource("support"),
 				Title:  "Login button not working",
 			},
 			expect: "fix: Login button not working",
@@ -52,7 +52,7 @@ func TestFormatPRTitle(t *testing.T) {
 		{
 			name: "unknown source uses fix prefix",
 			issue: models.Issue{
-				Source: "other",
+				Source: models.IssueSource("other"),
 				Title:  "Some issue",
 			},
 			expect: "fix: Some issue",
@@ -133,7 +133,7 @@ func TestFormatCommitMessage(t *testing.T) {
 		{
 			name: "linear issue includes Fixes reference",
 			issue: models.Issue{
-				Source:     "linear",
+				Source:     models.IssueSourceLinear,
 				ExternalID: "ENG-1234",
 				Title:      "Fix null pointer",
 			},
@@ -142,7 +142,7 @@ func TestFormatCommitMessage(t *testing.T) {
 		{
 			name: "sentry issue includes Resolves reference",
 			issue: models.Issue{
-				Source:     "sentry",
+				Source:     models.IssueSourceSentry,
 				ExternalID: "SENTRY-5678",
 				Title:      "TypeError in handler",
 			},
@@ -151,7 +151,7 @@ func TestFormatCommitMessage(t *testing.T) {
 		{
 			name: "support issue has no reference",
 			issue: models.Issue{
-				Source: "support",
+				Source: models.IssueSource("support"),
 				Title:  "Login broken",
 			},
 			expect: "fix: Login broken",
@@ -179,14 +179,14 @@ func TestBuildLabels(t *testing.T) {
 			name: "all labels",
 			issue: models.Issue{
 				Severity: "high",
-				Source:   "sentry",
+				Source:   models.IssueSourceSentry,
 			},
 			expect: []string{"143-generated", "severity:high", "source:sentry"},
 		},
 		{
 			name: "no severity",
 			issue: models.Issue{
-				Source: "linear",
+				Source: models.IssueSourceLinear,
 			},
 			expect: []string{"143-generated", "source:linear"},
 		},
@@ -220,7 +220,7 @@ func TestFormatPRBody(t *testing.T) {
 		ResultSummary: &summary,
 	}
 	issue := &models.Issue{
-		Source:                "sentry",
+		Source:                models.IssueSourceSentry,
 		Severity:              "high",
 		AffectedCustomerCount: 42,
 		OccurrenceCount:       100,
@@ -631,7 +631,7 @@ func TestFormatPRBody_WithValidation(t *testing.T) {
 		CompletedAt:   &now,
 	}
 	issue := &models.Issue{
-		Source:                "linear",
+		Source:                models.IssueSourceLinear,
 		Severity:              "critical",
 		AffectedCustomerCount: 10,
 		OccurrenceCount:       50,
@@ -659,7 +659,7 @@ func TestFormatPRBody_NilSummary(t *testing.T) {
 		AgentType: "claude-code",
 	}
 	issue := &models.Issue{
-		Source:   "sentry",
+		Source:   models.IssueSourceSentry,
 		Severity: "low",
 	}
 

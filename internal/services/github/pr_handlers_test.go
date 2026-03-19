@@ -862,7 +862,7 @@ func TestFormatPRBody_WithValidationStore(t *testing.T) {
 		ResultSummary: &summary,
 	}
 	issue := &models.Issue{
-		Source:                "sentry",
+		Source:                models.IssueSourceSentry,
 		Severity:              "high",
 		AffectedCustomerCount: 5,
 		OccurrenceCount:       20,
