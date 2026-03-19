@@ -323,7 +323,7 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 				logCh <- agent.LogEntry{
 					Timestamp: time.Now(),
 					Level:     "tool_use",
-					Message:   fmt.Sprintf("using tool: command_execution"),
+					Message:   "using tool: command_execution",
 					Metadata:  metadata,
 				}
 				if event.Item.AggregatedOutput != "" {
@@ -634,7 +634,7 @@ func parseCodexStreamOutput(output []byte, result *agent.AgentResult, logCh chan
 					logCh <- agent.LogEntry{
 						Timestamp: time.Now(),
 						Level:     "tool_use",
-						Message:   fmt.Sprintf("using tool: command_execution"),
+						Message:   "using tool: command_execution",
 						Metadata:  metadata,
 					}
 					if event.Item.AggregatedOutput != "" {
