@@ -239,7 +239,7 @@ func TestSessionHandler_List_CommaSeparatedStatuses(t *testing.T) {
 				nil, &now, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil, nil, nil, nil,
-				nil, nil, nil,
+				nil, nil, nil, nil,
 				nil, nil,
 				nil, // triggered_by_user_id
 				nil, 0, nil, "none", nil,
