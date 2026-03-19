@@ -114,7 +114,7 @@ func TestSummarizeIssue(t *testing.T) {
 
 	summary := summarizeIssue(issue)
 	require.Equal(t, issue.ID.String(), summary.ID, "summary should include issue ID")
-	require.Equal(t, issue.Source, summary.Source, "summary should include source")
+	require.Equal(t, string(issue.Source), summary.Source, "summary should include source")
 	require.Equal(t, issue.Title, summary.Title, "summary should include title")
 	require.Len(t, []rune(summary.Description), 500, "summary description should be truncated to 500 runes")
 	require.Equal(t, issue.Severity, summary.Severity, "summary should include severity")

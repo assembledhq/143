@@ -256,7 +256,7 @@ func summarizeIssue(issue models.Issue) IssueSummary {
 
 	summary := IssueSummary{
 		ID:                    issue.ID.String(),
-		Source:                issue.Source,
+		Source:                string(issue.Source),
 		Title:                 issue.Title,
 		Description:           description,
 		Severity:              issue.Severity,
@@ -270,9 +270,9 @@ func summarizeIssue(issue models.Issue) IssueSummary {
 
 	// Enrich with source-specific metadata.
 	switch issue.Source {
-	case "sentry":
+	case models.IssueSourceSentry:
 		summary.StackTraceSummary = extractStackTraceSummary(issue.RawData)
-	case "linear":
+	case models.IssueSourceLinear:
 		enrichLinearMetadata(&summary, issue.RawData)
 	}
 
