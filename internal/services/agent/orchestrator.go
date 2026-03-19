@@ -8,6 +8,7 @@ import (
 	"io"
 	"path"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -947,9 +948,13 @@ func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, san
 	}
 
 	authJSON, err := json.Marshal(map[string]interface{}{
-		"access_token":  cfg.AccessToken,
-		"refresh_token": cfg.RefreshToken,
-		"expires_at":    cfg.ExpiresAt.Format("2006-01-02T15:04:05Z"),
+		"auth_mode": "chatgpt",
+		"tokens": map[string]string{
+			"access_token":  cfg.AccessToken,
+			"refresh_token": cfg.RefreshToken,
+			"id_token":      cfg.IDToken,
+		},
+		"last_refresh": cfg.ExpiresAt.Add(-30 * 24 * time.Hour).Format(time.RFC3339),
 	})
 	if err != nil {
 		return false, fmt.Errorf("marshal auth.json: %w", err)
