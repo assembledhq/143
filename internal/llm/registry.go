@@ -21,7 +21,7 @@ type providerModel struct {
 // providers — if Anthropic is down directly, OpenRouter's Anthropic route is
 // likely also affected. However, OpenRouter can route to alternative models,
 // so it serves as a useful last-resort fallback.
-var defaultChains = map[string][]providerModel{
+var defaultChains = map[ModelName][]providerModel{
 	// Anthropic models — primary: Anthropic API, cross-provider fallback, then OpenRouter.
 	"claude-opus-4-6": {
 		{ProviderName: "anthropic", ModelID: "claude-opus-4-6"},
@@ -61,6 +61,12 @@ var defaultChains = map[string][]providerModel{
 		{ProviderName: "anthropic", ModelID: "claude-sonnet-4-5-20250929"},
 		{ProviderName: "openrouter", ModelID: "openai/o3-mini"},
 	},
+	"gpt-5.4-mini": {
+		{ProviderName: "openai_chat", ModelID: "gpt-5.4-mini"},
+		{ProviderName: "openai_responses", ModelID: "gpt-5.4-mini"},
+		{ProviderName: "anthropic", ModelID: "claude-haiku-4-5-20251001"},
+		{ProviderName: "openrouter", ModelID: "openai/gpt-5.4-mini"},
+	},
 	"gpt-5-nano": {
 		{ProviderName: "openai_chat", ModelID: "gpt-5-nano"},
 		{ProviderName: "openai_responses", ModelID: "gpt-5-nano"},
@@ -71,7 +77,7 @@ var defaultChains = map[string][]providerModel{
 // buildChain constructs an ordered fallback chain for the requested model,
 // filtering to only providers that are available (configured with API keys).
 // Returns an error if no providers are available for the requested model.
-func buildChain(model string, available map[string]Provider) ([]chainLink, error) {
+func buildChain(model ModelName, available map[string]Provider) ([]chainLink, error) {
 	chainsMu.RLock()
 	entries, ok := defaultChains[model]
 	chainsMu.RUnlock()
@@ -99,7 +105,7 @@ func buildChain(model string, available map[string]Provider) ([]chainLink, error
 
 // RegisterModel adds or replaces a model's provider chain in the registry.
 // This allows custom models to be added at runtime.
-func RegisterModel(model string, entries []providerModel) {
+func RegisterModel(model ModelName, entries []providerModel) {
 	chainsMu.Lock()
 	defaultChains[model] = entries
 	chainsMu.Unlock()

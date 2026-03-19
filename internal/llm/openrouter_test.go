@@ -34,7 +34,7 @@ func TestOpenRouterProvider_Complete_Success(t *testing.T) {
 	)
 	require.Equal(t, "openrouter", p.Name(), "provider name should be openrouter")
 
-	resp, err := p.Complete(context.Background(), "anthropic/claude-sonnet-4-5", "system", "user prompt")
+	resp, err := p.Complete(context.Background(), "anthropic/claude-sonnet-4-5", "system", "user prompt", "")
 	require.NoError(t, err, "should complete without error")
 	require.Equal(t, "hello from openrouter", resp, "should return message content")
 }
@@ -54,7 +54,7 @@ func TestOpenRouterProvider_Complete_NoHeaders(t *testing.T) {
 	defer server.Close()
 
 	p := NewOpenRouterProvider("key", WithOpenRouterBaseURL(server.URL), WithOpenRouterHTTPClient(server.Client()))
-	resp, err := p.Complete(context.Background(), "model", "sys", "user")
+	resp, err := p.Complete(context.Background(), "model", "sys", "user", "")
 	require.NoError(t, err, "should complete without error")
 	require.Equal(t, "ok", resp, "should return message content")
 }
@@ -69,7 +69,7 @@ func TestOpenRouterProvider_Complete_ServerError(t *testing.T) {
 	defer server.Close()
 
 	p := NewOpenRouterProvider("key", WithOpenRouterBaseURL(server.URL), WithOpenRouterHTTPClient(server.Client()))
-	_, err := p.Complete(context.Background(), "model", "sys", "user")
+	_, err := p.Complete(context.Background(), "model", "sys", "user", "")
 	require.Error(t, err, "should return error on server error")
 	require.ErrorIs(t, err, ErrServerError, "should wrap server error")
 }
