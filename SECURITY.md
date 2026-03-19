@@ -46,9 +46,9 @@ before proceeding.
 
 We aim to:
 
-- Acknowledge reports within 3 business days
-- Complete initial triage within 14 business days
-- Remediate confirmed issues within 90 days when feasible
+- Acknowledge reports within 30 days
+- Complete investigation within 60 days
+- Remediate confirmed issues within 180 days when feasible
 
 Actual remediation timing depends on severity, exploitability, dependency
 constraints, user impact, and whether coordinated disclosure is needed.

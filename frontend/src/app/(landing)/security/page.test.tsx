@@ -26,10 +26,11 @@ describe('SecurityPage', () => {
     expect(screen.getByText('Supported versions')).toBeInTheDocument();
   });
 
-  it('commits to faster vulnerability acknowledgement windows', () => {
+  it('displays vulnerability response timelines', () => {
     renderWithProviders(<SecurityPage />);
 
-    expect(screen.getByText(/within 3 business days/i)).toBeInTheDocument();
-    expect(screen.getByText(/within 14 business days/i)).toBeInTheDocument();
+    expect(screen.getByText(/within 30 days/i)).toBeInTheDocument();
+    expect(screen.getByText(/within 60 days/i)).toBeInTheDocument();
+    expect(screen.getByText(/within 180 days/i)).toBeInTheDocument();
   });
 });
