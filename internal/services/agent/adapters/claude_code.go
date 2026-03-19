@@ -238,7 +238,7 @@ func WithSandboxProvider(ctx context.Context, p agent.SandboxProvider) context.C
 func buildSystemPrompt(input *agent.AgentInput) string {
 	var b strings.Builder
 
-	base := prompts.AgentSystemPromptBase()
+	base := prompts.CodingTaskPreamble()
 	b.WriteString(base)
 	if !strings.HasSuffix(base, "\n\n") {
 		b.WriteString("\n\n")
