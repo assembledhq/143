@@ -1052,7 +1052,7 @@ func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
 		"sandbox config should only have HOME for unconfigured agent type")
 }
 
-func TestRunAgent_CodexUsesOpenAICredentialFallback(t *testing.T) {
+func TestRunAgent_CodexUsesAuthJsonNotEnvVar(t *testing.T) {
 	t.Parallel()
 
 	orgID := testOrg()
@@ -1062,26 +1062,60 @@ func TestRunAgent_CodexUsesOpenAICredentialFallback(t *testing.T) {
 
 	d := defaultDeps()
 	d.adapter.name = models.AgentTypeCodex
-	d.codexAuth = nil
-	d.creds = &mockCredentialProvider{
-		byProvider: map[models.ProviderName]*models.DecryptedCredential{
-			models.ProviderOpenAI: {
-				Provider: models.ProviderOpenAI,
-				Config:   models.OpenAIConfig{APIKey: "sk-openai-fallback", BaseURL: "https://api.openai.com/v1", APIType: "chat"},
-			},
+	d.codexAuth = &mockCodexAuthProvider{
+		cfg: &models.OpenAIChatGPTConfig{
+			AccessToken:  "chatgpt-access-token",
+			RefreshToken: "chatgpt-refresh-token",
+			ExpiresAt:    time.Now().Add(1 * time.Hour),
 		},
 	}
 
 	var capturedCfg agent.SandboxConfig
 	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
 		capturedCfg = cfg
-		return &agent.Sandbox{ID: "codex-fallback", Provider: "mock", WorkDir: "/workspace"}, nil
+		return &agent.Sandbox{ID: "codex-oauth", Provider: "mock", WorkDir: "/workspace"}, nil
 	}
 
 	orch := buildOrchestrator(d)
 	err := orch.RunAgent(context.Background(), run)
-	require.NoError(t, err, "run should succeed when openai credential exists")
-	require.Equal(t, "sk-openai-fallback", capturedCfg.Env["OPENAI_API_KEY"], "codex should receive OPENAI_API_KEY from org credentials")
+	require.NoError(t, err, "run should succeed when ChatGPT OAuth token exists")
+
+	// CODEX_API_KEY must NOT be set — it causes Codex CLI to call
+	// api.openai.com which requires api.responses.write scope.
+	require.Empty(t, capturedCfg.Env["CODEX_API_KEY"], "CODEX_API_KEY should not be set as env var")
+
+	// Instead, the token should be injected via auth.json.
+	authData, ok := d.provider.Files["/workspace/.codex/auth.json"]
+	require.True(t, ok, "auth.json should be written to sandbox")
+	var authJSON map[string]string
+	require.NoError(t, json.Unmarshal(authData, &authJSON))
+	require.Equal(t, "chatgpt-access-token", authJSON["access_token"], "auth.json should contain the ChatGPT OAuth token")
+}
+
+func TestRunAgent_CodexOpenAIKeyAloneIsNotSufficient(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.AgentType = models.AgentTypeCodex
+
+	d := defaultDeps()
+	d.adapter.name = models.AgentTypeCodex
+	d.codexAuth = nil // no ChatGPT OAuth
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderOpenAI: {
+				Provider: models.ProviderOpenAI,
+				Config:   models.OpenAIConfig{APIKey: "sk-openai-key", BaseURL: "https://api.openai.com/v1", APIType: "chat"},
+			},
+		},
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.Error(t, err, "run should fail when only OpenAI API key exists (no ChatGPT OAuth)")
+	require.Contains(t, err.Error(), "no credentials", "error should mention missing credentials")
 }
 
 func TestRunAgent_CodexAuthWritesToSandboxWorkdir(t *testing.T) {
@@ -1133,7 +1167,7 @@ func TestRunAgent_CodexNoCredentialsFails(t *testing.T) {
 
 	d := defaultDeps()
 	d.adapter.name = models.AgentTypeCodex
-	// No codexAuth provider and no OPENAI_API_KEY in env.
+	// No codexAuth provider and no CODEX_API_KEY in env.
 	d.codexAuth = nil
 
 	orch := buildOrchestrator(d)

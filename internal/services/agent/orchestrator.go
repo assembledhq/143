@@ -331,16 +331,16 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 	}()
 
-	// 8. Inject Codex auth file if this is a codex agent run.
+	// 8. Inject Codex auth.json if this is a codex agent run.
+	//    auth.json is the primary auth mechanism (uses ChatGPT backend).
 	if run.AgentType == models.AgentTypeCodex {
 		injected, err := o.injectCodexAuth(ctx, run.OrgID, sandbox)
 		if err != nil {
-			log.Warn().Err(err).Msg("codex auth injection failed, falling back to API key")
+			o.failRun(ctx, run, fmt.Sprintf("codex auth injection failed: %s", err))
+			return fmt.Errorf("codex auth injection: %w", err)
 		}
-		// Fail early if neither OAuth token nor API key is available.
-		hasAPIKey := sandboxCfg.Env["OPENAI_API_KEY"] != ""
-		if !hasAPIKey && !injected {
-			o.failRun(ctx, run, "no credentials configured for codex: connect ChatGPT or set an OPENAI_API_KEY in Settings")
+		if !injected {
+			o.failRun(ctx, run, "no credentials configured for codex: connect ChatGPT from the Overview page")
 			return fmt.Errorf("no credentials for codex agent")
 		}
 	}
@@ -590,10 +590,16 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		return fmt.Errorf("load snapshot: %w", restoreErr)
 	}
 
-	// 5. Re-inject Codex auth if needed.
+	// 5. Re-inject Codex auth.json (primary auth mechanism).
 	if session.AgentType == models.AgentTypeCodex {
-		if _, err := o.injectCodexAuth(ctx, session.OrgID, sandbox); err != nil {
-			log.Warn().Err(err).Msg("codex auth injection failed on continue")
+		injected, err := o.injectCodexAuth(ctx, session.OrgID, sandbox)
+		if err != nil {
+			o.failRun(ctx, session, fmt.Sprintf("codex auth injection failed: %s", err))
+			return fmt.Errorf("codex auth injection: %w", err)
+		}
+		if !injected {
+			o.failRun(ctx, session, "no credentials configured for codex: connect ChatGPT from the Overview page")
+			return fmt.Errorf("no credentials for codex agent")
 		}
 	}
 
@@ -823,11 +829,8 @@ func (o *Orchestrator) fetchIntegrationCredentials(ctx context.Context, orgID uu
 
 // resolveAgentEnv builds the sandbox env vars for the given agent type.
 // It checks credentials in order: user personal → team default → org credential.
+// Codex CLI auth is handled via auth.json injection (injectCodexAuth), not env vars.
 func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, userID *uuid.UUID) map[string]string {
-	if o.credentials == nil {
-		return nil
-	}
-
 	merged := make(map[string]string)
 
 	switch agentType {
@@ -842,6 +845,15 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 			}
 		}
 	case models.AgentTypeCodex:
+		// Codex CLI authenticates via ~/.codex/auth.json (injected by
+		// injectCodexAuth), NOT via the CODEX_API_KEY env var. The env
+		// var makes Codex call api.openai.com/v1/responses which requires
+		// the api.responses.write scope — a scope the ChatGPT OAuth token
+		// does not carry. The auth.json path uses the ChatGPT backend
+		// instead, which accepts the OAuth token as-is.
+		//
+		// Inject the general OpenAI API key as OPENAI_API_KEY for other
+		// tools in the sandbox (not used by Codex CLI itself).
 		cfg := o.resolveProviderConfig(ctx, orgID, userID, models.ProviderOpenAI)
 		if oc, ok := cfg.(models.OpenAIConfig); ok {
 			if oc.APIKey != "" {
@@ -915,9 +927,11 @@ func (o *Orchestrator) resolveProviderConfig(ctx context.Context, orgID uuid.UUI
 }
 
 // injectCodexAuth writes a ~/.codex/auth.json file into the sandbox if
-// a ChatGPT OAuth token exists for this org. Returns (true, nil) if auth
-// was injected, (false, nil) if no OAuth token is available (allowing
-// fallback to OPENAI_API_KEY env var), or (false, err) on failure.
+// a ChatGPT OAuth token exists for this org. This is the primary Codex
+// auth mechanism — auth.json tells the CLI to use the ChatGPT backend
+// which accepts the OAuth token without needing api.responses.write scope.
+// Returns (true, nil) if auth was injected, (false, nil) if no OAuth
+// token is available, or (false, err) on failure.
 func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox) (bool, error) {
 	if o.codexAuth == nil {
 		return false, nil
