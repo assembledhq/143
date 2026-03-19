@@ -1135,6 +1135,7 @@ func TestDispatchProjectTasks_TaskWithApproachAndReasoning(t *testing.T) {
 	dispatched := svc.dispatchProjectTasks(context.Background(), orgID, project, settings, uuid.New())
 	require.Equal(t, 1, dispatched)
 	require.Len(t, sessions.created, 1)
+	require.NotNil(t, sessions.created[0].Title, "session title should be set")
 	require.Equal(t, "my approach", *sessions.created[0].PMApproach)
 	require.Equal(t, "my reasoning", *sessions.created[0].PMReasoning)
 	require.Equal(t, "high", sessions.created[0].TokenMode, "complex should map to high")

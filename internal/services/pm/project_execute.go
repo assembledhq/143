@@ -179,6 +179,7 @@ func (s *Service) dispatchProjectTasks(ctx context.Context, orgID uuid.UUID, pro
 			AutonomyLevel: string(settings.AutonomyLevel),
 			TokenMode:     tokenModeFromTaskComplexity(task.Complexity),
 			PMPlanID:      &planID,
+			Title:         &task.Title,
 			PMApproach:    &approach,
 			PMReasoning:   &reasoning,
 			ProjectTaskID: &task.ID,
