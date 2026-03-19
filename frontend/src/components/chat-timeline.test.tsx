@@ -76,10 +76,10 @@ describe("ChatTimeline", () => {
 
     // Hidden by default
     expect(screen.queryByText("Info log one")).not.toBeInTheDocument();
-    expect(screen.getByText(/Show 2 log entries/)).toBeInTheDocument();
+    expect(screen.getByText(/2 log entries/)).toBeInTheDocument();
 
     // Click to reveal
-    await userEvent.click(screen.getByText(/Show 2 log entries/));
+    await userEvent.click(screen.getByText(/2 log entries/));
     expect(screen.getByText("Info log one")).toBeInTheDocument();
     expect(screen.getByText("Debug log two")).toBeInTheDocument();
   });
