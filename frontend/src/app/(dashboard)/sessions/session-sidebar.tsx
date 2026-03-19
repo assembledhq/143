@@ -77,8 +77,8 @@ function OptimisticSessionRow({ session }: { session: OptimisticSession }) {
           <p className="text-[13px] font-medium text-foreground truncate leading-snug">
             {session.title}
           </p>
-          <div className="flex items-center gap-2 mt-0.5">
-            <span className="text-[11px] text-muted-foreground">{cfg.label}</span>
+          <div className="flex items-center gap-3 mt-0.5">
+            <span className="text-[11px] text-muted-foreground shrink-0">{cfg.label}</span>
             <span className="text-[11px] text-muted-foreground/50">just now</span>
           </div>
         </div>
@@ -254,11 +254,11 @@ export function SessionSidebar() {
                   <p className="text-[13px] font-medium text-foreground truncate leading-snug">
                     {sessionTitle(session)}
                   </p>
-                  <div className="flex items-center gap-2 mt-0.5">
-                    <span className="text-[11px] text-muted-foreground">
+                  <div className="flex items-center gap-3 mt-0.5">
+                    <span className="text-[11px] text-muted-foreground shrink-0">
                       {cfg.label}
                     </span>
-                    <span className="text-[11px] text-muted-foreground/50">
+                    <span className="text-[11px] text-muted-foreground/50 truncate">
                       {formatTimeAgo(ts)}
                     </span>
                   </div>
