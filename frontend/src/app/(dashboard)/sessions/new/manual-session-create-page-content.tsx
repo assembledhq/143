@@ -77,8 +77,8 @@ export function ManualSessionCreatePageContent() {
   const [isDictating, setIsDictating] = useState(false);
   const [dictationError, setDictationError] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState("");
-  const [selectedRepoId, setSelectedRepoId] = useState<string>(repoId ?? "");
-  const [selectedBranch, setSelectedBranch] = useState<string>("");
+  const [userSelectedRepoId, setUserSelectedRepoId] = useState<string | null>(repoId ?? null);
+  const [branchByRepoId, setBranchByRepoId] = useState<Record<string, string>>({});
   const [creationError, setCreationError] = useState<string | null>(null);
 
   const { addOptimisticSession, removeOptimisticSession } = useOptimisticSessions();
@@ -97,24 +97,30 @@ export function ManualSessionCreatePageContent() {
   });
   const repositories = useMemo(() => reposResponse?.data ?? [], [reposResponse]);
 
+  // Auto-select the only repo for single-repo orgs; otherwise use user's choice.
+  const selectedRepoId = useMemo(() => {
+    if (userSelectedRepoId !== null) return userSelectedRepoId;
+    if (repositories.length === 1) return repositories[0].id;
+    return "";
+  }, [userSelectedRepoId, repositories]);
+
   const selectedRepo = repositories.find((r) => r.id === selectedRepoId);
 
-  // Auto-select the only repo for single-repo orgs.
-  useEffect(() => {
-    if (repositories.length === 1 && !selectedRepoId) {
-      setSelectedRepoId(repositories[0].id);
-    }
-  }, [repositories, selectedRepoId]);
+  // Derive branch: use user override if set, otherwise the repo's default.
+  const selectedBranch = useMemo(() => {
+    if (!selectedRepoId) return "";
+    if (branchByRepoId[selectedRepoId] !== undefined) return branchByRepoId[selectedRepoId];
+    return selectedRepo?.default_branch ?? "";
+  }, [selectedRepoId, branchByRepoId, selectedRepo]);
 
-  // Default branch to the repo's default_branch when repo changes.
-  useEffect(() => {
-    const repo = repositories.find((r) => r.id === selectedRepoId);
-    if (repo) {
-      setSelectedBranch(repo.default_branch);
-    } else {
-      setSelectedBranch("");
-    }
-  }, [selectedRepoId, repositories]);
+  const setSelectedRepoId = (id: string) => {
+    setUserSelectedRepoId(id);
+  };
+
+  const setSelectedBranch = (branch: string) => {
+    if (!selectedRepoId) return;
+    setBranchByRepoId((prev) => ({ ...prev, [selectedRepoId]: branch }));
+  };
 
   const availableModels = useMemo(() => {
     const agentType = AGENT_TYPE_OPTIONS.find((a) => a.key === defaultAgentType);
@@ -358,7 +364,7 @@ export function ManualSessionCreatePageContent() {
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="start" className="w-72">
                     <DropdownMenuItem
-                      onClick={() => { setSelectedRepoId(""); setSelectedBranch(""); }}
+                      onClick={() => setSelectedRepoId("")}
                       className={!selectedRepoId ? "font-medium" : ""}
                     >
                       No specific repo
