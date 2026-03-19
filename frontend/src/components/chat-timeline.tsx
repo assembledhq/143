@@ -6,8 +6,14 @@ import { Badge } from "@/components/ui/badge";
 import type { TimelineEntry } from "@/lib/timeline";
 import type { SessionMessage, SessionLog } from "@/lib/types";
 
+function safeDate(dateStr: string): Date | null {
+  const d = new Date(dateStr);
+  return isNaN(d.getTime()) ? null : d;
+}
+
 function formatTimestamp(dateStr: string): string {
-  const date = new Date(dateStr);
+  const date = safeDate(dateStr);
+  if (!date) return "";
   return date.toLocaleTimeString("en-US", {
     hour12: false,
     hour: "2-digit",
@@ -130,6 +136,28 @@ function HiddenLogsGroup({ logs }: { logs: SessionLog[] }) {
   );
 }
 
+export function formatMessageTime(dateStr: string): string {
+  const date = safeDate(dateStr);
+  if (!date) return "";
+  const now = new Date();
+  const isToday =
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate();
+  if (isToday) {
+    return date.toLocaleTimeString("en-US", {
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  }
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 function MessageBubble({ msg }: { msg: SessionMessage }) {
   return (
     <div className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
@@ -148,7 +176,7 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
               : "text-muted-foreground"
           }`}
         >
-          Turn {msg.turn_number}
+          {formatMessageTime(msg.created_at)}
         </p>
       </div>
     </div>
