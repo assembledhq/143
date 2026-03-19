@@ -354,6 +354,7 @@ func (s *Service) PollForToken(ctx context.Context, orgID uuid.UUID) (*AuthStatu
 	storedCfg := models.OpenAIChatGPTConfig{
 		AccessToken:  tokenResp.AccessToken,
 		RefreshToken: tokenResp.RefreshToken,
+		IDToken:      tokenResp.IDToken,
 	}
 	if tokenResp.ExpiresIn > 0 {
 		storedCfg.ExpiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
@@ -382,6 +383,7 @@ func (s *Service) PollForToken(ctx context.Context, orgID uuid.UUID) (*AuthStatu
 type tokenExchangeResponse struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
+	IDToken      string `json:"id_token"`
 	ExpiresIn    int    `json:"expires_in"`
 }
 
@@ -511,6 +513,7 @@ func (s *Service) RefreshToken(ctx context.Context, orgID uuid.UUID) (*models.Op
 	var tokenResp struct {
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
+		IDToken      string `json:"id_token"`
 		ExpiresIn    int    `json:"expires_in"`
 	}
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
@@ -521,6 +524,7 @@ func (s *Service) RefreshToken(ctx context.Context, orgID uuid.UUID) (*models.Op
 	newCfg := models.OpenAIChatGPTConfig{
 		AccessToken:  tokenResp.AccessToken,
 		RefreshToken: tokenResp.RefreshToken,
+		IDToken:      tokenResp.IDToken,
 		ExpiresAt:    time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
 		AccountType:  cfg.AccountType,
 	}

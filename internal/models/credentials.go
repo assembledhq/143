@@ -142,6 +142,7 @@ type SlackConfig struct {
 type OpenAIChatGPTConfig struct {
 	AccessToken  string    `json:"access_token"`  // #nosec G117 -- JSON config field
 	RefreshToken string    `json:"refresh_token"` // #nosec G117 -- JSON config field
+	IDToken      string    `json:"id_token,omitempty"` // OIDC id_token from OAuth exchange
 	ExpiresAt    time.Time `json:"expires_at"`
 	AccountType  string    `json:"account_type"` // "plus", "pro", "team", "enterprise"
 
