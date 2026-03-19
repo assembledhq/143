@@ -1,5 +1,6 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderWithProviders, screen, waitFor, userEvent } from '@/test/test-utils';
+import { act } from '@testing-library/react';
 import Overview from './page';
 
 const {
@@ -345,13 +346,14 @@ describe('OverviewPage', () => {
   });
 
   it('shows completed state when polling returns completed', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     // First call returns pending (for initial status check in AgentSelectionSection)
     // Second call onwards returns completed (for polling inside modal)
     codexStatusMock
       .mockResolvedValueOnce({ data: { status: 'pending' } })
       .mockResolvedValue({ data: { status: 'completed' } });
 
-    const user = userEvent.setup();
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     renderWithProviders(<Overview />);
 
     await waitFor(() => {
@@ -364,17 +366,22 @@ describe('OverviewPage', () => {
       expect(screen.getByText('ABCD-1234')).toBeInTheDocument();
     });
 
+    await act(async () => { vi.advanceTimersByTime(3100); });
+
     await waitFor(() => {
       expect(screen.getByText('Connected successfully!')).toBeInTheDocument();
-    }, { timeout: 10000 });
+    });
+
+    vi.useRealTimers();
   });
 
   it('shows expired state when polling returns expired', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     codexStatusMock
       .mockResolvedValueOnce({ data: { status: 'pending' } })
       .mockResolvedValue({ data: { status: 'expired' } });
 
-    const user = userEvent.setup();
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     renderWithProviders(<Overview />);
 
     await waitFor(() => {
@@ -387,19 +394,24 @@ describe('OverviewPage', () => {
       expect(screen.getByText('ABCD-1234')).toBeInTheDocument();
     });
 
+    await act(async () => { vi.advanceTimersByTime(3100); });
+
     await waitFor(() => {
       expect(screen.getByText('Code expired. Please try again.')).toBeInTheDocument();
-    }, { timeout: 10000 });
+    });
 
     expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+
+    vi.useRealTimers();
   });
 
   it('shows error state when polling returns error', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     codexStatusMock
       .mockResolvedValueOnce({ data: { status: 'pending' } })
       .mockResolvedValue({ data: { status: 'error', message: 'Auth denied' } });
 
-    const user = userEvent.setup();
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     renderWithProviders(<Overview />);
 
     await waitFor(() => {
@@ -412,9 +424,13 @@ describe('OverviewPage', () => {
       expect(screen.getByText('ABCD-1234')).toBeInTheDocument();
     });
 
+    await act(async () => { vi.advanceTimersByTime(3100); });
+
     await waitFor(() => {
       expect(screen.getByText('Auth denied')).toBeInTheDocument();
-    }, { timeout: 10000 });
+    });
+
+    vi.useRealTimers();
   });
 
   it('renders the expires timer text in the modal', async () => {
