@@ -169,6 +169,11 @@ func TestDockerProvider_Create(t *testing.T) {
 		require.Contains(t, capturedHostConfig.Tmpfs, "/tmp", "container should have tmpfs at /tmp")
 		require.Contains(t, capturedHostConfig.Tmpfs, "/workspace", "container should have writable tmpfs at /workspace")
 
+		// Verify tmpfs mount options
+		require.Contains(t, capturedHostConfig.Tmpfs["/tmp"], "noexec", "/tmp tmpfs should be noexec")
+		require.Contains(t, capturedHostConfig.Tmpfs["/workspace"], "mode=1777", "workspace tmpfs should be world-writable (mode=1777)")
+		require.NotContains(t, capturedHostConfig.Tmpfs["/workspace"], "noexec", "workspace tmpfs should allow exec for agent binaries")
+
 		// Verify resource limits
 		require.Equal(t, int64(2e9), capturedHostConfig.Resources.NanoCPUs, "container should have 2 CPU cores")
 		require.Equal(t, int64(4096*1024*1024), capturedHostConfig.Resources.Memory, "container should have 4GB memory")
@@ -180,6 +185,28 @@ func TestDockerProvider_Create(t *testing.T) {
 		require.Equal(t, "docker", sb.Provider, "sandbox provider should be 'docker'")
 		require.Equal(t, "/workspace", sb.WorkDir, "sandbox workdir should be '/workspace'")
 		require.Equal(t, "runsc", sb.Metadata["runtime"], "sandbox metadata should include runtime")
+	})
+
+	t.Run("workspace tmpfs uses configured WorkDir", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedHostConfig *container.HostConfig
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			capturedHostConfig = hostConfig
+			return container.CreateResponse{ID: "custom-workdir"}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+
+		cfg := agent.DefaultSandboxConfig()
+		cfg.WorkDir = "/custom/work"
+		_, err := p.Create(context.Background(), cfg)
+		require.NoError(t, err)
+
+		require.Contains(t, capturedHostConfig.Tmpfs, "/custom/work", "tmpfs should be mounted at the configured WorkDir")
+		require.Contains(t, capturedHostConfig.Tmpfs["/custom/work"], "mode=1777", "custom WorkDir tmpfs should be world-writable")
+		require.NotContains(t, capturedHostConfig.Tmpfs, "/workspace", "default /workspace should not appear when WorkDir is customized")
 	})
 
 	t.Run("injects env vars into container", func(t *testing.T) {
