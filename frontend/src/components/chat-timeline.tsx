@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronRight, AlertTriangle, Terminal, Wrench } from "lucide-react";
+import { ChevronRight, AlertTriangle, Wrench } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import type { TimelineEntry } from "@/lib/timeline";
 import type { SessionMessage, SessionLog } from "@/lib/types";
@@ -111,7 +111,6 @@ function HiddenLogsGroup({ logs }: { logs: SessionLog[] }) {
         className="flex items-center gap-2 w-full text-left py-1.5 px-2 rounded-md hover:bg-muted/50 transition-colors text-xs group"
       >
         <ChevronRight className={`h-3 w-3 text-muted-foreground shrink-0 transition-transform duration-150 ${open ? "rotate-90" : ""}`} />
-        <Terminal className="h-3 w-3 text-muted-foreground shrink-0" />
         <span className="text-muted-foreground">
           {logs.length} log {logs.length === 1 ? "entry" : "entries"}
         </span>
