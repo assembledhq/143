@@ -247,6 +247,7 @@ export interface OrgSettings {
   product_direction?: string;
   product_context?: ProductContext;
   llm_model?: string;
+  llm_reasoning_effort?: 'low' | 'medium' | 'high' | '';
   agent_config?: Record<string, Record<string, string>>;
   default_agent_type?: 'codex' | 'claude_code' | 'gemini_cli';
 }

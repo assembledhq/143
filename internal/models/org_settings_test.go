@@ -176,6 +176,36 @@ func TestAgentType_Validate(t *testing.T) {
 	require.Error(t, AgentType("").Validate())
 }
 
+func TestReasoningEffort_Validate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		effort  ReasoningEffort
+		wantErr bool
+	}{
+		{name: "empty is valid", effort: ""},
+		{name: "low is valid", effort: ReasoningEffortLow},
+		{name: "medium is valid", effort: ReasoningEffortMedium},
+		{name: "high is valid", effort: ReasoningEffortHigh},
+		{name: "rejects invalid value", effort: "invalid", wantErr: true},
+		{name: "rejects unknown value", effort: "max", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.effort.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "Validate should reject invalid reasoning effort")
+			} else {
+				require.NoError(t, err, "Validate should accept valid reasoning effort")
+			}
+		})
+	}
+}
+
 func TestConfidenceThresholdsForAutonomy(t *testing.T) {
 	t.Parallel()
 

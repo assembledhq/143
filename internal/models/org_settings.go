@@ -49,6 +49,26 @@ func (a AgentType) Validate() error {
 // values are maps of env var name → value.
 type AgentEnvConfig map[string]map[string]string
 
+// ReasoningEffort controls how much reasoning a model should use.
+// Valid values: "low", "medium", "high", or "" (default/none).
+type ReasoningEffort string
+
+const (
+	ReasoningEffortLow    ReasoningEffort = "low"
+	ReasoningEffortMedium ReasoningEffort = "medium"
+	ReasoningEffortHigh   ReasoningEffort = "high"
+)
+
+// Validate returns an error if the reasoning effort is not a recognized value.
+func (r ReasoningEffort) Validate() error {
+	switch r {
+	case "", ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh:
+		return nil
+	default:
+		return fmt.Errorf("invalid reasoning effort: %q", r)
+	}
+}
+
 // OrgSettings is the strongly-typed representation of organizations.settings JSONB.
 type OrgSettings struct {
 	AutonomyLevel        AutonomyLevel        `json:"autonomy_level"`
@@ -63,6 +83,7 @@ type OrgSettings struct {
 	PMScheduleHours      int                  `json:"pm_schedule_hours"`
 	PMModel              string               `json:"pm_model"`
 	LLMModel             string               `json:"llm_model"`
+	LLMReasoningEffort   ReasoningEffort      `json:"llm_reasoning_effort,omitempty"`
 	AgentConfig          AgentEnvConfig       `json:"agent_config,omitempty"`
 	DefaultAgentType     AgentType            `json:"default_agent_type,omitempty"`
 	AuditRetentionDays   int                  `json:"audit_retention_days,omitempty"`

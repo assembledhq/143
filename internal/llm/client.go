@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/rs/zerolog"
 )
 
@@ -26,15 +27,16 @@ type chainLink struct {
 // It tries providers in order, falling back on retryable errors (rate limits,
 // server errors) but stopping on non-retryable errors (auth, bad request).
 type FallbackClient struct {
-	chain  []chainLink
-	logger zerolog.Logger
+	chain           []chainLink
+	reasoningEffort ReasoningEffort
+	logger          zerolog.Logger
 }
 
 func (c *FallbackClient) Complete(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
 	var lastErr error
 
 	for i, link := range c.chain {
-		resp, err := link.provider.Complete(ctx, link.modelID, systemPrompt, userPrompt)
+		resp, err := link.provider.Complete(ctx, link.modelID, systemPrompt, userPrompt, c.reasoningEffort)
 		if err == nil {
 			if i > 0 {
 				c.logger.Info().
@@ -66,7 +68,12 @@ func (c *FallbackClient) Complete(ctx context.Context, systemPrompt, userPrompt 
 type Config struct {
 	// Model is the human-friendly model name (e.g., "claude-sonnet-4-5", "gpt-4o").
 	// The registry maps this to provider-specific model IDs and fallback chains.
-	Model string
+	Model ModelName
+
+	// ReasoningEffort controls how much reasoning the model should use.
+	// Only applies to providers/models that support it (e.g., OpenAI reasoning models).
+	// Leave empty to use the provider's default.
+	ReasoningEffort ReasoningEffort
 
 	// Anthropic API credentials.
 	AnthropicAPIKey  string
@@ -92,10 +99,10 @@ type Config struct {
 
 // NewClient creates a FallbackClient from config.
 // It builds providers from the configured API keys and assembles a fallback
-// chain for the requested model. Returns nil if no model is configured.
+// chain for the requested model. Defaults to the default model if none is specified.
 func NewClient(cfg Config, logger zerolog.Logger) (Client, error) {
 	if cfg.Model == "" {
-		return nil, nil
+		cfg.Model = ModelName(models.DefaultLLMModel)
 	}
 
 	timeout := cfg.Timeout
@@ -160,16 +167,16 @@ func NewClient(cfg Config, logger zerolog.Logger) (Client, error) {
 	}
 
 	logger.Info().
-		Str("model", cfg.Model).
+		Str("model", string(cfg.Model)).
 		Int("chain_length", len(chain)).
 		Msg("LLM client initialized")
 
-	return &FallbackClient{chain: chain, logger: logger}, nil
+	return &FallbackClient{chain: chain, reasoningEffort: cfg.ReasoningEffort, logger: logger}, nil
 }
 
 // UnknownModelError indicates the requested model is not in the registry.
 type UnknownModelError struct {
-	Model string
+	Model ModelName
 }
 
 func (e *UnknownModelError) Error() string {
@@ -178,7 +185,7 @@ func (e *UnknownModelError) Error() string {
 
 // NoProvidersError indicates no configured providers can serve the requested model.
 type NoProvidersError struct {
-	Model string
+	Model ModelName
 }
 
 func (e *NoProvidersError) Error() string {

@@ -56,8 +56,9 @@ type Config struct {
 	EncryptionMasterKey string `env:"ENCRYPTION_MASTER_KEY"`
 
 	// LLM
-	LLMModel          string `env:"LLM_MODEL"`
-	AnthropicAPIKey   string `env:"ANTHROPIC_API_KEY"`
+	LLMModel           string `env:"LLM_MODEL"`
+	LLMReasoningEffort string `env:"LLM_REASONING_EFFORT"`
+	AnthropicAPIKey    string `env:"ANTHROPIC_API_KEY"`
 	AnthropicBaseURL  string `env:"ANTHROPIC_BASE_URL"`
 	AnthropicModel    string `env:"ANTHROPIC_MODEL"`
 	OpenAIAPIKey      string `env:"OPENAI_API_KEY"`
@@ -126,7 +127,8 @@ func Load() *Config {
 // LLMConfig returns the llm.Config derived from this Config.
 func (c *Config) LLMConfig() llm.Config {
 	return llm.Config{
-		Model:             c.LLMModel,
+		Model:             llm.ModelName(c.LLMModel),
+		ReasoningEffort:   llm.ReasoningEffort(c.LLMReasoningEffort),
 		AnthropicAPIKey:   c.AnthropicAPIKey,
 		AnthropicBaseURL:  c.AnthropicBaseURL,
 		OpenAIAPIKey:      c.OpenAIAPIKey,
@@ -281,9 +283,13 @@ func (c *Config) LogStatus(logger zerolog.Logger) {
 		providers = append(providers, "openrouter")
 	}
 
-	if c.LLMModel != "" && len(providers) > 0 {
+	llmModel := c.LLMModel
+	if llmModel == "" {
+		llmModel = "(default: gpt-5.4-mini)"
+	}
+	if len(providers) > 0 {
 		logger.Info().
-			Str("model", c.LLMModel).
+			Str("model", llmModel).
 			Strs("providers", providers).
 			Int("chain_length", len(providers)).
 			Msg("LLM configured")
@@ -293,7 +299,7 @@ func (c *Config) LogStatus(logger zerolog.Logger) {
 			Msg("LLM model set but no provider API keys configured — LLM checks will be skipped")
 	} else {
 		logger.Warn().
-			Msg("LLM not configured (set LLM_MODEL + at least one provider API key) — LLM checks will be skipped")
+			Msg("LLM not configured (set at least one provider API key) — LLM checks will be skipped")
 	}
 
 	if c.SessionSecret == "" {
