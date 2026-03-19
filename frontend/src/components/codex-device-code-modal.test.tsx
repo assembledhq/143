@@ -114,4 +114,35 @@ describe("CodexDeviceCodeModal", () => {
 
     expect(screen.getByRole("button", { name: /try again/i })).toBeInTheDocument();
   });
+
+  it("shows 'Copied' feedback after clicking Copy", async () => {
+    Object.assign(navigator, {
+      clipboard: { writeText: vi.fn().mockResolvedValue(undefined) },
+    });
+
+    server.use(
+      http.post(INITIATE_URL, () => {
+        return HttpResponse.json({ data: mockDeviceAuth });
+      }),
+      http.get(STATUS_URL, () => {
+        return HttpResponse.json({ data: { status: "pending" } });
+      }),
+    );
+
+    render(<CodexDeviceCodeModal onClose={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("ABCD-1234")).toBeInTheDocument();
+    });
+
+    expect(screen.getByRole("button", { name: /copy/i })).toBeInTheDocument();
+    expect(screen.queryByText("Copied")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /copy/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Copied")).toBeInTheDocument();
+    });
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith("ABCD-1234");
+  });
 });
