@@ -471,6 +471,369 @@ FOR UPDATE SKIP LOCKED;
 | Medium (5-20 repos) | 2 `all` nodes + 1-3 `worker` nodes | Two `all` nodes for API redundancy + scheduler failover. Workers for compute. |
 | Large (20+ repos) | N `api` behind LB + M `worker` nodes | Dedicated roles. Move Postgres to managed service. At least 1 `all` node (or separate scheduler process) for cron. |
 
+#### Scaling Playbook
+
+This is the step-by-step path from a single VPS to a multi-node cluster. Each stage builds on the previous one — don't skip ahead. You should only move to the next stage when you're hitting the limits of the current one.
+
+##### Stage 1: Single VPS (where you start)
+
+Everything runs on one machine via docker compose. This handles more than you'd expect — a single 4-core / 8GB VPS can run the API, 3 concurrent agent sandboxes, and Postgres comfortably.
+
+```
+┌─────────────────────────────────────────┐
+│  VPS-1 (4 CPU / 8 GB)                  │
+│                                         │
+│  ┌──────────┐  ┌──────────┐            │
+│  │ Postgres │  │  Server  │            │
+│  │          │  │ mode=all │            │
+│  └──────────┘  └──────────┘            │
+│                ┌──────────┐            │
+│                │ Caddy/LB │            │
+│                └──────────┘            │
+└─────────────────────────────────────────┘
+```
+
+```yaml
+# docker-compose.prod.yml — this is your entire production stack
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: onefortythree
+      POSTGRES_USER: onefortythree
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres/postgresql.conf:/etc/postgresql/conf.d/custom.conf:ro
+    command: postgres -c config_file=/etc/postgresql/conf.d/custom.conf
+    ports:
+      - "127.0.0.1:5432:5432"   # only bind to localhost — no external access
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U onefortythree"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
+
+  server:
+    image: 143-server:latest
+    environment:
+      DATABASE_URL: postgres://onefortythree:${DB_PASSWORD}@postgres:5432/onefortythree?sslmode=disable
+      MODE: all
+      PORT: "8080"
+      NODE_ID: ${HOSTNAME:-node-1}
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "2.0"
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  caddy_data:
+```
+
+**Move to Stage 2 when:** agent runs are queuing up (check `jobs.queue.depth` metric), or you need the API to stay responsive while heavy agent runs are consuming CPU/memory on the same box.
+
+##### Stage 2: Split Postgres to Its Own VPS
+
+**Yes — Postgres should get its own dedicated node.** This is the single most impactful scaling move because:
+
+1. **Resource isolation** — agent sandboxes are CPU/memory hungry. A sandbox spike won't starve Postgres of resources and cause query timeouts or connection drops.
+2. **Independent backups** — backup scripts (pg_dump, WAL archiving) run without competing with the application for I/O.
+3. **Independent upgrades** — you can upgrade the app server or restart Docker without touching the database.
+4. **Foundation for everything after** — every subsequent stage assumes Postgres is on its own machine. Do this early.
+
+```
+┌──────────────────────┐     ┌──────────────────────┐
+│  VPS-1 (DB)          │     │  VPS-2 (App)         │
+│  4 CPU / 8 GB        │     │  4 CPU / 8 GB        │
+│                      │     │                      │
+│  ┌──────────┐        │     │  ┌──────────┐        │
+│  │ Postgres │◄───────┼─────┼──│  Server  │        │
+│  │          │        │     │  │ mode=all │        │
+│  └──────────┘        │     │  └──────────┘        │
+│                      │     │  ┌──────────┐        │
+│  pg_dump cron        │     │  │  Caddy   │        │
+│  WAL-G archiving     │     │  └──────────┘        │
+└──────────────────────┘     └──────────────────────┘
+```
+
+**How to do it:**
+
+```bash
+# === On the NEW database VPS (VPS-1) ===
+
+# 1. Set up Postgres
+mkdir -p /opt/143 && cd /opt/143
+```
+
+```yaml
+# /opt/143/docker-compose.db.yml
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: onefortythree
+      POSTGRES_USER: onefortythree
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres/postgresql.conf:/etc/postgresql/conf.d/custom.conf:ro
+    command: postgres -c config_file=/etc/postgresql/conf.d/custom.conf
+    ports:
+      - "0.0.0.0:5432:5432"    # accessible from other VPSs
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U onefortythree"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G            # give Postgres most of the RAM
+          cpus: "3.0"
+
+volumes:
+  pgdata:
+```
+
+```bash
+# 2. Migrate data from the old VPS
+# On the OLD VPS:
+docker exec 143-postgres-1 pg_dump -U onefortythree -Fc onefortythree > /tmp/143.dump
+
+# Copy to the new VPS:
+scp /tmp/143.dump db-vps:/tmp/143.dump
+
+# On the NEW VPS — start Postgres and restore:
+docker compose -f docker-compose.db.yml up -d
+docker exec -i 143-postgres-1 pg_restore -U onefortythree -d onefortythree --clean --if-exists < /tmp/143.dump
+
+# 3. Secure the connection
+# Option A: Hetzner private network (recommended — free, no encryption overhead)
+#   Both VPSs on the same Hetzner private network. Postgres listens on the private IP.
+#   DATABASE_URL uses the private IP (e.g., 10.0.0.2)
+#
+# Option B: Public IP + firewall
+#   Firewall Postgres port to only accept connections from the app VPS IP.
+#   Use sslmode=verify-full in DATABASE_URL.
+
+# === On the APP VPS (VPS-2) ===
+
+# 4. Update DATABASE_URL to point at the DB VPS
+# In .env or .env.production:
+DATABASE_URL=postgres://onefortythree:${DB_PASSWORD}@10.0.0.2:5432/onefortythree?sslmode=disable
+# (use private IP if on Hetzner private network, sslmode=disable is fine over private network)
+
+# 5. Remove Postgres from the app compose file and restart
+docker compose up -d
+```
+
+**Networking:** If you're on Hetzner, put both VPSs in the same [private network](https://docs.hetzner.com/cloud/networks/getting-started/creating-a-network/) (free, ~2Gbps, no encryption needed). Postgres listens on the private IP. The firewall blocks port 5432 on the public interface.
+
+**Move to Stage 3 when:** you need more concurrent agent runs than one VPS can handle (typically > 3-5 concurrent sandboxes depending on VPS size).
+
+##### Stage 3: Add Dedicated Worker Nodes
+
+Worker nodes run agent sandboxes — the most resource-intensive part of the system. Each worker VPS can run `MAX_CONCURRENT_RUNS` sandboxes in parallel. Adding a worker is a 5-minute operation.
+
+```
+┌───────────────┐     ┌───────────────┐
+│  VPS-1 (DB)   │     │  VPS-2 (App)  │
+│               │     │  mode=all     │
+│  Postgres  ◄──┼─────┤  Caddy        │
+│               │  ┌──┤               │
+└───────────────┘  │  └───────────────┘
+                   │
+        ┌──────────┼──────────┐
+        │          │          │
+   ┌────▼────┐ ┌──▼──────┐ ┌─▼───────┐
+   │ VPS-3   │ │ VPS-4   │ │ VPS-5   │
+   │ worker  │ │ worker  │ │ worker  │
+   │ 5 runs  │ │ 5 runs  │ │ 5 runs  │
+   └─────────┘ └─────────┘ └─────────┘
+```
+
+**On each new worker VPS:**
+
+```bash
+# 1. Install Docker + gVisor
+curl -fsSL https://get.docker.com | sh
+# Install gVisor (see gVisor Setup section above)
+
+# 2. Pull the images
+docker pull 143-server:latest
+docker pull 143-sandbox:latest
+
+# 3. Create the compose file
+```
+
+```yaml
+# /opt/143/docker-compose.worker.yml
+services:
+  worker:
+    image: 143-server:latest
+    environment:
+      DATABASE_URL: postgres://onefortythree:${DB_PASSWORD}@10.0.0.2:5432/onefortythree?sslmode=disable
+      MODE: worker
+      NODE_ID: ${HOSTNAME}
+      MAX_CONCURRENT_RUNS: 5
+      SANDBOX_IMAGE: 143-sandbox:latest
+      SANDBOX_RUNTIME: runsc
+    env_file:
+      - .env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G    # for the server process itself
+          cpus: "1.0"   # sandboxes get their own resource limits
+```
+
+```bash
+# 4. Start it
+docker compose -f docker-compose.worker.yml up -d
+
+# That's it. The worker registers itself in the nodes table,
+# starts polling for jobs, and picks up work immediately.
+```
+
+**Sizing worker VPSs:** Each sandbox gets `SANDBOX_CPU_LIMIT` (default 2) cores and `SANDBOX_MEMORY_LIMIT` (default 4GB) memory. For 5 concurrent runs, you want at least 12 CPU / 24 GB RAM on the worker VPS (some headroom for the worker process and OS).
+
+| Worker VPS size | `MAX_CONCURRENT_RUNS` | Good for |
+|----------------|----------------------|----------|
+| 4 CPU / 8 GB | 1-2 | Small/test |
+| 8 CPU / 16 GB | 3 | Medium |
+| 16 CPU / 32 GB | 5-7 | Production sweet spot |
+| 32 CPU / 64 GB | 10-15 | Heavy workloads |
+
+**Move to Stage 4 when:** you need API redundancy (uptime SLA), or a single API node can't keep up with webhook volume.
+
+##### Stage 4: Multiple API Nodes Behind a Load Balancer
+
+API nodes are stateless — sessions live in Postgres. Add as many as you need behind Caddy, nginx, or a cloud load balancer.
+
+```
+                 ┌──────────────────┐
+                 │   Caddy / LB     │
+                 │   (VPS-6 or      │
+                 │    cloud LB)     │
+                 └──┬──────────┬────┘
+                    │          │
+              ┌─────▼──┐  ┌───▼────┐
+              │ VPS-2  │  │ VPS-7  │
+              │ all    │  │ api    │
+              └────┬───┘  └───┬────┘
+                   │          │
+┌──────────────────▼──────────▼───────────────┐
+│                 VPS-1 (DB)                   │
+│                 Postgres                     │
+└──────────────────────────────────────────────┘
+```
+
+At this point your Caddy VPS (or a Hetzner Load Balancer — €6/mo) distributes traffic across API nodes. Keep at least one node as `mode=all` so the scheduler runs. All `api` and `all` nodes serve the same traffic.
+
+```
+# Caddyfile for multi-node
+app.143.dev {
+    reverse_proxy vps-2:8080 vps-7:8080 {
+        health_uri /healthz
+        health_interval 10s
+        lb_policy round_robin
+    }
+}
+```
+
+##### Stage 5: Managed Postgres (Optional)
+
+At some point the operational overhead of self-hosted Postgres (backups, monitoring, upgrades, failover) may outweigh the cost savings. Migration is straightforward:
+
+```bash
+# 1. Take a final backup
+docker exec 143-postgres-1 pg_dump -U onefortythree -Fc onefortythree > final.dump
+
+# 2. Restore to managed service
+pg_restore -h managed-db.provider.com -U onefortythree -d onefortythree final.dump
+
+# 3. Update DATABASE_URL on all nodes
+DATABASE_URL=postgres://onefortythree:pass@managed-db.provider.com:5432/onefortythree?sslmode=verify-full
+
+# 4. Restart all nodes
+# On each VPS: docker compose up -d
+
+# 5. Decommission the DB VPS
+```
+
+No application code changes. The app only sees `DATABASE_URL`.
+
+#### When to Split What
+
+| Signal | Action |
+|--------|--------|
+| Agent runs queuing for > 5 min | Add worker nodes (Stage 3) |
+| Postgres CPU > 70% sustained | Move Postgres to its own VPS (Stage 2) |
+| API p95 latency > 500ms under load | Add API nodes (Stage 4) |
+| Disk I/O wait > 20% on shared VPS | Separate Postgres (Stage 2) |
+| Spending > 2 hrs/month on Postgres ops | Consider managed Postgres (Stage 5) |
+| Need 99.9%+ uptime SLA | Multiple API nodes + Postgres HA (Stage 4+5) |
+
+#### Connection Pooling
+
+When you have many app/worker nodes, each opens a pool of connections to Postgres. At scale (10+ nodes), this can exhaust `max_connections`.
+
+**When to add PgBouncer:** When total connections across all nodes approach 80% of `max_connections` (default 100). Each node's pgx pool defaults to ~10 connections, so with 8+ nodes you're getting close.
+
+```yaml
+# Add to docker-compose.db.yml on the Postgres VPS
+services:
+  pgbouncer:
+    image: edoburu/pgbouncer:1.23.1
+    environment:
+      DATABASE_URL: postgres://onefortythree:${DB_PASSWORD}@postgres:5432/onefortythree
+      POOL_MODE: transaction    # required for SKIP LOCKED and advisory locks
+      MAX_CLIENT_CONN: 500
+      DEFAULT_POOL_SIZE: 30
+      RESERVE_POOL_SIZE: 5
+    ports:
+      - "0.0.0.0:6432:6432"
+    depends_on:
+      - postgres
+    restart: unless-stopped
+```
+
+All app/worker nodes change their `DATABASE_URL` to point at PgBouncer (port 6432) instead of Postgres directly. PgBouncer multiplexes hundreds of client connections into 30 actual Postgres connections.
+
+**Important:** Use `POOL_MODE=transaction` (not `session`). Session mode breaks `FOR UPDATE SKIP LOCKED` across transaction boundaries.
+
 #### Draining & Graceful Shutdown
 
 When removing a node:
