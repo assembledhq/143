@@ -208,11 +208,11 @@ export function ProjectSidebar() {
                     {project.title}
                   </p>
 
-                  <div className="flex items-center gap-2 mt-0.5">
-                    <span className="text-[11px] text-muted-foreground">
+                  <div className="flex items-center gap-3 mt-0.5">
+                    <span className="text-[11px] text-muted-foreground shrink-0">
                       {cfg.label}
                     </span>
-                    <span className="text-[11px] text-muted-foreground/50">
+                    <span className="text-[11px] text-muted-foreground/50 truncate">
                       {formatTimeAgo(ts)}
                     </span>
                   </div>
