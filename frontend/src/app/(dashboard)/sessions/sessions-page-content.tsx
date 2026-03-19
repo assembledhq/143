@@ -51,18 +51,18 @@ const statusConfig: Record<string, { dot: string; text: string; bg: string; labe
 
 const filterTabs = [
   { value: "all", label: "All" },
-  { value: "active", label: "Active" },
-  { value: "needs_human_guidance", label: "Needs guidance" },
-  { value: "failed", label: "Failed" },
+  { value: "needs_attention", label: "Needs attention" },
+  { value: "working", label: "Working" },
   { value: "done", label: "Done" },
   { value: "decisions", label: "Decisions" },
 ];
 
-const activeStatuses = new Set(["pending", "running", "awaiting_input"]);
-const doneStatuses = new Set(["completed", "pr_created"]);
+const needsAttentionStatuses = new Set(["awaiting_input", "needs_human_guidance", "failed"]);
+const workingStatuses = new Set(["pending", "running"]);
+const doneStatuses = new Set(["completed", "pr_created", "cancelled", "skipped", "idle"]);
 
-function isActive(s: Session): boolean {
-  return activeStatuses.has(s.status);
+function isWorking(s: Session): boolean {
+  return workingStatuses.has(s.status);
 }
 
 // ---------------------------------------------------------------------------
@@ -71,7 +71,8 @@ function isActive(s: Session): boolean {
 
 function filterSessions(sessions: Session[], filter: string | null): Session[] {
   if (!filter || filter === "all") return sessions;
-  if (filter === "active") return sessions.filter(isActive);
+  if (filter === "needs_attention") return sessions.filter((s) => needsAttentionStatuses.has(s.status));
+  if (filter === "working") return sessions.filter(isWorking);
   if (filter === "done") return sessions.filter((s) => doneStatuses.has(s.status));
   return sessions.filter((s) => s.status === filter);
 }
@@ -87,9 +88,9 @@ function sessionTitle(session: Session): string {
 // ---------------------------------------------------------------------------
 
 function SessionStatusDot({ status }: { status: string }) {
-  const active = activeStatuses.has(status);
+  const working = workingStatuses.has(status);
   const cfg = statusConfig[status] || statusConfig.pending;
-  if (active) {
+  if (working) {
     return <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />;
   }
   return <StatusDot color={cfg.dot} />;
@@ -235,9 +236,8 @@ export function SessionsPageContent() {
   const currentFilter = activeFilter ?? "all";
   const showDecisions = currentFilter === "decisions";
 
-  const activeSessions = allSessions.filter(isActive);
-  const failedSessions = allSessions.filter((s) => s.status === "failed");
-  const guidanceSessions = allSessions.filter((s) => s.status === "needs_human_guidance");
+  const needsAttentionSessions = allSessions.filter((s) => needsAttentionStatuses.has(s.status));
+  const workingSessions = allSessions.filter(isWorking);
 
   const filteredSessions = useMemo(
     () => (showDecisions ? [] : filterSessions(allSessions, activeFilter)),
@@ -262,16 +262,15 @@ export function SessionsPageContent() {
         description="Each agent execution creates a session."
       />
 
-      <PMStatusBanner hasActivePlanSession={activeSessions.length > 0} />
+      <PMStatusBanner hasActivePlanSession={workingSessions.length > 0} />
 
       {/* ── Tab filters ────────────────────────────────────────────── */}
       <div className="flex items-center gap-0 border-b border-border">
         {filterTabs.map((tab) => {
           const isSelected = currentFilter === tab.value;
           const count =
-            tab.value === "active" ? activeSessions.length
-            : tab.value === "failed" ? failedSessions.length
-            : tab.value === "needs_human_guidance" ? guidanceSessions.length
+            tab.value === "needs_attention" ? needsAttentionSessions.length
+            : tab.value === "working" ? workingSessions.length
             : 0;
           return (
             <button
@@ -287,8 +286,7 @@ export function SessionsPageContent() {
                 {tab.label}
                 {count > 0 && (
                   <span className={`rounded-full text-white text-[10px] leading-none px-1.5 py-0.5 font-normal ${
-                    tab.value === "failed" ? "bg-destructive"
-                    : tab.value === "needs_human_guidance" ? "bg-orange-500"
+                    tab.value === "needs_attention" ? "bg-orange-500"
                     : "bg-primary"
                   }`}>{count}</span>
                 )}

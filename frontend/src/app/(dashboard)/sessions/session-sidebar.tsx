@@ -33,22 +33,23 @@ const statusConfig: Record<string, { dot: string; label: string }> = {
 
 const filterTabs = [
   { value: "all", label: "All" },
-  { value: "active", label: "Active" },
-  { value: "needs_human_guidance", label: "Guidance" },
-  { value: "failed", label: "Failed" },
+  { value: "needs_attention", label: "Needs attention" },
+  { value: "working", label: "Working" },
   { value: "done", label: "Done" },
 ];
 
-const activeStatuses = new Set(["pending", "running", "awaiting_input"]);
-const doneStatuses = new Set(["completed", "pr_created"]);
+const needsAttentionStatuses = new Set(["awaiting_input", "needs_human_guidance", "failed"]);
+const workingStatuses = new Set(["pending", "running"]);
+const doneStatuses = new Set(["completed", "pr_created", "cancelled", "skipped", "idle"]);
 
-function isActive(s: Session): boolean {
-  return activeStatuses.has(s.status);
+function isWorking(s: Session): boolean {
+  return workingStatuses.has(s.status);
 }
 
 function filterSessions(sessions: Session[], filter: string | null): Session[] {
   if (!filter || filter === "all") return sessions;
-  if (filter === "active") return sessions.filter(isActive);
+  if (filter === "needs_attention") return sessions.filter((s) => needsAttentionStatuses.has(s.status));
+  if (filter === "working") return sessions.filter(isWorking);
   if (filter === "done") return sessions.filter((s) => doneStatuses.has(s.status));
   return sessions.filter((s) => s.status === filter);
 }
@@ -111,9 +112,8 @@ export function SessionSidebar() {
   const allSessions = data?.data ?? [];
   const currentFilter = activeFilter ?? "all";
 
-  const activeSessions = allSessions.filter(isActive);
-  const failedSessions = allSessions.filter((s) => s.status === "failed");
-  const guidanceSessions = allSessions.filter((s) => s.status === "needs_human_guidance");
+  const needsAttentionSessions = allSessions.filter((s) => needsAttentionStatuses.has(s.status));
+  const workingSessions = allSessions.filter(isWorking);
 
   const filteredSessions = useMemo(
     () => filterSessions(allSessions, activeFilter),
@@ -163,9 +163,8 @@ export function SessionSidebar() {
           <TabsList size="sm" className="overflow-x-auto">
             {filterTabs.map((tab) => {
               const count =
-                tab.value === "active" ? activeSessions.length
-                : tab.value === "failed" ? failedSessions.length
-                : tab.value === "needs_human_guidance" ? guidanceSessions.length
+                tab.value === "needs_attention" ? needsAttentionSessions.length
+                : tab.value === "working" ? workingSessions.length
                 : 0;
               return (
                 <TabsTrigger key={tab.value} value={tab.value}>
@@ -173,8 +172,7 @@ export function SessionSidebar() {
                   {count > 0 && (
                     <span className={cn(
                       "rounded-full text-white text-[9px] leading-none px-1.5 py-0.5",
-                      tab.value === "failed" ? "bg-destructive"
-                      : tab.value === "needs_human_guidance" ? "bg-orange-500"
+                      tab.value === "needs_attention" ? "bg-orange-500"
                       : "bg-primary"
                     )}>{count}</span>
                   )}
@@ -202,7 +200,7 @@ export function SessionSidebar() {
           </Link>
         )}
 
-        {(currentFilter === "all" || currentFilter === "active") &&
+        {(currentFilter === "all" || currentFilter === "working") &&
           optimisticSessions.map((os) => (
             <OptimisticSessionRow key={os.id} session={os} />
           ))}
@@ -222,7 +220,7 @@ export function SessionSidebar() {
         {displayedSessions.map((session) => {
           const isSelected = selectedId === session.id;
           const cfg = statusConfig[session.status] || statusConfig.pending;
-          const isActiveSession = activeStatuses.has(session.status);
+          const isWorkingSession = workingStatuses.has(session.status);
           const ts = session.completed_at || session.started_at || session.created_at;
 
           return (
@@ -239,7 +237,7 @@ export function SessionSidebar() {
               <div className="flex items-start gap-2.5 min-w-0">
                 {/* Status dot */}
                 <div className="mt-1.5 shrink-0">
-                  {isActiveSession ? (
+                  {isWorkingSession ? (
                     <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />
                   ) : (
                     <StatusDot color={cfg.dot} />
