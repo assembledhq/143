@@ -14,8 +14,9 @@ import (
 )
 
 type gatherIssueStoreMock struct {
-	byStatus map[string][]models.Issue
-	errByKey map[string]error
+	byStatus   map[string][]models.Issue
+	errByKey   map[string]error
+	totalCount int // returned by CountByOrg; defaults to 0 (small tier)
 }
 
 func (m *gatherIssueStoreMock) ListByOrg(ctx context.Context, orgID uuid.UUID, filters db.IssueFilters) ([]models.Issue, error) {
@@ -23,6 +24,13 @@ func (m *gatherIssueStoreMock) ListByOrg(ctx context.Context, orgID uuid.UUID, f
 		return nil, err
 	}
 	return m.byStatus[filters.Status], nil
+}
+
+func (m *gatherIssueStoreMock) CountByOrg(ctx context.Context, orgID uuid.UUID) (int, error) {
+	if err := m.errByKey["count"]; err != nil {
+		return 0, err
+	}
+	return m.totalCount, nil
 }
 
 func (m *gatherIssueStoreMock) UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status string) error {
@@ -104,6 +112,77 @@ func (m *gatherDecisionStoreMock) ListRecentByOrg(ctx context.Context, orgID uui
 
 func (m *gatherDecisionStoreMock) UpdateOutcome(ctx context.Context, orgID, planID, issueID uuid.UUID, outcome models.PMDecisionOutcome) error {
 	return nil
+}
+
+func TestGatherContext_CountByOrgError(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	settingsJSON, _ := json.Marshal(models.OrgSettings{MaxConcurrentRuns: 3})
+
+	svc := &Service{
+		issues: &gatherIssueStoreMock{
+			byStatus: map[string][]models.Issue{},
+			errByKey: map[string]error{"count": fmt.Errorf("count exploded")},
+		},
+		sessions: &gatherSessionStoreMock{byStatus: map[string][]models.Session{}},
+		orgs:     &gatherOrgStoreMock{org: models.Organization{ID: orgID, Settings: settingsJSON}},
+	}
+
+	_, err := svc.gatherContext(context.Background(), orgID, nil)
+	require.Error(t, err, "gatherContext should fail when CountByOrg errors")
+	require.Contains(t, err.Error(), "count issues", "error should mention count issues")
+}
+
+func TestGatherContext_AdaptiveLimitsTierSelection(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	settingsJSON, _ := json.Marshal(models.OrgSettings{MaxConcurrentRuns: 3})
+
+	tests := []struct {
+		name        string
+		totalCount  int
+		expectedMax int // expected IssuesPerStatus limit
+	}{
+		{
+			name:        "small org uses small limits",
+			totalCount:  10,
+			expectedMax: limitsSmall.IssuesPerStatus,
+		},
+		{
+			name:        "medium org uses medium limits",
+			totalCount:  200,
+			expectedMax: limitsMedium.IssuesPerStatus,
+		},
+		{
+			name:        "large org uses large limits",
+			totalCount:  1000,
+			expectedMax: limitsLarge.IssuesPerStatus,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc := &Service{
+				issues: &gatherIssueStoreMock{
+					byStatus:   map[string][]models.Issue{},
+					totalCount: tt.totalCount,
+				},
+				sessions: &gatherSessionStoreMock{byStatus: map[string][]models.Session{}, count: 0},
+				orgs:     &gatherOrgStoreMock{org: models.Organization{ID: orgID, Settings: settingsJSON}},
+			}
+
+			bundle, err := svc.gatherContext(context.Background(), orgID, nil)
+			require.NoError(t, err, "gatherContext should succeed")
+			require.NotNil(t, bundle, "gatherContext should return a bundle")
+			// The mock returns empty slices regardless of limit, so we verify
+			// the function completes without error at each tier. The actual
+			// limit values are validated in constants_test.go.
+		})
+	}
 }
 
 func TestServiceGatherContext(t *testing.T) {

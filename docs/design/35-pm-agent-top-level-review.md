@@ -1,8 +1,8 @@
-# 35 - PM Agent: Top-Level Concept Review
+# 35 - PM Agent: Operator Workspace
 
-> Should the PM agent be promoted to a first-class concept alongside Sessions and Projects? How does it differ from agents.md? How do we make it clearly differentiated?
+> Promote the PM agent to a first-class operator workspace alongside Sessions and Projects. Define how it differs from agents.md and design it as the place operators live.
 
-**Status**: Design review (decision pending)
+**Status**: Approved — promote PM to top-level nav as an operator workspace
 
 ## Decision Summary
 
@@ -81,7 +81,7 @@ The PM agent does more strategic work than anything else in the system, but it's
 The PM agent is not a settings page. It's a **continuously learning strategic planner** that:
 
 1. **Reads** the codebase (AGENTS.md, README, git history, stack traces at specific file:line locations)
-2. **Gathers** 200+ issues, 50 past decisions, 20 recent PRs, in-flight runs, active projects, Slack threads, reference documents
+2. **Gathers** open issues, past decisions, recent PRs, in-flight runs, active projects, Slack threads, and reference documents — with adaptive limits that scale by org size (small orgs: 30 issues/20 decisions, medium: 75/50, large: 150/75; see `internal/services/pm/constants.go`)
 3. **Reasons** about priority using product context (philosophy, direction, focus/avoid areas) and configurable weights (customer impact, severity, recency, revenue risk)
 4. **Decides** what to work on, what to skip, and why — with explicit reasoning for each decision
 5. **Clusters** related issues that share root causes
@@ -118,9 +118,9 @@ agents.md could theoretically include product context. But it can't:
 
 1. **Maintain state across runs** — agents.md is a static file. The PM tracks what it decided last time, what succeeded, what failed, and adjusts. This is the `pm_decision_log` with outcome tracking.
 
-2. **Reason across 200 issues simultaneously** — agents.md gives context to one agent working on one issue. The PM sees the full portfolio and makes cross-cutting decisions (clustering, prioritization, skip reasoning).
+2. **Reason across the full issue portfolio** — agents.md gives context to one agent working on one issue. The PM sees up to 150 issues at once (adaptive by org size) and makes cross-cutting decisions (clustering, prioritization, skip reasoning).
 
-3. **Learn from its own mistakes** — the PM reads `PreviousDecisions` (last 50 decisions with outcomes) and adjusts. A coding agent reading agents.md has no feedback loop.
+3. **Learn from its own mistakes** — the PM reads `PreviousDecisions` (up to 75 decisions with outcomes, adaptive by org size) and adjusts. A coding agent reading agents.md has no feedback loop.
 
 4. **Manage capacity** — the PM does slot allocation (`SlotAllocation.Reactive` vs `SlotAllocation.Projects`) and decides what fits in available capacity. agents.md has no concept of resource constraints.
 
@@ -154,27 +154,29 @@ agents.md could theoretically include product context. But it can't:
 
 4. **Design doc 30's original instinct was right.** "Enhance, don't add" is a good principle. The PM's value is best shown through its effects on Sessions and Projects, not on its own page.
 
-### Recommendation: Promote, but only if it supports a clear operating loop
+### Decision: Promote as an **operator workspace**
 
-The PM should be top-level if we are committing to it as an **active operating surface** for the PM/engineer hybrid. If it is mostly settings plus historical output, it should stay secondary.
-
-The standard to clear is:
+The PM should be top-level because we are committing to it as an **active operating surface** for the PM/engineer hybrid. It must clear a high bar:
 
 - users visit it repeatedly, not just during setup
 - users can take a clear action from it
 - it improves trust and control, rather than just exposing more internals
 - it gives users a clear path from review-heavy usage into autonomous operation
 
-### Recommendation: Promote, but as a **different kind of page**
+The PM isn't a list view like Sessions or Projects. It's an **operator workspace** — the place where the person steering 143 spends their time. Unlike a settings page (configure and leave), a workspace is a destination you return to repeatedly to observe, steer, and learn.
 
-The PM isn't a list view like Sessions or Projects. It's an **operator workspace**: part dashboard, part decision review, part steering surface. That's okay. Not every nav item needs to be a CRUD list.
+An operator workspace is:
+- **Observable**: see what the PM did, is doing, and will do next
+- **Steerable**: adjust product context, weights, schedule, documents — and see the effects immediately
+- **Accountable**: track the PM's success rate, review its decisions, build trust over time
+- **Adaptive**: context gathering scales automatically with org size (no manual tuning)
 
 ```
 ┌──────────────────────────────┐
 │  Overview                    │
 │  Sessions  ●                 │
 │  Projects                    │
-│  PM Agent                    │  ← NEW: consolidated PM home
+│  PM Agent                    │  ← Operator workspace
 └──────────────────────────────┘
 ```
 
@@ -182,35 +184,22 @@ Remove "Prioritization" from the dropdown. Remove the orphaned `/plans` route. C
 
 ---
 
-## 5. PM Agent Information Architecture
+## 5. Operator Workspace Structure
 
 ### Design principle
 
-Do not make the PM page a dumping ground for all PM-related data. It should be organized around the user's operating loop:
+Do not make the PM page a dumping ground for all PM-related data. It should be organized around the user's operating loop: **observe → steer → verify**.
 
-1. Review the latest plan
-2. Inspect the reasoning and tradeoffs
-3. Adjust context or constraints if needed
-4. Verify whether the PM is getting better
+1. Review the latest plan (observe)
+2. Inspect the reasoning and tradeoffs (observe)
+3. Adjust context or constraints if needed (steer)
+4. Verify whether the PM is getting better (verify)
 
 ### Recommended page model
 
 Use a **summary-first workspace** with tabs beneath it, not tabs alone.
 
-```
-PM Agent
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Plan status       Last run       Recommended next step
-Trust signal      Capacity split Requiring attention
-Autonomy level    Ready to unlock
-
-┌─────────┬────────────┬──────────┬─────────────┐
-│  Plan   │  Decisions │  Context │  Documents  │
-└─────────┴────────────┴──────────┴─────────────┘
-```
-
-The top summary block is important. It makes the page legible for repeat use and prevents users from landing in a content-heavy tab with no orientation.
+The top summary block (control strip) is important. It makes the page legible for repeat use and prevents users from landing in a content-heavy tab with no orientation.
 
 ### Tab-based layout
 
@@ -218,49 +207,65 @@ The top summary block is important. It makes the page legible for repeat use and
 PM Agent
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+┌─────────────────────────────────────────────────────────────┐
+│  PM Agent · Analyzing (14 issues) · Last run: 2h ago        │
+│  Next run: in 2h · Success rate: 84%                        │
+│  [Analyze Now]                                               │
+└─────────────────────────────────────────────────────────────┘
+
 ┌─────────┬────────────┬──────────┬─────────────┐
 │  Plan   │  Decisions │  Context │  Documents  │
 └─────────┴────────────┴──────────┴─────────────┘
 ```
 
-#### Plan tab (default) — formerly `/plans`
-- The main answer: what the PM recommends now
+The persistent header above the tabs is the **control strip** — always visible, shows real-time PM status, autonomy level, trust signal, and provides the primary action (Analyze Now). This is the first thing the operator sees.
+
+#### Plan tab (default) — OBSERVE what the PM decided
+
+The main answer: what the PM recommends now. Maps to the user's primary question: "What should happen next?"
+
 - Latest PM plan with prioritized tasks, clusters, skips, and capacity allocation
-- "Analyze now" button
 - Change summary since previous plan
-- Small set of context stats: issues reviewed, decisions learned from, PRs checked
-- Plan history in secondary position
+- Context stats (issues reviewed, decisions learned from, PRs checked) — these numbers are adaptive and scale with org size
+- Plan history accordion for comparing across cycles
+- Each task card shows which session it spawned and the outcome
 
-The Plan tab should be the default because it maps to the user's primary question: "What should happen next?"
+#### Decisions tab — VERIFY the PM is getting smarter
 
-#### Decisions tab — currently not exposed
-- The audit and trust surface
+The audit and trust surface. Should answer: "Should I trust this system more or constrain it more?"
+
 - Decision log with outcome, confidence, and rationale summary
 - Filter by repo, project, decision type, outcome
 - Trend line plus segmented performance by issue type or domain
+- Per-domain breakdown (e.g., "auth tasks: 92%, payment tasks: 67%")
 - Clear links from decisions to resulting sessions/projects
 
-This is the **learning loop made visible** and should answer: "Should I trust this system more or constrain it more?"
+#### Context tab — STEER the PM's priorities
 
-#### Context tab — formerly `/prioritization`
-- The steering surface
+The steering surface. Should focus on steering, not on proving intelligence.
+
 - Product philosophy, direction, focus/avoid areas
-- PM schedule and model selection
+- PM schedule (how often) and model selection (which LLM)
 - Priority weights with sum validation
-- Organization autonomy slider with clear capability mapping
-- Per-repo overrides list
+- Organization autonomy slider with clear capability mapping (see Section 6)
+- Per-repo overrides list with inheritance visualization
 - Preview of the effective context the PM will actually use
+- **Context health indicators**: show how each setting influenced recent decisions
 
-This tab should focus on steering, not on proving intelligence.
+#### Documents tab — INFORM the PM with strategic context
 
-#### Documents tab — currently nested in prioritization
+Currently nested inside prioritization. Reference documents that feed the PM's reasoning:
+
 - Reference documents (roadmaps, strategy docs, architecture)
 - Add/edit/delete with type badges
 - Shows "last read by PM" timestamp to prove documents are being used
+- Document influence indicators (e.g., "Roadmap.md cited in 3 recent task approaches")
+
+This is where the operator answers: *"Does the PM have enough context to make good decisions?"*
 
 ### Why tabs, not separate pages
 
-The PM is a single concept with multiple facets. Tabs keep it unified. Users should think "I'm operating the PM" — not "I'm on a settings page."
+The workspace is a single destination with multiple lenses on the same system. Users should think "I'm operating the PM" — not "I'm on a settings page."
 
 ### Interaction modes and ownership
 
@@ -270,6 +275,21 @@ The tabs should not imply the same user intent:
 - `Context` and `Documents` are steering/setup surfaces and likely visited less often
 
 This distinction matters for UX. The operational tabs should prioritize scanability and decision-making. The steering tabs can be more form-oriented.
+
+### The operator loop
+
+The workspace design follows a natural flow that operators repeat:
+
+```
+1. OBSERVE (Plan tab)     → What did the PM just decide?
+2. VERIFY  (Decisions tab) → Is the PM succeeding? Where is it struggling?
+3. STEER   (Context tab)   → Adjust direction, weights, focus areas
+4. INFORM  (Documents tab) → Upload new strategic context
+5. TRIGGER (Control strip)  → Run analysis with updated context
+→ Back to OBSERVE
+```
+
+This loop is why the PM page is a workspace, not a dashboard. Dashboards are for glancing. Workspaces are for operating.
 
 ---
 
@@ -715,7 +735,33 @@ Each level answers a different question. The PM is the strategic layer between "
 
 ---
 
-## 7. Implementation Sketch
+## 11. Adaptive Context Limits
+
+The PM's context gathering now scales automatically by org size. This replaces the previous hardcoded magic numbers (100 issues, 50 runs, 20 PRs, etc.) with tiered limits based on total issue count.
+
+### Tiers
+
+| Tier | Total issues | Issues/status | Decisions | Outcomes | PRs | In-flight | Cycles |
+|------|-------------|---------------|-----------|----------|-----|-----------|--------|
+| Small | 0-50 | 30 | 20 | 10 | 10 | 10 | 2 |
+| Medium | 51-500 | 75 | 50 | 20 | 20 | 30 | 3 |
+| Large | 500+ | 150 | 75 | 30 | 30 | 50 | 5 |
+
+### Why adaptive?
+
+- **Small repos** (solo project, early startup): Don't need 100-issue context windows. Smaller context = faster PM cycles, lower token cost, less noise.
+- **Large repos** (enterprise, mature product): Need more signal. 30 issues would miss important patterns. More past decisions = better institutional memory.
+- **Token budget**: Larger context limits for large orgs are offset by shorter description/stack trace truncation (400/600 chars vs 500/800), keeping total token usage bounded.
+
+### Implementation
+
+- `contextLimitsForOrgSize(totalIssues int) contextLimits` in `internal/services/pm/constants.go`
+- `issueStore.CountByOrg()` called once at the start of `gatherContext()` to determine tier
+- All limits flow through the `contextLimits` struct — no more inline magic numbers
+
+---
+
+## 12. Implementation Sketch
 
 ### Phase 1: Consolidate (low effort, high clarity)
 1. Add "PM Agent" to sidebar nav with `Brain` or `Lightbulb` icon
@@ -738,21 +784,3 @@ Each level answers a different question. The PM is the strategic layer between "
 14. Add "PM insights" card to Overview showing patterns and suggestions
 15. Show effective context inheritance (org → repo) on per-repo settings
 
----
-
-## 8. Open Questions
-
-1. **Icon choice**: Brain? Lightbulb? Compass? Target (currently used for Prioritization)?
-2. **Name**: "PM Agent" vs "PM" vs "Planner" vs "Strategy"? "PM Agent" is the most honest about what it is.
-3. **Should the PM status dot move to the PM nav item or stay on Sessions?** Recommendation: move it — the dot represents PM activity, not session activity.
-4. **Should Overview become PM-powered?** The Overview could show the PM's latest analysis as its hero content, making the PM feel like the product's intelligence layer rather than a separate page. This is a bigger bet but a stronger story.
-5. **Do we need both a PM page AND PM reasoning threaded into Sessions/Projects?** Yes — the page is the "configure and monitor" home, the threading is "see the effects everywhere." They serve different purposes.
-
----
-
-## 9. What This Is NOT
-
-- **Not a new agent type.** The PM agent already exists. We're giving it a home.
-- **Not more settings pages.** We're consolidating two existing pages (prioritization + plans) into one coherent place.
-- **Not a feature for power users.** The PM page should be the first place a new user visits after setup to understand what 143 is doing on their behalf.
-- **Not competing with agents.md.** agents.md tells coding agents HOW to work. The PM tells the system WHAT to work on. They're complementary, not alternatives.

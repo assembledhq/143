@@ -49,11 +49,18 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 		settings = models.MergeRepoPMSettings(settings, repoSettings)
 	}
 
-	openIssues, err := s.issues.ListByOrg(ctx, orgID, db.IssueFilters{Status: "open", Limit: 100})
+	// Determine adaptive limits based on org size.
+	totalIssues, err := s.issues.CountByOrg(ctx, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("count issues: %w", err)
+	}
+	limits := contextLimitsForOrgSize(totalIssues)
+
+	openIssues, err := s.issues.ListByOrg(ctx, orgID, db.IssueFilters{Status: "open", Limit: limits.IssuesPerStatus})
 	if err != nil {
 		return nil, err
 	}
-	triagedIssues, err := s.issues.ListByOrg(ctx, orgID, db.IssueFilters{Status: "triaged", Limit: 100})
+	triagedIssues, err := s.issues.ListByOrg(ctx, orgID, db.IssueFilters{Status: "triaged", Limit: limits.IssuesPerStatus})
 	if err != nil {
 		return nil, err
 	}
@@ -66,11 +73,11 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 		issueSummaries = append(issueSummaries, summarizeIssue(issue))
 	}
 
-	pendingRuns, err := s.sessions.ListByOrg(ctx, orgID, db.SessionFilters{Status: models.SessionStatusPending, Limit: 50})
+	pendingRuns, err := s.sessions.ListByOrg(ctx, orgID, db.SessionFilters{Status: models.SessionStatusPending, Limit: limits.InFlightRuns})
 	if err != nil {
 		return nil, err
 	}
-	runningRuns, err := s.sessions.ListByOrg(ctx, orgID, db.SessionFilters{Status: models.SessionStatusRunning, Limit: 50})
+	runningRuns, err := s.sessions.ListByOrg(ctx, orgID, db.SessionFilters{Status: models.SessionStatusRunning, Limit: limits.InFlightRuns})
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +95,7 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 		})
 	}
 
-	recentRuns, err := s.sessions.ListRecentByOrg(ctx, orgID, []string{"completed", "failed", "needs_human_guidance"}, 20)
+	recentRuns, err := s.sessions.ListRecentByOrg(ctx, orgID, []string{"completed", "failed", "needs_human_guidance"}, limits.RecentOutcomes)
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +114,7 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 
 	prSummaries := make([]PRSummary, 0)
 	if s.pullRequests != nil {
-		prs, err := s.pullRequests.ListByOrg(ctx, orgID, db.PullRequestFilters{Limit: 20})
+		prs, err := s.pullRequests.ListByOrg(ctx, orgID, db.PullRequestFilters{Limit: limits.RecentPRs})
 		if err != nil {
 			return nil, err
 		}
@@ -125,7 +132,7 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 
 	decisionSummaries := make([]DecisionLogEntrySummary, 0)
 	if s.decisionLog != nil {
-		decisions, err := s.decisionLog.ListRecentByOrg(ctx, orgID, 50)
+		decisions, err := s.decisionLog.ListRecentByOrg(ctx, orgID, limits.PastDecisions)
 		if err != nil {
 			return nil, err
 		}
@@ -252,7 +259,7 @@ func summarizeIssue(issue models.Issue) IssueSummary {
 	if issue.Description != nil {
 		description = *issue.Description
 	}
-	description = truncate(description, 500)
+	description = truncate(description, limitsMedium.DescriptionLen)
 
 	summary := IssueSummary{
 		ID:                    issue.ID.String(),
@@ -331,7 +338,7 @@ func extractStackTraceSummary(rawData json.RawMessage) string {
 		}
 	}
 
-	return truncate(b.String(), 800)
+	return truncate(b.String(), limitsMedium.StackTraceLen)
 }
 
 // enrichLinearMetadata extracts Linear-specific fields from raw webhook data.
@@ -409,7 +416,10 @@ func (s *Service) buildProjectSummary(ctx context.Context, orgID uuid.UUID, proj
 		return ProjectSummary{}, err
 	}
 
-	cycles, err := s.projectCycles.ListByProject(ctx, orgID, project.ID, 3)
+	// Use medium-tier limit for project cycles; the caller doesn't have
+	// access to per-org adaptive limits, and project context is bounded by
+	// the number of active projects rather than total issue volume.
+	cycles, err := s.projectCycles.ListByProject(ctx, orgID, project.ID, limitsMedium.ProjectCycles)
 	if err != nil {
 		return ProjectSummary{}, err
 	}
