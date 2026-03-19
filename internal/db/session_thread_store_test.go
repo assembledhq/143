@@ -348,3 +348,152 @@ func TestSessionThreadStore_ClaimIdle(t *testing.T) {
 		})
 	}
 }
+
+func TestSessionThreadStore_UpdateResult(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		status       models.ThreadStatus
+		rowsAffected int64
+		expectErr    bool
+	}{
+		{
+			name:         "success with completed status",
+			status:       models.ThreadStatusCompleted,
+			rowsAffected: 1,
+		},
+		{
+			name:         "success with failed status",
+			status:       models.ThreadStatusFailed,
+			rowsAffected: 1,
+		},
+		{
+			name:         "thread not found",
+			status:       models.ThreadStatusCompleted,
+			rowsAffected: 0,
+			expectErr:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewSessionThreadStore(mock)
+			orgID := uuid.New()
+			threadID := uuid.New()
+
+			summary := "done"
+			diff := "some diff"
+			score := 0.95
+			failErr := "something went wrong"
+			failCat := "runtime"
+			result := &models.SessionResult{
+				ConfidenceScore: &score,
+				ResultSummary:   &summary,
+				Diff:            &diff,
+				Error:           &failErr,
+				FailureCategory: &failCat,
+			}
+
+			// UpdateResult has 8 named args: id, org_id, status, confidence_score, result_summary, diff, failure_explanation, failure_category
+			mock.ExpectExec("UPDATE session_threads").
+				WithArgs(anyArgs(8)...).
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rowsAffected))
+
+			err = store.UpdateResult(context.Background(), orgID, threadID, tt.status, result)
+			if tt.expectErr {
+				require.Error(t, err, "UpdateResult should return an error when no rows affected")
+			} else {
+				require.NoError(t, err, "UpdateResult should not return an error")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestSessionThreadStore_UpdateResult_NilError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionThreadStore(mock)
+	orgID := uuid.New()
+	threadID := uuid.New()
+
+	summary := "done"
+	result := &models.SessionResult{
+		ResultSummary: &summary,
+	}
+
+	mock.ExpectExec("UPDATE session_threads").
+		WithArgs(anyArgs(8)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdateResult(context.Background(), orgID, threadID, models.ThreadStatusCompleted, result)
+	require.NoError(t, err, "UpdateResult should not return an error when Error is nil")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionThreadStore_UpdateTurnComplete(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		rowsAffected int64
+		expectErr    bool
+	}{
+		{
+			name:         "success",
+			rowsAffected: 1,
+		},
+		{
+			name:         "thread not found",
+			rowsAffected: 0,
+			expectErr:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewSessionThreadStore(mock)
+			orgID := uuid.New()
+			threadID := uuid.New()
+
+			summary := "turn done"
+			diff := "some diff"
+			score := 0.8
+			result := &models.SessionResult{
+				ConfidenceScore: &score,
+				ResultSummary:   &summary,
+				Diff:            &diff,
+			}
+
+			// UpdateTurnComplete has 7 named args: id, org_id, current_turn, agent_session_id, confidence_score, result_summary, diff
+			mock.ExpectExec("UPDATE session_threads").
+				WithArgs(anyArgs(7)...).
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rowsAffected))
+
+			err = store.UpdateTurnComplete(context.Background(), orgID, threadID, 2, result, "sess-123")
+			if tt.expectErr {
+				require.Error(t, err, "UpdateTurnComplete should return an error when no rows affected")
+			} else {
+				require.NoError(t, err, "UpdateTurnComplete should not return an error")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}

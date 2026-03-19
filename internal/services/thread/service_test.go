@@ -1,0 +1,801 @@
+package thread
+
+import (
+	"context"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/models"
+	"github.com/google/uuid"
+	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/require"
+)
+
+// --- Mock stores ---
+
+type mockThreadStore struct {
+	createFn        func(ctx context.Context, t *models.SessionThread, max int) error
+	getByIDFn       func(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
+	listBySessionFn func(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error)
+	claimIdleFn     func(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
+	updateStatusFn  func(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
+}
+
+func (m *mockThreadStore) Create(ctx context.Context, t *models.SessionThread, max int) error {
+	if m.createFn != nil {
+		return m.createFn(ctx, t, max)
+	}
+	return nil
+}
+
+func (m *mockThreadStore) GetByID(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error) {
+	if m.getByIDFn != nil {
+		return m.getByIDFn(ctx, orgID, threadID)
+	}
+	return models.SessionThread{}, fmt.Errorf("not found")
+}
+
+func (m *mockThreadStore) ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error) {
+	if m.listBySessionFn != nil {
+		return m.listBySessionFn(ctx, orgID, sessionID)
+	}
+	return nil, nil
+}
+
+func (m *mockThreadStore) ClaimIdle(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error) {
+	if m.claimIdleFn != nil {
+		return m.claimIdleFn(ctx, orgID, threadID)
+	}
+	return models.SessionThread{}, fmt.Errorf("not idle")
+}
+
+func (m *mockThreadStore) UpdateStatus(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error {
+	if m.updateStatusFn != nil {
+		return m.updateStatusFn(ctx, orgID, threadID, status)
+	}
+	return nil
+}
+
+type mockSessionStore struct {
+	getByIDFn func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
+}
+
+func (m *mockSessionStore) GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
+	if m.getByIDFn != nil {
+		return m.getByIDFn(ctx, orgID, sessionID)
+	}
+	return models.Session{}, fmt.Errorf("not found")
+}
+
+type mockMessageStore struct {
+	createFn       func(ctx context.Context, msg *models.SessionMessage) error
+	listByThreadFn func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionMessage, error)
+}
+
+func (m *mockMessageStore) Create(ctx context.Context, msg *models.SessionMessage) error {
+	if m.createFn != nil {
+		return m.createFn(ctx, msg)
+	}
+	return nil
+}
+
+func (m *mockMessageStore) ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionMessage, error) {
+	if m.listByThreadFn != nil {
+		return m.listByThreadFn(ctx, orgID, threadID)
+	}
+	return nil, nil
+}
+
+type mockLogStore struct {
+	listByThreadFn func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error)
+}
+
+func (m *mockLogStore) ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error) {
+	if m.listByThreadFn != nil {
+		return m.listByThreadFn(ctx, orgID, threadID)
+	}
+	return nil, nil
+}
+
+type mockJobStore struct {
+	enqueueFn func(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
+}
+
+func (m *mockJobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
+	if m.enqueueFn != nil {
+		return m.enqueueFn(ctx, orgID, queue, jobType, payload, priority, dedupeKey)
+	}
+	return uuid.New(), nil
+}
+
+type testDeps struct {
+	threadStore  *mockThreadStore
+	sessionStore *mockSessionStore
+	messageStore *mockMessageStore
+	logStore     *mockLogStore
+	jobStore     *mockJobStore
+}
+
+func newTestService(t *testing.T) (*Service, *testDeps) {
+	t.Helper()
+	deps := &testDeps{
+		threadStore:  &mockThreadStore{},
+		sessionStore: &mockSessionStore{},
+		messageStore: &mockMessageStore{},
+		logStore:     &mockLogStore{},
+		jobStore:     &mockJobStore{},
+	}
+	svc := NewService(deps.threadStore, deps.sessionStore, deps.messageStore, deps.logStore, deps.jobStore, zerolog.Nop())
+	return svc, deps
+}
+
+func TestService_CreateThread(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now()
+
+	tests := []struct {
+		name      string
+		input     CreateThreadInput
+		setupDeps func(deps *testDeps)
+		expectErr error
+	}{
+		{
+			name: "success with defaults",
+			input: CreateThreadInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				Label:     "Backend",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+				deps.threadStore.createFn = func(_ context.Context, t *models.SessionThread, _ int) error {
+					t.ID = threadID
+					t.CreatedAt = now
+					return nil
+				}
+			},
+		},
+		{
+			name: "success with explicit agent type and instructions",
+			input: CreateThreadInput{
+				SessionID:    sessionID,
+				OrgID:        orgID,
+				AgentType:    "claude_code",
+				Label:        "Frontend",
+				Instructions: "focus on UI",
+				FileScope:    []string{"src/"},
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+				deps.threadStore.createFn = func(_ context.Context, t *models.SessionThread, _ int) error {
+					t.ID = threadID
+					t.CreatedAt = now
+					return nil
+				}
+			},
+		},
+		{
+			name: "session not found",
+			input: CreateThreadInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				Label:     "Backend",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{}, fmt.Errorf("no rows")
+				}
+			},
+			expectErr: ErrSessionNotFound,
+		},
+		{
+			name: "session in terminal state",
+			input: CreateThreadInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				Label:     "Backend",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "completed", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+			},
+			expectErr: ErrSessionTerminal,
+		},
+		{
+			name: "invalid agent type",
+			input: CreateThreadInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				AgentType: "nonexistent_agent",
+				Label:     "Backend",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+			},
+			expectErr: ErrInvalidAgentType,
+		},
+		{
+			name: "thread limit reached",
+			input: CreateThreadInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				Label:     "Backend",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+				deps.threadStore.createFn = func(_ context.Context, _ *models.SessionThread, _ int) error {
+					return db.ErrThreadLimitReached
+				}
+			},
+			expectErr: db.ErrThreadLimitReached,
+		},
+		{
+			name: "enqueue failure",
+			input: CreateThreadInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				Label:     "Backend",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+				deps.threadStore.createFn = func(_ context.Context, t *models.SessionThread, _ int) error {
+					t.ID = threadID
+					t.CreatedAt = now
+					return nil
+				}
+				deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, _, _ string, _ any, _ int, _ *string) (uuid.UUID, error) {
+					return uuid.Nil, fmt.Errorf("queue down")
+				}
+			},
+			expectErr: ErrEnqueueFailed,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc, deps := newTestService(t)
+			tt.setupDeps(deps)
+
+			result, err := svc.CreateThread(context.Background(), tt.input)
+			if tt.expectErr != nil {
+				require.ErrorIs(t, err, tt.expectErr, "should return expected error")
+				require.Nil(t, result, "should not return a thread on error")
+				return
+			}
+			require.NoError(t, err, "should not return an error")
+			require.NotNil(t, result, "should return a thread")
+			require.Equal(t, threadID, result.ID, "should set the thread ID")
+			require.Equal(t, tt.input.Label, result.Label, "should set the label")
+		})
+	}
+}
+
+func TestService_ListThreads(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	tests := []struct {
+		name      string
+		setupDeps func(deps *testDeps)
+		expectErr error
+		expectLen int
+	}{
+		{
+			name: "success",
+			setupDeps: func(deps *testDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running"}, nil
+				}
+				deps.threadStore.listBySessionFn = func(_ context.Context, _, _ uuid.UUID) ([]models.SessionThread, error) {
+					return []models.SessionThread{{ID: uuid.New()}, {ID: uuid.New()}}, nil
+				}
+			},
+			expectLen: 2,
+		},
+		{
+			name: "session not found",
+			setupDeps: func(deps *testDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{}, fmt.Errorf("no rows")
+				}
+			},
+			expectErr: ErrSessionNotFound,
+		},
+		{
+			name: "list error",
+			setupDeps: func(deps *testDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running"}, nil
+				}
+				deps.threadStore.listBySessionFn = func(_ context.Context, _, _ uuid.UUID) ([]models.SessionThread, error) {
+					return nil, fmt.Errorf("db error")
+				}
+			},
+			expectErr: nil, // wraps as "list threads:" not a sentinel
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc, deps := newTestService(t)
+			tt.setupDeps(deps)
+
+			threads, err := svc.ListThreads(context.Background(), orgID, sessionID)
+			if tt.expectErr != nil {
+				require.ErrorIs(t, err, tt.expectErr, "should return expected error")
+				return
+			}
+			if tt.name == "list error" {
+				require.Error(t, err, "should return an error on db failure")
+				return
+			}
+			require.NoError(t, err, "should not return an error")
+			require.Len(t, threads, tt.expectLen, "should return expected number of threads")
+		})
+	}
+}
+
+func TestService_GetThread(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+
+	tests := []struct {
+		name      string
+		setupDeps func(deps *testDeps)
+		expectErr error
+	}{
+		{
+			name: "success",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID}, nil
+				}
+			},
+		},
+		{
+			name: "thread not found",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+			},
+			expectErr: ErrThreadNotFound,
+		},
+		{
+			name: "thread belongs to different session",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: uuid.New(), OrgID: orgID}, nil
+				}
+			},
+			expectErr: ErrThreadNotFound,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc, deps := newTestService(t)
+			tt.setupDeps(deps)
+
+			thread, err := svc.GetThread(context.Background(), orgID, sessionID, threadID)
+			if tt.expectErr != nil {
+				require.ErrorIs(t, err, tt.expectErr, "should return expected error")
+				return
+			}
+			require.NoError(t, err, "should not return an error")
+			require.Equal(t, threadID, thread.ID, "should return the correct thread")
+		})
+	}
+}
+
+func TestService_SendMessage(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	userID := uuid.New()
+
+	tests := []struct {
+		name      string
+		input     SendMessageInput
+		setupDeps func(deps *testDeps)
+		expectErr error
+	}{
+		{
+			name: "success",
+			input: SendMessageInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				UserID:    &userID,
+				Message:   "continue",
+				Images:    []string{"img1.png"},
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1, Status: models.ThreadStatusRunning}, nil
+				}
+				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+					msg.ID = 42
+					msg.CreatedAt = time.Now()
+					return nil
+				}
+			},
+		},
+		{
+			name: "thread not found",
+			input: SendMessageInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				Message:   "hi",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+			},
+			expectErr: ErrThreadNotFound,
+		},
+		{
+			name: "thread not idle",
+			input: SendMessageInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				Message:   "hi",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusRunning}, nil
+				}
+			},
+			expectErr: ErrThreadNotIdle,
+		},
+		{
+			name: "session mismatch reverts to idle",
+			input: SendMessageInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				Message:   "hi",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: uuid.New(), OrgID: orgID, Status: models.ThreadStatusRunning}, nil
+				}
+			},
+			expectErr: ErrThreadNotFound,
+		},
+		{
+			name: "message creation failure reverts to idle",
+			input: SendMessageInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				Message:   "hi",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1}, nil
+				}
+				deps.messageStore.createFn = func(_ context.Context, _ *models.SessionMessage) error {
+					return fmt.Errorf("db error")
+				}
+			},
+		},
+		{
+			name: "enqueue failure reverts to idle",
+			input: SendMessageInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				Message:   "hi",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1}, nil
+				}
+				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+					msg.ID = 42
+					return nil
+				}
+				deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, _, _ string, _ any, _ int, _ *string) (uuid.UUID, error) {
+					return uuid.Nil, fmt.Errorf("queue down")
+				}
+			},
+			expectErr: ErrEnqueueFailed,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc, deps := newTestService(t)
+			tt.setupDeps(deps)
+
+			msg, err := svc.SendMessage(context.Background(), tt.input)
+			if tt.expectErr != nil {
+				require.ErrorIs(t, err, tt.expectErr, "should return expected error")
+				require.Nil(t, msg, "should not return a message on error")
+				return
+			}
+			if tt.name == "message creation failure reverts to idle" {
+				require.Error(t, err, "should return error on message creation failure")
+				return
+			}
+			require.NoError(t, err, "should not return an error")
+			require.NotNil(t, msg, "should return a message")
+			require.Equal(t, models.MessageRoleUser, msg.Role, "should set role to user")
+		})
+	}
+}
+
+func TestService_EndThread(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+
+	tests := []struct {
+		name      string
+		setupDeps func(deps *testDeps)
+		expectErr error
+	}{
+		{
+			name: "success from idle",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusIdle}, nil
+				}
+			},
+		},
+		{
+			name: "success from pending",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusPending}, nil
+				}
+			},
+		},
+		{
+			name: "success from running",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusRunning}, nil
+				}
+			},
+		},
+		{
+			name: "thread not found",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+			},
+			expectErr: ErrThreadNotFound,
+		},
+		{
+			name: "session mismatch",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: uuid.New(), OrgID: orgID, Status: models.ThreadStatusIdle}, nil
+				}
+			},
+			expectErr: ErrThreadNotFound,
+		},
+		{
+			name: "already completed",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusCompleted}, nil
+				}
+			},
+			expectErr: ErrThreadCannotBeEnded,
+		},
+		{
+			name: "already failed",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusFailed}, nil
+				}
+			},
+			expectErr: ErrThreadCannotBeEnded,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc, deps := newTestService(t)
+			tt.setupDeps(deps)
+
+			thread, err := svc.EndThread(context.Background(), orgID, sessionID, threadID)
+			if tt.expectErr != nil {
+				require.ErrorIs(t, err, tt.expectErr, "should return expected error")
+				return
+			}
+			require.NoError(t, err, "should not return an error")
+			require.Equal(t, models.ThreadStatusCompleted, thread.Status, "should set status to completed")
+		})
+	}
+}
+
+func TestService_GetMessages(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+
+	tests := []struct {
+		name      string
+		setupDeps func(deps *testDeps)
+		expectErr error
+		expectLen int
+	}{
+		{
+			name: "success",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID}, nil
+				}
+				deps.messageStore.listByThreadFn = func(_ context.Context, _, _ uuid.UUID) ([]models.SessionMessage, error) {
+					return []models.SessionMessage{{ID: 1}, {ID: 2}}, nil
+				}
+			},
+			expectLen: 2,
+		},
+		{
+			name: "thread not found",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+			},
+			expectErr: ErrThreadNotFound,
+		},
+		{
+			name: "session mismatch",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: uuid.New(), OrgID: orgID}, nil
+				}
+			},
+			expectErr: ErrThreadNotFound,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc, deps := newTestService(t)
+			tt.setupDeps(deps)
+
+			messages, err := svc.GetMessages(context.Background(), orgID, sessionID, threadID)
+			if tt.expectErr != nil {
+				require.ErrorIs(t, err, tt.expectErr, "should return expected error")
+				return
+			}
+			require.NoError(t, err, "should not return an error")
+			require.Len(t, messages, tt.expectLen, "should return expected number of messages")
+		})
+	}
+}
+
+func TestService_GetLogs(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+
+	tests := []struct {
+		name      string
+		setupDeps func(deps *testDeps)
+		expectErr error
+		expectLen int
+	}{
+		{
+			name: "success",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID}, nil
+				}
+				deps.logStore.listByThreadFn = func(_ context.Context, _, _ uuid.UUID) ([]models.SessionLog, error) {
+					return []models.SessionLog{{ID: 1}, {ID: 2}}, nil
+				}
+			},
+			expectLen: 2,
+		},
+		{
+			name: "thread not found",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+			},
+			expectErr: ErrThreadNotFound,
+		},
+		{
+			name: "session mismatch",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: uuid.New(), OrgID: orgID}, nil
+				}
+			},
+			expectErr: ErrThreadNotFound,
+		},
+		{
+			name: "log store error",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID}, nil
+				}
+				deps.logStore.listByThreadFn = func(_ context.Context, _, _ uuid.UUID) ([]models.SessionLog, error) {
+					return nil, fmt.Errorf("db error")
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc, deps := newTestService(t)
+			tt.setupDeps(deps)
+
+			logs, err := svc.GetLogs(context.Background(), orgID, sessionID, threadID)
+			if tt.expectErr != nil {
+				require.ErrorIs(t, err, tt.expectErr, "should return expected error")
+				return
+			}
+			if tt.name == "log store error" {
+				require.Error(t, err, "should return error on db failure")
+				return
+			}
+			require.NoError(t, err, "should not return an error")
+			require.Len(t, logs, tt.expectLen, "should return expected number of logs")
+		})
+	}
+}
