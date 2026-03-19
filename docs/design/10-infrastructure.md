@@ -129,6 +129,10 @@ go test ./...
 cd frontend && npm test
 ```
 
+For the standard local workflow, `make dev` builds `143-sandbox:latest` via
+`docker compose build sandbox` before starting the stack, so Docker-backed
+agent runs use the same sandbox image tag as the runtime default.
+
 ### Makefile
 
 ```makefile
@@ -218,28 +222,7 @@ EXPOSE 8080
 CMD ["./server"]
 ```
 
-**Sandbox Dockerfile**:
-
-```dockerfile
-FROM ubuntu:24.04@sha256:PINNED_DIGEST  # Pin by digest — tags are mutable
-
-# Install common dev tools
-RUN apt-get update && apt-get install -y \
-    git curl wget \
-    build-essential \
-    nodejs npm \
-    python3 python3-pip \
-    golang-go \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install agent CLIs
-RUN npm install -g @anthropic-ai/claude-code
-
-# Non-root user for sandbox execution
-RUN useradd -m -s /bin/bash sandbox
-USER sandbox
-WORKDIR /workspace
-```
+**Sandbox Dockerfile**: See `sandbox/Dockerfile` for the full definition. The image installs all three agent CLIs (Claude Code, Codex, Gemini) at pinned versions from `sandbox/versions.json` via `sandbox/install-agents.sh`. Build with `docker build -t 143-sandbox:latest sandbox/`. CI also builds this image, and local Docker development builds it through the `sandbox` compose target.
 
 This image is used by the Docker sandbox provider. It runs under **gVisor** (`runsc` runtime) by default for syscall-level isolation. The same image works with both `runsc` (gVisor) and `runc` (standard Docker) — no image changes needed when switching runtimes.
 

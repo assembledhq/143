@@ -359,29 +359,23 @@ sandbox/
 
 ```json
 {
-  "claude_code": "1.0.23",
-  "codex_cli": "0.4.1",
-  "gemini_cli": "2.1.0"
+  "claude_code": "2.1.34",
+  "codex_cli": "0.115.0",
+  "gemini_cli": "0.34.0"
 }
 ```
 
 ### Build Process
 
-```dockerfile
-# sandbox/Dockerfile
-FROM ubuntu:24.04
+See `sandbox/Dockerfile` for the full implementation. Key points:
+- Base image: `ubuntu:26.04`
+- Node.js 24 LTS via NodeSource (required by all three CLIs)
+- Uses `jq` to parse `versions.json` (no Python dependency)
+- `install-agents.sh` installs all three CLIs at pinned versions via `npm install -g`
+- No `build-essential` needed — none of the CLIs require native compilation
 
-# System dependencies
-RUN apt-get update && apt-get install -y git curl nodejs npm python3 pip
-
-# Install agent CLIs at pinned versions
-COPY install-agents.sh versions.json /tmp/
-RUN /tmp/install-agents.sh
-
-# Non-root user
-RUN useradd -m -s /bin/bash sandbox
-USER sandbox
-WORKDIR /workspace
+```
+docker build -t 143-sandbox:latest sandbox/
 ```
 
 ### Versioning Rules

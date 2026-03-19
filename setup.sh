@@ -210,7 +210,18 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 8. Done
+# 8. Build sandbox image when Docker is available
+# ---------------------------------------------------------------------------
+if command -v docker >/dev/null 2>&1; then
+  info "Building sandbox image (143-sandbox:latest)..."
+  docker build -t 143-sandbox:latest sandbox
+else
+  warn "Docker not found — skipping sandbox image build."
+  warn "Docker-backed agent runs need 143-sandbox:latest built from sandbox/Dockerfile."
+fi
+
+# ---------------------------------------------------------------------------
+# 9. Done
 # ---------------------------------------------------------------------------
 echo ""
 echo -e "${GREEN}${BOLD}============================================${NC}"

@@ -1,4 +1,12 @@
 services:
+  sandbox:
+    image: 143-sandbox:latest
+    build:
+      context: ./sandbox
+      dockerfile: Dockerfile
+    profiles:
+      - sandbox
+
   postgres:
     image: postgres:17
     environment:
