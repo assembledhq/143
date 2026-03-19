@@ -35,7 +35,7 @@ const sessionSelectColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-00
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
-	sandbox_state, snapshot_key, created_at`
+	sandbox_state, snapshot_key, target_branch, created_at`
 
 func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters SessionFilters) ([]models.Session, error) {
 	args := pgx.NamedArgs{"org_id": orgID}
@@ -108,12 +108,12 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 		INSERT INTO sessions (
 			issue_id, org_id, agent_type, status, autonomy_level, token_mode, complexity_tier,
 			parent_session_id, revision_context, pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
-			model_override, triggered_by_user_id
+			model_override, triggered_by_user_id, target_branch
 		)
 		VALUES (
 			@issue_id, @org_id, @agent_type, @status, @autonomy_level, @token_mode, @complexity_tier,
 			@parent_session_id, @revision_context, @pm_plan_id, @title, @pm_approach, @pm_reasoning, @project_task_id,
-			@model_override, @triggered_by_user_id
+			@model_override, @triggered_by_user_id, @target_branch
 		)
 		RETURNING id, created_at`
 
@@ -139,6 +139,7 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 		"project_task_id":       run.ProjectTaskID,
 		"model_override":        run.ModelOverride,
 		"triggered_by_user_id":  run.TriggeredByUserID,
+		"target_branch":         run.TargetBranch,
 	}
 
 	row := s.db.QueryRow(ctx, query, args)
