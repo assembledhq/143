@@ -6,11 +6,13 @@ export const PM_MODEL_HAIKU = "haiku";
 export const LEGACY_PM_ALIASES = [PM_MODEL_OPUS, PM_MODEL_SONNET, PM_MODEL_HAIKU] as const;
 
 export const CLAUDE_CODE_MODEL_OPUS = "claude-opus-4-6";
+export const CLAUDE_CODE_MODEL_SONNET_46 = "claude-sonnet-4-6";
 export const CLAUDE_CODE_MODEL_SONNET = "claude-sonnet-4-5";
 export const CLAUDE_CODE_MODEL_HAIKU = "claude-haiku-4-5";
 
 export const AVAILABLE_CLAUDE_CODE_MODELS = [
   CLAUDE_CODE_MODEL_OPUS,
+  CLAUDE_CODE_MODEL_SONNET_46,
   CLAUDE_CODE_MODEL_SONNET,
   CLAUDE_CODE_MODEL_HAIKU,
 ] as const;
@@ -27,12 +29,16 @@ export const AVAILABLE_GEMINI_CLI_MODELS = [
   GEMINI_CLI_MODEL_GEMINI_2_5_FLASH,
 ] as const;
 
+export const CODEX_MODEL_GPT_5_4 = "gpt-5.4";
+export const CODEX_MODEL_GPT_5_4_MINI = "gpt-5.4-mini";
 export const CODEX_MODEL_GPT_5_3_CODEX = "gpt-5.3-codex";
 export const CODEX_MODEL_GPT_5_2_CODEX = "gpt-5.2-codex";
 export const CODEX_MODEL_GPT_5_CODEX = "gpt-5-codex";
 export const CODEX_MODEL_GPT_5_3_CODEX_SPARK = "gpt-5.3-codex-spark";
 
 export const AVAILABLE_CODEX_MODELS = [
+  CODEX_MODEL_GPT_5_4,
+  CODEX_MODEL_GPT_5_4_MINI,
   CODEX_MODEL_GPT_5_3_CODEX,
   CODEX_MODEL_GPT_5_2_CODEX,
   CODEX_MODEL_GPT_5_CODEX,
