@@ -20,7 +20,7 @@ func NewSessionStore(db DBTX) *SessionStore {
 }
 
 type SessionFilters struct {
-	Status       models.SessionStatus
+	Statuses     []models.SessionStatus // When non-empty, filter to sessions matching any of these statuses.
 	Limit        int
 	Cursor       string
 	AdHocOnly    bool      // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
@@ -50,9 +50,16 @@ func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters S
 		args["repository_id"] = filters.RepositoryID
 	}
 
-	if filters.Status != "" {
+	if len(filters.Statuses) == 1 {
 		query += ` AND status = @status`
-		args["status"] = string(filters.Status)
+		args["status"] = string(filters.Statuses[0])
+	} else if len(filters.Statuses) > 1 {
+		statusStrings := make([]string, len(filters.Statuses))
+		for i, s := range filters.Statuses {
+			statusStrings[i] = string(s)
+		}
+		query += ` AND status = ANY(@statuses)`
+		args["statuses"] = statusStrings
 	}
 	if filters.AdHocOnly {
 		query += ` AND pm_plan_id IS NULL`

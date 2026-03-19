@@ -66,17 +66,15 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 		issueSummaries = append(issueSummaries, summarizeIssue(issue))
 	}
 
-	pendingRuns, err := s.sessions.ListByOrg(ctx, orgID, db.SessionFilters{Status: models.SessionStatusPending, Limit: 50})
+	// Fetch pending + running sessions in a single query. Results are ordered by
+	// created_at DESC (interleaved), which is fine since we only summarize them.
+	inFlight, err := s.sessions.ListByOrg(ctx, orgID, db.SessionFilters{
+		Statuses: []models.SessionStatus{models.SessionStatusPending, models.SessionStatusRunning},
+		Limit:    50,
+	})
 	if err != nil {
 		return nil, err
 	}
-	runningRuns, err := s.sessions.ListByOrg(ctx, orgID, db.SessionFilters{Status: models.SessionStatusRunning, Limit: 50})
-	if err != nil {
-		return nil, err
-	}
-	inFlight := make([]models.Session, 0, len(pendingRuns)+len(runningRuns))
-	inFlight = append(inFlight, pendingRuns...)
-	inFlight = append(inFlight, runningRuns...)
 
 	inFlightSummaries := make([]RunSummary, 0, len(inFlight))
 	for _, run := range inFlight {

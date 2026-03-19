@@ -51,29 +51,27 @@ const statusConfig: Record<string, { dot: string; text: string; bg: string; labe
 
 const filterTabs = [
   { value: "all", label: "All" },
-  { value: "active", label: "Active" },
-  { value: "needs_human_guidance", label: "Needs guidance" },
-  { value: "failed", label: "Failed" },
+  { value: "needs_attention", label: "Needs attention" },
+  { value: "working", label: "Working" },
   { value: "done", label: "Done" },
   { value: "decisions", label: "Decisions" },
 ];
 
-const activeStatuses = new Set(["pending", "running", "awaiting_input"]);
-const doneStatuses = new Set(["completed", "pr_created"]);
+// Status groups — keep in sync with models.NeedsAttentionStatuses / WorkingStatuses / DoneStatuses.
+const needsAttentionStatuses = ["awaiting_input", "needs_human_guidance", "failed"];
+const workingStatuses = ["pending", "running"];
+const doneStatuses = ["completed", "pr_created", "cancelled", "skipped", "idle"];
 
-function isActive(s: Session): boolean {
-  return activeStatuses.has(s.status);
-}
+const needsAttentionSet = new Set(needsAttentionStatuses);
+const workingSet = new Set(workingStatuses);
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function filterSessions(sessions: Session[], filter: string | null): Session[] {
-  if (!filter || filter === "all") return sessions;
-  if (filter === "active") return sessions.filter(isActive);
-  if (filter === "done") return sessions.filter((s) => doneStatuses.has(s.status));
-  return sessions.filter((s) => s.status === filter);
+/** Map a filter tab value to the comma-separated status string for the API. */
+function filterToStatusParam(filter: string | null): string | undefined {
+  if (!filter || filter === "all" || filter === "decisions") return undefined;
+  if (filter === "needs_attention") return needsAttentionStatuses.join(",");
+  if (filter === "working") return workingStatuses.join(",");
+  if (filter === "done") return doneStatuses.join(",");
+  return filter;
 }
 
 function sessionTitle(session: Session): string {
@@ -87,9 +85,9 @@ function sessionTitle(session: Session): string {
 // ---------------------------------------------------------------------------
 
 function SessionStatusDot({ status }: { status: string }) {
-  const active = activeStatuses.has(status);
+  const working = workingSet.has(status);
   const cfg = statusConfig[status] || statusConfig.pending;
-  if (active) {
+  if (working) {
     return <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />;
   }
   return <StatusDot color={cfg.dot} />;
@@ -218,10 +216,29 @@ export function SessionsPageContent() {
   const [repo] = useQueryState("repo");
   const [sorting, setSorting] = useState<SortingState>([]);
 
-  const { data, isLoading, error } = useQuery({
+  const currentFilter = activeFilter ?? "all";
+  const showDecisions = currentFilter === "decisions";
+  const statusParam = filterToStatusParam(currentFilter);
+
+  // Fetch all sessions (for tab badge counts and the "all" view).
+  // We also fetch a filtered query below when a tab is active. The two queries
+  // run in parallel on a 10s interval. The "all" query is cheap (limit 50) and
+  // needed for accurate badge counts; the filtered query ensures the displayed
+  // list reflects the correct server-side results even when total sessions exceed
+  // the limit. If polling cost becomes a concern, consider a dedicated
+  // /sessions/counts endpoint.
+  const { data: allData, isLoading, error } = useQuery({
     queryKey: ["sessions", repo],
     queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined }),
     refetchInterval: 10000,
+  });
+
+  // Fetch filtered sessions from the backend when a specific tab is selected.
+  const { data: filteredData } = useQuery({
+    queryKey: ["sessions", repo, statusParam],
+    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, status: statusParam }),
+    refetchInterval: 10000,
+    enabled: !!statusParam,
   });
 
   const { data: membersData } = useQuery({
@@ -229,19 +246,19 @@ export function SessionsPageContent() {
     queryFn: () => api.team.listMembers(),
   });
 
-  const allSessions = data?.data ?? [];
+  const allSessions = allData?.data ?? [];
   const members = membersData?.data ?? [];
 
-  const currentFilter = activeFilter ?? "all";
-  const showDecisions = currentFilter === "decisions";
-
-  const activeSessions = allSessions.filter(isActive);
-  const failedSessions = allSessions.filter((s) => s.status === "failed");
-  const guidanceSessions = allSessions.filter((s) => s.status === "needs_human_guidance");
+  const needsAttentionSessions = allSessions.filter((s) => needsAttentionSet.has(s.status));
+  const workingSessions = allSessions.filter((s) => workingSet.has(s.status));
 
   const filteredSessions = useMemo(
-    () => (showDecisions ? [] : filterSessions(allSessions, activeFilter)),
-    [allSessions, activeFilter, showDecisions],
+    () => {
+      if (showDecisions) return [];
+      if (statusParam && filteredData) return filteredData.data;
+      return allSessions;
+    },
+    [allSessions, filteredData, statusParam, showDecisions],
   );
 
   const columns = useMemo(() => buildColumns(members), [members]);
@@ -262,16 +279,15 @@ export function SessionsPageContent() {
         description="Each agent execution creates a session."
       />
 
-      <PMStatusBanner hasActivePlanSession={activeSessions.length > 0} />
+      <PMStatusBanner hasActivePlanSession={workingSessions.length > 0} />
 
       {/* ── Tab filters ────────────────────────────────────────────── */}
       <div className="flex items-center gap-0 border-b border-border">
         {filterTabs.map((tab) => {
           const isSelected = currentFilter === tab.value;
           const count =
-            tab.value === "active" ? activeSessions.length
-            : tab.value === "failed" ? failedSessions.length
-            : tab.value === "needs_human_guidance" ? guidanceSessions.length
+            tab.value === "needs_attention" ? needsAttentionSessions.length
+            : tab.value === "working" ? workingSessions.length
             : 0;
           return (
             <button
@@ -287,8 +303,7 @@ export function SessionsPageContent() {
                 {tab.label}
                 {count > 0 && (
                   <span className={`rounded-full text-white text-[10px] leading-none px-1.5 py-0.5 font-normal ${
-                    tab.value === "failed" ? "bg-destructive"
-                    : tab.value === "needs_human_guidance" ? "bg-orange-500"
+                    tab.value === "needs_attention" ? "bg-orange-500"
                     : "bg-primary"
                   }`}>{count}</span>
                 )}

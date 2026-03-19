@@ -196,6 +196,72 @@ func TestSessionHandler_List_InvalidRepositoryID(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionHandler_List_InvalidStatus(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions?status=bogus", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.List(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "should return 400 for invalid status")
+	require.Contains(t, w.Body.String(), "INVALID_STATUS", "error code should indicate invalid status")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_List_CommaSeparatedStatuses(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	now := time.Now()
+	runID := uuid.New()
+	issueID := uuid.New()
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id .+ AND status = ANY").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).AddRow(
+				runID, issueID, orgID, "claude-code", "pending", "supervised", "standard",
+				nil, nil, nil, nil,
+				nil, &now, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil,
+				nil, nil,
+				nil, // triggered_by_user_id
+				nil, 0, nil, "none", nil,
+				now,
+			),
+		)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions?status=pending,running", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.List(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "should return 200 for comma-separated statuses")
+
+	var resp models.ListResponse[models.Session]
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err, "response body should be valid JSON")
+	require.Equal(t, 1, len(resp.Data), "should return filtered sessions")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionHandler_Get(t *testing.T) {
 	t.Parallel()
 
