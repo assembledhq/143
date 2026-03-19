@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
-import { ChatTimeline } from "./chat-timeline";
+import { describe, expect, it, vi } from "vitest";
+import { ChatTimeline, formatMessageTime } from "./chat-timeline";
 import type { TimelineEntry } from "@/lib/timeline";
 import type { SessionMessage, SessionLog } from "@/lib/types";
 
@@ -27,6 +27,30 @@ function makeLog(overrides: Partial<SessionLog> & { id: number; level: string })
     ...overrides,
   };
 }
+
+describe("formatMessageTime", () => {
+  it("returns time only for today's date", () => {
+    const now = new Date();
+    const todayISO = now.toISOString();
+    const result = formatMessageTime(todayISO);
+    // Should contain a colon (time) but not a month abbreviation
+    expect(result).toMatch(/\d{1,2}:\d{2}/);
+    expect(result).not.toMatch(/Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec/);
+  });
+
+  it("returns date and time for a past date", () => {
+    const result = formatMessageTime("2024-06-15T14:30:00Z");
+    // Should contain both a month and a time
+    expect(result).toMatch(/Jun/);
+    expect(result).toMatch(/15/);
+    expect(result).toMatch(/\d{1,2}:\d{2}/);
+  });
+
+  it("returns empty string for invalid date", () => {
+    expect(formatMessageTime("")).toBe("");
+    expect(formatMessageTime("not-a-date")).toBe("");
+  });
+});
 
 describe("ChatTimeline", () => {
   it("renders message bubbles", () => {
