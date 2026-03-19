@@ -201,6 +201,10 @@ func TestGeminiCLIAdapter_Execute(t *testing.T) {
 					_, _ = stdout.Write([]byte(tt.geminiOutput))
 					return tt.geminiExitCode, nil
 				}
+				if strings.HasPrefix(cmd, "git rev-parse") {
+					_, _ = stdout.Write([]byte("true\n"))
+					return 0, nil
+				}
 				if strings.HasPrefix(cmd, "git diff") {
 					_, _ = stdout.Write([]byte(tt.diffOutput))
 					return tt.diffExitCode, nil
@@ -631,6 +635,10 @@ func TestGeminiCLIAdapter_Execute_StreamingOutput(t *testing.T) {
 			_, _ = stdout.Write([]byte(streamOutput))
 			return 0, nil
 		}
+		if strings.HasPrefix(cmd, "git rev-parse") {
+			_, _ = stdout.Write([]byte("true\n"))
+			return 0, nil
+		}
 		if strings.HasPrefix(cmd, "git diff") {
 			_, _ = stdout.Write([]byte("diff --git a/main.go b/main.go\n"))
 			return 0, nil
@@ -675,6 +683,10 @@ func TestGeminiCLIAdapter_Execute_ContinuationWithoutSessionIDUsesResumeMode(t *
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 		if strings.HasPrefix(cmd, "gemini --resume") {
 			_, _ = stdout.Write([]byte(`{"type":"text","content":"continuing gemini session"}`))
+			return 0, nil
+		}
+		if strings.HasPrefix(cmd, "git rev-parse") {
+			_, _ = stdout.Write([]byte("true\n"))
 			return 0, nil
 		}
 		if strings.HasPrefix(cmd, "git diff") {
