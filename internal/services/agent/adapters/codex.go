@@ -63,19 +63,23 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 		return nil, fmt.Errorf("sandbox provider not found in context")
 	}
 
+	// Use --dangerously-bypass-approvals-and-sandbox (aka --yolo) to skip
+	// Codex's internal bwrap sandboxing. The container is already isolated
+	// by Docker + gVisor, and bwrap fails because gVisor doesn't support the
+	// unprivileged user namespaces that bwrap requires.
 	var cmd string
 	if prompt.Continuation {
 		// Subsequent turn: resume the latest restored session state.
 		msg := shellEscapeDouble(prompt.UserMessage)
 		if prompt.ResumeSessionID != "" {
 			cmd = fmt.Sprintf(
-				"codex exec resume --full-auto --sandbox danger-full-access --skip-git-repo-check --json %s \"%s\"",
+				"codex exec resume --dangerously-bypass-approvals-and-sandbox --full-auto --sandbox danger-full-access --skip-git-repo-check --json %s \"%s\"",
 				shellEscapeCodex(prompt.ResumeSessionID),
 				msg,
 			)
 		} else {
 			cmd = fmt.Sprintf(
-				"codex exec resume --last --full-auto --sandbox danger-full-access --skip-git-repo-check --json \"%s\"",
+				"codex exec resume --last --dangerously-bypass-approvals-and-sandbox --full-auto --sandbox danger-full-access --skip-git-repo-check --json \"%s\"",
 				msg,
 			)
 		}
@@ -87,7 +91,7 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 			return nil, fmt.Errorf("write prompt file: %w", err)
 		}
 		cmd = fmt.Sprintf(
-			"codex exec --full-auto --sandbox danger-full-access --skip-git-repo-check --json \"$(cat '%s')\"",
+			"codex exec --dangerously-bypass-approvals-and-sandbox --full-auto --sandbox danger-full-access --skip-git-repo-check --json \"$(cat '%s')\"",
 			shellEscapeCodex(promptPath),
 		)
 	}
