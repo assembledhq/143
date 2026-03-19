@@ -66,9 +66,9 @@ describe('SessionSidebar', () => {
     await screen.findByText('Fixed TypeError by adding null check');
 
     expect(screen.getByRole('tab', { name: 'All' })).toBeInTheDocument();
-    expect(screen.getAllByText('Active').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('Needs attention').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('Working').length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText('Done').length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText('Failed').length).toBeGreaterThanOrEqual(1);
   });
 
   it('shows status indicators for sessions', async () => {
