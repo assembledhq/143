@@ -97,6 +97,9 @@ func (s *Scheduler) Start(ctx context.Context, interval time.Duration) {
 }
 
 func (s *Scheduler) runOnce(ctx context.Context) {
+	if s.lock == nil {
+		return
+	}
 	acquired, err := s.lock.TryAcquire(ctx)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("scheduler failed to acquire lock")
