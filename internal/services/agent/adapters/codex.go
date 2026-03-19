@@ -69,13 +69,13 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 		msg := shellEscapeDouble(prompt.UserMessage)
 		if prompt.ResumeSessionID != "" {
 			cmd = fmt.Sprintf(
-				"codex exec resume --full-auto --skip-git-repo-check --json %s \"%s\"",
+				"codex exec resume --full-auto --sandbox danger-full-access --skip-git-repo-check --json %s \"%s\"",
 				shellEscapeCodex(prompt.ResumeSessionID),
 				msg,
 			)
 		} else {
 			cmd = fmt.Sprintf(
-				"codex exec resume --last --full-auto --skip-git-repo-check --json \"%s\"",
+				"codex exec resume --last --full-auto --sandbox danger-full-access --skip-git-repo-check --json \"%s\"",
 				msg,
 			)
 		}
@@ -87,7 +87,7 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 			return nil, fmt.Errorf("write prompt file: %w", err)
 		}
 		cmd = fmt.Sprintf(
-			"codex exec --full-auto --skip-git-repo-check --json \"$(cat '%s')\"",
+			"codex exec --full-auto --sandbox danger-full-access --skip-git-repo-check --json \"$(cat '%s')\"",
 			shellEscapeCodex(promptPath),
 		)
 	}
@@ -297,6 +297,72 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 			}
 		}
 
+	case "item.completed":
+		if event.Item != nil {
+			switch event.Item.Type {
+			case "agent_message":
+				text := event.Item.Text
+				if text != "" {
+					logCh <- agent.LogEntry{
+						Timestamp: time.Now(),
+						Level:     "output",
+						Message:   text,
+					}
+					*summaryParts = append(*summaryParts, text)
+					tryExtractConfidence(text, result)
+				}
+			case "command_execution":
+				metadata := map[string]interface{}{
+					"tool":   "command_execution",
+					"input":  map[string]interface{}{"command": event.Item.Command},
+					"status": event.Item.Status,
+				}
+				if event.Item.ExitCode != nil {
+					metadata["exit_code"] = *event.Item.ExitCode
+				}
+				logCh <- agent.LogEntry{
+					Timestamp: time.Now(),
+					Level:     "tool_use",
+					Message:   fmt.Sprintf("using tool: command_execution"),
+					Metadata:  metadata,
+				}
+				if event.Item.AggregatedOutput != "" {
+					logCh <- agent.LogEntry{
+						Timestamp: time.Now(),
+						Level:     "output",
+						Message:   event.Item.AggregatedOutput,
+						Metadata:  map[string]interface{}{"type": "tool_result"},
+					}
+				}
+			default:
+				logCh <- agent.LogEntry{
+					Timestamp: time.Now(),
+					Level:     "debug",
+					Message:   string(line),
+				}
+			}
+		}
+
+	case "turn.completed":
+		if len(event.Usage) > 0 {
+			var usage struct {
+				InputTokens       int `json:"input_tokens"`
+				CachedInputTokens int `json:"cached_input_tokens"`
+				OutputTokens      int `json:"output_tokens"`
+			}
+			if err := json.Unmarshal(event.Usage, &usage); err == nil && usage.InputTokens > 0 {
+				result.TokenUsage = agent.TokenUsage{
+					InputTokens:  usage.InputTokens,
+					OutputTokens: usage.OutputTokens,
+				}
+			}
+		}
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "debug",
+			Message:   string(line),
+		}
+
 	default:
 		logCh <- agent.LogEntry{
 			Timestamp: time.Now(),
@@ -362,6 +428,18 @@ func parseCodexOutput(output []byte, result *agent.AgentResult, logCh chan<- age
 	tryExtractConfidence(text, result)
 }
 
+// codexItem represents a nested item inside a Codex CLI stream event
+// (used by item.started / item.completed events).
+type codexItem struct {
+	ID               string  `json:"id,omitempty"`
+	Type             string  `json:"type,omitempty"`
+	Text             string  `json:"text,omitempty"`
+	Command          string  `json:"command,omitempty"`
+	AggregatedOutput string  `json:"aggregated_output,omitempty"`
+	ExitCode         *int    `json:"exit_code,omitempty"`
+	Status           string  `json:"status,omitempty"`
+}
+
 // codexStreamEvent represents a single line of Codex CLI's stream-json output.
 type codexStreamEvent struct {
 	Type      string          `json:"type"`
@@ -376,7 +454,9 @@ type codexStreamEvent struct {
 		InputTokens  int `json:"inputTokens"`
 		OutputTokens int `json:"outputTokens"`
 	} `json:"stats,omitempty"`
-	Error string `json:"error,omitempty"`
+	Error string          `json:"error,omitempty"`
+	Item  *codexItem      `json:"item,omitempty"`
+	Usage json.RawMessage `json:"usage,omitempty"`
 }
 
 // parseCodexStreamOutput processes the streaming JSONL output from Codex CLI,
@@ -526,6 +606,72 @@ func parseCodexStreamOutput(output []byte, result *agent.AgentResult, logCh chan
 				if err := json.Unmarshal(event.Result, &usage); err == nil && usage.InputTokens > 0 {
 					result.TokenUsage = usage
 				}
+			}
+
+		case "item.completed":
+			if event.Item != nil {
+				switch event.Item.Type {
+				case "agent_message":
+					text := event.Item.Text
+					if text != "" {
+						logCh <- agent.LogEntry{
+							Timestamp: time.Now(),
+							Level:     "output",
+							Message:   text,
+						}
+						summaryParts = append(summaryParts, text)
+						tryExtractConfidence(text, result)
+					}
+				case "command_execution":
+					metadata := map[string]interface{}{
+						"tool":   "command_execution",
+						"input":  map[string]interface{}{"command": event.Item.Command},
+						"status": event.Item.Status,
+					}
+					if event.Item.ExitCode != nil {
+						metadata["exit_code"] = *event.Item.ExitCode
+					}
+					logCh <- agent.LogEntry{
+						Timestamp: time.Now(),
+						Level:     "tool_use",
+						Message:   fmt.Sprintf("using tool: command_execution"),
+						Metadata:  metadata,
+					}
+					if event.Item.AggregatedOutput != "" {
+						logCh <- agent.LogEntry{
+							Timestamp: time.Now(),
+							Level:     "output",
+							Message:   event.Item.AggregatedOutput,
+							Metadata:  map[string]interface{}{"type": "tool_result"},
+						}
+					}
+				default:
+					logCh <- agent.LogEntry{
+						Timestamp: time.Now(),
+						Level:     "debug",
+						Message:   string(line),
+					}
+				}
+			}
+
+		case "turn.completed":
+			if len(event.Usage) > 0 {
+				var usage struct {
+					InputTokens       int `json:"input_tokens"`
+					CachedInputTokens int `json:"cached_input_tokens"`
+					OutputTokens      int `json:"output_tokens"`
+				}
+				if err := json.Unmarshal(event.Usage, &usage); err == nil && usage.InputTokens > 0 {
+					result.TokenUsage = agent.TokenUsage{
+						InputTokens:  usage.InputTokens,
+						OutputTokens: usage.OutputTokens,
+					}
+				}
+			}
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "debug",
+				Message:   string(line),
 			}
 
 		default:

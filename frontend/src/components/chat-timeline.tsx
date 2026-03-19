@@ -190,6 +190,15 @@ export function ChatTimeline({ entries, isRunning }: ChatTimelineProps) {
       case "message":
         rendered.push(<MessageBubble key={`msg-${entry.data.id}`} msg={entry.data} />);
         break;
+      case "assistant_output":
+        rendered.push(
+          <div key={`aout-${entry.data.id}`} className="flex justify-start">
+            <div className="max-w-[80%] rounded-lg px-3 py-2 text-sm bg-muted">
+              <p className="whitespace-pre-wrap">{entry.data.message}</p>
+            </div>
+          </div>
+        );
+        break;
       case "tool_group":
         rendered.push(
           <ToolGroupEntry
