@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowUp, Mic, Plus, X, ImagePlus, Paperclip } from "lucide-react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -60,10 +60,15 @@ function readFileAsDataURL(file: File): Promise<string> {
 
 export function ManualSessionCreatePageContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const queryClient = useQueryClient();
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const messageInputRef = useRef<HTMLTextAreaElement>(null);
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
+
+  // Read the currently selected repository from the URL query params
+  // (set by the RepoContextSwitcher) so we clone the codebase into the sandbox.
+  const repoId = searchParams.get("repo") ?? undefined;
 
   const [message, setMessage] = useState("");
   const [attachments, setAttachments] = useState<string[]>([]);
@@ -95,6 +100,7 @@ export function ManualSessionCreatePageContent() {
         message: message.trim(),
         images: attachments,
         ...(selectedModel ? { model: selectedModel } : {}),
+        ...(repoId ? { repository_id: repoId } : {}),
       }),
     onMutate: () => {
       setCreationError(null);

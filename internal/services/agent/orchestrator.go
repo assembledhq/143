@@ -332,8 +332,19 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 	}()
 
-	// 8. Inject Codex auth.json if this is a codex agent run.
+	// 8. Clone repo into sandbox. This must happen before auth injection
+	// so that /workspace is empty when git clone runs (git clone fails on
+	// non-empty directories).
+	if repoURL != "" {
+		if err := o.provider.CloneRepo(ctx, sandbox, repoURL, branch, token); err != nil {
+			o.failRun(ctx, run, fmt.Sprintf("clone repo: %s", err))
+			return fmt.Errorf("clone repo: %w", err)
+		}
+	}
+
+	// 9. Inject Codex auth.json if this is a codex agent run.
 	//    auth.json is the primary auth mechanism (uses ChatGPT backend).
+	//    Done after clone so the workspace is available.
 	if run.AgentType == models.AgentTypeCodex {
 		injected, err := o.injectCodexAuth(ctx, run.OrgID, sandbox)
 		if err != nil {
@@ -346,18 +357,10 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 	}
 
-	// 8b. Integration tools (143-tools CLI) are pre-installed in the container
+	// 9b. Integration tools (143-tools CLI) are pre-installed in the container
 	// image. Credentials are injected via env vars (resolveAgentEnv), and the
 	// skills doc is injected into the prompt (buildIntegrationSkills). No
 	// per-CLI config file injection needed — all agents can shell out directly.
-
-	// 9. Clone repo into sandbox.
-	if repoURL != "" {
-		if err := o.provider.CloneRepo(ctx, sandbox, repoURL, branch, token); err != nil {
-			o.failRun(ctx, run, fmt.Sprintf("clone repo: %s", err))
-			return fmt.Errorf("clone repo: %w", err)
-		}
-	}
 
 	// 10. Execute agent with log streaming.
 	logCh := make(chan LogEntry, 100)

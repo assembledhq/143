@@ -499,7 +499,15 @@ func (s *Service) RefreshToken(ctx context.Context, orgID uuid.UUID) (*models.Op
 	}
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		// Refresh token revoked or expired — mark credential as invalid.
+		// Check if this is a "refresh_token_reused" error, which means
+		// another client (e.g. the user's local Codex CLI) already used
+		// the refresh token. In this case, the access token may still be
+		// valid — don't mark the credential as invalid.
+		if strings.Contains(string(body), "refresh_token_reused") {
+			s.logger.Warn().Str("org_id", orgID.String()).Msg("refresh token already used by another client; access token may still be valid")
+			return nil, fmt.Errorf("refresh token already used by another client")
+		}
+		// Refresh token truly revoked or expired — mark credential as invalid.
 		if err := s.credentials.UpdateStatus(ctx, orgID, models.ProviderOpenAIChatGPT, "invalid"); err != nil {
 			s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to update credential status")
 		}
@@ -584,7 +592,15 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.O
 		refreshed, err := s.RefreshToken(ctx, orgID)
 		if err != nil {
 			s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("token refresh failed")
-			// If refresh fails but token is still valid, use it.
+			// If refresh token was already consumed by another client
+			// (e.g. user's local Codex CLI), return the existing config
+			// regardless of expiry. The access token may still work, and
+			// even if it doesn't, Codex CLI can handle 401s at runtime.
+			// This is better than blocking session creation entirely.
+			if strings.Contains(err.Error(), "refresh token already used by another client") {
+				return &cfg, nil
+			}
+			// For other refresh failures, use the token if not expired.
 			if !cfg.IsExpired() {
 				return &cfg, nil
 			}
