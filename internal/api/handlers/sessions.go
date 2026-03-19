@@ -709,19 +709,16 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	issue := &models.Issue{
-		OrgID:                 orgID,
-		ExternalID:            "manual-" + now.UTC().Format("20060102150405") + "-" + strings.ReplaceAll(uuid.NewString(), "-", ""),
-		Source:                "manual",
-		Title:                 title,
-		Description:           &description,
-		RawData:               rawData,
-		Status:                "open",
-		FirstSeenAt:           now,
-		LastSeenAt:            now,
-		OccurrenceCount:       1,
-		AffectedCustomerCount: 1,
-		Severity:              "medium",
-		Fingerprint:           fingerprint,
+		OrgID:       orgID,
+		ExternalID:  "manual-" + now.UTC().Format("20060102150405") + "-" + strings.ReplaceAll(uuid.NewString(), "-", ""),
+		Source:      models.IssueSourceManual,
+		Title:       title,
+		Description: &description,
+		RawData:     rawData,
+		Status:      "open",
+		FirstSeenAt: now,
+		LastSeenAt:  now,
+		Fingerprint: fingerprint,
 	}
 
 	if err := h.issueStore.Upsert(r.Context(), issue); err != nil {
@@ -743,7 +740,6 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		TokenMode:         tokenMode,
 		ModelOverride:     modelOverride,
 		TriggeredByUserID: manualTriggeredByUserID,
-		PMApproach:        &title,
 	}
 	if err := h.runStore.Create(r.Context(), session); err != nil {
 		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create manual session")

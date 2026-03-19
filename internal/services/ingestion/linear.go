@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/assembledhq/143/internal/models"
 )
 
 // LinearWebhookPayload represents a Linear webhook event.
@@ -86,7 +88,7 @@ func (a *LinearAdapter) ParseWebhook(integrationID uuid.UUID, payload json.RawMe
 
 	return &NormalizedIssue{
 		ExternalID:          issue.ID,
-		Source:              "linear",
+		Source:              models.IssueSourceLinear,
 		SourceIntegrationID: integrationID,
 		Title:               title,
 		Description:         issue.Description,

@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/assembledhq/143/internal/models"
 )
 
 // SentryWebhookPayload represents a Sentry webhook event.
@@ -106,7 +108,7 @@ func (a *SentryAdapter) ParseWebhook(integrationID uuid.UUID, payload json.RawMe
 
 	return &NormalizedIssue{
 		ExternalID:            issue.ID,
-		Source:                "sentry",
+		Source:                models.IssueSourceSentry,
 		SourceIntegrationID:   integrationID,
 		Title:                 issue.Title,
 		Description:           description,

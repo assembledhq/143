@@ -11,6 +11,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
+
+	"github.com/assembledhq/143/internal/models"
 )
 
 // SentryAPIClient fetches issues from the Sentry REST API.
@@ -150,7 +152,7 @@ func (c *SentryAPIClient) normalizeIssue(integrationID uuid.UUID, issue SentryIs
 
 	return NormalizedIssue{
 		ExternalID:            issue.ID,
-		Source:                "sentry",
+		Source:                models.IssueSourceSentry,
 		SourceIntegrationID:   integrationID,
 		Title:                 issue.Title,
 		Description:           description,

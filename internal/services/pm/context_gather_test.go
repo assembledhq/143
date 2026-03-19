@@ -170,7 +170,7 @@ func TestServiceGatherContext(t *testing.T) {
 				"open": {
 					{
 						ID:                    issueID,
-						Source:                "sentry",
+						Source:                models.IssueSourceSentry,
 						Title:                 "payment request panic",
 						Description:           &desc,
 						Severity:              "high",
@@ -185,7 +185,7 @@ func TestServiceGatherContext(t *testing.T) {
 				"triaged": {
 					{
 						ID:                    secondIssueID,
-						Source:                "github",
+						Source:                models.IssueSource("github"),
 						Title:                 "retry policy bug",
 						Severity:              "medium",
 						OccurrenceCount:       3,

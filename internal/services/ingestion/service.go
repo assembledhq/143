@@ -18,7 +18,7 @@ import (
 // NormalizedIssue is the intermediate form before upserting into the issues table.
 type NormalizedIssue struct {
 	ExternalID            string
-	Source                string
+	Source                models.IssueSource
 	SourceIntegrationID   uuid.UUID
 	Title                 string
 	Description           string
@@ -56,7 +56,7 @@ func NewService(
 // IngestNormalized normalizes and upserts an issue, then enqueues a prioritize job.
 func (s *Service) IngestNormalized(ctx context.Context, orgID uuid.UUID, ni NormalizedIssue) (*models.Issue, error) {
 	// Compute fingerprint for dedup
-	fingerprint := computeFingerprint(ni.Source, ni.ExternalID)
+	fingerprint := computeFingerprint(string(ni.Source), ni.ExternalID)
 
 	// Normalize severity
 	severity := normalizeSeverity(ni.Severity)
@@ -94,7 +94,7 @@ func (s *Service) IngestNormalized(ctx context.Context, orgID uuid.UUID, ni Norm
 
 	s.logger.Info().
 		Str("issue_id", issue.ID.String()).
-		Str("source", ni.Source).
+		Str("source", string(ni.Source)).
 		Str("external_id", ni.ExternalID).
 		Msg("issue ingested")
 
