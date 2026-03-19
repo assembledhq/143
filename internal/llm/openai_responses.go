@@ -48,11 +48,19 @@ func NewOpenAIResponsesProvider(apiKey string, opts ...OpenAIResponsesOption) *O
 
 func (p *OpenAIResponsesProvider) Name() string { return "openai_responses" }
 
-func (p *OpenAIResponsesProvider) Complete(ctx context.Context, model, systemPrompt, userPrompt string) (string, error) {
+func (p *OpenAIResponsesProvider) Complete(ctx context.Context, model, systemPrompt, userPrompt string, reasoningEffort ReasoningEffort) (string, error) {
+	// Only include reasoning_effort for models that support it. Sending it
+	// to non-reasoning models (e.g. gpt-4o) may cause a 400 error.
+	var effort ReasoningEffort
+	if modelSupportsReasoningEffort(model) {
+		effort = reasoningEffort
+	}
+
 	reqBody := responsesRequest{
-		Model:        model,
-		Instructions: systemPrompt,
-		Input:        userPrompt,
+		Model:           model,
+		Instructions:    systemPrompt,
+		Input:           userPrompt,
+		ReasoningEffort: effort,
 	}
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
@@ -100,9 +108,10 @@ func (p *OpenAIResponsesProvider) Complete(ctx context.Context, model, systemPro
 }
 
 type responsesRequest struct {
-	Model        string `json:"model"`
-	Instructions string `json:"instructions,omitempty"`
-	Input        string `json:"input"`
+	Model           string `json:"model"`
+	Instructions    string `json:"instructions,omitempty"`
+	Input           string `json:"input"`
+	ReasoningEffort ReasoningEffort `json:"reasoning_effort,omitempty"`
 }
 
 type responsesResponse struct {
