@@ -130,15 +130,6 @@ export function SessionSidebar() {
 
   return (
     <div className="w-full h-full border-r border-border bg-muted/30 flex flex-col">
-      {/* New session button */}
-      <Link
-        href="/sessions/new"
-        className="flex items-center gap-2.5 px-4 py-3 border-b border-border/50 text-[13px] font-medium text-muted-foreground hover:text-foreground transition-colors"
-      >
-        <Plus className="h-4 w-4" />
-        New session
-      </Link>
-
       {/* Header */}
       <div className="px-4 pt-3 pb-2 space-y-3">
 
@@ -153,6 +144,15 @@ export function SessionSidebar() {
             className="w-full h-8 pl-8 pr-3 rounded-md border border-border bg-background text-[13px] placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
           />
         </div>
+
+        {/* New session button */}
+        <Link
+          href="/sessions/new"
+          className="flex items-center justify-center gap-2 w-full h-9 rounded-md border border-border bg-background text-[13px] font-medium text-foreground hover:bg-accent transition-colors shadow-sm"
+        >
+          <Plus className="h-4 w-4" />
+          New session
+        </Link>
 
         {/* Filter tabs */}
         <Tabs
