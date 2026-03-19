@@ -38,6 +38,10 @@ tmp/
 
 # Build output
 bin/
+sandbox/.build-stamp
+
+# Runtime data (sandbox snapshots, etc.)
+.data/
 server
 coverage.html
 

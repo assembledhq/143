@@ -611,7 +611,20 @@ func shellEscapeDouble(s string) string {
 }
 
 // collectDiff runs git diff inside the sandbox to capture changes.
+// Returns an empty string (not an error) when the workspace is not a git repository,
+// which happens when no repository was configured for the issue.
 func collectDiff(ctx context.Context, provider agent.SandboxProvider, sandbox *agent.Sandbox) (string, error) {
+	// Check if the workspace is a git repository before attempting diff.
+	var checkStdout, checkStderr bytes.Buffer
+	checkExit, err := provider.Exec(ctx, sandbox, "git rev-parse --is-inside-work-tree", &checkStdout, &checkStderr)
+	if err != nil {
+		return "", fmt.Errorf("check git repo: %w", err)
+	}
+	if checkExit != 0 {
+		// Not a git repository — no diff to collect.
+		return "", nil
+	}
+
 	var stdout, stderr bytes.Buffer
 	exitCode, err := provider.Exec(ctx, sandbox, "git diff", &stdout, &stderr)
 	if err != nil {

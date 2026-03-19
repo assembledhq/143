@@ -1,3 +1,7 @@
+# Stamp file tracking when the sandbox image was last built.
+SANDBOX_STAMP := sandbox/.build-stamp
+SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json
+
 .PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-coverage migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
@@ -11,7 +15,15 @@ dev:
 		echo "Stop the process on that port, or run: FRONTEND_PORT=3001 make dev"; \
 		exit 1; \
 	fi; \
+	$(MAKE) sandbox-image; \
 	docker compose up --build
+
+# Only rebuild the sandbox image when Dockerfile or versions.json change.
+$(SANDBOX_STAMP): $(SANDBOX_SOURCES)
+	docker compose build sandbox
+	@touch $@
+
+sandbox-image: $(SANDBOX_STAMP)
 
 # Run the full Docker stack with an ngrok tunnel for external access.
 # The NGROK_DOMAIN is required (your reserved ngrok domain).
@@ -63,6 +75,7 @@ dev-ngrok:
 	BASE_URL=$$NGROK_URL \
 	FRONTEND_URL=$$NGROK_URL \
 	CORS_ALLOWED_ORIGINS=$$NGROK_URL \
+	$(MAKE) sandbox-image; \
 	docker compose up --build; \
 	kill $$NGROK_PID 2>/dev/null; \
 	wait $$NGROK_PID 2>/dev/null

@@ -69,13 +69,13 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 		msg := shellEscapeDouble(prompt.UserMessage)
 		if prompt.ResumeSessionID != "" {
 			cmd = fmt.Sprintf(
-				"codex resume --full-auto --output-format stream-json %s -q \"%s\"",
+				"codex exec resume --full-auto --json %s \"%s\"",
 				shellEscapeCodex(prompt.ResumeSessionID),
 				msg,
 			)
 		} else {
 			cmd = fmt.Sprintf(
-				"codex resume --last --full-auto --output-format stream-json -q \"%s\"",
+				"codex exec resume --last --full-auto --json \"%s\"",
 				msg,
 			)
 		}
@@ -87,7 +87,7 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 			return nil, fmt.Errorf("write prompt file: %w", err)
 		}
 		cmd = fmt.Sprintf(
-			"codex --full-auto --output-format stream-json -q \"$(cat '%s')\"",
+			"codex exec --full-auto --json \"$(cat '%s')\"",
 			shellEscapeCodex(promptPath),
 		)
 	}
