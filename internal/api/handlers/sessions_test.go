@@ -1332,6 +1332,34 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 			expectedCode: http.StatusBadRequest,
 			expectedBody: "INVALID_TOKEN_MODE",
 		},
+		{
+			name:         "returns bad request for invalid branch characters",
+			body:         `{"message":"Fix bug","agent_type":"claude_code","branch":"main..exploit"}`,
+			setupMock:    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_BRANCH",
+		},
+		{
+			name:         "returns bad request for invalid repository_id format",
+			body:         `{"message":"Fix bug","agent_type":"claude_code","repository_id":"not-a-uuid"}`,
+			setupMock:    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_REPOSITORY_ID",
+		},
+		{
+			name: "returns not found for non-existent repository",
+			body: `{"message":"Fix bug","agent_type":"claude_code","repository_id":"` + uuid.New().String() + `"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				mock.ExpectQuery("SELECT").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{
+						"id", "org_id", "platform", "platform_id", "full_name",
+						"default_branch", "installed_at", "created_at", "updated_at",
+					}))
+			},
+			expectedCode: http.StatusNotFound,
+			expectedBody: "REPOSITORY_NOT_FOUND",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1497,6 +1525,34 @@ func TestManualSessionTitle(t *testing.T) {
 			t.Parallel()
 			result := manualSessionTitle(tt.message)
 			require.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestIsValidGitRef(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		ref   string
+		valid bool
+	}{
+		{"main", true},
+		{"feature/add-auth", true},
+		{"fix-123", true},
+		{"refs/heads/main", true},
+		{"", false},
+		{"main..develop", false},
+		{"branch~1", false},
+		{"branch^2", false},
+		{"branch:file", false},
+		{"branch name", false},
+		{"branch\\path", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.ref, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.valid, isValidGitRef(tt.ref))
 		})
 	}
 }
