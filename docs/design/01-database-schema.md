@@ -288,6 +288,41 @@ Streaming logs from an agent run for real-time UI display.
 **Indexes:**
 - `(agent_run_id, timestamp)` — log streaming
 
+### `session_threads`
+
+Per-thread state for multi-agent sessions. Each thread runs a separate agent process in the same shared container/filesystem.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | uuid | PK |
+| session_id | uuid | FK -> sessions (agent_runs) ON DELETE CASCADE |
+| org_id | uuid | FK -> organizations |
+| agent_type | text | `claude_code`, `codex`, etc. |
+| model_override | text | optional per-thread model |
+| label | text | human-readable thread name (e.g. "Backend API") |
+| instructions | text | thread-specific instructions |
+| file_scope | text[] | optional file/directory focus |
+| status | text | `pending`, `running`, `idle`, `awaiting_input`, `completed`, `failed`, `cancelled` |
+| agent_session_id | text | provider session identifier |
+| current_turn | int | incremented each turn |
+| last_activity_at | timestamptz | |
+| confidence_score | float | thread-level confidence (0-1) |
+| result_summary | text | what this thread accomplished |
+| diff | text | thread's generated diff |
+| failure_explanation | text | |
+| failure_category | text | |
+| started_at | timestamptz | |
+| completed_at | timestamptz | |
+| created_at | timestamptz | |
+
+**Indexes:**
+- `(session_id)` — list threads for a session
+- `(org_id, status)` — operational queries
+
+**Notes:**
+- `agent_run_logs` and `session_messages` both have a nullable `thread_id` (FK -> session_threads) column added to scope logs/messages to a specific thread. NULL means session-level.
+- Maximum 4 threads per session, enforced in application layer.
+
 ### `agent_run_questions`
 
 Questions asked by the agent during execution. When the agent encounters ambiguity, it emits a question; the run pauses until answered.

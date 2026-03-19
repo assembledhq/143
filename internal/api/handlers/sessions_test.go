@@ -1014,9 +1014,9 @@ func TestSessionHandler_GetLogs_Success(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM session_logs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "session_id", "timestamp", "level", "message", "metadata", "turn_number"}).
-				AddRow(int64(1), runID, now, "info", "Starting agent", nil, nil).
-				AddRow(int64(2), runID, now, "info", "Agent completed", nil, nil),
+			pgxmock.NewRows([]string{"id", "session_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}).
+				AddRow(int64(1), runID, nil, now, "info", "Starting agent", nil, nil).
+				AddRow(int64(2), runID, nil, now, "info", "Agent completed", nil, nil),
 		)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+runID.String()+"/logs", nil)
@@ -1094,7 +1094,7 @@ func TestSessionHandler_GetLogs_EmptyLogs(t *testing.T) {
 
 	mock.ExpectQuery("SELECT .+ FROM session_logs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "session_id", "timestamp", "level", "message", "metadata", "turn_number"}))
+		WillReturnRows(pgxmock.NewRows([]string{"id", "session_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+runID.String()+"/logs", nil)
 	rctx := chi.NewRouteContext()
@@ -1169,8 +1169,8 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM session_logs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "session_id", "timestamp", "level", "message", "metadata", "turn_number"}).
-				AddRow(int64(1), runID, now, "info", "Done", nil, nil),
+			pgxmock.NewRows([]string{"id", "session_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}).
+				AddRow(int64(1), runID, nil, now, "info", "Done", nil, nil),
 		)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+runID.String()+"/logs/stream", nil)
@@ -1559,7 +1559,7 @@ func TestIsValidGitRef(t *testing.T) {
 
 // messageColumns is the standard column set for session_messages queries.
 var messageColumns = []string{
-	"id", "session_id", "org_id", "user_id", "turn_number", "role", "content", "attachments", "token_usage", "created_at",
+	"id", "session_id", "org_id", "thread_id", "user_id", "turn_number", "role", "content", "attachments", "token_usage", "created_at",
 }
 
 func TestSessionHandler_ListMessages(t *testing.T) {
@@ -1599,8 +1599,8 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(messageColumns).
-							AddRow(int64(1), sessionID, orgID, &userID, 1, "user", "Hello", nil, nil, now).
-							AddRow(int64(2), sessionID, orgID, nil, 1, "assistant", "Hi there", nil, nil, now),
+							AddRow(int64(1), sessionID, orgID, nil, &userID, 1, "user", "Hello", nil, nil, now).
+							AddRow(int64(2), sessionID, orgID, nil, nil, 1, "assistant", "Hi there", nil, nil, now),
 					)
 			},
 			expectedCode: http.StatusOK,
@@ -1705,7 +1705,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 					)
 				// Create message.
 				mock.ExpectQuery("INSERT INTO session_messages").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
 				// Enqueue job.
 				mock.ExpectQuery("INSERT INTO jobs").

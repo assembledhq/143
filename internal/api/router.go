@@ -16,6 +16,7 @@ import (
 	"github.com/assembledhq/143/internal/services/codexauth"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
+	threadservice "github.com/assembledhq/143/internal/services/thread"
 )
 
 func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, codexAuthSvc *codexauth.Service, llmClient llm.Client) (*chi.Mux, error) {
@@ -112,6 +113,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeAgentEnv(), cfg.SafeLLMEnv())
 	issueHandler := handlers.NewIssueHandler(issueStore)
 	sessionMessageStore := db.NewSessionMessageStore(pool)
+	sessionThreadStore := db.NewSessionThreadStore(pool)
 	sessionHandler := handlers.NewSessionHandler(
 		sessionStore,
 		sessionLogStore,
@@ -126,6 +128,15 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		llmClient,
 		logger,
 	)
+	threadSvc := threadservice.NewService(
+		sessionThreadStore,
+		sessionStore,
+		sessionMessageStore,
+		sessionLogStore,
+		jobStore,
+		logger,
+	)
+	sessionThreadHandler := handlers.NewSessionThreadHandler(threadSvc)
 	pmHandler := handlers.NewPMHandler(pmPlanStore, pmDecisionLogStore, jobStore, orgStore)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
@@ -136,6 +147,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 
 	projectHandler := handlers.NewProjectHandler(projectStore, projectTaskStore, projectCycleStore, projectAttachmentStore, projectSpecStore)
 	projectHandler.SetJobStore(jobStore)
+
+	// Wire thread store into session handler for enriched GET response.
+	sessionHandler.SetThreadStore(sessionThreadStore)
 
 	// Wire audit emitter into all handlers that perform state changes.
 	authHandler.SetAuditEmitter(auditEmitter)
@@ -226,6 +240,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/sessions/{id}/pr", sessionHandler.GetPullRequest)
 			r.Get("/api/v1/sessions/{id}/questions", sessionHandler.ListQuestions)
 			r.Get("/api/v1/sessions/{id}/messages", sessionHandler.ListMessages)
+			r.Get("/api/v1/sessions/{id}/threads", sessionThreadHandler.ListThreads)
+			r.Get("/api/v1/sessions/{id}/threads/{tid}", sessionThreadHandler.GetThread)
+			r.Get("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.GetThreadMessages)
+			r.Get("/api/v1/sessions/{id}/threads/{tid}/logs", sessionThreadHandler.GetThreadLogs)
 			r.Get("/api/v1/settings", settingsHandler.Get)
 			r.Get("/api/v1/settings/agent-defaults", settingsHandler.GetAgentDefaults)
 			r.Get("/api/v1/settings/llm-defaults", settingsHandler.GetLLMDefaults)
@@ -275,6 +293,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Post("/api/v1/sessions/{id}/questions/{qid}/answer", sessionHandler.AnswerQuestion)
 			r.Post("/api/v1/sessions/{id}/messages", sessionHandler.SendMessage)
 			r.Post("/api/v1/sessions/{id}/end", sessionHandler.EndSession)
+			r.Post("/api/v1/sessions/{id}/threads", sessionThreadHandler.CreateThread)
+			r.Post("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.SendThreadMessage)
+			r.Post("/api/v1/sessions/{id}/threads/{tid}/end", sessionThreadHandler.EndThread)
 			r.Post("/api/v1/projects", projectHandler.Create)
 			r.Patch("/api/v1/projects/{id}", projectHandler.Update)
 			r.Delete("/api/v1/projects/{id}", projectHandler.Delete)

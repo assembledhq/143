@@ -142,6 +142,12 @@ type Session struct {
 	CreatedAt            time.Time       `db:"created_at" json:"created_at"`
 }
 
+// SessionDetail is the API response for a single session, enriched with threads.
+type SessionDetail struct {
+	Session
+	Threads []SessionThread `json:"threads"`
+}
+
 // SessionResult holds the result fields to update on an agent run.
 type SessionResult struct {
 	ConfidenceScore     *float64        `json:"confidence_score,omitempty"`
@@ -151,6 +157,7 @@ type SessionResult struct {
 	ResultSummary       *string         `json:"result_summary,omitempty"`
 	Diff                *string         `json:"diff,omitempty"`
 	Error               *string         `json:"error,omitempty"`
+	FailureCategory     *string         `json:"failure_category,omitempty"`
 }
 
 // Validation represents validation results for an agent run.
@@ -193,6 +200,7 @@ type PullRequest struct {
 type SessionLog struct {
 	ID         int64           `db:"id" json:"id"`
 	SessionID  uuid.UUID       `db:"session_id" json:"session_id"`
+	ThreadID   *uuid.UUID      `db:"thread_id" json:"thread_id,omitempty"`
 	Timestamp  time.Time       `db:"timestamp" json:"created_at"`
 	Level      string          `db:"level" json:"level"`
 	Message    string          `db:"message" json:"message"`
@@ -205,6 +213,7 @@ type SessionMessage struct {
 	ID          int64           `db:"id" json:"id"`
 	SessionID   uuid.UUID       `db:"session_id" json:"session_id"`
 	OrgID       uuid.UUID       `db:"org_id" json:"org_id"`
+	ThreadID    *uuid.UUID      `db:"thread_id" json:"thread_id,omitempty"`
 	UserID      *uuid.UUID      `db:"user_id" json:"user_id,omitempty"`
 	TurnNumber  int             `db:"turn_number" json:"turn_number"`
 	Role        MessageRole     `db:"role" json:"role"`
@@ -212,6 +221,32 @@ type SessionMessage struct {
 	Attachments []string        `db:"attachments" json:"attachments,omitempty"`
 	TokenUsage  json.RawMessage `db:"token_usage" json:"token_usage,omitempty"`
 	CreatedAt   time.Time       `db:"created_at" json:"created_at"`
+}
+
+// SessionThread represents an agent thread within a multi-agent session.
+// Each thread is one agent doing one piece of work. All threads in a session
+// share the same container and filesystem.
+type SessionThread struct {
+	ID                 uuid.UUID  `db:"id" json:"id"`
+	SessionID          uuid.UUID  `db:"session_id" json:"session_id"`
+	OrgID              uuid.UUID  `db:"org_id" json:"org_id"`
+	AgentType          AgentType  `db:"agent_type" json:"agent_type"`
+	ModelOverride      *string    `db:"model_override" json:"model_override,omitempty"`
+	Label              string     `db:"label" json:"label"`
+	Instructions       *string    `db:"instructions" json:"instructions,omitempty"`
+	FileScope          []string   `db:"file_scope" json:"file_scope,omitempty"`
+	Status             ThreadStatus `db:"status" json:"status"`
+	AgentSessionID     *string    `db:"agent_session_id" json:"agent_session_id,omitempty"`
+	CurrentTurn        int        `db:"current_turn" json:"current_turn"`
+	LastActivityAt     *time.Time `db:"last_activity_at" json:"last_activity_at,omitempty"`
+	ConfidenceScore    *float64   `db:"confidence_score" json:"confidence_score,omitempty"`
+	ResultSummary      *string    `db:"result_summary" json:"result_summary,omitempty"`
+	Diff               *string    `db:"diff" json:"diff,omitempty"`
+	FailureExplanation *string    `db:"failure_explanation" json:"failure_explanation,omitempty"`
+	FailureCategory    *string    `db:"failure_category" json:"failure_category,omitempty"`
+	StartedAt          *time.Time `db:"started_at" json:"started_at,omitempty"`
+	CompletedAt        *time.Time `db:"completed_at" json:"completed_at,omitempty"`
+	CreatedAt          time.Time  `db:"created_at" json:"created_at"`
 }
 
 // SessionQuestion represents a question the agent asks a human during a run.

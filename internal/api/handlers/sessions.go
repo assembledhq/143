@@ -31,6 +31,7 @@ type SessionHandler struct {
 	orgStore         *db.OrganizationStore
 	jobStore         *db.JobStore
 	messageStore     *db.SessionMessageStore
+	threadStore      *db.SessionThreadStore
 	llmClient        llm.Client // optional, used for generating manual session titles
 	logger           zerolog.Logger
 	audit            *db.AuditEmitter
@@ -39,6 +40,11 @@ type SessionHandler struct {
 // SetAuditEmitter injects the audit emitter for logging session events.
 func (h *SessionHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 	h.audit = audit
+}
+
+// SetThreadStore injects the thread store for enriching session responses.
+func (h *SessionHandler) SetThreadStore(store *db.SessionThreadStore) {
+	h.threadStore = store
 }
 
 func NewSessionHandler(
@@ -137,7 +143,22 @@ func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "run not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, models.SingleResponse[models.Session]{Data: run})
+
+	detail := models.SessionDetail{Session: run}
+	if h.threadStore != nil {
+		threads, err := h.threadStore.ListBySession(r.Context(), orgID, runID)
+		if err != nil {
+			h.logger.Warn().Err(err).Str("session_id", runID.String()).Msg("failed to load threads for session")
+		}
+		if threads == nil {
+			threads = []models.SessionThread{}
+		}
+		detail.Threads = threads
+	} else {
+		detail.Threads = []models.SessionThread{}
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionDetail]{Data: detail})
 }
 
 // TriggerFix creates a new agent run for an issue and enqueues a run_agent job.
