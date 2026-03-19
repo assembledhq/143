@@ -33,7 +33,7 @@ func (rw *responseWriter) Flush() {
 }
 
 func (rw *responseWriter) captureErrorDetails(responseBody []byte) {
-	if rw.status < http.StatusInternalServerError {
+	if rw.status < http.StatusBadRequest {
 		return
 	}
 
@@ -55,6 +55,8 @@ func Logging(logger zerolog.Logger) func(http.Handler) http.Handler {
 			logEvent := logger.Info()
 			if rw.status >= http.StatusInternalServerError {
 				logEvent = logger.Error()
+			} else if rw.status >= http.StatusBadRequest {
+				logEvent = logger.Warn()
 			}
 
 			logEvent.
@@ -64,7 +66,7 @@ func Logging(logger zerolog.Logger) func(http.Handler) http.Handler {
 				Int("status", rw.status).
 				Dur("duration", time.Since(start))
 
-			if rw.status >= http.StatusInternalServerError {
+			if rw.status >= http.StatusBadRequest {
 				if rw.errorResponse != nil && rw.errorResponse.Error.Code != "" {
 					logEvent = logEvent.Str("error_code", rw.errorResponse.Error.Code)
 				}
