@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowUp, Mic, Plus, X, ImagePlus, Paperclip } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
@@ -60,6 +60,7 @@ function readFileAsDataURL(file: File): Promise<string> {
 
 export function ManualSessionCreatePageContent() {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const messageInputRef = useRef<HTMLTextAreaElement>(null);
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
@@ -102,7 +103,8 @@ export function ManualSessionCreatePageContent() {
         : message.trim();
       return { optimisticId: addOptimisticSession(title) };
     },
-    onSuccess: (response, _variables, context) => {
+    onSuccess: async (response, _variables, context) => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.sessions.all });
       removeOptimisticSession(context.optimisticId);
       router.push(`/sessions/${response.data.id}`);
     },
