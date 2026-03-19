@@ -23,7 +23,7 @@ func TestClaudeCodeModelConstants(t *testing.T) {
 	t.Parallel()
 
 	require.Equal(t,
-		[]string{ClaudeCodeModelOpus, ClaudeCodeModelSonnet, ClaudeCodeModelHaiku},
+		[]string{ClaudeCodeModelOpus, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet, ClaudeCodeModelHaiku},
 		AvailableClaudeCodeModels,
 		"AvailableClaudeCodeModels should be ordered by capability",
 	)
@@ -43,7 +43,7 @@ func TestCodexModelConstants(t *testing.T) {
 	t.Parallel()
 
 	require.Equal(t,
-		[]string{CodexModelGPT53Codex, CodexModelGPT52Codex, CodexModelGPT5Codex, CodexModelGPT53CodexSpark},
+		[]string{CodexModelGPT54, CodexModelGPT54Mini, CodexModelGPT53Codex, CodexModelGPT52Codex, CodexModelGPT5Codex, CodexModelGPT53CodexSpark},
 		AvailableCodexModels,
 		"AvailableCodexModels should include the latest Codex model family",
 	)
