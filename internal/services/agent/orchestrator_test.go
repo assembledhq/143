@@ -1087,9 +1087,12 @@ func TestRunAgent_CodexUsesAuthJsonNotEnvVar(t *testing.T) {
 	// Instead, the token should be injected via auth.json.
 	authData, ok := d.provider.Files["/workspace/.codex/auth.json"]
 	require.True(t, ok, "auth.json should be written to sandbox")
-	var authJSON map[string]string
+	var authJSON map[string]interface{}
 	require.NoError(t, json.Unmarshal(authData, &authJSON))
-	require.Equal(t, "chatgpt-access-token", authJSON["access_token"], "auth.json should contain the ChatGPT OAuth token")
+	require.Equal(t, "chatgpt", authJSON["auth_mode"])
+	tokens, ok := authJSON["tokens"].(map[string]interface{})
+	require.True(t, ok, "auth.json should have tokens object")
+	require.Equal(t, "chatgpt-access-token", tokens["access_token"], "auth.json should contain the ChatGPT OAuth token")
 }
 
 func TestRunAgent_CodexOpenAIKeyAloneIsNotSufficient(t *testing.T) {
@@ -1150,11 +1153,15 @@ func TestRunAgent_CodexAuthWritesToSandboxWorkdir(t *testing.T) {
 	authData, ok := d.provider.Files["/workspace/.codex/auth.json"]
 	require.True(t, ok, "codex auth injection should write auth.json under /workspace/.codex")
 
-	var authJSON map[string]string
+	var authJSON map[string]interface{}
 	unmarshalErr := json.Unmarshal(authData, &authJSON)
 	require.NoError(t, unmarshalErr, "auth.json should contain valid JSON")
-	require.Equal(t, "test-access-token", authJSON["access_token"], "auth.json should include access token")
-	require.Equal(t, "test-refresh-token", authJSON["refresh_token"], "auth.json should include refresh token")
+	require.Equal(t, "chatgpt", authJSON["auth_mode"], "auth.json should set auth_mode to chatgpt")
+	tokens, ok := authJSON["tokens"].(map[string]interface{})
+	require.True(t, ok, "auth.json should have a tokens object")
+	require.Equal(t, "test-access-token", tokens["access_token"], "tokens should include access token")
+	require.Equal(t, "test-refresh-token", tokens["refresh_token"], "tokens should include refresh token")
+	require.NotEmpty(t, authJSON["last_refresh"], "auth.json should include last_refresh timestamp")
 }
 
 func TestRunAgent_CodexNoCredentialsFails(t *testing.T) {
