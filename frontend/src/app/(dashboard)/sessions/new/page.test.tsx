@@ -9,6 +9,7 @@ const pushMock = vi.fn();
 
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: pushMock, back: vi.fn() }),
+  useSearchParams: () => new URLSearchParams(),
 }));
 
 describe('ManualSessionCreatePage', () => {
