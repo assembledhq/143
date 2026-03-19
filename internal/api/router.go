@@ -121,7 +121,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		issueStore,
 		repoStore,
 		orgStore,
-		repoStore,
 		jobStore,
 		sessionMessageStore,
 		llmClient,

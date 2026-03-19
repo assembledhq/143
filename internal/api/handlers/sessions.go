@@ -29,7 +29,6 @@ type SessionHandler struct {
 	issueStore       *db.IssueStore
 	repoStore        *db.RepositoryStore
 	orgStore         *db.OrganizationStore
-	repoStore        *db.RepositoryStore
 	jobStore         *db.JobStore
 	messageStore     *db.SessionMessageStore
 	llmClient        llm.Client // optional, used for generating manual session titles
@@ -51,7 +50,6 @@ func NewSessionHandler(
 	issueStore *db.IssueStore,
 	repoStore *db.RepositoryStore,
 	orgStore *db.OrganizationStore,
-	repoStore *db.RepositoryStore,
 	jobStore *db.JobStore,
 	messageStore *db.SessionMessageStore,
 	llmClient llm.Client,
@@ -66,7 +64,6 @@ func NewSessionHandler(
 		issueStore:       issueStore,
 		repoStore:        repoStore,
 		orgStore:         orgStore,
-		repoStore:        repoStore,
 		jobStore:         jobStore,
 		messageStore:     messageStore,
 		llmClient:        llmClient,
