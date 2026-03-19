@@ -25,7 +25,7 @@ import { ChatTimeline } from "@/components/chat-timeline";
 import { api } from "@/lib/api";
 import { SSE_EVENT, addSSEListener } from "@/lib/sse";
 import { buildTimeline } from "@/lib/timeline";
-import type { Session, SessionLog, User, Validation } from "@/lib/types";
+import type { Session, SessionLog, SessionMessage, User, Validation } from "@/lib/types";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
 import { cn } from "@/lib/utils";
@@ -417,6 +417,13 @@ function ChatPanel({ session, sessionId, isActive }: { session: Session; session
     refetchInterval: isActive ? 3000 : false,
   });
 
+  // Fetch the linked issue to display its description as the initial prompt.
+  const { data: issueData } = useQuery({
+    queryKey: ["issue", session.issue_id],
+    queryFn: () => api.issues.get(session.issue_id),
+    enabled: !!session.issue_id,
+  });
+
   // Merge fetched logs with streamed logs, deduplicating by ID.
   const allLogs = useMemo(() => {
     const fetched = logsData?.data || [];
@@ -427,9 +434,30 @@ function ChatPanel({ session, sessionId, isActive }: { session: Session; session
 
   const messages = messagesData?.data;
 
+  // Prepend the issue description as a synthetic user message for turn 0
+  // so the initial prompt is visible in the timeline.
+  const allMessages = useMemo(() => {
+    const issueDescription = issueData?.data?.description;
+    const msgs = messages || [];
+    if (!issueDescription) return msgs;
+    // Only prepend if there's no user message for turn 0 already.
+    const hasTurn0UserMsg = msgs.some((m) => m.role === "user" && m.turn_number === 0);
+    if (hasTurn0UserMsg) return msgs;
+    const syntheticMsg: SessionMessage = {
+      id: -1,
+      session_id: sessionId,
+      org_id: session.org_id,
+      turn_number: 0,
+      role: "user",
+      content: issueDescription,
+      created_at: session.created_at,
+    };
+    return [syntheticMsg, ...msgs];
+  }, [messages, issueData?.data?.description, sessionId, session.org_id, session.created_at]);
+
   const timelineEntries = useMemo(
-    () => buildTimeline(messages || [], allLogs),
-    [messages, allLogs]
+    () => buildTimeline(allMessages, allLogs),
+    [allMessages, allLogs]
   );
 
   // SSE streaming for real-time logs when the session is active.
@@ -677,7 +705,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <h1 className="text-sm font-semibold text-foreground truncate">
-                {session.result_summary || `Session ${session.id.slice(0, 8)}`}
+                {session.result_summary || session.pm_approach || `Session ${session.id.slice(0, 8)}`}
               </h1>
               <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium shrink-0 ${status.color}`}>
                 {status.label}

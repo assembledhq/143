@@ -139,7 +139,7 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
       <div
         className={`max-w-[80%] rounded-lg px-3 py-2 text-sm ${
           msg.role === "user"
-            ? "bg-primary text-primary-foreground"
+            ? "bg-primary bg-[image:var(--gradient-primary)] text-white shadow-sm"
             : "bg-muted"
         }`}
       >
@@ -147,7 +147,7 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
         <p
           className={`text-[10px] mt-1 ${
             msg.role === "user"
-              ? "text-primary-foreground/70"
+              ? "text-white/70"
               : "text-muted-foreground"
           }`}
         >
