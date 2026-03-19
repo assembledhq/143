@@ -6,9 +6,11 @@ import {
   AVAILABLE_GEMINI_CLI_MODELS,
   AVAILABLE_PM_MODELS,
   DEFAULT_PM_MODEL,
+  DEFAULT_LLM_MODEL,
   CLAUDE_CODE_MODEL_SONNET,
   LEGACY_PM_ALIASES,
   PM_MODELS_BY_PROVIDER,
+  LLM_MODELS_BY_PROVIDER,
 } from "./model-constants";
 
 describe("model constants", () => {
@@ -59,5 +61,20 @@ describe("model constants", () => {
       "gpt-5-codex",
       "gpt-5.3-codex-spark",
     ]);
+  });
+
+  it("uses gpt-5.4-mini as the default LLM model", () => {
+    expect(DEFAULT_LLM_MODEL).toBe("gpt-5.4-mini");
+  });
+
+  it("LLM_MODELS_BY_PROVIDER includes gpt-5.4-mini in openai and openrouter", () => {
+    expect(LLM_MODELS_BY_PROVIDER.openai.models).toContain("gpt-5.4-mini");
+    expect(LLM_MODELS_BY_PROVIDER.openrouter.models).toContain("gpt-5.4-mini");
+  });
+
+  it("LLM_MODELS_BY_PROVIDER maps providers to their models", () => {
+    expect(Object.keys(LLM_MODELS_BY_PROVIDER)).toEqual(["anthropic", "openai", "openrouter"]);
+    expect(LLM_MODELS_BY_PROVIDER.anthropic.models).toContain("claude-sonnet-4-5");
+    expect(LLM_MODELS_BY_PROVIDER.openai.models).toContain("gpt-4o");
   });
 });

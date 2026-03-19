@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -63,16 +64,24 @@ func NewOpenRouterProvider(apiKey string, opts ...OpenRouterOption) *OpenRouterP
 
 func (p *OpenRouterProvider) Name() string { return "openrouter" }
 
-func (p *OpenRouterProvider) Complete(ctx context.Context, model, systemPrompt, userPrompt string) (string, error) {
+func (p *OpenRouterProvider) Complete(ctx context.Context, model, systemPrompt, userPrompt string, reasoningEffort ReasoningEffort) (string, error) {
 	// OpenRouter uses the OpenAI Chat Completions format.
 	messages := []chatMessage{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: userPrompt},
 	}
 
+	// Only include reasoning_effort for OpenAI models. Non-OpenAI upstreams
+	// (e.g. Anthropic) may reject the unknown field with a 400 error.
+	var effort ReasoningEffort
+	if strings.HasPrefix(model, "openai/") {
+		effort = reasoningEffort
+	}
+
 	reqBody := chatCompletionsRequest{
-		Model:    model,
-		Messages: messages,
+		Model:           model,
+		Messages:        messages,
+		ReasoningEffort: effort,
 	}
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {

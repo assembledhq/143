@@ -3,6 +3,7 @@ package config
 import (
 	"testing"
 
+	"github.com/assembledhq/143/internal/llm"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
@@ -69,7 +70,7 @@ func TestLoad_LLMConfig(t *testing.T) {
 	cfg := Load()
 	llmCfg := cfg.LLMConfig()
 
-	require.Equal(t, "claude-sonnet-4-5", llmCfg.Model)
+	require.Equal(t, llm.ModelName("claude-sonnet-4-5"), llmCfg.Model)
 	require.Equal(t, "sk-ant-test", llmCfg.AnthropicAPIKey)
 	require.Equal(t, "sk-or-test", llmCfg.OpenRouterAPIKey)
 	require.Equal(t, "chat", llmCfg.OpenAIAPIType, "OpenAI API type should default to chat")

@@ -36,7 +36,7 @@ func TestOpenAIResponsesProvider_Complete_Success(t *testing.T) {
 	p := NewOpenAIResponsesProvider("test-key", WithOpenAIResponsesBaseURL(server.URL), WithOpenAIResponsesHTTPClient(server.Client()))
 	require.Equal(t, "openai_responses", p.Name(), "provider name should be openai_responses")
 
-	resp, err := p.Complete(context.Background(), "gpt-4o", "system", "user prompt")
+	resp, err := p.Complete(context.Background(), "gpt-4o", "system", "user prompt", "")
 	require.NoError(t, err, "should complete without error")
 	require.Equal(t, "hello from responses", resp, "should return text content")
 }
@@ -51,7 +51,7 @@ func TestOpenAIResponsesProvider_Complete_NoTextContent(t *testing.T) {
 	defer server.Close()
 
 	p := NewOpenAIResponsesProvider("key", WithOpenAIResponsesBaseURL(server.URL), WithOpenAIResponsesHTTPClient(server.Client()))
-	_, err := p.Complete(context.Background(), "model", "sys", "user")
+	_, err := p.Complete(context.Background(), "model", "sys", "user", "")
 	require.Error(t, err, "should return error when no text content")
 	require.Contains(t, err.Error(), "no text content", "error should mention missing text content")
 }
@@ -66,7 +66,7 @@ func TestOpenAIResponsesProvider_Complete_RateLimit(t *testing.T) {
 	defer server.Close()
 
 	p := NewOpenAIResponsesProvider("key", WithOpenAIResponsesBaseURL(server.URL), WithOpenAIResponsesHTTPClient(server.Client()))
-	_, err := p.Complete(context.Background(), "model", "sys", "user")
+	_, err := p.Complete(context.Background(), "model", "sys", "user", "")
 	require.Error(t, err, "should return error on rate limit")
 	require.ErrorIs(t, err, ErrRateLimit, "should wrap rate limit error")
 }

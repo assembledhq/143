@@ -20,7 +20,7 @@ type mockProvider struct {
 
 func (m *mockProvider) Name() string { return m.name }
 
-func (m *mockProvider) Complete(_ context.Context, model, systemPrompt, userPrompt string) (string, error) {
+func (m *mockProvider) Complete(_ context.Context, model, systemPrompt, userPrompt string, _ ReasoningEffort) (string, error) {
 	m.callCount++
 	if m.err != nil {
 		return "", m.err
@@ -177,12 +177,14 @@ func TestIsRetryable(t *testing.T) {
 	require.False(t, IsRetryable(nil))
 }
 
-func TestNewClient_NilWhenNoModel(t *testing.T) {
+func TestNewClient_DefaultsModelWhenEmpty(t *testing.T) {
 	t.Parallel()
 
-	client, err := NewClient(Config{}, zerolog.Nop())
-	require.NoError(t, err)
-	require.Nil(t, client)
+	// No API keys configured, so it will default the model but fail to find providers.
+	_, err := NewClient(Config{}, zerolog.Nop())
+	require.Error(t, err)
+	var npe *NoProvidersError
+	require.ErrorAs(t, err, &npe)
 }
 
 func TestNewClient_ErrorWhenNoProviders(t *testing.T) {
@@ -297,7 +299,7 @@ func TestNoProvidersError_Error(t *testing.T) {
 func TestRegisterModel(t *testing.T) {
 	t.Parallel()
 
-	customModel := "test-custom-model"
+	customModel := ModelName("test-custom-model")
 	entries := []providerModel{
 		{ProviderName: "anthropic", ModelID: "custom-id"},
 	}

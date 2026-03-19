@@ -34,7 +34,7 @@ func TestOpenAIChatProvider_Complete_Success(t *testing.T) {
 	p := NewOpenAIChatProvider("test-key", WithOpenAIChatBaseURL(server.URL), WithOpenAIChatHTTPClient(server.Client()))
 	require.Equal(t, "openai_chat", p.Name(), "provider name should be openai_chat")
 
-	resp, err := p.Complete(context.Background(), "gpt-4o", "system", "user prompt")
+	resp, err := p.Complete(context.Background(), "gpt-4o", "system", "user prompt", "")
 	require.NoError(t, err, "should complete without error")
 	require.Equal(t, "hello from openai", resp, "should return message content")
 }
@@ -49,9 +49,53 @@ func TestOpenAIChatProvider_Complete_NoChoices(t *testing.T) {
 	defer server.Close()
 
 	p := NewOpenAIChatProvider("key", WithOpenAIChatBaseURL(server.URL), WithOpenAIChatHTTPClient(server.Client()))
-	_, err := p.Complete(context.Background(), "model", "sys", "user")
+	_, err := p.Complete(context.Background(), "model", "sys", "user", "")
 	require.Error(t, err, "should return error when no choices")
 	require.Contains(t, err.Error(), "no choices", "error should mention missing choices")
+}
+
+func TestOpenAIChatProvider_Complete_ReasoningEffort(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req chatCompletionsRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req), "should decode request")
+		require.Equal(t, ReasoningEffort("low"), req.ReasoningEffort, "should include reasoning_effort in request")
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(chatCompletionsResponse{
+			Choices: []chatChoice{{Message: chatMessage{Content: "response"}}},
+		})
+	}))
+	defer server.Close()
+
+	p := NewOpenAIChatProvider("key", WithOpenAIChatBaseURL(server.URL), WithOpenAIChatHTTPClient(server.Client()))
+	resp, err := p.Complete(context.Background(), "gpt-5.4-mini", "sys", "user", ReasoningEffort("low"))
+	require.NoError(t, err, "should complete without error")
+	require.Equal(t, "response", resp, "should return message content")
+}
+
+func TestOpenAIChatProvider_Complete_ReasoningEffortOmitted(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Decode as raw JSON to check omitempty behavior.
+		var raw map[string]json.RawMessage
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&raw), "should decode request")
+		_, hasEffort := raw["reasoning_effort"]
+		require.False(t, hasEffort, "reasoning_effort should be omitted when empty")
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(chatCompletionsResponse{
+			Choices: []chatChoice{{Message: chatMessage{Content: "response"}}},
+		})
+	}))
+	defer server.Close()
+
+	p := NewOpenAIChatProvider("key", WithOpenAIChatBaseURL(server.URL), WithOpenAIChatHTTPClient(server.Client()))
+	resp, err := p.Complete(context.Background(), "gpt-4o", "sys", "user", "")
+	require.NoError(t, err, "should complete without error")
+	require.Equal(t, "response", resp, "should return message content")
 }
 
 func TestOpenAIChatProvider_Complete_ServerError(t *testing.T) {
@@ -64,7 +108,7 @@ func TestOpenAIChatProvider_Complete_ServerError(t *testing.T) {
 	defer server.Close()
 
 	p := NewOpenAIChatProvider("key", WithOpenAIChatBaseURL(server.URL), WithOpenAIChatHTTPClient(server.Client()))
-	_, err := p.Complete(context.Background(), "model", "sys", "user")
+	_, err := p.Complete(context.Background(), "model", "sys", "user", "")
 	require.Error(t, err, "should return error on server error")
 	require.ErrorIs(t, err, ErrServerError, "should wrap server error")
 }
