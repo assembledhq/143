@@ -61,6 +61,7 @@ func (s *Service) executePlan(ctx context.Context, orgID uuid.UUID, plan *Plan, 
 			AutonomyLevel: string(settings.AutonomyLevel),
 			TokenMode:     tokenModeFromComplexity(task.Complexity),
 			PMPlanID:      &plan.ID,
+			Title:         &task.Title,
 			PMApproach:    &task.Approach,
 			PMReasoning:   &task.Reasoning,
 		}

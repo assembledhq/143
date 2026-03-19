@@ -45,7 +45,7 @@ var sessionColumns = []string{
 	"container_id", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
-	"pm_plan_id", "pm_approach", "pm_reasoning",
+	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
 	"created_at",
@@ -75,7 +75,7 @@ func TestSessionHandler_List(t *testing.T) {
 							nil, &now, &now, nil,
 							nil, nil, nil, nil,
 							nil, nil, nil, nil, nil,
-							nil, nil, nil,
+							nil, nil, nil, nil,
 							nil, // project_task_id
 							nil, // model_override
 							nil, // triggered_by_user_id
@@ -152,7 +152,7 @@ func TestSessionHandler_List_WithRepositoryID(t *testing.T) {
 				nil, &now, &now, nil,
 				nil, nil, nil, nil,
 				nil, nil, nil, nil, nil,
-				nil, nil, nil,
+				nil, nil, nil, nil,
 				nil, nil,
 				nil, // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
@@ -239,7 +239,7 @@ func TestSessionHandler_List_CommaSeparatedStatuses(t *testing.T) {
 				nil, &now, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil, nil, nil, nil,
-				nil, nil, nil,
+				nil, nil, nil, nil,
 				nil, nil,
 				nil, // triggered_by_user_id
 				nil, 0, nil, "none", nil,
@@ -288,7 +288,7 @@ func TestSessionHandler_Get(t *testing.T) {
 							nil, &now, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil, nil, nil, nil,
-							nil, nil, nil,
+							nil, nil, nil, nil,
 							nil, // project_task_id
 							nil, // model_override
 							nil, // triggered_by_user_id
@@ -372,7 +372,7 @@ func triggerFixIssueMock(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
 
 	// Mock job enqueue (6 named args)
@@ -419,7 +419,7 @@ func triggerFixIssueAndOrgDefaultMock(mock pgxmock.PgxPoolIface, orgID uuid.UUID
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
 
 	// Mock job enqueue (6 named args)
@@ -994,7 +994,7 @@ func TestSessionHandler_GetLogs_Success(t *testing.T) {
 				nil, &now, &now, nil,
 				nil, nil, nil, nil,
 				nil, nil, nil, nil, nil,
-				nil, nil, nil,
+				nil, nil, nil, nil,
 				nil, nil,
 				nil, // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
@@ -1075,7 +1075,7 @@ func TestSessionHandler_GetLogs_EmptyLogs(t *testing.T) {
 				nil, &now, &now, nil,
 				nil, nil, nil, nil,
 				nil, nil, nil, nil, nil,
-				nil, nil, nil,
+				nil, nil, nil, nil,
 				nil, nil,
 				nil, // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
@@ -1129,7 +1129,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil, &now, &now, nil,
 				nil, nil, nil, nil,
 				nil, nil, nil, nil, nil,
-				nil, nil, nil,
+				nil, nil, nil, nil,
 				nil, nil,
 				nil, // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
@@ -1147,7 +1147,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil, &now, &now, nil,
 				nil, nil, nil, nil,
 				nil, nil, nil, nil, nil,
-				nil, nil, nil,
+				nil, nil, nil, nil,
 				nil, nil,
 				nil, // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
@@ -1230,7 +1230,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
 
 				// Mock job enqueue (6 named args)
@@ -1272,7 +1272,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
 
 				// Mock job enqueue
@@ -1370,7 +1370,7 @@ func TestSessionHandler_EndSession_EnqueuesValidation(t *testing.T) {
 				nil, &now, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil, nil, nil, nil,
-				nil, nil, nil,
+				nil, nil, nil, nil,
 				nil, nil,
 				nil, // triggered_by_user_id
 				nil, 1, &now, "snapshotted", stringPtr("snapshots/test.tar"),
@@ -1515,7 +1515,7 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							nil, &now, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil, nil, nil, nil,
-							nil, nil, nil,
+							nil, nil, nil, nil,
 							nil, nil,
 							nil, // triggered_by_user_id
 							nil, 1, &now, "snapshotted", nil,
@@ -1548,7 +1548,7 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							nil, &now, &now, nil,
 							nil, nil, nil, nil,
 							nil, nil, nil, nil, nil,
-							nil, nil, nil,
+							nil, nil, nil, nil,
 							nil, nil,
 							nil, // triggered_by_user_id
 							nil, 0, nil, "none", nil,
@@ -1623,7 +1623,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, &now, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil, nil, nil, nil,
-							nil, nil, nil,
+							nil, nil, nil, nil,
 							nil, nil,
 							nil, // triggered_by_user_id
 							nil, 1, &now, "snapshotted", stringPtr("snapshots/test"),
@@ -1669,7 +1669,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, &now, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil, nil, nil, nil,
-							nil, nil, nil,
+							nil, nil, nil, nil,
 							nil, nil,
 							nil, // triggered_by_user_id
 							nil, 0, nil, "none", nil,
@@ -1822,7 +1822,7 @@ func TestSessionHandler_CreateManual_WithLLMTitle(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
 
 	// Mock job enqueue
@@ -1832,7 +1832,7 @@ func TestSessionHandler_CreateManual_WithLLMTitle(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
 
 	// Mock UpdateTitle call
-	mock.ExpectExec("UPDATE sessions SET pm_approach").
+	mock.ExpectExec("UPDATE sessions SET title").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
@@ -1852,8 +1852,8 @@ func TestSessionHandler_CreateManual_WithLLMTitle(t *testing.T) {
 	var resp models.SingleResponse[models.Session]
 	err = json.Unmarshal(w.Body.Bytes(), &resp)
 	require.NoError(t, err)
-	require.NotNil(t, resp.Data.PMApproach)
-	require.Equal(t, "Fix authentication login flow", *resp.Data.PMApproach)
+	require.NotNil(t, resp.Data.Title)
+	require.Equal(t, "Fix authentication login flow", *resp.Data.Title)
 
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -1900,7 +1900,7 @@ func TestSessionHandler_CreateManual_LLMError_Returns500(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
 
 	// Mock job enqueue

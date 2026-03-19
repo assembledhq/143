@@ -754,6 +754,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		TokenMode:         tokenMode,
 		ModelOverride:     modelOverride,
 		TriggeredByUserID: manualTriggeredByUserID,
+		Title:             &title,
 	}
 	if err := h.runStore.Create(r.Context(), session); err != nil {
 		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create manual session")
@@ -802,7 +803,7 @@ func (h *SessionHandler) generateSessionTitle(parent context.Context, session *m
 	if err := h.runStore.UpdateTitle(ctx, orgID, session.ID, generated); err != nil {
 		return fmt.Errorf("update title: %w", err)
 	}
-	session.PMApproach = &generated
+	session.Title = &generated
 	return nil
 }
 

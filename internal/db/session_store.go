@@ -33,7 +33,7 @@ const sessionSelectColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-00
 	container_id, started_at, completed_at, token_usage,
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
 	parent_session_id, revision_context, error, result_summary, diff,
-	pm_plan_id, pm_approach, pm_reasoning, project_task_id,
+	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
 	sandbox_state, snapshot_key, created_at`
 
@@ -107,12 +107,12 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 	query := `
 		INSERT INTO sessions (
 			issue_id, org_id, agent_type, status, autonomy_level, token_mode, complexity_tier,
-			parent_session_id, revision_context, pm_plan_id, pm_approach, pm_reasoning, project_task_id,
+			parent_session_id, revision_context, pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 			model_override, triggered_by_user_id
 		)
 		VALUES (
 			@issue_id, @org_id, @agent_type, @status, @autonomy_level, @token_mode, @complexity_tier,
-			@parent_session_id, @revision_context, @pm_plan_id, @pm_approach, @pm_reasoning, @project_task_id,
+			@parent_session_id, @revision_context, @pm_plan_id, @title, @pm_approach, @pm_reasoning, @project_task_id,
 			@model_override, @triggered_by_user_id
 		)
 		RETURNING id, created_at`
@@ -133,6 +133,7 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 		"parent_session_id":     run.ParentSessionID,
 		"revision_context":      run.RevisionContext,
 		"pm_plan_id":            run.PMPlanID,
+		"title":                 run.Title,
 		"pm_approach":           run.PMApproach,
 		"pm_reasoning":          run.PMReasoning,
 		"project_task_id":       run.ProjectTaskID,
@@ -229,11 +230,11 @@ func (s *SessionStore) UpdateFailure(ctx context.Context, orgID, runID uuid.UUID
 }
 
 func (s *SessionStore) UpdateTitle(ctx context.Context, orgID, sessionID uuid.UUID, title string) error {
-	query := `UPDATE sessions SET pm_approach = @pm_approach WHERE id = @id AND org_id = @org_id`
+	query := `UPDATE sessions SET title = @title WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
-		"id":          sessionID,
-		"org_id":      orgID,
-		"pm_approach": title,
+		"id":     sessionID,
+		"org_id": orgID,
+		"title":  title,
 	})
 	return err
 }

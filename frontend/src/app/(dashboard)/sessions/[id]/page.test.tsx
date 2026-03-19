@@ -352,6 +352,6 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findByText('PM context');
     expect(screen.getByText('High impact bug')).toBeInTheDocument();
-    expect(screen.getByText('Quick null check fix')).toBeInTheDocument();
+    expect(screen.getAllByText('Quick null check fix').length).toBeGreaterThanOrEqual(1);
   });
 });
