@@ -66,6 +66,17 @@ export default function TermsPage() {
         </p>
       </Section>
 
+      <Section heading="Third-party models and services">
+        <p>
+          The service relies on third-party AI model providers, including
+          Anthropic, OpenAI, OpenRouter, and Google, to process prompts and
+          generate output. Your use of the service is also subject to the terms
+          and policies of the providers whose models are used for your requests.
+          If your organization supplies its own API keys, the provider&apos;s
+          terms apply directly to that usage.
+        </p>
+      </Section>
+
       <Section heading="Acceptable use">
         <p>You agree not to:</p>
         <ul className="list-disc pl-5 space-y-1.5">
@@ -162,6 +173,18 @@ export default function TermsPage() {
           changes, we will notify you by updating the date at the top of this
           page. Continued use of the service after changes constitutes
           acceptance.
+        </p>
+      </Section>
+
+      <Section heading="Dispute resolution">
+        <p>
+          Any dispute arising from these terms or your use of the service will
+          be resolved by binding individual arbitration administered under the
+          rules of the American Arbitration Association in San Francisco,
+          California. You agree to waive any right to participate in a class
+          action, class-wide arbitration, or representative proceeding. Either
+          party may seek injunctive relief in a court of competent jurisdiction
+          to protect intellectual property rights.
         </p>
       </Section>
 

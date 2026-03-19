@@ -33,6 +33,14 @@ export default function PrivacyPage() {
       </Section>
 
       <Section heading="What we collect">
+        <p>
+          When you use the hosted service at 143.dev, we store code, prompts,
+          agent output, and related workspace data on our servers in order to
+          run cloud-hosted coding agents on your behalf. If you use the
+          open-source, self-hosted version of 143, none of this data is sent to
+          or stored by Assembled — it stays entirely on your own
+          infrastructure.
+        </p>
         <ul className="list-disc pl-5 space-y-1.5">
           <li>
             <strong className="font-medium opacity-80">Account information</strong> -
@@ -90,7 +98,7 @@ export default function PrivacyPage() {
         </p>
       </Section>
 
-      <Section heading="AI providers">
+      <Section heading="AI providers and data retention">
         <p>
           We may send prompts and related workspace content to AI providers that
           power the service, such as Anthropic, OpenAI, OpenRouter, or Google
@@ -98,6 +106,15 @@ export default function PrivacyPage() {
           credentials configured for the run. If your organization supplies its
           own API keys, those requests run through your configured provider
           accounts.
+        </p>
+        <p>
+          AI providers may temporarily retain request data in accordance with
+          their own policies. For example, as of the date of this policy,
+          Anthropic and OpenAI retain API inputs for up to 30 days for trust and
+          safety purposes and do not use API data to train models by default.
+          Google retains Gemini API data in accordance with its Cloud data
+          processing terms. We encourage you to review each provider&apos;s
+          data-handling policies directly, as they may change.
         </p>
       </Section>
 
@@ -144,10 +161,27 @@ export default function PrivacyPage() {
       <Section heading="Your rights and choices">
         <p>
           Depending on your location, you may have rights to access, correct,
-          delete, export, or object to certain processing of personal data.
-          California residents may also have rights under the CCPA/CPRA. If a
+          delete, export, or object to certain processing of personal data. If a
           request relates to organization-controlled content, we may direct you
           to your organization administrator first.
+        </p>
+        <p>
+          Residents of certain U.S. states have additional rights under
+          applicable privacy laws, including the California Consumer Privacy Act
+          (CCPA/CPRA), the Colorado Privacy Act, the Connecticut Data Privacy
+          Act, the Delaware Personal Data Privacy Act, and similar state
+          statutes. These rights may include the right to know what personal
+          data we collect and how it is used, the right to request deletion, the
+          right to opt out of the sale or sharing of personal data (we do not
+          sell personal data), and the right to non-discrimination for
+          exercising your rights. To make a request, contact us at{" "}
+          <a
+            href="mailto:privacy@assembled.com"
+            className="underline underline-offset-2"
+          >
+            privacy@assembled.com
+          </a>
+          .
         </p>
       </Section>
 

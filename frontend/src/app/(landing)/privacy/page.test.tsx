@@ -24,7 +24,7 @@ describe('PrivacyPage', () => {
 
     expect(screen.getByText('Customer content')).toBeInTheDocument();
     expect(screen.getByText(/source code, issue descriptions, pull request content/i)).toBeInTheDocument();
-    expect(screen.getByText('AI providers')).toBeInTheDocument();
+    expect(screen.getByText('AI providers and data retention')).toBeInTheDocument();
     expect(screen.getAllByText(/Anthropic, OpenAI, OpenRouter, or Google Gemini/i).length).toBeGreaterThan(0);
   });
 
