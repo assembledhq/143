@@ -2,6 +2,7 @@ package thread
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -9,6 +10,19 @@ import (
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+)
+
+// Sentinel errors returned by the thread service. Handlers should match on
+// these with errors.Is rather than inspecting error strings.
+var (
+	ErrSessionNotFound    = errors.New("session not found")
+	ErrSessionTerminal    = errors.New("cannot add threads to a completed session")
+	ErrInvalidAgentType   = errors.New("invalid agent type")
+	ErrInvalidModel       = errors.New("invalid model")
+	ErrEnqueueFailed      = errors.New("enqueue failed")
+	ErrThreadNotFound     = errors.New("thread not found")
+	ErrThreadNotIdle      = errors.New("thread must be idle to send a message")
+	ErrThreadCannotBeEnded = errors.New("thread cannot be ended in its current state")
 )
 
 // SessionStore defines the session DB operations needed by the thread service.
@@ -104,12 +118,12 @@ func (s *Service) CreateThread(ctx context.Context, input CreateThreadInput) (*m
 	// Verify session exists and belongs to org.
 	session, err := s.sessionStore.GetByID(ctx, input.OrgID, input.SessionID)
 	if err != nil {
-		return nil, fmt.Errorf("session not found: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrSessionNotFound, err)
 	}
 
 	// Only allow adding threads to active sessions.
 	if isTerminalStatus(session.Status) {
-		return nil, fmt.Errorf("cannot add threads to a completed session")
+		return nil, ErrSessionTerminal
 	}
 
 	// Default agent type to the session's agent type.
@@ -118,13 +132,13 @@ func (s *Service) CreateThread(ctx context.Context, input CreateThreadInput) (*m
 		agentType = session.AgentType
 	}
 	if err := agentType.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid agent type: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidAgentType, err)
 	}
 
 	var modelOverride *string
 	if input.Model != "" {
 		if err := models.ValidateModelForAgentType(agentType, input.Model); err != nil {
-			return nil, fmt.Errorf("invalid model: %w", err)
+			return nil, fmt.Errorf("%w: %w", ErrInvalidModel, err)
 		}
 		modelOverride = &input.Model
 	}
@@ -146,7 +160,7 @@ func (s *Service) CreateThread(ctx context.Context, input CreateThreadInput) (*m
 	}
 
 	if err := s.threadStore.Create(ctx, thread, models.MaxThreadsPerSession); err != nil {
-		if err == db.ErrThreadLimitReached {
+		if errors.Is(err, db.ErrThreadLimitReached) {
 			return nil, db.ErrThreadLimitReached
 		}
 		return nil, fmt.Errorf("create thread: %w", err)
@@ -160,7 +174,7 @@ func (s *Service) CreateThread(ctx context.Context, input CreateThreadInput) (*m
 	}
 	if _, err := s.jobStore.Enqueue(ctx, input.OrgID, "agent", "run_thread", payload, 5, nil); err != nil {
 		s.logger.Error().Err(err).Str("thread_id", thread.ID.String()).Msg("failed to enqueue run_thread job")
-		return nil, fmt.Errorf("enqueue run_thread: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrEnqueueFailed, err)
 	}
 
 	return thread, nil
@@ -170,7 +184,7 @@ func (s *Service) CreateThread(ctx context.Context, input CreateThreadInput) (*m
 func (s *Service) ListThreads(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error) {
 	// Verify session exists and belongs to org.
 	if _, err := s.sessionStore.GetByID(ctx, orgID, sessionID); err != nil {
-		return nil, fmt.Errorf("session not found: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrSessionNotFound, err)
 	}
 
 	threads, err := s.threadStore.ListBySession(ctx, orgID, sessionID)
@@ -184,23 +198,30 @@ func (s *Service) ListThreads(ctx context.Context, orgID, sessionID uuid.UUID) (
 func (s *Service) GetThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error) {
 	thread, err := s.threadStore.GetByID(ctx, orgID, threadID)
 	if err != nil {
-		return models.SessionThread{}, fmt.Errorf("thread not found: %w", err)
+		return models.SessionThread{}, fmt.Errorf("%w: %w", ErrThreadNotFound, err)
 	}
 	if thread.SessionID != sessionID {
-		return models.SessionThread{}, fmt.Errorf("thread not found")
+		return models.SessionThread{}, ErrThreadNotFound
 	}
 	return thread, nil
 }
 
 // SendMessage claims an idle thread, creates a message, and enqueues a continue_thread job.
+//
+// Race condition note: ClaimIdle atomically sets the thread to "running". If the
+// subsequent message creation or job enqueue fails, we best-effort revert the
+// thread to "idle". Between ClaimIdle and the revert, concurrent callers will
+// see the thread as "running" and be rejected. This is acceptable because the
+// revert window is short and the alternative (a distributed transaction) adds
+// significant complexity for minimal benefit.
 func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*models.SessionMessage, error) {
 	thread, err := s.threadStore.ClaimIdle(ctx, input.OrgID, input.ThreadID)
 	if err != nil {
 		// Check if thread exists at all to provide a better error.
 		if _, lookupErr := s.threadStore.GetByID(ctx, input.OrgID, input.ThreadID); lookupErr != nil {
-			return nil, fmt.Errorf("thread not found: %w", lookupErr)
+			return nil, fmt.Errorf("%w: %w", ErrThreadNotFound, lookupErr)
 		}
-		return nil, fmt.Errorf("thread must be idle to send a message")
+		return nil, ErrThreadNotIdle
 	}
 
 	// Verify thread belongs to the session.
@@ -208,7 +229,7 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*mod
 		if revertErr := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); revertErr != nil {
 			s.logger.Error().Err(revertErr).Str("thread_id", input.ThreadID.String()).Msg("failed to revert thread to idle after session mismatch")
 		}
-		return nil, fmt.Errorf("thread not found")
+		return nil, ErrThreadNotFound
 	}
 
 	msg := &models.SessionMessage{
@@ -241,7 +262,7 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*mod
 		if revertErr := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); revertErr != nil {
 			s.logger.Error().Err(revertErr).Str("thread_id", input.ThreadID.String()).Msg("failed to revert thread to idle after enqueue failure")
 		}
-		return nil, fmt.Errorf("enqueue continue_thread: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrEnqueueFailed, err)
 	}
 
 	return msg, nil
@@ -251,19 +272,19 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*mod
 func (s *Service) EndThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error) {
 	thread, err := s.threadStore.GetByID(ctx, orgID, threadID)
 	if err != nil {
-		return models.SessionThread{}, fmt.Errorf("thread not found: %w", err)
+		return models.SessionThread{}, fmt.Errorf("%w: %w", ErrThreadNotFound, err)
 	}
 
 	if thread.SessionID != sessionID {
-		return models.SessionThread{}, fmt.Errorf("thread not found")
+		return models.SessionThread{}, ErrThreadNotFound
 	}
 
-	// Only idle, running, or awaiting_input threads can be ended.
+	// Only pending, idle, running, or awaiting_input threads can be ended.
 	switch thread.Status {
-	case models.ThreadStatusIdle, models.ThreadStatusRunning, models.ThreadStatusAwaitingInput:
+	case models.ThreadStatusPending, models.ThreadStatusIdle, models.ThreadStatusRunning, models.ThreadStatusAwaitingInput:
 		// OK
 	default:
-		return models.SessionThread{}, fmt.Errorf("thread cannot be ended in its current state")
+		return models.SessionThread{}, ErrThreadCannotBeEnded
 	}
 
 	if err := s.threadStore.UpdateStatus(ctx, orgID, threadID, models.ThreadStatusCompleted); err != nil {
@@ -278,10 +299,10 @@ func (s *Service) EndThread(ctx context.Context, orgID, sessionID, threadID uuid
 func (s *Service) GetMessages(ctx context.Context, orgID, sessionID, threadID uuid.UUID) ([]models.SessionMessage, error) {
 	thread, err := s.threadStore.GetByID(ctx, orgID, threadID)
 	if err != nil {
-		return nil, fmt.Errorf("thread not found: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrThreadNotFound, err)
 	}
 	if thread.SessionID != sessionID {
-		return nil, fmt.Errorf("thread not found")
+		return nil, ErrThreadNotFound
 	}
 
 	messages, err := s.messageStore.ListByThread(ctx, orgID, threadID)
@@ -295,10 +316,10 @@ func (s *Service) GetMessages(ctx context.Context, orgID, sessionID, threadID uu
 func (s *Service) GetLogs(ctx context.Context, orgID, sessionID, threadID uuid.UUID) ([]models.SessionLog, error) {
 	thread, err := s.threadStore.GetByID(ctx, orgID, threadID)
 	if err != nil {
-		return nil, fmt.Errorf("thread not found: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrThreadNotFound, err)
 	}
 	if thread.SessionID != sessionID {
-		return nil, fmt.Errorf("thread not found")
+		return nil, ErrThreadNotFound
 	}
 
 	logs, err := s.logStore.ListByThread(ctx, orgID, threadID)

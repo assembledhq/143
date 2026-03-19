@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -14,11 +15,22 @@ import (
 	"github.com/google/uuid"
 )
 
-type SessionThreadHandler struct {
-	svc *thread.Service
+// ThreadService defines the interface for thread business logic.
+type ThreadService interface {
+	CreateThread(ctx context.Context, input thread.CreateThreadInput) (*models.SessionThread, error)
+	ListThreads(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error)
+	GetThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
+	SendMessage(ctx context.Context, input thread.SendMessageInput) (*models.SessionMessage, error)
+	EndThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
+	GetMessages(ctx context.Context, orgID, sessionID, threadID uuid.UUID) ([]models.SessionMessage, error)
+	GetLogs(ctx context.Context, orgID, sessionID, threadID uuid.UUID) ([]models.SessionLog, error)
 }
 
-func NewSessionThreadHandler(svc *thread.Service) *SessionThreadHandler {
+type SessionThreadHandler struct {
+	svc ThreadService
+}
+
+func NewSessionThreadHandler(svc ThreadService) *SessionThreadHandler {
 	return &SessionThreadHandler{svc: svc}
 }
 
@@ -63,15 +75,15 @@ func (h *SessionThreadHandler) CreateThread(w http.ResponseWriter, r *http.Reque
 		switch {
 		case errors.Is(err, db.ErrThreadLimitReached):
 			writeError(w, http.StatusConflict, "THREAD_LIMIT", "maximum of 4 threads per session")
-		case strings.Contains(err.Error(), "session not found"):
+		case errors.Is(err, thread.ErrSessionNotFound):
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "session not found")
-		case strings.Contains(err.Error(), "cannot add threads to a completed session"):
+		case errors.Is(err, thread.ErrSessionTerminal):
 			writeError(w, http.StatusConflict, "SESSION_TERMINAL", "cannot add threads to a completed session")
-		case strings.Contains(err.Error(), "invalid agent type"):
+		case errors.Is(err, thread.ErrInvalidAgentType):
 			writeError(w, http.StatusBadRequest, "INVALID_AGENT_TYPE", err.Error())
-		case strings.Contains(err.Error(), "invalid model"):
+		case errors.Is(err, thread.ErrInvalidModel):
 			writeError(w, http.StatusBadRequest, "INVALID_MODEL", err.Error())
-		case strings.Contains(err.Error(), "enqueue"):
+		case errors.Is(err, thread.ErrEnqueueFailed):
 			writeError(w, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue thread agent job")
 		default:
 			writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create thread")
@@ -93,7 +105,7 @@ func (h *SessionThreadHandler) ListThreads(w http.ResponseWriter, r *http.Reques
 
 	threads, err := h.svc.ListThreads(r.Context(), orgID, sessionID)
 	if err != nil {
-		if strings.Contains(err.Error(), "session not found") {
+		if errors.Is(err, thread.ErrSessionNotFound) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "session not found")
 			return
 		}
@@ -175,11 +187,11 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 	})
 	if err != nil {
 		switch {
-		case strings.Contains(err.Error(), "thread not found"):
+		case errors.Is(err, thread.ErrThreadNotFound):
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "thread not found")
-		case strings.Contains(err.Error(), "thread must be idle"):
+		case errors.Is(err, thread.ErrThreadNotIdle):
 			writeError(w, http.StatusConflict, "NOT_IDLE", "thread must be idle to send a message")
-		case strings.Contains(err.Error(), "enqueue"):
+		case errors.Is(err, thread.ErrEnqueueFailed):
 			writeError(w, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue continue_thread job")
 		default:
 			writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message")
@@ -207,7 +219,7 @@ func (h *SessionThreadHandler) GetThreadMessages(w http.ResponseWriter, r *http.
 
 	messages, err := h.svc.GetMessages(r.Context(), orgID, sessionID, threadID)
 	if err != nil {
-		if strings.Contains(err.Error(), "thread not found") {
+		if errors.Is(err, thread.ErrThreadNotFound) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "thread not found")
 			return
 		}
@@ -238,9 +250,9 @@ func (h *SessionThreadHandler) EndThread(w http.ResponseWriter, r *http.Request)
 	t, err := h.svc.EndThread(r.Context(), orgID, sessionID, threadID)
 	if err != nil {
 		switch {
-		case strings.Contains(err.Error(), "thread not found"):
+		case errors.Is(err, thread.ErrThreadNotFound):
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "thread not found")
-		case strings.Contains(err.Error(), "cannot be ended"):
+		case errors.Is(err, thread.ErrThreadCannotBeEnded):
 			writeError(w, http.StatusConflict, "INVALID_STATUS", "thread cannot be ended in its current state")
 		default:
 			writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to end thread")
@@ -268,7 +280,7 @@ func (h *SessionThreadHandler) GetThreadLogs(w http.ResponseWriter, r *http.Requ
 
 	logs, err := h.svc.GetLogs(r.Context(), orgID, sessionID, threadID)
 	if err != nil {
-		if strings.Contains(err.Error(), "thread not found") {
+		if errors.Is(err, thread.ErrThreadNotFound) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "thread not found")
 			return
 		}

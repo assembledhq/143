@@ -125,6 +125,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		orgStore,
 		jobStore,
 		sessionMessageStore,
+		sessionThreadStore,
 		llmClient,
 		logger,
 	)
@@ -147,9 +148,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 
 	projectHandler := handlers.NewProjectHandler(projectStore, projectTaskStore, projectCycleStore, projectAttachmentStore, projectSpecStore)
 	projectHandler.SetJobStore(jobStore)
-
-	// Wire thread store into session handler for enriched GET response.
-	sessionHandler.SetThreadStore(sessionThreadStore)
 
 	// Wire audit emitter into all handlers that perform state changes.
 	authHandler.SetAuditEmitter(auditEmitter)

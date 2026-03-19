@@ -34,6 +34,7 @@ func newSessionHandler(t *testing.T, mock pgxmock.PgxPoolIface) *SessionHandler 
 		db.NewOrganizationStore(mock),
 		db.NewJobStore(mock),
 		db.NewSessionMessageStore(mock),
+		db.NewSessionThreadStore(mock),
 		nil, // llmClient — not needed in unit tests
 		zerolog.Nop(),
 	)
@@ -1875,6 +1876,7 @@ func TestSessionHandler_CreateManual_WithLLMTitle(t *testing.T) {
 		db.NewOrganizationStore(mock),
 		db.NewJobStore(mock),
 		db.NewSessionMessageStore(mock),
+		db.NewSessionThreadStore(mock),
 		llmClient,
 		zerolog.Nop(),
 	)
@@ -1955,6 +1957,7 @@ func TestSessionHandler_CreateManual_LLMError_Returns500(t *testing.T) {
 		db.NewOrganizationStore(mock),
 		db.NewJobStore(mock),
 		db.NewSessionMessageStore(mock),
+		db.NewSessionThreadStore(mock),
 		llmClient,
 		zerolog.Nop(),
 	)

@@ -42,11 +42,6 @@ func (h *SessionHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 	h.audit = audit
 }
 
-// SetThreadStore injects the thread store for enriching session responses.
-func (h *SessionHandler) SetThreadStore(store *db.SessionThreadStore) {
-	h.threadStore = store
-}
-
 func NewSessionHandler(
 	runStore *db.SessionStore,
 	logStore *db.SessionLogStore,
@@ -58,6 +53,7 @@ func NewSessionHandler(
 	orgStore *db.OrganizationStore,
 	jobStore *db.JobStore,
 	messageStore *db.SessionMessageStore,
+	threadStore *db.SessionThreadStore,
 	llmClient llm.Client,
 	logger zerolog.Logger,
 ) *SessionHandler {
@@ -72,6 +68,7 @@ func NewSessionHandler(
 		orgStore:         orgStore,
 		jobStore:         jobStore,
 		messageStore:     messageStore,
+		threadStore:      threadStore,
 		llmClient:        llmClient,
 		logger:           logger,
 	}

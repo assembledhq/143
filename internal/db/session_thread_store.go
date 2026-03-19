@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -53,7 +54,7 @@ func (s *SessionThreadStore) Create(ctx context.Context, thread *models.SessionT
 	row := s.db.QueryRow(ctx, query, args)
 	err := row.Scan(&thread.ID, &thread.CreatedAt)
 	if err != nil {
-		if err.Error() == "no rows in result set" {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrThreadLimitReached
 		}
 		return err
