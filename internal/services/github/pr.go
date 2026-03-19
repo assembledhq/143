@@ -768,7 +768,7 @@ func formatBranchName(runID uuid.UUID, issueTitle string) string {
 
 func formatPRTitle(issue *models.Issue) string {
 	switch issue.Source {
-	case "linear":
+	case models.IssueSourceLinear:
 		return fmt.Sprintf("%s: %s", issue.ExternalID, issue.Title)
 	default:
 		return fmt.Sprintf("fix: %s", issue.Title)
@@ -778,9 +778,9 @@ func formatPRTitle(issue *models.Issue) string {
 func formatCommitMessage(issue *models.Issue) string {
 	msg := fmt.Sprintf("fix: %s", issue.Title)
 	switch issue.Source {
-	case "linear":
+	case models.IssueSourceLinear:
 		msg += fmt.Sprintf("\n\nFixes #%s", issue.ExternalID)
-	case "sentry":
+	case models.IssueSourceSentry:
 		msg += fmt.Sprintf("\n\nResolves %s", issue.ExternalID)
 	}
 	return msg
@@ -852,7 +852,7 @@ func buildLabels(issue *models.Issue) []string {
 		labels = append(labels, "severity:"+issue.Severity)
 	}
 	if issue.Source != "" {
-		labels = append(labels, "source:"+issue.Source)
+		labels = append(labels, "source:"+string(issue.Source))
 	}
 	return labels
 }

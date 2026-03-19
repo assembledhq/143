@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -59,7 +60,7 @@ func TestSentryAPIClient_FetchIssues(t *testing.T) {
 			expected: []NormalizedIssue{
 				{
 					ExternalID:            "100",
-					Source:                "sentry",
+					Source:                models.IssueSourceSentry,
 					Title:                 "TypeError in handler",
 					Description:           "TypeError: undefined is not a function",
 					Severity:              "high",
@@ -126,7 +127,7 @@ func TestSentryAPIClient_FetchIssues(t *testing.T) {
 			expected: []NormalizedIssue{
 				{
 					ExternalID:            "200",
-					Source:                "sentry",
+					Source:                models.IssueSourceSentry,
 					Title:                 "Error 1",
 					Description:           "Error 1",
 					Severity:              "high",
@@ -138,7 +139,7 @@ func TestSentryAPIClient_FetchIssues(t *testing.T) {
 				},
 				{
 					ExternalID:            "201",
-					Source:                "sentry",
+					Source:                models.IssueSourceSentry,
 					Title:                 "Error 2",
 					Description:           "Error 2",
 					Severity:              "medium",
@@ -217,7 +218,7 @@ func TestSentryAPIClient_FetchIssues(t *testing.T) {
 			expected: []NormalizedIssue{
 				{
 					ExternalID:            "300",
-					Source:                "sentry",
+					Source:                models.IssueSourceSentry,
 					Title:                 "After rate limit",
 					Description:           "After rate limit",
 					Severity:              "high",

@@ -82,7 +82,7 @@ type Issue struct {
 	ID                    uuid.UUID       `db:"id" json:"id"`
 	OrgID                 uuid.UUID       `db:"org_id" json:"org_id"`
 	ExternalID            string          `db:"external_id" json:"external_id"`
-	Source                string          `db:"source" json:"source"`
+	Source                IssueSource     `db:"source" json:"source"`
 	SourceIntegrationID   *uuid.UUID      `db:"source_integration_id" json:"source_integration_id,omitempty"`
 	RepositoryID          *uuid.UUID      `db:"repository_id" json:"repository_id,omitempty"`
 	Title                 string          `db:"title" json:"title"`

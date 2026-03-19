@@ -48,7 +48,7 @@ func TestCodexAdapter_PreparePrompt(t *testing.T) {
 				Issue: &models.Issue{
 					Title:    "NilPointerException in user service",
 					Severity: "high",
-					Source:   "sentry",
+					Source:   models.IssueSourceSentry,
 				},
 				TokenMode: "low",
 			},
@@ -61,7 +61,7 @@ func TestCodexAdapter_PreparePrompt(t *testing.T) {
 				Issue: &models.Issue{
 					Title:    "Complex refactor needed",
 					Severity: "medium",
-					Source:   "sentry",
+					Source:   models.IssueSourceSentry,
 				},
 				TokenMode: "high",
 			},

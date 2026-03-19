@@ -901,7 +901,7 @@ func TestSummarizeIssue_NilDescription(t *testing.T) {
 
 	issue := models.Issue{
 		ID:          uuid.New(),
-		Source:      "github",
+		Source:      models.IssueSource("github"),
 		Title:       "Issue without description",
 		Description: nil,
 		Severity:    "low",
