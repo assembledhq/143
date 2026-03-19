@@ -26,6 +26,7 @@ type SessionHandler struct {
 	validationStore  *db.ValidationStore
 	pullRequestStore *db.PullRequestStore
 	issueStore       *db.IssueStore
+	repoStore        *db.RepositoryStore
 	orgStore         *db.OrganizationStore
 	jobStore         *db.JobStore
 	messageStore     *db.SessionMessageStore
@@ -46,6 +47,7 @@ func NewSessionHandler(
 	validationStore *db.ValidationStore,
 	pullRequestStore *db.PullRequestStore,
 	issueStore *db.IssueStore,
+	repoStore *db.RepositoryStore,
 	orgStore *db.OrganizationStore,
 	jobStore *db.JobStore,
 	messageStore *db.SessionMessageStore,
@@ -59,6 +61,7 @@ func NewSessionHandler(
 		validationStore:  validationStore,
 		pullRequestStore: pullRequestStore,
 		issueStore:       issueStore,
+		repoStore:        repoStore,
 		orgStore:         orgStore,
 		jobStore:         jobStore,
 		messageStore:     messageStore,
@@ -648,6 +651,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		Model         string   `json:"model"`
 		AutonomyLevel string   `json:"autonomy_level"`
 		TokenMode     string   `json:"token_mode"`
+		RepositoryID  string   `json:"repository_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
@@ -658,6 +662,22 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	if body.Message == "" {
 		writeError(w, http.StatusBadRequest, "MISSING_MESSAGE", "message is required")
 		return
+	}
+
+	// Resolve repository for the manual session so the orchestrator can
+	// clone the codebase into the sandbox.
+	var repoID *uuid.UUID
+	if body.RepositoryID != "" {
+		parsed, err := uuid.Parse(body.RepositoryID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "invalid repository_id")
+			return
+		}
+		if _, err := h.repoStore.GetByID(r.Context(), orgID, parsed); err != nil {
+			writeError(w, http.StatusNotFound, "REPOSITORY_NOT_FOUND", "repository not found")
+			return
+		}
+		repoID = &parsed
 	}
 
 	agentType := models.AgentType(body.AgentType)
@@ -723,16 +743,17 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	issue := &models.Issue{
-		OrgID:       orgID,
-		ExternalID:  "manual-" + now.UTC().Format("20060102150405") + "-" + strings.ReplaceAll(uuid.NewString(), "-", ""),
-		Source:      models.IssueSourceManual,
-		Title:       title,
-		Description: &description,
-		RawData:     rawData,
-		Status:      "open",
-		FirstSeenAt: now,
-		LastSeenAt:  now,
-		Fingerprint: fingerprint,
+		OrgID:        orgID,
+		ExternalID:   "manual-" + now.UTC().Format("20060102150405") + "-" + strings.ReplaceAll(uuid.NewString(), "-", ""),
+		Source:       models.IssueSourceManual,
+		RepositoryID: repoID,
+		Title:        title,
+		Description:  &description,
+		RawData:      rawData,
+		Status:       "open",
+		FirstSeenAt:  now,
+		LastSeenAt:   now,
+		Fingerprint:  fingerprint,
 	}
 
 	if err := h.issueStore.Upsert(r.Context(), issue); err != nil {
