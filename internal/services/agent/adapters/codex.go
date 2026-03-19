@@ -122,10 +122,18 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 	result.Summary = strings.Join(summaryParts, "\n")
 
 	if stderr.Len() > 0 {
+		stderrStr := stderr.String()
+		// Downgrade token-refresh errors to debug — these are expected when
+		// the user shares their ChatGPT OAuth tokens between a local Codex
+		// CLI and 143.  Showing them as red errors is alarming and unhelpful.
+		stderrLevel := "error"
+		if strings.Contains(stderrStr, "refresh_token_reused") || strings.Contains(stderrStr, "refresh token") {
+			stderrLevel = "debug"
+		}
 		logCh <- agent.LogEntry{
 			Timestamp: time.Now(),
-			Level:     "error",
-			Message:   stderr.String(),
+			Level:     stderrLevel,
+			Message:   stderrStr,
 		}
 	}
 
@@ -271,9 +279,13 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 		if msg == "" {
 			msg = event.Content
 		}
+		errLevel := "error"
+		if strings.Contains(msg, "refresh_token_reused") || strings.Contains(msg, "refresh token") {
+			errLevel = "debug"
+		}
 		logCh <- agent.LogEntry{
 			Timestamp: time.Now(),
-			Level:     "error",
+			Level:     errLevel,
 			Message:   msg,
 		}
 
@@ -582,9 +594,13 @@ func parseCodexStreamOutput(output []byte, result *agent.AgentResult, logCh chan
 			if msg == "" {
 				msg = event.Content
 			}
+			errLevel := "error"
+			if strings.Contains(msg, "refresh_token_reused") || strings.Contains(msg, "refresh token") {
+				errLevel = "debug"
+			}
 			logCh <- agent.LogEntry{
 				Timestamp: time.Now(),
-				Level:     "error",
+				Level:     errLevel,
 				Message:   msg,
 			}
 
