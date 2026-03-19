@@ -395,6 +395,7 @@ func (s *Service) exchangeAuthCode(ctx context.Context, authCode, codeVerifier s
 		"grant_type":    "authorization_code",
 		"code":          authCode,
 		"code_verifier": codeVerifier,
+		"redirect_uri":  s.issuer + "/deviceauth/callback",
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal token exchange request: %w", err)
