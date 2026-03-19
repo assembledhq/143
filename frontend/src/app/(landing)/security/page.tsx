@@ -4,7 +4,7 @@ import LegalPageLayout, {
 
 export default function SecurityPage() {
   return (
-    <LegalPageLayout title="Security" lastUpdated="March 15, 2026">
+    <LegalPageLayout title="Security" lastUpdated="March 18, 2026">
       <Section heading="Reporting a vulnerability">
         <p>
           If you discover a security vulnerability in 143, please report it
@@ -22,10 +22,9 @@ export default function SecurityPage() {
             rel="noopener noreferrer"
             className="underline underline-offset-2"
           >
-            Security Advisory reporting
+            private security advisory reporting
           </a>{" "}
-          — click &quot;Report a vulnerability&quot; on the repository&apos;s Security
-          tab.
+          on the repository&apos;s Security tab.
         </p>
         <p>
           <strong className="font-medium opacity-80">
@@ -38,7 +37,35 @@ export default function SecurityPage() {
           >
             security@assembled.com
           </a>
+          , and review the repository&apos;s{" "}
+          <a
+            href="https://github.com/assembledhq/143/blob/main/SECURITY.md"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline underline-offset-2"
+          >
+            SECURITY.md
+          </a>
           .
+        </p>
+      </Section>
+
+      <Section heading="Supported versions">
+        <p>
+          We currently support the hosted service at 143.dev and the latest code
+          on the repository&apos;s default branch. Because the open-source project
+          moves quickly and does not currently publish long-term support
+          branches, older forks or unpatched deployments may not receive
+          coordinated fixes.
+        </p>
+      </Section>
+
+      <Section heading="Safe harbor and testing rules">
+        <p>
+          We support good-faith security research that avoids privacy
+          violations, service disruption, destructive testing, social
+          engineering, spam, and persistence in other users&apos; data. Stop
+          testing and contact us immediately if you access non-public data.
         </p>
       </Section>
 
@@ -55,16 +82,17 @@ export default function SecurityPage() {
         <ul className="list-disc pl-5 space-y-1.5">
           <li>
             <strong className="font-medium opacity-80">Acknowledgment:</strong>{" "}
-            within 30 business days
+            within 3 business days
           </li>
           <li>
-            <strong className="font-medium opacity-80">Initial assessment:</strong>{" "}
-            within 90 business days
+            <strong className="font-medium opacity-80">Initial triage:</strong>{" "}
+            within 14 business days
           </li>
           <li>
-            <strong className="font-medium opacity-80">Fix and disclosure:</strong>{" "}
-            we aim to release a fix within 180 days of confirmation, followed by
-            coordinated public disclosure
+            <strong className="font-medium opacity-80">Remediation target:</strong>{" "}
+            we aim to remediate confirmed issues within 90 days when feasible,
+            with coordinated disclosure timing based on severity,
+            exploitability, and user impact
           </li>
         </ul>
         <p>
@@ -77,25 +105,32 @@ export default function SecurityPage() {
         <p>143 is designed with security in mind:</p>
         <ul className="list-disc pl-5 space-y-1.5">
           <li>
-            <strong className="font-medium opacity-80">Sandboxed execution</strong> —
+            <strong className="font-medium opacity-80">Sandboxed execution</strong> -
             coding agents run in isolated containers, separate from the host
             system
           </li>
           <li>
-            <strong className="font-medium opacity-80">Minimal permissions</strong> —
+            <strong className="font-medium opacity-80">Minimal permissions</strong> -
             integrations request only the scopes necessary to function
           </li>
           <li>
-            <strong className="font-medium opacity-80">Encryption in transit</strong> —
-            all connections use TLS
+            <strong className="font-medium opacity-80">Hosted-service transport security</strong> -
+            production traffic to 143.dev is intended to use TLS; self-hosted
+            operators are responsible for their own deployment configuration
           </li>
           <li>
-            <strong className="font-medium opacity-80">Credential isolation</strong> —
-            secrets and API keys are stored encrypted, never logged, and not
-            exposed to agent processes
+            <strong className="font-medium opacity-80">Credential handling</strong> -
+            credentials are stored with platform protections, and some
+            credentials may be injected into sandboxes when needed to run a
+            configured agent or integration workflow
           </li>
           <li>
-            <strong className="font-medium opacity-80">Open source</strong> —
+            <strong className="font-medium opacity-80">Sensitive state treatment</strong> -
+            workspace snapshots and agent state are treated as sensitive because
+            they may contain customer content and temporary credentials
+          </li>
+          <li>
+            <strong className="font-medium opacity-80">Open source</strong> -
             the entire codebase is public and auditable under the MIT License
           </li>
         </ul>
@@ -103,10 +138,10 @@ export default function SecurityPage() {
 
       <Section heading="Scope">
         <p>
-          This policy covers the 143 open-source project and the hosted service
-          at 143.dev. If you find a vulnerability in a third-party dependency,
-          please report it to the respective maintainers and let us know so we
-          can update.
+          This page covers the 143 open-source project and the hosted service at
+          143.dev. Vulnerabilities in third-party dependencies should also be
+          reported to the relevant maintainers, but we still want to know about
+          them so we can patch or upgrade our usage promptly.
         </p>
       </Section>
 
@@ -114,7 +149,7 @@ export default function SecurityPage() {
         <p>
           We appreciate the work of security researchers. With your permission,
           we are happy to credit you in the security advisory and release notes
-          when a vulnerability is fixed.
+          when a fix is available.
         </p>
       </Section>
 

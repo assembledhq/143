@@ -5,12 +5,12 @@ import LegalPageLayout, {
 
 export default function TermsPage() {
   return (
-    <LegalPageLayout title="Terms of Use" lastUpdated="March 15, 2026">
+    <LegalPageLayout title="Terms of Use" lastUpdated="March 18, 2026">
       <Section heading="Scope">
         <p>
           These terms govern your use of the 143 website and hosted service at
           143.dev, operated by Assembled, Inc. They do not govern the 143
-          open-source software itself — that is licensed under the{" "}
+          open-source software itself - that is licensed under the{" "}
           <a
             href="https://github.com/assembledhq/143/blob/main/LICENSE"
             target="_blank"
@@ -19,7 +19,7 @@ export default function TermsPage() {
           >
             MIT License
           </a>{" "}
-          and its terms apply independently.
+          and applies independently.
         </p>
         <p>
           By using 143.dev, you agree to these terms. If you do not agree, do
@@ -30,60 +30,67 @@ export default function TermsPage() {
       <Section heading="The service">
         <p>
           143 is an open-source platform that uses AI agents to analyze
-          production issues and submit validated pull requests. The hosted
-          service at 143.dev provides a managed version of this platform,
-          including account management, integrations, and infrastructure.
+          production issues and prepare code changes, validations, and pull
+          requests. The hosted service at 143.dev provides a managed version of
+          that platform, including account management, integrations, and
+          infrastructure.
         </p>
       </Section>
 
       <Section heading="Accounts">
         <p>
-          You are responsible for maintaining the security of your account
-          credentials. You must provide accurate information when creating an
-          account. You are responsible for all activity that occurs under your
-          account.
+          You are responsible for maintaining the confidentiality of your
+          account credentials, providing accurate account information, and using
+          the service only as authorized by your organization and these terms.
+          Organization administrators may control access to workspace content
+          and settings for users in their organization.
+        </p>
+      </Section>
+
+      <Section heading="Your content">
+        <p>
+          You retain ownership of your code, prompts, repositories, issues, and
+          other content. You grant us a limited license to host, store,
+          transmit, reproduce, and process that content as needed to operate,
+          secure, and support the hosted service.
+        </p>
+      </Section>
+
+      <Section heading="AI-generated output">
+        <p>
+          143 uses automated systems and third-party AI models to generate
+          suggestions, diffs, summaries, and pull requests. AI-generated output
+          may be incomplete, inaccurate, insecure, or unsuitable for your use
+          case. You are responsible for reviewing, testing, approving, and
+          deciding whether to use any output before relying on it in production.
         </p>
       </Section>
 
       <Section heading="Acceptable use">
         <p>You agree not to:</p>
         <ul className="list-disc pl-5 space-y-1.5">
-          <li>
-            Use the service to violate any applicable law or regulation
-          </li>
-          <li>
-            Interfere with or disrupt the service or its infrastructure
-          </li>
+          <li>Use the service to violate any applicable law or regulation</li>
+          <li>Interfere with or disrupt the service or its infrastructure</li>
           <li>
             Attempt to gain unauthorized access to other users&apos; accounts or
             data
           </li>
-          <li>
-            Use the service to transmit malware or malicious code
-          </li>
+          <li>Use the service to transmit malware or malicious code</li>
           <li>
             Scrape, crawl, or index the service in a way that places undue
             burden on our infrastructure
           </li>
+          <li>
+            Use the service to exfiltrate secrets, access data without
+            authorization, or interfere with another user, organization, or
+            connected service
+          </li>
         </ul>
-      </Section>
-
-      <Section heading="Your data">
-        <p>
-          You retain ownership of all code, issues, and other content you
-          connect to or create through the service. We do not claim intellectual
-          property rights over your content. See our{" "}
-          <Link href="/privacy" className="underline underline-offset-2">
-            Privacy Policy
-          </Link>{" "}
-          for how we handle your data.
-        </p>
       </Section>
 
       <Section heading="Open-source contributions">
         <p>
-          Contributions to the 143 open-source project (pull requests, issues,
-          code) are governed by the{" "}
+          Contributions to the open-source repository are governed by the{" "}
           <a
             href="https://github.com/assembledhq/143/blob/main/LICENSE"
             target="_blank"
@@ -91,9 +98,19 @@ export default function TermsPage() {
             className="underline underline-offset-2"
           >
             MIT License
+          </a>{" "}
+          and the repository&apos;s{" "}
+          <a
+            href="https://github.com/assembledhq/143/blob/main/CONTRIBUTING.md"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline underline-offset-2"
+          >
+            CONTRIBUTING.md
           </a>
-          , not these terms. By contributing, you agree that your contributions
-          are licensed under the same MIT License.
+          . Our contribution model is inbound=outbound: unless explicitly stated
+          otherwise, contributions intentionally submitted for inclusion in the
+          project are licensed under the same MIT License.
         </p>
       </Section>
 
@@ -103,6 +120,16 @@ export default function TermsPage() {
           uninterrupted access. The service is provided on an &quot;as is&quot;
           and &quot;as available&quot; basis. We may modify, suspend, or
           discontinue the service at any time.
+        </p>
+      </Section>
+
+      <Section heading="Suspension and termination">
+        <p>
+          You may stop using the service at any time. We may suspend or
+          terminate access if you violate these terms, create security risk, or
+          misuse the service. Termination of the hosted service does not affect
+          your rights under the MIT License to use the open-source software on a
+          self-hosted basis.
         </p>
       </Section>
 
@@ -121,17 +148,11 @@ export default function TermsPage() {
           To the maximum extent permitted by law, Assembled, Inc. shall not be
           liable for any indirect, incidental, special, consequential, or
           punitive damages, or any loss of profits, data, or goodwill, arising
-          out of or related to your use of the service.
-        </p>
-      </Section>
-
-      <Section heading="Termination">
-        <p>
-          You may stop using the service at any time. We may suspend or
-          terminate your access if you violate these terms. Upon termination,
-          your right to use the hosted service ends, but the open-source
-          software remains available under the MIT License — you can always
-          self-host.
+          out of or related to your use of the service. To the maximum extent
+          permitted by law, our aggregate liability for all claims arising out
+          of or related to the service will not exceed the greater of $100 USD
+          or the amount you paid us for the service in the 12 months before the
+          event giving rise to the claim.
         </p>
       </Section>
 
@@ -160,16 +181,11 @@ export default function TermsPage() {
           >
             legal@assembled.com
           </a>{" "}
-          or open an issue on{" "}
-          <a
-            href="https://github.com/assembledhq/143"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="underline underline-offset-2"
-          >
-            GitHub
-          </a>
-          .
+          and see our{" "}
+          <Link href="/privacy" className="underline underline-offset-2">
+            Privacy Policy
+          </Link>{" "}
+          for data-handling terms.
         </p>
       </Section>
     </LegalPageLayout>
