@@ -38,20 +38,20 @@ const filterTabs = [
   { value: "done", label: "Done" },
 ];
 
-const needsAttentionStatuses = new Set(["awaiting_input", "needs_human_guidance", "failed"]);
-const workingStatuses = new Set(["pending", "running"]);
-const doneStatuses = new Set(["completed", "pr_created", "cancelled", "skipped", "idle"]);
+const needsAttentionStatuses = ["awaiting_input", "needs_human_guidance", "failed"];
+const workingStatuses = ["pending", "running"];
+const doneStatuses = ["completed", "pr_created", "cancelled", "skipped", "idle"];
 
-function isWorking(s: Session): boolean {
-  return workingStatuses.has(s.status);
-}
+const needsAttentionSet = new Set(needsAttentionStatuses);
+const workingSet = new Set(workingStatuses);
 
-function filterSessions(sessions: Session[], filter: string | null): Session[] {
-  if (!filter || filter === "all") return sessions;
-  if (filter === "needs_attention") return sessions.filter((s) => needsAttentionStatuses.has(s.status));
-  if (filter === "working") return sessions.filter(isWorking);
-  if (filter === "done") return sessions.filter((s) => doneStatuses.has(s.status));
-  return sessions.filter((s) => s.status === filter);
+/** Map a filter tab value to the comma-separated status string for the API. */
+function filterToStatusParam(filter: string | null): string | undefined {
+  if (!filter || filter === "all") return undefined;
+  if (filter === "needs_attention") return needsAttentionStatuses.join(",");
+  if (filter === "working") return workingStatuses.join(",");
+  if (filter === "done") return doneStatuses.join(",");
+  return filter;
 }
 
 function sessionTitle(session: Session): string {
@@ -103,21 +103,35 @@ export function SessionSidebar() {
 
   const { optimisticSessions } = useOptimisticSessions();
 
-  const { data, isLoading } = useQuery({
+  const currentFilter = activeFilter ?? "all";
+  const statusParam = filterToStatusParam(currentFilter);
+
+  // Fetch all sessions (for tab counts and the "all" view).
+  const { data: allData, isLoading } = useQuery({
     queryKey: queryKeys.sessions.list(repo),
     queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined }),
     refetchInterval: 10000,
   });
 
-  const allSessions = data?.data ?? [];
-  const currentFilter = activeFilter ?? "all";
+  // Fetch filtered sessions from the backend when a specific tab is selected.
+  const { data: filteredData } = useQuery({
+    queryKey: [...queryKeys.sessions.list(repo), statusParam],
+    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, status: statusParam }),
+    refetchInterval: 10000,
+    enabled: !!statusParam,
+  });
 
-  const needsAttentionSessions = allSessions.filter((s) => needsAttentionStatuses.has(s.status));
-  const workingSessions = allSessions.filter(isWorking);
+  const allSessions = allData?.data ?? [];
+
+  const needsAttentionSessions = allSessions.filter((s) => needsAttentionSet.has(s.status));
+  const workingSessions = allSessions.filter((s) => workingSet.has(s.status));
 
   const filteredSessions = useMemo(
-    () => filterSessions(allSessions, activeFilter),
-    [allSessions, activeFilter],
+    () => {
+      if (statusParam && filteredData) return filteredData.data;
+      return allSessions;
+    },
+    [allSessions, filteredData, statusParam],
   );
 
   const displayedSessions = useMemo(() => {
@@ -220,7 +234,7 @@ export function SessionSidebar() {
         {displayedSessions.map((session) => {
           const isSelected = selectedId === session.id;
           const cfg = statusConfig[session.status] || statusConfig.pending;
-          const isWorkingSession = workingStatuses.has(session.status);
+          const isWorkingSession = workingSet.has(session.status);
           const ts = session.completed_at || session.started_at || session.created_at;
 
           return (

@@ -79,7 +79,7 @@ func TestSessionStore_ListByOrg(t *testing.T) {
 		},
 		{
 			name:    "returns filtered agent runs by status",
-			filters: SessionFilters{Status: models.SessionStatusRunning},
+			filters: SessionFilters{Statuses: []models.SessionStatus{models.SessionStatusRunning}},
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id .+ AND status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).

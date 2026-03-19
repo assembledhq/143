@@ -48,11 +48,21 @@ func (m *gatherSessionStoreMock) Create(ctx context.Context, run *models.Session
 }
 
 func (m *gatherSessionStoreMock) ListByOrg(ctx context.Context, orgID uuid.UUID, filters db.SessionFilters) ([]models.Session, error) {
-	key := string(filters.Status)
-	if err := m.errByKey[key]; err != nil {
-		return nil, err
+	var result []models.Session
+	for _, s := range filters.Statuses {
+		key := string(s)
+		if err := m.errByKey[key]; err != nil {
+			return nil, err
+		}
+		result = append(result, m.byStatus[key]...)
 	}
-	return m.byStatus[key], nil
+	if len(filters.Statuses) == 0 {
+		if err := m.errByKey[""]; err != nil {
+			return nil, err
+		}
+		return m.byStatus[""], nil
+	}
+	return result, nil
 }
 
 func (m *gatherSessionStoreMock) ListRecentByOrg(ctx context.Context, orgID uuid.UUID, statuses []string, limit int) ([]models.Session, error) {

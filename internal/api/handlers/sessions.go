@@ -72,9 +72,17 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	limit := queryInt(r, "limit", 50)
 	filters := db.SessionFilters{
-		Status: models.SessionStatus(r.URL.Query().Get("status")),
 		Limit:  limit,
 		Cursor: r.URL.Query().Get("cursor"),
+	}
+
+	if statusParam := r.URL.Query().Get("status"); statusParam != "" {
+		for _, s := range strings.Split(statusParam, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				filters.Statuses = append(filters.Statuses, models.SessionStatus(s))
+			}
+		}
 	}
 
 	if repoIDStr := r.URL.Query().Get("repository_id"); repoIDStr != "" {

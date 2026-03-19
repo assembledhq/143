@@ -57,24 +57,20 @@ const filterTabs = [
   { value: "decisions", label: "Decisions" },
 ];
 
-const needsAttentionStatuses = new Set(["awaiting_input", "needs_human_guidance", "failed"]);
-const workingStatuses = new Set(["pending", "running"]);
-const doneStatuses = new Set(["completed", "pr_created", "cancelled", "skipped", "idle"]);
+const needsAttentionStatuses = ["awaiting_input", "needs_human_guidance", "failed"];
+const workingStatuses = ["pending", "running"];
+const doneStatuses = ["completed", "pr_created", "cancelled", "skipped", "idle"];
 
-function isWorking(s: Session): boolean {
-  return workingStatuses.has(s.status);
-}
+const needsAttentionSet = new Set(needsAttentionStatuses);
+const workingSet = new Set(workingStatuses);
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function filterSessions(sessions: Session[], filter: string | null): Session[] {
-  if (!filter || filter === "all") return sessions;
-  if (filter === "needs_attention") return sessions.filter((s) => needsAttentionStatuses.has(s.status));
-  if (filter === "working") return sessions.filter(isWorking);
-  if (filter === "done") return sessions.filter((s) => doneStatuses.has(s.status));
-  return sessions.filter((s) => s.status === filter);
+/** Map a filter tab value to the comma-separated status string for the API. */
+function filterToStatusParam(filter: string | null): string | undefined {
+  if (!filter || filter === "all" || filter === "decisions") return undefined;
+  if (filter === "needs_attention") return needsAttentionStatuses.join(",");
+  if (filter === "working") return workingStatuses.join(",");
+  if (filter === "done") return doneStatuses.join(",");
+  return filter;
 }
 
 function sessionTitle(session: Session): string {
@@ -88,7 +84,7 @@ function sessionTitle(session: Session): string {
 // ---------------------------------------------------------------------------
 
 function SessionStatusDot({ status }: { status: string }) {
-  const working = workingStatuses.has(status);
+  const working = workingSet.has(status);
   const cfg = statusConfig[status] || statusConfig.pending;
   if (working) {
     return <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />;
@@ -219,10 +215,23 @@ export function SessionsPageContent() {
   const [repo] = useQueryState("repo");
   const [sorting, setSorting] = useState<SortingState>([]);
 
-  const { data, isLoading, error } = useQuery({
+  const currentFilter = activeFilter ?? "all";
+  const showDecisions = currentFilter === "decisions";
+  const statusParam = filterToStatusParam(currentFilter);
+
+  // Fetch all sessions (for tab counts and the "all" view).
+  const { data: allData, isLoading, error } = useQuery({
     queryKey: ["sessions", repo],
     queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined }),
     refetchInterval: 10000,
+  });
+
+  // Fetch filtered sessions from the backend when a specific tab is selected.
+  const { data: filteredData } = useQuery({
+    queryKey: ["sessions", repo, statusParam],
+    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, status: statusParam }),
+    refetchInterval: 10000,
+    enabled: !!statusParam,
   });
 
   const { data: membersData } = useQuery({
@@ -230,18 +239,19 @@ export function SessionsPageContent() {
     queryFn: () => api.team.listMembers(),
   });
 
-  const allSessions = data?.data ?? [];
+  const allSessions = allData?.data ?? [];
   const members = membersData?.data ?? [];
 
-  const currentFilter = activeFilter ?? "all";
-  const showDecisions = currentFilter === "decisions";
-
-  const needsAttentionSessions = allSessions.filter((s) => needsAttentionStatuses.has(s.status));
-  const workingSessions = allSessions.filter(isWorking);
+  const needsAttentionSessions = allSessions.filter((s) => needsAttentionSet.has(s.status));
+  const workingSessions = allSessions.filter((s) => workingSet.has(s.status));
 
   const filteredSessions = useMemo(
-    () => (showDecisions ? [] : filterSessions(allSessions, activeFilter)),
-    [allSessions, activeFilter, showDecisions],
+    () => {
+      if (showDecisions) return [];
+      if (statusParam && filteredData) return filteredData.data;
+      return allSessions;
+    },
+    [allSessions, filteredData, statusParam, showDecisions],
   );
 
   const columns = useMemo(() => buildColumns(members), [members]);
