@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronDown, ChevronRight, AlertTriangle, Terminal, Wrench } from "lucide-react";
+import { ChevronRight, AlertTriangle, Terminal, Wrench } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import type { TimelineEntry } from "@/lib/timeline";
 import type { SessionMessage, SessionLog } from "@/lib/types";
@@ -26,11 +26,7 @@ function ToolGroupEntry({ toolUse, toolResult }: { toolUse: SessionLog; toolResu
         onClick={() => setOpen(!open)}
         className="flex items-center gap-2 w-full text-left py-1.5 px-2 rounded-md hover:bg-muted/50 transition-colors text-xs group"
       >
-        {open ? (
-          <ChevronDown className="h-3 w-3 text-muted-foreground shrink-0" />
-        ) : (
-          <ChevronRight className="h-3 w-3 text-muted-foreground shrink-0" />
-        )}
+        <ChevronRight className={`h-3 w-3 text-muted-foreground shrink-0 transition-transform duration-150 ${open ? "rotate-90" : ""}`} />
         <Wrench className="h-3 w-3 text-blue-600 dark:text-blue-400 shrink-0" />
         <Badge
           variant="secondary"
@@ -38,7 +34,7 @@ function ToolGroupEntry({ toolUse, toolResult }: { toolUse: SessionLog; toolResu
         >
           {toolName}
         </Badge>
-        <span className="text-muted-foreground text-[10px]">
+        <span className="ml-auto text-muted-foreground/60 text-[10px] tabular-nums shrink-0">
           {formatTimestamp(toolUse.created_at)}
         </span>
       </button>
@@ -112,18 +108,19 @@ function HiddenLogsGroup({ logs }: { logs: SessionLog[] }) {
     <div className="mx-2">
       <button
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-2 py-1 px-2 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+        className="flex items-center gap-2 w-full text-left py-1.5 px-2 rounded-md hover:bg-muted/50 transition-colors text-xs group"
       >
-        <Terminal className="h-3 w-3" />
-        {open ? "Hide" : "Show"} {logs.length} log {logs.length === 1 ? "entry" : "entries"}
-        {open ? (
-          <ChevronDown className="h-3 w-3" />
-        ) : (
-          <ChevronRight className="h-3 w-3" />
-        )}
+        <ChevronRight className={`h-3 w-3 text-muted-foreground shrink-0 transition-transform duration-150 ${open ? "rotate-90" : ""}`} />
+        <Terminal className="h-3 w-3 text-muted-foreground shrink-0" />
+        <span className="text-muted-foreground">
+          {logs.length} log {logs.length === 1 ? "entry" : "entries"}
+        </span>
+        <span className="ml-auto text-muted-foreground/60 text-[10px] tabular-nums shrink-0">
+          {formatTimestamp(logs[0].created_at)}
+        </span>
       </button>
       {open && (
-        <div className="mt-1 mb-2 rounded-md border border-border bg-muted/20 py-1 overflow-x-auto max-h-[300px] overflow-y-auto">
+        <div className="ml-7 mt-1 mb-2 rounded-md border border-border bg-muted/30 py-1 overflow-x-auto max-h-[300px] overflow-y-auto">
           {logs.map((log) => (
             <HiddenLogEntry key={log.id} log={log} />
           ))}
