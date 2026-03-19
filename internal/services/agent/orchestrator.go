@@ -986,9 +986,19 @@ func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, san
 		return false, fmt.Errorf("write auth.json: %w", err)
 	}
 
+	// Write config.toml to disable Codex's internal bwrap sandboxing.
+	// The container is already isolated by Docker + gVisor so bwrap is
+	// redundant and fails because gVisor doesn't support the unprivileged
+	// user namespaces that bwrap requires.
+	configTOML := []byte("sandbox_mode = \"danger-full-access\"\n")
+	configPath := authDir + "/config.toml"
+	if err := o.provider.WriteFile(ctx, sandbox, configPath, configTOML); err != nil {
+		return false, fmt.Errorf("write config.toml: %w", err)
+	}
+
 	o.logger.Debug().
 		Str("org_id", orgID.String()).
-		Msg("injected codex auth.json into sandbox")
+		Msg("injected codex auth.json and config.toml into sandbox")
 
 	return true, nil
 }
