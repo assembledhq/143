@@ -82,15 +82,15 @@ export default function SecurityPage() {
         <ul className="list-disc pl-5 space-y-1.5">
           <li>
             <strong className="font-medium opacity-80">Acknowledgment:</strong>{" "}
-            within 3 business days
+            within 30 days
           </li>
           <li>
-            <strong className="font-medium opacity-80">Initial triage:</strong>{" "}
-            within 14 business days
+            <strong className="font-medium opacity-80">Investigation:</strong>{" "}
+            within 60 days
           </li>
           <li>
             <strong className="font-medium opacity-80">Remediation target:</strong>{" "}
-            we aim to remediate confirmed issues within 90 days when feasible,
+            we aim to remediate confirmed issues within 180 days when feasible,
             with coordinated disclosure timing based on severity,
             exploitability, and user impact
           </li>
