@@ -28,7 +28,7 @@ import { buildTimeline } from "@/lib/timeline";
 import type { Session, SessionLog, SessionMessage, User, Validation } from "@/lib/types";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
-import { cn } from "@/lib/utils";
+import { cn, sessionTitle } from "@/lib/utils";
 
 const statusConfig: Record<string, { color: string; label: string }> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
@@ -705,7 +705,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <h1 className="text-sm font-semibold text-foreground truncate">
-                {session.result_summary || session.pm_approach || `Session ${session.id.slice(0, 8)}`}
+                {sessionTitle(session)}
               </h1>
               <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium shrink-0 ${status.color}`}>
                 {status.label}

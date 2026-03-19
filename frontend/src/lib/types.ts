@@ -100,6 +100,7 @@ export interface Session {
   failure_retry_advised?: boolean;
   parent_session_id?: string;
   pm_plan_id?: string;
+  title?: string;
   pm_approach?: string;
   pm_reasoning?: string;
   project_task_id?: string;

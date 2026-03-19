@@ -6,7 +6,7 @@ import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
 import { useMemo, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
-import { cn, formatTimeAgo } from "@/lib/utils";
+import { cn, formatTimeAgo, sessionTitle } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
@@ -53,12 +53,6 @@ function filterToStatusParam(filter: string | null): string | undefined {
   if (filter === "working") return workingStatuses.join(",");
   if (filter === "done") return doneStatuses.join(",");
   return filter;
-}
-
-function sessionTitle(session: Session): string {
-  if (session.result_summary) return session.result_summary;
-  if (session.pm_approach) return session.pm_approach;
-  return `Session ${session.id.slice(0, 8)}`;
 }
 
 // ---------------------------------------------------------------------------

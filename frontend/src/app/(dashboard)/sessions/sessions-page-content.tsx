@@ -28,7 +28,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { api } from "@/lib/api";
-import { formatTimeAgo } from "@/lib/utils";
+import { formatTimeAgo, sessionTitle } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
 import type { Session, User } from "@/lib/types";
 
@@ -72,12 +72,6 @@ function filterToStatusParam(filter: string | null): string | undefined {
   if (filter === "working") return workingStatuses.join(",");
   if (filter === "done") return doneStatuses.join(",");
   return filter;
-}
-
-function sessionTitle(session: Session): string {
-  if (session.result_summary) return session.result_summary;
-  if (session.pm_approach) return session.pm_approach;
-  return `Session ${session.id.slice(0, 8)}`;
 }
 
 // ---------------------------------------------------------------------------

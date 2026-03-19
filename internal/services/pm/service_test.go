@@ -134,6 +134,7 @@ func TestExecutePlan_DelegatesWithinCapacity(t *testing.T) {
 	require.Len(t, runStore.created, 1, "should create one agent run")
 	require.NotNil(t, runStore.created[0].PMPlanID, "created run should link to PM plan")
 	require.Equal(t, planID, *runStore.created[0].PMPlanID, "PM plan ID should be set")
+	require.NotNil(t, runStore.created[0].Title, "session title should be set")
 	require.NotNil(t, runStore.created[0].PMApproach, "PM approach should be set")
 	require.NotNil(t, runStore.created[0].PMReasoning, "PM reasoning should be set")
 }
