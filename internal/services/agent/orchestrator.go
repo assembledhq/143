@@ -864,6 +864,12 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 				merged["OPENAI_BASE_URL"] = oc.BaseURL
 			}
 		}
+		// Skip Codex CLI's internal bwrap (bubblewrap) sandboxing. The
+		// container is already isolated by Docker + gVisor (dropped caps,
+		// read-only rootfs, non-root user, PID limits), so bwrap is
+		// redundant and fails because gVisor doesn't support the
+		// unprivileged user namespaces that bwrap requires.
+		merged["CODEX_UNSAFE_ALLOW_NO_SANDBOX"] = "1"
 	case models.AgentTypeGeminiCLI:
 		cfg := o.resolveProviderConfig(ctx, orgID, userID, models.ProviderGemini)
 		if gc, ok := cfg.(models.GeminiConfig); ok {
