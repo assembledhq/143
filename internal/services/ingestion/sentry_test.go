@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -52,7 +53,7 @@ func TestSentryAdapter_ParseWebhook(t *testing.T) {
 			checkResult: func(t *testing.T, ni *NormalizedIssue, integrationID uuid.UUID) {
 				t.Helper()
 				require.Equal(t, "12345", ni.ExternalID, "should parse external ID from sentry issue ID")
-				require.Equal(t, "sentry", ni.Source, "source should be sentry")
+				require.Equal(t, models.IssueSourceSentry, ni.Source, "source should be sentry")
 				require.Equal(t, integrationID, ni.SourceIntegrationID, "should set integration ID")
 				require.Equal(t, "TypeError: Cannot read property 'map' of undefined", ni.Title, "should parse issue title")
 				require.Contains(t, ni.Description, "TypeError: Cannot read property 'map' of undefined", "description should contain metadata value")
