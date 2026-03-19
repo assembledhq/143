@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { ChevronRight, AlertTriangle, Wrench } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { MarkdownContent } from "@/components/markdown";
 import type { TimelineEntry } from "@/lib/timeline";
 import type { SessionMessage, SessionLog } from "@/lib/types";
 
@@ -157,28 +158,37 @@ export function formatMessageTime(dateStr: string): string {
   });
 }
 
-function MessageBubble({ msg }: { msg: SessionMessage }) {
+function AssistantBubble({ children }: { children: React.ReactNode }) {
   return (
-    <div className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-      <div
-        className={`max-w-[80%] rounded-lg px-3 py-2 text-sm ${
-          msg.role === "user"
-            ? "bg-primary bg-[image:var(--gradient-primary)] text-white shadow-sm"
-            : "bg-muted"
-        }`}
-      >
-        <p className="whitespace-pre-wrap">{msg.content}</p>
-        <p
-          className={`text-[10px] mt-1 ${
-            msg.role === "user"
-              ? "text-white/70"
-              : "text-muted-foreground"
-          }`}
-        >
-          {formatMessageTime(msg.created_at)}
-        </p>
+    <div className="flex justify-start">
+      <div className="max-w-[80%] rounded-lg px-3 py-2 text-sm bg-muted">
+        {children}
       </div>
     </div>
+  );
+}
+
+function MessageBubble({ msg }: { msg: SessionMessage }) {
+  if (msg.role === "user") {
+    return (
+      <div className="flex justify-end">
+        <div className="max-w-[80%] rounded-lg px-3 py-2 text-sm bg-primary bg-[image:var(--gradient-primary)] text-white shadow-sm">
+          <p className="whitespace-pre-wrap">{msg.content}</p>
+          <p className="text-[10px] mt-1 text-white/70">
+            {formatMessageTime(msg.created_at)}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <AssistantBubble>
+      <MarkdownContent content={msg.content} />
+      <p className="text-[10px] mt-1 text-muted-foreground">
+        {formatMessageTime(msg.created_at)}
+      </p>
+    </AssistantBubble>
   );
 }
 
@@ -216,11 +226,9 @@ export function ChatTimeline({ entries, isRunning }: ChatTimelineProps) {
         break;
       case "assistant_output":
         rendered.push(
-          <div key={`aout-${entry.data.id}`} className="flex justify-start">
-            <div className="max-w-[80%] rounded-lg px-3 py-2 text-sm bg-muted">
-              <p className="whitespace-pre-wrap">{entry.data.message}</p>
-            </div>
-          </div>
+          <AssistantBubble key={`aout-${entry.data.id}`}>
+            <MarkdownContent content={entry.data.message} />
+          </AssistantBubble>
         );
         break;
       case "tool_group":
