@@ -2,6 +2,7 @@ import type { SessionMessage, SessionLog } from "./types";
 
 export type TimelineEntry =
   | { kind: "message"; data: SessionMessage }
+  | { kind: "assistant_output"; data: SessionLog }
   | { kind: "tool_group"; toolUse: SessionLog; toolResult?: SessionLog }
   | { kind: "error"; data: SessionLog }
   | { kind: "log"; data: SessionLog };
@@ -88,6 +89,14 @@ export function buildTimeline(
 
     if (log.level === "error") {
       entries.push({ kind: "error", data: log });
+      i++;
+      continue;
+    }
+
+    // output-level logs without metadata type are assistant text responses
+    // (e.g. agent_message from Codex CLI). Show them as visible output.
+    if (log.level === "output" && (!log.metadata || !log.metadata.type)) {
+      entries.push({ kind: "assistant_output", data: log });
       i++;
       continue;
     }

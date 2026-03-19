@@ -404,6 +404,90 @@ func TestParseCodexStreamOutput(t *testing.T) {
 			},
 		},
 		{
+			name:   "item.completed agent_message surfaces as output",
+			output: `{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I found the bug and fixed it."}}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Len(t, logs, 1)
+				require.Equal(t, "output", logs[0].Level)
+				require.Contains(t, logs[0].Message, "I found the bug and fixed it.")
+				require.Contains(t, result.Summary, "I found the bug and fixed it.")
+			},
+		},
+		{
+			name:   "item.completed command_execution surfaces as tool_use",
+			output: `{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'ls -la /workspace'","aggregated_output":"total 8\ndrwxr-xr-x  2 root root 4096 main.go","exit_code":0,"status":"completed"}}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Len(t, logs, 2, "should have tool_use + tool_result")
+				require.Equal(t, "tool_use", logs[0].Level)
+				require.Equal(t, "command_execution", logs[0].Metadata["tool"])
+				inputMap, ok := logs[0].Metadata["input"].(map[string]interface{})
+				require.True(t, ok)
+				require.Contains(t, inputMap["command"], "ls -la /workspace")
+				require.Equal(t, "output", logs[1].Level)
+				require.Equal(t, "tool_result", logs[1].Metadata["type"])
+			},
+		},
+		{
+			name:   "item.completed command_execution with failed status",
+			output: `{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"/bin/bash -c 'ls'","aggregated_output":"bwrap: No permissions","exit_code":1,"status":"failed"}}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Len(t, logs, 2)
+				require.Equal(t, "tool_use", logs[0].Level)
+				require.Equal(t, "failed", logs[0].Metadata["status"])
+				exitCode, ok := logs[0].Metadata["exit_code"]
+				require.True(t, ok)
+				require.Equal(t, 1, exitCode)
+			},
+		},
+		{
+			name:   "turn.completed extracts usage info",
+			output: `{"type":"turn.completed","usage":{"input_tokens":45439,"cached_input_tokens":39296,"output_tokens":870}}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Equal(t, 45439, result.TokenUsage.InputTokens)
+				require.Equal(t, 870, result.TokenUsage.OutputTokens)
+				require.Len(t, logs, 1)
+				require.Equal(t, "debug", logs[0].Level)
+			},
+		},
+		{
+			name: "full Codex CLI stream with item events",
+			output: `{"type":"thread.started","thread_id":"019d049e-f7f8-7b71-bb08-e174ba50c73c"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I'm going to inspect the workspace."}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'ls /workspace'","aggregated_output":"main.go","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"I found the issue and applied a fix."}}
+{"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":500,"output_tokens":200}}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Contains(t, result.Summary, "I'm going to inspect the workspace.")
+				require.Contains(t, result.Summary, "I found the issue and applied a fix.")
+				require.Equal(t, 1000, result.TokenUsage.InputTokens)
+				require.Equal(t, 200, result.TokenUsage.OutputTokens)
+
+				// Count visible entries by level.
+				outputCount := 0
+				toolUseCount := 0
+				debugCount := 0
+				for _, log := range logs {
+					switch log.Level {
+					case "output":
+						outputCount++
+					case "tool_use":
+						toolUseCount++
+					case "debug":
+						debugCount++
+					}
+				}
+				require.Equal(t, 3, outputCount, "2 agent_messages + 1 tool_result should produce output logs")
+				require.Equal(t, 1, toolUseCount, "command_execution should produce tool_use log")
+				require.GreaterOrEqual(t, debugCount, 3, "thread.started, turn.started, turn.completed should be debug")
+			},
+		},
+		{
 			name:   "unknown event type logged as debug",
 			output: `{"type":"custom_unknown","content":"whatever"}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
@@ -676,7 +760,7 @@ func TestCodexAdapter_Execute_ContinuationWithoutSessionIDUsesResumeLast(t *test
 	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
 	require.NoError(t, err, "continuation should succeed without an explicit session ID")
 	require.NotNil(t, result, "continuation should return a result")
-	require.Contains(t, provider.ExecCalls[0], "codex exec resume --last", "continuation without a session ID should resume the latest restored Codex session")
+	require.Contains(t, provider.ExecCalls[0], "codex exec resume --last --full-auto --sandbox danger-full-access", "continuation without a session ID should resume the latest restored Codex session")
 	_, exists := provider.Files["/workspace/.143-prompt.md"]
 	require.False(t, exists, "continuation should not write a fresh prompt file")
 }
