@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/assembledhq/143/internal/models"
 )
 
 // SentryWebhookPayload represents a Sentry webhook event.

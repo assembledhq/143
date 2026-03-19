@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/assembledhq/143/internal/models"
 )
 
 // LinearWebhookPayload represents a Linear webhook event.

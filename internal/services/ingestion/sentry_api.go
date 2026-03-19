@@ -11,6 +11,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
+
+	"github.com/assembledhq/143/internal/models"
 )
 
 // SentryAPIClient fetches issues from the Sentry REST API.
