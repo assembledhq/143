@@ -163,6 +163,10 @@ func TestClaudeCodeAdapter_Execute(t *testing.T) {
 					}
 					return tt.claudeExitCode, nil
 				}
+				if strings.HasPrefix(cmd, "git rev-parse") {
+					_, _ = stdout.Write([]byte("true\n"))
+					return 0, nil
+				}
 				if strings.HasPrefix(cmd, "git diff") {
 					_, _ = stdout.Write([]byte(tt.diffOutput))
 					return tt.diffExitCode, nil
@@ -269,6 +273,10 @@ func TestClaudeCodeAdapter_Execute_ContinuationUsesContinueMode(t *testing.T) {
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 		if strings.HasPrefix(cmd, "claude") {
 			_, _ = stdout.Write([]byte(`{"type":"assistant","content":"continuing the session"}`))
+			return 0, nil
+		}
+		if strings.HasPrefix(cmd, "git rev-parse") {
+			_, _ = stdout.Write([]byte("true\n"))
 			return 0, nil
 		}
 		if strings.HasPrefix(cmd, "git diff") {
@@ -968,28 +976,35 @@ func TestCollectDiff(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		stdout   string
-		exitCode int
-		execErr  error
-		wantDiff string
-		wantErr  bool
+		name         string
+		isGitRepo    bool // whether git rev-parse returns 0
+		diffStdout   string
+		diffExitCode int
+		execErr      error
+		wantDiff     string
+		wantErr      bool
 	}{
 		{
-			name:     "successful diff",
-			stdout:   "diff --git a/f.go b/f.go\n+fixed\n",
-			exitCode: 0,
-			wantDiff: "diff --git a/f.go b/f.go\n+fixed\n",
+			name:       "successful diff",
+			isGitRepo:  true,
+			diffStdout: "diff --git a/f.go b/f.go\n+fixed\n",
+			wantDiff:   "diff --git a/f.go b/f.go\n+fixed\n",
 		},
 		{
-			name:     "non-zero exit code",
-			exitCode: 1,
-			wantErr:  true,
+			name:         "non-zero diff exit code",
+			isGitRepo:    true,
+			diffExitCode: 1,
+			wantErr:      true,
 		},
 		{
-			name:    "exec error",
+			name:    "exec error on rev-parse",
 			execErr: context.DeadlineExceeded,
 			wantErr: true,
+		},
+		{
+			name:      "not a git repo returns empty diff",
+			isGitRepo: false,
+			wantDiff:  "",
 		},
 	}
 
@@ -1001,8 +1016,19 @@ func TestCollectDiff(t *testing.T) {
 				if tt.execErr != nil {
 					return 0, tt.execErr
 				}
-				_, _ = stdout.Write([]byte(tt.stdout))
-				return tt.exitCode, nil
+				if strings.HasPrefix(cmd, "git rev-parse") {
+					if tt.isGitRepo {
+						_, _ = stdout.Write([]byte("true\n"))
+						return 0, nil
+					}
+					_, _ = stderr.Write([]byte("fatal: not a git repository\n"))
+					return 128, nil
+				}
+				if strings.HasPrefix(cmd, "git diff") {
+					_, _ = stdout.Write([]byte(tt.diffStdout))
+					return tt.diffExitCode, nil
+				}
+				return 0, nil
 			}
 
 			sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}

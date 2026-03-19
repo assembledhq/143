@@ -540,6 +540,10 @@ func TestCodexAdapter_Execute(t *testing.T) {
 					}
 					return tt.codexExitCode, nil
 				}
+				if strings.HasPrefix(cmd, "git rev-parse") {
+					_, _ = stdout.Write([]byte("true\n"))
+					return 0, nil
+				}
 				if strings.HasPrefix(cmd, "git diff") {
 					_, _ = stdout.Write([]byte(tt.diffOutput))
 					return tt.diffExitCode, nil
@@ -644,7 +648,7 @@ func TestCodexAdapter_Execute_ContinuationWithoutSessionIDUsesResumeLast(t *test
 
 	provider := testutil.NewMockSandboxProvider()
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-		if strings.HasPrefix(cmd, "codex resume") {
+		if strings.HasPrefix(cmd, "codex exec resume") {
 			_, _ = stdout.Write([]byte(`{"type":"message","content":"continuing prior session"}`))
 			return 0, nil
 		}
@@ -668,7 +672,7 @@ func TestCodexAdapter_Execute_ContinuationWithoutSessionIDUsesResumeLast(t *test
 	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
 	require.NoError(t, err, "continuation should succeed without an explicit session ID")
 	require.NotNil(t, result, "continuation should return a result")
-	require.Contains(t, provider.ExecCalls[0], "codex resume --last", "continuation without a session ID should resume the latest restored Codex session")
+	require.Contains(t, provider.ExecCalls[0], "codex exec resume --last", "continuation without a session ID should resume the latest restored Codex session")
 	_, exists := provider.Files["/workspace/.143-prompt.md"]
 	require.False(t, exists, "continuation should not write a fresh prompt file")
 }

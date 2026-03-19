@@ -476,7 +476,7 @@ POST /api/v1/issues/{id}/fix                   Defaults to org's default_agent_t
 
 | Error | Detection | Recovery |
 |-------|-----------|---------|
-| Codex CLI not in sandbox | Exit code 127 (command not found) | Fail with "Update 143-agent Docker image to include Codex CLI" |
+| Codex CLI not in sandbox | Exit code 127 (command not found) | Fail with "Rebuild 143-sandbox image with Codex CLI (see sandbox/Dockerfile)" |
 | No credentials at all | No API key AND no OAuth token | Fail with `failure_category: "no_credentials"`, prompt user to configure |
 | gpt-5.3-codex with API key only | Model requires OAuth | Warn in UI when user selects model, fail gracefully if attempted |
 
@@ -509,13 +509,7 @@ POST /api/v1/issues/{id}/fix                   Defaults to org's default_agent_t
 
 ## Docker Image Update
 
-The sandbox base image (`143-agent:latest`) must include the Codex CLI. Add to the agent Dockerfile:
-
-```dockerfile
-RUN npm install -g @openai/codex
-```
-
-This is a prerequisite for running the Codex adapter but can be done independently of all other changes.
+The sandbox base image (`143-sandbox:latest`) must include the Codex CLI. This is now handled by `sandbox/Dockerfile` and `sandbox/install-agents.sh`, which installs all three agent CLIs (Claude Code, Codex, Gemini) at pinned versions from `sandbox/versions.json`.
 
 ## Implementation Phases
 

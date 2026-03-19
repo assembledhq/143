@@ -645,7 +645,7 @@ func TestDefaultSandboxConfig(t *testing.T) {
 	t.Parallel()
 
 	cfg := agent.DefaultSandboxConfig()
-	require.Equal(t, "143-agent:latest", cfg.Image, "default image should be '143-agent:latest'")
+	require.Equal(t, "143-sandbox:latest", cfg.Image, "default image should be '143-sandbox:latest'")
 	require.Equal(t, float64(2), cfg.CPULimit, "default CPU limit should be 2")
 	require.Equal(t, 4096, cfg.MemoryLimitMB, "default memory limit should be 4096 MB")
 	require.Equal(t, "/workspace", cfg.WorkDir, "default work dir should be '/workspace'")

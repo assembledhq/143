@@ -160,7 +160,7 @@ type SandboxConfig struct {
 // DefaultSandboxConfig returns a SandboxConfig populated with sensible defaults.
 func DefaultSandboxConfig() SandboxConfig {
 	return SandboxConfig{
-		Image:         "143-agent:latest",
+		Image:         "143-sandbox:latest",
 		CPULimit:      2,
 		MemoryLimitMB: 4096,
 		Timeout:       5 * time.Minute,
