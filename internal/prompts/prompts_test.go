@@ -111,21 +111,15 @@ func TestReviewCommentPrompt(t *testing.T) {
 	assert.Contains(t, result, "</generalizability_criteria>")
 }
 
-func TestAgentSystemPromptBase(t *testing.T) {
+func TestCodingTaskPreamble(t *testing.T) {
 	t.Parallel()
 
-	result := AgentSystemPromptBase()
+	result := CodingTaskPreamble()
 	assert.NotEmpty(t, result)
-	assert.Contains(t, result, "<instructions>")
-	assert.Contains(t, result, "</instructions>")
-	assert.Contains(t, result, "<approach>")
-	assert.Contains(t, result, "UNDERSTAND the issue")
-	assert.Contains(t, result, "KEEP CHANGES MINIMAL")
-	assert.Contains(t, result, "</approach>")
-	assert.Contains(t, result, "<testing_requirements>")
-	assert.Contains(t, result, "</testing_requirements>")
-	assert.Contains(t, result, "<response_format>")
-	assert.Contains(t, result, "</response_format>")
+	assert.Contains(t, result, "untrusted external content")
+	assert.Contains(t, result, "confidence_score")
+	assert.Contains(t, result, "confidence_reasoning")
+	assert.Contains(t, result, "risk_factors")
 }
 
 func TestProjectGeneratePrompt(t *testing.T) {

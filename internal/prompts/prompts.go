@@ -78,9 +78,10 @@ func ReviewCommentPrompt() string {
 
 // ─── Agent ───────────────────────────────────────────────────────────────────
 
-// AgentSystemPromptBase returns the base system prompt for coding agents.
-func AgentSystemPromptBase() string {
-	return render("agent_system_prompt_base.template", nil)
+// CodingTaskPreamble returns the preamble injected into coding agent system prompts
+// when a PM agent assigns a task to a coding agent.
+func CodingTaskPreamble() string {
+	return render("coding_task_preamble.template", nil)
 }
 
 // ─── Slack ────────────────────────────────────────────────────────────────────
