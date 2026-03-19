@@ -47,7 +47,7 @@ func TestClaudeCodeAdapter_PreparePrompt(t *testing.T) {
 		{
 			name: "low token mode",
 			input: &agent.AgentInput{
-				Issue:     &models.Issue{Title: "Bug", Source: "sentry"},
+				Issue:     &models.Issue{Title: "Bug", Source: models.IssueSourceSentry},
 				TokenMode: "low",
 			},
 			wantToken: lowTokenMax,
@@ -55,7 +55,7 @@ func TestClaudeCodeAdapter_PreparePrompt(t *testing.T) {
 		{
 			name: "high token mode",
 			input: &agent.AgentInput{
-				Issue:     &models.Issue{Title: "Bug", Source: "sentry"},
+				Issue:     &models.Issue{Title: "Bug", Source: models.IssueSourceSentry},
 				TokenMode: "high",
 			},
 			wantToken: highTokenMax,
@@ -509,6 +509,22 @@ func TestBuildSystemPrompt_Minimal(t *testing.T) {
 	require.NotContains(t, prompt, "Repository Conventions")
 }
 
+func TestBuildSystemPrompt_ManualSessionSkipsBaseTemplate(t *testing.T) {
+	t.Parallel()
+
+	input := &agent.AgentInput{
+		Issue:       &models.Issue{Title: "help me refactor", Source: models.IssueSourceManual},
+		ContextDocs: []string{"Use Go 1.22"},
+	}
+
+	prompt := buildSystemPrompt(input)
+	require.NotContains(t, prompt, "coding agent tasked with fixing a bug", "manual sessions should not include bug-fixing template")
+	require.NotContains(t, prompt, "testing_requirements", "manual sessions should not include testing requirements")
+	require.NotContains(t, prompt, "confidence_score", "manual sessions should not include confidence format")
+	require.Contains(t, prompt, "Repository Conventions", "manual sessions should still include repo conventions")
+	require.Contains(t, prompt, "Use Go 1.22")
+}
+
 // ---------------------------------------------------------------------------
 // buildUserPrompt
 // ---------------------------------------------------------------------------
@@ -528,6 +544,7 @@ func TestBuildUserPrompt(t *testing.T) {
 			input: &agent.AgentInput{
 				Issue: &models.Issue{
 					Title:       "Billing crash",
+					Source:      models.IssueSourceSentry,
 					Description: &desc,
 				},
 			},
@@ -538,7 +555,7 @@ func TestBuildUserPrompt(t *testing.T) {
 			input: &agent.AgentInput{
 				Issue: &models.Issue{
 					Title:  "NullPointer",
-					Source: "sentry",
+					Source: models.IssueSourceSentry,
 					RawData: json.RawMessage(`{
 						"entries": [{
 							"type": "exception",
@@ -566,6 +583,7 @@ func TestBuildUserPrompt(t *testing.T) {
 			input: &agent.AgentInput{
 				Issue: &models.Issue{
 					Title:                 "Error",
+					Source:                models.IssueSourceSentry,
 					OccurrenceCount:       150,
 					AffectedCustomerCount: 25,
 				},
@@ -577,6 +595,7 @@ func TestBuildUserPrompt(t *testing.T) {
 			input: &agent.AgentInput{
 				Issue: &models.Issue{
 					Title:    "Error",
+					Source:   models.IssueSourceSentry,
 					Severity: "critical",
 				},
 			},
@@ -585,7 +604,7 @@ func TestBuildUserPrompt(t *testing.T) {
 		{
 			name: "complexity estimate",
 			input: &agent.AgentInput{
-				Issue: &models.Issue{Title: "Error"},
+				Issue: &models.Issue{Title: "Error", Source: models.IssueSourceLinear},
 				ComplexityEstimate: &agent.ComplexityEstimate{
 					Tier:      2,
 					Reasoning: "Multiple files affected",
@@ -606,6 +625,26 @@ func TestBuildUserPrompt(t *testing.T) {
 	}
 }
 
+func TestBuildUserPrompt_ManualSessionReturnsRawMessage(t *testing.T) {
+	t.Parallel()
+
+	msg := "help me improve the margins in the session"
+	input := &agent.AgentInput{
+		Issue: &models.Issue{
+			Title:       "help me improve the margins",
+			Source:      models.IssueSourceManual,
+			Description: &msg,
+		},
+	}
+
+	prompt := buildUserPrompt(input)
+	require.Equal(t, msg, prompt, "manual session should return raw user message")
+	require.NotContains(t, prompt, "## Issue:")
+	require.NotContains(t, prompt, "### Description")
+	require.NotContains(t, prompt, "Customer Impact")
+	require.NotContains(t, prompt, "Severity")
+}
+
 // ---------------------------------------------------------------------------
 // extractFileHints
 // ---------------------------------------------------------------------------
@@ -622,14 +661,14 @@ func TestExtractFileHints(t *testing.T) {
 		{
 			name: "non-sentry source returns nil",
 			input: &agent.AgentInput{
-				Issue: &models.Issue{Title: "Bug", Source: "linear"},
+				Issue: &models.Issue{Title: "Bug", Source: models.IssueSourceLinear},
 			},
 			wantNil: true,
 		},
 		{
 			name: "empty raw data returns nil",
 			input: &agent.AgentInput{
-				Issue: &models.Issue{Title: "Bug", Source: "sentry", RawData: nil},
+				Issue: &models.Issue{Title: "Bug", Source: models.IssueSourceSentry, RawData: nil},
 			},
 			wantNil: true,
 		},
@@ -638,7 +677,7 @@ func TestExtractFileHints(t *testing.T) {
 			input: &agent.AgentInput{
 				Issue: &models.Issue{
 					Title:  "Bug",
-					Source: "sentry",
+					Source: models.IssueSourceSentry,
 					RawData: json.RawMessage(`{
 						"entries": [{
 							"type": "exception",
@@ -663,7 +702,7 @@ func TestExtractFileHints(t *testing.T) {
 			input: &agent.AgentInput{
 				Issue: &models.Issue{
 					Title:  "Bug",
-					Source: "sentry",
+					Source: models.IssueSourceSentry,
 					RawData: json.RawMessage(`{
 						"entries": [{
 							"type": "exception",
@@ -690,7 +729,7 @@ func TestExtractFileHints(t *testing.T) {
 			input: &agent.AgentInput{
 				Issue: &models.Issue{
 					Title:  "Bug",
-					Source: "sentry",
+					Source: models.IssueSourceSentry,
 					RawData: json.RawMessage(`{
 						"entries": [{
 							"type": "exception",
@@ -715,7 +754,7 @@ func TestExtractFileHints(t *testing.T) {
 			input: &agent.AgentInput{
 				Issue: &models.Issue{
 					Title:  "Bug",
-					Source: "sentry",
+					Source: models.IssueSourceSentry,
 					RawData: json.RawMessage(`{
 						"entries": [{
 							"type": "breadcrumbs",
@@ -737,7 +776,7 @@ func TestExtractFileHints(t *testing.T) {
 			input: &agent.AgentInput{
 				Issue: &models.Issue{
 					Title:   "Bug",
-					Source:  "sentry",
+					Source:  models.IssueSourceSentry,
 					RawData: json.RawMessage(`{not valid json`),
 				},
 			},
@@ -748,7 +787,7 @@ func TestExtractFileHints(t *testing.T) {
 			input: &agent.AgentInput{
 				Issue: &models.Issue{
 					Title:  "Bug",
-					Source: "sentry",
+					Source: models.IssueSourceSentry,
 					RawData: json.RawMessage(`{
 						"entries": [{
 							"type": "exception",
@@ -772,7 +811,7 @@ func TestExtractFileHints(t *testing.T) {
 			input: &agent.AgentInput{
 				Issue: &models.Issue{
 					Title:  "Bug",
-					Source: "sentry",
+					Source: models.IssueSourceSentry,
 					RawData: json.RawMessage(`{
 						"entries": [{
 							"type": "exception",

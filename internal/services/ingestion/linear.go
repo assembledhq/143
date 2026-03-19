@@ -86,7 +86,7 @@ func (a *LinearAdapter) ParseWebhook(integrationID uuid.UUID, payload json.RawMe
 
 	return &NormalizedIssue{
 		ExternalID:          issue.ID,
-		Source:              "linear",
+		Source:              models.IssueSourceLinear,
 		SourceIntegrationID: integrationID,
 		Title:               title,
 		Description:         issue.Description,

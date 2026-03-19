@@ -852,7 +852,7 @@ func buildLabels(issue *models.Issue) []string {
 		labels = append(labels, "severity:"+issue.Severity)
 	}
 	if issue.Source != "" {
-		labels = append(labels, "source:"+issue.Source)
+		labels = append(labels, "source:"+string(issue.Source))
 	}
 	return labels
 }

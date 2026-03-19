@@ -100,7 +100,7 @@ func TestSummarizeIssue(t *testing.T) {
 	longDescription := strings.Repeat("x", 600)
 	issue := models.Issue{
 		ID:                    uuid.New(),
-		Source:                "sentry",
+		Source:                models.IssueSourceSentry,
 		Title:                 "nil pointer panic",
 		Description:           &longDescription,
 		Severity:              "critical",

@@ -106,7 +106,7 @@ func (a *SentryAdapter) ParseWebhook(integrationID uuid.UUID, payload json.RawMe
 
 	return &NormalizedIssue{
 		ExternalID:            issue.ID,
-		Source:                "sentry",
+		Source:                models.IssueSourceSentry,
 		SourceIntegrationID:   integrationID,
 		Title:                 issue.Title,
 		Description:           description,

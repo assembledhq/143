@@ -150,7 +150,7 @@ func (c *SentryAPIClient) normalizeIssue(integrationID uuid.UUID, issue SentryIs
 
 	return NormalizedIssue{
 		ExternalID:            issue.ID,
-		Source:                "sentry",
+		Source:                models.IssueSourceSentry,
 		SourceIntegrationID:   integrationID,
 		Title:                 issue.Title,
 		Description:           description,
