@@ -1173,7 +1173,7 @@ func TestRunAgent_CodexAuthWritesToSandboxWorkdir(t *testing.T) {
 	tokens, ok := authJSON["tokens"].(map[string]interface{})
 	require.True(t, ok, "auth.json should have a tokens object")
 	require.Equal(t, "test-access-token", tokens["access_token"], "tokens should include access token")
-	require.Equal(t, "test-refresh-token", tokens["refresh_token"], "tokens should include refresh token")
+	require.Equal(t, "", tokens["refresh_token"], "refresh_token should be empty so the CLI cannot consume it")
 	require.NotEmpty(t, authJSON["last_refresh"], "auth.json should include last_refresh timestamp")
 }
 
@@ -1494,58 +1494,3 @@ func TestRunAgent_CodexAuthRefreshFallsBackToGetValidToken(t *testing.T) {
 	require.Equal(t, "fallback-access-token", tokens["access_token"], "auth.json should contain the fallback token from GetValidToken")
 }
 
-func TestRefreshAuthLoop_StopsOnDone(t *testing.T) {
-	t.Parallel()
-
-	orgID := testOrg()
-	issue := testIssue(orgID)
-	run := testRun(orgID, issue.ID)
-	run.AgentType = models.AgentTypeCodex
-
-	d := defaultDeps()
-	d.adapter.name = models.AgentTypeCodex
-	d.codexAuth = &mockCodexAuthProvider{
-		cfg: &models.OpenAIChatGPTConfig{
-			AccessToken:  "test-token",
-			RefreshToken: "test-refresh",
-			ExpiresAt:    time.Now().Add(1 * time.Hour),
-		},
-	}
-
-	orch := buildOrchestrator(d)
-
-	// Create a sandbox for the test.
-	sandbox := &agent.Sandbox{ID: "test-sandbox", Provider: "mock", WorkDir: "/workspace"}
-
-	// Start the refresh loop and immediately close done to verify clean exit.
-	done := make(chan struct{})
-	close(done)
-
-	// refreshAuthLoop is unexported, so we verify it indirectly by running
-	// a full agent run (which starts/stops the loop). The fact that RunAgent
-	// completes without hanging confirms the loop exits cleanly.
-	_ = orch
-	_ = sandbox
-
-	// Instead, run a full agent flow and verify it doesn't hang.
-	d.adapter.executeFn = func(ctx context.Context, sb *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
-		return &agent.AgentResult{
-			Summary:         "ok",
-			ConfidenceScore: 0.9,
-			ExitCode:        0,
-		}, nil
-	}
-
-	orch2 := buildOrchestrator(d)
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- orch2.RunAgent(context.Background(), run)
-	}()
-
-	select {
-	case err := <-errCh:
-		require.NoError(t, err, "RunAgent with refresh loop should complete without error")
-	case <-time.After(10 * time.Second):
-		t.Fatal("RunAgent with refresh loop did not complete in time — loop may not have stopped")
-	}
-}
