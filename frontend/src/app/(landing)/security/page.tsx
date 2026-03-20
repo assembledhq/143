@@ -82,7 +82,7 @@ export default function SecurityPage() {
         <ul className="list-disc pl-5 space-y-1.5">
           <li>
             <strong className="font-medium opacity-80">Acknowledgment:</strong>{" "}
-            within 5 business days
+            within 30 days
           </li>
           <li>
             <strong className="font-medium opacity-80">Investigation:</strong>{" "}

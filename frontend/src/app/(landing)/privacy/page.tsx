@@ -167,29 +167,39 @@ export default function PrivacyPage() {
         <ul className="list-disc pl-5 space-y-1.5">
           <li>
             <strong className="font-medium opacity-80">Account information</strong>{" "}
-            - retained while the account is active, plus 30 days after account
-            deletion to allow for recovery or dispute resolution
+            - retained while the account is active and for a reasonable period
+            after account closure to support recovery, dispute resolution, or
+            legal obligations
           </li>
           <li>
             <strong className="font-medium opacity-80">Authentication and session data</strong>{" "}
-            - session tokens expire according to platform defaults; login audit
-            records are retained for up to 12 months
+            - session tokens expire after 30 days; audit records (including
+            login events) are retained for a default of 90 days, configurable
+            by your Organization
           </li>
           <li>
             <strong className="font-medium opacity-80">Agent and workspace data</strong>{" "}
             - session messages, generated diffs, and logs are retained while the
-            workspace is active; temporary workspace snapshots are generally
-            purged within 30 days after a run completes
+            workspace is active; temporary workspace snapshots are cleaned up
+            shortly after a session becomes idle or completes; agent run logs
+            are retained for a default of 90 days
           </li>
           <li>
             <strong className="font-medium opacity-80">Technical and security data</strong>{" "}
             - IP addresses, request identifiers, and audit events are retained
-            for up to 12 months for security and compliance purposes
+            for a default of 90 days for security and compliance purposes,
+            configurable by your Organization
+          </li>
+          <li>
+            <strong className="font-medium opacity-80">Webhook data</strong>{" "}
+            - webhook payloads are retained for a default of 30 days before
+            being purged; metadata such as timestamps and delivery statuses may
+            be retained longer for analytics
           </li>
           <li>
             <strong className="font-medium opacity-80">Backups</strong>{" "}
-            - deleted data may persist in encrypted backups for up to 90 days
-            after deletion before being purged
+            - deleted data may persist in backups for a limited period after
+            deletion before being purged
           </li>
         </ul>
         <p>
