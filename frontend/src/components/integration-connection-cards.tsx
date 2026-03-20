@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import Image from "next/image";
 import { Button } from "@/components/ui/button";
@@ -98,15 +98,6 @@ function IntegrationAction({
 }) {
   const [confirmOpen, setConfirmOpen] = useState(false);
 
-  // Close the confirmation dialog when disconnect finishes
-  const prevDisconnecting = useRef(false);
-  useEffect(() => {
-    if (prevDisconnecting.current && !disconnecting) {
-      setConfirmOpen(false);
-    }
-    prevDisconnecting.current = !!disconnecting;
-  }, [disconnecting]);
-
   if (connected && onDisconnect) {
     return (
       <>
@@ -137,7 +128,10 @@ function IntegrationAction({
             <AlertDialogFooter>
               <AlertDialogCancel>Cancel</AlertDialogCancel>
               <AlertDialogAction
-                onClick={() => onDisconnect(integrationKey)}
+                onClick={() => {
+                  setConfirmOpen(false);
+                  onDisconnect(integrationKey);
+                }}
                 className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               >
                 Disconnect
