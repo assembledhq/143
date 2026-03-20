@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import Image from "next/image";
 import { Button } from "@/components/ui/button";
@@ -97,6 +97,15 @@ function IntegrationAction({
   loading?: boolean;
 }) {
   const [confirmOpen, setConfirmOpen] = useState(false);
+
+  // Close the confirmation dialog when disconnect finishes
+  const prevDisconnecting = useRef(false);
+  useEffect(() => {
+    if (prevDisconnecting.current && !disconnecting) {
+      setConfirmOpen(false);
+    }
+    prevDisconnecting.current = !!disconnecting;
+  }, [disconnecting]);
 
   if (connected && onDisconnect) {
     return (

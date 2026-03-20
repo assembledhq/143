@@ -162,7 +162,7 @@ export default function IntegrationsPage() {
         onConnectLinear={() => api.integrations.loginLinear()}
         onConnectSlack={() => api.integrations.loginSlack()}
         onDisconnect={(provider) => disconnectMutation.mutate(provider)}
-        disconnectingProvider={disconnectMutation.isPending ? (disconnectMutation.variables as typeof disconnectMutation.variables) : null}
+        disconnectingProvider={disconnectMutation.isPending ? disconnectMutation.variables : null}
         disconnectError={disconnectMutation.isError ? "Failed to disconnect." : null}
       />
       {slackIntegration && <SlackChannelPicker />}

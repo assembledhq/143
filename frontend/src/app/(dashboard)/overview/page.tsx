@@ -283,7 +283,7 @@ export default function Overview() {
             githubConnected={Boolean(githubIntegration)}
             onConnectGitHub={() => api.integrations.loginGitHub()}
             onDisconnect={(provider) => disconnectMutation.mutate(provider)}
-            disconnectingProvider={disconnectMutation.isPending ? (disconnectMutation.variables as typeof disconnectMutation.variables) : null}
+            disconnectingProvider={disconnectMutation.isPending ? disconnectMutation.variables : null}
             disconnectError={disconnectMutation.isError ? "Failed to disconnect." : null}
           />
           <AdditionalIntegrationCards
@@ -295,7 +295,7 @@ export default function Overview() {
             onConnectLinear={() => api.integrations.loginLinear()}
             onConnectSlack={() => api.integrations.loginSlack()}
             onDisconnect={(provider) => disconnectMutation.mutate(provider)}
-            disconnectingProvider={disconnectMutation.isPending ? (disconnectMutation.variables as typeof disconnectMutation.variables) : null}
+            disconnectingProvider={disconnectMutation.isPending ? disconnectMutation.variables : null}
             disconnectError={disconnectMutation.isError ? "Failed to disconnect." : null}
           />
         </div>
