@@ -139,9 +139,39 @@ export interface Validation {
   updated_at: string;
 }
 
+export type ThreadStatus = 'pending' | 'running' | 'idle' | 'awaiting_input' | 'completed' | 'failed' | 'cancelled';
+
+export interface SessionThread {
+  id: string;
+  session_id: string;
+  org_id: string;
+  agent_type: string;
+  model_override?: string;
+  label: string;
+  instructions?: string;
+  file_scope?: string[];
+  status: ThreadStatus;
+  agent_session_id?: string;
+  current_turn: number;
+  last_activity_at?: string;
+  confidence_score?: number;
+  result_summary?: string;
+  diff?: string;
+  failure_explanation?: string;
+  failure_category?: string;
+  started_at?: string;
+  completed_at?: string;
+  created_at: string;
+}
+
+export interface SessionDetail extends Session {
+  threads: SessionThread[];
+}
+
 export interface SessionLog {
   id: number;
   session_id: string;
+  thread_id?: string;
   level: string;
   message: string;
   metadata: Record<string, unknown> | null;
@@ -153,6 +183,7 @@ export interface SessionMessage {
   id: number;
   session_id: string;
   org_id: string;
+  thread_id?: string;
   user_id?: string;
   turn_number: number;
   role: 'user' | 'assistant';

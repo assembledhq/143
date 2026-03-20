@@ -18,17 +18,18 @@ func NewSessionMessageStore(db DBTX) *SessionMessageStore {
 	return &SessionMessageStore{db: db}
 }
 
-const sessionMessageSelectColumns = `id, session_id, org_id, user_id, turn_number, role, content, attachments, token_usage, created_at`
+const sessionMessageSelectColumns = `id, session_id, org_id, thread_id, user_id, turn_number, role, content, attachments, token_usage, created_at`
 
 func (s *SessionMessageStore) Create(ctx context.Context, msg *models.SessionMessage) error {
 	query := `
-		INSERT INTO session_messages (session_id, org_id, user_id, turn_number, role, content, attachments, token_usage)
-		VALUES (@session_id, @org_id, @user_id, @turn_number, @role, @content, @attachments, @token_usage)
+		INSERT INTO session_messages (session_id, org_id, thread_id, user_id, turn_number, role, content, attachments, token_usage)
+		VALUES (@session_id, @org_id, @thread_id, @user_id, @turn_number, @role, @content, @attachments, @token_usage)
 		RETURNING id, created_at`
 
 	args := pgx.NamedArgs{
 		"session_id":  msg.SessionID,
 		"org_id":      msg.OrgID,
+		"thread_id":   msg.ThreadID,
 		"user_id":     msg.UserID,
 		"turn_number": msg.TurnNumber,
 		"role":        msg.Role,
@@ -54,6 +55,23 @@ func (s *SessionMessageStore) ListBySession(ctx context.Context, orgID, sessionI
 	})
 	if err != nil {
 		return nil, fmt.Errorf("query session messages: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionMessage])
+}
+
+func (s *SessionMessageStore) ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionMessage, error) {
+	query := `
+		SELECT ` + sessionMessageSelectColumns + `
+		FROM session_messages
+		WHERE org_id = @org_id AND thread_id = @thread_id
+		ORDER BY turn_number ASC, id ASC`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":    orgID,
+		"thread_id": threadID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query thread messages: %w", err)
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionMessage])
 }

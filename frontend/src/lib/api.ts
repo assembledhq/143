@@ -179,7 +179,7 @@ export const api = {
       const qs = searchParams.toString();
       return get<import('./types').ListResponse<import('./types').Session>>(`/api/v1/sessions${qs ? `?${qs}` : ''}`);
     },
-    get: (id: string) => get<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${id}`),
+    get: (id: string) => get<import('./types').SingleResponse<import('./types').SessionDetail>>(`/api/v1/sessions/${id}`),
     getLogs: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/logs`),
     getValidation: (sessionId: string) => get<import('./types').SingleResponse<import('./types').Validation>>(`/api/v1/sessions/${sessionId}/validation`),
     getPR: (sessionId: string) => get<import('./types').SingleResponse<import('./types').PullRequest>>(`/api/v1/sessions/${sessionId}/pr`),
@@ -194,6 +194,21 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/messages`, { message, images }),
     endSession: (sessionId: string) =>
       post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${sessionId}/end`),
+    // Thread endpoints
+    listThreads: (sessionId: string) =>
+      get<import('./types').ListResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads`),
+    getThread: (sessionId: string, threadId: string) =>
+      get<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads/${threadId}`),
+    createThread: (sessionId: string, body: { agent_type?: string; model?: string; label: string; instructions?: string; file_scope?: string[] }) =>
+      post<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads`, body),
+    sendThreadMessage: (sessionId: string, threadId: string, message: string, images?: string[]) =>
+      post<import('./types').SingleResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/messages`, { message, images }),
+    endThread: (sessionId: string, threadId: string) =>
+      post<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/end`),
+    getThreadMessages: (sessionId: string, threadId: string) =>
+      get<import('./types').ListResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/messages`),
+    getThreadLogs: (sessionId: string, threadId: string) =>
+      get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/logs`),
   },
   settings: {
     get: () => get<import('./types').SingleResponse<import('./types').Organization>>('/api/v1/settings'),
