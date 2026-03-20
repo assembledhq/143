@@ -67,26 +67,31 @@ following tiers:
 
 | Tier | CVSS Range | Description | Target Remediation |
 |------|-----------|-------------|-------------------|
-| **Critical** | 9.0 – 10.0 | Sandbox escape, RCE, credential exfiltration, cross-org data access | 7 days |
-| **High** | 7.0 – 8.9 | Privilege escalation, auth bypass, prompt injection with demonstrated impact | 30 days |
-| **Medium** | 4.0 – 6.9 | Information disclosure, CSRF, limited-scope injection | 60 days |
-| **Low** | 0.1 – 3.9 | Minor information leaks, best-practice deviations | 90 days |
+| **Critical** | 9.0 – 10.0 | Sandbox escape, RCE, credential exfiltration, cross-org data access | 90 days |
+| **High** | 7.0 – 8.9 | Privilege escalation, auth bypass, prompt injection with demonstrated impact | 120 days |
+| **Medium** | 4.0 – 6.9 | Information disclosure, CSRF, limited-scope injection | 180 days |
+| **Low** | 0.1 – 3.9 | Minor information leaks, best-practice deviations | 365 days |
 
-These targets are goals, not guarantees. Actual timelines may vary based on
-complexity, dependency constraints, and coordinated disclosure requirements.
+143 is maintained by a small team. These targets are best-effort goals, not
+guarantees. We will prioritize based on severity and exploitability, but actual
+timelines may vary based on complexity, contributor availability, dependency
+constraints, and coordinated disclosure requirements. We may publish
+mitigations or workarounds while a full fix is in progress.
 
 ## Response Process
 
 | Step | Target |
 |------|--------|
-| **Acknowledge receipt** | 2 business days |
-| **Initial triage and severity assessment** | 7 calendar days |
-| **Investigation complete; remediation plan shared with reporter** | 14 calendar days |
-| **Remediation deployed (hosted) / patch released (open source)** | Per severity tier above (max 90 calendar days) |
-| **Public advisory published** | Within 7 days of fix availability |
+| **Acknowledge receipt** | 14 calendar days |
+| **Initial triage and severity assessment** | 30 calendar days |
+| **Investigation complete; remediation plan shared with reporter** | 60 calendar days |
+| **Remediation deployed (hosted) / patch released (open source)** | Per severity tier above |
+| **Public advisory published** | Within 30 days of fix availability |
 
-If we cannot meet a target, we will communicate the revised timeline to the
-reporter and explain the delay.
+143 is maintained by a small team alongside other responsibilities. We will do
+our best to meet these targets but cannot guarantee them. If we cannot meet a
+target, we will communicate the revised timeline to the reporter and explain
+the delay.
 
 ## Coordinated Disclosure
 
@@ -97,13 +102,13 @@ We practice coordinated disclosure:
 2. **After remediation**: We publish a GitHub Security Advisory (GHSA), request
    a CVE identifier where appropriate, and release a patched version.
 3. **Reporter publication**: Reporters may publish their findings **after** the
-   public advisory is issued or **90 days after the initial report**, whichever
+   public advisory is issued or **180 days after the initial report**, whichever
    comes first, regardless of fix status.
 4. **Self-hosted notification**: Security advisories are published via GitHub's
    advisory system. Self-hosted operators should watch this repository or
    subscribe to advisory notifications.
 
-We will not request indefinite embargo. If we are unable to remediate within 90
+We will not request indefinite embargo. If we are unable to remediate within 180
 days, we will work with the reporter on a disclosure timeline that balances user
 safety with transparency.
 
