@@ -35,7 +35,7 @@ const sessionSelectColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-00
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
-	sandbox_state, snapshot_key, target_branch, created_at`
+	sandbox_state, snapshot_key, target_branch, working_branch, created_at`
 
 func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters SessionFilters) ([]models.Session, error) {
 	args := pgx.NamedArgs{"org_id": orgID}
@@ -361,6 +361,17 @@ func (s *SessionStore) UpdateSandboxState(ctx context.Context, orgID, sessionID 
 		"id":            sessionID,
 		"org_id":        orgID,
 		"sandbox_state": state,
+	})
+	return err
+}
+
+// UpdateWorkingBranch sets the working branch name for a session.
+func (s *SessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessionID uuid.UUID, branch string) error {
+	query := `UPDATE sessions SET working_branch = @working_branch WHERE id = @id AND org_id = @org_id`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":              sessionID,
+		"org_id":          orgID,
+		"working_branch":  branch,
 	})
 	return err
 }

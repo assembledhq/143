@@ -50,7 +50,7 @@ var sessionColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
-	"target_branch", "created_at",
+	"target_branch", "working_branch", "created_at",
 }
 
 func TestSessionHandler_List(t *testing.T) {
@@ -83,6 +83,7 @@ func TestSessionHandler_List(t *testing.T) {
 							nil, // triggered_by_user_id
 							nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 							nil, // target_branch
+							nil, // working_branch
 							now,
 						),
 					)
@@ -160,6 +161,7 @@ func TestSessionHandler_List_WithRepositoryID(t *testing.T) {
 				nil, // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 				nil, // target_branch
+				nil, // working_branch
 				now,
 			),
 		)
@@ -248,6 +250,7 @@ func TestSessionHandler_List_CommaSeparatedStatuses(t *testing.T) {
 				nil, // triggered_by_user_id
 				nil, 0, nil, "none", nil,
 				nil, // target_branch
+				nil, // working_branch
 				now,
 			),
 		)
@@ -299,6 +302,7 @@ func TestSessionHandler_Get(t *testing.T) {
 							nil, // triggered_by_user_id
 							nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 							nil, // target_branch
+							nil, // working_branch
 							now,
 						),
 					)
@@ -1007,6 +1011,7 @@ func TestSessionHandler_GetLogs_Success(t *testing.T) {
 				nil, // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 				nil, // target_branch
+				nil, // working_branch
 				now,
 			),
 		)
@@ -1089,6 +1094,7 @@ func TestSessionHandler_GetLogs_EmptyLogs(t *testing.T) {
 				nil, // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 				nil, // target_branch
+				nil, // working_branch
 				now,
 			),
 		)
@@ -1144,6 +1150,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil, // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 				nil, // target_branch
+				nil, // working_branch
 				now,
 			),
 		)
@@ -1163,6 +1170,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil, // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 				nil, // target_branch
+				nil, // working_branch
 				now,
 			),
 		)
@@ -1417,6 +1425,7 @@ func TestSessionHandler_EndSession_EnqueuesValidation(t *testing.T) {
 				nil, // triggered_by_user_id
 				nil, 1, &now, "snapshotted", stringPtr("snapshots/test.tar"),
 				nil, // target_branch
+				nil, // working_branch
 				now,
 			),
 		)
@@ -1591,6 +1600,7 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							nil, // triggered_by_user_id
 							nil, 1, &now, "snapshotted", nil,
 							nil, // target_branch
+							nil, // working_branch
 							now,
 						),
 					)
@@ -1625,6 +1635,7 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							nil, // triggered_by_user_id
 							nil, 0, nil, "none", nil,
 							nil, // target_branch
+							nil, // working_branch
 							now,
 						),
 					)
@@ -1701,6 +1712,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // triggered_by_user_id
 							nil, 1, &now, "snapshotted", stringPtr("snapshots/test"),
 							nil, // target_branch
+							nil, // working_branch
 							now,
 						),
 					)
@@ -1748,6 +1760,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // triggered_by_user_id
 							nil, 0, nil, "none", nil,
 							nil, // target_branch
+							nil, // working_branch
 							now,
 						),
 					)
