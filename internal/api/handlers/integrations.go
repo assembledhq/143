@@ -247,20 +247,13 @@ func (h *IntegrationHandler) ListIntegrations(w http.ResponseWriter, r *http.Req
 // DisconnectIntegration sets the integration status to inactive for a given provider.
 func (h *IntegrationHandler) DisconnectIntegration(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
-	provider := chi.URLParam(r, "provider")
-
-	validProviders := map[string]bool{
-		string(models.IntegrationProviderGitHub): true,
-		string(models.IntegrationProviderSentry): true,
-		string(models.IntegrationProviderLinear): true,
-		string(models.IntegrationProviderSlack):  true,
-	}
-	if !validProviders[provider] {
+	provider := models.IntegrationProvider(chi.URLParam(r, "provider"))
+	if err := provider.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_PROVIDER", "invalid integration provider")
 		return
 	}
 
-	activeIntegrations, err := h.integrationStore.ListByOrgAndProvider(r.Context(), orgID, provider)
+	activeIntegrations, err := h.integrationStore.ListByOrgAndProvider(r.Context(), orgID, string(provider))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to look up integration")
 		return
@@ -270,9 +263,11 @@ func (h *IntegrationHandler) DisconnectIntegration(w http.ResponseWriter, r *htt
 		return
 	}
 
-	if err := h.integrationStore.UpdateStatus(r.Context(), orgID, activeIntegrations[0].ID, string(models.IntegrationStatusInactive)); err != nil {
-		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to disconnect integration")
-		return
+	for _, integration := range activeIntegrations {
+		if err := h.integrationStore.UpdateStatus(r.Context(), orgID, integration.ID, string(models.IntegrationStatusInactive)); err != nil {
+			writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to disconnect integration")
+			return
+		}
 	}
 
 	w.WriteHeader(http.StatusNoContent)

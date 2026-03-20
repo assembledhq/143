@@ -8,6 +8,8 @@ export function useDisconnectIntegration() {
     mutationFn: (provider: IntegrationKey) => api.integrations.disconnect(provider),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["integrations"] });
+      queryClient.invalidateQueries({ queryKey: ["repositories"] });
+      queryClient.invalidateQueries({ queryKey: ["slack-channels"] });
     },
   });
 }
