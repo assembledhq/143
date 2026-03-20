@@ -107,12 +107,13 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 	result := &agent.AgentResult{}
 	var stderr bytes.Buffer
 	var summaryParts []string
+	var lastOutput string
 
 	exitCode, err := provider.ExecStream(ctx, sandbox, cmd, func(line []byte) {
 		if len(bytes.TrimSpace(line)) == 0 {
 			return
 		}
-		parseCodexStreamLine(line, result, logCh, &summaryParts)
+		parseCodexStreamLine(line, result, logCh, &summaryParts, &lastOutput)
 	}, &stderr)
 	if err != nil {
 		return nil, fmt.Errorf("exec codex CLI: %w", err)
@@ -165,11 +166,26 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 	return result, nil
 }
 
+// isDuplicateOutput returns true if content matches the previous output and
+// should be suppressed. It tracks the last emitted content via lastOutput.
+func isDuplicateOutput(content string, lastOutput *string) bool {
+	if lastOutput != nil && content != "" && *lastOutput == content {
+		return true
+	}
+	if lastOutput != nil && content != "" {
+		*lastOutput = content
+	}
+	return false
+}
+
 // parseCodexStreamLine processes a single line of Codex streaming output.
-func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- agent.LogEntry, summaryParts *[]string) {
+func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- agent.LogEntry, summaryParts *[]string, lastOutput *string) {
 	var event codexStreamEvent
 	if err := json.Unmarshal(line, &event); err != nil {
 		text := string(line)
+		if isDuplicateOutput(text, lastOutput) {
+			return
+		}
 		logCh <- agent.LogEntry{
 			Timestamp: time.Now(),
 			Level:     "output",
@@ -184,12 +200,14 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 	if event.Type == "" {
 		var legacy codexJSONOutput
 		if err := json.Unmarshal(line, &legacy); err == nil && legacy.Response != "" {
-			logCh <- agent.LogEntry{
-				Timestamp: time.Now(),
-				Level:     "output",
-				Message:   legacy.Response,
+			if !isDuplicateOutput(legacy.Response, lastOutput) {
+				logCh <- agent.LogEntry{
+					Timestamp: time.Now(),
+					Level:     "output",
+					Message:   legacy.Response,
+				}
+				*summaryParts = append(*summaryParts, legacy.Response)
 			}
-			*summaryParts = append(*summaryParts, legacy.Response)
 			tryExtractConfidence(legacy.Response, result)
 			if legacy.Stats != nil {
 				result.TokenUsage = agent.TokenUsage{
@@ -206,6 +224,9 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 		content := event.Content
 		if content == "" {
 			content = event.Message
+		}
+		if isDuplicateOutput(content, lastOutput) {
+			return
 		}
 		logCh <- agent.LogEntry{
 			Timestamp: time.Now(),
@@ -319,6 +340,9 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 			case "agent_message":
 				text := event.Item.Text
 				if text != "" {
+					if isDuplicateOutput(text, lastOutput) {
+						return
+					}
 					logCh <- agent.LogEntry{
 						Timestamp: time.Now(),
 						Level:     "output",

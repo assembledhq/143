@@ -31,6 +31,7 @@ type GitHubTokenProvider interface {
 // CodexAuthProvider abstracts retrieving valid ChatGPT OAuth tokens for Codex.
 type CodexAuthProvider interface {
 	GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAIChatGPTConfig, error)
+	RefreshToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAIChatGPTConfig, error)
 }
 
 // CredentialProvider abstracts retrieving org-scoped provider credentials.
@@ -376,10 +377,28 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		o.streamLogs(ctx, run.ID, run.OrgID, run.CurrentTurn, logCh)
 	}()
 
+	// Start background token re-injection for Codex agents.
+	var refreshDone chan struct{}
+	var refreshWg sync.WaitGroup
+	if run.AgentType == models.AgentTypeCodex && o.codexAuth != nil {
+		refreshDone = make(chan struct{})
+		refreshWg.Add(1)
+		go func() {
+			defer refreshWg.Done()
+			o.refreshAuthLoop(ctx, run.OrgID, sandbox, refreshDone)
+		}()
+	}
+
 	execCtx := WithSandboxProvider(ctx, o.provider)
 	result, err := adapter.Execute(execCtx, sandbox, prompt, logCh)
 	close(logCh)
 	logWg.Wait()
+
+	// Stop background token refresh.
+	if refreshDone != nil {
+		close(refreshDone)
+		refreshWg.Wait()
+	}
 
 	// 11. Handle result.
 	if err != nil {
@@ -634,10 +653,28 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		o.streamLogs(ctx, session.ID, session.OrgID, turnNumber, logCh)
 	}()
 
+	// Start background token re-injection for Codex agents.
+	var refreshDone chan struct{}
+	var refreshWg sync.WaitGroup
+	if session.AgentType == models.AgentTypeCodex && o.codexAuth != nil {
+		refreshDone = make(chan struct{})
+		refreshWg.Add(1)
+		go func() {
+			defer refreshWg.Done()
+			o.refreshAuthLoop(ctx, session.OrgID, sandbox, refreshDone)
+		}()
+	}
+
 	execCtx := WithSandboxProvider(ctx, o.provider)
 	result, err := adapter.Execute(execCtx, sandbox, prompt, logCh)
 	close(logCh)
 	logWg.Wait()
+
+	// Stop background token refresh.
+	if refreshDone != nil {
+		close(refreshDone)
+		refreshWg.Wait()
+	}
 
 	if err != nil {
 		o.failRun(ctx, session, err.Error())
@@ -952,9 +989,16 @@ func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, san
 		return false, nil
 	}
 
-	cfg, err := o.codexAuth.GetValidToken(ctx, orgID)
+	// Force-refresh the token to ensure a fresh access_token is injected
+	// into the sandbox. If the refresh fails (e.g. token already consumed),
+	// fall back to GetValidToken which returns any cached valid token.
+	cfg, err := o.codexAuth.RefreshToken(ctx, orgID)
 	if err != nil {
-		return false, fmt.Errorf("get codex auth token: %w", err)
+		o.logger.Debug().Err(err).Str("org_id", orgID.String()).Msg("forced token refresh failed, falling back to GetValidToken")
+		cfg, err = o.codexAuth.GetValidToken(ctx, orgID)
+		if err != nil {
+			return false, fmt.Errorf("get codex auth token: %w", err)
+		}
 	}
 	if cfg == nil {
 		// No OAuth token — not an error, agent will use API key.
@@ -1009,6 +1053,59 @@ func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, san
 		Msg("injected codex auth.json and config.toml into sandbox")
 
 	return true, nil
+}
+
+// refreshAuthLoop periodically re-injects a fresh Codex auth.json into the
+// sandbox. This prevents token expiry during long-running agent sessions by
+// refreshing the token every 4 minutes (under the 5-minute refresh window).
+// The loop stops when the done channel is closed or the context is cancelled.
+// All errors are logged and continued — transient failures must not kill the loop.
+func (o *Orchestrator) refreshAuthLoop(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, done <-chan struct{}) {
+	ticker := time.NewTicker(4 * time.Minute)
+	defer ticker.Stop()
+
+	authDir := path.Join(sandbox.WorkDir, ".codex")
+	authPath := authDir + "/auth.json"
+
+	for {
+		select {
+		case <-done:
+			return
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cfg, err := o.codexAuth.GetValidToken(ctx, orgID)
+			if err != nil {
+				o.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("background token refresh: GetValidToken failed")
+				continue
+			}
+			if cfg == nil {
+				o.logger.Warn().Str("org_id", orgID.String()).Msg("background token refresh: no token available")
+				continue
+			}
+
+			authJSON, err := json.Marshal(map[string]interface{}{
+				"auth_mode": "chatgpt",
+				"tokens": map[string]string{
+					"access_token":  cfg.AccessToken,
+					"refresh_token": cfg.RefreshToken,
+					"id_token":      cfg.IDToken,
+				},
+				"last_refresh": cfg.ExpiresAt.Add(-30 * 24 * time.Hour).Format(time.RFC3339),
+			})
+			if err != nil {
+				o.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("background token refresh: marshal failed")
+				continue
+			}
+
+			if err := o.provider.WriteFile(ctx, sandbox, authPath, authJSON); err != nil {
+				o.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("background token refresh: write auth.json failed")
+				continue
+			}
+
+			o.logger.Debug().Str("org_id", orgID.String()).Msg("background token refresh: auth.json updated")
+		}
+	}
 }
 
 // buildIntegrationSkills generates a CLI skills doc from the org's integration
