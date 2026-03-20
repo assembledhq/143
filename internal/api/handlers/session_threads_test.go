@@ -1,0 +1,1059 @@
+package handlers
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/thread"
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/require"
+)
+
+// --- Mock stores implementing the thread service interfaces ---
+
+type mockThreadStore struct {
+	createFn       func(ctx context.Context, t *models.SessionThread, max int) error
+	getByIDFn      func(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
+	listBySessionFn func(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error)
+	claimIdleFn    func(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
+	updateStatusFn func(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
+}
+
+func (m *mockThreadStore) Create(ctx context.Context, t *models.SessionThread, max int) error {
+	if m.createFn != nil {
+		return m.createFn(ctx, t, max)
+	}
+	return nil
+}
+
+func (m *mockThreadStore) GetByID(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error) {
+	if m.getByIDFn != nil {
+		return m.getByIDFn(ctx, orgID, threadID)
+	}
+	return models.SessionThread{}, fmt.Errorf("not found")
+}
+
+func (m *mockThreadStore) ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error) {
+	if m.listBySessionFn != nil {
+		return m.listBySessionFn(ctx, orgID, sessionID)
+	}
+	return nil, nil
+}
+
+func (m *mockThreadStore) ClaimIdle(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error) {
+	if m.claimIdleFn != nil {
+		return m.claimIdleFn(ctx, orgID, threadID)
+	}
+	return models.SessionThread{}, fmt.Errorf("not idle")
+}
+
+func (m *mockThreadStore) UpdateStatus(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error {
+	if m.updateStatusFn != nil {
+		return m.updateStatusFn(ctx, orgID, threadID, status)
+	}
+	return nil
+}
+
+type mockSessionStoreForThread struct {
+	getByIDFn func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
+}
+
+func (m *mockSessionStoreForThread) GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
+	if m.getByIDFn != nil {
+		return m.getByIDFn(ctx, orgID, sessionID)
+	}
+	return models.Session{}, fmt.Errorf("not found")
+}
+
+type mockMessageStore struct {
+	createFn       func(ctx context.Context, msg *models.SessionMessage) error
+	listByThreadFn func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionMessage, error)
+}
+
+func (m *mockMessageStore) Create(ctx context.Context, msg *models.SessionMessage) error {
+	if m.createFn != nil {
+		return m.createFn(ctx, msg)
+	}
+	return nil
+}
+
+func (m *mockMessageStore) ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionMessage, error) {
+	if m.listByThreadFn != nil {
+		return m.listByThreadFn(ctx, orgID, threadID)
+	}
+	return nil, nil
+}
+
+type mockLogStore struct {
+	listByThreadFn func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error)
+}
+
+func (m *mockLogStore) ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error) {
+	if m.listByThreadFn != nil {
+		return m.listByThreadFn(ctx, orgID, threadID)
+	}
+	return nil, nil
+}
+
+type mockJobStore struct {
+	enqueueFn func(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
+}
+
+func (m *mockJobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
+	if m.enqueueFn != nil {
+		return m.enqueueFn(ctx, orgID, queue, jobType, payload, priority, dedupeKey)
+	}
+	return uuid.New(), nil
+}
+
+// --- Helper to build the handler ---
+
+type threadTestDeps struct {
+	threadStore  *mockThreadStore
+	sessionStore *mockSessionStoreForThread
+	messageStore *mockMessageStore
+	logStore     *mockLogStore
+	jobStore     *mockJobStore
+}
+
+func newThreadHandler(t *testing.T) (*SessionThreadHandler, *threadTestDeps) {
+	t.Helper()
+	deps := &threadTestDeps{
+		threadStore:  &mockThreadStore{},
+		sessionStore: &mockSessionStoreForThread{},
+		messageStore: &mockMessageStore{},
+		logStore:     &mockLogStore{},
+		jobStore:     &mockJobStore{},
+	}
+	svc := thread.NewService(
+		deps.threadStore,
+		deps.sessionStore,
+		deps.messageStore,
+		deps.logStore,
+		deps.jobStore,
+		zerolog.Nop(),
+	)
+	return NewSessionThreadHandler(svc), deps
+}
+
+// threadRequest builds a request with orgID in context and chi URL params set.
+func threadRequest(method, url string, body string, orgID uuid.UUID, params map[string]string) *http.Request {
+	var r *http.Request
+	if body != "" {
+		r = httptest.NewRequest(method, url, strings.NewReader(body))
+	} else {
+		r = httptest.NewRequest(method, url, nil)
+	}
+	ctx := middleware.WithOrgID(r.Context(), orgID)
+
+	// Set chi URL params.
+	rctx := chi.NewRouteContext()
+	for k, v := range params {
+		rctx.URLParams.Add(k, v)
+	}
+	ctx = context.WithValue(ctx, chi.RouteCtxKey, rctx)
+	return r.WithContext(ctx)
+}
+
+// --- Tests ---
+
+func TestSessionThreadHandler_CreateThread(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now()
+
+	tests := []struct {
+		name           string
+		sessionIDParam string
+		body           string
+		setupDeps      func(deps *threadTestDeps)
+		expectedCode   int
+		expectedError  string
+	}{
+		{
+			name:           "success",
+			sessionIDParam: sessionID.String(),
+			body:           `{"label":"Backend API","agent_type":"claude_code"}`,
+			setupDeps: func(deps *threadTestDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+				deps.threadStore.createFn = func(_ context.Context, t *models.SessionThread, _ int) error {
+					t.ID = threadID
+					t.CreatedAt = now
+					return nil
+				}
+			},
+			expectedCode: http.StatusCreated,
+		},
+		{
+			name:           "invalid session ID",
+			sessionIDParam: "not-a-uuid",
+			body:           `{"label":"Backend"}`,
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_ID",
+		},
+		{
+			name:           "missing label",
+			sessionIDParam: sessionID.String(),
+			body:           `{"agent_type":"claude_code"}`,
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "MISSING_LABEL",
+		},
+		{
+			name:           "whitespace-only label",
+			sessionIDParam: sessionID.String(),
+			body:           `{"label":"   ","agent_type":"claude_code"}`,
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "MISSING_LABEL",
+		},
+		{
+			name:           "session not found",
+			sessionIDParam: sessionID.String(),
+			body:           `{"label":"Backend"}`,
+			setupDeps: func(deps *threadTestDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{}, fmt.Errorf("no rows")
+				}
+			},
+			expectedCode:  http.StatusNotFound,
+			expectedError: "NOT_FOUND",
+		},
+		{
+			name:           "thread limit reached",
+			sessionIDParam: sessionID.String(),
+			body:           `{"label":"Backend"}`,
+			setupDeps: func(deps *threadTestDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+				deps.threadStore.createFn = func(_ context.Context, _ *models.SessionThread, _ int) error {
+					return db.ErrThreadLimitReached
+				}
+			},
+			expectedCode:  http.StatusConflict,
+			expectedError: "THREAD_LIMIT",
+		},
+		{
+			name:           "session in terminal state",
+			sessionIDParam: sessionID.String(),
+			body:           `{"label":"Backend"}`,
+			setupDeps: func(deps *threadTestDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "completed", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+			},
+			expectedCode:  http.StatusConflict,
+			expectedError: "SESSION_TERMINAL",
+		},
+		{
+			name:           "invalid request body",
+			sessionIDParam: sessionID.String(),
+			body:           `{invalid-json`,
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_BODY",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler, deps := newThreadHandler(t)
+			tt.setupDeps(deps)
+
+			req := threadRequest(http.MethodPost, "/api/v1/sessions/"+tt.sessionIDParam+"/threads", tt.body, orgID, map[string]string{"id": tt.sessionIDParam})
+			w := httptest.NewRecorder()
+
+			handler.CreateThread(w, req)
+			require.Equal(t, tt.expectedCode, w.Code, "should return expected status code")
+
+			if tt.expectedError != "" {
+				var errResp models.ErrorResponse
+				err := json.Unmarshal(w.Body.Bytes(), &errResp)
+				require.NoError(t, err, "response body should be valid JSON")
+				require.Equal(t, tt.expectedError, errResp.Error.Code, "should return expected error code")
+			} else {
+				var resp models.SingleResponse[models.SessionThread]
+				err := json.Unmarshal(w.Body.Bytes(), &resp)
+				require.NoError(t, err, "response body should be valid JSON")
+				require.Equal(t, threadID, resp.Data.ID, "should return the created thread ID")
+				require.Equal(t, "Backend API", resp.Data.Label, "should return the correct label")
+			}
+		})
+	}
+}
+
+func TestSessionThreadHandler_ListThreads(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID1 := uuid.New()
+	threadID2 := uuid.New()
+	now := time.Now()
+
+	tests := []struct {
+		name           string
+		sessionIDParam string
+		setupDeps      func(deps *threadTestDeps)
+		expectedCode   int
+		expectedLen    int
+		expectedError  string
+	}{
+		{
+			name:           "success with threads",
+			sessionIDParam: sessionID.String(),
+			setupDeps: func(deps *threadTestDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running"}, nil
+				}
+				deps.threadStore.listBySessionFn = func(_ context.Context, _, _ uuid.UUID) ([]models.SessionThread, error) {
+					return []models.SessionThread{
+						{ID: threadID1, SessionID: sessionID, OrgID: orgID, Label: "Backend", Status: models.ThreadStatusRunning, CreatedAt: now},
+						{ID: threadID2, SessionID: sessionID, OrgID: orgID, Label: "Frontend", Status: models.ThreadStatusIdle, CreatedAt: now},
+					}, nil
+				}
+			},
+			expectedCode: http.StatusOK,
+			expectedLen:  2,
+		},
+		{
+			name:           "success with empty list",
+			sessionIDParam: sessionID.String(),
+			setupDeps: func(deps *threadTestDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running"}, nil
+				}
+				deps.threadStore.listBySessionFn = func(_ context.Context, _, _ uuid.UUID) ([]models.SessionThread, error) {
+					return nil, nil
+				}
+			},
+			expectedCode: http.StatusOK,
+			expectedLen:  0,
+		},
+		{
+			name:           "invalid session ID",
+			sessionIDParam: "bad-id",
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_ID",
+		},
+		{
+			name:           "session not found",
+			sessionIDParam: sessionID.String(),
+			setupDeps: func(deps *threadTestDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{}, fmt.Errorf("no rows")
+				}
+			},
+			expectedCode:  http.StatusNotFound,
+			expectedError: "NOT_FOUND",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler, deps := newThreadHandler(t)
+			tt.setupDeps(deps)
+
+			req := threadRequest(http.MethodGet, "/api/v1/sessions/"+tt.sessionIDParam+"/threads", "", orgID, map[string]string{"id": tt.sessionIDParam})
+			w := httptest.NewRecorder()
+
+			handler.ListThreads(w, req)
+			require.Equal(t, tt.expectedCode, w.Code, "should return expected status code")
+
+			if tt.expectedError != "" {
+				var errResp models.ErrorResponse
+				err := json.Unmarshal(w.Body.Bytes(), &errResp)
+				require.NoError(t, err, "response body should be valid JSON")
+				require.Equal(t, tt.expectedError, errResp.Error.Code, "should return expected error code")
+			} else {
+				var resp models.ListResponse[models.SessionThread]
+				err := json.Unmarshal(w.Body.Bytes(), &resp)
+				require.NoError(t, err, "response body should be valid JSON")
+				require.Equal(t, tt.expectedLen, len(resp.Data), "should return expected number of threads")
+			}
+		})
+	}
+}
+
+func TestSessionThreadHandler_GetThread(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now()
+
+	tests := []struct {
+		name           string
+		sessionIDParam string
+		threadIDParam  string
+		setupDeps      func(deps *threadTestDeps)
+		expectedCode   int
+		expectedError  string
+	}{
+		{
+			name:           "success",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			setupDeps: func(deps *threadTestDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:        threadID,
+						SessionID: sessionID,
+						OrgID:     orgID,
+						Label:     "Backend",
+						Status:    models.ThreadStatusRunning,
+						CreatedAt: now,
+					}, nil
+				}
+			},
+			expectedCode: http.StatusOK,
+		},
+		{
+			name:           "invalid session ID",
+			sessionIDParam: "bad-id",
+			threadIDParam:  threadID.String(),
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_ID",
+		},
+		{
+			name:           "invalid thread ID",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  "bad-id",
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_ID",
+		},
+		{
+			name:           "thread not found",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			setupDeps: func(deps *threadTestDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+			},
+			expectedCode:  http.StatusNotFound,
+			expectedError: "NOT_FOUND",
+		},
+		{
+			name:           "thread belongs to different session",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			setupDeps: func(deps *threadTestDeps) {
+				otherSessionID := uuid.New()
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:        threadID,
+						SessionID: otherSessionID,
+						OrgID:     orgID,
+						Label:     "Backend",
+						Status:    models.ThreadStatusRunning,
+					}, nil
+				}
+			},
+			expectedCode:  http.StatusNotFound,
+			expectedError: "NOT_FOUND",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler, deps := newThreadHandler(t)
+			tt.setupDeps(deps)
+
+			req := threadRequest(http.MethodGet, "/api/v1/sessions/"+tt.sessionIDParam+"/threads/"+tt.threadIDParam, "", orgID, map[string]string{"id": tt.sessionIDParam, "tid": tt.threadIDParam})
+			w := httptest.NewRecorder()
+
+			handler.GetThread(w, req)
+			require.Equal(t, tt.expectedCode, w.Code, "should return expected status code")
+
+			if tt.expectedError != "" {
+				var errResp models.ErrorResponse
+				err := json.Unmarshal(w.Body.Bytes(), &errResp)
+				require.NoError(t, err, "response body should be valid JSON")
+				require.Equal(t, tt.expectedError, errResp.Error.Code, "should return expected error code")
+			} else {
+				var resp models.SingleResponse[models.SessionThread]
+				err := json.Unmarshal(w.Body.Bytes(), &resp)
+				require.NoError(t, err, "response body should be valid JSON")
+				require.Equal(t, threadID, resp.Data.ID, "should return the correct thread")
+				require.Equal(t, "Backend", resp.Data.Label, "should return the correct label")
+			}
+		})
+	}
+}
+
+func TestSessionThreadHandler_SendThreadMessage(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+
+	tests := []struct {
+		name           string
+		sessionIDParam string
+		threadIDParam  string
+		body           string
+		setupDeps      func(deps *threadTestDeps)
+		expectedCode   int
+		expectedError  string
+	}{
+		{
+			name:           "success",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			body:           `{"message":"please continue"}`,
+			setupDeps: func(deps *threadTestDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:          threadID,
+						SessionID:   sessionID,
+						OrgID:       orgID,
+						Status:      models.ThreadStatusRunning,
+						CurrentTurn: 1,
+					}, nil
+				}
+				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+					msg.ID = 42
+					msg.CreatedAt = time.Now()
+					return nil
+				}
+			},
+			expectedCode: http.StatusCreated,
+		},
+		{
+			name:           "invalid session ID",
+			sessionIDParam: "bad-id",
+			threadIDParam:  threadID.String(),
+			body:           `{"message":"hi"}`,
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_ID",
+		},
+		{
+			name:           "invalid thread ID",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  "bad-id",
+			body:           `{"message":"hi"}`,
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_ID",
+		},
+		{
+			name:           "missing message",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			body:           `{"message":""}`,
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "MISSING_MESSAGE",
+		},
+		{
+			name:           "whitespace-only message",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			body:           `{"message":"   "}`,
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "MISSING_MESSAGE",
+		},
+		{
+			name:           "thread not found",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			body:           `{"message":"continue"}`,
+			setupDeps: func(deps *threadTestDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+			},
+			expectedCode:  http.StatusNotFound,
+			expectedError: "NOT_FOUND",
+		},
+		{
+			name:           "thread not idle",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			body:           `{"message":"continue"}`,
+			setupDeps: func(deps *threadTestDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:        threadID,
+						SessionID: sessionID,
+						OrgID:     orgID,
+						Status:    models.ThreadStatusRunning,
+					}, nil
+				}
+			},
+			expectedCode:  http.StatusConflict,
+			expectedError: "NOT_IDLE",
+		},
+		{
+			name:           "enqueue failure",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			body:           `{"message":"continue"}`,
+			setupDeps: func(deps *threadTestDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:          threadID,
+						SessionID:   sessionID,
+						OrgID:       orgID,
+						Status:      models.ThreadStatusRunning,
+						CurrentTurn: 1,
+					}, nil
+				}
+				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+					msg.ID = 42
+					return nil
+				}
+				deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, _, _ string, _ any, _ int, _ *string) (uuid.UUID, error) {
+					return uuid.Nil, fmt.Errorf("enqueue failed")
+				}
+			},
+			expectedCode:  http.StatusInternalServerError,
+			expectedError: "ENQUEUE_FAILED",
+		},
+		{
+			name:           "invalid request body",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			body:           `{bad-json`,
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_BODY",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler, deps := newThreadHandler(t)
+			tt.setupDeps(deps)
+
+			req := threadRequest(http.MethodPost, "/api/v1/sessions/"+tt.sessionIDParam+"/threads/"+tt.threadIDParam+"/messages", tt.body, orgID, map[string]string{"id": tt.sessionIDParam, "tid": tt.threadIDParam})
+			w := httptest.NewRecorder()
+
+			handler.SendThreadMessage(w, req)
+			require.Equal(t, tt.expectedCode, w.Code, "should return expected status code")
+
+			if tt.expectedError != "" {
+				var errResp models.ErrorResponse
+				err := json.Unmarshal(w.Body.Bytes(), &errResp)
+				require.NoError(t, err, "response body should be valid JSON")
+				require.Equal(t, tt.expectedError, errResp.Error.Code, "should return expected error code")
+			} else {
+				var resp models.SingleResponse[models.SessionMessage]
+				err := json.Unmarshal(w.Body.Bytes(), &resp)
+				require.NoError(t, err, "response body should be valid JSON")
+				require.Equal(t, "please continue", resp.Data.Content, "should return the message content")
+				require.Equal(t, models.MessageRoleUser, resp.Data.Role, "should set the message role to user")
+			}
+		})
+	}
+}
+
+func TestSessionThreadHandler_EndThread(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now()
+
+	tests := []struct {
+		name           string
+		sessionIDParam string
+		threadIDParam  string
+		setupDeps      func(deps *threadTestDeps)
+		expectedCode   int
+		expectedError  string
+	}{
+		{
+			name:           "success",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			setupDeps: func(deps *threadTestDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:        threadID,
+						SessionID: sessionID,
+						OrgID:     orgID,
+						Label:     "Backend",
+						Status:    models.ThreadStatusIdle,
+						CreatedAt: now,
+					}, nil
+				}
+				deps.threadStore.updateStatusFn = func(_ context.Context, _, _ uuid.UUID, _ models.ThreadStatus) error {
+					return nil
+				}
+			},
+			expectedCode: http.StatusOK,
+		},
+		{
+			name:           "invalid session ID",
+			sessionIDParam: "bad-id",
+			threadIDParam:  threadID.String(),
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_ID",
+		},
+		{
+			name:           "invalid thread ID",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  "bad-id",
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_ID",
+		},
+		{
+			name:           "thread not found",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			setupDeps: func(deps *threadTestDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+			},
+			expectedCode:  http.StatusNotFound,
+			expectedError: "NOT_FOUND",
+		},
+		{
+			name:           "thread already completed - invalid status",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			setupDeps: func(deps *threadTestDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:        threadID,
+						SessionID: sessionID,
+						OrgID:     orgID,
+						Label:     "Backend",
+						Status:    models.ThreadStatusCompleted,
+					}, nil
+				}
+			},
+			expectedCode:  http.StatusConflict,
+			expectedError: "INVALID_STATUS",
+		},
+		{
+			name:           "thread belongs to different session",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			setupDeps: func(deps *threadTestDeps) {
+				otherSessionID := uuid.New()
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:        threadID,
+						SessionID: otherSessionID,
+						OrgID:     orgID,
+						Label:     "Backend",
+						Status:    models.ThreadStatusIdle,
+					}, nil
+				}
+			},
+			expectedCode:  http.StatusNotFound,
+			expectedError: "NOT_FOUND",
+		},
+		{
+			name:           "end running thread succeeds",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			setupDeps: func(deps *threadTestDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:        threadID,
+						SessionID: sessionID,
+						OrgID:     orgID,
+						Label:     "Backend",
+						Status:    models.ThreadStatusRunning,
+						CreatedAt: now,
+					}, nil
+				}
+				deps.threadStore.updateStatusFn = func(_ context.Context, _, _ uuid.UUID, _ models.ThreadStatus) error {
+					return nil
+				}
+			},
+			expectedCode: http.StatusOK,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler, deps := newThreadHandler(t)
+			tt.setupDeps(deps)
+
+			req := threadRequest(http.MethodPost, "/api/v1/sessions/"+tt.sessionIDParam+"/threads/"+tt.threadIDParam+"/end", "", orgID, map[string]string{"id": tt.sessionIDParam, "tid": tt.threadIDParam})
+			w := httptest.NewRecorder()
+
+			handler.EndThread(w, req)
+			require.Equal(t, tt.expectedCode, w.Code, "should return expected status code")
+
+			if tt.expectedError != "" {
+				var errResp models.ErrorResponse
+				err := json.Unmarshal(w.Body.Bytes(), &errResp)
+				require.NoError(t, err, "response body should be valid JSON")
+				require.Equal(t, tt.expectedError, errResp.Error.Code, "should return expected error code")
+			} else {
+				var resp models.SingleResponse[models.SessionThread]
+				err := json.Unmarshal(w.Body.Bytes(), &resp)
+				require.NoError(t, err, "response body should be valid JSON")
+				require.Equal(t, threadID, resp.Data.ID, "should return the ended thread")
+				require.Equal(t, models.ThreadStatusCompleted, resp.Data.Status, "should set status to completed")
+			}
+		})
+	}
+}
+
+func TestSessionThreadHandler_GetThreadMessages(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now()
+
+	tests := []struct {
+		name           string
+		sessionIDParam string
+		threadIDParam  string
+		setupDeps      func(deps *threadTestDeps)
+		expectedCode   int
+		expectedLen    int
+		expectedError  string
+	}{
+		{
+			name:           "success with messages",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			setupDeps: func(deps *threadTestDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID}, nil
+				}
+				deps.messageStore.listByThreadFn = func(_ context.Context, _, _ uuid.UUID) ([]models.SessionMessage, error) {
+					return []models.SessionMessage{
+						{ID: 1, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID, Role: models.MessageRoleUser, Content: "hello", CreatedAt: now},
+						{ID: 2, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID, Role: models.MessageRoleAssistant, Content: "hi", CreatedAt: now},
+					}, nil
+				}
+			},
+			expectedCode: http.StatusOK,
+			expectedLen:  2,
+		},
+		{
+			name:           "success with empty messages",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			setupDeps: func(deps *threadTestDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID}, nil
+				}
+				deps.messageStore.listByThreadFn = func(_ context.Context, _, _ uuid.UUID) ([]models.SessionMessage, error) {
+					return nil, nil
+				}
+			},
+			expectedCode: http.StatusOK,
+			expectedLen:  0,
+		},
+		{
+			name:           "invalid session ID",
+			sessionIDParam: "bad-id",
+			threadIDParam:  threadID.String(),
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_ID",
+		},
+		{
+			name:           "invalid thread ID",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  "bad-id",
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_ID",
+		},
+		{
+			name:           "thread not found",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			setupDeps: func(deps *threadTestDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+			},
+			expectedCode:  http.StatusNotFound,
+			expectedError: "NOT_FOUND",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler, deps := newThreadHandler(t)
+			tt.setupDeps(deps)
+
+			req := threadRequest(http.MethodGet, "/api/v1/sessions/"+tt.sessionIDParam+"/threads/"+tt.threadIDParam+"/messages", "", orgID, map[string]string{"id": tt.sessionIDParam, "tid": tt.threadIDParam})
+			w := httptest.NewRecorder()
+
+			handler.GetThreadMessages(w, req)
+			require.Equal(t, tt.expectedCode, w.Code, "should return expected status code")
+
+			if tt.expectedError != "" {
+				var errResp models.ErrorResponse
+				err := json.Unmarshal(w.Body.Bytes(), &errResp)
+				require.NoError(t, err, "response body should be valid JSON")
+				require.Equal(t, tt.expectedError, errResp.Error.Code, "should return expected error code")
+			} else {
+				var resp models.ListResponse[models.SessionMessage]
+				err := json.Unmarshal(w.Body.Bytes(), &resp)
+				require.NoError(t, err, "response body should be valid JSON")
+				require.Equal(t, tt.expectedLen, len(resp.Data), "should return expected number of messages")
+			}
+		})
+	}
+}
+
+func TestSessionThreadHandler_GetThreadLogs(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now()
+
+	tests := []struct {
+		name           string
+		sessionIDParam string
+		threadIDParam  string
+		setupDeps      func(deps *threadTestDeps)
+		expectedCode   int
+		expectedLen    int
+		expectedError  string
+	}{
+		{
+			name:           "success with logs",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			setupDeps: func(deps *threadTestDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID}, nil
+				}
+				deps.logStore.listByThreadFn = func(_ context.Context, _, _ uuid.UUID) ([]models.SessionLog, error) {
+					return []models.SessionLog{
+						{ID: 1, SessionID: sessionID, ThreadID: &threadID, Level: "info", Message: "started", Timestamp: now},
+						{ID: 2, SessionID: sessionID, ThreadID: &threadID, Level: "info", Message: "completed", Timestamp: now},
+					}, nil
+				}
+			},
+			expectedCode: http.StatusOK,
+			expectedLen:  2,
+		},
+		{
+			name:           "success with empty logs",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			setupDeps: func(deps *threadTestDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID}, nil
+				}
+				deps.logStore.listByThreadFn = func(_ context.Context, _, _ uuid.UUID) ([]models.SessionLog, error) {
+					return nil, nil
+				}
+			},
+			expectedCode: http.StatusOK,
+			expectedLen:  0,
+		},
+		{
+			name:           "invalid session ID",
+			sessionIDParam: "bad-id",
+			threadIDParam:  threadID.String(),
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_ID",
+		},
+		{
+			name:           "invalid thread ID",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  "bad-id",
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_ID",
+		},
+		{
+			name:           "thread not found",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			setupDeps: func(deps *threadTestDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+			},
+			expectedCode:  http.StatusNotFound,
+			expectedError: "NOT_FOUND",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler, deps := newThreadHandler(t)
+			tt.setupDeps(deps)
+
+			req := threadRequest(http.MethodGet, "/api/v1/sessions/"+tt.sessionIDParam+"/threads/"+tt.threadIDParam+"/logs", "", orgID, map[string]string{"id": tt.sessionIDParam, "tid": tt.threadIDParam})
+			w := httptest.NewRecorder()
+
+			handler.GetThreadLogs(w, req)
+			require.Equal(t, tt.expectedCode, w.Code, "should return expected status code")
+
+			if tt.expectedError != "" {
+				var errResp models.ErrorResponse
+				err := json.Unmarshal(w.Body.Bytes(), &errResp)
+				require.NoError(t, err, "response body should be valid JSON")
+				require.Equal(t, tt.expectedError, errResp.Error.Code, "should return expected error code")
+			} else {
+				var resp models.ListResponse[models.SessionLog]
+				err := json.Unmarshal(w.Body.Bytes(), &resp)
+				require.NoError(t, err, "response body should be valid JSON")
+				require.Equal(t, tt.expectedLen, len(resp.Data), "should return expected number of logs")
+			}
+		})
+	}
+}

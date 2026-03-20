@@ -15,6 +15,10 @@ export const queryKeys = {
     validation: (id: string) => ["session", id, "validation"] as const,
     pr: (id: string) => ["session", id, "pr"] as const,
     messages: (id: string) => ["session", id, "messages"] as const,
+    threads: (id: string) => ["session", id, "threads"] as const,
+    threadDetail: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId] as const,
+    threadMessages: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId, "messages"] as const,
+    threadLogs: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId, "logs"] as const,
   },
   repositories: {
     all: ["repositories"] as const,

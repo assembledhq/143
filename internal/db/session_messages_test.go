@@ -25,7 +25,7 @@ func TestSessionMessageStore_Create(t *testing.T) {
 
 	mock.ExpectQuery("INSERT INTO session_messages").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at"}).
 				AddRow(int64(1), now),
@@ -61,9 +61,9 @@ func TestSessionMessageStore_ListBySession(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM session_messages WHERE org_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "session_id", "org_id", "user_id", "turn_number", "role", "content", "attachments", "token_usage", "created_at"}).
-				AddRow(int64(1), sessionID, orgID, nil, 1, "user", "Fix the bug", nil, nil, now).
-				AddRow(int64(2), sessionID, orgID, nil, 1, "assistant", "Done", nil, nil, now),
+			pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "user_id", "turn_number", "role", "content", "attachments", "token_usage", "created_at"}).
+				AddRow(int64(1), sessionID, orgID, nil, nil, 1, "user", "Fix the bug", nil, nil, now).
+				AddRow(int64(2), sessionID, orgID, nil, nil, 1, "assistant", "Done", nil, nil, now),
 		)
 
 	msgs, err := store.ListBySession(context.Background(), orgID, sessionID)
