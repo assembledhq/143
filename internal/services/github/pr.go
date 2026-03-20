@@ -89,11 +89,17 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session) (*models.
 		return nil, fmt.Errorf("get issue: %w", err)
 	}
 
-	// Look up the repository to get installation ID and default branch.
-	if issue.RepositoryID == nil {
-		return nil, fmt.Errorf("issue %s has no repository", issue.ID)
+	// Resolve repository: session.RepositoryID first, then issue.RepositoryID.
+	var repoID *uuid.UUID
+	if run.RepositoryID != nil {
+		repoID = run.RepositoryID
+	} else if issue.RepositoryID != nil {
+		repoID = issue.RepositoryID
 	}
-	repo, err := s.repos.GetByID(ctx, run.OrgID, *issue.RepositoryID)
+	if repoID == nil {
+		return nil, fmt.Errorf("session %s has no repository", run.ID)
+	}
+	repo, err := s.repos.GetByID(ctx, run.OrgID, *repoID)
 	if err != nil {
 		return nil, fmt.Errorf("get repository: %w", err)
 	}
@@ -457,15 +463,21 @@ func (s *PRService) PushRevision(ctx context.Context, pr *models.PullRequest, ru
 		return fmt.Errorf("revision run %s has no diff", run.ID)
 	}
 
-	// Look up the repo to get installation ID.
-	issue, err := s.issues.GetByID(ctx, run.OrgID, run.IssueID)
-	if err != nil {
-		return fmt.Errorf("get issue: %w", err)
+	// Resolve repository: session.RepositoryID first, then issue.RepositoryID.
+	var repoID *uuid.UUID
+	if run.RepositoryID != nil {
+		repoID = run.RepositoryID
+	} else {
+		issue, err := s.issues.GetByID(ctx, run.OrgID, run.IssueID)
+		if err != nil {
+			return fmt.Errorf("get issue: %w", err)
+		}
+		repoID = issue.RepositoryID
 	}
-	if issue.RepositoryID == nil {
-		return fmt.Errorf("issue %s has no repository", issue.ID)
+	if repoID == nil {
+		return fmt.Errorf("session %s has no repository", run.ID)
 	}
-	repo, err := s.repos.GetByID(ctx, run.OrgID, *issue.RepositoryID)
+	repo, err := s.repos.GetByID(ctx, run.OrgID, *repoID)
 	if err != nil {
 		return fmt.Errorf("get repository: %w", err)
 	}

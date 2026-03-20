@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
@@ -606,6 +607,99 @@ func (h *IntegrationHandler) syncInstallationRepos(ctx context.Context, orgID uu
 			continue
 		}
 	}
+}
+
+// SyncGitHubRepos re-syncs repositories from a GitHub App installation.
+// This is a recovery mechanism for when the initial webhook-based sync fails.
+func (h *IntegrationHandler) SyncGitHubRepos(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	orgID := middleware.OrgIDFromContext(ctx)
+
+	if h.githubService == nil || h.repoStore == nil {
+		writeError(w, http.StatusServiceUnavailable, "GITHUB_APP_NOT_CONFIGURED", "github app is not configured")
+		return
+	}
+
+	integrations, err := h.integrationStore.ListByOrgAndProvider(ctx, orgID, string(models.IntegrationProviderGitHub))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "LIST_INTEGRATIONS_FAILED", "failed to list integrations")
+		return
+	}
+	if len(integrations) == 0 {
+		writeError(w, http.StatusNotFound, "NO_GITHUB_INTEGRATION", "no active github integration found")
+		return
+	}
+
+	integration := integrations[0]
+
+	// Extract installation_id from integration config.
+	var config struct {
+		InstallationID int64 `json:"installation_id"`
+	}
+	if integration.Config != nil {
+		if err := json.Unmarshal(integration.Config, &config); err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_CONFIG", "failed to parse integration config")
+			return
+		}
+	}
+	if config.InstallationID == 0 {
+		writeError(w, http.StatusBadRequest, "MISSING_INSTALLATION_ID", "integration config missing installation_id")
+		return
+	}
+
+	token, err := h.githubService.GetInstallationToken(ctx, config.InstallationID)
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Msg("failed to get installation token for sync")
+		writeError(w, http.StatusBadGateway, "TOKEN_FAILED", "failed to get github installation token")
+		return
+	}
+
+	repos, err := h.listInstallationRepos(ctx, token)
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Msg("failed to list installation repos for sync")
+		writeError(w, http.StatusBadGateway, "LIST_REPOS_FAILED", "failed to list github repositories")
+		return
+	}
+
+	synced := 0
+	syncErrors := 0
+	for _, ghRepo := range repos {
+		repo := &models.Repository{
+			OrgID:          orgID,
+			IntegrationID:  integration.ID,
+			GitHubID:       ghRepo.ID,
+			FullName:       ghRepo.FullName,
+			DefaultBranch:  ghRepo.DefaultBranch,
+			Private:        ghRepo.Private,
+			CloneURL:       ghRepo.CloneURL,
+			InstallationID: config.InstallationID,
+			Status:         "active",
+			Settings:       json.RawMessage(`{}`),
+		}
+		if repo.DefaultBranch == "" {
+			repo.DefaultBranch = "main"
+		}
+		if repo.CloneURL == "" {
+			repo.CloneURL = "https://github.com/" + ghRepo.FullName + ".git"
+		}
+		if err := h.repoStore.UpsertFromGitHub(ctx, repo); err != nil {
+			zerolog.Ctx(ctx).Warn().Err(err).Str("repo", ghRepo.FullName).Msg("failed to upsert repo during sync")
+			syncErrors++
+			continue
+		}
+		synced++
+	}
+
+	if err := h.integrationStore.UpdateLastSyncedAt(ctx, orgID, integration.ID, time.Now()); err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Msg("failed to update last_synced_at after sync")
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": map[string]any{
+			"repos_synced": synced,
+			"errors":       syncErrors,
+		},
+	})
 }
 
 // githubInstallationRepo is the subset of fields returned by

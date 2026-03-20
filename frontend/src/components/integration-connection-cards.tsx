@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import Image from "next/image";
 import { Button } from "@/components/ui/button";
@@ -25,6 +26,8 @@ type SourceControlIntegrationCardProps = IntegrationCallbacks & {
   githubConnected: boolean;
   githubRepoNames?: string[];
   onConnectGitHub: () => void;
+  onSyncRepos?: () => void;
+  isSyncing?: boolean;
 };
 
 type AdditionalIntegrationCardsProps = IntegrationCallbacks & {
@@ -163,6 +166,8 @@ export function SourceControlIntegrationCard({
   onDisconnect,
   disconnectingProvider,
   disconnectError,
+  onSyncRepos,
+  isSyncing,
 }: SourceControlIntegrationCardProps) {
   const github = getIntegrationByKey("github");
 
@@ -177,15 +182,29 @@ export function SourceControlIntegrationCard({
           badge: <Badge variant="outline" className="text-xs">Required</Badge>,
           extra: githubConnected ? <ConnectedReposList repoNames={githubRepoNames} /> : undefined,
           action: (
-            <IntegrationAction
-              connected={githubConnected}
-              integrationKey="github"
-              integrationName={github.name}
-              onConnect={onConnectGitHub}
-              onDisconnect={onDisconnect}
-              disconnecting={disconnectingProvider === "github"}
-              disconnectError={disconnectingProvider === "github" ? disconnectError : null}
-            />
+            <div className="flex items-center gap-1.5">
+              {githubConnected && onSyncRepos && (
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="h-8 w-8"
+                  onClick={onSyncRepos}
+                  disabled={isSyncing}
+                  aria-label="Sync repositories"
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 ${isSyncing ? "animate-spin" : ""}`} />
+                </Button>
+              )}
+              <IntegrationAction
+                connected={githubConnected}
+                integrationKey="github"
+                integrationName={github.name}
+                onConnect={onConnectGitHub}
+                onDisconnect={onDisconnect}
+                disconnecting={disconnectingProvider === "github"}
+                disconnectError={disconnectingProvider === "github" ? disconnectError : null}
+              />
+            </div>
           ),
         },
       ]}

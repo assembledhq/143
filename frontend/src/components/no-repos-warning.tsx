@@ -1,0 +1,120 @@
+"use client";
+
+import { useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { AlertTriangle, RefreshCw, Check } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { api } from "@/lib/api";
+import { queryKeys } from "@/lib/query-keys";
+import { useGitHubRepoSync } from "@/hooks/use-github-repo-sync";
+
+/** Error codes that mean the user needs to reinstall the GitHub App. */
+const REINSTALL_ERROR_CODES = new Set([
+  "MISSING_INSTALLATION_ID",
+  "INVALID_CONFIG",
+  "GITHUB_APP_NOT_CONFIGURED",
+]);
+
+function isReinstallError(err: unknown): boolean {
+  return (
+    err != null &&
+    typeof err === "object" &&
+    "code" in err &&
+    typeof (err as { code: unknown }).code === "string" &&
+    REINSTALL_ERROR_CODES.has((err as { code: string }).code)
+  );
+}
+
+export function NoReposWarning() {
+  const { data: integrationsResp } = useQuery({
+    queryKey: ["integrations"],
+    queryFn: () => api.integrations.list(),
+  });
+
+  const { data: reposResp } = useQuery({
+    queryKey: queryKeys.repositories.all,
+    queryFn: () => api.repositories.list(),
+  });
+
+  const hasGitHub = Boolean(
+    integrationsResp?.data?.find(
+      (i) => i.provider === "github" && i.status === "active"
+    )
+  );
+  const repos = reposResp?.data ?? [];
+  const hasRepos = repos.length > 0;
+
+  const { sync, isSyncing, syncResult, syncError, autoSyncIfNeeded } =
+    useGitHubRepoSync();
+
+  const needsReinstall = isReinstallError(syncError);
+
+  useEffect(() => {
+    autoSyncIfNeeded(hasGitHub, hasRepos);
+  }, [hasGitHub, hasRepos, autoSyncIfNeeded]);
+
+  // Don't render if GitHub isn't connected or repos exist (and no recent sync result to show)
+  if (!hasGitHub || (hasRepos && !syncResult)) return null;
+
+  // After a successful sync that found repos, show success briefly then hide
+  if (syncResult && syncResult.repos_synced > 0 && hasRepos) {
+    return (
+      <div className="flex items-center gap-3 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-4 py-3">
+        <Check className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+        <p className="text-[13px] text-emerald-700 dark:text-emerald-300">
+          {syncResult.repos_synced} repositor{syncResult.repos_synced === 1 ? "y" : "ies"} synced.
+        </p>
+      </div>
+    );
+  }
+
+  // If repos now exist (from query refetch), hide the warning
+  if (hasRepos) return null;
+
+  return (
+    <div className="flex items-center gap-3 rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-3">
+      <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+      <div className="flex-1 min-w-0">
+        <p className="text-[13px] text-amber-700 dark:text-amber-300">
+          GitHub is connected but no repositories are synced. Sessions won&apos;t have access to your code.
+        </p>
+        {syncError && needsReinstall && (
+          <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+            The GitHub App installation ID is missing. Please reconnect GitHub to fix this.
+          </p>
+        )}
+        {syncError && !needsReinstall && (
+          <p className="mt-1 text-xs text-destructive">
+            {syncError instanceof Error ? syncError.message : "Sync failed. Please try again."}
+          </p>
+        )}
+        {syncResult && syncResult.repos_synced === 0 && (
+          <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+            No repositories found. Make sure the GitHub App has access to at least one repository.
+          </p>
+        )}
+      </div>
+      {needsReinstall ? (
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => api.integrations.loginGitHub()}
+          className="shrink-0 gap-1.5"
+        >
+          Reconnect GitHub
+        </Button>
+      ) : (
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={sync}
+          disabled={isSyncing}
+          className="shrink-0 gap-1.5"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${isSyncing ? "animate-spin" : ""}`} />
+          {isSyncing ? "Syncing..." : "Sync repositories"}
+        </Button>
+      )}
+    </div>
+  );
+}

@@ -16,6 +16,10 @@ type mockIssueStore struct {
 	updated []uuid.UUID
 }
 
+func (m *mockIssueStore) GetByID(ctx context.Context, orgID, issueID uuid.UUID) (models.Issue, error) {
+	return models.Issue{}, nil
+}
+
 func (m *mockIssueStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters db.IssueFilters) ([]models.Issue, error) {
 	return nil, nil
 }

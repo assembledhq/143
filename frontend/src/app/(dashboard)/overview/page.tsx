@@ -20,9 +20,12 @@ import {
 } from "@/components/integration-connection-cards";
 import { AgentSettingsEditor } from "@/components/agent-settings-editor";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
+import { NoReposWarning } from "@/components/no-repos-warning";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { useDisconnectIntegration } from "@/hooks/use-disconnect-integration";
+import { useGitHubRepoSync } from "@/hooks/use-github-repo-sync";
+import { queryKeys } from "@/lib/query-keys";
 import type { CodexAuthStatus, OrgSettings } from "@/lib/types";
 
 function AgentSettingsModal({ onClose, initialAgentType }: { onClose: () => void; initialAgentType?: OrgSettings["default_agent_type"] }) {
@@ -227,6 +230,15 @@ export default function Overview() {
 
   const disconnectMutation = useDisconnectIntegration();
 
+  const { data: reposResp } = useQuery({
+    queryKey: queryKeys.repositories.all,
+    queryFn: () => api.repositories.list(),
+  });
+  const repos = reposResp?.data ?? [];
+  const githubRepoNames = repos.map((r) => r.full_name);
+
+  const { sync: syncRepos, isSyncing: isSyncingRepos } = useGitHubRepoSync();
+
   const githubIntegration = integrationsResp?.data?.find(
     (integration) => integration.provider === "github" && integration.status === "active"
   );
@@ -240,12 +252,13 @@ export default function Overview() {
     (integration) => integration.provider === "slack" && integration.status === "active"
   );
 
-  // Count completed setup stages (step 1: coding agent, step 2: integrations)
+  // Count completed setup stages (step 1: coding agent, step 2: integrations with repos)
+  const githubReady = Boolean(githubIntegration) && repos.length > 0;
   const connectedCount =
     (agentConnected ? 1 : 0) +
-    (githubIntegration ? 1 : 0);
+    (githubReady ? 1 : 0);
   const totalCount = 2;
-  const allRequiredConnected = agentConnected && Boolean(githubIntegration);
+  const allRequiredConnected = agentConnected && githubReady;
 
   return (
     <PageContainer size="default">
@@ -277,15 +290,19 @@ export default function Overview() {
       </StepSection>
 
       {/* Step 2: Connect Integrations (consolidated) */}
-      <StepSection step={2} title="Connect integrations" completed={Boolean(githubIntegration)}>
+      <StepSection step={2} title="Connect integrations" completed={githubReady}>
         <div className="space-y-3">
           <SourceControlIntegrationCard
             githubConnected={Boolean(githubIntegration)}
+            githubRepoNames={githubRepoNames}
             onConnectGitHub={() => api.integrations.loginGitHub()}
             onDisconnect={(provider) => disconnectMutation.mutate(provider)}
             disconnectingProvider={disconnectMutation.isPending ? disconnectMutation.variables : null}
             disconnectError={disconnectMutation.isError ? "Failed to disconnect." : null}
+            onSyncRepos={syncRepos}
+            isSyncing={isSyncingRepos}
           />
+          <NoReposWarning />
           <AdditionalIntegrationCards
             sentryConnected={Boolean(sentryIntegration)}
             linearConnected={Boolean(linearIntegration)}

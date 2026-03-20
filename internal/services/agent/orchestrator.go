@@ -226,17 +226,29 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		return fmt.Errorf("update run status to running: %w", err)
 	}
 
-	// 3. Fetch the issue.
-	issue, err := o.issues.GetByID(ctx, run.OrgID, run.IssueID)
-	if err != nil {
-		o.failRun(ctx, run, fmt.Sprintf("fetch issue: %s", err))
-		return fmt.Errorf("fetch issue: %w", err)
+	// 3. Fetch the issue (non-fatal when IssueID is nil/zero for project-dispatched sessions).
+	var issue *models.Issue
+	if run.IssueID != uuid.Nil {
+		fetched, err := o.issues.GetByID(ctx, run.OrgID, run.IssueID)
+		if err != nil {
+			o.failRun(ctx, run, fmt.Sprintf("fetch issue: %s", err))
+			return fmt.Errorf("fetch issue: %w", err)
+		}
+		issue = &fetched
 	}
 
-	// 4. Look up the repository for clone URL and branch.
+	// 4. Resolve which repository to clone.
+	// Priority: session.RepositoryID → issue.RepositoryID (backwards compat).
+	var resolvedRepoID *uuid.UUID
+	if run.RepositoryID != nil {
+		resolvedRepoID = run.RepositoryID
+	} else if issue != nil && issue.RepositoryID != nil {
+		resolvedRepoID = issue.RepositoryID
+	}
+
 	var repoURL, branch, token, repoFullName string
-	if issue.RepositoryID != nil {
-		repo, err := o.repositories.GetByID(ctx, run.OrgID, *issue.RepositoryID)
+	if resolvedRepoID != nil {
+		repo, err := o.repositories.GetByID(ctx, run.OrgID, *resolvedRepoID)
 		if err != nil {
 			o.failRun(ctx, run, fmt.Sprintf("fetch repository: %s", err))
 			return fmt.Errorf("fetch repository: %w", err)
@@ -268,7 +280,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 	// 6. Prepare the prompt.
 	input := &AgentInput{
-		Issue:      &issue,
+		Issue:      issue,
 		RepoURL:    repoURL,
 		RepoBranch: branch,
 		TokenMode:  run.TokenMode,
@@ -436,7 +448,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// Store the successful result.
 	runResult := o.buildRunResult(result)
 	status := "completed"
-	isInteractive := o.isInteractiveSession(&issue) && snapshotKey != ""
+	isInteractive := o.isInteractiveSession(issue) && snapshotKey != ""
 
 	// 11. Confidence gating: use org-configured auto-proceed threshold.
 	if result.ConfidenceScore < confidenceThresholds.AutoProceed {

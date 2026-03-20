@@ -35,7 +35,7 @@ const sessionSelectColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-00
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
-	sandbox_state, snapshot_key, target_branch, working_branch, created_at`
+	sandbox_state, snapshot_key, target_branch, working_branch, repository_id, created_at`
 
 func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters SessionFilters) ([]models.Session, error) {
 	args := pgx.NamedArgs{"org_id": orgID}
@@ -46,7 +46,7 @@ func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters S
 		WHERE org_id = @org_id`
 
 	if filters.RepositoryID != uuid.Nil {
-		query += ` AND issue_id IN (SELECT id FROM issues WHERE repository_id = @repository_id AND org_id = @org_id)`
+		query += ` AND repository_id = @repository_id`
 		args["repository_id"] = filters.RepositoryID
 	}
 
@@ -108,12 +108,12 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 		INSERT INTO sessions (
 			issue_id, org_id, agent_type, status, autonomy_level, token_mode, complexity_tier,
 			parent_session_id, revision_context, pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
-			model_override, triggered_by_user_id, target_branch
+			model_override, triggered_by_user_id, target_branch, repository_id
 		)
 		VALUES (
 			@issue_id, @org_id, @agent_type, @status, @autonomy_level, @token_mode, @complexity_tier,
 			@parent_session_id, @revision_context, @pm_plan_id, @title, @pm_approach, @pm_reasoning, @project_task_id,
-			@model_override, @triggered_by_user_id, @target_branch
+			@model_override, @triggered_by_user_id, @target_branch, @repository_id
 		)
 		RETURNING id, created_at`
 
@@ -140,6 +140,7 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 		"model_override":        run.ModelOverride,
 		"triggered_by_user_id":  run.TriggeredByUserID,
 		"target_branch":         run.TargetBranch,
+		"repository_id":         run.RepositoryID,
 	}
 
 	row := s.db.QueryRow(ctx, query, args)

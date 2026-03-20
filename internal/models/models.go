@@ -140,6 +140,7 @@ type Session struct {
 	SnapshotKey          *string         `db:"snapshot_key" json:"snapshot_key,omitempty"`
 	TargetBranch         *string         `db:"target_branch" json:"target_branch,omitempty"`
 	WorkingBranch        *string         `db:"working_branch" json:"working_branch,omitempty"`
+	RepositoryID         *uuid.UUID      `db:"repository_id" json:"repository_id,omitempty"`
 	CreatedAt            time.Time       `db:"created_at" json:"created_at"`
 }
 
