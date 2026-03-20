@@ -49,7 +49,7 @@ var sessionColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
-	"created_at",
+	"target_branch", "created_at",
 }
 
 func TestSessionHandler_List(t *testing.T) {
@@ -81,6 +81,7 @@ func TestSessionHandler_List(t *testing.T) {
 							nil, // model_override
 							nil, // triggered_by_user_id
 							nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+							nil, // target_branch
 							now,
 						),
 					)
@@ -157,6 +158,7 @@ func TestSessionHandler_List_WithRepositoryID(t *testing.T) {
 				nil, nil,
 				nil, // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+				nil, // target_branch
 				now,
 			),
 		)
@@ -244,6 +246,7 @@ func TestSessionHandler_List_CommaSeparatedStatuses(t *testing.T) {
 				nil, nil,
 				nil, // triggered_by_user_id
 				nil, 0, nil, "none", nil,
+				nil, // target_branch
 				now,
 			),
 		)
@@ -294,6 +297,7 @@ func TestSessionHandler_Get(t *testing.T) {
 							nil, // model_override
 							nil, // triggered_by_user_id
 							nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+							nil, // target_branch
 							now,
 						),
 					)
@@ -367,13 +371,14 @@ func triggerFixIssueMock(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
 			),
 		)
 
-	// Mock agent run create (14 named args)
+	// Mock agent run create (17 named args)
 	runID := uuid.New()
 	mock.ExpectQuery("INSERT INTO sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
 
 	// Mock job enqueue (6 named args)
@@ -414,13 +419,14 @@ func triggerFixIssueAndOrgDefaultMock(mock pgxmock.PgxPoolIface, orgID uuid.UUID
 				AddRow(orgID, "Acme", []byte(settings), now, now),
 		)
 
-	// Mock agent run create (14 named args)
+	// Mock agent run create (17 named args)
 	runID := uuid.New()
 	mock.ExpectQuery("INSERT INTO sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
 
 	// Mock job enqueue (6 named args)
@@ -999,6 +1005,7 @@ func TestSessionHandler_GetLogs_Success(t *testing.T) {
 				nil, nil,
 				nil, // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+				nil, // target_branch
 				now,
 			),
 		)
@@ -1080,6 +1087,7 @@ func TestSessionHandler_GetLogs_EmptyLogs(t *testing.T) {
 				nil, nil,
 				nil, // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+				nil, // target_branch
 				now,
 			),
 		)
@@ -1134,6 +1142,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil, nil,
 				nil, // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+				nil, // target_branch
 				now,
 			),
 		)
@@ -1152,6 +1161,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil, nil,
 				nil, // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+				nil, // target_branch
 				now,
 			),
 		)
@@ -1226,12 +1236,13 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(issueID, now, now))
 
-				// Mock session create (14 named args)
+				// Mock session create (17 named args)
 				mock.ExpectQuery("INSERT INTO sessions").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
 
 				// Mock job enqueue (6 named args)
@@ -1273,7 +1284,8 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
 
 				// Mock job enqueue
@@ -1319,6 +1331,34 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 			setupMock:    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {},
 			expectedCode: http.StatusBadRequest,
 			expectedBody: "INVALID_TOKEN_MODE",
+		},
+		{
+			name:         "returns bad request for invalid branch characters",
+			body:         `{"message":"Fix bug","agent_type":"claude_code","branch":"main..exploit"}`,
+			setupMock:    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_BRANCH",
+		},
+		{
+			name:         "returns bad request for invalid repository_id format",
+			body:         `{"message":"Fix bug","agent_type":"claude_code","repository_id":"not-a-uuid"}`,
+			setupMock:    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_REPOSITORY_ID",
+		},
+		{
+			name: "returns not found for non-existent repository",
+			body: `{"message":"Fix bug","agent_type":"claude_code","repository_id":"` + uuid.New().String() + `"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				mock.ExpectQuery("SELECT").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{
+						"id", "org_id", "platform", "platform_id", "full_name",
+						"default_branch", "installed_at", "created_at", "updated_at",
+					}))
+			},
+			expectedCode: http.StatusNotFound,
+			expectedBody: "REPOSITORY_NOT_FOUND",
 		},
 	}
 
@@ -1375,6 +1415,7 @@ func TestSessionHandler_EndSession_EnqueuesValidation(t *testing.T) {
 				nil, nil,
 				nil, // triggered_by_user_id
 				nil, 1, &now, "snapshotted", stringPtr("snapshots/test.tar"),
+				nil, // target_branch
 				now,
 			),
 		)
@@ -1488,6 +1529,34 @@ func TestManualSessionTitle(t *testing.T) {
 	}
 }
 
+func TestIsValidGitRef(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		ref   string
+		valid bool
+	}{
+		{"main", true},
+		{"feature/add-auth", true},
+		{"fix-123", true},
+		{"refs/heads/main", true},
+		{"", false},
+		{"main..develop", false},
+		{"branch~1", false},
+		{"branch^2", false},
+		{"branch:file", false},
+		{"branch name", false},
+		{"branch\\path", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.ref, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.valid, isValidGitRef(tt.ref))
+		})
+	}
+}
+
 // messageColumns is the standard column set for session_messages queries.
 var messageColumns = []string{
 	"id", "session_id", "org_id", "user_id", "turn_number", "role", "content", "attachments", "token_usage", "created_at",
@@ -1520,6 +1589,7 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							nil, nil,
 							nil, // triggered_by_user_id
 							nil, 1, &now, "snapshotted", nil,
+							nil, // target_branch
 							now,
 						),
 					)
@@ -1553,6 +1623,7 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							nil, nil,
 							nil, // triggered_by_user_id
 							nil, 0, nil, "none", nil,
+							nil, // target_branch
 							now,
 						),
 					)
@@ -1628,6 +1699,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, nil,
 							nil, // triggered_by_user_id
 							nil, 1, &now, "snapshotted", stringPtr("snapshots/test"),
+							nil, // target_branch
 							now,
 						),
 					)
@@ -1674,6 +1746,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, nil,
 							nil, // triggered_by_user_id
 							nil, 0, nil, "none", nil,
+							nil, // target_branch
 							now,
 						),
 					)
@@ -1824,7 +1897,8 @@ func TestSessionHandler_CreateManual_WithLLMTitle(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
 
 	// Mock job enqueue
@@ -1903,7 +1977,8 @@ func TestSessionHandler_CreateManual_LLMError_Returns500(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
 
 	// Mock job enqueue
