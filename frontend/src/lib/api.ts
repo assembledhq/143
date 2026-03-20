@@ -267,6 +267,7 @@ export const api = {
       body: JSON.stringify({ channel_ids: channelIds }),
     }),
     disconnect: (provider: string) => del(`/api/v1/integrations/${provider}/disconnect`),
+    syncGitHub: () => post<{ data: { repos_synced: number; errors: number } }>('/api/v1/integrations/github/sync'),
   },
   codexAuth: {
     initiate: () => post<import('./types').SingleResponse<import('./types').CodexDeviceAuth>>('/api/v1/settings/codex-auth/initiate'),

@@ -18,6 +18,10 @@ type gatherIssueStoreMock struct {
 	errByKey map[string]error
 }
 
+func (m *gatherIssueStoreMock) GetByID(ctx context.Context, orgID, issueID uuid.UUID) (models.Issue, error) {
+	return models.Issue{}, nil
+}
+
 func (m *gatherIssueStoreMock) ListByOrg(ctx context.Context, orgID uuid.UUID, filters db.IssueFilters) ([]models.Issue, error) {
 	if err := m.errByKey[filters.Status]; err != nil {
 		return nil, err

@@ -24,6 +24,7 @@ var sessionColumns = []string{
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at",
 	"sandbox_state", "snapshot_key", "target_branch", "working_branch",
+	"repository_id",
 	"created_at",
 }
 
@@ -45,6 +46,7 @@ func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 		nil,    // snapshot_key
 		nil,    // target_branch
 		nil,    // working_branch
+		nil,    // repository_id
 		now,
 	}
 }
@@ -254,7 +256,7 @@ func TestSessionStore_Create(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at"}).
 				AddRow(generatedID, now),
@@ -292,7 +294,7 @@ func TestSessionStore_Create_AllowsNilIssueID(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at"}).
 				AddRow(generatedID, now),

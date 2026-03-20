@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/select";
 import { api } from "@/lib/api";
 import { AGENT_TYPE_OPTIONS } from "@/lib/model-constants";
+import { NoReposWarning } from "@/components/no-repos-warning";
 import type { OrgSettings, Organization, SingleResponse } from "@/lib/types";
 
 const PRIORITY_OPTIONS = [
@@ -419,6 +420,8 @@ export default function NewProjectPage() {
                 </div>
               </div>
             )}
+
+            {repos.length === 0 && <NoReposWarning />}
 
             <div className="space-y-2">
               <Label>Repository</Label>
