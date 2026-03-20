@@ -210,6 +210,26 @@ func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
 }
 
+// ClaimForResume atomically transitions a terminal session to running so it
+// can be resumed with a follow-up message. Used when a user sends a message
+// to a completed/failed/cancelled/pr_created session.
+func (s *SessionStore) ClaimForResume(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
+	query := `
+		UPDATE sessions
+		SET status = 'running', completed_at = NULL
+		WHERE id = @id AND org_id = @org_id AND status IN ('completed', 'pr_created', 'failed', 'cancelled')
+		RETURNING ` + sessionSelectColumns
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	})
+	if err != nil {
+		return models.Session{}, fmt.Errorf("claim terminal session for resume: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+}
+
 func (s *SessionStore) UpdateFailure(ctx context.Context, orgID, runID uuid.UUID, explanation, category string, nextSteps []string, retryAdvised bool) error {
 	query := `
 		UPDATE sessions
@@ -376,18 +396,15 @@ func (s *SessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessionID
 	return err
 }
 
-// ListStaleSessions returns sessions whose snapshots should be cleaned up:
-// idle sessions that have been inactive too long, OR completed/failed sessions
-// that still have snapshots (e.g. after EndSession or normal completion).
-func (s *SessionStore) ListStaleSessions(ctx context.Context, olderThan time.Time) ([]models.Session, error) {
+// ListStaleIdleSessions returns idle sessions that have been inactive longer
+// than the idle timeout. These sessions should be transitioned to completed
+// but their snapshots are preserved for later resumption.
+func (s *SessionStore) ListStaleIdleSessions(ctx context.Context, olderThan time.Time) ([]models.Session, error) {
 	query := `
 		SELECT ` + sessionSelectColumns + `
 		FROM sessions
-		WHERE sandbox_state = 'snapshotted'
-		  AND (
-		    (status = 'idle' AND last_activity_at < @older_than)
-		    OR status IN ('completed', 'failed', 'cancelled')
-		  )
+		WHERE status = 'idle'
+		  AND last_activity_at < @older_than
 		ORDER BY last_activity_at ASC NULLS FIRST
 		LIMIT 100`
 
@@ -395,7 +412,28 @@ func (s *SessionStore) ListStaleSessions(ctx context.Context, olderThan time.Tim
 		"older_than": olderThan,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("query stale sessions: %w", err)
+		return nil, fmt.Errorf("query stale idle sessions: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+}
+
+// ListExpiredSnapshots returns non-active sessions whose snapshots have
+// exceeded the maximum snapshot age and should be cleaned up from storage.
+func (s *SessionStore) ListExpiredSnapshots(ctx context.Context, olderThan time.Time) ([]models.Session, error) {
+	query := `
+		SELECT ` + sessionSelectColumns + `
+		FROM sessions
+		WHERE sandbox_state = 'snapshotted'
+		  AND last_activity_at < @older_than
+		  AND status NOT IN ('running', 'idle')
+		ORDER BY last_activity_at ASC NULLS FIRST
+		LIMIT 100`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"older_than": olderThan,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query expired snapshots: %w", err)
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
 }

@@ -403,6 +403,11 @@ function ChatPanel({ session, sessionId, isActive }: { session: Session; session
 
   const isIdle = session.status === "idle";
   const isRunning = session.status === "running";
+  const isCompleted = session.status === "completed";
+  const isPrCreated = session.status === "pr_created";
+  const isFailed = session.status === "failed";
+  const isCancelled = session.status === "cancelled";
+  const canSendMessage = isIdle || isCompleted || isPrCreated || isFailed || isCancelled;
 
   const { data: messagesData } = useQuery({
     queryKey: ["session", sessionId, "messages"],
@@ -569,7 +574,7 @@ function ChatPanel({ session, sessionId, isActive }: { session: Session; session
   function handleKeyDown(e: React.KeyboardEvent) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      if (message.trim() && isIdle && !sendMutation.isPending) {
+      if (message.trim() && canSendMessage && !sendMutation.isPending) {
         sendMutation.mutate();
       }
     }
@@ -603,8 +608,8 @@ function ChatPanel({ session, sessionId, isActive }: { session: Session; session
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder={isIdle ? "Send a follow-up message..." : isRunning ? "Agent is working..." : "Session is not active"}
-            disabled={!isIdle || sendMutation.isPending}
+            placeholder={canSendMessage ? "Send a follow-up message..." : isRunning ? "Agent is working..." : "Session is not active"}
+            disabled={!canSendMessage || sendMutation.isPending}
             className="min-h-[44px] max-h-[200px] resize-none"
           />
           <div className="flex flex-col gap-1">
@@ -612,7 +617,7 @@ function ChatPanel({ session, sessionId, isActive }: { session: Session; session
               size="icon"
               variant="default"
               className="h-8 w-8 shrink-0"
-              disabled={!message.trim() || !isIdle || sendMutation.isPending}
+              disabled={!message.trim() || !canSendMessage || sendMutation.isPending}
               onClick={() => sendMutation.mutate()}
             >
               <ArrowUp className="h-4 w-4" />

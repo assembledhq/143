@@ -524,14 +524,21 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Try claiming an idle session first, then fall back to resuming a
+	// terminal session (completed/pr_created/failed/cancelled).
+	var resumed bool
 	session, err := h.runStore.ClaimIdle(r.Context(), orgID, sessionID)
 	if err != nil {
-		if _, lookupErr := h.runStore.GetByID(r.Context(), orgID, sessionID); lookupErr != nil {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "session not found")
+		session, err = h.runStore.ClaimForResume(r.Context(), orgID, sessionID)
+		if err != nil {
+			if _, lookupErr := h.runStore.GetByID(r.Context(), orgID, sessionID); lookupErr != nil {
+				writeError(w, http.StatusNotFound, "NOT_FOUND", "session not found")
+				return
+			}
+			writeError(w, http.StatusConflict, "NOT_RESUMABLE", "session must be idle or completed to send a message")
 			return
 		}
-		writeError(w, http.StatusConflict, "NOT_IDLE", "session must be idle to send a message")
-		return
+		resumed = true
 	}
 
 	user := middleware.UserFromContext(r.Context())
@@ -552,9 +559,15 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		msg.Attachments = body.Images
 	}
 
+	// On failure, revert to the original status.
+	revertStatus := string(models.SessionStatusIdle)
+	if resumed {
+		revertStatus = string(models.SessionStatusCompleted)
+	}
+
 	if err := h.messageStore.Create(r.Context(), msg); err != nil {
-		if revertErr := h.runStore.UpdateStatus(r.Context(), orgID, sessionID, string(models.SessionStatusIdle)); revertErr != nil {
-			zerolog.Ctx(r.Context()).Error().Err(revertErr).Str("session_id", sessionID.String()).Msg("failed to revert session to idle after message creation failure")
+		if revertErr := h.runStore.UpdateStatus(r.Context(), orgID, sessionID, revertStatus); revertErr != nil {
+			zerolog.Ctx(r.Context()).Error().Err(revertErr).Str("session_id", sessionID.String()).Msg("failed to revert session status after message creation failure")
 		}
 		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message")
 		return
@@ -566,8 +579,8 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		"org_id":     orgID.String(),
 	}
 	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "continue_session", payload, 5, nil); err != nil {
-		if revertErr := h.runStore.UpdateStatus(r.Context(), orgID, sessionID, string(models.SessionStatusIdle)); revertErr != nil {
-			zerolog.Ctx(r.Context()).Error().Err(revertErr).Str("session_id", sessionID.String()).Msg("failed to revert session to idle after enqueue failure")
+		if revertErr := h.runStore.UpdateStatus(r.Context(), orgID, sessionID, revertStatus); revertErr != nil {
+			zerolog.Ctx(r.Context()).Error().Err(revertErr).Str("session_id", sessionID.String()).Msg("failed to revert session status after enqueue failure")
 		}
 		writeError(w, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue continue_session job")
 		return

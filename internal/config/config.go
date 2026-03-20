@@ -81,6 +81,7 @@ type Config struct {
 	SnapshotStorageDir    string        `env:"SNAPSHOT_STORAGE_DIR"    envDefault:".data/snapshots"`
 	SessionMaxIdleAge     time.Duration `env:"SESSION_MAX_IDLE_AGE"    envDefault:"2h"`
 	SessionReaperInterval time.Duration `env:"SESSION_REAPER_INTERVAL" envDefault:"5m"`
+	SessionMaxSnapshotAge time.Duration `env:"SESSION_MAX_SNAPSHOT_AGE" envDefault:"720h"` // 30 days
 }
 
 // Load reads configuration from env files and environment variables.
