@@ -1,5 +1,7 @@
 # Design: Validation Pipeline
 
+> **Status:** Implemented | **Last reviewed:** 2026-03-19
+
 This document describes how 143.dev validates the code produced by an agent run before it becomes a PR.
 
 ## Overview

@@ -1,5 +1,7 @@
 # Design Resolutions: Cross-Document Clarifications
 
+> **Status:** Implemented | **Last reviewed:** 2026-03-19
+
 This document resolves conflicts, ambiguities, and gaps identified during design review. Each resolution includes the specific change to make in the referenced doc(s). Engineers should treat this document as authoritative where it contradicts earlier docs — those docs should be updated to match.
 
 ---

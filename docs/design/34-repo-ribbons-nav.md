@@ -1,5 +1,7 @@
 # 34 - Repo Context Switcher: Repository-Scoped Navigation
 
+> **Status:** Implemented | **Last reviewed:** 2026-03-19
+
 > Give multi-repo users a global repo context selector that scopes all navigation, while keeping single-repo users' experience unchanged.
 
 **Status:** Proposal

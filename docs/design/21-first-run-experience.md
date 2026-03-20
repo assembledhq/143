@@ -1,5 +1,7 @@
 # Design: First-Run Experience & Time-to-Value
 
+> **Status:** Implemented | **Last reviewed:** 2026-03-19
+
 This document describes how 143.dev gets new users from sign-up to their first shipped fix as fast as possible. The goal: value in under 10 minutes, "aha moment" in under 5.
 
 ## Overview
