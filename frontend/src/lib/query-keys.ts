@@ -16,6 +16,9 @@ export const queryKeys = {
     pr: (id: string) => ["session", id, "pr"] as const,
     messages: (id: string) => ["session", id, "messages"] as const,
   },
+  repositories: {
+    all: ["repositories"] as const,
+  },
   settings: {
     all: ["settings"] as const,
   },

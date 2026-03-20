@@ -111,6 +111,7 @@ export interface Session {
   last_activity_at?: string;
   sandbox_state: string;
   snapshot_key?: string;
+  target_branch?: string;
   error?: string;
   result_summary?: string;
   diff?: string;

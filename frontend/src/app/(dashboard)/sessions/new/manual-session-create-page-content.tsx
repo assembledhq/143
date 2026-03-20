@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowUp, Mic, Plus, X, ImagePlus, Paperclip } from "lucide-react";
+import { ArrowUp, Mic, Plus, X, ImagePlus, Paperclip, GitBranch, ChevronDown } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -26,7 +26,7 @@ import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { AGENT_TYPE_OPTIONS } from "@/lib/model-constants";
 import { useOptimisticSessions } from "@/contexts/optimistic-sessions";
-import type { OrgSettings, Organization, SingleResponse } from "@/lib/types";
+import type { OrgSettings, Organization, Repository, SingleResponse, ListResponse } from "@/lib/types";
 
 type DictationResult = {
   transcript: string;
@@ -77,6 +77,8 @@ export function ManualSessionCreatePageContent() {
   const [isDictating, setIsDictating] = useState(false);
   const [dictationError, setDictationError] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState("");
+  const [userSelectedRepoId, setUserSelectedRepoId] = useState<string | null>(repoId ?? null);
+  const [branchByRepoId, setBranchByRepoId] = useState<Record<string, string>>({});
   const [creationError, setCreationError] = useState<string | null>(null);
 
   const { addOptimisticSession, removeOptimisticSession } = useOptimisticSessions();
@@ -89,6 +91,37 @@ export function ManualSessionCreatePageContent() {
   const settings = settingsResponse?.data?.settings as OrgSettings | undefined;
   const defaultAgentType = settings?.default_agent_type ?? "codex";
 
+  const { data: reposResponse } = useQuery<ListResponse<Repository>>({
+    queryKey: queryKeys.repositories.all,
+    queryFn: () => api.repositories.list(),
+  });
+  const repositories = useMemo(() => reposResponse?.data ?? [], [reposResponse]);
+
+  // Auto-select the only repo for single-repo orgs; otherwise use user's choice.
+  const selectedRepoId = useMemo(() => {
+    if (userSelectedRepoId !== null) return userSelectedRepoId;
+    if (repositories.length === 1) return repositories[0].id;
+    return "";
+  }, [userSelectedRepoId, repositories]);
+
+  const selectedRepo = repositories.find((r) => r.id === selectedRepoId);
+
+  // Derive branch: use user override if set, otherwise the repo's default.
+  const selectedBranch = useMemo(() => {
+    if (!selectedRepoId) return "";
+    if (branchByRepoId[selectedRepoId] !== undefined) return branchByRepoId[selectedRepoId];
+    return selectedRepo?.default_branch ?? "";
+  }, [selectedRepoId, branchByRepoId, selectedRepo]);
+
+  const setSelectedRepoId = (id: string) => {
+    setUserSelectedRepoId(id);
+  };
+
+  const setSelectedBranch = (branch: string) => {
+    if (!selectedRepoId) return;
+    setBranchByRepoId((prev) => ({ ...prev, [selectedRepoId]: branch }));
+  };
+
   const availableModels = useMemo(() => {
     const agentType = AGENT_TYPE_OPTIONS.find((a) => a.key === defaultAgentType);
     return agentType?.models ?? [];
@@ -100,7 +133,8 @@ export function ManualSessionCreatePageContent() {
         message: message.trim(),
         images: attachments,
         ...(selectedModel ? { model: selectedModel } : {}),
-        ...(repoId ? { repository_id: repoId } : {}),
+        ...(selectedRepoId ? { repository_id: selectedRepoId } : {}),
+        ...(selectedBranch ? { branch: selectedBranch } : {}),
       }),
     onMutate: () => {
       setCreationError(null);
@@ -314,6 +348,53 @@ export function ManualSessionCreatePageContent() {
                 className="hidden"
                 onChange={onUploadChange}
               />
+
+              {repositories.length > 0 && (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-8 gap-1.5 rounded-full px-3 text-[13px] text-muted-foreground hover:text-foreground"
+                    >
+                      <GitBranch className="h-3.5 w-3.5" />
+                      <span>{selectedRepo ? selectedRepo.full_name.split("/").pop() : "Select repo"}</span>
+                      <ChevronDown className="h-3 w-3 opacity-50" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start" className="w-72">
+                    <DropdownMenuItem
+                      onClick={() => setSelectedRepoId("")}
+                      className={!selectedRepoId ? "font-medium" : ""}
+                    >
+                      No specific repo
+                    </DropdownMenuItem>
+                    {repositories.map((repo) => (
+                      <DropdownMenuItem
+                        key={repo.id}
+                        onClick={() => setSelectedRepoId(repo.id)}
+                        className={selectedRepoId === repo.id ? "font-medium" : ""}
+                      >
+                        <GitBranch className="mr-2 h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                        <span className="truncate">{repo.full_name}</span>
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              )}
+
+              {selectedRepo && (
+                <div className="flex items-center gap-1">
+                  <GitBranch className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                  <Input
+                    value={selectedBranch}
+                    onChange={(e) => setSelectedBranch(e.target.value)}
+                    placeholder={selectedRepo.default_branch || "main"}
+                    className="h-7 w-36 text-[13px] px-2"
+                    aria-label="Target branch"
+                  />
+                </div>
+              )}
 
               <Select value={selectedModel} onValueChange={setSelectedModel}>
                 <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-[13px] text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
