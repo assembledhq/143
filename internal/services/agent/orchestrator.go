@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -53,6 +55,7 @@ type SessionStore interface {
 	UpdateTurnComplete(ctx context.Context, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string) error
 	UpdateSnapshotInfo(ctx context.Context, orgID, sessionID uuid.UUID, agentSessionID, snapshotKey string) error
 	UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state string) error
+	UpdateWorkingBranch(ctx context.Context, orgID, sessionID uuid.UUID, branch string) error
 	GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 }
 
@@ -345,6 +348,25 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		if err := o.provider.CloneRepo(ctx, sandbox, repoURL, branch, token); err != nil {
 			o.failRun(ctx, run, fmt.Sprintf("clone repo: %s", err))
 			return fmt.Errorf("clone repo: %w", err)
+		}
+
+		// 8b. Create a working branch so the agent operates on a separate
+		// branch from the start, keeping the base branch clean.
+		workingBranch := formatWorkingBranch(run, &issue)
+		checkoutCmd := fmt.Sprintf("git checkout -b '%s'", shellEscapeSingleQuote(workingBranch))
+		var checkoutOut, checkoutErr bytes.Buffer
+		exitCode, execErr := o.provider.Exec(ctx, sandbox, checkoutCmd, &checkoutOut, &checkoutErr)
+		if execErr != nil || exitCode != 0 {
+			log.Warn().
+				Err(execErr).
+				Int("exit_code", exitCode).
+				Str("stderr", checkoutErr.String()).
+				Msg("failed to create working branch, agent will work on base branch")
+		} else {
+			run.WorkingBranch = &workingBranch
+			if dbErr := o.sessions.UpdateWorkingBranch(ctx, run.OrgID, run.ID, workingBranch); dbErr != nil {
+				log.Warn().Err(dbErr).Str("branch", workingBranch).Msg("failed to persist working branch")
+			}
 		}
 	}
 
@@ -1129,4 +1151,47 @@ func strPtr(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+const maxBranchSlugLen = 60
+
+var nonAlphanumRegexp = regexp.MustCompile(`[^a-z0-9]+`)
+
+// slugifyForBranch converts a title into a lowercase, hyphen-separated slug
+// suitable for use in a git branch name.
+func slugifyForBranch(s string) string {
+	s = strings.ToLower(s)
+	s = nonAlphanumRegexp.ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-")
+	if len(s) > maxBranchSlugLen {
+		s = s[:maxBranchSlugLen]
+		if i := strings.LastIndex(s, "-"); i > 0 {
+			s = s[:i]
+		}
+	}
+	return s
+}
+
+// formatWorkingBranch generates a branch name for an agent session.
+// Format: 143-<short-id>-<slug> — short, flat, and descriptive.
+func formatWorkingBranch(run *models.Session, issue *models.Issue) string {
+	short := run.ID.String()[:8]
+
+	// Prefer the session title (set for manual sessions) over the issue title.
+	title := issue.Title
+	if run.Title != nil && *run.Title != "" {
+		title = *run.Title
+	}
+
+	slug := slugifyForBranch(title)
+	if slug == "" {
+		slug = "session"
+	}
+
+	return fmt.Sprintf("143-%s-%s", short, slug)
+}
+
+// shellEscapeSingleQuote escapes single quotes for safe use in shell commands.
+func shellEscapeSingleQuote(s string) string {
+	return strings.ReplaceAll(s, "'", "'\\''")
 }
