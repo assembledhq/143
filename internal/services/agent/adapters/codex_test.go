@@ -765,6 +765,149 @@ func TestCodexAdapter_Execute_ContinuationWithoutSessionIDUsesResumeLast(t *test
 	require.False(t, exists, "continuation should not write a fresh prompt file")
 }
 
+func TestIsDuplicateOutput(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		content    string
+		lastOutput *string
+		wantDup    bool
+		wantLast   string // expected *lastOutput after call; ignored when lastOutput is nil
+	}{
+		{
+			name:       "nil lastOutput pointer never duplicates",
+			content:    "hello",
+			lastOutput: nil,
+			wantDup:    false,
+		},
+		{
+			name:       "first content is not a duplicate",
+			content:    "hello",
+			lastOutput: strPtr(""),
+			wantDup:    false,
+			wantLast:   "hello",
+		},
+		{
+			name:       "same content is a duplicate",
+			content:    "hello",
+			lastOutput: strPtr("hello"),
+			wantDup:    true,
+			wantLast:   "hello",
+		},
+		{
+			name:       "different content is not a duplicate",
+			content:    "world",
+			lastOutput: strPtr("hello"),
+			wantDup:    false,
+			wantLast:   "world",
+		},
+		{
+			name:       "empty content is never a duplicate",
+			content:    "",
+			lastOutput: strPtr("hello"),
+			wantDup:    false,
+			wantLast:   "hello",
+		},
+		{
+			name:       "empty content with empty lastOutput",
+			content:    "",
+			lastOutput: strPtr(""),
+			wantDup:    false,
+			wantLast:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := isDuplicateOutput(tt.content, tt.lastOutput)
+			require.Equal(t, tt.wantDup, got)
+			if tt.lastOutput != nil {
+				require.Equal(t, tt.wantLast, *tt.lastOutput)
+			}
+		})
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
+func TestParseCodexStreamLine_DeduplicatesConsecutiveOutput(t *testing.T) {
+	t.Parallel()
+
+	result := &agent.AgentResult{}
+	logCh := make(chan agent.LogEntry, 100)
+	var summaryParts []string
+	var lastOutput string
+
+	line := []byte(`{"type":"message","content":"Hello world"}`)
+
+	// Send the same line twice — only one log entry should be emitted.
+	parseCodexStreamLine(line, result, logCh, &summaryParts, &lastOutput)
+	parseCodexStreamLine(line, result, logCh, &summaryParts, &lastOutput)
+	close(logCh)
+
+	var logs []agent.LogEntry
+	for entry := range logCh {
+		logs = append(logs, entry)
+	}
+
+	require.Len(t, logs, 1, "consecutive duplicate messages should be deduplicated to 1 log entry")
+	require.Len(t, summaryParts, 1, "summary should only contain 1 entry for deduplicated output")
+}
+
+func TestParseCodexStreamLine_AllowsNonConsecutiveDuplicates(t *testing.T) {
+	t.Parallel()
+
+	result := &agent.AgentResult{}
+	logCh := make(chan agent.LogEntry, 100)
+	var summaryParts []string
+	var lastOutput string
+
+	lineA := []byte(`{"type":"message","content":"A"}`)
+	lineB := []byte(`{"type":"message","content":"B"}`)
+
+	// A, B, A — all 3 should pass through because A is non-consecutive.
+	parseCodexStreamLine(lineA, result, logCh, &summaryParts, &lastOutput)
+	parseCodexStreamLine(lineB, result, logCh, &summaryParts, &lastOutput)
+	parseCodexStreamLine(lineA, result, logCh, &summaryParts, &lastOutput)
+	close(logCh)
+
+	var logs []agent.LogEntry
+	for entry := range logCh {
+		logs = append(logs, entry)
+	}
+
+	require.Len(t, logs, 3, "non-consecutive duplicates should all pass through")
+	require.Equal(t, "A", logs[0].Message)
+	require.Equal(t, "B", logs[1].Message)
+	require.Equal(t, "A", logs[2].Message)
+}
+
+func TestParseCodexStreamLine_DeduplicatesItemCompleted(t *testing.T) {
+	t.Parallel()
+
+	result := &agent.AgentResult{}
+	logCh := make(chan agent.LogEntry, 100)
+	var summaryParts []string
+	var lastOutput string
+
+	line := []byte(`{"type":"item.completed","item":{"type":"agent_message","text":"Final answer"}}`)
+
+	// Same item.completed agent_message twice.
+	parseCodexStreamLine(line, result, logCh, &summaryParts, &lastOutput)
+	parseCodexStreamLine(line, result, logCh, &summaryParts, &lastOutput)
+	close(logCh)
+
+	var logs []agent.LogEntry
+	for entry := range logCh {
+		logs = append(logs, entry)
+	}
+
+	require.Len(t, logs, 1, "consecutive duplicate item.completed agent_message should be deduplicated")
+	require.Len(t, summaryParts, 1, "summary should only contain 1 entry for deduplicated item.completed")
+}
+
 func TestShellEscapeCodex(t *testing.T) {
 	tests := []struct {
 		name     string
