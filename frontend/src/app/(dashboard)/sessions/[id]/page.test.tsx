@@ -70,11 +70,10 @@ describe('SessionDetailPage', () => {
     expect(screen.getByText('92%')).toBeInTheDocument();
   });
 
-  it('shows detail panel tabs for Overview, Logs, Changes, Validation', async () => {
+  it('shows detail panel tabs for Overview, Changes, Validation', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
     expect(screen.getByRole('button', { name: 'Overview' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Logs' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Changes' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Validation' })).toBeInTheDocument();
   });
