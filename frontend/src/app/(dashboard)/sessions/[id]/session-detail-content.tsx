@@ -19,7 +19,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
-import { LogViewer } from "@/components/log-viewer";
 import { DiffViewer } from "@/components/diff-viewer";
 import { ChatTimeline } from "@/components/chat-timeline";
 import { api } from "@/lib/api";
@@ -93,7 +92,7 @@ function checkResultBadge(result: string | null) {
 // Detail panel tabs (shown in right sidebar)
 // ---------------------------------------------------------------------------
 
-type DetailTab = "overview" | "changes" | "validation" | "logs";
+type DetailTab = "overview" | "changes" | "validation";
 
 function OverviewTab({ session, members }: { session: Session; members: User[] }) {
   const queryClient = useQueryClient();
@@ -693,7 +692,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     { value: "overview", label: "Overview" },
     { value: "changes", label: "Changes" },
     { value: "validation", label: "Validation" },
-    { value: "logs", label: "Logs" },
   ];
 
   return (
@@ -771,7 +769,6 @@ export function SessionDetailContent({ id }: { id: string }) {
             {detailTab === "overview" && <OverviewTab session={session} members={members} />}
             {detailTab === "changes" && <ChangesTab session={session} sessionId={id} />}
             {detailTab === "validation" && <ValidationTab sessionId={id} />}
-            {detailTab === "logs" && <LogViewer runId={id} isActive={isActive} />}
           </div>
         </div>
         </>
