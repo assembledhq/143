@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -23,8 +24,15 @@ import (
 	"github.com/assembledhq/143/internal/services/validation"
 )
 
+// DataRetentionConfig holds retention periods for the data cleanup handler.
+type DataRetentionConfig struct {
+	WebhookDays int
+	LogsDays    int
+	JobsDays    int
+}
+
 // RegisterHandlers registers all job handlers on the worker.
-func RegisterHandlers(w *Worker, stores *Stores, services *Services, logger zerolog.Logger) {
+func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCfg DataRetentionConfig, logger zerolog.Logger) {
 	w.Register("ingest_webhook", newIngestWebhookHandler(stores, logger))
 	w.Register("sync_sentry", newSyncSentryHandler(stores, logger))
 	w.Register("sync_slack", newSyncSlackHandler(stores, services, logger))
@@ -52,6 +60,7 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, logger zero
 	if stores.AuditLogs != nil && stores.Organizations != nil {
 		w.Register("audit_retention_cleanup", newAuditRetentionCleanupHandler(stores, logger))
 	}
+	w.Register("data_retention_cleanup", newDataRetentionCleanupHandler(stores, retentionCfg, logger))
 }
 
 func hasServiceHandlersDependencies(services *Services) bool {
@@ -79,6 +88,7 @@ type Stores struct {
 	Credentials         *db.OrgCredentialStore // nil-safe: needed for sync_slack
 	AuditLogs           *db.AuditLogStore     // nil-safe: audit retention cleanup
 	Organizations       *db.OrganizationStore // nil-safe: needed for audit retention
+	SessionLogs         *db.SessionLogStore   // nil-safe: data retention cleanup
 }
 
 // MemoryReinforcer retrieves and reinforces memories for a repo.
@@ -871,6 +881,55 @@ func newAuditRetentionCleanupHandler(stores *Stores, logger zerolog.Logger) JobH
 			Int64("deleted", deleted).
 			Msg("audit retention cleanup complete")
 
+		return nil
+	}
+}
+
+// data_retention_cleanup handler deletes expired webhook deliveries, session logs,
+// and completed jobs based on configurable retention periods.
+func newDataRetentionCleanupHandler(stores *Stores, retentionCfg DataRetentionConfig, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var totalDeleted int64
+		var errs []error
+
+		if stores.Webhooks != nil && retentionCfg.WebhookDays > 0 {
+			deleted, err := stores.Webhooks.DeleteExpired(ctx, retentionCfg.WebhookDays)
+			if err != nil {
+				logger.Error().Err(err).Msg("failed to delete expired webhook deliveries")
+				errs = append(errs, fmt.Errorf("delete expired webhook deliveries: %w", err))
+			} else {
+				totalDeleted += deleted
+				logger.Info().Int64("deleted", deleted).Int("retention_days", retentionCfg.WebhookDays).Msg("webhook delivery cleanup complete")
+			}
+		}
+
+		if stores.SessionLogs != nil && retentionCfg.LogsDays > 0 {
+			deleted, err := stores.SessionLogs.DeleteExpired(ctx, retentionCfg.LogsDays)
+			if err != nil {
+				logger.Error().Err(err).Msg("failed to delete expired session logs")
+				errs = append(errs, fmt.Errorf("delete expired session logs: %w", err))
+			} else {
+				totalDeleted += deleted
+				logger.Info().Int64("deleted", deleted).Int("retention_days", retentionCfg.LogsDays).Msg("session log cleanup complete")
+			}
+		}
+
+		if stores.Jobs != nil && retentionCfg.JobsDays > 0 {
+			deleted, err := stores.Jobs.DeleteExpiredCompleted(ctx, retentionCfg.JobsDays)
+			if err != nil {
+				logger.Error().Err(err).Msg("failed to delete expired completed jobs")
+				errs = append(errs, fmt.Errorf("delete expired completed jobs: %w", err))
+			} else {
+				totalDeleted += deleted
+				logger.Info().Int64("deleted", deleted).Int("retention_days", retentionCfg.JobsDays).Msg("completed job cleanup complete")
+			}
+		}
+
+		logger.Info().Int64("total_deleted", totalDeleted).Msg("data retention cleanup complete")
+
+		if len(errs) > 0 {
+			return fmt.Errorf("data retention cleanup had %d error(s): %w", len(errs), errors.Join(errs...))
+		}
 		return nil
 	}
 }

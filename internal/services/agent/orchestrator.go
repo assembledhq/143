@@ -1145,8 +1145,10 @@ func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, san
 	// into the sandbox. If the refresh fails (e.g. token already consumed),
 	// fall back to GetValidToken which returns any cached valid token.
 	cfg, err := o.codexAuth.RefreshToken(ctx, orgID)
-	if err != nil {
-		o.logger.Debug().Err(err).Str("org_id", orgID.String()).Msg("forced token refresh failed, falling back to GetValidToken")
+	if err != nil || cfg == nil {
+		if err != nil {
+			o.logger.Debug().Err(err).Str("org_id", orgID.String()).Msg("forced token refresh failed, falling back to GetValidToken")
+		}
 		cfg, err = o.codexAuth.GetValidToken(ctx, orgID)
 		if err != nil {
 			return false, fmt.Errorf("get codex auth token: %w", err)

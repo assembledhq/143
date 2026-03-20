@@ -91,3 +91,12 @@ func (s *SessionLogStore) ListByThread(ctx context.Context, orgID, threadID uuid
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionLog])
 }
+
+// DeleteExpired removes session logs older than the given number of days.
+func (s *SessionLogStore) DeleteExpired(ctx context.Context, retentionDays int) (int64, error) {
+	var deleted int64
+	err := s.db.QueryRow(ctx,
+		"SELECT delete_expired_session_logs($1)", retentionDays,
+	).Scan(&deleted)
+	return deleted, err
+}
