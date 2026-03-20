@@ -78,17 +78,9 @@ export function ProjectSidebar() {
 
   return (
     <div className="w-full h-full border-r border-border bg-muted/30 flex flex-col">
-      {/* New project button */}
-      <Link
-        href="/projects/new"
-        className="flex items-center gap-2.5 px-4 py-3 border-b border-border/50 text-[13px] font-medium text-muted-foreground hover:text-foreground transition-colors"
-      >
-        <Plus className="h-4 w-4" />
-        New project
-      </Link>
-
       {/* Header */}
       <div className="px-4 pt-3 pb-2 space-y-3">
+
         {/* Search */}
         <div className="relative">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground/50" />
@@ -100,6 +92,15 @@ export function ProjectSidebar() {
             className="w-full h-8 pl-8 pr-3 rounded-md border border-border bg-background text-[13px] placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
           />
         </div>
+
+        {/* New project button */}
+        <Link
+          href="/projects/new"
+          className="flex items-center justify-center gap-2 w-full h-9 rounded-md border border-border bg-background text-[13px] font-medium text-foreground hover:bg-accent transition-colors shadow-sm"
+        >
+          <Plus className="h-4 w-4" />
+          New project
+        </Link>
 
         {/* Filter tabs */}
         <Tabs
