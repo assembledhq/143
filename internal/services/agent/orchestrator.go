@@ -799,11 +799,11 @@ func (o *Orchestrator) buildResumeContext(session *models.Session, issue *models
 
 	// Include the original issue description for context (especially
 	// important for non-manual sessions that may have no prior messages).
-	if issue != nil && issue.Description != "" {
+	if issue != nil && issue.Description != nil && *issue.Description != "" {
 		b.WriteString("## Original issue\n\n**")
 		b.WriteString(issue.Title)
 		b.WriteString("**\n\n")
-		b.WriteString(issue.Description)
+		b.WriteString(*issue.Description)
 		b.WriteString("\n\n")
 	}
 
