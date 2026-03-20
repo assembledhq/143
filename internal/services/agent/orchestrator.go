@@ -241,6 +241,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		branch = repo.DefaultBranch
 		repoFullName = repo.FullName
 
+		// Override with session-specific branch if set.
+		if run.TargetBranch != nil && *run.TargetBranch != "" {
+			branch = *run.TargetBranch
+		}
+
 		// Get GitHub installation token for cloning.
 		ghToken, err := o.github.GetInstallationToken(ctx, repo.InstallationID)
 		if err != nil {

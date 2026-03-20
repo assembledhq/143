@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -652,6 +653,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		AutonomyLevel string   `json:"autonomy_level"`
 		TokenMode     string   `json:"token_mode"`
 		RepositoryID  string   `json:"repository_id"`
+		Branch        string   `json:"branch"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
@@ -678,6 +680,16 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		repoID = &parsed
+	}
+
+	var targetBranch *string
+	if body.Branch != "" {
+		b := strings.TrimSpace(body.Branch)
+		if !isValidGitRef(b) {
+			writeError(w, http.StatusBadRequest, "INVALID_BRANCH", "branch contains invalid characters")
+			return
+		}
+		targetBranch = &b
 	}
 
 	agentType := models.AgentType(body.AgentType)
@@ -776,6 +788,8 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		ModelOverride:     modelOverride,
 		TriggeredByUserID: manualTriggeredByUserID,
 		Title:             &title,
+		PMApproach:        &title,
+		TargetBranch:      targetBranch,
 	}
 	if err := h.runStore.Create(r.Context(), session); err != nil {
 		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create manual session")
@@ -863,4 +877,19 @@ func manualSessionTitle(message string) string {
 	}
 
 	return strings.TrimSpace(trimmed[:120]) + "..."
+}
+
+// gitRefPattern validates git ref names. Allows alphanumeric, dots, hyphens,
+// underscores, and forward slashes (for namespaced branches like feature/foo).
+var gitRefPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._/-]*$`)
+
+// isValidGitRef checks whether s is a plausible git branch/ref name.
+func isValidGitRef(s string) bool {
+	if s == "" || len(s) > 255 {
+		return false
+	}
+	if strings.Contains(s, "..") || strings.Contains(s, "~") || strings.Contains(s, "^") || strings.Contains(s, ":") || strings.Contains(s, " ") || strings.Contains(s, "\\") {
+		return false
+	}
+	return gitRefPattern.MatchString(s)
 }
