@@ -124,24 +124,26 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 
 	if stderr.Len() > 0 {
 		stderrStr := stderr.String()
-		// Downgrade token-refresh errors to debug — these are expected when
-		// the user shares their ChatGPT OAuth tokens between a local Codex
-		// CLI and 143.  Showing them as red errors is alarming and unhelpful.
-		stderrLevel := "error"
-		if strings.Contains(stderrStr, "refresh_token_reused") || strings.Contains(stderrStr, "refresh token") {
-			stderrLevel = "debug"
-		}
-		logCh <- agent.LogEntry{
-			Timestamp: time.Now(),
-			Level:     stderrLevel,
-			Message:   stderrStr,
+		// Strip refresh-token errors entirely — these are expected when the
+		// user shares their ChatGPT OAuth tokens between a local Codex CLI
+		// and 143. Showing them is alarming and unhelpful.
+		filtered := filterRefreshTokenLines(stderrStr)
+		if filtered != "" {
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "error",
+				Message:   filtered,
+			}
 		}
 	}
 
 	if exitCode != 0 {
 		result.Error = fmt.Sprintf("codex CLI exited with code %d", exitCode)
 		if stderr.Len() > 0 {
-			result.Error += ": " + stderr.String()
+			filtered := filterRefreshTokenLines(stderr.String())
+			if filtered != "" {
+				result.Error += ": " + filtered
+			}
 		}
 	}
 
@@ -180,6 +182,12 @@ func isDuplicateOutput(content string, lastOutput *string) bool {
 
 // parseCodexStreamLine processes a single line of Codex streaming output.
 func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- agent.LogEntry, summaryParts *[]string, lastOutput *string) {
+	// Suppress refresh-token errors regardless of how they arrive (stdout or
+	// stderr). The Codex CLI sometimes writes these to stdout at shutdown.
+	if isRefreshTokenError(string(line)) {
+		return
+	}
+
 	var event codexStreamEvent
 	if err := json.Unmarshal(line, &event); err != nil {
 		text := string(line)
@@ -300,13 +308,14 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 		if msg == "" {
 			msg = event.Content
 		}
-		errLevel := "error"
-		if strings.Contains(msg, "refresh_token_reused") || strings.Contains(msg, "refresh token") {
-			errLevel = "debug"
+		// Suppress refresh-token errors entirely — they are expected when
+		// tokens are shared and showing them is alarming and unhelpful.
+		if isRefreshTokenError(msg) {
+			return
 		}
 		logCh <- agent.LogEntry{
 			Timestamp: time.Now(),
-			Level:     errLevel,
+			Level:     "error",
 			Message:   msg,
 		}
 
@@ -618,13 +627,12 @@ func parseCodexStreamOutput(output []byte, result *agent.AgentResult, logCh chan
 			if msg == "" {
 				msg = event.Content
 			}
-			errLevel := "error"
-			if strings.Contains(msg, "refresh_token_reused") || strings.Contains(msg, "refresh token") {
-				errLevel = "debug"
+			if isRefreshTokenError(msg) {
+				continue
 			}
 			logCh <- agent.LogEntry{
 				Timestamp: time.Now(),
-				Level:     errLevel,
+				Level:     "error",
 				Message:   msg,
 			}
 
@@ -728,6 +736,25 @@ func parseCodexStreamOutput(output []byte, result *agent.AgentResult, logCh chan
 	}
 
 	result.Summary = strings.Join(summaryParts, "\n")
+}
+
+// isRefreshTokenError returns true if the message contains token-refresh error
+// indicators that should be suppressed from user-visible logs.
+func isRefreshTokenError(msg string) bool {
+	return strings.Contains(msg, "refresh_token_reused") ||
+		strings.Contains(msg, "refresh token") ||
+		strings.Contains(msg, "Failed to refresh token")
+}
+
+// filterRefreshTokenLines removes refresh-token error content from stderr
+// output. If the entire blob is refresh-token noise, returns "". Otherwise
+// returns the original stderr unchanged (we can't reliably split multi-line
+// error messages by newline).
+func filterRefreshTokenLines(stderr string) string {
+	if isRefreshTokenError(stderr) {
+		return ""
+	}
+	return stderr
 }
 
 // shellEscapeCodex escapes single quotes in a path for use inside a

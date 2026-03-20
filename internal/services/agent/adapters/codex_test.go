@@ -908,6 +908,113 @@ func TestParseCodexStreamLine_DeduplicatesItemCompleted(t *testing.T) {
 	require.Len(t, summaryParts, 1, "summary should only contain 1 entry for deduplicated item.completed")
 }
 
+func TestParseCodexStreamLine_SuppressesRefreshTokenFromStdout(t *testing.T) {
+	t.Parallel()
+
+	result := &agent.AgentResult{}
+	logCh := make(chan agent.LogEntry, 100)
+	var summaryParts []string
+	var lastOutput string
+
+	// Simulate the exact stderr-style errors that arrive via stdout at session end.
+	lines := [][]byte{
+		[]byte(`2026-03-20T04:36:19.827548Z ERROR codex_core::auth: Failed to refresh token: 401 Unauthorized: { "error": { "message": "Your refresh token has already been used", "type": "invalid_request_error", "param": null, "code": "refresh_token_reused" } }`),
+		[]byte(`2026-03-20T04:36:19.827634Z ERROR codex_core::auth: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.`),
+	}
+	for _, line := range lines {
+		parseCodexStreamLine(line, result, logCh, &summaryParts, &lastOutput)
+	}
+	close(logCh)
+
+	var logs []agent.LogEntry
+	for entry := range logCh {
+		logs = append(logs, entry)
+	}
+
+	require.Empty(t, logs, "refresh token errors arriving via stdout should be suppressed entirely")
+	require.Empty(t, summaryParts, "refresh token errors should not appear in summary")
+}
+
+func TestIsRefreshTokenError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		msg  string
+		want bool
+	}{
+		{"refresh_token_reused", true},
+		{`401 Unauthorized: { "error": { "code": "refresh_token_reused" } }`, true},
+		{"Failed to refresh token: Your access token could not be refreshed because your refresh token was already used.", true},
+		{`Failed to refresh token: 401 Unauthorized: { "error": { "message": "bad", "type": "invalid_request_error" } }`, true},
+		// Multi-line blob with fragments — overall blob contains the keyword.
+		{`"error": { "type": "invalid_request_error", "param": null, } } Failed to refresh token: done`, true},
+		{"context deadline exceeded", false},
+		{"command not found", false},
+		{`"error": { "type": "invalid_request_error" }`, false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		require.Equal(t, tt.want, isRefreshTokenError(tt.msg), "isRefreshTokenError(%q)", tt.msg)
+	}
+}
+
+func TestFilterRefreshTokenLines(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		input  string
+		expect string
+	}{
+		{
+			name:   "entire stderr is refresh token errors",
+			input:  "ERROR codex_core::auth: Failed to refresh token: refresh_token_reused\nERROR codex_core::auth: Your refresh token was already used.",
+			expect: "",
+		},
+		{
+			name:   "multi-line blob with refresh_token_reused keyword anywhere",
+			input:  "\"error\": { \"type\": \"invalid_request_error\", \"param\": null, } }\nFailed to refresh token: refresh_token_reused\n\"error\": { \"type\": \"invalid_request_error\" }",
+			expect: "",
+		},
+		{
+			name:   "empty input",
+			input:  "",
+			expect: "",
+		},
+		{
+			name:   "no refresh token content at all — preserved as-is",
+			input:  "real error line 1\nreal error line 2",
+			expect: "real error line 1\nreal error line 2",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expect, filterRefreshTokenLines(tt.input))
+		})
+	}
+}
+
+func TestParseCodexStreamLine_SuppressesRefreshTokenError(t *testing.T) {
+	t.Parallel()
+
+	result := &agent.AgentResult{}
+	logCh := make(chan agent.LogEntry, 100)
+	var summaryParts []string
+	var lastOutput string
+
+	line := []byte(`{"type":"error","error":"401 Unauthorized: refresh_token_reused"}`)
+	parseCodexStreamLine(line, result, logCh, &summaryParts, &lastOutput)
+	close(logCh)
+
+	var logs []agent.LogEntry
+	for entry := range logCh {
+		logs = append(logs, entry)
+	}
+
+	require.Empty(t, logs, "refresh_token_reused error events should be suppressed entirely")
+}
+
 func TestShellEscapeCodex(t *testing.T) {
 	tests := []struct {
 		name     string
