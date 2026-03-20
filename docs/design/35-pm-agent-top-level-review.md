@@ -6,7 +6,7 @@
 
 ## Decision Summary
 
-**Recommendation**: Promote the PM Agent to a top-level nav item, but design it as an operator workspace for a PM/engineer hybrid, not as a generic settings page.
+**Recommendation**: Promote the PM Agent to a top-level nav item, designed as an operator workspace for a PM/engineer hybrid. Use a **split-view layout** (intelligence above, configuration below) with no user-facing "Plan" concept. The PM's output is expressed as actions on **Sessions** and **Projects** — users never see or manage "plans."
 
 The goal is not "make the PM visible" in the abstract. The goal is to give one cross-functional owner a single place to:
 
@@ -17,7 +17,10 @@ The goal is not "make the PM visible" in the abstract. The goal is to give one c
 
 This page should earn its place in the nav by supporting a repeated operating loop, not by housing PM-related configuration.
 
-**Additional recommendation**: Make autonomy a first-class part of the PM model. New orgs should start in suggestion mode, but the path into higher-autonomy operation should be explicit, legible, and easy to adopt as trust grows.
+**Additional recommendations**:
+
+- Make autonomy a first-class part of the PM model. New orgs should start in suggestion mode, but the path into higher-autonomy operation should be explicit, legible, and easy to adopt as trust grows.
+- **Deprecate "Plan" as a user-facing concept.** The `pm_plans` table remains as internal execution infrastructure, but the UI never exposes plans as a named entity. The PM "analyzes and acts" — results flow into Sessions (reactive work) and Projects (strategic work). The decision log replaces the plan list as the audit trail. See Section 5a for details.
 
 ---
 
@@ -53,9 +56,9 @@ They are also often making a fifth decision over time:
 
 The PM Agent page should optimize for **fast strategic comprehension**. A user should be able to land on the page and, within a minute, answer:
 
-- What changed since the last plan?
 - What is the PM recommending now?
 - Why is it recommending that?
+- What changed since the last analysis?
 - What, if anything, should I change?
 - Is the PM ready for more autonomy?
 
@@ -70,7 +73,7 @@ The PM agent is fragmented across **four locations** with no clear home:
 | Surface | What it shows | Discoverability |
 |---------|--------------|-----------------|
 | `/prioritization` (settings dropdown) | PM config: schedule, model, product context, docs, weights | Buried 2 clicks deep |
-| `/plans` | PM plan output: analysis, tasks, clusters, skips | **No nav link at all** — orphaned page |
+| `/plans` | PM plan output: analysis, tasks, clusters, skips | **No nav link at all** — orphaned page (to be removed) |
 | Sessions list status banner | PM running/completed indicator | Visible but confusing (PM dot on Sessions) |
 | Session detail | Tasks, clusters, skipped — the PM's decisions | Shown but not attributed to the PM |
 
@@ -190,106 +193,238 @@ Remove "Prioritization" from the dropdown. Remove the orphaned `/plans` route. C
 
 Do not make the PM page a dumping ground for all PM-related data. It should be organized around the user's operating loop: **observe → steer → verify**.
 
-1. Review the latest plan (observe)
+1. See what the PM recommends now (observe)
 2. Inspect the reasoning and tradeoffs (observe)
 3. Adjust context or constraints if needed (steer)
 4. Verify whether the PM is getting better (verify)
 
-### Recommended page model
+### 5a. Deprecating "Plan" as a user-facing concept
 
-Use a **summary-first workspace** with tabs beneath it, not tabs alone.
+The previous design used "Plans" as a first-class entity — the PM produced a "plan" that users could view, compare, and browse in history. This introduces an unnecessary concept between the PM's intelligence and its effects.
 
-The top summary block (control strip) is important. It makes the page legible for repeat use and prevents users from landing in a content-heavy tab with no orientation.
+**The user's mental model should be:**
 
-### Tab-based layout
+- The PM **analyzes** issues and projects
+- The PM **recommends** what to work on next (expressed as Sessions and Project tasks)
+- The PM **decides** what to skip and why
+- The PM **learns** from outcomes over time
 
-```
-PM Agent
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Users think in terms of Sessions, Projects, and the PM's reasoning — not "Plan #14."
 
-┌─────────────────────────────────────────────────────────────┐
-│  PM Agent · Analyzing (14 issues) · Last run: 2h ago        │
-│  Next run: in 2h · Success rate: 84%                        │
-│  [Analyze Now]                                               │
-└─────────────────────────────────────────────────────────────┘
+**Backend approach:**
 
-┌─────────┬────────────┬──────────┬─────────────┐
-│  Plan   │  Decisions │  Context │  Documents  │
-└─────────┴────────────┴──────────┴─────────────┘
-```
+The `pm_plans` table stays as **internal execution infrastructure**. It records what the PM analyzed, what it decided, and what it executed — but this is never exposed as a named entity in the UI. Specifically:
 
-The persistent header above the tabs is the **control strip** — always visible, shows real-time PM status, autonomy level, trust signal, and provides the primary action (Analyze Now). This is the first thing the operator sees.
+- Keep `pm_plans` table and `PMPlanID` foreign keys on Sessions and ProjectCycles for backend traceability
+- Keep the `pm_analyze` and `project_cycle` job types unchanged
+- Keep `planToModel()` and `planToDecisionLog()` conversion functions
+- **Remove** the `/api/v1/pm/plans`, `/api/v1/pm/plans/{id}`, and `/api/v1/pm/plans/latest` API endpoints from the frontend (keep for internal/debug use if needed)
+- **Remove** the `/plans` frontend page and plan history UI
+- **Rename** user-facing language: "plan" → "analysis cycle" or "recommendation" throughout the UI
+- **Promote** the decision log (`/api/v1/pm/decisions`) as the primary audit trail
+- **Add** a new `/api/v1/pm/current` endpoint that returns the PM's latest recommendation in a presentation-friendly format (current tasks, project actions, skipped issues, reasoning) without exposing the raw plan structure
 
-#### Plan tab (default) — OBSERVE what the PM decided
-
-The main answer: what the PM recommends now. Maps to the user's primary question: "What should happen next?"
-
-- Latest PM plan with prioritized tasks, clusters, skips, and capacity allocation
-- Change summary since previous plan
-- Context stats (issues reviewed, decisions learned from, PRs checked) — these numbers are adaptive and scale with org size
-- Plan history accordion for comparing across cycles
-- Each task card shows which session it spawned and the outcome
-
-#### Decisions tab — VERIFY the PM is getting smarter
-
-The audit and trust surface. Should answer: "Should I trust this system more or constrain it more?"
-
-- Decision log with outcome, confidence, and rationale summary
-- Filter by repo, project, decision type, outcome
-- Trend line plus segmented performance by issue type or domain
-- Per-domain breakdown (e.g., "auth tasks: 92%, payment tasks: 67%")
-- Clear links from decisions to resulting sessions/projects
-
-#### Context tab — STEER the PM's priorities
-
-The steering surface. Should focus on steering, not on proving intelligence.
-
-- Product philosophy, direction, focus/avoid areas
-- PM schedule (how often) and model selection (which LLM)
-- Priority weights with sum validation
-- Organization autonomy slider with clear capability mapping (see Section 6)
-- Per-repo overrides list with inheritance visualization
-- Preview of the effective context the PM will actually use
-- **Context health indicators**: show how each setting influenced recent decisions
-
-#### Documents tab — INFORM the PM with strategic context
-
-Currently nested inside prioritization. Reference documents that feed the PM's reasoning:
-
-- Reference documents (roadmaps, strategy docs, architecture)
-- Add/edit/delete with type badges
-- Shows "last read by PM" timestamp to prove documents are being used
-- Document influence indicators (e.g., "Roadmap.md cited in 3 recent task approaches")
-
-This is where the operator answers: *"Does the PM have enough context to make good decisions?"*
-
-### Why tabs, not separate pages
-
-The workspace is a single destination with multiple lenses on the same system. Users should think "I'm operating the PM" — not "I'm on a settings page."
-
-### Interaction modes and ownership
-
-The tabs should not imply the same user intent:
-
-- `Plan` and `Decisions` are operational and likely visited frequently
-- `Context` and `Documents` are steering/setup surfaces and likely visited less often
-
-This distinction matters for UX. The operational tabs should prioritize scanability and decision-making. The steering tabs can be more form-oriented.
-
-### The operator loop
-
-The workspace design follows a natural flow that operators repeat:
+**What this means for the entity model:**
 
 ```
-1. OBSERVE (Plan tab)     → What did the PM just decide?
-2. VERIFY  (Decisions tab) → Is the PM succeeding? Where is it struggling?
-3. STEER   (Context tab)   → Adjust direction, weights, focus areas
-4. INFORM  (Documents tab) → Upload new strategic context
-5. TRIGGER (Control strip)  → Run analysis with updated context
+Before (3 user concepts):
+  Session ← Plan → Project
+  User manages: Sessions, Plans, Projects
+
+After (2 user concepts):
+  Session ← [internal pm_plan] → Project
+  User manages: Sessions, Projects
+  User observes: PM recommendations, PM decisions, PM performance
+```
+
+The PM becomes a **verb** (it analyzes, recommends, acts) rather than a **noun** (it produces plans).
+
+### Recommended page model: Split-view workspace
+
+Use a **split-view layout** — intelligence above, configuration below — on a single scrollable page. No tabs. A clear visual divider separates "what the PM decided" (AI output) from "your direction" (human input).
+
+This is the clearest expression of the human/AI boundary. Users always know: top = the PM's intelligence, bottom = my controls.
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  143.dev                                                                    │
+├────────────┬─────────────────────────────────────────────────────────────────┤
+│            │                                                                │
+│  Overview  │  PM Agent                                         [✦ Analyze] │
+│            │  ────────────────────────────────────────────────────────────  │
+│  Sessions  │  Act on low-risk · 84% success · Last analyzed 2h ago          │
+│            │                                                                │
+│  Projects  │  ┌─ Current Recommendation ─────────────────────────────────┐ │
+│            │  │                                                          │ │
+│ ▎PM Agent  │  │  "Payment reliability cluster: 3 issues share auth      │ │
+│            │  │   middleware root cause. Aligns with Q1 hardening."      │ │
+│            │  │                                                          │ │
+│            │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐   │ │
+│            │  │  │ PAY-3a2d │ │ AUTH-142 │ │ AUTH-156 │ │ +1 more  │   │ │
+│            │  │  │ ✓ Done   │ │ ● Active │ │ ○ Queued │ │          │   │ │
+│            │  │  └──────────┘ └──────────┘ └──────────┘ └──────────┘   │ │
+│            │  │                                                          │ │
+│            │  │  Projects this cycle:                                    │ │
+│            │  │  Payments Hardening → 2 new tasks · Auth Overhaul → 1   │ │
+│            │  │                                                          │ │
+│            │  │  Skipped (4)                                         ▾  │ │
+│            │  └──────────────────────────────────────────────────────────┘ │
+│            │                                                                │
+│            │  ┌─ Decisions ──────────────┐  ┌─ Performance ──────────────┐ │
+│            │  │                          │  │                            │ │
+│            │  │  ✓ PAY-3a2d  Succeeded   │  │  84%  ████████████░░      │ │
+│            │  │  ✗ AUTH-99   Failed      │  │                            │ │
+│            │  │  ✓ DB-12     Succeeded   │  │  Auth    92%              │ │
+│            │  │  ○ UI-9d4e   Skipped     │  │  Payment 67%              │ │
+│            │  │                          │  │  Infra   88%              │ │
+│            │  │  [View all →]            │  │                            │ │
+│            │  └──────────────────────────┘  └────────────────────────────┘ │
+│            │                                                                │
+│            │  ┌─ Recent Activity ────────────────────────────────────────┐ │
+│            │  │  Today: Analyzed 14 issues · 3 delegated · 4 skipped     │ │
+│            │  │  Yesterday: 4/4 sessions succeeded ✓                     │ │
+│            │  │  Mar 17: AUTH-99 failed — PM now requires high confidence │ │
+│            │  │  [View all decisions →]                                   │ │
+│            │  └──────────────────────────────────────────────────────────┘ │
+│            │                                                                │
+│            │  ═══════════════════════════════════════════════════════════   │
+│            │  Your Direction                                                │
+│            │  ═══════════════════════════════════════════════════════════   │
+│            │                                                                │
+│            │  ┌─ Product Context ─────────────────────────────────────────┐│
+│            │  │                                                          ││
+│            │  │  Philosophy                    Direction                  ││
+│            │  │  "Ship reliability first"      "Payments hardening"      ││
+│            │  │  [edit]                        [edit]                     ││
+│            │  │                                                          ││
+│            │  │  Focus areas                   Avoid areas               ││
+│            │  │  slo, incident prevention      new-ui                    ││
+│            │  │  [edit]                        [edit]                     ││
+│            │  │                                                          ││
+│            │  │  Priority weights                                        ││
+│            │  │  Impact 0.35 · Severity 0.25 · Recency 0.20 · ...      ││
+│            │  │  [edit]                                                   ││
+│            │  └──────────────────────────────────────────────────────────┘│
+│            │                                                                │
+│            │  ┌─ Autonomy ────────────────┐  ┌─ Documents ───────────────┐│
+│            │  │                            │  │                            ││
+│            │  │  ○─────●─────○            │  │  roadmap.md    Read 2d ago ││
+│            │  │  Suggest  Act  Operate    │  │  arch-guide    Read 5d ago ││
+│            │  │           ▲               │  │                            ││
+│            │  │                            │  │  [+ Add document]         ││
+│            │  │  PM has 87% acceptance     │  │                            ││
+│            │  │  over 9 reviewed cycles.   │  │  Context health:          ││
+│            │  │  Ready to advance? →       │  │  ✓ Philosophy   Active    ││
+│            │  │                            │  │  ⚠ Direction    45d ago   ││
+│            │  └────────────────────────────┘  │  ✓ Focus areas  3 set    ││
+│            │                                  │  ○ Docs         Add more  ││
+│            │                                  └────────────────────────────┘│
+│            │                                                                │
+└────────────┴────────────────────────────────────────────────────────────────┘
+```
+
+### Why split-view, not tabs
+
+**The human/AI boundary is the single most important design decision.** The PM is the first surface where AI reasoning and human steering coexist on the same page. The visual divider ("Your Direction") explicitly separates "what the PM decided" from "what you told it." This is the foundation of trust.
+
+Previous designs used tabs (Plan / Decisions / Context / Documents). This had three problems:
+
+1. **Tabs hide information.** The operator's core loop (observe → steer → verify) requires information from what would be multiple tabs simultaneously. A user checking whether the PM's recommendation aligns with their direction needs to see both the recommendation AND the direction at the same time. Tabs force mental context-switching.
+
+2. **Tabs create a false equivalence.** The "Plan" tab and "Context" tab serve fundamentally different purposes — one is AI output, one is human input. Putting them in the same tab bar implies they're peer concepts. The split-view makes the hierarchy explicit: the PM's intelligence is the primary content; your configuration is the supporting structure beneath it.
+
+3. **Configuration accessibility matters.** The PM/engineer hybrid persona's core loop is observe → steer → re-run. If steering requires clicking to a different tab, there's friction in the most important loop. The split-view puts context, weights, autonomy, and documents right on the page. The PM page isn't just for reading — it's for operating.
+
+### Page zones explained
+
+The page has five distinct zones, read top to bottom:
+
+#### Zone 1: Control strip (always visible)
+
+```
+PM Agent                                                     [✦ Analyze]
+────────────────────────────────────────────────────────────────────────
+Act on low-risk · 84% success · Last analyzed 2h ago
+```
+
+Shows: current autonomy level, headline success rate, last analysis time, next scheduled run. Primary action: Analyze Now. This orients the operator instantly on every visit.
+
+#### Zone 2: Current Recommendation (hero)
+
+The PM's latest recommendation, expressed as **actions on issues and projects** — not as a "plan." The PM speaks in first person ("Focus on payment reliability cluster...") to make it feel like an intelligent collaborator.
+
+Contents:
+- One-sentence situational analysis with reasoning
+- Issue cards showing what the PM delegated, with status (done/active/queued)
+- Project actions this cycle (tasks created per active project, with progress)
+- Collapsed "Skipped" section with skip reasoning (progressive disclosure)
+- Capacity indicator (slots used / available)
+
+This zone answers: "What does the PM think should happen next, and why?"
+
+#### Zone 3: Decisions + Performance (side by side)
+
+Two cards sitting next to each other:
+
+**Decisions card** — Recent decision log entries with outcomes (succeeded/failed/skipped/still open). Links to resulting sessions. Filterable on full view. This is the primary audit trail, replacing the old plan history.
+
+**Performance card** — 30-day success rate with per-domain breakdown (e.g., "auth: 92%, payment: 67%"). This is the trust signal — the operator glances here to decide whether to increase autonomy or add constraints.
+
+These two cards together answer: "Is the PM getting smarter?"
+
+#### Zone 4: Recent Activity (compact timeline)
+
+A small, collapsed section showing the last 3-5 PM actions as a compact narrative:
+
+```
+Today: Analyzed 14 issues · 3 delegated · 4 skipped
+Yesterday: 4/4 sessions succeeded ✓
+Mar 17: AUTH-99 failed — PM now requires high confidence
+```
+
+This gives the page a sense that the PM is **alive and continuously working**, without requiring a full activity feed. Expandable to full decision history via "View all decisions →".
+
+This zone answers: "What has the PM been doing?"
+
+#### Zone 5: Your Direction (below the divider)
+
+Everything below the `═══ Your Direction ═══` divider is human-authored steering. This zone contains:
+
+**Product Context** — Philosophy, direction, focus/avoid areas, priority weights. Inline `[edit]` buttons for immediate adjustment. Shows how context influenced recent decisions (context health).
+
+**Autonomy** — Single slider (Suggest / Act on low-risk / Operate broadly) with capability mapping. Shows readiness signals ("PM has 87% acceptance over 9 reviewed cycles. Ready to advance?").
+
+**Documents** — Reference documents with "last read by PM" timestamps. Add/edit/delete. Document influence indicators.
+
+**Context Health** — Inline indicators showing freshness and influence of each setting. Nudges like "Direction last updated 45d ago — consider refreshing."
+
+This zone answers: "Does the PM have the right context and the right amount of autonomy?"
+
+### The operator loop (no tabs needed)
+
+The workspace supports the full operating loop on a single scrollable page:
+
+```
+1. OBSERVE  (Zone 2: Recommendation)  → What did the PM just decide?
+2. VERIFY   (Zone 3: Decisions/Perf)  → Is the PM succeeding? Where is it struggling?
+3. REVIEW   (Zone 4: Recent Activity) → What has the PM been doing over time?
+4. STEER    (Zone 5: Your Direction)  → Adjust direction, weights, focus areas, docs
+5. TRIGGER  (Zone 1: Control strip)   → Run analysis with updated context
 → Back to OBSERVE
 ```
 
-This loop is why the PM page is a workspace, not a dashboard. Dashboards are for glancing. Workspaces are for operating.
+This loop works without any navigation. The user scrolls down to steer, scrolls up to observe. The divider makes the boundary between AI output and human input unmistakable.
+
+### Why this works for the empty state
+
+When a new org opens this page for the first time:
+
+- **Zone 2** shows: "No analysis yet — run your first cycle" with a prominent Analyze button
+- **Zone 3** shows: empty state cards with "Decision history builds after your first few cycles"
+- **Zone 4** shows: nothing (hidden until first activity)
+- **Zone 5** shows: the configuration forms with helpful nudges ("Add a short product philosophy to improve recommendation quality", "Define focus areas", "Attach roadmap or strategy docs")
+
+The bottom half is immediately useful — the user can start configuring before the PM has ever run. The top half fills in naturally after the first cycle. This is a much better onboarding experience than a dashboard full of empty cards.
 
 ---
 
@@ -325,7 +460,7 @@ The PM should be allowed to recommend broadly, but actions that materially resha
 
 Suggested default model:
 
-- PM can automatically produce plans and recommendations
+- PM can automatically analyze and produce recommendations
 - PM can automatically create sessions only within configured autonomy and confidence constraints
 - PM can suggest project creation, issue closure, or issue relabeling, but those actions should require explicit human approval unless the org opts into automation later
 
@@ -428,7 +563,7 @@ The PM page should make autonomy advancement feel earned and obvious:
 ```
 Autonomy: Suggest
 
-The PM has produced 9 reviewed plans with 87% accepted recommendations.
+The PM has completed 9 analysis cycles with 87% accepted recommendations.
 Context coverage is healthy and manual overrides are low.
 
 Recommended next step: move to Act on low-risk work
@@ -558,12 +693,12 @@ If a user disagrees with the PM, they should know whether to:
 
 For the team building this feature, the PM surface should have stable conceptual primitives. At minimum the design should use explicit entities such as:
 
-- `Plan`
-- `Decision`
-- `DecisionOutcome`
-- `ContextSource`
-- `ContextOverride`
-- `Recommendation`
+- `Recommendation` (the PM's current output — what to work on, what to skip, why)
+- `Decision` (a single PM choice: delegate, skip, or cluster)
+- `DecisionOutcome` (what happened after the decision: succeeded, failed, still open)
+- `AnalysisCycle` (internal record of a PM run — not user-facing)
+- `ContextSource` (where steering input comes from)
+- `ContextOverride` (per-repo overrides of org-level context)
 
 Without named primitives, implementation will drift into loosely structured JSON blobs and ad hoc UI copy.
 
@@ -571,7 +706,7 @@ Without named primitives, implementation will drift into loosely structured JSON
 
 ## 7. Making the PM Visibly Different — Concrete Strategies
 
-### 5a. Thread PM reasoning into Sessions
+### 7a. Thread PM reasoning into Sessions
 
 Every session spawned by the PM already has `pm_approach` and `pm_reasoning` fields. Surface these prominently on session detail:
 
@@ -592,9 +727,9 @@ Every session spawned by the PM already has `pm_approach` and `pm_reasoning` fie
 
 This makes the PM's intelligence tangible on every session, even for users who never visit the PM page.
 
-### 5b. Show what the PM chose NOT to do
+### 7b. Show what the PM chose NOT to do
 
-The skip list is one of the PM's most valuable outputs. A human PM builds trust by showing they considered everything and made deliberate tradeoffs. Surface skipped issues with reasons, but keep the default view concise:
+The skip list is one of the PM's most valuable outputs. A human PM builds trust by showing they considered everything and made deliberate tradeoffs. In the split-view layout, skipped issues live inside the Current Recommendation zone as a collapsed section. Surface skipped issues with reasons, but keep the default view concise:
 
 ```
 Deprioritized (4 issues):
@@ -604,7 +739,7 @@ Deprioritized (4 issues):
   DB-1f3g   "Too complex: requires schema migration (PM confidence: low)"
 ```
 
-### 5c. Surface institutional learning
+### 7c. Surface institutional learning
 
 The decision log with outcomes is the PM's moat. Show it as a narrative, but anchor it to actions:
 
@@ -618,19 +753,21 @@ PM track record (last 30 days):
   Payment tasks have 67% — PM now requires high confidence for payment.
 ```
 
-### 5d. Make product context feel alive
+### 7d. Make product context feel alive
 
 Instead of a static settings form, show how product context influenced recent decisions:
 
 ```
 Product context health:
-  ✓ Philosophy referenced in 8 of last 10 plans
+  ✓ Philosophy referenced in 8 of last 10 analysis cycles
   ✓ "Q1 reliability focus" matched 12 prioritized tasks
   ⚠ Direction last updated 45 days ago — consider refreshing
   ✓ Avoid area "legacy-auth" correctly filtered 3 issues
 ```
 
-### 5e. Company-specific vs. general — visual layering
+In the split-view layout, these indicators live in the "Your Direction" zone, adjacent to the configuration controls they describe. The user sees the health signal right next to the `[edit]` button — so the nudge and the action are co-located.
+
+### 7e. Company-specific vs. general — visual layering
 
 Show the context inheritance clearly:
 
@@ -649,7 +786,7 @@ Effective PM context for [repo-name]:
         = Effective config for this repo's PM cycle
 ```
 
-### 5f. Use progressive disclosure aggressively
+### 7f. Use progressive disclosure aggressively
 
 The PM should feel intelligent, not verbose. Default UI patterns should be:
 
@@ -668,7 +805,7 @@ The PM must work before the team has a rich body of PM context.
 
 ### Day 1 behavior
 
-If an org has little or no context yet, the PM should still produce a usable first plan using:
+If an org has little or no context yet, the PM should still produce a usable first recommendation using:
 
 - issue severity and recency
 - customer impact signals available from integrations
@@ -677,7 +814,7 @@ If an org has little or no context yet, the PM should still produce a usable fir
 
 ### Empty-state guidance
 
-The PM page should guide the user to improve plan quality over time:
+The PM page should guide the user to improve recommendation quality over time:
 
 - missing philosophy → "Add a short product philosophy to improve tradeoff quality"
 - no focus areas → "Define one or two current focus areas"
@@ -705,10 +842,11 @@ Suggested success metrics:
 
 - users can identify the PM's top recommendation and rationale in under 1 minute
 - meaningful repeat usage of the PM page after onboarding
-- increased manual review and approval of PM plans
+- increased review and engagement with PM recommendations
 - improved session acceptance or merge rates for PM-selected work
-- reduced confusion about where PM settings and outputs live
+- reduced confusion about where PM settings and outputs live (everything is on one page)
 - more explicit user corrections through context updates rather than ad hoc workarounds
+- reduced user-facing concept count: users think in Sessions + Projects, not Sessions + Plans + Projects
 
 If these do not improve, the PM likely does not deserve top-level prominence yet.
 
@@ -720,7 +858,7 @@ If these do not improve, the PM likely does not deserve top-level prominence yet
 
 Most AI coding tools: "Give us a ticket, we'll write code."
 
-143 with a visible PM: "We have an AI PM that reads your product strategy, analyzes your issue backlog, learns from what worked, and decides what your agents should build next. You set the direction. The PM handles prioritization, planning, and coordination. The coding agents execute."
+143 with a visible PM: "We have an AI PM that reads your product strategy, analyzes your issue backlog, learns from what worked, and decides what your agents should build next. You set the direction. The PM handles prioritization and coordination. The coding agents execute. You manage Sessions and Projects — the PM makes both smarter."
 
 ### The information hierarchy tells the story
 
@@ -763,24 +901,29 @@ The PM's context gathering now scales automatically by org size. This replaces t
 
 ## 12. Implementation Sketch
 
-### Phase 1: Consolidate (low effort, high clarity)
+### Phase 1: Consolidate and remove Plans from UI (low effort, high clarity)
 1. Add "PM Agent" to sidebar nav with `Brain` or `Lightbulb` icon
-2. Create `/pm` page with tabs: Plan, Decisions, Context, Documents
-3. Move `/plans` content → Plan tab
-4. Move `/prioritization` content → Context tab + Documents tab
-5. Build Decisions tab from existing `pm_decision_log` data
-6. Remove "Prioritization" from dropdown menu
-7. Move PM status dot from Sessions to PM Agent nav item
+2. Create `/pm` page with split-view layout (intelligence above, configuration below)
+3. Build "Current Recommendation" zone from existing PM analysis output (reformat plan data into recommendation presentation)
+4. Move `/prioritization` content → "Your Direction" zone (product context, autonomy, documents)
+5. Build Decisions + Performance cards from existing `pm_decision_log` data
+6. Build Recent Activity section from pm_plans + decision log history
+7. Remove `/plans` page from frontend navigation
+8. Remove "Prioritization" from dropdown menu
+9. Move PM status dot from Sessions to PM Agent nav item
+10. Create new `/api/v1/pm/current` endpoint that returns the latest recommendation in a presentation-friendly format (no raw plan structure exposed)
+11. Deprecate `/api/v1/pm/plans`, `/api/v1/pm/plans/{id}`, `/api/v1/pm/plans/latest` from frontend usage (keep for internal/debug)
 
 ### Phase 2: Thread PM intelligence (medium effort, high impact)
-8. Add PM reasoning card to session detail (for PM-spawned sessions)
-9. Add "Deprioritized" section to plan view with skip reasoning
-10. Add context stats to plan view (issues reviewed, decisions learned from)
-11. Add "PM spawned this session" attribution badge on session cards
+12. Add PM reasoning card to session detail (for PM-spawned sessions)
+13. Add "Deprioritized" collapsed section to recommendation zone with skip reasoning
+14. Add context stats to recommendation zone (issues reviewed, decisions learned from)
+15. Add "PM spawned this session" attribution badge on session cards
 
 ### Phase 3: Show learning (higher effort, strongest differentiator)
-12. Build decision history table with success rate, trends, filtering
-13. Add "context health" indicators showing how product context influences decisions
-14. Add "PM insights" card to Overview showing patterns and suggestions
-15. Show effective context inheritance (org → repo) on per-repo settings
+16. Build full decision history view with success rate, trends, filtering (linked from "View all decisions →")
+17. Add "context health" indicators to "Your Direction" zone showing how product context influences decisions
+18. Add "PM insights" card to Overview showing patterns and suggestions
+19. Show effective context inheritance (org → repo) on per-repo settings
+20. Add autonomy readiness signals ("PM has 87% acceptance over 9 cycles — ready to advance?")
 
