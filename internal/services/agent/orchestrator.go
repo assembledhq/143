@@ -653,18 +653,41 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// reconstruct the prior state.
 		log.Info().Msg("continuing session without snapshot, starting fresh")
 
-		if err := o.setupFreshSandbox(ctx, session, sandbox); err != nil {
+		issue, repoFullName, err := o.setupFreshSandbox(ctx, session, sandbox)
+		if err != nil {
 			o.failRun(ctx, session, fmt.Sprintf("setup fresh sandbox: %s", err))
 			return fmt.Errorf("setup fresh sandbox: %w", err)
 		}
 
-		// Build a prompt that includes conversation history and the stored diff.
-		enrichedMessage := o.buildResumeContext(session, messages, userMessage)
-		prompt = &AgentPrompt{
-			Continuation: false,
-			UserMessage:  enrichedMessage,
-			MaxTokens:    tokenLimitForMode(session.TokenMode),
+		// Build a full prompt via PreparePrompt so the agent gets the system
+		// prompt with integration skills, memory, and repo conventions.
+		input := &AgentInput{
+			Issue:     &issue,
+			TokenMode: session.TokenMode,
 		}
+		input.IntegrationSkills = o.buildIntegrationSkills(ctx, session.OrgID)
+		if o.memory != nil && repoFullName != "" {
+			memResult, memErr := o.memory.GetContextMemories(ctx, MemoryContextRequest{
+				OrgID: session.OrgID,
+				Repo:  repoFullName,
+			})
+			if memErr != nil {
+				log.Warn().Err(memErr).Str("repo", repoFullName).Msg("failed to retrieve memories for resume context")
+			} else if memResult != nil && memResult.Formatted != "" {
+				input.ContextDocs = append(input.ContextDocs, memResult.Formatted)
+			}
+		}
+
+		basePrompt, err := adapter.PreparePrompt(ctx, input)
+		if err != nil {
+			o.failRun(ctx, session, fmt.Sprintf("prepare prompt for resume: %s", err))
+			return fmt.Errorf("prepare prompt for resume: %w", err)
+		}
+
+		// Override UserPrompt with resume context (conversation history + diff).
+		basePrompt.UserPrompt = o.buildResumeContext(session, &issue, messages, userMessage)
+		basePrompt.Continuation = false
+		prompt = basePrompt
 	}
 
 	// 6. Execute agent with log streaming.
@@ -716,30 +739,33 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 }
 
 // setupFreshSandbox clones the session's repository into the sandbox when no
-// snapshot is available. Handles sessions with or without a repository.
-func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Session, sandbox *Sandbox) error {
+// snapshot is available. Returns the issue (for prompt building) and the repo
+// full name (for memory lookup). Handles sessions with or without a repository.
+func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Session, sandbox *Sandbox) (models.Issue, string, error) {
 	// Fetch the issue to get repository info.
 	issue, err := o.issues.GetByID(ctx, session.OrgID, session.IssueID)
 	if err != nil {
-		return fmt.Errorf("fetch issue: %w", err)
+		return models.Issue{}, "", fmt.Errorf("fetch issue: %w", err)
 	}
 
 	// Clone repo if the session has one.
+	var repoFullName string
 	if issue.RepositoryID != nil {
 		repo, err := o.repositories.GetByID(ctx, session.OrgID, *issue.RepositoryID)
 		if err != nil {
-			return fmt.Errorf("fetch repository: %w", err)
+			return models.Issue{}, "", fmt.Errorf("fetch repository: %w", err)
 		}
+		repoFullName = repo.FullName
 		branch := repo.DefaultBranch
 		if session.TargetBranch != nil && *session.TargetBranch != "" {
 			branch = *session.TargetBranch
 		}
 		token, err := o.github.GetInstallationToken(ctx, repo.InstallationID)
 		if err != nil {
-			return fmt.Errorf("get installation token: %w", err)
+			return models.Issue{}, "", fmt.Errorf("get installation token: %w", err)
 		}
 		if err := o.provider.CloneRepo(ctx, sandbox, repo.CloneURL, branch, token); err != nil {
-			return fmt.Errorf("clone repo: %w", err)
+			return models.Issue{}, "", fmt.Errorf("clone repo: %w", err)
 		}
 	}
 
@@ -747,23 +773,39 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 	if session.AgentType == models.AgentTypeCodex {
 		injected, err := o.injectCodexAuth(ctx, session.OrgID, sandbox)
 		if err != nil {
-			return fmt.Errorf("codex auth injection: %w", err)
+			return models.Issue{}, "", fmt.Errorf("codex auth injection: %w", err)
 		}
 		if !injected {
-			return fmt.Errorf("no credentials for codex agent")
+			return models.Issue{}, "", fmt.Errorf("no credentials for codex agent")
 		}
 	}
 
-	return nil
+	return issue, repoFullName, nil
 }
 
-// buildResumeContext constructs the user message for a resumed session that
-// has no snapshot. It includes conversation history and the stored diff so
-// the agent understands the prior state and can re-apply changes.
-func (o *Orchestrator) buildResumeContext(session *models.Session, messages []models.SessionMessage, latestUserMessage string) string {
+// maxDiffCharsInPrompt is the maximum number of characters from a stored diff
+// to include in a resume prompt. Larger diffs are truncated to avoid blowing
+// up the agent's token budget.
+const maxDiffCharsInPrompt = 50000
+
+// buildResumeContext constructs the user prompt for a resumed session that has
+// no snapshot. It includes the issue description, conversation history, and
+// the stored diff so the agent understands the prior state and can re-apply
+// changes.
+func (o *Orchestrator) buildResumeContext(session *models.Session, issue *models.Issue, messages []models.SessionMessage, latestUserMessage string) string {
 	var b bytes.Buffer
 
 	b.WriteString("This is a continuation of a previous session. The previous workspace state is not available, so you are starting from a fresh clone.\n\n")
+
+	// Include the original issue description for context (especially
+	// important for non-manual sessions that may have no prior messages).
+	if issue != nil && issue.Description != "" {
+		b.WriteString("## Original issue\n\n**")
+		b.WriteString(issue.Title)
+		b.WriteString("**\n\n")
+		b.WriteString(issue.Description)
+		b.WriteString("\n\n")
+	}
 
 	// Include conversation history if available.
 	if len(messages) > 1 { // >1 because the latest user message is always present
@@ -777,11 +819,21 @@ func (o *Orchestrator) buildResumeContext(session *models.Session, messages []mo
 		}
 	}
 
-	// Include the stored diff if available.
+	// Include the stored diff if available, truncating if very large.
 	if session.Diff != nil && *session.Diff != "" {
+		diff := *session.Diff
+		truncated := false
+		if len(diff) > maxDiffCharsInPrompt {
+			diff = diff[:maxDiffCharsInPrompt]
+			truncated = true
+		}
 		b.WriteString("## Previous code changes (git diff)\n\nThe following diff was produced in the previous session. Please re-apply these changes as needed:\n\n```diff\n")
-		b.WriteString(*session.Diff)
-		b.WriteString("\n```\n\n")
+		b.WriteString(diff)
+		b.WriteString("\n```\n")
+		if truncated {
+			b.WriteString("\n**Note:** The diff was truncated due to size. The full diff had additional changes not shown above.\n")
+		}
+		b.WriteString("\n")
 	}
 
 	// Include the result summary if available.

@@ -407,6 +407,8 @@ function ChatPanel({ session, sessionId, isActive }: { session: Session; session
   const isPrCreated = session.status === "pr_created";
   const isFailed = session.status === "failed";
   const isCancelled = session.status === "cancelled";
+  // "skipped" sessions are intentionally excluded — they were never run,
+  // so there is no workspace state or context to resume from.
   const canSendMessage = isIdle || isCompleted || isPrCreated || isFailed || isCancelled;
 
   const { data: messagesData } = useQuery({

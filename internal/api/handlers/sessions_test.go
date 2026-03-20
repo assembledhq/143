@@ -1745,11 +1745,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionColumns))
-				// ClaimForResume also fails (no row returned).
-				mock.ExpectQuery("UPDATE sessions SET status").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows(sessionColumns))
-				// Fallback lookup.
+				// GetByID lookup (to capture original status for revert).
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
@@ -1768,6 +1764,10 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							now,
 						),
 					)
+				// ClaimForResume also fails (no row returned).
+				mock.ExpectQuery("UPDATE sessions SET status").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionColumns))
 			},
 			expectedCode: http.StatusConflict,
 			expectedBody: "NOT_RESUMABLE",
@@ -1781,6 +1781,24 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionColumns))
+				// GetByID lookup (to capture original status for revert).
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionColumns).AddRow(
+							sessionID, uuid.New(), orgID, "claude-code", "completed", "semi", "low",
+							nil, nil, nil, nil,
+							nil, &now, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil, // triggered_by_user_id
+							nil, 1, &now, "snapshotted", stringPtr("snapshots/test"),
+							nil, // target_branch
+							now,
+						),
+					)
 				// ClaimForResume succeeds.
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).

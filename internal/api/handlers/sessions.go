@@ -526,19 +526,23 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 
 	// Try claiming an idle session first, then fall back to resuming a
 	// terminal session (completed/pr_created/failed/cancelled).
-	var resumed bool
+	var revertStatus string
 	session, err := h.runStore.ClaimIdle(r.Context(), orgID, sessionID)
 	if err != nil {
+		// Look up the session to capture its current status for revert.
+		existing, lookupErr := h.runStore.GetByID(r.Context(), orgID, sessionID)
+		if lookupErr != nil {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "session not found")
+			return
+		}
 		session, err = h.runStore.ClaimForResume(r.Context(), orgID, sessionID)
 		if err != nil {
-			if _, lookupErr := h.runStore.GetByID(r.Context(), orgID, sessionID); lookupErr != nil {
-				writeError(w, http.StatusNotFound, "NOT_FOUND", "session not found")
-				return
-			}
 			writeError(w, http.StatusConflict, "NOT_RESUMABLE", "session must be idle or completed to send a message")
 			return
 		}
-		resumed = true
+		revertStatus = existing.Status // preserve original status for revert
+	} else {
+		revertStatus = string(models.SessionStatusIdle)
 	}
 
 	user := middleware.UserFromContext(r.Context())
@@ -557,12 +561,6 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(body.Images) > 0 {
 		msg.Attachments = body.Images
-	}
-
-	// On failure, revert to the original status.
-	revertStatus := string(models.SessionStatusIdle)
-	if resumed {
-		revertStatus = string(models.SessionStatusCompleted)
 	}
 
 	if err := h.messageStore.Create(r.Context(), msg); err != nil {
