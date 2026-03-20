@@ -16,10 +16,8 @@ function formatTimestamp(dateStr: string): string {
   const date = safeDate(dateStr);
   if (!date) return "";
   return date.toLocaleTimeString("en-US", {
-    hour12: false,
-    hour: "2-digit",
+    hour: "numeric",
     minute: "2-digit",
-    second: "2-digit",
   });
 }
 
