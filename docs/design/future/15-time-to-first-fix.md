@@ -1,5 +1,7 @@
 # Design: Time to First Fix
 
+> **Status:** Not Started | **Last reviewed:** 2026-03-19
+
 The most critical moment in the 143.dev experience is: **user installs, connects a repo, and sees their first successful fix**. Every minute this takes, a percentage of users are lost. This document designs the path from sign-up to "wow" as short as possible.
 
 ## The Goal

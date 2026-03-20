@@ -1,5 +1,7 @@
 # Design: Fix Quality Feedback Loop (Production Impact -> Agent Improvement)
 
+> **Status:** Not Started | **Last reviewed:** 2026-03-19
+
 The review feedback loop (doc 11) captures feedback from PR reviews. But there's a more important signal: **did the fix actually work in production?** This document closes the loop between post-deploy observability and future agent runs.
 
 ## Problem

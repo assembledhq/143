@@ -1,5 +1,7 @@
 # 25 — Dashboard Credential Management
 
+> **Status:** Implemented | **Last reviewed:** 2026-03-19
+
 **Status**: proposed
 **Depends on**: 01-database-schema, 20-security-architecture
 

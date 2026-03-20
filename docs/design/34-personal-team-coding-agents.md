@@ -1,5 +1,7 @@
 # Personal & Team Coding Agent Configuration Plan
 
+> **Status:** Implemented | **Last reviewed:** 2026-03-19
+
 ## Problem Statement
 
 Currently, coding agent credentials (Anthropic, OpenAI, Gemini keys) are configured at the **org level only** (`org_credentials` table with `UNIQUE(org_id, provider)`). Every team member shares the same API keys. This means:
