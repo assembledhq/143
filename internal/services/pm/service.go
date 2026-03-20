@@ -16,6 +16,7 @@ import (
 )
 
 type issueStore interface {
+	GetByID(ctx context.Context, orgID, issueID uuid.UUID) (models.Issue, error)
 	ListByOrg(ctx context.Context, orgID uuid.UUID, filters db.IssueFilters) ([]models.Issue, error)
 	UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status string) error
 }

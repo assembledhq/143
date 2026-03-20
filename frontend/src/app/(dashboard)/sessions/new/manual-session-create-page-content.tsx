@@ -25,6 +25,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { AGENT_TYPE_OPTIONS } from "@/lib/model-constants";
+import { NoReposWarning } from "@/components/no-repos-warning";
 import { useOptimisticSessions } from "@/contexts/optimistic-sessions";
 import type { OrgSettings, Organization, Repository, SingleResponse, ListResponse } from "@/lib/types";
 
@@ -262,6 +263,15 @@ export function ManualSessionCreatePageContent() {
           <p className="mt-2 text-sm text-muted-foreground">Start a manual session with text, files, photos, or dictation.</p>
         </div>
       </div>
+
+      {/* No repos warning */}
+      {repositories.length === 0 && (
+        <div className="shrink-0 px-4">
+          <div className="w-full max-w-3xl mx-auto">
+            <NoReposWarning />
+          </div>
+        </div>
+      )}
 
       {/* Composer pinned to bottom */}
       <div className="shrink-0 px-4 pb-4">

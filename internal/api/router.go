@@ -277,6 +277,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/integrations/github/callback", integrationHandler.HandleGitHubOAuthCallback)
 			r.Get("/api/v1/integrations/github/installed", integrationHandler.HandleGitHubAppInstalled)
 			r.Post("/api/v1/integrations/github/connect", integrationHandler.ConnectGitHub)
+			r.Post("/api/v1/integrations/github/sync", integrationHandler.SyncGitHubRepos)
 			r.Get("/api/v1/integrations/slack/login", integrationHandler.StartSlackOAuth)
 			r.Get("/api/v1/integrations/slack/callback", integrationHandler.HandleSlackOAuthCallback)
 			r.Post("/api/v1/integrations/slack/connect", integrationHandler.ConnectSlack)

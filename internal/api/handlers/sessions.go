@@ -819,6 +819,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		Title:             &title,
 		PMApproach:        &title,
 		TargetBranch:      targetBranch,
+		RepositoryID:      repoID,
 	}
 	if err := h.runStore.Create(r.Context(), session); err != nil {
 		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create manual session")

@@ -477,13 +477,15 @@ func testRepo(orgID uuid.UUID) models.Repository {
 }
 
 func testRun(orgID, issueID uuid.UUID) *models.Session {
+	repoID := uuid.MustParse("00000000-0000-0000-0000-000000000099")
 	return &models.Session{
-		ID:        uuid.MustParse("00000000-0000-0000-0000-000000000003"),
-		IssueID:   issueID,
-		OrgID:     orgID,
-		AgentType: models.AgentTypeClaudeCode,
-		Status:    "pending",
-		TokenMode: "low",
+		ID:           uuid.MustParse("00000000-0000-0000-0000-000000000003"),
+		IssueID:      issueID,
+		OrgID:        orgID,
+		AgentType:    models.AgentTypeClaudeCode,
+		Status:       "pending",
+		TokenMode:    "low",
+		RepositoryID: &repoID,
 	}
 }
 
@@ -1248,6 +1250,7 @@ func TestRunAgent_IssueWithoutRepository(t *testing.T) {
 	issue.RepositoryID = nil
 
 	run := testRun(orgID, issue.ID)
+	run.RepositoryID = nil // no repo on session either
 
 	d := defaultDeps()
 	d.issues.issue = issue
