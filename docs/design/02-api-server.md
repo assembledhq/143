@@ -1,5 +1,7 @@
 # Design: Go API Server
 
+> **Status:** Implemented | **Last reviewed:** 2026-03-19
+
 This document describes the Go backend architecture for 143.dev.
 
 ## Project Structure

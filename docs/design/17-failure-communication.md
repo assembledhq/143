@@ -1,5 +1,7 @@
 # Design: Failure Communication
 
+> **Status:** Partially Implemented | **Last reviewed:** 2026-03-19
+
 When an agent run fails, the user experience matters as much as the technical classification. This document designs how 143.dev communicates failures to users in a way that is honest, helpful, and not demoralizing.
 
 ## Problem

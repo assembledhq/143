@@ -1,5 +1,7 @@
 # 31 - Automations Tab (On-Demand Workflows)
 
+> **Status:** Implemented | **Last reviewed:** 2026-03-19
+
 > Add an `Automations` surface that lets teams define reusable workflows and run them on command, while staying aligned with the existing PM + jobs architecture.
 
 ## Goal

@@ -1,5 +1,7 @@
 # Design: Audit Logs
 
+> **Status:** Implemented | **Last reviewed:** 2026-03-19
+
 **Status**: Implemented
 **Depends on**: [01-database-schema.md](01-database-schema.md), [02-api-server.md](02-api-server.md)
 

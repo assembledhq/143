@@ -1,5 +1,7 @@
 # Design: Ingestion Pipeline
 
+> **Status:** Implemented | **Last reviewed:** 2026-03-19
+
 This document describes how 143.dev ingests issues from external sources (Sentry, Linear, support tools), normalizes them into a unified format, deduplicates, and stores them for prioritization.
 
 ## Overview

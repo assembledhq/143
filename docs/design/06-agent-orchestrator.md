@@ -1,5 +1,7 @@
 # Design: Agent Orchestrator
 
+> **Status:** Implemented | **Last reviewed:** 2026-03-19
+
 This document describes how 143.dev launches, manages, and monitors coding agent runs inside isolated sandboxes.
 
 ## Overview

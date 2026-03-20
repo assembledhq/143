@@ -1,5 +1,7 @@
 # 32 - Project Cadence and Lifecycle (Evergreen + Finite)
 
+> **Status:** Implemented | **Last reviewed:** 2026-03-19
+
 **Status**: Proposal
 **Depends on**: [29-projects.md](29-projects.md), [30-pm-agent-ux-elevation.md](30-pm-agent-ux-elevation.md), [31-automations-tab.md](31-automations-tab.md)
 

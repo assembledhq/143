@@ -1,5 +1,7 @@
 # Design: AI Agent Evaluation System
 
+> **Status:** Not Started | **Last reviewed:** 2026-03-19
+
 ## Overview
 
 This document defines the evaluation system for 143.dev. It replaces people/process guidance with a strict focus on measurable agent quality and automated improvement loops.
