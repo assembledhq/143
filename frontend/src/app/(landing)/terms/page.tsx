@@ -5,7 +5,40 @@ import LegalPageLayout, {
 
 export default function TermsPage() {
   return (
-    <LegalPageLayout title="Terms of Use" lastUpdated="March 18, 2026">
+    <LegalPageLayout title="Terms of Use" lastUpdated="March 20, 2026">
+      <Section heading="Definitions">
+        <ul className="list-disc pl-5 space-y-1.5">
+          <li>
+            <strong className="font-medium opacity-80">&quot;Assembled,&quot; &quot;we,&quot; &quot;us,&quot; or &quot;our&quot;</strong>{" "}
+            means Assembled, Inc., a Delaware corporation that operates the
+            hosted service at 143.dev.
+          </li>
+          <li>
+            <strong className="font-medium opacity-80">&quot;You&quot; or &quot;User&quot;</strong>{" "}
+            means the individual accessing or using the service, or the entity
+            on whose behalf that individual is accessing or using the service.
+          </li>
+          <li>
+            <strong className="font-medium opacity-80">&quot;Organization&quot;</strong>{" "}
+            means the company, team, or other legal entity that has established
+            an account on 143.dev and invited or authorized Users to access its
+            workspace.
+          </li>
+          <li>
+            <strong className="font-medium opacity-80">&quot;Administrator&quot;</strong>{" "}
+            means a User designated by the Organization with the authority to
+            manage workspace settings, integrations, members, and access
+            controls.
+          </li>
+          <li>
+            <strong className="font-medium opacity-80">&quot;Service&quot;</strong>{" "}
+            means the hosted platform and related services provided at 143.dev,
+            including account management, integrations, AI agent workflows, and
+            supporting infrastructure.
+          </li>
+        </ul>
+      </Section>
+
       <Section heading="Scope">
         <p>
           These terms govern your use of the 143 website and hosted service at
@@ -24,6 +57,17 @@ export default function TermsPage() {
         <p>
           By using 143.dev, you agree to these terms. If you do not agree, do
           not use the service.
+        </p>
+      </Section>
+
+      <Section heading="Eligibility">
+        <p>
+          You must be at least 18 years old (or the age of majority in your
+          jurisdiction, whichever is greater) to use the service. By using
+          143.dev, you represent that you meet this age requirement and have
+          the legal authority to enter into these terms. If you are using the
+          service on behalf of an Organization, you represent that you have
+          the authority to bind that Organization to these terms.
         </p>
       </Section>
 
@@ -50,9 +94,17 @@ export default function TermsPage() {
       <Section heading="Your content">
         <p>
           You retain ownership of your code, prompts, repositories, issues, and
-          other content. You grant us a limited license to host, store,
-          transmit, reproduce, and process that content as needed to operate,
-          secure, and support the hosted service.
+          other content. You grant us a limited, non-exclusive, worldwide
+          license to host, store, transmit, reproduce, process, and create
+          derivative works of that content solely as needed to operate, secure,
+          and support the service. This includes transmitting content to
+          third-party AI model providers for inference, generating and
+          displaying output such as diffs, summaries, and pull requests in
+          connected services such as GitHub, and caching or transforming
+          content as necessary for service functionality. This license ends
+          when you delete your content or terminate your account, except as
+          required for backups, legal obligations, or legitimate security
+          purposes.
         </p>
       </Section>
 
@@ -64,6 +116,16 @@ export default function TermsPage() {
           case. You are responsible for reviewing, testing, approving, and
           deciding whether to use any output before relying on it in production.
         </p>
+        <p>
+          We make no representation that AI-generated output is original, free
+          of third-party intellectual property claims, or suitable for any
+          particular licensing requirement. AI models may produce output that
+          resembles existing copyrighted or open-source-licensed code. You are
+          solely responsible for ensuring that any code you adopt complies with
+          applicable licenses and does not infringe third-party rights.
+          Assembled does not indemnify you against intellectual property claims
+          arising from AI-generated output.
+        </p>
       </Section>
 
       <Section heading="Third-party models and services">
@@ -74,6 +136,25 @@ export default function TermsPage() {
           and policies of the providers whose models are used for your requests.
           If your organization supplies its own API keys, the provider&apos;s
           terms apply directly to that usage.
+        </p>
+      </Section>
+
+      <Section heading="Data processing">
+        <p>
+          If your use of the service involves processing personal data on
+          behalf of your Organization, and applicable data protection laws
+          (such as the GDPR, UK GDPR, or similar frameworks) require a data
+          processing agreement, a Data Processing Addendum (DPA) is available
+          upon request. Contact{" "}
+          <a
+            href="mailto:legal@assembled.com"
+            className="underline underline-offset-2"
+          >
+            legal@assembled.com
+          </a>{" "}
+          to request a DPA. Where a DPA is executed, it forms part of these
+          terms and takes precedence to the extent of any conflict with these
+          terms regarding the processing of personal data.
         </p>
       </Section>
 
@@ -125,6 +206,21 @@ export default function TermsPage() {
         </p>
       </Section>
 
+      <Section heading="Trademarks">
+        <p>
+          The MIT License grants rights to the software code but does not grant
+          any rights to use Assembled&apos;s or 143&apos;s trademarks, service
+          marks, trade names, logos, or branding. You may use the name
+          &quot;143&quot; to truthfully describe your use of the software (for
+          example, &quot;built with 143&quot; or &quot;powered by 143&quot;), but
+          you may not use our trademarks in a way that suggests endorsement,
+          affiliation, or sponsorship by Assembled without prior written
+          consent. If you fork or modify the software, you must use your own
+          branding and clearly distinguish your version from the official
+          project.
+        </p>
+      </Section>
+
       <Section heading="Service availability">
         <p>
           We aim to keep 143.dev available and reliable, but we do not guarantee
@@ -169,10 +265,15 @@ export default function TermsPage() {
 
       <Section heading="Changes">
         <p>
-          We may update these terms from time to time. If we make material
-          changes, we will notify you by updating the date at the top of this
-          page. Continued use of the service after changes constitutes
-          acceptance.
+          We may update these terms from time to time. For material changes, we
+          will provide at least 30 days&apos; advance notice via email to the
+          address associated with your account or your Organization&apos;s
+          primary contact, and we will update the date at the top of this page.
+          If you do not agree with the revised terms, you may terminate your
+          account before the changes take effect. Continued use of the service
+          after the effective date of revised terms constitutes acceptance.
+          Non-material changes (such as corrections, clarifications, or
+          formatting) may take effect immediately upon posting.
         </p>
       </Section>
 
@@ -184,7 +285,11 @@ export default function TermsPage() {
           California. You agree to waive any right to participate in a class
           action, class-wide arbitration, or representative proceeding. Either
           party may seek injunctive relief in a court of competent jurisdiction
-          to protect intellectual property rights.
+          to protect intellectual property rights. As an alternative to
+          arbitration, either party may bring qualifying claims in small claims
+          court in San Francisco, California, or, if you are an individual, in
+          the county of your residence, provided the claim falls within the
+          court&apos;s jurisdictional limits.
         </p>
       </Section>
 
@@ -192,6 +297,70 @@ export default function TermsPage() {
         <p>
           These terms are governed by the laws of the State of California,
           without regard to conflict of law principles.
+        </p>
+      </Section>
+
+      <Section heading="Export controls and sanctions">
+        <p>
+          You represent and warrant that you are not located in, under the
+          control of, or a national or resident of any country or territory
+          subject to U.S. government embargo or trade sanctions, and that you
+          are not listed on any U.S. government list of prohibited or restricted
+          parties. You agree not to use the service in violation of any
+          applicable export control, sanctions, or trade compliance laws,
+          including without limitation the U.S. Export Administration
+          Regulations, International Traffic in Arms Regulations, and programs
+          administered by the U.S. Treasury Department&apos;s Office of Foreign
+          Assets Control (OFAC).
+        </p>
+      </Section>
+
+      <Section heading="Force majeure">
+        <p>
+          Neither party will be liable for any failure or delay in performing
+          its obligations under these terms (other than payment obligations)
+          where such failure or delay results from causes beyond the affected
+          party&apos;s reasonable control, including but not limited to natural
+          disasters, pandemics, government actions, third-party service or
+          infrastructure outages, internet disruptions, labor disputes, or acts
+          of war or terrorism.
+        </p>
+      </Section>
+
+      <Section heading="Assignment">
+        <p>
+          You may not assign or transfer these terms or any rights or
+          obligations under these terms without our prior written consent. We
+          may assign these terms in connection with a merger, acquisition,
+          corporate reorganization, or sale of all or substantially all of our
+          assets. Any attempted assignment in violation of this section is void.
+          Subject to the foregoing, these terms bind and inure to the benefit
+          of the parties and their respective successors and permitted assigns.
+        </p>
+      </Section>
+
+      <Section heading="Severability">
+        <p>
+          If any provision of these terms is held to be invalid, illegal, or
+          unenforceable by a court of competent jurisdiction, the remaining
+          provisions will continue in full force and effect. The invalid
+          provision will be modified to the minimum extent necessary to make it
+          valid and enforceable while preserving the parties&apos; original
+          intent.
+        </p>
+      </Section>
+
+      <Section heading="Entire agreement">
+        <p>
+          These terms, together with the{" "}
+          <Link href="/privacy" className="underline underline-offset-2">
+            Privacy Policy
+          </Link>
+          , and any applicable Data Processing Addendum, constitute the entire
+          agreement between you and Assembled regarding the service and
+          supersede all prior or contemporaneous agreements, proposals, or
+          representations, whether written or oral, concerning their subject
+          matter.
         </p>
       </Section>
 

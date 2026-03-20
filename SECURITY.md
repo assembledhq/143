@@ -82,7 +82,7 @@ mitigations or workarounds while a full fix is in progress.
 
 | Step | Target |
 |------|--------|
-| **Acknowledge receipt** | 14 calendar days |
+| **Acknowledge receipt** | 5 business days |
 | **Initial triage and severity assessment** | 30 calendar days |
 | **Investigation complete; remediation plan shared with reporter** | 60 calendar days |
 | **Remediation deployed (hosted) / patch released (open source)** | Per severity tier above |

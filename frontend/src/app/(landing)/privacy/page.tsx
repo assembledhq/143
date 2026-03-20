@@ -5,7 +5,7 @@ import LegalPageLayout, {
 
 export default function PrivacyPage() {
   return (
-    <LegalPageLayout title="Privacy Policy" lastUpdated="March 18, 2026">
+    <LegalPageLayout title="Privacy Policy" lastUpdated="March 20, 2026">
       <Section heading="Scope">
         <p>
           This policy covers the 143 website and hosted service at 143.dev,
@@ -136,6 +136,19 @@ export default function PrivacyPage() {
           inference providers. We do not sell personal information and we do not
           share personal information for cross-context behavioral advertising.
         </p>
+        <p>
+          A current list of our subprocessors is available upon request by
+          contacting{" "}
+          <a
+            href="mailto:privacy@assembled.com"
+            className="underline underline-offset-2"
+          >
+            privacy@assembled.com
+          </a>
+          . We will notify Organizations that have executed a Data Processing
+          Addendum before adding new subprocessors that materially change how
+          personal data is processed, providing reasonable time to object.
+        </p>
       </Section>
 
       <Section heading="International transfers">
@@ -148,13 +161,42 @@ export default function PrivacyPage() {
 
       <Section heading="Retention">
         <p>
-          We retain data for different periods depending on the category and why
-          we need it. Account records are generally kept while the account is
-          active. Session messages, logs, and snapshots may be retained while a
-          workspace is active, for debugging, or for security review, and then
-          deleted according to product settings, retention jobs, backups, and
-          legal obligations. Some information may persist in backups for a
-          limited period after deletion.
+          We retain data for different periods depending on the category and
+          purpose:
+        </p>
+        <ul className="list-disc pl-5 space-y-1.5">
+          <li>
+            <strong className="font-medium opacity-80">Account information</strong>{" "}
+            - retained while the account is active, plus 30 days after account
+            deletion to allow for recovery or dispute resolution
+          </li>
+          <li>
+            <strong className="font-medium opacity-80">Authentication and session data</strong>{" "}
+            - session tokens expire according to platform defaults; login audit
+            records are retained for up to 12 months
+          </li>
+          <li>
+            <strong className="font-medium opacity-80">Agent and workspace data</strong>{" "}
+            - session messages, generated diffs, and logs are retained while the
+            workspace is active; temporary workspace snapshots are generally
+            purged within 30 days after a run completes
+          </li>
+          <li>
+            <strong className="font-medium opacity-80">Technical and security data</strong>{" "}
+            - IP addresses, request identifiers, and audit events are retained
+            for up to 12 months for security and compliance purposes
+          </li>
+          <li>
+            <strong className="font-medium opacity-80">Backups</strong>{" "}
+            - deleted data may persist in encrypted backups for up to 90 days
+            after deletion before being purged
+          </li>
+        </ul>
+        <p>
+          Specific retention periods may vary based on product settings
+          configured by your Organization, applicable legal obligations, or
+          ongoing security investigations. Where required by law, we will
+          retain data for the minimum period necessary to comply.
         </p>
       </Section>
 
@@ -182,6 +224,67 @@ export default function PrivacyPage() {
             privacy@assembled.com
           </a>
           .
+        </p>
+      </Section>
+
+      <Section heading="European and UK users">
+        <p>
+          If you are located in the European Economic Area (EEA), the United
+          Kingdom, or Switzerland, you may have additional rights under the
+          General Data Protection Regulation (GDPR) or the UK GDPR, including:
+        </p>
+        <ul className="list-disc pl-5 space-y-1.5">
+          <li>
+            <strong className="font-medium opacity-80">Right of access</strong>{" "}
+            - to obtain confirmation of whether we process your personal data
+            and to receive a copy
+          </li>
+          <li>
+            <strong className="font-medium opacity-80">Right to rectification</strong>{" "}
+            - to correct inaccurate or incomplete personal data
+          </li>
+          <li>
+            <strong className="font-medium opacity-80">Right to erasure</strong>{" "}
+            - to request deletion of your personal data, subject to legal
+            retention requirements
+          </li>
+          <li>
+            <strong className="font-medium opacity-80">Right to restriction</strong>{" "}
+            - to request that we limit processing of your personal data in
+            certain circumstances
+          </li>
+          <li>
+            <strong className="font-medium opacity-80">Right to data portability</strong>{" "}
+            - to receive your personal data in a structured, commonly used,
+            machine-readable format and to transmit it to another controller
+          </li>
+          <li>
+            <strong className="font-medium opacity-80">Right to object</strong>{" "}
+            - to object to processing based on legitimate interests or for
+            direct marketing purposes
+          </li>
+          <li>
+            <strong className="font-medium opacity-80">Right to lodge a complaint</strong>{" "}
+            - to file a complaint with your local data protection supervisory
+            authority
+          </li>
+        </ul>
+        <p>
+          Where we process personal data on the basis of your consent, you have
+          the right to withdraw that consent at any time without affecting the
+          lawfulness of processing carried out before withdrawal. To exercise
+          any of these rights, contact us at{" "}
+          <a
+            href="mailto:privacy@assembled.com"
+            className="underline underline-offset-2"
+          >
+            privacy@assembled.com
+          </a>
+          . We will respond within the timeframes required by applicable law
+          (generally within one month, with the possibility of extension for
+          complex requests). Where we transfer personal data outside the EEA or
+          UK, we rely on appropriate safeguards such as Standard Contractual
+          Clauses approved by the European Commission.
         </p>
       </Section>
 

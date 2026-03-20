@@ -4,7 +4,7 @@ import LegalPageLayout, {
 
 export default function SecurityPage() {
   return (
-    <LegalPageLayout title="Security" lastUpdated="March 18, 2026">
+    <LegalPageLayout title="Security" lastUpdated="March 20, 2026">
       <Section heading="Reporting a vulnerability">
         <p>
           If you discover a security vulnerability in 143, please report it
@@ -82,7 +82,7 @@ export default function SecurityPage() {
         <ul className="list-disc pl-5 space-y-1.5">
           <li>
             <strong className="font-medium opacity-80">Acknowledgment:</strong>{" "}
-            within 30 days
+            within 5 business days
           </li>
           <li>
             <strong className="font-medium opacity-80">Investigation:</strong>{" "}
@@ -145,11 +145,13 @@ export default function SecurityPage() {
         </p>
       </Section>
 
-      <Section heading="Recognition">
+      <Section heading="Recognition and rewards">
         <p>
           We appreciate the work of security researchers. With your permission,
           we are happy to credit you in the security advisory and release notes
-          when a fix is available.
+          when a fix is available. We do not currently operate a formal bug
+          bounty program, but we may offer recognition or rewards at our
+          discretion for reports of significant vulnerabilities.
         </p>
       </Section>
 

@@ -29,7 +29,7 @@ describe('SecurityPage', () => {
   it('displays vulnerability response timelines', () => {
     renderWithProviders(<SecurityPage />);
 
-    expect(screen.getByText(/within 30 days/i)).toBeInTheDocument();
+    expect(screen.getByText(/within 5 business days/i)).toBeInTheDocument();
     expect(screen.getByText(/within 60 days/i)).toBeInTheDocument();
     expect(screen.getByText(/within 180 days/i)).toBeInTheDocument();
   });
