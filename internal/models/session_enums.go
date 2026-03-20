@@ -66,6 +66,37 @@ func (s SandboxState) Validate() error {
 	}
 }
 
+// ThreadStatus captures the lifecycle of a thread within a session.
+type ThreadStatus string
+
+const (
+	ThreadStatusPending       ThreadStatus = "pending"
+	ThreadStatusRunning       ThreadStatus = "running"
+	ThreadStatusIdle          ThreadStatus = "idle"
+	ThreadStatusAwaitingInput ThreadStatus = "awaiting_input"
+	ThreadStatusCompleted     ThreadStatus = "completed"
+	ThreadStatusFailed        ThreadStatus = "failed"
+	ThreadStatusCancelled     ThreadStatus = "cancelled"
+)
+
+func (s ThreadStatus) Validate() error {
+	switch s {
+	case ThreadStatusPending,
+		ThreadStatusRunning,
+		ThreadStatusIdle,
+		ThreadStatusAwaitingInput,
+		ThreadStatusCompleted,
+		ThreadStatusFailed,
+		ThreadStatusCancelled:
+		return nil
+	default:
+		return fmt.Errorf("invalid ThreadStatus: %q", s)
+	}
+}
+
+// MaxThreadsPerSession is the maximum number of threads allowed in a single session.
+const MaxThreadsPerSession = 4
+
 // MessageRole identifies who sent a session message.
 type MessageRole string
 
