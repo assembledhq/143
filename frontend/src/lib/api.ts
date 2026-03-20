@@ -251,6 +251,7 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify({ channel_ids: channelIds }),
     }),
+    disconnect: (provider: string) => del(`/api/v1/integrations/${provider}/disconnect`),
   },
   codexAuth: {
     initiate: () => post<import('./types').SingleResponse<import('./types').CodexDeviceAuth>>('/api/v1/settings/codex-auth/initiate'),

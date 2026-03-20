@@ -8,6 +8,7 @@ import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { useDisconnectIntegration } from "@/hooks/use-disconnect-integration";
 
 function SlackChannelPicker() {
   const queryClient = useQueryClient();
@@ -123,6 +124,8 @@ export default function IntegrationsPage() {
     queryKey: ["repositories"],
     queryFn: () => api.repositories.list(),
   });
+  const disconnectMutation = useDisconnectIntegration();
+
   const githubIntegration = integrationsResp?.data?.find(
     (integration) => integration.provider === "github" && integration.status === "active"
   );
@@ -158,6 +161,9 @@ export default function IntegrationsPage() {
         onConnectSentry={() => api.auth.loginSentry()}
         onConnectLinear={() => api.integrations.loginLinear()}
         onConnectSlack={() => api.integrations.loginSlack()}
+        onDisconnect={(provider) => disconnectMutation.mutate(provider)}
+        disconnectingProvider={disconnectMutation.isPending ? (disconnectMutation.variables as typeof disconnectMutation.variables) : null}
+        disconnectError={disconnectMutation.isError ? "Failed to disconnect." : null}
       />
       {slackIntegration && <SlackChannelPicker />}
       </div>

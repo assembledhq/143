@@ -22,6 +22,7 @@ import { AgentSettingsEditor } from "@/components/agent-settings-editor";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
+import { useDisconnectIntegration } from "@/hooks/use-disconnect-integration";
 import type { CodexAuthStatus, OrgSettings } from "@/lib/types";
 
 function AgentSettingsModal({ onClose, initialAgentType }: { onClose: () => void; initialAgentType?: OrgSettings["default_agent_type"] }) {
@@ -224,6 +225,8 @@ export default function Overview() {
     queryFn: () => api.integrations.list(),
   });
 
+  const disconnectMutation = useDisconnectIntegration();
+
   const githubIntegration = integrationsResp?.data?.find(
     (integration) => integration.provider === "github" && integration.status === "active"
   );
@@ -276,7 +279,13 @@ export default function Overview() {
       {/* Step 2: Connect Integrations (consolidated) */}
       <StepSection step={2} title="Connect integrations" completed={Boolean(githubIntegration)}>
         <div className="space-y-3">
-          <SourceControlIntegrationCard githubConnected={Boolean(githubIntegration)} onConnectGitHub={() => api.integrations.loginGitHub()} />
+          <SourceControlIntegrationCard
+            githubConnected={Boolean(githubIntegration)}
+            onConnectGitHub={() => api.integrations.loginGitHub()}
+            onDisconnect={(provider) => disconnectMutation.mutate(provider)}
+            disconnectingProvider={disconnectMutation.isPending ? (disconnectMutation.variables as typeof disconnectMutation.variables) : null}
+            disconnectError={disconnectMutation.isError ? "Failed to disconnect." : null}
+          />
           <AdditionalIntegrationCards
             sentryConnected={Boolean(sentryIntegration)}
             linearConnected={Boolean(linearIntegration)}
@@ -285,6 +294,9 @@ export default function Overview() {
             onConnectSentry={() => api.auth.loginSentry()}
             onConnectLinear={() => api.integrations.loginLinear()}
             onConnectSlack={() => api.integrations.loginSlack()}
+            onDisconnect={(provider) => disconnectMutation.mutate(provider)}
+            disconnectingProvider={disconnectMutation.isPending ? (disconnectMutation.variables as typeof disconnectMutation.variables) : null}
+            disconnectError={disconnectMutation.isError ? "Failed to disconnect." : null}
           />
         </div>
       </StepSection>
