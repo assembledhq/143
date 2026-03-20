@@ -372,14 +372,14 @@ function ChangesTab({ session, sessionId }: { session: Session; sessionId: strin
       )}
 
       {prLoading ? (
-        <div className="text-center text-sm text-muted-foreground py-2">Loading PR details...</div>
+        <div className="py-8 text-center text-sm text-muted-foreground">Loading PR details...</div>
+      ) : !pr && !session.diff ? (
+        <div className="py-8 text-center text-sm text-muted-foreground">
+          No PR or diff available for this session.
+        </div>
       ) : session.diff ? (
         <DiffViewer diff={session.diff} />
-      ) : (
-        <div className="py-8 text-center text-sm text-muted-foreground">
-          No diff available for this session.
-        </div>
-      )}
+      ) : null}
     </div>
   );
 }
