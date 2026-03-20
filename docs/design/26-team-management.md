@@ -1,5 +1,7 @@
 # Design: Team Management
 
+> **Status:** Implemented | **Last reviewed:** 2026-03-19
+
 This document describes how 143.dev enables organization admins to manage their team — inviting new members, assigning roles, and removing users. Today, users can only join via self-signup (GitHub OAuth, Google OAuth, or email registration), and there's no way for admins to control who's in their org or what role they have. This creates a gap: the RBAC middleware enforces three roles (`admin`, `member`, `viewer`), but nothing in the UI or API lets admins assign or change them.
 
 ## Problem

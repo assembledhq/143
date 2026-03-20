@@ -1,5 +1,7 @@
 # Design: Infrastructure & Deployment
 
+> **Status:** Partially Implemented | **Last reviewed:** 2026-03-19
+
 This document describes how 143.dev is packaged, deployed, and scaled.
 
 ## Design Principles

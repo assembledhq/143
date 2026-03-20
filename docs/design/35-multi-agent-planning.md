@@ -1,5 +1,7 @@
 # Design: Multi-Agent Sessions
 
+> **Status:** Implemented | **Last reviewed:** 2026-03-19
+
 ## Problem
 
 Today, each session runs exactly one coding agent. But users sometimes want to compare how different agents approach the same problem, or split work across agents (e.g., Claude on the backend, Codex on the frontend) — all within the same session, on the same branch, producing one PR.

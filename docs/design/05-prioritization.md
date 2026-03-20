@@ -1,5 +1,7 @@
 # Design: Prioritization Engine
 
+> **Status:** Implemented | **Last reviewed:** 2026-03-19
+
 This document describes how 143.dev scores and ranks ingested issues to determine which ones should be fixed first.
 
 ## Overview

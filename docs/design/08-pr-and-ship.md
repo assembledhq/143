@@ -1,5 +1,7 @@
 # Design: PR Creation & Ship
 
+> **Status:** Implemented | **Last reviewed:** 2026-03-19
+
 This document describes how 143.dev creates GitHub pull requests from validated agent runs and manages the path to deployment.
 
 ## Overview

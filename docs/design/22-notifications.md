@@ -1,5 +1,7 @@
 # Design: Notification System
 
+> **Status:** Implemented | **Last reviewed:** 2026-03-19
+
 This document describes how 143.dev notifies users about events that need their attention. The system generates value asynchronously — agents run, PRs open, fixes deploy, impact is measured — and users aren't watching the dashboard. The notification system pulls them back in at the right moment.
 
 ## Overview
