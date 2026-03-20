@@ -189,6 +189,10 @@ func (m *mockSessionStore) UpdateSandboxState(ctx context.Context, orgID, sessio
 	return nil
 }
 
+func (m *mockSessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessionID uuid.UUID, branch string) error {
+	return nil
+}
+
 func (m *mockSessionStore) GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
 	return models.Session{}, nil
 }

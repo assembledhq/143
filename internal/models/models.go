@@ -139,6 +139,7 @@ type Session struct {
 	SandboxState         string          `db:"sandbox_state" json:"sandbox_state"`
 	SnapshotKey          *string         `db:"snapshot_key" json:"snapshot_key,omitempty"`
 	TargetBranch         *string         `db:"target_branch" json:"target_branch,omitempty"`
+	WorkingBranch        *string         `db:"working_branch" json:"working_branch,omitempty"`
 	CreatedAt            time.Time       `db:"created_at" json:"created_at"`
 }
 
