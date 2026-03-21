@@ -229,32 +229,32 @@ func TestConfidenceThresholdsForAutonomy(t *testing.T) {
 func TestOrgSize_Validate(t *testing.T) {
 	t.Parallel()
 
-	require.NoError(t, OrgSize("").Validate(), "empty should be valid (defaults to medium)")
 	require.NoError(t, OrgSizeSmall.Validate())
 	require.NoError(t, OrgSizeMedium.Validate())
 	require.NoError(t, OrgSizeLarge.Validate())
 	require.NoError(t, OrgSizeEnterprise.Validate())
+	require.Error(t, OrgSize("").Validate(), "empty string should be invalid")
 	require.Error(t, OrgSize("huge").Validate())
 }
 
-func TestContextLimitsForSize(t *testing.T) {
+func TestOrgSize_ContextLimits(t *testing.T) {
 	t.Parallel()
 
-	small := ContextLimitsForSize(OrgSizeSmall)
+	small := OrgSizeSmall.ContextLimits()
 	require.Equal(t, 50, small.MaxOpenIssues, "small orgs should have lower issue limit")
 	require.Equal(t, 30_000, small.PMMaxTokens, "small orgs should have lower PM token limit")
 
-	medium := ContextLimitsForSize(OrgSizeMedium)
+	medium := OrgSizeMedium.ContextLimits()
 	require.Equal(t, 100, medium.MaxOpenIssues, "medium should match previous defaults")
 	require.Equal(t, 50_000, medium.PMMaxTokens, "medium should match previous PM token default")
 	require.Equal(t, 50_000, medium.AgentLowTokenMax, "medium low token should match previous default")
 	require.Equal(t, 200_000, medium.AgentHighTokenMax, "medium high token should match previous default")
 
-	large := ContextLimitsForSize(OrgSizeLarge)
+	large := OrgSizeLarge.ContextLimits()
 	require.Equal(t, 300, large.MaxOpenIssues, "large orgs should see more issues")
 	require.Equal(t, 100_000, large.PMMaxTokens, "large orgs should have higher PM token limit")
 
-	enterprise := ContextLimitsForSize(OrgSizeEnterprise)
+	enterprise := OrgSizeEnterprise.ContextLimits()
 	require.Equal(t, 500, enterprise.MaxOpenIssues, "enterprise orgs should see most issues")
 	require.Equal(t, 150_000, enterprise.PMMaxTokens, "enterprise orgs should have highest PM token limit")
 	require.Equal(t, 75_000, enterprise.AgentLowTokenMax, "enterprise low tokens should be elevated")
@@ -265,22 +265,55 @@ func TestContextLimitsForSize(t *testing.T) {
 		"larger orgs should have shorter per-issue descriptions to fit more issues in context")
 }
 
-func TestPMScheduleHoursForSize(t *testing.T) {
+func TestOrgSize_PMScheduleHours(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, 6, PMScheduleHoursForSize(OrgSizeSmall), "small orgs run PM less often")
-	require.Equal(t, 4, PMScheduleHoursForSize(OrgSizeMedium), "medium matches previous default")
-	require.Equal(t, 2, PMScheduleHoursForSize(OrgSizeLarge), "large orgs need more frequent PM")
-	require.Equal(t, 1, PMScheduleHoursForSize(OrgSizeEnterprise), "enterprise orgs need hourly PM")
+	require.Equal(t, 6, OrgSizeSmall.PMScheduleHours(), "small orgs run PM less often")
+	require.Equal(t, 4, OrgSizeMedium.PMScheduleHours(), "medium matches previous default")
+	require.Equal(t, 2, OrgSizeLarge.PMScheduleHours(), "large orgs need more frequent PM")
+	require.Equal(t, 1, OrgSizeEnterprise.PMScheduleHours(), "enterprise orgs need hourly PM")
 }
 
-func TestMaxConcurrentRunsForSize(t *testing.T) {
+func TestOrgSize_MaxConcurrentRuns(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, 3, MaxConcurrentRunsForSize(OrgSizeSmall))
-	require.Equal(t, 5, MaxConcurrentRunsForSize(OrgSizeMedium))
-	require.Equal(t, 10, MaxConcurrentRunsForSize(OrgSizeLarge))
-	require.Equal(t, 20, MaxConcurrentRunsForSize(OrgSizeEnterprise))
+	require.Equal(t, 3, OrgSizeSmall.MaxConcurrentRuns())
+	require.Equal(t, 5, OrgSizeMedium.MaxConcurrentRuns())
+	require.Equal(t, 10, OrgSizeLarge.MaxConcurrentRuns())
+	require.Equal(t, 20, OrgSizeEnterprise.MaxConcurrentRuns())
+}
+
+func TestContextLimits_WithDefaults(t *testing.T) {
+	t.Parallel()
+
+	defaults := OrgSizeLarge.ContextLimits()
+
+	t.Run("fills all zero fields", func(t *testing.T) {
+		t.Parallel()
+		empty := ContextLimits{}
+		result := empty.WithDefaults(defaults)
+		require.Equal(t, defaults, result, "all-zero input should produce the defaults")
+	})
+
+	t.Run("preserves explicit values", func(t *testing.T) {
+		t.Parallel()
+		partial := ContextLimits{
+			MaxOpenIssues: 400,
+			PMMaxTokens:   120_000,
+		}
+		result := partial.WithDefaults(defaults)
+		require.Equal(t, 400, result.MaxOpenIssues, "explicit value should be preserved")
+		require.Equal(t, 120_000, result.PMMaxTokens, "explicit value should be preserved")
+		require.Equal(t, defaults.MaxTriagedIssues, result.MaxTriagedIssues, "zero field should get default")
+		require.Equal(t, defaults.AgentHighTokenMax, result.AgentHighTokenMax, "zero field should get default")
+	})
+
+	t.Run("idempotent on complete input", func(t *testing.T) {
+		t.Parallel()
+		complete := OrgSizeEnterprise.ContextLimits()
+		result := complete.WithDefaults(defaults)
+		require.Equal(t, complete, result, "already-complete input should be unchanged")
+	})
 }
 
 func TestParseOrgSettings_OrgSizeDefaults(t *testing.T) {

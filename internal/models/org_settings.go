@@ -84,7 +84,7 @@ const (
 // Validate returns an error if the org size is not a recognized value.
 func (s OrgSize) Validate() error {
 	switch s {
-	case "", OrgSizeSmall, OrgSizeMedium, OrgSizeLarge, OrgSizeEnterprise:
+	case OrgSizeSmall, OrgSizeMedium, OrgSizeLarge, OrgSizeEnterprise:
 		return nil
 	default:
 		return fmt.Errorf("invalid org size: %q", s)
@@ -108,6 +108,44 @@ type ContextLimits struct {
 	PMMaxTokens        int `json:"pm_max_tokens"`         // max tokens for PM agent context
 	AgentLowTokenMax   int `json:"agent_low_token_max"`   // token limit for low-complexity tasks
 	AgentHighTokenMax  int `json:"agent_high_token_max"`  // token limit for high-complexity tasks
+}
+
+// WithDefaults returns a copy of the ContextLimits with any zero-valued fields
+// filled in from defaults. This is idempotent — calling it on an already-complete
+// ContextLimits returns an identical copy.
+func (c ContextLimits) WithDefaults(defaults ContextLimits) ContextLimits {
+	out := c
+	if out.MaxOpenIssues == 0 {
+		out.MaxOpenIssues = defaults.MaxOpenIssues
+	}
+	if out.MaxTriagedIssues == 0 {
+		out.MaxTriagedIssues = defaults.MaxTriagedIssues
+	}
+	if out.MaxInFlightRuns == 0 {
+		out.MaxInFlightRuns = defaults.MaxInFlightRuns
+	}
+	if out.MaxRecentOutcomes == 0 {
+		out.MaxRecentOutcomes = defaults.MaxRecentOutcomes
+	}
+	if out.MaxRecentPRs == 0 {
+		out.MaxRecentPRs = defaults.MaxRecentPRs
+	}
+	if out.MaxDecisionHistory == 0 {
+		out.MaxDecisionHistory = defaults.MaxDecisionHistory
+	}
+	if out.IssueDescriptionMax == 0 {
+		out.IssueDescriptionMax = defaults.IssueDescriptionMax
+	}
+	if out.PMMaxTokens == 0 {
+		out.PMMaxTokens = defaults.PMMaxTokens
+	}
+	if out.AgentLowTokenMax == 0 {
+		out.AgentLowTokenMax = defaults.AgentLowTokenMax
+	}
+	if out.AgentHighTokenMax == 0 {
+		out.AgentHighTokenMax = defaults.AgentHighTokenMax
+	}
+	return out
 }
 
 // OrgSettings is the strongly-typed representation of organizations.settings JSONB.
@@ -188,14 +226,14 @@ const (
 	DefaultConfidenceHumanReview = 0.60
 )
 
-// ContextLimitsForSize returns the default context limits for a given org size.
+// ContextLimits returns the default context limits for this org size.
 // These presets balance signal quality against token costs:
 //   - Small orgs: minimal context, all issues fit easily
 //   - Medium orgs: moderate context (current defaults)
 //   - Large orgs: expanded context, more frequent PM runs, higher token budgets
 //   - Enterprise orgs: maximum context for comprehensive prioritization
-func ContextLimitsForSize(size OrgSize) ContextLimits {
-	switch size {
+func (s OrgSize) ContextLimits() ContextLimits {
+	switch s {
 	case OrgSizeSmall:
 		return ContextLimits{
 			MaxOpenIssues:       50,
@@ -251,11 +289,10 @@ func ContextLimitsForSize(size OrgSize) ContextLimits {
 	}
 }
 
-// PMScheduleHoursForSize returns the recommended PM schedule interval
-// for a given org size. Larger orgs benefit from more frequent PM runs
-// to keep up with higher issue volume.
-func PMScheduleHoursForSize(size OrgSize) int {
-	switch size {
+// PMScheduleHours returns the recommended PM schedule interval for this org size.
+// Larger orgs benefit from more frequent PM runs to keep up with higher issue volume.
+func (s OrgSize) PMScheduleHours() int {
+	switch s {
 	case OrgSizeSmall:
 		return 6
 	case OrgSizeLarge:
@@ -267,10 +304,9 @@ func PMScheduleHoursForSize(size OrgSize) int {
 	}
 }
 
-// MaxConcurrentRunsForSize returns the recommended concurrency limit
-// for a given org size.
-func MaxConcurrentRunsForSize(size OrgSize) int {
-	switch size {
+// MaxConcurrentRuns returns the recommended concurrency limit for this org size.
+func (s OrgSize) MaxConcurrentRuns() int {
+	switch s {
 	case OrgSizeSmall:
 		return 3
 	case OrgSizeLarge:
@@ -313,7 +349,7 @@ func ParseOrgSettings(raw json.RawMessage) (OrgSettings, error) {
 	}
 
 	if s.MaxConcurrentRuns == 0 {
-		s.MaxConcurrentRuns = MaxConcurrentRunsForSize(effectiveSize)
+		s.MaxConcurrentRuns = effectiveSize.MaxConcurrentRuns()
 	}
 	if s.AgentAutonomy == "" {
 		s.AgentAutonomy = DefaultAgentAutonomy
@@ -324,7 +360,7 @@ func ParseOrgSettings(raw json.RawMessage) (OrgSettings, error) {
 		s.MinPriorityThreshold = DefaultMinPriorityThreshold
 	}
 	if s.PMScheduleHours == 0 {
-		s.PMScheduleHours = PMScheduleHoursForSize(effectiveSize)
+		s.PMScheduleHours = effectiveSize.PMScheduleHours()
 	}
 	if s.PMModel == "" {
 		s.PMModel = DefaultPMModel
@@ -350,41 +386,7 @@ func ParseOrgSettings(raw json.RawMessage) (OrgSettings, error) {
 	}
 
 	// Apply org-size-aware defaults for context limits.
-	orgSize := s.OrgSize
-	if orgSize == "" {
-		orgSize = DefaultOrgSize
-	}
-	defaults := ContextLimitsForSize(orgSize)
-	if s.ContextLimits.MaxOpenIssues == 0 {
-		s.ContextLimits.MaxOpenIssues = defaults.MaxOpenIssues
-	}
-	if s.ContextLimits.MaxTriagedIssues == 0 {
-		s.ContextLimits.MaxTriagedIssues = defaults.MaxTriagedIssues
-	}
-	if s.ContextLimits.MaxInFlightRuns == 0 {
-		s.ContextLimits.MaxInFlightRuns = defaults.MaxInFlightRuns
-	}
-	if s.ContextLimits.MaxRecentOutcomes == 0 {
-		s.ContextLimits.MaxRecentOutcomes = defaults.MaxRecentOutcomes
-	}
-	if s.ContextLimits.MaxRecentPRs == 0 {
-		s.ContextLimits.MaxRecentPRs = defaults.MaxRecentPRs
-	}
-	if s.ContextLimits.MaxDecisionHistory == 0 {
-		s.ContextLimits.MaxDecisionHistory = defaults.MaxDecisionHistory
-	}
-	if s.ContextLimits.IssueDescriptionMax == 0 {
-		s.ContextLimits.IssueDescriptionMax = defaults.IssueDescriptionMax
-	}
-	if s.ContextLimits.PMMaxTokens == 0 {
-		s.ContextLimits.PMMaxTokens = defaults.PMMaxTokens
-	}
-	if s.ContextLimits.AgentLowTokenMax == 0 {
-		s.ContextLimits.AgentLowTokenMax = defaults.AgentLowTokenMax
-	}
-	if s.ContextLimits.AgentHighTokenMax == 0 {
-		s.ContextLimits.AgentHighTokenMax = defaults.AgentHighTokenMax
-	}
+	s.ContextLimits = s.ContextLimits.WithDefaults(effectiveSize.ContextLimits())
 
 	return s, nil
 }
