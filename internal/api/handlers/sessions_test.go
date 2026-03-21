@@ -78,9 +78,9 @@ func TestSessionHandler_List(t *testing.T) {
 							nil, nil, nil, nil,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
-							nil, // project_task_id
-							nil, // model_override
-							nil, // triggered_by_user_id
+							nil,                      // project_task_id
+							nil,                      // model_override
+							nil,                      // triggered_by_user_id
 							nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 							nil, // target_branch
 							nil, // working_branch
@@ -159,7 +159,7 @@ func TestSessionHandler_List_WithRepositoryID(t *testing.T) {
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil,
-				nil, // triggered_by_user_id
+				nil,                      // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 				nil, // target_branch
 				nil, // working_branch
@@ -300,9 +300,9 @@ func TestSessionHandler_Get(t *testing.T) {
 							nil, nil, nil, nil,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
-							nil, // project_task_id
-							nil, // model_override
-							nil, // triggered_by_user_id
+							nil,                      // project_task_id
+							nil,                      // model_override
+							nil,                      // triggered_by_user_id
 							nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 							nil, // target_branch
 							nil, // working_branch
@@ -1012,7 +1012,7 @@ func TestSessionHandler_GetLogs_Success(t *testing.T) {
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil,
-				nil, // triggered_by_user_id
+				nil,                      // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 				nil, // target_branch
 				nil, // working_branch
@@ -1096,7 +1096,7 @@ func TestSessionHandler_GetLogs_EmptyLogs(t *testing.T) {
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil,
-				nil, // triggered_by_user_id
+				nil,                      // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 				nil, // target_branch
 				nil, // working_branch
@@ -1153,7 +1153,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil,
-				nil, // triggered_by_user_id
+				nil,                      // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 				nil, // target_branch
 				nil, // working_branch
@@ -1174,7 +1174,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil,
-				nil, // triggered_by_user_id
+				nil,                      // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 				nil, // target_branch
 				nil, // working_branch

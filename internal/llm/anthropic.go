@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/rs/zerolog/log"
+	"github.com/rs/zerolog"
 )
 
 // AnthropicProvider implements Provider using the Anthropic Messages API.
@@ -53,7 +53,7 @@ func (p *AnthropicProvider) Name() string { return "anthropic" }
 func (p *AnthropicProvider) Complete(ctx context.Context, model, systemPrompt, userPrompt string, reasoningEffort ReasoningEffort) (string, error) {
 	if reasoningEffort != "" {
 		// Anthropic does not support reasoning_effort; log so callers know it was ignored.
-		log.Ctx(ctx).Warn().
+		zerolog.Ctx(ctx).Warn().
 			Str("provider", "anthropic").
 			Str("model", model).
 			Str("reasoning_effort", string(reasoningEffort)).

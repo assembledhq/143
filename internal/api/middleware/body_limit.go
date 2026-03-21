@@ -2,6 +2,8 @@ package middleware
 
 import (
 	"net/http"
+
+	"github.com/rs/zerolog"
 )
 
 // MaxBodySize returns middleware that limits request body size.
@@ -13,6 +15,7 @@ func MaxBodySize(maxBytes int64) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.ContentLength > maxBytes {
+				zerolog.Ctx(r.Context()).Warn().Int64("content_length", r.ContentLength).Int64("max_bytes", maxBytes).Msg("request body too large")
 				http.Error(w, `{"error":{"code":"PAYLOAD_TOO_LARGE","message":"request body too large"}}`, http.StatusRequestEntityTooLarge)
 				return
 			}

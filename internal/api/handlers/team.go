@@ -90,7 +90,7 @@ func (h *TeamHandler) ListMembers(w http.ResponseWriter, r *http.Request) {
 
 	users, err := h.users.ListByOrg(r.Context(), orgID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list members")
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list members", err)
 		return
 	}
 	if users == nil {
@@ -106,7 +106,7 @@ func (h *TeamHandler) ChangeRole(w http.ResponseWriter, r *http.Request) {
 
 	memberID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid member ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid member ID")
 		return
 	}
 
@@ -114,41 +114,41 @@ func (h *TeamHandler) ChangeRole(w http.ResponseWriter, r *http.Request) {
 		Role string `json:"role"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
 		return
 	}
 
 	if !slices.Contains(validRoles, body.Role) {
-		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "invalid role: must be admin, member, or viewer")
+		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid role: must be admin, member, or viewer")
 		return
 	}
 
 	if currentUser != nil && currentUser.ID == memberID {
-		writeError(w, http.StatusBadRequest, "CANNOT_CHANGE_OWN_ROLE", "admins cannot change their own role")
+		writeError(w, r, http.StatusBadRequest, "CANNOT_CHANGE_OWN_ROLE", "admins cannot change their own role")
 		return
 	}
 
 	// If demoting from admin, ensure they're not the last admin.
 	member, err := h.users.GetByID(r.Context(), orgID, memberID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "MEMBER_NOT_FOUND", "member not found in this organization")
+		writeError(w, r, http.StatusNotFound, "MEMBER_NOT_FOUND", "member not found in this organization")
 		return
 	}
 
 	if member.Role == "admin" && body.Role != "admin" {
 		count, err := h.users.CountAdmins(r.Context(), orgID)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "COUNT_FAILED", "failed to check admin count")
+			writeError(w, r, http.StatusInternalServerError, "COUNT_FAILED", "failed to check admin count", err)
 			return
 		}
 		if count <= 1 {
-			writeError(w, http.StatusBadRequest, "LAST_ADMIN", "cannot demote the last admin")
+			writeError(w, r, http.StatusBadRequest, "LAST_ADMIN", "cannot demote the last admin")
 			return
 		}
 	}
 
 	if err := h.users.UpdateRole(r.Context(), orgID, memberID, body.Role); err != nil {
-		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update role")
+		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update role", err)
 		return
 	}
 
@@ -170,36 +170,36 @@ func (h *TeamHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 
 	memberID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid member ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid member ID")
 		return
 	}
 
 	if currentUser != nil && currentUser.ID == memberID {
-		writeError(w, http.StatusBadRequest, "CANNOT_REMOVE_SELF", "admins cannot remove themselves")
+		writeError(w, r, http.StatusBadRequest, "CANNOT_REMOVE_SELF", "admins cannot remove themselves")
 		return
 	}
 
 	// Check that the member exists and isn't the last admin.
 	member, err := h.users.GetByID(r.Context(), orgID, memberID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "MEMBER_NOT_FOUND", "member not found in this organization")
+		writeError(w, r, http.StatusNotFound, "MEMBER_NOT_FOUND", "member not found in this organization")
 		return
 	}
 
 	if member.Role == "admin" {
 		count, err := h.users.CountAdmins(r.Context(), orgID)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "COUNT_FAILED", "failed to check admin count")
+			writeError(w, r, http.StatusInternalServerError, "COUNT_FAILED", "failed to check admin count", err)
 			return
 		}
 		if count <= 1 {
-			writeError(w, http.StatusBadRequest, "LAST_ADMIN", "cannot remove the last admin")
+			writeError(w, r, http.StatusBadRequest, "LAST_ADMIN", "cannot remove the last admin")
 			return
 		}
 	}
 
 	if err := h.users.Delete(r.Context(), orgID, memberID); err != nil {
-		writeError(w, http.StatusInternalServerError, "DELETE_FAILED", "failed to remove member")
+		writeError(w, r, http.StatusInternalServerError, "DELETE_FAILED", "failed to remove member", err)
 		return
 	}
 
@@ -230,14 +230,14 @@ func (h *TeamHandler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 		Role  string `json:"role"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
 		return
 	}
 
 	body.Email = strings.TrimSpace(strings.ToLower(body.Email))
 
 	if _, err := mail.ParseAddress(body.Email); err != nil {
-		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "invalid email address")
+		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid email address")
 		return
 	}
 
@@ -245,19 +245,19 @@ func (h *TeamHandler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 		body.Role = "member"
 	}
 	if !slices.Contains(validRoles, body.Role) {
-		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "invalid role: must be admin, member, or viewer")
+		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid role: must be admin, member, or viewer")
 		return
 	}
 
 	// Check if email is already a member of this org.
 	if existing, err := h.users.GetByEmail(r.Context(), body.Email); err == nil && existing.OrgID == orgID {
-		writeError(w, http.StatusConflict, "ALREADY_MEMBER", "this email is already a member of the organization")
+		writeError(w, r, http.StatusConflict, "ALREADY_MEMBER", "this email is already a member of the organization")
 		return
 	}
 
 	token, err := generateRandomString(32)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "TOKEN_ERROR", "failed to generate invitation token")
+		writeError(w, r, http.StatusInternalServerError, "TOKEN_ERROR", "failed to generate invitation token", err)
 		return
 	}
 
@@ -273,10 +273,10 @@ func (h *TeamHandler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 	if err := h.invitations.Create(r.Context(), inv); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			writeError(w, http.StatusConflict, "INVITE_EXISTS", "a pending invitation already exists for this email")
+			writeError(w, r, http.StatusConflict, "INVITE_EXISTS", "a pending invitation already exists for this email")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create invitation")
+		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create invitation", err)
 		return
 	}
 
@@ -296,9 +296,9 @@ func (h *TeamHandler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 		Msg("invitation created — share this link with the invitee")
 
 	resp := models.InvitationResponse{
-		ID:    inv.ID,
-		Email: inv.Email,
-		Role:  inv.Role,
+		ID:     inv.ID,
+		Email:  inv.Email,
+		Role:   inv.Role,
 		Status: inv.Status,
 		InvitedBy: models.UserBrief{
 			ID:   currentUser.ID,
@@ -317,16 +317,16 @@ func (h *TeamHandler) ListInvitations(w http.ResponseWriter, r *http.Request) {
 
 	invitations, err := h.invitations.ListPendingByOrgWithInviter(r.Context(), orgID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list invitations")
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list invitations", err)
 		return
 	}
 
 	responses := make([]models.InvitationResponse, 0, len(invitations))
 	for _, inv := range invitations {
 		responses = append(responses, models.InvitationResponse{
-			ID:    inv.ID,
-			Email: inv.Email,
-			Role:  inv.Role,
+			ID:     inv.ID,
+			Email:  inv.Email,
+			Role:   inv.Role,
 			Status: inv.Status,
 			InvitedBy: models.UserBrief{
 				ID:   inv.InvitedBy,
@@ -346,16 +346,16 @@ func (h *TeamHandler) RevokeInvitation(w http.ResponseWriter, r *http.Request) {
 
 	invID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid invitation ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid invitation ID")
 		return
 	}
 
 	if err := h.invitations.Revoke(r.Context(), orgID, invID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "INVITE_NOT_FOUND", "invitation not found or already revoked")
+			writeError(w, r, http.StatusNotFound, "INVITE_NOT_FOUND", "invitation not found or already revoked")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "REVOKE_FAILED", "failed to revoke invitation")
+		writeError(w, r, http.StatusInternalServerError, "REVOKE_FAILED", "failed to revoke invitation", err)
 		return
 	}
 
@@ -371,44 +371,44 @@ func (h *TeamHandler) AcceptInvitation(w http.ResponseWriter, r *http.Request) {
 		Token string `json:"token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Token == "" {
-		writeError(w, http.StatusBadRequest, "INVALID_BODY", "token is required")
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "token is required")
 		return
 	}
 
 	inv, err := h.invitations.GetByToken(r.Context(), body.Token)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "INVITE_NOT_FOUND", "invitation not found")
+			writeError(w, r, http.StatusNotFound, "INVITE_NOT_FOUND", "invitation not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "LOOKUP_FAILED", "failed to look up invitation")
+		writeError(w, r, http.StatusInternalServerError, "LOOKUP_FAILED", "failed to look up invitation", err)
 		return
 	}
 
 	// Check status-specific errors.
 	switch inv.Status {
 	case "accepted":
-		writeError(w, http.StatusGone, "INVITE_ALREADY_USED", "this invitation has already been accepted")
+		writeError(w, r, http.StatusGone, "INVITE_ALREADY_USED", "this invitation has already been accepted")
 		return
 	case "revoked":
-		writeError(w, http.StatusGone, "INVITE_REVOKED", "this invitation has been revoked")
+		writeError(w, r, http.StatusGone, "INVITE_REVOKED", "this invitation has been revoked")
 		return
 	}
 
 	if inv.Status != "pending" {
-		writeError(w, http.StatusGone, "INVITE_EXPIRED", "this invitation is no longer valid")
+		writeError(w, r, http.StatusGone, "INVITE_EXPIRED", "this invitation is no longer valid")
 		return
 	}
 
 	if time.Now().After(inv.ExpiresAt) {
-		writeError(w, http.StatusGone, "INVITE_EXPIRED", "this invitation has expired")
+		writeError(w, r, http.StatusGone, "INVITE_EXPIRED", "this invitation has expired")
 		return
 	}
 
 	// Look up the org name for the response.
 	org, err := h.orgs.GetByID(r.Context(), inv.OrgID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "ORG_LOOKUP_FAILED", "failed to look up organization")
+		writeError(w, r, http.StatusInternalServerError, "ORG_LOOKUP_FAILED", "failed to look up organization", err)
 		return
 	}
 

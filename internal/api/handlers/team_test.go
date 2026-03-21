@@ -275,9 +275,9 @@ func TestTeamHandler_ChangeRole(t *testing.T) {
 			expectedBody: "CANNOT_CHANGE_OWN_ROLE",
 		},
 		{
-			name:     "cannot demote last admin",
-			memberID: memberID.String(),
-			body:     map[string]string{"role": "member"},
+			name:        "cannot demote last admin",
+			memberID:    memberID.String(),
+			body:        map[string]string{"role": "member"},
 			currentUser: adminUser,
 			users: &mockTeamUserStore{
 				getByIDFn: func(_ context.Context, _, _ uuid.UUID) (models.User, error) {
@@ -291,9 +291,9 @@ func TestTeamHandler_ChangeRole(t *testing.T) {
 			expectedBody: "LAST_ADMIN",
 		},
 		{
-			name:     "successfully changes role",
-			memberID: memberID.String(),
-			body:     map[string]string{"role": "viewer"},
+			name:        "successfully changes role",
+			memberID:    memberID.String(),
+			body:        map[string]string{"role": "viewer"},
 			currentUser: adminUser,
 			users: &mockTeamUserStore{
 				getByIDFn: func(_ context.Context, _, _ uuid.UUID) (models.User, error) {
@@ -357,8 +357,8 @@ func TestTeamHandler_RemoveMember(t *testing.T) {
 			expectedBody: "CANNOT_REMOVE_SELF",
 		},
 		{
-			name:     "cannot remove last admin",
-			memberID: memberID.String(),
+			name:        "cannot remove last admin",
+			memberID:    memberID.String(),
 			currentUser: adminUser,
 			users: &mockTeamUserStore{
 				getByIDFn: func(_ context.Context, _, _ uuid.UUID) (models.User, error) {
@@ -372,8 +372,8 @@ func TestTeamHandler_RemoveMember(t *testing.T) {
 			expectedBody: "LAST_ADMIN",
 		},
 		{
-			name:     "successfully removes member",
-			memberID: memberID.String(),
+			name:        "successfully removes member",
+			memberID:    memberID.String(),
 			currentUser: adminUser,
 			users: &mockTeamUserStore{
 				getByIDFn: func(_ context.Context, _, _ uuid.UUID) (models.User, error) {
