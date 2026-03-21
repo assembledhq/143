@@ -1810,6 +1810,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, 1, &now, "snapshotted", stringPtr("snapshots/test"),
 							nil, // target_branch
 							nil, // working_branch
+							nil, // repository_id
 							now,
 						),
 					)
@@ -1829,6 +1830,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, 1, &now, "snapshotted", stringPtr("snapshots/test"),
 							nil, // target_branch
 							nil, // working_branch
+							nil, // repository_id
 							now,
 						),
 					)

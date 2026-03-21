@@ -364,7 +364,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 		// 8b. Create a working branch so the agent operates on a separate
 		// branch from the start, keeping the base branch clean.
-		workingBranch := formatWorkingBranch(run, &issue)
+		workingBranch := formatWorkingBranch(run, issue)
 		checkoutCmd := fmt.Sprintf("git checkout -b '%s'", shellEscapeSingleQuote(workingBranch))
 		var checkoutOut, checkoutErr bytes.Buffer
 		exitCode, execErr := o.provider.Exec(ctx, sandbox, checkoutCmd, &checkoutOut, &checkoutErr)
@@ -1145,8 +1145,10 @@ func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, san
 	// into the sandbox. If the refresh fails (e.g. token already consumed),
 	// fall back to GetValidToken which returns any cached valid token.
 	cfg, err := o.codexAuth.RefreshToken(ctx, orgID)
-	if err != nil {
-		o.logger.Debug().Err(err).Str("org_id", orgID.String()).Msg("forced token refresh failed, falling back to GetValidToken")
+	if err != nil || cfg == nil {
+		if err != nil {
+			o.logger.Debug().Err(err).Str("org_id", orgID.String()).Msg("forced token refresh failed, falling back to GetValidToken")
+		}
 		cfg, err = o.codexAuth.GetValidToken(ctx, orgID)
 		if err != nil {
 			return false, fmt.Errorf("get codex auth token: %w", err)

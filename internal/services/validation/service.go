@@ -14,6 +14,7 @@ import (
 	llmpkg "github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/prompts"
+	"github.com/assembledhq/143/internal/sanitize"
 	"github.com/assembledhq/143/internal/services/agent"
 )
 
@@ -214,6 +215,18 @@ func wrapDiff(diff string) string {
 	return "<code_diff>\n" + diff + "\n</code_diff>"
 }
 
+// buildIssueContext returns sanitized issue title/description for LLM prompts.
+func buildIssueContext(issue *models.Issue) string {
+	if issue == nil {
+		return "No issue context available.\n"
+	}
+	result := fmt.Sprintf("Issue Title: %s\n", sanitize.SanitizeForPrompt(issue.Title, 10000))
+	if issue.Description != nil {
+		result += fmt.Sprintf("Issue Description: %s\n", sanitize.SanitizeForPrompt(*issue.Description, 10000))
+	}
+	return result
+}
+
 // checkDirection uses the LLM to verify that the diff aligns with the issue
 // and the organization's product direction.
 func (s *Service) checkDirection(ctx context.Context, diff string, issue *models.Issue, org *models.Organization) (string, string, error) {
@@ -223,15 +236,7 @@ func (s *Service) checkDirection(ctx context.Context, diff string, issue *models
 
 	systemPrompt := prompts.DirectionCheckPrompt()
 
-	var issueContext string
-	if issue != nil {
-		issueContext = fmt.Sprintf("Issue Title: %s\n", issue.Title)
-		if issue.Description != nil {
-			issueContext += fmt.Sprintf("Issue Description: %s\n", *issue.Description)
-		}
-	} else {
-		issueContext = "No issue context available.\n"
-	}
+	issueContext := buildIssueContext(issue)
 
 	var orgContext string
 	if org != nil && org.Settings != nil {
@@ -261,15 +266,9 @@ func (s *Service) checkCorrectness(ctx context.Context, diff string, issue *mode
 
 	systemPrompt := prompts.CorrectnessCheckPrompt()
 
-	var issueContext string
+	issueContext := buildIssueContext(issue)
 	if issue != nil {
-		issueContext = fmt.Sprintf("Issue Title: %s\n", issue.Title)
-		if issue.Description != nil {
-			issueContext += fmt.Sprintf("Issue Description: %s\n", *issue.Description)
-		}
 		issueContext += fmt.Sprintf("Severity: %s\n", issue.Severity)
-	} else {
-		issueContext = "No issue context available.\n"
 	}
 
 	userPrompt := prompts.CorrectnessCheckUserPrompt(prompts.CorrectnessCheckUserPromptData{
@@ -294,15 +293,7 @@ func (s *Service) checkRegressionTest(ctx context.Context, diff string, issue *m
 
 	systemPrompt := prompts.RegressionCheckPrompt()
 
-	var issueContext string
-	if issue != nil {
-		issueContext = fmt.Sprintf("Issue Title: %s\n", issue.Title)
-		if issue.Description != nil {
-			issueContext += fmt.Sprintf("Issue Description: %s\n", *issue.Description)
-		}
-	} else {
-		issueContext = "No issue context available.\n"
-	}
+	issueContext := buildIssueContext(issue)
 
 	userPrompt := prompts.RegressionCheckUserPrompt(prompts.RegressionCheckUserPromptData{
 		IssueContext: issueContext,
@@ -345,6 +336,62 @@ var sqlInjectionPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)fmt\.Sprintf\(\s*["']` + "`?" + `\s*(SELECT|INSERT|UPDATE|DELETE|DROP)`),
 }
 
+// exfiltrationURLRe matches outbound HTTP requests via curl/wget or HTTP client calls.
+var exfiltrationURLRe = regexp.MustCompile(`(?i)(curl|wget)\s+["']?https?://([^\s/"']+)`)
+
+// exfiltrationHTTPClientRe matches HTTP client calls to URLs (Go, Python, JS, etc.).
+var exfiltrationHTTPClientRe = regexp.MustCompile(`(?i)(http\.(Get|Post|NewRequest|Do)|requests\.(get|post|put|delete|patch)|fetch\(|axios\.(get|post|put|delete|patch)|urllib\.request\.urlopen|httpx\.(get|post|put|delete|patch))[\s(]*["']https?://([^\s/"']+)`)
+
+// allowedExfiltrationDomains are domains that are allowed for outbound HTTP requests.
+var allowedExfiltrationDomains = map[string]bool{
+	"api.anthropic.com":  true,
+	"api.openai.com":     true,
+	"api.github.com":     true,
+	"registry.npmjs.org": true,
+	"pypi.org":           true,
+	"proxy.golang.org":   true,
+}
+
+// exfiltrationPatterns detect suspicious data exfiltration attempts in diffs.
+var exfiltrationPatterns = []*regexp.Regexp{
+	// Base64 encoding of environment variables or file contents
+	regexp.MustCompile(`(?i)(base64\.encode|btoa|base64\.b64encode)\s*\(.*\b(os\.Getenv|process\.env|open\(|readFile|ReadFile|ReadAll)\b`),
+	// Writing environment variables to files
+	regexp.MustCompile(`(?i)(os\.Getenv|process\.env\.\w+)\s*.*>>`),
+	regexp.MustCompile(`(?i)(WriteFile|write_file|appendFile|write_text).*\b(API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY)\b`),
+	// Subprocess piping data to external tools
+	regexp.MustCompile(`(?i)(exec\.Command|subprocess(\.\w+)?|os\.system|child_process)\s*\(.*\b(curl|wget|nc|ncat|netcat)\b`),
+	// DNS-based exfiltration via known tools/domains
+	regexp.MustCompile(`(?i)\.(burpcollaborator\.net|oastify\.com|interact\.sh|canarytokens\.com)`),
+	// Encoding data in DNS queries
+	regexp.MustCompile(`(?i)(nslookup|dig|host)\s+.*\$`),
+}
+
+// isAllowedExfiltrationDomain checks if a domain is in the allowed list.
+// Strips port numbers (e.g. "api.github.com:8080" → "api.github.com").
+func isAllowedExfiltrationDomain(domain string) bool {
+	host := domain
+	if idx := strings.Index(domain, ":"); idx != -1 {
+		host = domain[:idx]
+	}
+	return allowedExfiltrationDomains[host]
+}
+
+// checkExfiltrationURLs checks for outbound HTTP requests to non-allowlisted domains.
+func checkExfiltrationURLs(addedLines string) []string {
+	var findings []string
+	for _, re := range []*regexp.Regexp{exfiltrationURLRe, exfiltrationHTTPClientRe} {
+		matches := re.FindAllStringSubmatch(addedLines, 100)
+		for _, m := range matches {
+			domain := m[len(m)-1]
+			if !isAllowedExfiltrationDomain(domain) {
+				findings = append(findings, fmt.Sprintf("potential exfiltration: outbound request to %s", domain))
+			}
+		}
+	}
+	return findings
+}
+
 // checkSecurity scans a diff for obvious security issues.
 func (s *Service) checkSecurity(diff string) (string, string, error) {
 	addedLines := extractAddedLines(diff)
@@ -362,6 +409,14 @@ func (s *Service) checkSecurity(diff string) (string, string, error) {
 			findings = append(findings, fmt.Sprintf("potential SQL injection: pattern %s matched", pattern.String()))
 		}
 	}
+
+	for _, pattern := range exfiltrationPatterns {
+		if matches := pattern.FindAllString(addedLines, -1); len(matches) > 0 {
+			findings = append(findings, fmt.Sprintf("potential exfiltration: pattern %s matched", pattern.String()))
+		}
+	}
+
+	findings = append(findings, checkExfiltrationURLs(addedLines)...)
 
 	if len(findings) > 0 {
 		return "fail", fmt.Sprintf("security issues found: %s", strings.Join(findings, "; ")), nil

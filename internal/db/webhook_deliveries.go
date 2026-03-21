@@ -57,3 +57,12 @@ func (s *WebhookDeliveryStore) MarkProcessed(ctx context.Context, d *models.Webh
 	})
 	return err
 }
+
+// DeleteExpired removes webhook deliveries older than the given number of days.
+func (s *WebhookDeliveryStore) DeleteExpired(ctx context.Context, retentionDays int) (int64, error) {
+	var deleted int64
+	err := s.db.QueryRow(ctx,
+		"SELECT delete_expired_webhook_deliveries($1)", retentionDays,
+	).Scan(&deleted)
+	return deleted, err
+}

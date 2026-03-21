@@ -452,12 +452,13 @@ func TestRegisterHandlers_AllRegistered(t *testing.T) {
 	logger := zerolog.Nop()
 
 	w := New(nil, logger, "test-node")
-	RegisterHandlers(w, stores, nil, logger)
+	RegisterHandlers(w, stores, nil, DataRetentionConfig{}, logger)
 
 	expectedHandlers := []string{
 		"ingest_webhook",
 		"sync_sentry",
 		"sync_slack",
+		"data_retention_cleanup",
 	}
 	for _, name := range expectedHandlers {
 		_, ok := w.handlers[name]
@@ -476,7 +477,7 @@ func TestRegisterHandlers_AllRegistered(t *testing.T) {
 
 	// Now test with PM service — pm_analyze and project_cycle should be registered
 	w2 := New(nil, logger, "test-node")
-	RegisterHandlers(w2, stores, &Services{PM: &mockPMService{}}, logger)
+	RegisterHandlers(w2, stores, &Services{PM: &mockPMService{}}, DataRetentionConfig{}, logger)
 	for _, name := range []string{"pm_analyze", "project_cycle"} {
 		_, ok := w2.handlers[name]
 		require.True(t, ok, "%s handler should be registered with PM service", name)
@@ -861,7 +862,7 @@ func TestRegisterHandlers_WithAllServices(t *testing.T) {
 	}
 
 	w := New(nil, logger, "test-node")
-	RegisterHandlers(w, stores, services, logger)
+	RegisterHandlers(w, stores, services, DataRetentionConfig{}, logger)
 
 	allExpected := []string{
 		"ingest_webhook",
@@ -875,6 +876,7 @@ func TestRegisterHandlers_WithAllServices(t *testing.T) {
 		"analyze_failure",
 		"process_review_comment",
 		"update_memories",
+		"data_retention_cleanup",
 	}
 	for _, name := range allExpected {
 		_, ok := w.handlers[name]
@@ -894,7 +896,7 @@ func TestRegisterHandlers_WithOnlyPrioritization(t *testing.T) {
 	}
 
 	w := New(nil, logger, "test-node")
-	RegisterHandlers(w, stores, services, logger)
+	RegisterHandlers(w, stores, services, DataRetentionConfig{}, logger)
 
 	_, ok := w.handlers["prioritize"]
 	require.True(t, ok, "prioritize handler should be registered")
@@ -917,7 +919,7 @@ func TestRegisterHandlers_WithOnlyFeedback(t *testing.T) {
 	}
 
 	w := New(nil, logger, "test-node")
-	RegisterHandlers(w, stores, services, logger)
+	RegisterHandlers(w, stores, services, DataRetentionConfig{}, logger)
 
 	_, ok := w.handlers["process_review_comment"]
 	require.True(t, ok, "process_review_comment handler should be registered")
@@ -939,7 +941,7 @@ func TestRegisterHandlers_WithOnlyPM(t *testing.T) {
 	}
 
 	w := New(nil, logger, "test-node")
-	RegisterHandlers(w, stores, services, logger)
+	RegisterHandlers(w, stores, services, DataRetentionConfig{}, logger)
 
 	_, ok := w.handlers["pm_analyze"]
 	require.True(t, ok, "pm_analyze handler should be registered")
@@ -1436,4 +1438,93 @@ func TestPrioritizeHandler_InvalidIssueID(t *testing.T) {
 	err := handler(context.Background(), "prioritize", payload)
 	require.Error(t, err, "prioritize handler should fail for invalid issue ID")
 	require.Contains(t, err.Error(), "parse issue ID", "error should mention issue ID")
+}
+
+// ---------------------------------------------------------------------------
+// Data retention cleanup handler tests
+// ---------------------------------------------------------------------------
+
+func newRetentionTestStores(t *testing.T) (*Stores, pgxmock.PgxPoolIface) {
+	t.Helper()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	stores := &Stores{
+		Webhooks:    db.NewWebhookDeliveryStore(mock),
+		SessionLogs: db.NewSessionLogStore(mock),
+		Jobs:        db.NewJobStore(mock),
+	}
+	return stores, mock
+}
+
+func TestDataRetentionHandler_AllStoresSucceed(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newRetentionTestStores(t)
+	defer mock.Close()
+
+	cfg := DataRetentionConfig{WebhookDays: 30, LogsDays: 90, JobsDays: 30}
+
+	mock.ExpectQuery("SELECT delete_expired_webhook_deliveries").
+		WithArgs(30).
+		WillReturnRows(pgxmock.NewRows([]string{"delete_expired_webhook_deliveries"}).AddRow(int64(5)))
+	mock.ExpectQuery("SELECT delete_expired_session_logs").
+		WithArgs(90).
+		WillReturnRows(pgxmock.NewRows([]string{"delete_expired_session_logs"}).AddRow(int64(10)))
+	mock.ExpectQuery("SELECT delete_expired_completed_jobs").
+		WithArgs(30).
+		WillReturnRows(pgxmock.NewRows([]string{"delete_expired_completed_jobs"}).AddRow(int64(3)))
+
+	handler := newDataRetentionCleanupHandler(stores, cfg, zerolog.Nop())
+	err := handler(context.Background(), "data_retention_cleanup", nil)
+	require.NoError(t, err, "handler should succeed when all stores succeed")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDataRetentionHandler_ReturnsErrorOnFailure(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newRetentionTestStores(t)
+	defer mock.Close()
+
+	cfg := DataRetentionConfig{WebhookDays: 30, LogsDays: 90, JobsDays: 30}
+
+	mock.ExpectQuery("SELECT delete_expired_webhook_deliveries").
+		WithArgs(30).
+		WillReturnError(errors.New("db connection lost"))
+	mock.ExpectQuery("SELECT delete_expired_session_logs").
+		WithArgs(90).
+		WillReturnRows(pgxmock.NewRows([]string{"delete_expired_session_logs"}).AddRow(int64(0)))
+	mock.ExpectQuery("SELECT delete_expired_completed_jobs").
+		WithArgs(30).
+		WillReturnRows(pgxmock.NewRows([]string{"delete_expired_completed_jobs"}).AddRow(int64(0)))
+
+	handler := newDataRetentionCleanupHandler(stores, cfg, zerolog.Nop())
+	err := handler(context.Background(), "data_retention_cleanup", nil)
+	require.Error(t, err, "handler should return error when a store fails")
+	require.Contains(t, err.Error(), "delete expired webhook deliveries")
+}
+
+func TestDataRetentionHandler_SkipsNilStores(t *testing.T) {
+	t.Parallel()
+
+	stores := &Stores{} // all nil
+	cfg := DataRetentionConfig{WebhookDays: 30, LogsDays: 90, JobsDays: 30}
+
+	handler := newDataRetentionCleanupHandler(stores, cfg, zerolog.Nop())
+	err := handler(context.Background(), "data_retention_cleanup", nil)
+	require.NoError(t, err, "handler should succeed with nil stores")
+}
+
+func TestDataRetentionHandler_SkipsZeroRetentionDays(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newRetentionTestStores(t)
+	defer mock.Close()
+
+	cfg := DataRetentionConfig{WebhookDays: 0, LogsDays: 0, JobsDays: 0}
+
+	handler := newDataRetentionCleanupHandler(stores, cfg, zerolog.Nop())
+	err := handler(context.Background(), "data_retention_cleanup", nil)
+	require.NoError(t, err, "handler should skip cleanup when retention days are 0")
+	require.NoError(t, mock.ExpectationsWereMet(), "no DB calls should be made")
 }

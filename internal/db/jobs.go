@@ -71,3 +71,12 @@ func (s *JobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType 
 	}).Scan(&id)
 	return id, err
 }
+
+// DeleteExpiredCompleted removes completed/failed jobs older than the given number of days.
+func (s *JobStore) DeleteExpiredCompleted(ctx context.Context, retentionDays int) (int64, error) {
+	var deleted int64
+	err := s.db.QueryRow(ctx,
+		"SELECT delete_expired_completed_jobs($1)", retentionDays,
+	).Scan(&deleted)
+	return deleted, err
+}
