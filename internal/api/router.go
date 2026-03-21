@@ -162,7 +162,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	projectAnalysisHandler := handlers.NewProjectAnalysisHandler(projectStore, projectSpecStore, projectAttachmentStore, projectTaskStore)
 	projectGenerateHandler := handlers.NewProjectGenerateHandler(llmClient)
 	codexAuthHandler := handlers.NewCodexAuthHandler(codexAuthSvc, logger)
-	pmDocumentHandler := handlers.NewPMDocumentHandler(pmDocumentStore)
+	pmDocumentHandler := handlers.NewPMDocumentHandler(pmDocumentStore, credentialStore)
 	auditLogHandler := handlers.NewAuditLogHandler(auditLogStore)
 
 	r := chi.NewRouter()
@@ -323,6 +323,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Post("/api/v1/pm/documents", pmDocumentHandler.Create)
 			r.Patch("/api/v1/pm/documents/{docId}", pmDocumentHandler.Update)
 			r.Delete("/api/v1/pm/documents/{docId}", pmDocumentHandler.Delete)
+			r.Post("/api/v1/pm/documents/{docId}/sync", pmDocumentHandler.SyncFromNotion)
+			r.Post("/api/v1/pm/documents/discover/notion", pmDocumentHandler.DiscoverNotion)
 		})
 
 		// Admin-only routes

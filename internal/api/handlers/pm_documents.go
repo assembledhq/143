@@ -3,20 +3,23 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/integration"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
 
 type PMDocumentHandler struct {
-	store *db.PMDocumentStore
+	store       *db.PMDocumentStore
+	credentials *db.OrgCredentialStore
 }
 
-func NewPMDocumentHandler(store *db.PMDocumentStore) *PMDocumentHandler {
-	return &PMDocumentHandler{store: store}
+func NewPMDocumentHandler(store *db.PMDocumentStore, credentials *db.OrgCredentialStore) *PMDocumentHandler {
+	return &PMDocumentHandler{store: store, credentials: credentials}
 }
 
 func (h *PMDocumentHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -191,4 +194,134 @@ func (h *PMDocumentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// getNotionStore returns a configured NotionDocumentStore for the org, or
+// writes an error response and returns nil if Notion is not configured.
+func (h *PMDocumentHandler) getNotionStore(w http.ResponseWriter, r *http.Request, orgID uuid.UUID) *integration.NotionDocumentStore {
+	if h.credentials == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "NOT_CONFIGURED", "credential store not available")
+		return nil
+	}
+
+	cred, err := h.credentials.Get(r.Context(), orgID, models.ProviderNotion)
+	if err != nil || cred == nil {
+		writeError(w, r, http.StatusNotFound, "NOTION_NOT_CONFIGURED", "Notion integration is not configured for this organization")
+		return nil
+	}
+
+	cfg, ok := cred.Config.(models.NotionConfig)
+	if !ok || cfg.AccessToken == "" {
+		writeError(w, r, http.StatusNotFound, "NOTION_NOT_CONFIGURED", "Notion integration is not configured for this organization")
+		return nil
+	}
+
+	return integration.NewNotionDocumentStore(integration.NotionDocumentStoreConfig{
+		AuthToken: cfg.AccessToken,
+	})
+}
+
+// SyncFromNotion re-fetches a PM document's content from Notion using its
+// source_id (Notion page ID). Updates the local copy with fresh content.
+func (h *PMDocumentHandler) SyncFromNotion(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	docID, err := uuid.Parse(chi.URLParam(r, "docId"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid document ID")
+		return
+	}
+
+	doc, err := h.store.GetByID(r.Context(), orgID, docID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "document not found")
+		return
+	}
+
+	if doc.SourceType != models.PMDocSourceNotion || doc.SourceID == nil || *doc.SourceID == "" {
+		writeError(w, r, http.StatusBadRequest, "NOT_NOTION_SOURCE", "document is not sourced from Notion")
+		return
+	}
+
+	store := h.getNotionStore(w, r, orgID)
+	if store == nil {
+		return // error already written
+	}
+
+	notionDoc, err := store.GetDocument(r.Context(), *doc.SourceID)
+	if err != nil {
+		writeError(w, r, http.StatusBadGateway, "NOTION_FETCH_FAILED", "failed to fetch document from Notion", err)
+		return
+	}
+
+	// Update the local copy.
+	doc.Title = notionDoc.Title
+	doc.Content = notionDoc.Content
+	now := time.Now()
+	doc.LastSyncedAt = &now
+	doc.SourceURL = &notionDoc.WebURL
+
+	// Store Notion metadata.
+	meta, _ := json.Marshal(map[string]interface{}{
+		"last_edited": notionDoc.LastEdited,
+		"author":      notionDoc.Author,
+		"properties":  notionDoc.Properties,
+	})
+	doc.SourceMeta = meta
+
+	if err := h.store.Update(r.Context(), &doc); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update PM document", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.PMDocument]{Data: doc})
+}
+
+// DiscoverNotion searches the org's Notion workspace for product-relevant
+// documents (roadmaps, strategy, OKRs, etc.) and returns summaries. Users
+// can then select which ones to import as PM documents.
+func (h *PMDocumentHandler) DiscoverNotion(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+
+	store := h.getNotionStore(w, r, orgID)
+	if store == nil {
+		return // error already written
+	}
+
+	// Product-relevant search queries.
+	queries := []string{
+		"roadmap",
+		"product direction",
+		"strategy",
+		"OKR",
+		"vision",
+		"product requirements",
+		"architecture",
+		"RFC",
+	}
+
+	seen := make(map[string]bool)
+	var results []integration.DocSummary
+
+	for _, q := range queries {
+		docs, err := store.SearchDocuments(r.Context(), q, integration.DocFilter{Limit: 10})
+		if err != nil {
+			// Log but continue with other queries.
+			continue
+		}
+		for _, doc := range docs {
+			if !seen[doc.ID] {
+				seen[doc.ID] = true
+				results = append(results, doc)
+			}
+		}
+	}
+
+	if results == nil {
+		results = []integration.DocSummary{}
+	}
+
+	writeJSON(w, http.StatusOK, models.ListResponse[integration.DocSummary]{
+		Data: results,
+		Meta: models.PaginationMeta{},
+	})
 }
