@@ -141,8 +141,8 @@ type Session struct {
 	TargetBranch         *string         `db:"target_branch" json:"target_branch,omitempty"`
 	WorkingBranch        *string         `db:"working_branch" json:"working_branch,omitempty"`
 	RepositoryID         *uuid.UUID      `db:"repository_id" json:"repository_id,omitempty"`
-	DiffStats            json.RawMessage `db:"diff_stats" json:"diff_stats,omitempty"`
-	DiffHistory          json.RawMessage `db:"diff_history" json:"diff_history,omitempty"`
+	DiffStats            json.RawMessage `db:"diff_stats" json:"diff_stats,omitempty"`   // nil for list queries (excluded to reduce payload size)
+	DiffHistory          json.RawMessage `db:"diff_history" json:"diff_history,omitempty"` // nil for list queries (excluded to reduce payload size)
 	CreatedAt            time.Time       `db:"created_at" json:"created_at"`
 }
 

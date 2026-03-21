@@ -1,7 +1,3 @@
--- Add diff_stats and diff_history columns to sessions
-ALTER TABLE sessions ADD COLUMN diff_stats jsonb;
-ALTER TABLE sessions ADD COLUMN diff_history jsonb DEFAULT '[]';
-
 -- Create session_review_comments table for inline code review comments
 CREATE TABLE session_review_comments (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -20,5 +16,5 @@ CREATE TABLE session_review_comments (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_session_review_comments_session ON session_review_comments(session_id);
+CREATE INDEX idx_session_review_comments_session ON session_review_comments(org_id, session_id);
 CREATE INDEX idx_session_review_comments_session_file ON session_review_comments(session_id, file_path);

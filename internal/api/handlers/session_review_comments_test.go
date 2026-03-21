@@ -196,6 +196,62 @@ func TestSessionReviewCommentHandler_Create(t *testing.T) {
 		require.Equal(t, http.StatusBadRequest, w.Code)
 	})
 
+	t.Run("rejects zero line_number", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		handler := newTestReviewCommentHandler(t, mock)
+
+		body := `{"file_path":"src/app.ts","line_number":0,"body":"test"}`
+		url := fmt.Sprintf("/api/v1/sessions/%s/review-comments", sessionID)
+		req := httptest.NewRequest(http.MethodPost, url, bytes.NewReader([]byte(body)))
+		req.Header.Set("Content-Type", "application/json")
+		ctx := middleware.WithOrgID(req.Context(), orgID)
+		ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+		req = req.WithContext(ctx)
+
+		w := httptest.NewRecorder()
+		withReviewCommentRoutes(handler).ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusBadRequest, w.Code)
+	})
+
+	t.Run("rejects oversized body", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		handler := newTestReviewCommentHandler(t, mock)
+
+		longBody := make([]byte, 10241)
+		for i := range longBody {
+			longBody[i] = 'a'
+		}
+		reqBody := fmt.Sprintf(`{"file_path":"src/app.ts","line_number":1,"body":"%s"}`, string(longBody))
+		url := fmt.Sprintf("/api/v1/sessions/%s/review-comments", sessionID)
+		req := httptest.NewRequest(http.MethodPost, url, bytes.NewReader([]byte(reqBody)))
+		req.Header.Set("Content-Type", "application/json")
+		ctx := middleware.WithOrgID(req.Context(), orgID)
+		ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+		req = req.WithContext(ctx)
+
+		w := httptest.NewRecorder()
+		withReviewCommentRoutes(handler).ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusBadRequest, w.Code)
+	})
+
 	t.Run("rejects invalid side", func(t *testing.T) {
 		t.Parallel()
 
@@ -226,7 +282,7 @@ func TestSessionReviewCommentHandler_Create(t *testing.T) {
 func TestSessionReviewCommentHandler_Delete(t *testing.T) {
 	t.Parallel()
 
-	t.Run("deletes successfully with session_id check", func(t *testing.T) {
+	t.Run("deletes successfully with ownership check", func(t *testing.T) {
 		t.Parallel()
 
 		mock, err := pgxmock.NewPool()
@@ -238,6 +294,14 @@ func TestSessionReviewCommentHandler_Delete(t *testing.T) {
 		userID := uuid.New()
 		commentID := uuid.New()
 		handler := newTestReviewCommentHandler(t, mock)
+
+		// Ownership check: GetByID returns the comment owned by the requesting user
+		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(reviewCommentColumns).
+					AddRow(reviewCommentRow(commentID, sessionID, orgID, userID, "src/app.ts", 10, "Fix this", false)...),
+			)
 
 		// Expect DELETE with session_id in WHERE clause
 		mock.ExpectExec("DELETE FROM session_review_comments WHERE id = .+ AND org_id = .+ AND session_id").
@@ -257,6 +321,41 @@ func TestSessionReviewCommentHandler_Delete(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 
+	t.Run("rejects delete by non-owner", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		ownerID := uuid.New()
+		otherUserID := uuid.New()
+		commentID := uuid.New()
+		handler := newTestReviewCommentHandler(t, mock)
+
+		// Ownership check: comment is owned by a different user
+		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(reviewCommentColumns).
+					AddRow(reviewCommentRow(commentID, sessionID, orgID, ownerID, "src/app.ts", 10, "Fix this", false)...),
+			)
+
+		url := fmt.Sprintf("/api/v1/sessions/%s/review-comments/%s", sessionID, commentID)
+		req := httptest.NewRequest(http.MethodDelete, url, nil)
+		ctx := middleware.WithOrgID(req.Context(), orgID)
+		ctx = middleware.WithUser(ctx, &models.User{ID: otherUserID, OrgID: orgID})
+		req = req.WithContext(ctx)
+
+		w := httptest.NewRecorder()
+		withReviewCommentRoutes(handler).ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusForbidden, w.Code)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
 	t.Run("returns not found when comment doesn't exist", func(t *testing.T) {
 		t.Parallel()
 
@@ -270,9 +369,10 @@ func TestSessionReviewCommentHandler_Delete(t *testing.T) {
 		commentID := uuid.New()
 		handler := newTestReviewCommentHandler(t, mock)
 
-		mock.ExpectExec("DELETE FROM session_review_comments").
+		// Ownership check: comment not found
+		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id").
 			WithArgs(pgxmock.AnyArg()).
-			WillReturnResult(pgxmock.NewResult("DELETE", 0))
+			WillReturnRows(pgxmock.NewRows(reviewCommentColumns))
 
 		url := fmt.Sprintf("/api/v1/sessions/%s/review-comments/%s", sessionID, commentID)
 		req := httptest.NewRequest(http.MethodDelete, url, nil)
@@ -303,6 +403,14 @@ func TestSessionReviewCommentHandler_Update(t *testing.T) {
 		userID := uuid.New()
 		commentID := uuid.New()
 		handler := newTestReviewCommentHandler(t, mock)
+
+		// Ownership check: GetByID returns the comment owned by the requesting user
+		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(reviewCommentColumns).
+					AddRow(reviewCommentRow(commentID, sessionID, orgID, userID, "src/app.ts", 10, "Fix this", false)...),
+			)
 
 		mock.ExpectQuery("UPDATE session_review_comments").
 			WithArgs(pgxmock.AnyArg()).
@@ -342,6 +450,14 @@ func TestSessionReviewCommentHandler_Update(t *testing.T) {
 		commentID := uuid.New()
 		handler := newTestReviewCommentHandler(t, mock)
 
+		// Ownership check
+		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(reviewCommentColumns).
+					AddRow(reviewCommentRow(commentID, sessionID, orgID, userID, "src/app.ts", 10, "Fix this", false)...),
+			)
+
 		// GetByID for session lookup (to get current_turn for resolved_by_pass)
 		setupSessionMock(mock, orgID, sessionID, nil)
 
@@ -376,6 +492,43 @@ func TestSessionReviewCommentHandler_Update(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 
+	t.Run("rejects update by non-owner", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		ownerID := uuid.New()
+		otherUserID := uuid.New()
+		commentID := uuid.New()
+		handler := newTestReviewCommentHandler(t, mock)
+
+		// Ownership check: comment is owned by a different user
+		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(reviewCommentColumns).
+					AddRow(reviewCommentRow(commentID, sessionID, orgID, ownerID, "src/app.ts", 10, "Fix this", false)...),
+			)
+
+		body := `{"body":"Updated text"}`
+		url := fmt.Sprintf("/api/v1/sessions/%s/review-comments/%s", sessionID, commentID)
+		req := httptest.NewRequest(http.MethodPatch, url, bytes.NewReader([]byte(body)))
+		req.Header.Set("Content-Type", "application/json")
+		ctx := middleware.WithOrgID(req.Context(), orgID)
+		ctx = middleware.WithUser(ctx, &models.User{ID: otherUserID, OrgID: orgID})
+		req = req.WithContext(ctx)
+
+		w := httptest.NewRecorder()
+		withReviewCommentRoutes(handler).ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusForbidden, w.Code)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
 	t.Run("returns not found for missing comment", func(t *testing.T) {
 		t.Parallel()
 
@@ -389,7 +542,8 @@ func TestSessionReviewCommentHandler_Update(t *testing.T) {
 		commentID := uuid.New()
 		handler := newTestReviewCommentHandler(t, mock)
 
-		mock.ExpectQuery("UPDATE session_review_comments").
+		// Ownership check: comment not found
+		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id").
 			WithArgs(pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows(reviewCommentColumns))
 

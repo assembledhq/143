@@ -89,12 +89,12 @@ export function useFileHighlighting(
 ): string[] | null {
   const [highlighted, setHighlighted] = useState<string[] | null>(null);
 
-  // Compute a stable key to avoid re-highlighting when nothing changed
-  const lineCount = allLineContents.length;
-  const contentKey = lineCount > 0 ? `${lang}:${lineCount}:${allLineContents[0]}:${allLineContents[lineCount - 1]}` : "";
+  // Compute a stable key to avoid re-highlighting when nothing changed.
+  // We join all lines to ensure any content change triggers re-highlighting.
+  const contentKey = allLineContents.length > 0 ? `${lang}:${allLineContents.join("\n")}` : "";
 
   useEffect(() => {
-    if (lineCount === 0) {
+    if (allLineContents.length === 0) {
       setHighlighted(null);
       return;
     }

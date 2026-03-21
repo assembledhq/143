@@ -112,7 +112,7 @@ function DirectoryTree({
 }: {
   sessionId: string;
   currentPath: string;
-  onNavigate: (path: string) => void;
+  onNavigate: (path: string, type?: "file" | "dir") => void;
   activePath: string;
   changedFiles: Set<string>;
 }) {
@@ -130,11 +130,7 @@ function DirectoryTree({
 
   const handleSelect = useCallback(
     (entry: FileEntry) => {
-      if (entry.type === "dir") {
-        onNavigate(entry.path);
-      } else {
-        onNavigate(entry.path);
-      }
+      onNavigate(entry.path, entry.type);
     },
     [onNavigate]
   );
@@ -326,21 +322,19 @@ export function RepoExplorer({
   }, [diffFiles]);
 
   const handleNavigate = useCallback(
-    (path: string) => {
-      // Need to determine if this path is a file or directory.
-      // Check for a file extension (dot followed by at least one non-dot character after the last segment).
-      // This handles extensionless files like Makefile or Dockerfile by treating them as directories
-      // until the API confirms otherwise — the DirectoryTreeEntry already uses the API's type field.
-      const lastSegment = path.split("/").pop() || "";
-      const hasExtension = /\.\w+$/.test(lastSegment);
-      if (hasExtension && path !== "") {
+    (path: string, type?: "file" | "dir") => {
+      if (type === "file") {
         setSelectedFile(path);
-        // Set currentDir to the parent
         const parts = path.split("/");
         if (parts.length > 1) {
           setCurrentDir(parts.slice(0, -1).join("/"));
         }
+      } else if (type === "dir") {
+        setCurrentDir(path);
+        setSelectedFile("");
       } else {
+        // Fallback for breadcrumb navigation where we don't have type info.
+        // Breadcrumbs always navigate to directories (intermediate path segments).
         setCurrentDir(path);
         setSelectedFile("");
       }

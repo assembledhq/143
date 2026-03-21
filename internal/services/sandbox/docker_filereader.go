@@ -31,8 +31,9 @@ func NewDockerFileReader(client DockerClient) *DockerFileReader {
 	return &DockerFileReader{client: client}
 }
 
-// unsafePathRE matches shell metacharacters that could be used for command injection.
-var unsafePathRE = regexp.MustCompile("[`$|;&(){}\\[\\]!<>\\\\\"']")
+// unsafePathRE matches shell metacharacters and control characters that could be
+// used for command injection or cause unexpected behavior in exec'd commands.
+var unsafePathRE = regexp.MustCompile("[`$|;&(){}\\[\\]!<>\\\\\"'\\x00-\\x1f]")
 
 // validateExecPath checks a resolved absolute path for shell-unsafe characters.
 // Returns an error if the path contains metacharacters that could allow injection.
@@ -85,7 +86,10 @@ func (d *DockerFileReader) ListDir(ctx context.Context, containerID, workDir, di
 
 	// Use find with null-delimited output for safe parsing of filenames
 	// that may contain tabs or newlines.
-	// find -printf interprets its own escapes: \t = tab, \0 = null byte.
+	// The format string uses find's own escape sequences (not Go's):
+	// \t = tab, \0 = null byte. Go's raw string literal (`...`) passes
+	// the backslash-t and backslash-zero through literally, which find
+	// then interprets as its own escapes.
 	argv := []string{
 		"find", absPath, "-maxdepth", "1", "-mindepth", "1",
 		"-printf", `%y\t%s\t%P\0`,
@@ -212,7 +216,8 @@ func resolvePathInWorkDir(workDir, relPath string) string {
 	joined := filepath.Join(workDir, cleaned)
 
 	// Ensure the result is still under workDir (prevent traversal).
-	if !strings.HasPrefix(joined, workDir) {
+	// Use workDir+"/" to avoid false positives like "/workspaceevil" matching "/workspace".
+	if joined != workDir && !strings.HasPrefix(joined, workDir+"/") {
 		return workDir
 	}
 

@@ -85,6 +85,14 @@ func (h *SessionReviewCommentHandler) Create(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "VALIDATION", "file_path must be 1024 characters or less")
 		return
 	}
+	if len(body.Body) > 10240 {
+		writeError(w, http.StatusBadRequest, "VALIDATION", "body must be 10KB or less")
+		return
+	}
+	if body.LineNumber < 1 {
+		writeError(w, http.StatusBadRequest, "VALIDATION", "line_number must be a positive integer")
+		return
+	}
 
 	side := body.Side
 	if side == "" {
@@ -157,6 +165,17 @@ func (h *SessionReviewCommentHandler) Update(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Verify the requesting user owns this comment.
+	existing, err := h.store.GetByID(r.Context(), orgID, commentID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "review comment not found")
+		return
+	}
+	if existing.UserID != user.ID {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "you can only edit your own comments")
+		return
+	}
+
 	var body struct {
 		Body     *string `json:"body"`
 		Resolved *bool   `json:"resolved"`
@@ -217,6 +236,17 @@ func (h *SessionReviewCommentHandler) Delete(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Verify the requesting user owns this comment.
+	existing, err := h.store.GetByID(r.Context(), orgID, commentID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "review comment not found")
+		return
+	}
+	if existing.UserID != user.ID {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "you can only delete your own comments")
+		return
+	}
+
 	if err := h.store.Delete(r.Context(), orgID, sessionID, commentID); err != nil {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "review comment not found")
 		return
@@ -268,11 +298,13 @@ func (h *SessionReviewCommentHandler) SendToAgent(w http.ResponseWriter, r *http
 	}
 
 	// Format into a structured directive for the agent.
+	// Indent multi-line comment bodies so each line stays within the numbered block.
 	var sb strings.Builder
 	sb.WriteString("Please address the following code review comments:\n\n")
 	for i, c := range open {
 		sb.WriteString(fmt.Sprintf("%d. %s:%d\n", i+1, c.FilePath, c.LineNumber))
-		sb.WriteString(fmt.Sprintf("   \"%s\"\n\n", c.Body))
+		indented := strings.ReplaceAll(c.Body, "\n", "\n   ")
+		sb.WriteString(fmt.Sprintf("   \"%s\"\n\n", indented))
 	}
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[struct {

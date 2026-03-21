@@ -58,6 +58,9 @@ const maxDiffHistoryEntries = 20
 // diffHistoryAppendSQL returns the SQL fragment for appending to diff_history
 // with a cap of maxDiffHistoryEntries. The caller must supply @diff, @diff_stats,
 // and a pass-number expression (e.g. "@current_turn::int" or "COALESCE(current_turn, 0) + 1").
+//
+// IMPORTANT: passExpr is interpolated directly into SQL via fmt.Sprintf.
+// It MUST be a trusted constant expression — never pass user-controlled input.
 func diffHistoryAppendSQL(passExpr string) string {
 	return fmt.Sprintf(`CASE WHEN @diff IS NOT NULL THEN
 	  (SELECT jsonb_agg(elem) FROM (
