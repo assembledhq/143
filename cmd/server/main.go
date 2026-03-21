@@ -126,7 +126,7 @@ func main() {
 		go w.Start(ctx)
 		logger.Info().Msg("worker started with registered handlers")
 
-		reaper := agent.NewSessionReaper(sessionStore, snapshotStore, cfg.SessionMaxIdleAge, cfg.SessionReaperInterval, logger)
+		reaper := agent.NewSessionReaper(sessionStore, snapshotStore, cfg.SessionMaxIdleAge, cfg.SessionMaxSnapshotAge, cfg.SessionReaperInterval, logger)
 		go reaper.Run(ctx)
 
 		scheduler := cluster.NewScheduler(

@@ -11,34 +11,37 @@ import (
 	"github.com/assembledhq/143/internal/services/storage"
 )
 
-// SessionReaper periodically cleans up stale session snapshots from object
-// storage. It handles two cases:
-//   - Idle sessions that have been inactive for longer than maxIdleAge
-//   - Completed/failed/cancelled sessions that still have snapshots
+// SessionReaper periodically cleans up stale sessions and expired snapshots
+// in two phases:
+//   - Phase 1: Transition idle sessions to completed (keep snapshots)
+//   - Phase 2: Delete snapshots that have exceeded the max snapshot age
 type SessionReaper struct {
-	sessions      StaleSessionLister
-	snapshotStore storage.SnapshotStore
-	maxIdleAge    time.Duration
-	interval      time.Duration
-	logger        zerolog.Logger
+	sessions       StaleSessionLister
+	snapshotStore  storage.SnapshotStore
+	maxIdleAge     time.Duration
+	maxSnapshotAge time.Duration
+	interval       time.Duration
+	logger         zerolog.Logger
 }
 
 // StaleSessionLister is the subset of the session store used by the reaper.
 type StaleSessionLister interface {
-	ListStaleSessions(ctx context.Context, olderThan time.Time) ([]models.Session, error)
+	ListStaleIdleSessions(ctx context.Context, olderThan time.Time) ([]models.Session, error)
+	ListExpiredSnapshots(ctx context.Context, olderThan time.Time) ([]models.Session, error)
 	UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status string) error
 	UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state string) error
 }
 
 // NewSessionReaper creates a reaper that runs every interval, cleaning up
-// sessions idle for longer than maxIdleAge.
-func NewSessionReaper(sessions StaleSessionLister, snapshotStore storage.SnapshotStore, maxIdleAge, interval time.Duration, logger zerolog.Logger) *SessionReaper {
+// sessions idle for longer than maxIdleAge and snapshots older than maxSnapshotAge.
+func NewSessionReaper(sessions StaleSessionLister, snapshotStore storage.SnapshotStore, maxIdleAge, maxSnapshotAge, interval time.Duration, logger zerolog.Logger) *SessionReaper {
 	return &SessionReaper{
-		sessions:      sessions,
-		snapshotStore: snapshotStore,
-		maxIdleAge:    maxIdleAge,
-		interval:      interval,
-		logger:        logger,
+		sessions:       sessions,
+		snapshotStore:  snapshotStore,
+		maxIdleAge:     maxIdleAge,
+		maxSnapshotAge: maxSnapshotAge,
+		interval:       interval,
+		logger:         logger,
 	}
 }
 
@@ -50,6 +53,7 @@ func (r *SessionReaper) Run(ctx context.Context) {
 	r.logger.Info().
 		Dur("interval", r.interval).
 		Dur("max_idle", r.maxIdleAge).
+		Dur("max_snapshot_age", r.maxSnapshotAge).
 		Msg("snapshot reaper started")
 
 	for {
@@ -64,35 +68,42 @@ func (r *SessionReaper) Run(ctx context.Context) {
 }
 
 func (r *SessionReaper) reap(ctx context.Context) {
-	cutoff := time.Now().Add(-r.maxIdleAge)
-	sessions, err := r.sessions.ListStaleSessions(ctx, cutoff)
+	// Phase 1: Transition stale idle sessions to completed (keep snapshots).
+	idleCutoff := time.Now().Add(-r.maxIdleAge)
+	staleSessions, err := r.sessions.ListStaleIdleSessions(ctx, idleCutoff)
 	if err != nil {
-		r.logger.Error().Err(err).Msg("reaper: failed to list stale sessions")
+		r.logger.Error().Err(err).Msg("reaper: failed to list stale idle sessions")
+	} else {
+		for _, s := range staleSessions {
+			if err := r.sessions.UpdateStatus(ctx, s.OrgID, s.ID, string(models.SessionStatusCompleted)); err != nil {
+				r.logger.Error().Err(err).Str("session_id", s.ID.String()).Msg("reaper: failed to mark session completed")
+				continue
+			}
+			r.logger.Info().
+				Str("session_id", s.ID.String()).
+				Msg("reaper: transitioned idle session to completed")
+		}
+	}
+
+	// Phase 2: Delete snapshots that have exceeded the max snapshot age.
+	snapshotCutoff := time.Now().Add(-r.maxSnapshotAge)
+	expiredSnapshots, err := r.sessions.ListExpiredSnapshots(ctx, snapshotCutoff)
+	if err != nil {
+		r.logger.Error().Err(err).Msg("reaper: failed to list expired snapshots")
 		return
 	}
 
-	if len(sessions) == 0 {
-		return
+	if len(expiredSnapshots) > 0 {
+		r.logger.Info().Int("count", len(expiredSnapshots)).Msg("reaper: cleaning up expired snapshots")
 	}
 
-	r.logger.Info().Int("count", len(sessions)).Msg("reaper: cleaning up stale snapshots")
-
-	for _, s := range sessions {
+	for _, s := range expiredSnapshots {
 		if s.SnapshotKey != nil && *s.SnapshotKey != "" {
 			if err := r.snapshotStore.Delete(ctx, *s.SnapshotKey); err != nil {
 				r.logger.Error().Err(err).
 					Str("session_id", s.ID.String()).
 					Str("snapshot_key", *s.SnapshotKey).
 					Msg("reaper: failed to delete snapshot")
-				continue
-			}
-		}
-
-		// Only set status to completed for idle sessions; completed/failed
-		// sessions should keep their existing status.
-		if s.Status == string(models.SessionStatusIdle) {
-			if err := r.sessions.UpdateStatus(ctx, s.OrgID, s.ID, string(models.SessionStatusCompleted)); err != nil {
-				r.logger.Error().Err(err).Str("session_id", s.ID.String()).Msg("reaper: failed to mark session completed")
 				continue
 			}
 		}
@@ -105,6 +116,6 @@ func (r *SessionReaper) reap(ctx context.Context) {
 		r.logger.Info().
 			Str("session_id", s.ID.String()).
 			Str("status", s.Status).
-			Msg("reaper: cleaned up stale session")
+			Msg("reaper: cleaned up expired snapshot")
 	}
 }

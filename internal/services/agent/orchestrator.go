@@ -531,12 +531,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		Int("turn", session.CurrentTurn).
 		Logger()
 
-	if session.SnapshotKey == nil || *session.SnapshotKey == "" {
-		return fmt.Errorf("session has no snapshot to restore")
-	}
-	if o.snapshots == nil {
-		return fmt.Errorf("snapshot store not configured")
-	}
+	// Determine whether we can restore from a snapshot or need a fresh start.
+	hasSnapshot := session.SnapshotKey != nil && *session.SnapshotKey != "" &&
+		o.snapshots != nil &&
+		session.SandboxState != string(models.SandboxStateDestroyed)
 
 	// 1. Update status to running.
 	if err := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, "running"); err != nil {
@@ -572,7 +570,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		return fmt.Errorf("no user message found")
 	}
 
-	// 4. Create sandbox and restore snapshot.
+	// 4. Create sandbox.
 	sandboxCfg := DefaultSandboxConfig()
 	sandboxCfg.Env = o.resolveAgentEnv(ctx, session.OrgID, session.AgentType, session.TriggeredByUserID)
 	if sandboxCfg.Env == nil {
@@ -598,56 +596,101 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 	}()
 
-	// Restore snapshot from S3.
-	snapshotReader, snapshotWriter := io.Pipe()
-	var restoreErr error
-	var restoreWg sync.WaitGroup
-	restoreWg.Add(1)
-	go func() {
-		defer restoreWg.Done()
-		restoreErr = o.snapshots.Load(ctx, *session.SnapshotKey, snapshotWriter)
-		_ = snapshotWriter.Close()
-	}()
+	// 5. Set up the workspace — either restore snapshot or clone fresh.
+	var prompt *AgentPrompt
+	if hasSnapshot {
+		// Path A: Restore snapshot from storage — preserves all git changes.
+		snapshotReader, snapshotWriter := io.Pipe()
+		var restoreErr error
+		var restoreWg sync.WaitGroup
+		restoreWg.Add(1)
+		go func() {
+			defer restoreWg.Done()
+			restoreErr = o.snapshots.Load(ctx, *session.SnapshotKey, snapshotWriter)
+			_ = snapshotWriter.Close()
+		}()
 
-	if err := o.provider.Restore(ctx, sandbox, snapshotReader); err != nil {
-		// Close the reader to unblock the goroutine writing to the pipe.
-		_ = snapshotReader.Close()
+		if err := o.provider.Restore(ctx, sandbox, snapshotReader); err != nil {
+			_ = snapshotReader.Close()
+			restoreWg.Wait()
+			o.failRun(ctx, session, fmt.Sprintf("restore snapshot: %s", err))
+			return fmt.Errorf("restore snapshot: %w", err)
+		}
 		restoreWg.Wait()
-		o.failRun(ctx, session, fmt.Sprintf("restore snapshot: %s", err))
-		return fmt.Errorf("restore snapshot: %w", err)
-	}
-	restoreWg.Wait()
-	if restoreErr != nil {
-		o.failRun(ctx, session, fmt.Sprintf("load snapshot from storage: %s", restoreErr))
-		return fmt.Errorf("load snapshot: %w", restoreErr)
-	}
+		if restoreErr != nil {
+			o.failRun(ctx, session, fmt.Sprintf("load snapshot from storage: %s", restoreErr))
+			return fmt.Errorf("load snapshot: %w", restoreErr)
+		}
 
-	// 5. Re-inject Codex auth.json (primary auth mechanism).
-	if session.AgentType == models.AgentTypeCodex {
-		injected, err := o.injectCodexAuth(ctx, session.OrgID, sandbox)
+		// Re-inject Codex auth.json if needed.
+		if session.AgentType == models.AgentTypeCodex {
+			injected, err := o.injectCodexAuth(ctx, session.OrgID, sandbox)
+			if err != nil {
+				o.failRun(ctx, session, fmt.Sprintf("codex auth injection failed: %s", err))
+				return fmt.Errorf("codex auth injection: %w", err)
+			}
+			if !injected {
+				o.failRun(ctx, session, "no credentials configured for codex: connect ChatGPT from the Overview page")
+				return fmt.Errorf("no credentials for codex agent")
+			}
+		}
+
+		var resumeSessionID string
+		if session.AgentSessionID != nil {
+			resumeSessionID = *session.AgentSessionID
+		}
+		prompt = &AgentPrompt{
+			Continuation:    true,
+			ResumeSessionID: resumeSessionID,
+			UserMessage:     userMessage,
+			MaxTokens:       tokenLimitForMode(session.TokenMode),
+		}
+
+		log.Info().Msg("continuing session with snapshot restore")
+	} else {
+		// Path B: No snapshot available — clone repo fresh and provide
+		// conversation history + stored diff as context so the agent can
+		// reconstruct the prior state.
+		log.Info().Msg("continuing session without snapshot, starting fresh")
+
+		issue, repoFullName, err := o.setupFreshSandbox(ctx, session, sandbox)
 		if err != nil {
-			o.failRun(ctx, session, fmt.Sprintf("codex auth injection failed: %s", err))
-			return fmt.Errorf("codex auth injection: %w", err)
+			o.failRun(ctx, session, fmt.Sprintf("setup fresh sandbox: %s", err))
+			return fmt.Errorf("setup fresh sandbox: %w", err)
 		}
-		if !injected {
-			o.failRun(ctx, session, "no credentials configured for codex: connect ChatGPT from the Overview page")
-			return fmt.Errorf("no credentials for codex agent")
+
+		// Build a full prompt via PreparePrompt so the agent gets the system
+		// prompt with integration skills, memory, and repo conventions.
+		input := &AgentInput{
+			Issue:     &issue,
+			TokenMode: session.TokenMode,
 		}
+		input.IntegrationSkills = o.buildIntegrationSkills(ctx, session.OrgID)
+		if o.memory != nil && repoFullName != "" {
+			memResult, memErr := o.memory.GetContextMemories(ctx, MemoryContextRequest{
+				OrgID: session.OrgID,
+				Repo:  repoFullName,
+			})
+			if memErr != nil {
+				log.Warn().Err(memErr).Str("repo", repoFullName).Msg("failed to retrieve memories for resume context")
+			} else if memResult != nil && memResult.Formatted != "" {
+				input.ContextDocs = append(input.ContextDocs, memResult.Formatted)
+			}
+		}
+
+		basePrompt, err := adapter.PreparePrompt(ctx, input)
+		if err != nil {
+			o.failRun(ctx, session, fmt.Sprintf("prepare prompt for resume: %s", err))
+			return fmt.Errorf("prepare prompt for resume: %w", err)
+		}
+
+		// Override UserPrompt with resume context (conversation history + diff).
+		basePrompt.UserPrompt = o.buildResumeContext(session, &issue, messages, userMessage)
+		basePrompt.Continuation = false
+		prompt = basePrompt
 	}
 
-	// 6. Build the resume prompt.
-	var resumeSessionID string
-	if session.AgentSessionID != nil {
-		resumeSessionID = *session.AgentSessionID
-	}
-	prompt := &AgentPrompt{
-		Continuation:    true,
-		ResumeSessionID: resumeSessionID,
-		UserMessage:     userMessage,
-		MaxTokens:       tokenLimitForMode(session.TokenMode),
-	}
-
-	// 7. Execute agent with log streaming.
+	// 6. Execute agent with log streaming.
 	turnNumber := session.CurrentTurn + 1
 	logCh := make(chan LogEntry, 100)
 	var logWg sync.WaitGroup
@@ -667,18 +710,18 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		return fmt.Errorf("execute agent on continue: %w", err)
 	}
 
-	// 8. Create assistant message with result summary.
+	// 7. Create assistant message with result summary.
 	if err := o.createAssistantMessage(ctx, session.ID, session.OrgID, turnNumber, result); err != nil {
 		log.Warn().Err(err).Msg("failed to create assistant message")
 	}
 
-	// 9. Snapshot again.
+	// 8. Snapshot again.
 	newSnapshotKey, snapshotErr := o.snapshotSession(ctx, session, sandbox, result)
 	if snapshotErr != nil {
 		log.Warn().Err(snapshotErr).Msg("failed to snapshot session after continue")
 	}
 
-	// 10. Update turn complete — sets status to idle.
+	// 9. Update turn complete — sets status to idle.
 	agentSessionID := result.AgentSessionID
 	if agentSessionID == "" && session.AgentSessionID != nil {
 		agentSessionID = *session.AgentSessionID
@@ -693,6 +736,117 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 
 	log.Info().Int("turn", turnNumber).Msg("session turn completed, now idle")
 	return nil
+}
+
+// setupFreshSandbox clones the session's repository into the sandbox when no
+// snapshot is available. Returns the issue (for prompt building) and the repo
+// full name (for memory lookup). Handles sessions with or without a repository.
+func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Session, sandbox *Sandbox) (models.Issue, string, error) {
+	// Fetch the issue to get repository info.
+	issue, err := o.issues.GetByID(ctx, session.OrgID, session.IssueID)
+	if err != nil {
+		return models.Issue{}, "", fmt.Errorf("fetch issue: %w", err)
+	}
+
+	// Clone repo if the session has one.
+	var repoFullName string
+	if issue.RepositoryID != nil {
+		repo, err := o.repositories.GetByID(ctx, session.OrgID, *issue.RepositoryID)
+		if err != nil {
+			return models.Issue{}, "", fmt.Errorf("fetch repository: %w", err)
+		}
+		repoFullName = repo.FullName
+		branch := repo.DefaultBranch
+		if session.TargetBranch != nil && *session.TargetBranch != "" {
+			branch = *session.TargetBranch
+		}
+		token, err := o.github.GetInstallationToken(ctx, repo.InstallationID)
+		if err != nil {
+			return models.Issue{}, "", fmt.Errorf("get installation token: %w", err)
+		}
+		if err := o.provider.CloneRepo(ctx, sandbox, repo.CloneURL, branch, token); err != nil {
+			return models.Issue{}, "", fmt.Errorf("clone repo: %w", err)
+		}
+	}
+
+	// Inject Codex auth if needed.
+	if session.AgentType == models.AgentTypeCodex {
+		injected, err := o.injectCodexAuth(ctx, session.OrgID, sandbox)
+		if err != nil {
+			return models.Issue{}, "", fmt.Errorf("codex auth injection: %w", err)
+		}
+		if !injected {
+			return models.Issue{}, "", fmt.Errorf("no credentials for codex agent")
+		}
+	}
+
+	return issue, repoFullName, nil
+}
+
+// maxDiffCharsInPrompt is the maximum number of characters from a stored diff
+// to include in a resume prompt. Larger diffs are truncated to avoid blowing
+// up the agent's token budget.
+const maxDiffCharsInPrompt = 50000
+
+// buildResumeContext constructs the user prompt for a resumed session that has
+// no snapshot. It includes the issue description, conversation history, and
+// the stored diff so the agent understands the prior state and can re-apply
+// changes.
+func (o *Orchestrator) buildResumeContext(session *models.Session, issue *models.Issue, messages []models.SessionMessage, latestUserMessage string) string {
+	var b bytes.Buffer
+
+	b.WriteString("This is a continuation of a previous session. The previous workspace state is not available, so you are starting from a fresh clone.\n\n")
+
+	// Include the original issue description for context (especially
+	// important for non-manual sessions that may have no prior messages).
+	if issue != nil && issue.Description != nil && *issue.Description != "" {
+		b.WriteString("## Original issue\n\n**")
+		b.WriteString(issue.Title)
+		b.WriteString("**\n\n")
+		b.WriteString(*issue.Description)
+		b.WriteString("\n\n")
+	}
+
+	// Include conversation history if available.
+	if len(messages) > 1 { // >1 because the latest user message is always present
+		b.WriteString("## Previous conversation history\n\n")
+		for _, msg := range messages[:len(messages)-1] {
+			role := "User"
+			if msg.Role == models.MessageRoleAssistant {
+				role = "Assistant"
+			}
+			b.WriteString(fmt.Sprintf("**%s:** %s\n\n", role, msg.Content))
+		}
+	}
+
+	// Include the stored diff if available, truncating if very large.
+	if session.Diff != nil && *session.Diff != "" {
+		diff := *session.Diff
+		truncated := false
+		if len(diff) > maxDiffCharsInPrompt {
+			diff = diff[:maxDiffCharsInPrompt]
+			truncated = true
+		}
+		b.WriteString("## Previous code changes (git diff)\n\nThe following diff was produced in the previous session. Please re-apply these changes as needed:\n\n```diff\n")
+		b.WriteString(diff)
+		b.WriteString("\n```\n")
+		if truncated {
+			b.WriteString("\n**Note:** The diff was truncated due to size. The full diff had additional changes not shown above.\n")
+		}
+		b.WriteString("\n")
+	}
+
+	// Include the result summary if available.
+	if session.ResultSummary != nil && *session.ResultSummary != "" {
+		b.WriteString("## Previous session summary\n\n")
+		b.WriteString(*session.ResultSummary)
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString("## New message\n\n")
+	b.WriteString(latestUserMessage)
+
+	return b.String()
 }
 
 func outcomeFromRunStatus(status string) models.PMDecisionOutcome {
