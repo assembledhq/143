@@ -15,6 +15,8 @@ import (
 )
 
 func TestCodexAdapter_Name(t *testing.T) {
+	t.Parallel()
+
 	a := NewCodexAdapter(zerolog.Nop())
 	if a.Name() != models.AgentTypeCodex {
 		t.Errorf("expected name 'codex', got %q", a.Name())
@@ -22,8 +24,9 @@ func TestCodexAdapter_Name(t *testing.T) {
 }
 
 func TestCodexAdapter_PreparePrompt(t *testing.T) {
-	a := NewCodexAdapter(zerolog.Nop())
+	t.Parallel()
 
+	a := NewCodexAdapter(zerolog.Nop())
 	tests := []struct {
 		name      string
 		input     *agent.AgentInput
@@ -96,8 +99,9 @@ func TestCodexAdapter_PreparePrompt(t *testing.T) {
 }
 
 func TestParseCodexOutput_JSON(t *testing.T) {
-	output := []byte(`{"response": "Fixed the null pointer by adding a nil check.", "stats": {"inputTokens": 1500, "outputTokens": 500}}`)
+	t.Parallel()
 
+	output := []byte(`{"response": "Fixed the null pointer by adding a nil check.", "stats": {"inputTokens": 1500, "outputTokens": 500}}`)
 	result := &agent.AgentResult{}
 	logCh := make(chan agent.LogEntry, 100)
 
@@ -116,8 +120,9 @@ func TestParseCodexOutput_JSON(t *testing.T) {
 }
 
 func TestParseCodexOutput_PlainText(t *testing.T) {
-	output := []byte("I fixed the bug by adding a nil check on line 42.")
+	t.Parallel()
 
+	output := []byte("I fixed the bug by adding a nil check on line 42.")
 	result := &agent.AgentResult{}
 	logCh := make(chan agent.LogEntry, 100)
 
@@ -130,8 +135,9 @@ func TestParseCodexOutput_PlainText(t *testing.T) {
 }
 
 func TestParseCodexOutput_WithConfidence(t *testing.T) {
-	output := []byte(`{"response": "Fixed it.\n\n` + "```json\\n{\\\"confidence_score\\\": 0.85, \\\"confidence_reasoning\\\": \\\"Simple nil check\\\", \\\"risk_factors\\\": [\\\"none\\\"]}\\n```" + `"}`)
+	t.Parallel()
 
+	output := []byte(`{"response": "Fixed it.\n\n` + "```json\\n{\\\"confidence_score\\\": 0.85, \\\"confidence_reasoning\\\": \\\"Simple nil check\\\", \\\"risk_factors\\\": [\\\"none\\\"]}\\n```" + `"}`)
 	result := &agent.AgentResult{}
 	logCh := make(chan agent.LogEntry, 100)
 
@@ -144,6 +150,8 @@ func TestParseCodexOutput_WithConfidence(t *testing.T) {
 }
 
 func TestParseCodexOutput_Empty(t *testing.T) {
+	t.Parallel()
+
 	result := &agent.AgentResult{}
 	logCh := make(chan agent.LogEntry, 100)
 
@@ -156,8 +164,9 @@ func TestParseCodexOutput_Empty(t *testing.T) {
 }
 
 func TestParseCodexOutput_JSONWithError(t *testing.T) {
-	output := []byte(`{"response": "Attempted fix.", "error": "rate limit exceeded"}`)
+	t.Parallel()
 
+	output := []byte(`{"response": "Attempted fix.", "error": "rate limit exceeded"}`)
 	result := &agent.AgentResult{}
 	logCh := make(chan agent.LogEntry, 100)
 
@@ -769,7 +778,6 @@ func TestIsDuplicateOutput(t *testing.T) {
 	t.Parallel()
 
 	t.Run("first content is not a duplicate", func(t *testing.T) {
-		t.Parallel()
 		m := make(map[string]string)
 		require.False(t, isDuplicateOutput("message", "hello", m))
 		require.Equal(t, "hello", m["message"])
@@ -986,6 +994,8 @@ func TestParseCodexStreamLine_SuppressesRefreshTokenError(t *testing.T) {
 }
 
 func TestShellEscapeCodex(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		input    string
