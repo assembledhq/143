@@ -52,7 +52,7 @@ func TestPMAdapterPreparePrompt(t *testing.T) {
 			name:          "builds PM prompt from input context",
 			input:         &agent.AgentInput{PMContextJSON: `{"open_issues":[]}`},
 			expectedUser:  `{"open_issues":[]}`,
-			expectedToken: pmMaxTokens,
+			expectedToken: defaultPMMaxTokens,
 		},
 	}
 
@@ -74,6 +74,22 @@ func TestPMAdapterPreparePrompt(t *testing.T) {
 			require.Contains(t, strings.ToLower(prompt.SystemPrompt), "available agent slots", "PreparePrompt should include available slot guidance in PM system prompt")
 		})
 	}
+}
+
+func TestPMAdapterWithLimits(t *testing.T) {
+	t.Parallel()
+
+	// Custom token limit should be used
+	adapter := NewPMAdapterWithLimits(&pmInnerAdapterMock{}, 3, 7, 100_000)
+	prompt, err := adapter.PreparePrompt(context.Background(), &agent.AgentInput{PMContextJSON: `{}`})
+	require.NoError(t, err)
+	require.Equal(t, 100_000, prompt.MaxTokens, "should use custom PM token limit")
+
+	// Zero/negative falls back to default
+	adapterZero := NewPMAdapterWithLimits(&pmInnerAdapterMock{}, 3, 7, 0)
+	promptZero, err := adapterZero.PreparePrompt(context.Background(), &agent.AgentInput{PMContextJSON: `{}`})
+	require.NoError(t, err)
+	require.Equal(t, defaultPMMaxTokens, promptZero.MaxTokens, "zero should fall back to default")
 }
 
 func TestPMAdapterExecuteAndName(t *testing.T) {

@@ -278,12 +278,23 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		return fmt.Errorf("unknown agent type: %s", run.AgentType)
 	}
 
+	// 5b. Resolve org-specific context limits for adaptive token budgets.
+	var contextLimits *models.ContextLimits
+	if o.orgs != nil {
+		if org, orgErr := o.orgs.GetByID(ctx, run.OrgID); orgErr == nil {
+			if orgSettings, parseErr := models.ParseOrgSettings(org.Settings); parseErr == nil {
+				contextLimits = &orgSettings.ContextLimits
+			}
+		}
+	}
+
 	// 6. Prepare the prompt.
 	input := &AgentInput{
-		Issue:      issue,
-		RepoURL:    repoURL,
-		RepoBranch: branch,
-		TokenMode:  run.TokenMode,
+		Issue:         issue,
+		RepoURL:       repoURL,
+		RepoBranch:    branch,
+		TokenMode:     run.TokenMode,
+		ContextLimits: contextLimits,
 	}
 	if run.ComplexityTier != nil {
 		input.ComplexityEstimate = &ComplexityEstimate{
@@ -1305,12 +1316,25 @@ func (o *Orchestrator) createAssistantMessage(ctx context.Context, sessionID, or
 }
 
 // tokenLimitForMode returns the max token limit based on the session's token mode.
-func tokenLimitForMode(mode string) int {
+// Optional context limits from org settings override the defaults when provided.
+func tokenLimitForMode(mode string, limits ...models.ContextLimits) int {
+	var lowMax, highMax int
+	if len(limits) > 0 && limits[0].AgentLowTokenMax > 0 {
+		lowMax = limits[0].AgentLowTokenMax
+	} else {
+		lowMax = 50000
+	}
+	if len(limits) > 0 && limits[0].AgentHighTokenMax > 0 {
+		highMax = limits[0].AgentHighTokenMax
+	} else {
+		highMax = 200000
+	}
+
 	switch mode {
 	case "high":
-		return 200000
+		return highMax
 	default:
-		return 50000
+		return lowMax
 	}
 }
 

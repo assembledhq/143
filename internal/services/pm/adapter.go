@@ -14,10 +14,19 @@ type PMAdapter struct {
 	inner          agent.AgentAdapter
 	availableSlots int
 	maxConcurrent  int
+	maxTokens      int
 }
 
 func NewPMAdapter(inner agent.AgentAdapter, availableSlots int, maxConcurrent int) *PMAdapter {
-	return &PMAdapter{inner: inner, availableSlots: availableSlots, maxConcurrent: maxConcurrent}
+	return &PMAdapter{inner: inner, availableSlots: availableSlots, maxConcurrent: maxConcurrent, maxTokens: defaultPMMaxTokens}
+}
+
+// NewPMAdapterWithLimits creates a PM adapter with a custom token limit from org settings.
+func NewPMAdapterWithLimits(inner agent.AgentAdapter, availableSlots int, maxConcurrent int, maxTokens int) *PMAdapter {
+	if maxTokens <= 0 {
+		maxTokens = defaultPMMaxTokens
+	}
+	return &PMAdapter{inner: inner, availableSlots: availableSlots, maxConcurrent: maxConcurrent, maxTokens: maxTokens}
 }
 
 func (a *PMAdapter) Name() models.AgentType { return models.AgentTypePMAgent }
@@ -29,7 +38,7 @@ func (a *PMAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) 
 	return &agent.AgentPrompt{
 		SystemPrompt: buildPMSystemPrompt(a.availableSlots, a.maxConcurrent, 0),
 		UserPrompt:   input.PMContextJSON,
-		MaxTokens:    pmMaxTokens,
+		MaxTokens:    a.maxTokens,
 	}, nil
 }
 
