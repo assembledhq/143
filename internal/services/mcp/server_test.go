@@ -11,6 +11,7 @@ import (
 )
 
 func TestServerInitializeHandshake(t *testing.T) {
+	t.Parallel()
 	reg := integration.NewRegistry()
 	srv := NewServer(reg, &bytes.Buffer{})
 
@@ -62,6 +63,7 @@ func TestServerInitializeHandshake(t *testing.T) {
 }
 
 func TestServerToolsListRequiresInit(t *testing.T) {
+	t.Parallel()
 	reg := integration.NewRegistry()
 	srv := NewServer(reg, &bytes.Buffer{})
 
@@ -92,6 +94,7 @@ func TestServerToolsListRequiresInit(t *testing.T) {
 }
 
 func TestServerToolsListEmpty(t *testing.T) {
+	t.Parallel()
 	reg := integration.NewRegistry()
 	srv := NewServer(reg, &bytes.Buffer{})
 
@@ -135,6 +138,7 @@ func TestServerToolsListEmpty(t *testing.T) {
 }
 
 func TestServerPing(t *testing.T) {
+	t.Parallel()
 	reg := integration.NewRegistry()
 	srv := NewServer(reg, &bytes.Buffer{})
 
@@ -163,6 +167,7 @@ func TestServerPing(t *testing.T) {
 }
 
 func TestServerUnknownMethod(t *testing.T) {
+	t.Parallel()
 	reg := integration.NewRegistry()
 	srv := NewServer(reg, &bytes.Buffer{})
 
@@ -194,6 +199,7 @@ func TestServerUnknownMethod(t *testing.T) {
 }
 
 func TestServerParseError(t *testing.T) {
+	t.Parallel()
 	reg := integration.NewRegistry()
 	srv := NewServer(reg, &bytes.Buffer{})
 

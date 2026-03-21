@@ -6,6 +6,7 @@ import (
 )
 
 func TestParseRepoSettings_Empty(t *testing.T) {
+	t.Parallel()
 	s, err := ParseRepoSettings(nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -16,6 +17,7 @@ func TestParseRepoSettings_Empty(t *testing.T) {
 }
 
 func TestParseRepoSettings_WithPM(t *testing.T) {
+	t.Parallel()
 	raw := json.RawMessage(`{"pm":{"pm_schedule_hours":2,"pm_model":"opus"}}`)
 	s, err := ParseRepoSettings(raw)
 	if err != nil {
@@ -33,6 +35,7 @@ func TestParseRepoSettings_WithPM(t *testing.T) {
 }
 
 func TestParseRepoSettings_InvalidJSON(t *testing.T) {
+	t.Parallel()
 	_, err := ParseRepoSettings(json.RawMessage(`{invalid`))
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
@@ -40,6 +43,7 @@ func TestParseRepoSettings_InvalidJSON(t *testing.T) {
 }
 
 func TestMergeRepoPMSettings_NilPM(t *testing.T) {
+	t.Parallel()
 	org, err := ParseOrgSettings(nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -52,6 +56,7 @@ func TestMergeRepoPMSettings_NilPM(t *testing.T) {
 }
 
 func TestMergeRepoPMSettings_Overrides(t *testing.T) {
+	t.Parallel()
 	org, err := ParseOrgSettings(nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -92,6 +97,7 @@ func TestMergeRepoPMSettings_Overrides(t *testing.T) {
 }
 
 func TestMergeRepoPMSettings_PartialOverride(t *testing.T) {
+	t.Parallel()
 	org, err := ParseOrgSettings(nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -114,6 +120,7 @@ func TestMergeRepoPMSettings_PartialOverride(t *testing.T) {
 }
 
 func TestValidateRepoPMSettings_ValidModel(t *testing.T) {
+	t.Parallel()
 	model := "opus"
 	pm := RepoPMSettings{PMModel: &model}
 	if err := ValidateRepoPMSettings(pm); err != nil {
@@ -122,6 +129,7 @@ func TestValidateRepoPMSettings_ValidModel(t *testing.T) {
 }
 
 func TestValidateRepoPMSettings_InvalidModel(t *testing.T) {
+	t.Parallel()
 	model := "nonexistent-model"
 	pm := RepoPMSettings{PMModel: &model}
 	if err := ValidateRepoPMSettings(pm); err == nil {
