@@ -31,13 +31,13 @@ func (h *ProjectAttachmentHandler) List(w http.ResponseWriter, r *http.Request) 
 	orgID := middleware.OrgIDFromContext(r.Context())
 	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
 		return
 	}
 
 	attachments, err := h.attachmentStore.ListByProject(r.Context(), orgID, projectID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list attachments")
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list attachments", err)
 		return
 	}
 	if attachments == nil {
@@ -55,13 +55,13 @@ func (h *ProjectAttachmentHandler) Create(w http.ResponseWriter, r *http.Request
 	user := middleware.UserFromContext(r.Context())
 	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
 		return
 	}
 
 	// Verify project exists
 	if _, err := h.projectStore.GetByID(r.Context(), orgID, projectID); err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "project not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "project not found")
 		return
 	}
 
@@ -76,17 +76,17 @@ func (h *ProjectAttachmentHandler) Create(w http.ResponseWriter, r *http.Request
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
 
 	if req.FileName == "" || req.FileURL == "" {
-		writeError(w, http.StatusBadRequest, "MISSING_FIELD", "file_name and file_url are required")
+		writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", "file_name and file_url are required")
 		return
 	}
 
 	if !strings.HasPrefix(req.FileURL, "https://") && !strings.HasPrefix(req.FileURL, "http://") {
-		writeError(w, http.StatusBadRequest, "INVALID_URL", "file_url must start with https:// or http://")
+		writeError(w, r, http.StatusBadRequest, "INVALID_URL", "file_url must start with https:// or http://")
 		return
 	}
 
@@ -114,7 +114,7 @@ func (h *ProjectAttachmentHandler) Create(w http.ResponseWriter, r *http.Request
 	}
 
 	if err := h.attachmentStore.Create(r.Context(), &attachment); err != nil {
-		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create attachment")
+		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create attachment", err)
 		return
 	}
 
@@ -125,22 +125,22 @@ func (h *ProjectAttachmentHandler) Update(w http.ResponseWriter, r *http.Request
 	orgID := middleware.OrgIDFromContext(r.Context())
 	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
 		return
 	}
 	attachmentID, err := uuid.Parse(chi.URLParam(r, "attachmentId"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid attachment ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid attachment ID")
 		return
 	}
 
 	attachment, err := h.attachmentStore.GetByID(r.Context(), orgID, attachmentID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "attachment not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "attachment not found")
 		return
 	}
 	if attachment.ProjectID != projectID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "attachment not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "attachment not found")
 		return
 	}
 
@@ -151,7 +151,7 @@ func (h *ProjectAttachmentHandler) Update(w http.ResponseWriter, r *http.Request
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
 
@@ -166,7 +166,7 @@ func (h *ProjectAttachmentHandler) Update(w http.ResponseWriter, r *http.Request
 	}
 
 	if err := h.attachmentStore.Update(r.Context(), &attachment); err != nil {
-		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update attachment")
+		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update attachment", err)
 		return
 	}
 
@@ -177,26 +177,26 @@ func (h *ProjectAttachmentHandler) Delete(w http.ResponseWriter, r *http.Request
 	orgID := middleware.OrgIDFromContext(r.Context())
 	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
 		return
 	}
 	attachmentID, err := uuid.Parse(chi.URLParam(r, "attachmentId"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid attachment ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid attachment ID")
 		return
 	}
 	attachment, err := h.attachmentStore.GetByID(r.Context(), orgID, attachmentID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "attachment not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "attachment not found")
 		return
 	}
 	if attachment.ProjectID != projectID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "attachment not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "attachment not found")
 		return
 	}
 
 	if err := h.attachmentStore.Delete(r.Context(), orgID, attachmentID); err != nil {
-		writeError(w, http.StatusInternalServerError, "DELETE_FAILED", "failed to delete attachment")
+		writeError(w, r, http.StatusInternalServerError, "DELETE_FAILED", "failed to delete attachment", err)
 		return
 	}
 

@@ -149,17 +149,21 @@ func (w *Worker) poll(ctx context.Context) {
 }
 
 func (w *Worker) succeedJob(ctx context.Context, jobID uuid.UUID) {
-	_, _ = w.db.Exec(ctx, `
+	if _, err := w.db.Exec(ctx, `
 		UPDATE jobs SET status = 'succeeded', completed_at = now(), locked_by_node_id = NULL, locked_at = NULL, updated_at = now()
 		WHERE id = $1
-	`, jobID)
+	`, jobID); err != nil {
+		w.logger.Warn().Err(err).Str("job_id", jobID.String()).Msg("failed to mark job as succeeded")
+	}
 }
 
 func (w *Worker) failJob(ctx context.Context, jobID uuid.UUID, errMsg string) {
-	_, _ = w.db.Exec(ctx, `
+	if _, err := w.db.Exec(ctx, `
 		UPDATE jobs SET status = 'failed', last_error = $1, locked_by_node_id = NULL, locked_at = NULL, updated_at = now()
 		WHERE id = $2
-	`, errMsg, jobID)
+	`, errMsg, jobID); err != nil {
+		w.logger.Warn().Err(err).Str("job_id", jobID.String()).Msg("failed to mark job as failed")
+	}
 }
 
 func (w *Worker) retryJob(ctx context.Context, jobID uuid.UUID, errMsg string, attempt int) {
@@ -169,15 +173,19 @@ func (w *Worker) retryJob(ctx context.Context, jobID uuid.UUID, errMsg string, a
 		exp = 10
 	}
 	backoff := time.Duration(1<<exp) * time.Second // exp is capped at 10 above
-	_, _ = w.db.Exec(ctx, `
+	if _, err := w.db.Exec(ctx, `
 		UPDATE jobs SET status = 'pending', last_error = $1, run_at = now() + $2::interval, locked_by_node_id = NULL, locked_at = NULL, updated_at = now()
 		WHERE id = $3
-	`, errMsg, fmt.Sprintf("%d seconds", int(backoff.Seconds())), jobID)
+	`, errMsg, fmt.Sprintf("%d seconds", int(backoff.Seconds())), jobID); err != nil {
+		w.logger.Warn().Err(err).Str("job_id", jobID.String()).Msg("failed to schedule job retry")
+	}
 }
 
 func (w *Worker) deadLetterJob(ctx context.Context, jobID uuid.UUID, errMsg string) {
-	_, _ = w.db.Exec(ctx, `
+	if _, err := w.db.Exec(ctx, `
 		UPDATE jobs SET status = 'dead_letter', last_error = $1, completed_at = now(), locked_by_node_id = NULL, locked_at = NULL, updated_at = now()
 		WHERE id = $2
-	`, errMsg, jobID)
+	`, errMsg, jobID); err != nil {
+		w.logger.Warn().Err(err).Str("job_id", jobID.String()).Msg("failed to dead-letter job")
+	}
 }

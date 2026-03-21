@@ -29,7 +29,7 @@ func (h *SettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	org, err := h.orgStore.GetByID(r.Context(), orgID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "organization not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "organization not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Organization]{Data: org})
@@ -62,25 +62,25 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		Settings *json.RawMessage `json:"settings"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
 
 	if req.Settings != nil {
 		var parsedSettings models.OrgSettings
 		if err := json.Unmarshal(*req.Settings, &parsedSettings); err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid settings JSON")
+			writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid settings JSON")
 			return
 		}
 		if err := models.ValidateSettingsModels(parsedSettings); err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_SETTINGS", err.Error())
+			writeError(w, r, http.StatusBadRequest, "INVALID_SETTINGS", err.Error())
 			return
 		}
 	}
 
 	org, err := h.orgStore.GetByID(r.Context(), orgID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "organization not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "organization not found")
 		return
 	}
 
@@ -92,7 +92,7 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.orgStore.Update(r.Context(), &org); err != nil {
-		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update organization")
+		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update organization", err)
 		return
 	}
 

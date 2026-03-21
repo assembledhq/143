@@ -30,13 +30,13 @@ func (h *ProjectSpecHandler) List(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
 		return
 	}
 
 	specs, err := h.specStore.ListByProject(r.Context(), orgID, projectID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list specs")
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list specs", err)
 		return
 	}
 	if specs == nil {
@@ -54,12 +54,12 @@ func (h *ProjectSpecHandler) Create(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserFromContext(r.Context())
 	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
 		return
 	}
 
 	if _, err := h.projectStore.GetByID(r.Context(), orgID, projectID); err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "project not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "project not found")
 		return
 	}
 
@@ -70,12 +70,12 @@ func (h *ProjectSpecHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
 
 	if req.Title == "" {
-		writeError(w, http.StatusBadRequest, "MISSING_FIELD", "title is required")
+		writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", "title is required")
 		return
 	}
 
@@ -99,7 +99,7 @@ func (h *ProjectSpecHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.specStore.Create(r.Context(), &spec); err != nil {
-		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create spec")
+		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create spec", err)
 		return
 	}
 
@@ -110,22 +110,22 @@ func (h *ProjectSpecHandler) Get(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
 		return
 	}
 	specID, err := uuid.Parse(chi.URLParam(r, "specId"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid spec ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid spec ID")
 		return
 	}
 
 	spec, err := h.specStore.GetByID(r.Context(), orgID, specID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "spec not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "spec not found")
 		return
 	}
 	if spec.ProjectID != projectID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "spec not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "spec not found")
 		return
 	}
 
@@ -136,22 +136,22 @@ func (h *ProjectSpecHandler) Update(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
 		return
 	}
 	specID, err := uuid.Parse(chi.URLParam(r, "specId"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid spec ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid spec ID")
 		return
 	}
 
 	spec, err := h.specStore.GetByID(r.Context(), orgID, specID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "spec not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "spec not found")
 		return
 	}
 	if spec.ProjectID != projectID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "spec not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "spec not found")
 		return
 	}
 
@@ -162,7 +162,7 @@ func (h *ProjectSpecHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
 
@@ -177,7 +177,7 @@ func (h *ProjectSpecHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.specStore.Update(r.Context(), &spec); err != nil {
-		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update spec")
+		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update spec", err)
 		return
 	}
 
@@ -188,26 +188,26 @@ func (h *ProjectSpecHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
 		return
 	}
 	specID, err := uuid.Parse(chi.URLParam(r, "specId"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid spec ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid spec ID")
 		return
 	}
 	spec, err := h.specStore.GetByID(r.Context(), orgID, specID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "spec not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "spec not found")
 		return
 	}
 	if spec.ProjectID != projectID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "spec not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "spec not found")
 		return
 	}
 
 	if err := h.specStore.Delete(r.Context(), orgID, specID); err != nil {
-		writeError(w, http.StatusInternalServerError, "DELETE_FAILED", "failed to delete spec")
+		writeError(w, r, http.StatusInternalServerError, "DELETE_FAILED", "failed to delete spec", err)
 		return
 	}
 

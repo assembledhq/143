@@ -26,8 +26,7 @@ func (h *CodexAuthHandler) Initiate(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.svc.InitiateDeviceAuth(r.Context(), orgID)
 	if err != nil {
-		h.logger.Error().Err(err).Str("org_id", orgID.String()).Msg("failed to initiate codex device auth")
-		writeError(w, http.StatusInternalServerError, "AUTH_INITIATE_FAILED", "failed to initiate device auth")
+		writeError(w, r, http.StatusInternalServerError, "AUTH_INITIATE_FAILED", "failed to initiate device auth", err)
 		return
 	}
 
@@ -40,7 +39,7 @@ func (h *CodexAuthHandler) Status(w http.ResponseWriter, r *http.Request) {
 
 	status, err := h.svc.PollForToken(r.Context(), orgID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "AUTH_STATUS_FAILED", "failed to check auth status")
+		writeError(w, r, http.StatusInternalServerError, "AUTH_STATUS_FAILED", "failed to check auth status", err)
 		return
 	}
 
@@ -52,7 +51,7 @@ func (h *CodexAuthHandler) Disconnect(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
 	if err := h.svc.Disconnect(r.Context(), orgID); err != nil {
-		writeError(w, http.StatusInternalServerError, "AUTH_DISCONNECT_FAILED", "failed to disconnect ChatGPT")
+		writeError(w, r, http.StatusInternalServerError, "AUTH_DISCONNECT_FAILED", "failed to disconnect ChatGPT", err)
 		return
 	}
 

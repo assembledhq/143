@@ -434,6 +434,8 @@ func (d *DockerProvider) Restore(ctx context.Context, sb *agent.Sandbox, reader 
 	if _, err := io.Copy(attachResp.Conn, reader); err != nil {
 		return fmt.Errorf("write snapshot to container: %w", err)
 	}
+	// Intentionally ignored: CloseWrite signals EOF to the exec process; any error here
+	// does not affect the snapshot data already written.
 	_ = attachResp.CloseWrite()
 
 	// Drain stdout/stderr so the exec process can finish writing.

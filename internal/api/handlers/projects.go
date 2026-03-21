@@ -90,7 +90,7 @@ func (h *ProjectHandler) List(w http.ResponseWriter, r *http.Request) {
 	if repoIDStr := r.URL.Query().Get("repository_id"); repoIDStr != "" {
 		repoID, err := uuid.Parse(repoIDStr)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "invalid repository_id")
+			writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "invalid repository_id")
 			return
 		}
 		filters.RepositoryID = repoID
@@ -98,7 +98,7 @@ func (h *ProjectHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	projects, err := h.projectStore.ListByOrg(r.Context(), orgID, filters)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list projects")
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list projects", err)
 		return
 	}
 	if projects == nil {
@@ -120,19 +120,19 @@ func (h *ProjectHandler) Get(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
 		return
 	}
 
 	project, err := h.projectStore.GetByID(r.Context(), orgID, projectID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "project not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "project not found")
 		return
 	}
 
 	tasks, err := h.projectTaskStore.ListByProject(r.Context(), orgID, projectID, db.ProjectTaskFilters{})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_TASKS_FAILED", "failed to list project tasks")
+		writeError(w, r, http.StatusInternalServerError, "LIST_TASKS_FAILED", "failed to list project tasks", err)
 		return
 	}
 	if tasks == nil {
@@ -141,7 +141,7 @@ func (h *ProjectHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 	cycles, err := h.projectCycleStore.ListByProject(r.Context(), orgID, projectID, 10)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_CYCLES_FAILED", "failed to list project cycles")
+		writeError(w, r, http.StatusInternalServerError, "LIST_CYCLES_FAILED", "failed to list project cycles", err)
 		return
 	}
 	if cycles == nil {
@@ -152,7 +152,7 @@ func (h *ProjectHandler) Get(w http.ResponseWriter, r *http.Request) {
 	if h.attachmentStore != nil {
 		attachments, err = h.attachmentStore.ListByProject(r.Context(), orgID, projectID)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "LIST_ATTACHMENTS_FAILED", "failed to list project attachments")
+			writeError(w, r, http.StatusInternalServerError, "LIST_ATTACHMENTS_FAILED", "failed to list project attachments", err)
 			return
 		}
 	}
@@ -164,7 +164,7 @@ func (h *ProjectHandler) Get(w http.ResponseWriter, r *http.Request) {
 	if h.specStore != nil {
 		specs, err = h.specStore.ListByProject(r.Context(), orgID, projectID)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "LIST_SPECS_FAILED", "failed to list project specs")
+			writeError(w, r, http.StatusInternalServerError, "LIST_SPECS_FAILED", "failed to list project specs", err)
 			return
 		}
 	}
@@ -205,18 +205,18 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
 
 	if req.Title == "" || req.Goal == "" {
-		writeError(w, http.StatusBadRequest, "MISSING_FIELD", "title and goal are required")
+		writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", "title and goal are required")
 		return
 	}
 
 	repoID, err := uuid.Parse(req.RepositoryID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "invalid repository_id")
+		writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "invalid repository_id")
 		return
 	}
 
@@ -224,7 +224,7 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if req.ExecutionMode != nil {
 		execMode = models.ProjectExecMode(*req.ExecutionMode)
 		if err := execMode.Validate(); err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_EXECUTION_MODE", err.Error())
+			writeError(w, r, http.StatusBadRequest, "INVALID_EXECUTION_MODE", err.Error())
 			return
 		}
 	}
@@ -246,7 +246,7 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	if req.AgentType != nil && *req.AgentType != "" {
 		if err := models.AgentType(*req.AgentType).Validate(); err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_AGENT_TYPE", err.Error())
+			writeError(w, r, http.StatusBadRequest, "INVALID_AGENT_TYPE", err.Error())
 			return
 		}
 	}
@@ -257,7 +257,7 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 			agentType = models.AgentType(*req.AgentType)
 		}
 		if err := models.ValidateModelForAgentType(agentType, *req.Model); err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_MODEL", err.Error())
+			writeError(w, r, http.StatusBadRequest, "INVALID_MODEL", err.Error())
 			return
 		}
 	}
@@ -270,7 +270,7 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.ScheduleInterval != nil && *req.ScheduleInterval > 0 {
 		if *req.ScheduleInterval > 365 {
-			writeError(w, http.StatusBadRequest, "INVALID_SCHEDULE_INTERVAL", "schedule_interval must be between 1 and 365")
+			writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE_INTERVAL", "schedule_interval must be between 1 and 365")
 			return
 		}
 		scheduleInterval = *req.ScheduleInterval
@@ -278,7 +278,7 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if req.ScheduleUnit != nil && *req.ScheduleUnit != "" {
 		scheduleUnit = *req.ScheduleUnit
 		if err := models.ScheduleUnit(scheduleUnit).Validate(); err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_SCHEDULE_UNIT", err.Error())
+			writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE_UNIT", err.Error())
 			return
 		}
 	}
@@ -314,7 +314,7 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.projectStore.Create(r.Context(), &project); err != nil {
-		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create project")
+		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create project", err)
 		return
 	}
 
@@ -327,13 +327,13 @@ func (h *ProjectHandler) Update(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
 		return
 	}
 
 	project, err := h.projectStore.GetByID(r.Context(), orgID, projectID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "project not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "project not found")
 		return
 	}
 
@@ -355,7 +355,7 @@ func (h *ProjectHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
 
@@ -374,11 +374,11 @@ func (h *ProjectHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if req.Status != nil {
 		newStatus := models.ProjectStatus(*req.Status)
 		if err := newStatus.Validate(); err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_STATUS", err.Error())
+			writeError(w, r, http.StatusBadRequest, "INVALID_STATUS", err.Error())
 			return
 		}
 		if !validStatusTransition(project.Status, newStatus) {
-			writeError(w, http.StatusBadRequest, "INVALID_TRANSITION", "invalid status transition")
+			writeError(w, r, http.StatusBadRequest, "INVALID_TRANSITION", "invalid status transition")
 			return
 		}
 		project.Status = newStatus
@@ -389,7 +389,7 @@ func (h *ProjectHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if req.ExecutionMode != nil {
 		execMode := models.ProjectExecMode(*req.ExecutionMode)
 		if err := execMode.Validate(); err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_EXECUTION_MODE", err.Error())
+			writeError(w, r, http.StatusBadRequest, "INVALID_EXECUTION_MODE", err.Error())
 			return
 		}
 		project.ExecutionMode = execMode
@@ -408,7 +408,7 @@ func (h *ProjectHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.ScheduleInterval != nil && *req.ScheduleInterval > 0 {
 		if *req.ScheduleInterval > 365 {
-			writeError(w, http.StatusBadRequest, "INVALID_SCHEDULE_INTERVAL", "schedule_interval must be between 1 and 365")
+			writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE_INTERVAL", "schedule_interval must be between 1 and 365")
 			return
 		}
 		project.ScheduleInterval = *req.ScheduleInterval
@@ -416,7 +416,7 @@ func (h *ProjectHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if req.ScheduleUnit != nil && *req.ScheduleUnit != "" {
 		unit := models.ScheduleUnit(*req.ScheduleUnit)
 		if err := unit.Validate(); err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_SCHEDULE_UNIT", err.Error())
+			writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE_UNIT", err.Error())
 			return
 		}
 		project.ScheduleUnit = *req.ScheduleUnit
@@ -437,7 +437,7 @@ func (h *ProjectHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.projectStore.Update(r.Context(), &project); err != nil {
-		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update project")
+		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update project", err)
 		return
 	}
 
@@ -450,12 +450,12 @@ func (h *ProjectHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
 		return
 	}
 
 	if err := h.projectStore.UpdateStatus(r.Context(), orgID, projectID, string(models.ProjectStatusCancelled)); err != nil {
-		writeError(w, http.StatusInternalServerError, "DELETE_FAILED", "failed to cancel project")
+		writeError(w, r, http.StatusInternalServerError, "DELETE_FAILED", "failed to cancel project", err)
 		return
 	}
 
@@ -487,25 +487,25 @@ func (h *ProjectHandler) Dismiss(w http.ResponseWriter, r *http.Request) {
 // RunNow enqueues an immediate project_cycle job for the project.
 func (h *ProjectHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 	if h.jobStore == nil {
-		writeError(w, http.StatusServiceUnavailable, "NOT_CONFIGURED", "job store not configured")
+		writeError(w, r, http.StatusServiceUnavailable, "NOT_CONFIGURED", "job store not configured")
 		return
 	}
 
 	orgID := middleware.OrgIDFromContext(r.Context())
 	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
 		return
 	}
 
 	project, err := h.projectStore.GetByID(r.Context(), orgID, projectID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "project not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "project not found")
 		return
 	}
 
 	if project.Status != models.ProjectStatusActive {
-		writeError(w, http.StatusBadRequest, "INVALID_STATUS", "project must be active to run")
+		writeError(w, r, http.StatusBadRequest, "INVALID_STATUS", "project must be active to run")
 		return
 	}
 
@@ -516,7 +516,7 @@ func (h *ProjectHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 	}
 	jobID, err := h.jobStore.Enqueue(r.Context(), orgID, "default", "project_cycle", payload, 5, &dedupeKey)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue project cycle job")
+		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue project cycle job", err)
 		return
 	}
 
@@ -531,23 +531,23 @@ func (h *ProjectHandler) transitionStatus(w http.ResponseWriter, r *http.Request
 	orgID := middleware.OrgIDFromContext(r.Context())
 	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
 		return
 	}
 
 	project, err := h.projectStore.GetByID(r.Context(), orgID, projectID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "project not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "project not found")
 		return
 	}
 
 	if !validStatusTransition(project.Status, target) {
-		writeError(w, http.StatusBadRequest, "INVALID_TRANSITION", "invalid status transition")
+		writeError(w, r, http.StatusBadRequest, "INVALID_TRANSITION", "invalid status transition")
 		return
 	}
 
 	if err := h.projectStore.UpdateStatus(r.Context(), orgID, projectID, string(target)); err != nil {
-		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update project status")
+		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update project status", err)
 		return
 	}
 
@@ -584,13 +584,13 @@ func (h *ProjectHandler) CreateTask(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
 		return
 	}
 
 	// Verify project exists
 	if _, err := h.projectStore.GetByID(r.Context(), orgID, projectID); err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "project not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "project not found")
 		return
 	}
 
@@ -601,12 +601,12 @@ func (h *ProjectHandler) CreateTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
 
 	if req.Title == "" {
-		writeError(w, http.StatusBadRequest, "MISSING_FIELD", "title is required")
+		writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", "title is required")
 		return
 	}
 
@@ -626,7 +626,7 @@ func (h *ProjectHandler) CreateTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.projectTaskStore.Create(r.Context(), &task); err != nil {
-		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create task")
+		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create task", err)
 		return
 	}
 
@@ -645,22 +645,22 @@ func (h *ProjectHandler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
 		return
 	}
 	taskID, err := uuid.Parse(chi.URLParam(r, "taskId"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid task ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid task ID")
 		return
 	}
 
 	task, err := h.projectTaskStore.GetByID(r.Context(), orgID, taskID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "task not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "task not found")
 		return
 	}
 	if task.ProjectID != projectID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "task not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "task not found")
 		return
 	}
 
@@ -673,7 +673,7 @@ func (h *ProjectHandler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
 
@@ -689,7 +689,7 @@ func (h *ProjectHandler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	if req.Status != nil {
 		newStatus := models.ProjectTaskStatus(*req.Status)
 		if err := newStatus.Validate(); err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_STATUS", err.Error())
+			writeError(w, r, http.StatusBadRequest, "INVALID_STATUS", err.Error())
 			return
 		}
 		task.Status = newStatus
@@ -699,7 +699,7 @@ func (h *ProjectHandler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.projectTaskStore.Update(r.Context(), &task); err != nil {
-		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update task")
+		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update task", err)
 		return
 	}
 
@@ -717,27 +717,27 @@ func (h *ProjectHandler) DeleteTask(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
 		return
 	}
 	taskID, err := uuid.Parse(chi.URLParam(r, "taskId"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid task ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid task ID")
 		return
 	}
 
 	task, err := h.projectTaskStore.GetByID(r.Context(), orgID, taskID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "task not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "task not found")
 		return
 	}
 	if task.ProjectID != projectID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "task not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "task not found")
 		return
 	}
 
 	if err := h.projectTaskStore.Delete(r.Context(), orgID, taskID); err != nil {
-		writeError(w, http.StatusInternalServerError, "DELETE_FAILED", "failed to delete task")
+		writeError(w, r, http.StatusInternalServerError, "DELETE_FAILED", "failed to delete task", err)
 		return
 	}
 
@@ -755,27 +755,27 @@ func (h *ProjectHandler) RetryTask(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
 		return
 	}
 	taskID, err := uuid.Parse(chi.URLParam(r, "taskId"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid task ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid task ID")
 		return
 	}
 
 	task, err := h.projectTaskStore.GetByID(r.Context(), orgID, taskID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "task not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "task not found")
 		return
 	}
 	if task.ProjectID != projectID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "task not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "task not found")
 		return
 	}
 
 	if task.Status != models.ProjectTaskStatusFailed {
-		writeError(w, http.StatusBadRequest, "INVALID_STATUS", "only failed tasks can be retried")
+		writeError(w, r, http.StatusBadRequest, "INVALID_STATUS", "only failed tasks can be retried")
 		return
 	}
 
@@ -783,7 +783,7 @@ func (h *ProjectHandler) RetryTask(w http.ResponseWriter, r *http.Request) {
 	task.RetryCount++
 
 	if err := h.projectTaskStore.Update(r.Context(), &task); err != nil {
-		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to retry task")
+		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to retry task", err)
 		return
 	}
 
@@ -803,7 +803,7 @@ func (h *ProjectHandler) ListCycles(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
 		return
 	}
 
@@ -811,7 +811,7 @@ func (h *ProjectHandler) ListCycles(w http.ResponseWriter, r *http.Request) {
 
 	cycles, err := h.projectCycleStore.ListByProject(r.Context(), orgID, projectID, limit)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list cycles")
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list cycles", err)
 		return
 	}
 	if cycles == nil {
@@ -828,13 +828,13 @@ func (h *ProjectHandler) GetCycle(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	cycleID, err := uuid.Parse(chi.URLParam(r, "cycleId"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid cycle ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid cycle ID")
 		return
 	}
 
 	cycle, err := h.projectCycleStore.GetByID(r.Context(), orgID, cycleID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "cycle not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "cycle not found")
 		return
 	}
 

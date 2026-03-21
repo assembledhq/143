@@ -51,13 +51,13 @@ func (h *UserCredentialHandler) ListPersonal(w http.ResponseWriter, r *http.Requ
 	orgID := middleware.OrgIDFromContext(r.Context())
 	user := middleware.UserFromContext(r.Context())
 	if user == nil {
-		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "user not found")
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user not found")
 		return
 	}
 
 	creds, err := h.store.ListByUser(r.Context(), orgID, user.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list personal credentials")
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list personal credentials", err)
 		return
 	}
 
@@ -95,14 +95,14 @@ func (h *UserCredentialHandler) UpsertPersonal(w http.ResponseWriter, r *http.Re
 	orgID := middleware.OrgIDFromContext(r.Context())
 	user := middleware.UserFromContext(r.Context())
 	if user == nil {
-		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "user not found")
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user not found")
 		return
 	}
 
 	providerStr := chi.URLParam(r, "provider")
 	provider := models.ProviderName(providerStr)
 	if !provider.IsCodingAgentProvider() {
-		writeError(w, http.StatusBadRequest, "INVALID_PROVIDER", "unsupported coding agent provider: "+providerStr)
+		writeError(w, r, http.StatusBadRequest, "INVALID_PROVIDER", "unsupported coding agent provider: "+providerStr)
 		return
 	}
 
@@ -111,28 +111,28 @@ func (h *UserCredentialHandler) UpsertPersonal(w http.ResponseWriter, r *http.Re
 		IsTeamDefault bool            `json:"is_team_default"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
 
 	cfg, err := models.ParseProviderConfig(provider, body.Config)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_CONFIG", err.Error())
+		writeError(w, r, http.StatusBadRequest, "INVALID_CONFIG", err.Error())
 		return
 	}
 	if err := cfg.Validate(); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_CONFIG", err.Error())
+		writeError(w, r, http.StatusBadRequest, "INVALID_CONFIG", err.Error())
 		return
 	}
 
 	// Only admins can set team defaults.
 	if body.IsTeamDefault && user.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can set team defaults")
+		writeError(w, r, http.StatusForbidden, "FORBIDDEN", "only admins can set team defaults")
 		return
 	}
 
 	if err := h.store.Upsert(r.Context(), user.ID, orgID, cfg, body.IsTeamDefault); err != nil {
-		writeError(w, http.StatusInternalServerError, "UPSERT_FAILED", "failed to save credential")
+		writeError(w, r, http.StatusInternalServerError, "UPSERT_FAILED", "failed to save credential", err)
 		return
 	}
 
@@ -151,19 +151,19 @@ func (h *UserCredentialHandler) DeletePersonal(w http.ResponseWriter, r *http.Re
 	orgID := middleware.OrgIDFromContext(r.Context())
 	user := middleware.UserFromContext(r.Context())
 	if user == nil {
-		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "user not found")
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user not found")
 		return
 	}
 
 	providerStr := chi.URLParam(r, "provider")
 	provider := models.ProviderName(providerStr)
 	if !provider.IsCodingAgentProvider() {
-		writeError(w, http.StatusBadRequest, "INVALID_PROVIDER", "unsupported coding agent provider: "+providerStr)
+		writeError(w, r, http.StatusBadRequest, "INVALID_PROVIDER", "unsupported coding agent provider: "+providerStr)
 		return
 	}
 
 	if err := h.store.Disable(r.Context(), orgID, user.ID, provider); err != nil {
-		writeError(w, http.StatusInternalServerError, "DELETE_FAILED", "failed to disable credential")
+		writeError(w, r, http.StatusInternalServerError, "DELETE_FAILED", "failed to disable credential", err)
 		return
 	}
 
@@ -176,7 +176,7 @@ func (h *UserCredentialHandler) ListTeamDefaults(w http.ResponseWriter, r *http.
 
 	defaults, err := h.store.ListTeamDefaults(r.Context(), orgID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list team defaults")
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list team defaults", err)
 		return
 	}
 
@@ -207,7 +207,7 @@ func (h *UserCredentialHandler) SetTeamDefault(w http.ResponseWriter, r *http.Re
 	providerStr := chi.URLParam(r, "provider")
 	provider := models.ProviderName(providerStr)
 	if !provider.IsCodingAgentProvider() {
-		writeError(w, http.StatusBadRequest, "INVALID_PROVIDER", "unsupported coding agent provider: "+providerStr)
+		writeError(w, r, http.StatusBadRequest, "INVALID_PROVIDER", "unsupported coding agent provider: "+providerStr)
 		return
 	}
 
@@ -215,17 +215,17 @@ func (h *UserCredentialHandler) SetTeamDefault(w http.ResponseWriter, r *http.Re
 		UserID string `json:"user_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
 	userID, err := uuid.Parse(body.UserID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_USER_ID", "invalid user_id")
+		writeError(w, r, http.StatusBadRequest, "INVALID_USER_ID", "invalid user_id")
 		return
 	}
 
 	if err := h.store.SetTeamDefault(r.Context(), orgID, userID, provider); err != nil {
-		writeError(w, http.StatusInternalServerError, "SET_FAILED", "failed to set team default")
+		writeError(w, r, http.StatusInternalServerError, "SET_FAILED", "failed to set team default", err)
 		return
 	}
 
@@ -239,12 +239,12 @@ func (h *UserCredentialHandler) DeleteTeamDefault(w http.ResponseWriter, r *http
 	providerStr := chi.URLParam(r, "provider")
 	provider := models.ProviderName(providerStr)
 	if !provider.IsCodingAgentProvider() {
-		writeError(w, http.StatusBadRequest, "INVALID_PROVIDER", "unsupported coding agent provider: "+providerStr)
+		writeError(w, r, http.StatusBadRequest, "INVALID_PROVIDER", "unsupported coding agent provider: "+providerStr)
 		return
 	}
 
 	if err := h.store.RemoveTeamDefault(r.Context(), orgID, provider); err != nil {
-		writeError(w, http.StatusInternalServerError, "DELETE_FAILED", "failed to remove team default")
+		writeError(w, r, http.StatusInternalServerError, "DELETE_FAILED", "failed to remove team default", err)
 		return
 	}
 
@@ -256,7 +256,7 @@ func (h *UserCredentialHandler) ListResolved(w http.ResponseWriter, r *http.Requ
 	orgID := middleware.OrgIDFromContext(r.Context())
 	user := middleware.UserFromContext(r.Context())
 	if user == nil {
-		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "user not found")
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user not found")
 		return
 	}
 

@@ -91,7 +91,7 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 			}
 			status := models.SessionStatus(s)
 			if err := status.Validate(); err != nil {
-				writeError(w, http.StatusBadRequest, "INVALID_STATUS", "invalid status: "+s)
+				writeError(w, r, http.StatusBadRequest, "INVALID_STATUS", "invalid status: "+s)
 				return
 			}
 			filters.Statuses = append(filters.Statuses, status)
@@ -101,7 +101,7 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 	if repoIDStr := r.URL.Query().Get("repository_id"); repoIDStr != "" {
 		repoID, err := uuid.Parse(repoIDStr)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "invalid repository_id")
+			writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "invalid repository_id")
 			return
 		}
 		filters.RepositoryID = repoID
@@ -109,7 +109,7 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	runs, err := h.runStore.ListByOrg(r.Context(), orgID, filters)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list runs")
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list runs", err)
 		return
 	}
 	if runs == nil {
@@ -131,13 +131,13 @@ func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	runID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid run ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid run ID")
 		return
 	}
 
 	run, err := h.runStore.GetByID(r.Context(), orgID, runID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "run not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "run not found")
 		return
 	}
 
@@ -145,7 +145,7 @@ func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 	if h.threadStore != nil {
 		threads, err := h.threadStore.ListBySession(r.Context(), orgID, runID)
 		if err != nil {
-			h.logger.Warn().Err(err).Str("session_id", runID.String()).Msg("failed to load threads for session")
+			zerolog.Ctx(r.Context()).Warn().Err(err).Str("session_id", runID.String()).Msg("failed to load threads for session")
 		}
 		if threads == nil {
 			threads = []models.SessionThread{}
@@ -163,14 +163,14 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	issueID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid issue ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid issue ID")
 		return
 	}
 
 	// Verify the issue exists.
 	_, err = h.issueStore.GetByID(r.Context(), orgID, issueID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "issue not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "issue not found")
 		return
 	}
 
@@ -187,7 +187,7 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 	if agentType == "" {
 		org, err := h.orgStore.GetByID(r.Context(), orgID)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "DEFAULT_AGENT_LOOKUP_FAILED", "failed to load organization settings")
+			writeError(w, r, http.StatusInternalServerError, "DEFAULT_AGENT_LOOKUP_FAILED", "failed to load organization settings", err)
 			return
 		}
 		orgSettings, parseErr := models.ParseOrgSettings(org.Settings)
@@ -200,7 +200,7 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := agentType.Validate(); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_AGENT_TYPE", err.Error())
+		writeError(w, r, http.StatusBadRequest, "INVALID_AGENT_TYPE", err.Error())
 		return
 	}
 
@@ -210,7 +210,7 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 	}
 	validAutonomyLevels := map[string]bool{"full": true, "semi": true, "supervised": true}
 	if !validAutonomyLevels[autonomyLevel] {
-		writeError(w, http.StatusBadRequest, "INVALID_AUTONOMY_LEVEL", "autonomy_level must be one of: full, semi, supervised")
+		writeError(w, r, http.StatusBadRequest, "INVALID_AUTONOMY_LEVEL", "autonomy_level must be one of: full, semi, supervised")
 		return
 	}
 
@@ -220,7 +220,7 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 	}
 	validTokenModes := map[string]bool{"low": true, "high": true}
 	if !validTokenModes[tokenMode] {
-		writeError(w, http.StatusBadRequest, "INVALID_TOKEN_MODE", "token_mode must be one of: low, high")
+		writeError(w, r, http.StatusBadRequest, "INVALID_TOKEN_MODE", "token_mode must be one of: low, high")
 		return
 	}
 
@@ -239,7 +239,7 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 		TriggeredByUserID: triggeredByUserID,
 	}
 	if err := h.runStore.Create(r.Context(), run); err != nil {
-		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create agent run")
+		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create agent run", err)
 		return
 	}
 
@@ -249,7 +249,7 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 		"org_id":     orgID.String(),
 	}
 	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "run_agent", payload, 5, nil); err != nil {
-		writeError(w, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue agent run job")
+		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue agent run job", err)
 		return
 	}
 
@@ -265,20 +265,20 @@ func (h *SessionHandler) GetLogs(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	runID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid run ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid run ID")
 		return
 	}
 
 	// Verify run exists and belongs to org.
 	_, err = h.runStore.GetByID(r.Context(), orgID, runID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "run not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "run not found")
 		return
 	}
 
 	logs, err := h.logStore.ListByRunID(r.Context(), orgID, runID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list logs")
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list logs", err)
 		return
 	}
 	if logs == nil {
@@ -295,14 +295,14 @@ func (h *SessionHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	runID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid run ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid run ID")
 		return
 	}
 
 	// Verify run exists.
 	run, err := h.runStore.GetByID(r.Context(), orgID, runID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "run not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "run not found")
 		return
 	}
 
@@ -315,7 +315,7 @@ func (h *SessionHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 
 	sw := sse.NewWriter(w)
 	if sw == nil {
-		writeError(w, http.StatusInternalServerError, "SSE_NOT_SUPPORTED", "streaming not supported")
+		writeError(w, r, http.StatusInternalServerError, "SSE_NOT_SUPPORTED", "streaming not supported")
 		return
 	}
 
@@ -328,7 +328,7 @@ func (h *SessionHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 	var lastSeenID int64
 	for _, log := range logs {
 		if err := sw.WriteData(log); err != nil {
-			h.logger.Error().Err(err).Str("session_id", runID.String()).Msg("failed to write log event to SSE stream")
+			zerolog.Ctx(r.Context()).Error().Err(err).Str("session_id", runID.String()).Msg("failed to write log event to SSE stream")
 			return
 		}
 		lastSeenID = log.ID
@@ -337,7 +337,7 @@ func (h *SessionHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 	// Send initial status event with the current session state.
 	lastStatus := run.Status
 	if err := sw.WriteEvent(sse.EventStatus, run); err != nil {
-		h.logger.Error().Err(err).Str("session_id", runID.String()).Msg("failed to write initial status event to SSE stream")
+		zerolog.Ctx(r.Context()).Error().Err(err).Str("session_id", runID.String()).Msg("failed to write initial status event to SSE stream")
 		return
 	}
 	sw.Flush()
@@ -362,7 +362,7 @@ func (h *SessionHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 			}
 			for _, log := range newLogs {
 				if err := sw.WriteData(log); err != nil {
-					h.logger.Error().Err(err).Str("session_id", runID.String()).Msg("failed to write log event to SSE stream")
+					zerolog.Ctx(r.Context()).Error().Err(err).Str("session_id", runID.String()).Msg("failed to write log event to SSE stream")
 					return
 				}
 				lastSeenID = log.ID
@@ -372,7 +372,7 @@ func (h *SessionHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 			if run.Status != lastStatus {
 				lastStatus = run.Status
 				if err := sw.WriteEvent(sse.EventStatus, run); err != nil {
-					h.logger.Error().Err(err).Str("session_id", runID.String()).Msg("failed to write status event to SSE stream")
+					zerolog.Ctx(r.Context()).Error().Err(err).Str("session_id", runID.String()).Msg("failed to write status event to SSE stream")
 					return
 				}
 			}
@@ -381,7 +381,7 @@ func (h *SessionHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 
 			if isTerminalStatus(run.Status) {
 				if err := sw.WriteEvent(sse.EventDone, run); err != nil {
-					h.logger.Error().Err(err).Str("session_id", runID.String()).Msg("failed to write done event to SSE stream")
+					zerolog.Ctx(r.Context()).Error().Err(err).Str("session_id", runID.String()).Msg("failed to write done event to SSE stream")
 					return
 				}
 				sw.Flush()
@@ -396,13 +396,13 @@ func (h *SessionHandler) GetValidation(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	runID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid run ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid run ID")
 		return
 	}
 
 	v, err := h.validationStore.GetBySessionID(r.Context(), orgID, runID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "validation not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "validation not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Validation]{Data: v})
@@ -413,13 +413,13 @@ func (h *SessionHandler) GetPullRequest(w http.ResponseWriter, r *http.Request) 
 	orgID := middleware.OrgIDFromContext(r.Context())
 	runID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid run ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid run ID")
 		return
 	}
 
 	pr, err := h.pullRequestStore.GetBySessionID(r.Context(), orgID, runID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "pull request not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "pull request not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.PullRequest]{Data: pr})
@@ -430,13 +430,13 @@ func (h *SessionHandler) ListQuestions(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	runID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid run ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid run ID")
 		return
 	}
 
 	questions, err := h.questionStore.ListByRunID(r.Context(), orgID, runID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list questions")
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list questions", err)
 		return
 	}
 	if questions == nil {
@@ -453,13 +453,13 @@ func (h *SessionHandler) AnswerQuestion(w http.ResponseWriter, r *http.Request) 
 	orgID := middleware.OrgIDFromContext(r.Context())
 	qID, err := uuid.Parse(chi.URLParam(r, "qid"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid question ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid question ID")
 		return
 	}
 
 	user := middleware.UserFromContext(r.Context())
 	if user == nil {
-		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "user not found")
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user not found")
 		return
 	}
 
@@ -467,22 +467,22 @@ func (h *SessionHandler) AnswerQuestion(w http.ResponseWriter, r *http.Request) 
 		Answer string `json:"answer"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
 		return
 	}
 	if body.Answer == "" {
-		writeError(w, http.StatusBadRequest, "MISSING_ANSWER", "answer is required")
+		writeError(w, r, http.StatusBadRequest, "MISSING_ANSWER", "answer is required")
 		return
 	}
 
 	if err := h.questionStore.Answer(r.Context(), orgID, qID, body.Answer, user.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, "ANSWER_FAILED", "failed to answer question")
+		writeError(w, r, http.StatusInternalServerError, "ANSWER_FAILED", "failed to answer question", err)
 		return
 	}
 
 	question, err := h.questionStore.GetByID(r.Context(), orgID, qID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "FETCH_FAILED", "failed to fetch updated question")
+		writeError(w, r, http.StatusInternalServerError, "FETCH_FAILED", "failed to fetch updated question", err)
 		return
 	}
 
@@ -501,12 +501,12 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
 		return
 	}
 
 	if h.messageStore == nil {
-		writeError(w, http.StatusNotImplemented, "NOT_CONFIGURED", "multi-turn sessions not configured")
+		writeError(w, r, http.StatusNotImplemented, "NOT_CONFIGURED", "multi-turn sessions not configured")
 		return
 	}
 
@@ -515,12 +515,12 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		Images  []string `json:"images"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
 		return
 	}
 	body.Message = strings.TrimSpace(body.Message)
 	if body.Message == "" {
-		writeError(w, http.StatusBadRequest, "MISSING_MESSAGE", "message is required")
+		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message is required")
 		return
 	}
 
@@ -532,12 +532,12 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		// Look up the session to capture its current status for revert.
 		existing, lookupErr := h.runStore.GetByID(r.Context(), orgID, sessionID)
 		if lookupErr != nil {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "session not found")
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
 			return
 		}
 		session, err = h.runStore.ClaimForResume(r.Context(), orgID, sessionID)
 		if err != nil {
-			writeError(w, http.StatusConflict, "NOT_RESUMABLE", "session must be idle or completed to send a message")
+			writeError(w, r, http.StatusConflict, "NOT_RESUMABLE", "session must be idle or completed to send a message")
 			return
 		}
 		revertStatus = existing.Status // preserve original status for revert
@@ -567,7 +567,7 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		if revertErr := h.runStore.UpdateStatus(r.Context(), orgID, sessionID, revertStatus); revertErr != nil {
 			zerolog.Ctx(r.Context()).Error().Err(revertErr).Str("session_id", sessionID.String()).Msg("failed to revert session status after message creation failure")
 		}
-		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message")
+		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message", err)
 		return
 	}
 
@@ -580,7 +580,7 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		if revertErr := h.runStore.UpdateStatus(r.Context(), orgID, sessionID, revertStatus); revertErr != nil {
 			zerolog.Ctx(r.Context()).Error().Err(revertErr).Str("session_id", sessionID.String()).Msg("failed to revert session status after enqueue failure")
 		}
-		writeError(w, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue continue_session job")
+		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue continue_session job", err)
 		return
 	}
 
@@ -592,7 +592,7 @@ func (h *SessionHandler) ListMessages(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
 		return
 	}
 
@@ -604,13 +604,13 @@ func (h *SessionHandler) ListMessages(w http.ResponseWriter, r *http.Request) {
 	// Verify session exists and belongs to org.
 	_, err = h.runStore.GetByID(r.Context(), orgID, sessionID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "session not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
 		return
 	}
 
 	messages, err := h.messageStore.ListBySession(r.Context(), orgID, sessionID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list messages")
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list messages", err)
 		return
 	}
 	if messages == nil {
@@ -625,23 +625,23 @@ func (h *SessionHandler) EndSession(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
 		return
 	}
 
 	session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "session not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
 		return
 	}
 
 	if session.Status != string(models.SessionStatusIdle) {
-		writeError(w, http.StatusConflict, "NOT_IDLE", "only idle sessions can be ended")
+		writeError(w, r, http.StatusConflict, "NOT_IDLE", "only idle sessions can be ended")
 		return
 	}
 
 	if err := h.runStore.UpdateStatus(r.Context(), orgID, sessionID, string(models.SessionStatusCompleted)); err != nil {
-		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to end session")
+		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to end session", err)
 		return
 	}
 
@@ -651,7 +651,7 @@ func (h *SessionHandler) EndSession(w http.ResponseWriter, r *http.Request) {
 	}
 	dedupeKey := fmt.Sprintf("validate:%s", sessionID)
 	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "validate", payload, 5, &dedupeKey); err != nil {
-		writeError(w, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue validation")
+		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue validation", err)
 		return
 	}
 
@@ -685,13 +685,13 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		Branch        string   `json:"branch"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
 		return
 	}
 
 	body.Message = strings.TrimSpace(body.Message)
 	if body.Message == "" {
-		writeError(w, http.StatusBadRequest, "MISSING_MESSAGE", "message is required")
+		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message is required")
 		return
 	}
 
@@ -701,11 +701,11 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	if body.RepositoryID != "" {
 		parsed, err := uuid.Parse(body.RepositoryID)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "invalid repository_id")
+			writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "invalid repository_id")
 			return
 		}
 		if _, err := h.repoStore.GetByID(r.Context(), orgID, parsed); err != nil {
-			writeError(w, http.StatusNotFound, "REPOSITORY_NOT_FOUND", "repository not found")
+			writeError(w, r, http.StatusNotFound, "REPOSITORY_NOT_FOUND", "repository not found")
 			return
 		}
 		repoID = &parsed
@@ -715,7 +715,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	if body.Branch != "" {
 		b := strings.TrimSpace(body.Branch)
 		if !isValidGitRef(b) {
-			writeError(w, http.StatusBadRequest, "INVALID_BRANCH", "branch contains invalid characters")
+			writeError(w, r, http.StatusBadRequest, "INVALID_BRANCH", "branch contains invalid characters")
 			return
 		}
 		targetBranch = &b
@@ -725,7 +725,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	if agentType == "" {
 		org, err := h.orgStore.GetByID(r.Context(), orgID)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "DEFAULT_AGENT_LOOKUP_FAILED", "failed to load organization settings")
+			writeError(w, r, http.StatusInternalServerError, "DEFAULT_AGENT_LOOKUP_FAILED", "failed to load organization settings", err)
 			return
 		}
 		orgSettings, parseErr := models.ParseOrgSettings(org.Settings)
@@ -738,14 +738,14 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := agentType.Validate(); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_AGENT_TYPE", err.Error())
+		writeError(w, r, http.StatusBadRequest, "INVALID_AGENT_TYPE", err.Error())
 		return
 	}
 
 	var modelOverride *string
 	if body.Model != "" {
 		if err := models.ValidateModelForAgentType(agentType, body.Model); err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_MODEL", err.Error())
+			writeError(w, r, http.StatusBadRequest, "INVALID_MODEL", err.Error())
 			return
 		}
 		modelOverride = &body.Model
@@ -757,7 +757,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 	validAutonomyLevels := map[string]bool{"full": true, "semi": true, "supervised": true}
 	if !validAutonomyLevels[autonomyLevel] {
-		writeError(w, http.StatusBadRequest, "INVALID_AUTONOMY_LEVEL", "autonomy_level must be one of: full, semi, supervised")
+		writeError(w, r, http.StatusBadRequest, "INVALID_AUTONOMY_LEVEL", "autonomy_level must be one of: full, semi, supervised")
 		return
 	}
 
@@ -767,7 +767,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 	validTokenModes := map[string]bool{"low": true, "high": true}
 	if !validTokenModes[tokenMode] {
-		writeError(w, http.StatusBadRequest, "INVALID_TOKEN_MODE", "token_mode must be one of: low, high")
+		writeError(w, r, http.StatusBadRequest, "INVALID_TOKEN_MODE", "token_mode must be one of: low, high")
 		return
 	}
 
@@ -780,7 +780,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		"images":         body.Images,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "ENCODE_FAILED", "failed to encode manual session context")
+		writeError(w, r, http.StatusInternalServerError, "ENCODE_FAILED", "failed to encode manual session context", err)
 		return
 	}
 	issue := &models.Issue{
@@ -798,7 +798,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.issueStore.Upsert(r.Context(), issue); err != nil {
-		writeError(w, http.StatusInternalServerError, "ISSUE_CREATE_FAILED", "failed to create manual issue")
+		writeError(w, r, http.StatusInternalServerError, "ISSUE_CREATE_FAILED", "failed to create manual issue", err)
 		return
 	}
 
@@ -822,7 +822,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		RepositoryID:      repoID,
 	}
 	if err := h.runStore.Create(r.Context(), session); err != nil {
-		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create manual session")
+		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create manual session", err)
 		return
 	}
 
@@ -831,7 +831,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		"org_id":     orgID.String(),
 	}
 	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "run_agent", payload, 5, nil); err != nil {
-		writeError(w, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue manual session")
+		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue manual session", err)
 		return
 	}
 
@@ -839,7 +839,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	// request doesn't block for too long).
 	if h.llmClient != nil {
 		if err := h.generateSessionTitle(r.Context(), session, orgID, body.Message); err != nil {
-			writeError(w, http.StatusInternalServerError, "TITLE_GENERATION_FAILED", "failed to generate session title")
+			writeError(w, r, http.StatusInternalServerError, "TITLE_GENERATION_FAILED", "failed to generate session title", err)
 			return
 		}
 	}
