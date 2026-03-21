@@ -1,7 +1,7 @@
 "use client";
 
-import { forwardRef, useMemo, useCallback } from "react";
-import type { DiffFile } from "@/lib/diff-parser";
+import { forwardRef, useMemo, useCallback, useState } from "react";
+import type { DiffFile, DiffLine } from "@/lib/diff-parser";
 import type { SessionReviewComment, FileLine } from "@/lib/types";
 import type { CommentLineKey } from "@/hooks/use-review-comments";
 import { useFileHighlighting } from "@/lib/syntax-highlighter";
@@ -21,6 +21,8 @@ interface FileDiffSectionProps {
   file: DiffFile;
   viewMode: ViewMode;
   sessionId?: string;
+  /** When true, syntax highlighting is enabled for this file. Defaults to true. */
+  isActive?: boolean;
   commentsByLine?: Map<CommentLineKey, SessionReviewComment[]>;
   activeCommentLine?: ActiveCommentLine | null;
   onAddComment?: (filePath: string, lineNumber: number, side: "old" | "new") => void;
@@ -59,6 +61,7 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
     file,
     viewMode,
     sessionId,
+    isActive = true,
     commentsByLine,
     activeCommentLine,
     onAddComment,
@@ -79,7 +82,7 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
       return contents;
     }, [file.hunks]);
 
-    const highlighted = useFileHighlighting(allLineContents, file.language);
+    const highlighted = useFileHighlighting(allLineContents, file.language, "github-dark", isActive);
 
     // Build per-hunk Maps of line index → highlighted HTML
     const hunkHighlightMaps = useMemo(() => {
@@ -97,12 +100,25 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
       return maps;
     }, [highlighted, file.hunks]);
 
-    // Callback for ContextExpander — the component manages its own
-    // expanded/hidden state internally after a successful fetch.
-    const handleContextExpand = useCallback((_lines: FileLine[]) => {
-      // No-op: ContextExpander hides itself once context is fetched.
-      // Full inline insertion of fetched lines would require mutating
-      // hunk data, which is left as a future enhancement.
+    // Track expanded context lines per gap (keyed by hunk index).
+    const [expandedGaps, setExpandedGaps] = useState<Map<number, DiffLine[]>>(new Map());
+
+    // Factory that returns a callback for a specific gap index.
+    const makeHandleContextExpand = useCallback((gapIndex: number) => {
+      return (lines: FileLine[]) => {
+        // Convert FileLine[] to DiffLine[] (context lines with both old and new line numbers).
+        const diffLines: DiffLine[] = lines.map((l) => ({
+          type: "context" as const,
+          content: l.content,
+          oldLineNumber: l.number,
+          newLineNumber: l.number,
+        }));
+        setExpandedGaps((prev) => {
+          const next = new Map(prev);
+          next.set(gapIndex, diffLines);
+          return next;
+        });
+      };
     }, []);
 
     const handleAddComment = useCallback(
@@ -159,16 +175,31 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
             if (l.oldLineNumber != null) expandStartLine = l.oldLineNumber;
           }
 
+          const expandedLines = expandedGaps.get(i);
+
           return (
             <div key={i}>
-              {hidden > 0 && (
+              {hidden > 0 && !expandedLines && (
                 <ContextExpander
                   hiddenLineCount={hidden}
                   sessionId={sessionId}
                   filePath={file.newPath}
                   startLine={expandStartLine}
-                  onExpand={handleContextExpand}
+                  onExpand={makeHandleContextExpand(i)}
                 />
+              )}
+              {expandedLines && expandedLines.length > 0 && (
+                viewMode === "split" ? (
+                  <SplitDiffHunk
+                    hunk={{ oldStart: expandedLines[0].oldLineNumber ?? 0, oldCount: expandedLines.length, newStart: expandedLines[0].newLineNumber ?? 0, newCount: expandedLines.length, header: "", lines: expandedLines }}
+                    {...commonHunkProps}
+                  />
+                ) : (
+                  <DiffHunk
+                    hunk={{ oldStart: expandedLines[0].oldLineNumber ?? 0, oldCount: expandedLines.length, newStart: expandedLines[0].newLineNumber ?? 0, newCount: expandedLines.length, header: "", lines: expandedLines }}
+                    {...commonHunkProps}
+                  />
+                )
               )}
               {hunkEl}
             </div>

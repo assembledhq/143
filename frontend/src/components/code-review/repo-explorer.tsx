@@ -117,7 +117,6 @@ function DirectoryTree({
   changedFiles: Set<string>;
 }) {
   const { data, isLoading, error } = useSessionFileList(sessionId, currentPath);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   const entries = data?.data ?? [];
 

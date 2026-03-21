@@ -174,21 +174,25 @@ export function CommentThread({ comments, onUpdate, onDelete }: CommentThreadPro
               {resolvedComments.map((c) => (
                 <SingleComment key={c.id} comment={c} onUpdate={onUpdate} onDelete={onDelete} />
               ))}
-              <button
+              <Button
+                variant="ghost"
+                size="sm"
                 onClick={() => setShowResolved(false)}
-                className="text-[11px] text-muted-foreground/60 hover:text-muted-foreground px-3 py-0.5"
+                className="h-auto text-[11px] text-muted-foreground/60 hover:text-muted-foreground px-3 py-0.5"
               >
                 Hide resolved
-              </button>
+              </Button>
             </>
           ) : (
-            <button
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => setShowResolved(true)}
-              className="flex items-center gap-1 text-[11px] text-muted-foreground/60 hover:text-muted-foreground px-3 py-1"
+              className="flex items-center gap-1 h-auto text-[11px] text-muted-foreground/60 hover:text-muted-foreground px-3 py-1"
             >
               <Check className="h-3 w-3" />
               {resolvedComments.length} resolved comment{resolvedComments.length > 1 ? "s" : ""}
-            </button>
+            </Button>
           )}
         </>
       )}

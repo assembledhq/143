@@ -168,6 +168,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	auditLogHandler := handlers.NewAuditLogHandler(auditLogStore)
 	sessionReviewCommentHandler := handlers.NewSessionReviewCommentHandler(sessionReviewCommentStore, sessionStore, logger)
 	sessionReviewCommentHandler.SetAuditEmitter(auditEmitter)
+	sessionReviewCommentHandler.SetMessageAndJobStores(sessionMessageStore, jobStore)
 	sessionFileHandler := handlers.NewSessionFileHandler(sessionStore, fileReader, logger)
 
 	r := chi.NewRouter()

@@ -423,12 +423,19 @@ function ChangesTab({
     deleteComment,
   } = useReviewComments(sessionId);
 
-  // Use backend endpoint to format comments, then send as message
+  // Use backend endpoint to compile and send review comments in one call.
+  // The backend formats the comments and sends the message directly.
+  // If the backend cannot send (e.g., session not idle), it returns sent=false
+  // and the frontend falls back to sending manually.
   const sendToAgentMutation = useMutation({
     mutationFn: async () => {
       const resp = await api.sessions.sendReviewComments(sessionId);
-      const message = resp.data.message;
-      return api.sessions.sendMessage(sessionId, message);
+      if (!resp.data.sent) {
+        // Fallback: backend could not send directly, send manually
+        const message = resp.data.message;
+        return api.sessions.sendMessage(sessionId, message);
+      }
+      return resp;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
@@ -536,7 +543,7 @@ function ChangesTab({
 
   // `c` key: open comment input on the first changed line of the active file
   const handleAddCommentOnSelectedLine = useCallback(() => {
-    const activeFile = files[activeFileIndex];
+    const activeFile = filteredFiles[activeFileIndex];
     if (!activeFile) return;
     // Find the first add or remove line to comment on
     for (const hunk of activeFile.hunks) {
@@ -551,7 +558,7 @@ function ChangesTab({
         }
       }
     }
-  }, [files, activeFileIndex, handleAddComment]);
+  }, [filteredFiles, activeFileIndex, handleAddComment]);
 
   useDiffKeyboardNav({
     fileCount: files.length,
@@ -640,6 +647,7 @@ function ChangesTab({
             files={filteredFiles}
             viewMode={viewMode}
             sessionId={sessionId}
+            activeFileIndex={activeFileIndex}
             commentsByLine={commentsByLine}
             activeCommentLine={activeCommentLine}
             onAddComment={handleAddComment}

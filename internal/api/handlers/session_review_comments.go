@@ -18,6 +18,8 @@ import (
 type SessionReviewCommentHandler struct {
 	store        *db.SessionReviewCommentStore
 	sessionStore *db.SessionStore
+	messageStore *db.SessionMessageStore
+	jobStore     *db.JobStore
 	logger       zerolog.Logger
 	audit        *db.AuditEmitter
 }
@@ -28,6 +30,13 @@ func NewSessionReviewCommentHandler(store *db.SessionReviewCommentStore, session
 		sessionStore: sessionStore,
 		logger:       logger,
 	}
+}
+
+// SetMessageAndJobStores wires the message and job stores needed by SendToAgent
+// to send messages directly without a second frontend call.
+func (h *SessionReviewCommentHandler) SetMessageAndJobStores(messageStore *db.SessionMessageStore, jobStore *db.JobStore) {
+	h.messageStore = messageStore
+	h.jobStore = jobStore
 }
 
 func (h *SessionReviewCommentHandler) SetAuditEmitter(audit *db.AuditEmitter) {
@@ -267,9 +276,10 @@ func (h *SessionReviewCommentHandler) Delete(w http.ResponseWriter, r *http.Requ
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// SendToAgent compiles open review comments into a structured message.
-// The frontend can use this to get the formatted message, then send it via
-// the session's SendMessage endpoint.
+// SendToAgent compiles open review comments into a structured message and
+// sends it to the session as a follow-up message, enqueuing a continue_session job.
+// If messageStore/jobStore are not configured, it falls back to returning the
+// formatted message for the frontend to send manually.
 func (h *SessionReviewCommentHandler) SendToAgent(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
@@ -306,10 +316,74 @@ func (h *SessionReviewCommentHandler) SendToAgent(w http.ResponseWriter, r *http
 		indented := strings.ReplaceAll(c.Body, "\n", "\n   ")
 		sb.WriteString(fmt.Sprintf("   \"%s\"\n\n", indented))
 	}
+	message := strings.TrimSpace(sb.String())
 
+	// If message and job stores are available, send the message directly.
+	if h.messageStore != nil && h.jobStore != nil && h.sessionStore != nil {
+		session, err := h.sessionStore.ClaimIdle(r.Context(), orgID, sessionID)
+		if err != nil {
+			// Session may not be idle — fall back to returning the message.
+			writeJSON(w, http.StatusOK, models.SingleResponse[struct {
+				Message string `json:"message"`
+				Sent    bool   `json:"sent"`
+			}]{Data: struct {
+				Message string `json:"message"`
+				Sent    bool   `json:"sent"`
+			}{Message: message, Sent: false}})
+			return
+		}
+
+		user := middleware.UserFromContext(r.Context())
+		var userID *uuid.UUID
+		if user != nil {
+			userID = &user.ID
+		}
+
+		msg := &models.SessionMessage{
+			SessionID:  sessionID,
+			OrgID:      orgID,
+			UserID:     userID,
+			TurnNumber: session.CurrentTurn + 1,
+			Role:       models.MessageRoleUser,
+			Content:    message,
+		}
+
+		if err := h.messageStore.Create(r.Context(), msg); err != nil {
+			if revertErr := h.sessionStore.UpdateStatus(r.Context(), orgID, sessionID, string(models.SessionStatusIdle)); revertErr != nil {
+				h.logger.Error().Err(revertErr).Str("session_id", sessionID.String()).Msg("failed to revert session to idle after message creation failure")
+			}
+			writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message")
+			return
+		}
+
+		payload := map[string]string{
+			"session_id": sessionID.String(),
+			"org_id":     orgID.String(),
+		}
+		if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "continue_session", payload, 5, nil); err != nil {
+			if revertErr := h.sessionStore.UpdateStatus(r.Context(), orgID, sessionID, string(models.SessionStatusIdle)); revertErr != nil {
+				h.logger.Error().Err(revertErr).Str("session_id", sessionID.String()).Msg("failed to revert session to idle after enqueue failure")
+			}
+			writeError(w, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue continue_session job")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, models.SingleResponse[struct {
+			Message string `json:"message"`
+			Sent    bool   `json:"sent"`
+		}]{Data: struct {
+			Message string `json:"message"`
+			Sent    bool   `json:"sent"`
+		}{Message: message, Sent: true}})
+		return
+	}
+
+	// Fallback: return the formatted message for the frontend to send.
 	writeJSON(w, http.StatusOK, models.SingleResponse[struct {
 		Message string `json:"message"`
+		Sent    bool   `json:"sent"`
 	}]{Data: struct {
 		Message string `json:"message"`
-	}{Message: strings.TrimSpace(sb.String())}})
+		Sent    bool   `json:"sent"`
+	}{Message: message, Sent: false}})
 }

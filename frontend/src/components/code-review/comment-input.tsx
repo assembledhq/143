@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 
 interface CommentInputProps {
   onSubmit: (body: string) => void;
@@ -55,14 +56,14 @@ export function CommentInput({
 
   return (
     <div className="mx-2 my-1.5 rounded-md border border-border bg-background shadow-sm">
-      <textarea
+      <Textarea
         ref={textareaRef}
         value={value}
         onChange={(e) => setValue(e.target.value)}
         onKeyDown={handleKeyDown}
         placeholder="Leave a comment..."
         aria-label="Review comment"
-        className="w-full min-h-[60px] max-h-[160px] resize-none rounded-t-md px-3 py-2 text-[13px] bg-transparent focus:outline-none placeholder:text-muted-foreground/50"
+        className="min-h-[60px] max-h-[160px] resize-none rounded-t-md rounded-b-none border-0 border-b px-3 py-2 bg-transparent focus-visible:ring-0 focus-visible:ring-offset-0 placeholder:text-muted-foreground/50"
       />
       <div className="flex items-center justify-end gap-2 px-3 py-2 border-t border-border/50 bg-muted/20 rounded-b-md">
         <Button variant="ghost" size="sm" className="h-7 text-[12px]" onClick={onCancel}>

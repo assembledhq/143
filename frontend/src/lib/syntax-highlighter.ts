@@ -85,7 +85,8 @@ function escapeHtml(str: string): string {
 export function useFileHighlighting(
   allLineContents: string[],
   lang: string,
-  theme: "github-dark" | "github-light" = "github-dark"
+  theme: "github-dark" | "github-light" = "github-dark",
+  enabled: boolean = true
 ): string[] | null {
   const [highlighted, setHighlighted] = useState<string[] | null>(null);
 
@@ -94,7 +95,7 @@ export function useFileHighlighting(
   const contentKey = allLineContents.length > 0 ? `${lang}:${allLineContents.join("\n")}` : "";
 
   useEffect(() => {
-    if (allLineContents.length === 0) {
+    if (!enabled || allLineContents.length === 0) {
       setHighlighted(null);
       return;
     }
@@ -111,7 +112,7 @@ export function useFileHighlighting(
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- contentKey is a stable digest
-  }, [contentKey, lang, theme]);
+  }, [contentKey, lang, theme, enabled]);
 
   return highlighted;
 }

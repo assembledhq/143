@@ -17,6 +17,7 @@ interface DiffPaneProps {
   files: DiffFile[];
   viewMode: ViewMode;
   sessionId?: string;
+  activeFileIndex?: number;
   commentsByLine?: Map<CommentLineKey, SessionReviewComment[]>;
   activeCommentLine?: ActiveCommentLine | null;
   onAddComment?: (filePath: string, lineNumber: number, side: "old" | "new") => void;
@@ -38,6 +39,7 @@ export const DiffPane = forwardRef<DiffPaneHandle, DiffPaneProps>(
     files,
     viewMode,
     sessionId,
+    activeFileIndex,
     commentsByLine,
     activeCommentLine,
     onAddComment,
@@ -133,6 +135,7 @@ export const DiffPane = forwardRef<DiffPaneHandle, DiffPaneProps>(
             file={file}
             viewMode={viewMode}
             sessionId={sessionId}
+            isActive={activeFileIndex === undefined || activeFileIndex === i}
             commentsByLine={commentsByLine}
             activeCommentLine={activeCommentLine}
             onAddComment={onAddComment}

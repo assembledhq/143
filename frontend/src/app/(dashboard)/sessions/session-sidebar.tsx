@@ -13,7 +13,6 @@ import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { useOptimisticSessions, type OptimisticSession } from "@/contexts/optimistic-sessions";
 import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
-import { parseDiffStats } from "@/lib/diff-parser";
 import type { Session } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
@@ -61,13 +60,10 @@ function filterToStatusParam(filter: string | null): string | undefined {
 // Lightweight diff stats badge for sidebar rows
 // ---------------------------------------------------------------------------
 
-function SessionDiffBadge({ diffStats, diff }: { diffStats?: { added: number; removed: number; files_changed: number }; diff?: string }) {
-  // diff_stats may be null in list responses (excluded for performance).
-  // Fall back to lightweight client-side parse when the diff string is available.
-  const stats = diffStats ?? (diff ? parseDiffStats(diff) : null);
-  if (!stats) return null;
-  if (stats.added === 0 && stats.removed === 0) return null;
-  return <DiffStatsBadge added={stats.added} removed={stats.removed} />;
+function SessionDiffBadge({ diffStats }: { diffStats?: { added: number; removed: number; files_changed: number } }) {
+  if (!diffStats) return null;
+  if (diffStats.added === 0 && diffStats.removed === 0) return null;
+  return <DiffStatsBadge added={diffStats.added} removed={diffStats.removed} />;
 }
 
 // ---------------------------------------------------------------------------
@@ -282,7 +278,7 @@ export function SessionSidebar() {
                     <span className="text-[11px] text-muted-foreground/50 truncate">
                       {formatTimeAgo(ts)}
                     </span>
-                    <SessionDiffBadge diffStats={session.diff_stats} diff={session.diff} />
+                    <SessionDiffBadge diffStats={session.diff_stats} />
                   </div>
                   {session.status === "failed" && (session.failure_explanation || session.error) && (
                     <p className="text-[11px] text-destructive/70 truncate mt-0.5">
