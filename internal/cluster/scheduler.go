@@ -219,6 +219,9 @@ func (s *Scheduler) scheduleDataRetentionCleanup(ctx context.Context, orgIDs []u
 // tick of the day — matching the selective-query pattern used by scheduleProjectCycles.
 func (s *Scheduler) scheduleDailyCleanupJob(ctx context.Context, jobType string, orgIDs []uuid.UUID, now time.Time) {
 	dateKey := now.UTC().Format("2006-01-02")
+	if s.lastCleanupDates == nil {
+		s.lastCleanupDates = make(map[string]string)
+	}
 	if s.lastCleanupDates[jobType] == dateKey {
 		return
 	}
