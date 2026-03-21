@@ -75,6 +75,7 @@ func TestCodexAdapter_PreparePrompt(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			prompt, err := a.PreparePrompt(context.Background(), tt.input)
 			if tt.wantErr {
 				if err == nil {
@@ -778,6 +779,7 @@ func TestIsDuplicateOutput(t *testing.T) {
 	t.Parallel()
 
 	t.Run("first content is not a duplicate", func(t *testing.T) {
+		t.Parallel()
 		m := make(map[string]string)
 		require.False(t, isDuplicateOutput("message", "hello", m))
 		require.Equal(t, "hello", m["message"])
@@ -1009,6 +1011,7 @@ func TestShellEscapeCodex(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := shellEscapeCodex(tt.input)
 			if got != tt.expected {
 				t.Errorf("shellEscapeCodex(%q) = %q, want %q", tt.input, got, tt.expected)
