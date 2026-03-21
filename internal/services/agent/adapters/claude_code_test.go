@@ -50,7 +50,7 @@ func TestClaudeCodeAdapter_PreparePrompt(t *testing.T) {
 				Issue:     &models.Issue{Title: "Bug", Source: models.IssueSourceSentry},
 				TokenMode: "low",
 			},
-			wantToken: lowTokenMax,
+			wantToken: defaultLowTokenMax,
 		},
 		{
 			name: "high token mode",
@@ -58,14 +58,14 @@ func TestClaudeCodeAdapter_PreparePrompt(t *testing.T) {
 				Issue:     &models.Issue{Title: "Bug", Source: models.IssueSourceSentry},
 				TokenMode: "high",
 			},
-			wantToken: highTokenMax,
+			wantToken: defaultHighTokenMax,
 		},
 		{
 			name: "default token mode",
 			input: &agent.AgentInput{
 				Issue: &models.Issue{Title: "Bug"},
 			},
-			wantToken: lowTokenMax,
+			wantToken: defaultLowTokenMax,
 		},
 	}
 
@@ -85,6 +85,45 @@ func TestClaudeCodeAdapter_PreparePrompt(t *testing.T) {
 			require.NotEmpty(t, prompt.UserPrompt)
 		})
 	}
+}
+
+func TestResolveTokenLimit(t *testing.T) {
+	t.Parallel()
+
+	// Without context limits (nil), uses defaults
+	require.Equal(t, defaultLowTokenMax, resolveTokenLimit("low", nil))
+	require.Equal(t, defaultHighTokenMax, resolveTokenLimit("high", nil))
+	require.Equal(t, defaultLowTokenMax, resolveTokenLimit("", nil))
+
+	// With custom context limits
+	custom := &models.ContextLimits{
+		AgentLowTokenMax:  75_000,
+		AgentHighTokenMax: 250_000,
+	}
+	require.Equal(t, 75_000, resolveTokenLimit("low", custom))
+	require.Equal(t, 250_000, resolveTokenLimit("high", custom))
+	require.Equal(t, 75_000, resolveTokenLimit("", custom))
+
+	// Partial override (only low set)
+	partial := &models.ContextLimits{AgentLowTokenMax: 60_000}
+	require.Equal(t, 60_000, resolveTokenLimit("low", partial))
+	require.Equal(t, defaultHighTokenMax, resolveTokenLimit("high", partial))
+}
+
+func TestClaudeCodeAdapter_PreparePrompt_WithContextLimits(t *testing.T) {
+	t.Parallel()
+
+	a := NewClaudeCodeAdapter(zerolog.Nop())
+	input := &agent.AgentInput{
+		Issue:     &models.Issue{Title: "Bug", Source: models.IssueSourceSentry},
+		TokenMode: "high",
+		ContextLimits: &models.ContextLimits{
+			AgentHighTokenMax: 300_000,
+		},
+	}
+	prompt, err := a.PreparePrompt(context.Background(), input)
+	require.NoError(t, err)
+	require.Equal(t, 300_000, prompt.MaxTokens, "should use org-specific high token limit")
 }
 
 // ---------------------------------------------------------------------------

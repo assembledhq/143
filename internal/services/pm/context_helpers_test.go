@@ -112,7 +112,7 @@ func TestSummarizeIssue(t *testing.T) {
 		RawData:               json.RawMessage(`{"stacktrace":"line 1"}`),
 	}
 
-	summary := summarizeIssue(issue)
+	summary := summarizeIssue(issue, 500)
 	require.Equal(t, issue.ID.String(), summary.ID, "summary should include issue ID")
 	require.Equal(t, string(issue.Source), summary.Source, "summary should include source")
 	require.Equal(t, issue.Title, summary.Title, "summary should include title")

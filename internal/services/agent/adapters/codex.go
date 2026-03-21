@@ -39,10 +39,7 @@ func (a *CodexAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInpu
 		return nil, fmt.Errorf("agent input and issue are required")
 	}
 
-	maxTokens := lowTokenMax
-	if input.TokenMode == "high" {
-		maxTokens = highTokenMax
-	}
+	maxTokens := resolveTokenLimit(input.TokenMode, input.ContextLimits)
 
 	systemPrompt := buildSystemPrompt(input)
 	userPrompt := buildUserPrompt(input)

@@ -909,7 +909,7 @@ func TestSummarizeIssue_NilDescription(t *testing.T) {
 		LastSeenAt:  time.Now(),
 	}
 
-	summary := summarizeIssue(issue)
+	summary := summarizeIssue(issue, 500)
 	require.Equal(t, "", summary.Description)
 }
 

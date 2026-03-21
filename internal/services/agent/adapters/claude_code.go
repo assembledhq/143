@@ -19,9 +19,28 @@ import (
 )
 
 const (
-	lowTokenMax  = 50_000
-	highTokenMax = 200_000
+	defaultLowTokenMax  = 50_000
+	defaultHighTokenMax = 200_000
 )
+
+// resolveTokenLimit returns the appropriate max token limit based on
+// the token mode and optional org-specific context limits.
+func resolveTokenLimit(mode string, limits *models.ContextLimits) int {
+	low := defaultLowTokenMax
+	high := defaultHighTokenMax
+	if limits != nil {
+		if limits.AgentLowTokenMax > 0 {
+			low = limits.AgentLowTokenMax
+		}
+		if limits.AgentHighTokenMax > 0 {
+			high = limits.AgentHighTokenMax
+		}
+	}
+	if mode == "high" {
+		return high
+	}
+	return low
+}
 
 // ClaudeCodeAdapter runs the Claude Code CLI inside a sandbox.
 type ClaudeCodeAdapter struct {
@@ -47,10 +66,7 @@ func (a *ClaudeCodeAdapter) PreparePrompt(ctx context.Context, input *agent.Agen
 		return nil, fmt.Errorf("agent input and issue are required")
 	}
 
-	maxTokens := lowTokenMax
-	if input.TokenMode == "high" {
-		maxTokens = highTokenMax
-	}
+	maxTokens := resolveTokenLimit(input.TokenMode, input.ContextLimits)
 
 	systemPrompt := buildSystemPrompt(input)
 	userPrompt := buildUserPrompt(input)
