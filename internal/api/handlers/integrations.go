@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
@@ -246,9 +247,23 @@ func (h *IntegrationHandler) ListIntegrations(w http.ResponseWriter, r *http.Req
 }
 
 // DisconnectIntegration sets the integration status to inactive for a given provider.
+// The provider is extracted from the URL path: /api/v1/integrations/{provider}/disconnect.
 func (h *IntegrationHandler) DisconnectIntegration(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
-	provider := models.IntegrationProvider(chi.URLParam(r, "provider"))
+
+	// Extract provider from the URL path. We use explicit routes per provider
+	// (rather than chi's {provider} param) to avoid routing conflicts with
+	// other static integration routes like /integrations/github/sync.
+	providerStr := chi.URLParam(r, "provider")
+	if providerStr == "" {
+		segments := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		// Expected: api / v1 / integrations / {provider} / disconnect
+		if len(segments) >= 5 {
+			providerStr = segments[3]
+		}
+	}
+
+	provider := models.IntegrationProvider(providerStr)
 	if err := provider.Validate(); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_PROVIDER", "invalid integration provider")
 		return
@@ -260,7 +275,7 @@ func (h *IntegrationHandler) DisconnectIntegration(w http.ResponseWriter, r *htt
 		return
 	}
 	if len(activeIntegrations) == 0 {
-		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "no active integration found for this provider")
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
@@ -490,6 +505,15 @@ func (h *IntegrationHandler) StartGitHubOAuth(w http.ResponseWriter, r *http.Req
 }
 
 func (h *IntegrationHandler) HandleGitHubOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	// When a GitHub App has "Request user authorization during installation"
+	// enabled, GitHub redirects here with installation_id and setup_action
+	// instead of the Setup URL. Delegate to the App installation handler
+	// which stores the installation_id and syncs repos.
+	if r.URL.Query().Get("installation_id") != "" && r.URL.Query().Get("setup_action") == "install" {
+		h.HandleGitHubAppInstalled(w, r)
+		return
+	}
+
 	code, ok := validateOAuthCallback(w, r, githubIntegrationOAuthStateCookie)
 	if !ok {
 		return
