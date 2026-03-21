@@ -179,8 +179,7 @@ export default function PrivacyPage() {
             <strong className="font-medium opacity-80">Agent and workspace data</strong>{" "}
             - session messages, generated diffs, and logs are retained while the
             workspace is active; temporary workspace snapshots are cleaned up
-            shortly after a session becomes idle or completes; agent run logs
-            are retained for a default of 90 days
+            shortly after a session becomes idle or completes
           </li>
           <li>
             <strong className="font-medium opacity-80">Technical and security data</strong>{" "}
@@ -190,9 +189,8 @@ export default function PrivacyPage() {
           </li>
           <li>
             <strong className="font-medium opacity-80">Webhook data</strong>{" "}
-            - webhook payloads are retained for a default of 30 days before
-            being purged; metadata such as timestamps and delivery statuses may
-            be retained longer for analytics
+            - webhook payloads may be retained for operational and debugging
+            purposes and deleted according to internal retention schedules
           </li>
           <li>
             <strong className="font-medium opacity-80">Backups</strong>{" "}
