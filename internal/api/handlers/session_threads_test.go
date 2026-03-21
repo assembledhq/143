@@ -23,11 +23,11 @@ import (
 // --- Mock stores implementing the thread service interfaces ---
 
 type mockThreadStore struct {
-	createFn       func(ctx context.Context, t *models.SessionThread, max int) error
-	getByIDFn      func(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
+	createFn        func(ctx context.Context, t *models.SessionThread, max int) error
+	getByIDFn       func(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
 	listBySessionFn func(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error)
-	claimIdleFn    func(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
-	updateStatusFn func(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
+	claimIdleFn     func(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
+	updateStatusFn  func(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
 }
 
 func (m *mockThreadStore) Create(ctx context.Context, t *models.SessionThread, max int) error {

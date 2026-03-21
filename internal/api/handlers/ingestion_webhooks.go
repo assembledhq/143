@@ -67,32 +67,32 @@ var providerSignatureHeader = map[string]string{
 func (h *IngestionWebhookHandler) handleProvider(w http.ResponseWriter, r *http.Request, provider string) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1MB limit
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "READ_FAILED", "failed to read request body")
+		writeError(w, r, http.StatusBadRequest, "READ_FAILED", "failed to read request body")
 		return
 	}
 
 	// Get integration ID from query param or header
 	integrationIDStr := r.URL.Query().Get("integration_id")
 	if integrationIDStr == "" {
-		writeError(w, http.StatusBadRequest, "MISSING_INTEGRATION", "integration_id query parameter required")
+		writeError(w, r, http.StatusBadRequest, "MISSING_INTEGRATION", "integration_id query parameter required")
 		return
 	}
 	integrationID, err := uuid.Parse(integrationIDStr)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid integration_id")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid integration_id")
 		return
 	}
 
 	// Look up integration to get org_id
 	integration, err := h.integrationStore.GetByID(r.Context(), integrationID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "integration not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "integration not found")
 		return
 	}
 
 	// Verify webhook signature using per-org credential from DB.
 	if err := h.verifyProviderSignature(r.Context(), integration.OrgID, provider, body, r.Header); err != nil {
-		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", err.Error())
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", err.Error())
 		return
 	}
 
@@ -106,7 +106,7 @@ func (h *IngestionWebhookHandler) handleProvider(w http.ResponseWriter, r *http.
 		Status:        "received",
 	}
 	if err := h.webhookStore.Create(r.Context(), delivery); err != nil {
-		h.logger.Error().Err(err).Msg("failed to record webhook delivery")
+		zerolog.Ctx(r.Context()).Error().Err(err).Msg("failed to record webhook delivery")
 	}
 
 	// Parse and ingest
@@ -125,8 +125,7 @@ func (h *IngestionWebhookHandler) handleProvider(w http.ResponseWriter, r *http.
 		if markErr := h.webhookStore.MarkProcessed(r.Context(), delivery, &errMsg); markErr != nil {
 			zerolog.Ctx(r.Context()).Warn().Err(markErr).Msg("failed to mark webhook processed")
 		}
-		h.logger.Error().Err(err).Str("provider", provider).Msg("failed to parse webhook")
-		writeError(w, http.StatusBadRequest, "PARSE_FAILED", "failed to parse webhook payload")
+		writeError(w, r, http.StatusBadRequest, "PARSE_FAILED", "failed to parse webhook payload")
 		return
 	}
 
@@ -145,8 +144,7 @@ func (h *IngestionWebhookHandler) handleProvider(w http.ResponseWriter, r *http.
 		if markErr := h.webhookStore.MarkProcessed(r.Context(), delivery, &errMsg); markErr != nil {
 			zerolog.Ctx(r.Context()).Warn().Err(markErr).Msg("failed to mark webhook processed")
 		}
-		h.logger.Error().Err(err).Str("provider", provider).Msg("failed to ingest issue")
-		writeError(w, http.StatusInternalServerError, "INGEST_FAILED", "failed to ingest issue")
+		writeError(w, r, http.StatusInternalServerError, "INGEST_FAILED", "failed to ingest issue", err)
 		return
 	}
 
@@ -185,10 +183,10 @@ func (h *IngestionWebhookHandler) verifyProviderSignature(
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// No credential configured — skip verification (dev mode)
-			h.logger.Debug().Err(err).Str("provider", provider).Msg("no webhook credential configured, skipping signature verification")
+			zerolog.Ctx(ctx).Debug().Err(err).Str("provider", provider).Msg("no webhook credential configured, skipping signature verification")
 			return nil
 		}
-		h.logger.Error().Err(err).Str("provider", provider).Msg("failed to load webhook credential")
+		zerolog.Ctx(ctx).Error().Err(err).Str("provider", provider).Msg("failed to load webhook credential")
 		return fmt.Errorf("failed to load webhook credential")
 	}
 

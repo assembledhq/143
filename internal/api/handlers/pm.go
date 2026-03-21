@@ -41,7 +41,7 @@ func (h *PMHandler) Analyze(w http.ResponseWriter, r *http.Request) {
 	}
 	jobID, err := h.jobStore.Enqueue(r.Context(), orgID, "default", "pm_analyze", payload, 5, nil)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue pm analyze job")
+		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue pm analyze job", err)
 		return
 	}
 
@@ -62,7 +62,7 @@ func (h *PMHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	plans, err := h.planStore.ListByOrg(r.Context(), orgID, filters)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list pm plans")
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list pm plans", err)
 		return
 	}
 	if plans == nil {
@@ -84,13 +84,13 @@ func (h *PMHandler) Get(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	planID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid plan ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid plan ID")
 		return
 	}
 
 	plan, err := h.planStore.GetByID(r.Context(), orgID, planID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "plan not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "plan not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.PMPlan]{Data: plan})
@@ -101,7 +101,7 @@ func (h *PMHandler) Latest(w http.ResponseWriter, r *http.Request) {
 
 	plan, err := h.planStore.GetLatestByOrg(r.Context(), orgID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "plan not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "plan not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.PMPlan]{Data: plan})
@@ -109,7 +109,7 @@ func (h *PMHandler) Latest(w http.ResponseWriter, r *http.Request) {
 
 // decisionsResponse is the response for the decisions endpoint.
 type decisionsResponse struct {
-	Data    []models.PMDecisionView `json:"data"`
+	Data    []models.PMDecisionView  `json:"data"`
 	Summary models.PMDecisionSummary `json:"summary"`
 	Meta    models.PaginationMeta    `json:"meta"`
 }
@@ -126,7 +126,7 @@ func (h *PMHandler) Decisions(w http.ResponseWriter, r *http.Request) {
 
 	decisions, err := h.decisionLogStore.ListDecisionViews(r.Context(), orgID, filters)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list pm decisions")
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list pm decisions", err)
 		return
 	}
 	if decisions == nil {
@@ -135,7 +135,7 @@ func (h *PMHandler) Decisions(w http.ResponseWriter, r *http.Request) {
 
 	summary, err := h.decisionLogStore.GetDecisionSummary(r.Context(), orgID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "SUMMARY_FAILED", "failed to get decision summary")
+		writeError(w, r, http.StatusInternalServerError, "SUMMARY_FAILED", "failed to get decision summary", err)
 		return
 	}
 

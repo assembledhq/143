@@ -40,7 +40,7 @@ func (h *SessionThreadHandler) CreateThread(w http.ResponseWriter, r *http.Reque
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
 		return
 	}
 
@@ -52,13 +52,13 @@ func (h *SessionThreadHandler) CreateThread(w http.ResponseWriter, r *http.Reque
 		FileScope    []string `json:"file_scope"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
 		return
 	}
 
 	body.Label = strings.TrimSpace(body.Label)
 	if body.Label == "" {
-		writeError(w, http.StatusBadRequest, "MISSING_LABEL", "label is required")
+		writeError(w, r, http.StatusBadRequest, "MISSING_LABEL", "label is required")
 		return
 	}
 
@@ -74,19 +74,19 @@ func (h *SessionThreadHandler) CreateThread(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		switch {
 		case errors.Is(err, db.ErrThreadLimitReached):
-			writeError(w, http.StatusConflict, "THREAD_LIMIT", "maximum of 4 threads per session")
+			writeError(w, r, http.StatusConflict, "THREAD_LIMIT", "maximum of 4 threads per session")
 		case errors.Is(err, thread.ErrSessionNotFound):
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "session not found")
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
 		case errors.Is(err, thread.ErrSessionTerminal):
-			writeError(w, http.StatusConflict, "SESSION_TERMINAL", "cannot add threads to a completed session")
+			writeError(w, r, http.StatusConflict, "SESSION_TERMINAL", "cannot add threads to a completed session")
 		case errors.Is(err, thread.ErrInvalidAgentType):
-			writeError(w, http.StatusBadRequest, "INVALID_AGENT_TYPE", err.Error())
+			writeError(w, r, http.StatusBadRequest, "INVALID_AGENT_TYPE", err.Error())
 		case errors.Is(err, thread.ErrInvalidModel):
-			writeError(w, http.StatusBadRequest, "INVALID_MODEL", err.Error())
+			writeError(w, r, http.StatusBadRequest, "INVALID_MODEL", err.Error())
 		case errors.Is(err, thread.ErrEnqueueFailed):
-			writeError(w, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue thread agent job")
+			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue thread agent job", err)
 		default:
-			writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create thread")
+			writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create thread", err)
 		}
 		return
 	}
@@ -99,17 +99,17 @@ func (h *SessionThreadHandler) ListThreads(w http.ResponseWriter, r *http.Reques
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
 		return
 	}
 
 	threads, err := h.svc.ListThreads(r.Context(), orgID, sessionID)
 	if err != nil {
 		if errors.Is(err, thread.ErrSessionNotFound) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "session not found")
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list threads")
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list threads", err)
 		return
 	}
 	if threads == nil {
@@ -124,18 +124,18 @@ func (h *SessionThreadHandler) GetThread(w http.ResponseWriter, r *http.Request)
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
 		return
 	}
 	threadID, err := uuid.Parse(chi.URLParam(r, "tid"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid thread ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid thread ID")
 		return
 	}
 
 	t, err := h.svc.GetThread(r.Context(), orgID, sessionID, threadID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "thread not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "thread not found")
 		return
 	}
 
@@ -148,12 +148,12 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
 		return
 	}
 	threadID, err := uuid.Parse(chi.URLParam(r, "tid"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid thread ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid thread ID")
 		return
 	}
 
@@ -162,12 +162,12 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 		Images  []string `json:"images"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
 		return
 	}
 	body.Message = strings.TrimSpace(body.Message)
 	if body.Message == "" {
-		writeError(w, http.StatusBadRequest, "MISSING_MESSAGE", "message is required")
+		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message is required")
 		return
 	}
 
@@ -188,13 +188,13 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 	if err != nil {
 		switch {
 		case errors.Is(err, thread.ErrThreadNotFound):
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "thread not found")
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "thread not found")
 		case errors.Is(err, thread.ErrThreadNotIdle):
-			writeError(w, http.StatusConflict, "NOT_IDLE", "thread must be idle to send a message")
+			writeError(w, r, http.StatusConflict, "NOT_IDLE", "thread must be idle to send a message")
 		case errors.Is(err, thread.ErrEnqueueFailed):
-			writeError(w, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue continue_thread job")
+			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue continue_thread job", err)
 		default:
-			writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message")
+			writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message", err)
 		}
 		return
 	}
@@ -208,22 +208,22 @@ func (h *SessionThreadHandler) GetThreadMessages(w http.ResponseWriter, r *http.
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
 		return
 	}
 	threadID, err := uuid.Parse(chi.URLParam(r, "tid"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid thread ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid thread ID")
 		return
 	}
 
 	messages, err := h.svc.GetMessages(r.Context(), orgID, sessionID, threadID)
 	if err != nil {
 		if errors.Is(err, thread.ErrThreadNotFound) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "thread not found")
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "thread not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list thread messages")
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list thread messages", err)
 		return
 	}
 	if messages == nil {
@@ -238,12 +238,12 @@ func (h *SessionThreadHandler) EndThread(w http.ResponseWriter, r *http.Request)
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
 		return
 	}
 	threadID, err := uuid.Parse(chi.URLParam(r, "tid"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid thread ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid thread ID")
 		return
 	}
 
@@ -251,11 +251,11 @@ func (h *SessionThreadHandler) EndThread(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		switch {
 		case errors.Is(err, thread.ErrThreadNotFound):
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "thread not found")
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "thread not found")
 		case errors.Is(err, thread.ErrThreadCannotBeEnded):
-			writeError(w, http.StatusConflict, "INVALID_STATUS", "thread cannot be ended in its current state")
+			writeError(w, r, http.StatusConflict, "INVALID_STATUS", "thread cannot be ended in its current state")
 		default:
-			writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to end thread")
+			writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to end thread", err)
 		}
 		return
 	}
@@ -269,22 +269,22 @@ func (h *SessionThreadHandler) GetThreadLogs(w http.ResponseWriter, r *http.Requ
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
 		return
 	}
 	threadID, err := uuid.Parse(chi.URLParam(r, "tid"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid thread ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid thread ID")
 		return
 	}
 
 	logs, err := h.svc.GetLogs(r.Context(), orgID, sessionID, threadID)
 	if err != nil {
 		if errors.Is(err, thread.ErrThreadNotFound) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "thread not found")
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "thread not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list thread logs")
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list thread logs", err)
 		return
 	}
 	if logs == nil {

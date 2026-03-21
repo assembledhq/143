@@ -34,13 +34,13 @@ func (h *PriorityHandler) GetPriorityScore(w http.ResponseWriter, r *http.Reques
 	orgID := middleware.OrgIDFromContext(r.Context())
 	issueID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid issue ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid issue ID")
 		return
 	}
 
 	score, err := h.priorityScores.GetByIssueID(r.Context(), orgID, issueID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "priority score not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "priority score not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.PriorityScore]{Data: score})
@@ -51,13 +51,13 @@ func (h *PriorityHandler) GetComplexity(w http.ResponseWriter, r *http.Request) 
 	orgID := middleware.OrgIDFromContext(r.Context())
 	issueID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid issue ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid issue ID")
 		return
 	}
 
 	estimate, err := h.complexityEstimates.GetByIssueID(r.Context(), orgID, issueID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "complexity estimate not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "complexity estimate not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.ComplexityEstimate]{Data: estimate})
@@ -72,7 +72,7 @@ func (h *PriorityHandler) ListPriorityScores(w http.ResponseWriter, r *http.Requ
 
 	scores, err := h.priorityScores.ListByOrg(r.Context(), orgID, eligibleOnly, limit)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list priority scores")
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list priority scores", err)
 		return
 	}
 	if scores == nil {
@@ -90,7 +90,7 @@ func (h *PriorityHandler) Reprioritize(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	issueID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid issue ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid issue ID")
 		return
 	}
 
@@ -100,10 +100,9 @@ func (h *PriorityHandler) Reprioritize(w http.ResponseWriter, r *http.Request) {
 		"org_id":   orgID.String(),
 	}, 3, &dedupeKey)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue prioritize job")
+		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue prioritize job", err)
 		return
 	}
 
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
 }
-

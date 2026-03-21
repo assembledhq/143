@@ -82,7 +82,7 @@ func (h *AuditLogHandler) List(w http.ResponseWriter, r *http.Request) {
 	if uid := q.Get("user_id"); uid != "" {
 		parsed, err := uuid.Parse(uid)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_USER_ID", "invalid user_id parameter")
+			writeError(w, r, http.StatusBadRequest, "INVALID_USER_ID", "invalid user_id parameter")
 			return
 		}
 		filters.UserID = &parsed
@@ -90,7 +90,7 @@ func (h *AuditLogHandler) List(w http.ResponseWriter, r *http.Request) {
 	if sid := q.Get("session_id"); sid != "" {
 		parsed, err := uuid.Parse(sid)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_SESSION_ID", "invalid session_id parameter")
+			writeError(w, r, http.StatusBadRequest, "INVALID_SESSION_ID", "invalid session_id parameter")
 			return
 		}
 		filters.SessionID = &parsed
@@ -98,7 +98,7 @@ func (h *AuditLogHandler) List(w http.ResponseWriter, r *http.Request) {
 	if pid := q.Get("project_id"); pid != "" {
 		parsed, err := uuid.Parse(pid)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_PROJECT_ID", "invalid project_id parameter")
+			writeError(w, r, http.StatusBadRequest, "INVALID_PROJECT_ID", "invalid project_id parameter")
 			return
 		}
 		filters.ProjectID = &parsed
@@ -106,7 +106,7 @@ func (h *AuditLogHandler) List(w http.ResponseWriter, r *http.Request) {
 	if since := q.Get("since"); since != "" {
 		t, err := time.Parse(time.RFC3339, since)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_SINCE", "invalid since parameter, expected ISO 8601")
+			writeError(w, r, http.StatusBadRequest, "INVALID_SINCE", "invalid since parameter, expected ISO 8601")
 			return
 		}
 		filters.Since = &t
@@ -114,7 +114,7 @@ func (h *AuditLogHandler) List(w http.ResponseWriter, r *http.Request) {
 	if until := q.Get("until"); until != "" {
 		t, err := time.Parse(time.RFC3339, until)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_UNTIL", "invalid until parameter, expected ISO 8601")
+			writeError(w, r, http.StatusBadRequest, "INVALID_UNTIL", "invalid until parameter, expected ISO 8601")
 			return
 		}
 		filters.Until = &t
@@ -122,7 +122,7 @@ func (h *AuditLogHandler) List(w http.ResponseWriter, r *http.Request) {
 	if cursor := q.Get("cursor"); cursor != "" {
 		t, id, err := decodeAuditCursor(cursor)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_CURSOR", "invalid cursor")
+			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "invalid cursor")
 			return
 		}
 		filters.CursorTime = &t
@@ -131,7 +131,7 @@ func (h *AuditLogHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	entries, err := h.store.List(r.Context(), orgID, filters)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list audit logs")
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list audit logs", err)
 		return
 	}
 	if entries == nil {
@@ -156,17 +156,17 @@ func (h *AuditLogHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid audit log ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid audit log ID")
 		return
 	}
 
 	entry, err := h.store.GetByID(r.Context(), orgID, id)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "audit log entry not found")
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "audit log entry not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "GET_FAILED", "failed to get audit log entry")
+		writeError(w, r, http.StatusInternalServerError, "GET_FAILED", "failed to get audit log entry", err)
 		return
 	}
 

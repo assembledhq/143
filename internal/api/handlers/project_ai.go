@@ -38,7 +38,7 @@ func NewProjectAnalysisHandler(
 
 // AnalysisRequest is the request body for project analysis suggestions.
 type AnalysisRequest struct {
-	Target string  `json:"target"`           // "spec", "design", "tasks", or "all"
+	Target string  `json:"target"`            // "spec", "design", "tasks", or "all"
 	SpecID *string `json:"spec_id,omitempty"` // for spec-specific analysis
 	Prompt *string `json:"prompt,omitempty"`  // additional user instruction
 }
@@ -50,7 +50,7 @@ type AnalysisResponse struct {
 }
 
 type AnalysisSuggestion struct {
-	Type        string `json:"type"`     // "addition", "revision", "question", "task"
+	Type        string `json:"type"` // "addition", "revision", "question", "task"
 	Title       string `json:"title"`
 	Description string `json:"description"`
 	Priority    string `json:"priority"` // "high", "medium", "low"
@@ -61,40 +61,40 @@ func (h *ProjectAnalysisHandler) Improve(w http.ResponseWriter, r *http.Request)
 	orgID := middleware.OrgIDFromContext(r.Context())
 	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
 		return
 	}
 
 	project, err := h.projectStore.GetByID(r.Context(), orgID, projectID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "project not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "project not found")
 		return
 	}
 
 	var req AnalysisRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
 
 	if req.Target == "" {
-		writeError(w, http.StatusBadRequest, "MISSING_FIELD", "target is required (spec, design, or tasks)")
+		writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", "target is required (spec, design, or tasks)")
 		return
 	}
 
 	specs, err := h.specStore.ListByProject(r.Context(), orgID, projectID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_SPECS_FAILED", "failed to list project specs")
+		writeError(w, r, http.StatusInternalServerError, "LIST_SPECS_FAILED", "failed to list project specs", err)
 		return
 	}
 	attachments, err := h.attachmentStore.ListByProject(r.Context(), orgID, projectID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_ATTACHMENTS_FAILED", "failed to list project attachments")
+		writeError(w, r, http.StatusInternalServerError, "LIST_ATTACHMENTS_FAILED", "failed to list project attachments", err)
 		return
 	}
 	tasks, err := h.taskStore.ListByProject(r.Context(), orgID, projectID, db.ProjectTaskFilters{})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_TASKS_FAILED", "failed to list project tasks")
+		writeError(w, r, http.StatusInternalServerError, "LIST_TASKS_FAILED", "failed to list project tasks", err)
 		return
 	}
 
