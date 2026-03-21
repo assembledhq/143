@@ -72,9 +72,9 @@ export default function AboutPage() {
               </p>
               <p>
                 The name comes from the 143 days it took a small team of
-                Lockheed engineers to build the XP-80 Shooting Star, America's
+                Lockheed engineers to build the XP-80 Shooting Star, America&apos;s
                 first jet fighter, in 1943. A small focused team with the right
-                tools doing the impossible. That's the spirit we wanted to
+                tools doing the impossible. That&apos;s the spirit we wanted to
                 capture.
               </p>
             </section>
@@ -105,11 +105,11 @@ export default function AboutPage() {
                 Every model provider only supports their own models. That
                 frustrated us. We wanted one place where different people on the
                 team could use whatever coding agent they preferred, whether
-                that's Claude, GPT, Gemini, or something else, without getting
+                that&apos;s Claude, GPT, Gemini, or something else, without getting
                 locked into a single vendor.
               </p>
               <p>
-                It's not just about model choice though. We wanted a single
+                It&apos;s not just about model choice though. We wanted a single
                 experience for the whole team where you can see all coding agent
                 usage in one place, collaborate on projects that span multiple
                 PRs and commits, and keep context alive across sessions instead
@@ -117,7 +117,7 @@ export default function AboutPage() {
               </p>
               <p>
                 We also wanted to build a PM agent that actually knows your
-                company's context. Your codebase, your product, your priorities.
+                company&apos;s context. Your codebase, your product, your priorities.
                 One that keeps building on that knowledge over time and gets
                 smarter the more your team uses it.
               </p>
