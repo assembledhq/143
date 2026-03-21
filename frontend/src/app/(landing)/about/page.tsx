@@ -73,10 +73,11 @@ export default function AboutPage() {
                 features and ship small fixes without waiting on a sprint cycle.
               </p>
               <p>
-                The name comes from a simple idea: 143 means &ldquo;I love
-                you&rdquo;&mdash;one letter, four letters, three letters. We
-                wanted to build something we loved working with every day, and we
-                did.
+                The name comes from the 143 days it took a small team of
+                Lockheed engineers to build the XP-80 Shooting
+                Star&mdash;America&rsquo;s first jet fighter&mdash;in 1943.
+                Proof that a small, focused team with the right tools can do the
+                impossible. That spirit is what we wanted to capture.
               </p>
             </section>
 
@@ -84,14 +85,15 @@ export default function AboutPage() {
               <h2
                 className={`text-base font-medium ${isDark ? "text-white/70" : "text-slate-800"}`}
               >
-                Why open source
+                Open source from day one
               </h2>
               <p>
-                After seeing how much 143 changed the way we worked at
-                Assembled, we decided to open source it and give it back to the
-                community. We believe the best developer tools are built in the
-                open, shaped by the people who use them. By sharing 143, we hope
-                to help other teams&mdash;whether they have five engineers or
+                143 was built from the beginning to be open-source software. Our
+                founders have been involved in open source for a long time and
+                always wanted to find a way to contribute back to the community.
+                143 was that opportunity. We believe the best developer tools are
+                built in the open, shaped by the people who use them, and we hope
+                143 helps other teams&mdash;whether they have five engineers or
                 five hundred&mdash;move faster and bring more people into the
                 building process.
               </p>
