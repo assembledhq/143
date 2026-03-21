@@ -17,7 +17,6 @@ import (
 
 type issueStore interface {
 	ListByOrg(ctx context.Context, orgID uuid.UUID, filters db.IssueFilters) ([]models.Issue, error)
-	CountByOrg(ctx context.Context, orgID uuid.UUID) (int, error)
 	UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status string) error
 }
 

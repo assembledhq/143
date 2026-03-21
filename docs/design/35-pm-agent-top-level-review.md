@@ -165,11 +165,51 @@ The current Overview page is a setup wizard that becomes dead weight after onboa
 
 This means:
 
-- **Pre-onboarding**: The PM Agent page shows the setup wizard, framed as giving the PM what it needs to work ("I need repo access to read your code", "More signal = better prioritization")
+- **Pre-onboarding**: The landing page shows the setup wizard, framed as giving the PM what it needs to work ("I need repo access to read your code", "More signal = better prioritization")
 - **Post-onboarding, pre-first-analysis**: The page shows the "Your Direction" configuration zone with nudges to set philosophy, direction, and focus areas, plus a prominent "Analyze" button
 - **Post-first-analysis**: The full split-view workspace with current recommendation, decisions, performance, activity, and configuration
 
 The page grows *in place* as the user gives it more context. There is no transition between "setup" and "product." The product starts empty and becomes intelligent.
+
+### Naming the nav item
+
+The nav label is one of the most visible design decisions in the product. It appears on every page, it's the first word in the sidebar, and it frames how users think about what 143 is. The name should be short (1-2 words), convey intelligence/agency, and feel native to modern AI-forward tools.
+
+#### Candidates
+
+| Name | Feel | Why it works | Why it might not |
+|------|------|-------------|-----------------|
+| **Autopilot** | Confident, autonomous | Evokes autonomous operation. Tesla, Vercel use this pattern. Implies intelligence + delegation. Immediately communicates "this thing drives itself." | Could imply the user isn't in control. Slightly overused in tech. |
+| **Command** | Authoritative, operator-native | Mission control framing. Short, active verb-energy. Implies the user is in command — the PM is their instrument. | Could feel too militaristic. Doesn't convey learning/intelligence. |
+| **Bridge** | Narrative, distinctive | Star Trek metaphor — the captain's seat. You see everything, you give orders. Unusual in product nav, which makes it memorable. | Requires explanation. Could feel pretentious. |
+| **Helm** | Nautical, directional | Where you steer the ship. Short. Implies direction-setting, which is exactly what the PM page is for. Uncommon in tech = distinctive. | Unfamiliar metaphor for some users. |
+| **Ops** | Technical, clean | DevOps-native teams understand instantly. Feels like a real workspace, not a dashboard. Short. | Too generic — could mean anything operational. Doesn't communicate AI. |
+| **Intel** | Sharp, specific | Short for "intelligence." The PM's core function is institutional intelligence. Stands out in a sidebar. | Could feel like surveillance. Military connotation. |
+| **PM** | Honest, minimal | Everyone knows what a PM does. Two characters. Zero learning curve. Matches the internal concept exactly. | Doesn't convey that it's AI-powered. Could be confused with "project management." |
+| **Strategy** | Clear, descriptive | What the PM actually does. No metaphor needed. Self-documenting. | Passive — doesn't convey a living system. Feels like a static page. |
+| **Pulse** | Alive, continuous | Implies a living system with a heartbeat. The PM is continuously analyzing, learning, acting. The page IS the product's pulse. | Vague. Could mean monitoring/health rather than intelligence. |
+
+#### Recommendation: **Autopilot**
+
+**Autopilot** is the strongest choice for three reasons:
+
+1. **It communicates the product's promise in one word.** When a new user sees "Autopilot" as the first nav item, they immediately understand: this thing runs itself. That's the entire pitch of 143 — an AI engineering team that works autonomously.
+
+2. **It frames the autonomy slider naturally.** The PM page has a 3-level autonomy model (Suggest → Act → Operate). "Autopilot" makes the metaphor intuitive: you can have autopilot in advisory mode, partial autopilot, or full autopilot. The language scales with the feature.
+
+3. **It differentiates from the word "PM."** Internally, the system is a PM agent. But "PM" as a nav label carries baggage — users might think project management, not AI intelligence. "Autopilot" sidesteps this entirely and positions 143 as forward-looking.
+
+```
+┌──────────────────────────────┐
+│ ▎Autopilot                   │  ← Landing page. The product's brain.
+│  Sessions                    │  ← The work being done.
+│  Projects                    │  ← The long-term goals.
+└──────────────────────────────┘
+```
+
+**Runner-up: Helm.** If "Autopilot" feels too autonomous for early trust-building, "Helm" puts the user in the driver's seat while still implying intelligence and direction. The sidebar reads: Helm → Sessions → Projects. "You're at the helm."
+
+**Decision**: Open — pick based on brand voice and positioning. Both Autopilot and Helm work. Autopilot leans into AI-forward confidence. Helm leans into user control.
 
 The bar for this decision:
 
@@ -188,15 +228,15 @@ An operator workspace is:
 
 ```
 ┌──────────────────────────────┐
-│ ▎PM Agent                    │  ← Landing page. Setup → workspace.
+│ ▎Autopilot                   │  ← Landing page. Setup → workspace.
 │  Sessions  ●                 │
 │  Projects                    │
 └──────────────────────────────┘
 ```
 
-Three nav items. PM first. The hierarchy tells the product story: intelligence → execution → strategy.
+Three nav items. Autopilot first. The hierarchy tells the product story: intelligence → execution → strategy. The name "Autopilot" immediately communicates the product promise — this thing drives itself. (See "Naming the nav item" above for alternatives.)
 
-Remove "Overview" as a nav concept. Remove "Prioritization" from the dropdown. Remove the orphaned `/plans` route. The PM Agent page is the single home for setup, intelligence, and steering.
+Remove "Overview" as a nav concept. Remove "Prioritization" from the dropdown. Remove the orphaned `/plans` route. The Autopilot page is the single home for setup, intelligence, and steering.
 
 ---
 
@@ -263,13 +303,13 @@ This is the clearest expression of the human/AI boundary. Users always know: top
 │  143.dev                                                                    │
 ├────────────┬─────────────────────────────────────────────────────────────────┤
 │            │                                                                │
-│  Overview  │  PM Agent                                         [✦ Analyze] │
+│ ▎Autopilot │  Autopilot                                        [✦ Analyze] │
 │            │  ────────────────────────────────────────────────────────────  │
 │  Sessions  │  Act on low-risk · 84% success · Last analyzed 2h ago          │
 │            │                                                                │
 │  Projects  │  ┌─ Current Recommendation ─────────────────────────────────┐ │
 │            │  │                                                          │ │
-│ ▎PM Agent  │  │  "Payment reliability cluster: 3 issues share auth      │ │
+│            │  │  "Payment reliability cluster: 3 issues share auth      │ │
 │            │  │   middleware root cause. Aligns with Q1 hardening."      │ │
 │            │  │                                                          │ │
 │            │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐   │ │
@@ -434,70 +474,164 @@ The PM Agent page is the landing page for all users — including brand new ones
 
 #### State 1: Pre-onboarding (no integrations connected)
 
-The setup wizard lives *inside* the PM page, framed as helping the PM get started. Every integration step is presented from the PM's perspective:
+The setup wizard lives *inside* the landing page, framed as helping the PM get started. Every integration step is presented from the PM's perspective. The layout uses the same sidebar and page structure as the populated workspace — the user is already "in the product," not in a separate onboarding flow.
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                                                              │
-│  Hi. I'm your PM.                                           │
-│                                                              │
-│  I'll analyze your issues, learn what works, and decide      │
-│  what your agents should build. But I need a few things      │
-│  to get started.                                             │
-│                                                              │
-│  ┌─ 1. Connect a coding agent ──────────────────────────┐   │
-│  │  Codex (recommended) · Claude Code · Gemini CLI      │   │
-│  └──────────────────────────────────────────────────────┘   │
-│                                                              │
-│  ┌─ 2. Connect GitHub ──────────────────────────────────┐   │
-│  │  I need repo access to read your code and open PRs   │   │
-│  └──────────────────────────────────────────────────────┘   │
-│                                                              │
-│  ┌─ 3. Optional: Sentry, Linear, Slack ────────────────┐   │
-│  │  More signal = better prioritization                  │   │
-│  └──────────────────────────────────────────────────────┘   │
-│                                                              │
-│  ═══════════════════════════════════════════════════════════ │
-│  Your Direction                                              │
-│  ═══════════════════════════════════════════════════════════ │
-│                                                              │
-│  Once connected, tell me what matters:                       │
-│                                                              │
-│  Philosophy    "What's your team's engineering philosophy?"  │
-│  Direction     "What are you focused on this quarter?"       │
-│  Focus areas   "Which areas should I prioritize?"            │
-│                                                              │
-└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  143.dev                                                                    │
+├────────────┬─────────────────────────────────────────────────────────────────┤
+│            │                                                                │
+│ ▎Autopilot │  Autopilot                                                     │
+│            │  ────────────────────────────────────────────────────────────  │
+│  Sessions  │  0 of 2 connected                                              │
+│            │                                                                │
+│  Projects  │  ┌──────────────────────────────────────────────────────────┐  │
+│            │  │                                                          │  │
+│            │  │  I'm your AI project manager. I analyze your issues,     │  │
+│            │  │  learn what works, and decide what your coding agents     │  │
+│            │  │  should build next.                                       │  │
+│            │  │                                                          │  │
+│            │  │  I need a few things to get started.                      │  │
+│            │  │                                                          │  │
+│            │  └──────────────────────────────────────────────────────────┘  │
+│            │                                                                │
+│            │  ┌─ 1 ─────────────────────────────────────────────────────┐  │
+│            │  │  Connect a coding agent                                  │  │
+│            │  │  I'll delegate work to this agent on your behalf.        │  │
+│            │  │                                                          │  │
+│            │  │  ┌────────────┐ ┌────────────┐ ┌────────────┐          │  │
+│            │  │  │   Codex    │ │ Claude Code│ │ Gemini CLI │          │  │
+│            │  │  │ recommended│ │            │ │            │          │  │
+│            │  │  └────────────┘ └────────────┘ └────────────┘          │  │
+│            │  └──────────────────────────────────────────────────────────┘  │
+│            │                                                                │
+│            │  ┌─ 2 ─────────────────────────────────────────────────────┐  │
+│            │  │  Connect GitHub                              Required   │  │
+│            │  │  I need repo access to read your code and open PRs.     │  │
+│            │  │                                          [Connect →]    │  │
+│            │  └──────────────────────────────────────────────────────────┘  │
+│            │                                                                │
+│            │  ┌─ 3 ─────────────────────────────────────────────────────┐  │
+│            │  │  Connect issue sources                       Optional   │  │
+│            │  │  More signal = better recommendations.                   │  │
+│            │  │                                                          │  │
+│            │  │  ○ Sentry  "I'll catch errors before your users do"     │  │
+│            │  │  ○ Linear  "I'll read your backlog and priorities"      │  │
+│            │  │  ○ Slack   "I'll pick up on what your team discusses"   │  │
+│            │  └──────────────────────────────────────────────────────────┘  │
+│            │                                                                │
+│            │  ═══════════════════════════════════════════════════════════   │
+│            │  Your Direction                                                │
+│            │  ═══════════════════════════════════════════════════════════   │
+│            │                                                                │
+│            │  ┌─ Product Context ─────────────────────────────────────────┐│
+│            │  │                                                          ││
+│            │  │  Once connected, tell me what matters to your team.       ││
+│            │  │                                                          ││
+│            │  │  Philosophy   "What's your engineering philosophy?"       ││
+│            │  │               e.g. "Ship reliability first, iterate fast" ││
+│            │  │               [Add →]                                     ││
+│            │  │                                                          ││
+│            │  │  Direction    "What's the current focus?"                 ││
+│            │  │               e.g. "Payments hardening for Q1 launch"    ││
+│            │  │               [Add →]                                     ││
+│            │  │                                                          ││
+│            │  │  Focus areas  "Which areas should I prioritize?"         ││
+│            │  │               e.g. slo, incident-prevention, billing     ││
+│            │  │               [Add →]                                     ││
+│            │  └──────────────────────────────────────────────────────────┘│
+│            │                                                                │
+└────────────┴────────────────────────────────────────────────────────────────┘
 ```
 
-This reframes onboarding as serving the PM's intelligence. "Connect GitHub" isn't an admin checkbox — it's "I need repo access to read your code." The user is setting up a collaborator, not configuring a tool.
+This reframes onboarding as serving the PM's intelligence. "Connect GitHub" isn't an admin checkbox — it's "I need repo access to read your code." The user is setting up a collaborator, not configuring a tool. Each integration explains *why the PM needs it* in one sentence.
 
-The "Your Direction" zone is visible even during setup. Users can start entering product context before the PM has ever run. This primes the PM for a better first analysis.
+The "Your Direction" zone is visible even during setup. Users can start entering product context before the PM has ever run. The placeholder examples ("Ship reliability first, iterate fast") show what good input looks like without requiring it.
 
 #### State 2: Post-onboarding, pre-first-analysis (connected but no PM run yet)
 
-The setup steps collapse into a "Connected" badge or disappear. The intelligence zone shows:
+The setup steps collapse. The page now shows the same zone structure as the full workspace, but with empty-state content in each zone. This is critical — the user should see the *shape* of the product before data fills it in, so the first analysis feels like the page coming alive, not a different page loading.
 
 ```
-┌─ Current Recommendation ─────────────────────────────────┐
-│                                                          │
-│  Ready to analyze.                                       │
-│                                                          │
-│  I can see 23 open issues across 2 repos.                │
-│  Run my first analysis to see what I'd recommend.        │
-│                                                          │
-│  [✦ Run First Analysis]                                  │
-│                                                          │
-└──────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  143.dev                                                                    │
+├────────────┬─────────────────────────────────────────────────────────────────┤
+│            │                                                                │
+│ ▎Autopilot │  Autopilot                                  [✦ First Analysis] │
+│            │  ────────────────────────────────────────────────────────────  │
+│  Sessions  │  Suggest · No data yet · ✓ GitHub · ✓ Sentry                   │
+│            │                                                                │
+│  Projects  │  ┌─ Current Recommendation ─────────────────────────────────┐ │
+│            │  │                                                          │ │
+│            │  │  I can see 23 open issues across 2 repos.                │ │
+│            │  │                                                          │ │
+│            │  │  Run my first analysis and I'll tell you which ones      │ │
+│            │  │  matter most, which ones cluster together, and what      │ │
+│            │  │  your agents should work on first.                        │ │
+│            │  │                                                          │ │
+│            │  │  This takes about 2 minutes.                             │ │
+│            │  │                                                          │ │
+│            │  │  [✦ Run First Analysis]                                  │ │
+│            │  │                                                          │ │
+│            │  └──────────────────────────────────────────────────────────┘ │
+│            │                                                                │
+│            │  ┌─ Decisions ──────────────┐  ┌─ Performance ──────────────┐ │
+│            │  │                          │  │                            │ │
+│            │  │  No decisions yet.        │  │  No data yet.              │ │
+│            │  │                          │  │                            │ │
+│            │  │  After the first          │  │  After a few cycles,      │ │
+│            │  │  analysis, you'll see     │  │  you'll see success       │ │
+│            │  │  what I chose and why.    │  │  rates by domain.         │ │
+│            │  │                          │  │                            │ │
+│            │  └──────────────────────────┘  └────────────────────────────┘ │
+│            │                                                                │
+│            │  ═══════════════════════════════════════════════════════════   │
+│            │  Your Direction                                                │
+│            │  ═══════════════════════════════════════════════════════════   │
+│            │                                                                │
+│            │  ┌─ Product Context ─────────────────────────────────────────┐│
+│            │  │                                                          ││
+│            │  │  Philosophy                    Direction                  ││
+│            │  │  "Ship reliability first"      Not set yet               ││
+│            │  │  [edit]                        [add →]                    ││
+│            │  │                                                          ││
+│            │  │  Focus areas                   Avoid areas               ││
+│            │  │  slo, incident-prevention      Not set yet               ││
+│            │  │  [edit]                        [add →]                    ││
+│            │  │                                                          ││
+│            │  │  Priority weights              Using defaults            ││
+│            │  │  Impact 0.30 · Severity 0.25 · Recency 0.20 · ...      ││
+│            │  │  [customize]                                             ││
+│            │  └──────────────────────────────────────────────────────────┘│
+│            │                                                                │
+│            │  ┌─ Autonomy ────────────────┐  ┌─ Documents ───────────────┐│
+│            │  │                            │  │                            ││
+│            │  │  ●─────○─────○            │  │  No documents yet.         ││
+│            │  │  Suggest  Act  Operate    │  │                            ││
+│            │  │  ▲                        │  │  Upload a roadmap,         ││
+│            │  │                            │  │  architecture doc, or      ││
+│            │  │  Starting in Suggest       │  │  strategy doc to give me   ││
+│            │  │  mode. I'll recommend,     │  │  more context.             ││
+│            │  │  you decide.               │  │                            ││
+│            │  │                            │  │  [+ Add document]         ││
+│            │  └────────────────────────────┘  └────────────────────────────┘│
+│            │                                                                │
+└────────────┴────────────────────────────────────────────────────────────────┘
 ```
 
-The "Your Direction" zone below shows the configuration forms with helpful nudges. The user can refine context before the first analysis, or just hit Analyze.
+Key design choices for this state:
+
+- **The zone structure matches the populated workspace exactly.** The user sees Recommendation, Decisions, Performance, Your Direction in the same positions. When the first analysis completes, content fills into these same zones — the page *comes alive* rather than changing shape.
+- **Empty zones explain what they'll show, not that they're empty.** "After the first analysis, you'll see what I chose and why" is better than "No data." Each zone previews its future value.
+- **The control strip already works.** It shows the connected integrations, the current autonomy level, and the primary action (First Analysis). The user can see the product is ready.
+- **"Your Direction" shows what the user already configured** during State 1, plus defaults for anything they skipped. The "Not set yet" + `[add →]` pattern nudges without blocking.
+- **Autonomy defaults to Suggest** with a first-person explanation: "I'll recommend, you decide." This is the PM introducing itself as a collaborator, not a setting being described.
 
 #### State 3: Post-first-analysis (full workspace)
 
-The full split-view workspace as designed in the layout above. The recommendation zone fills in. The decisions and performance cards populate. The activity feed starts. The page the user was already on *became* intelligent — no navigation required.
+The full split-view workspace as designed in the layout above. The recommendation zone fills in with the PM's analysis. The decisions card populates. The activity feed shows its first entry ("Today: Analyzed 23 issues · 3 delegated · 4 skipped"). The page the user was already on *became* intelligent — no navigation required. The zone structure didn't change — only the content within each zone.
 
-This three-state progression is the entire onboarding and product experience on a single URL. The PM page grows in place.
+This three-state progression is the entire onboarding and product experience on a single URL. The page grows in place.
 
 ---
 
@@ -937,14 +1071,14 @@ Most AI coding tools: "Give us a ticket, we'll write code."
 ### The information hierarchy tells the story
 
 ```
-PM Agent  → "Here's what we should do and why"  ← THE DIFFERENTIATOR (landing page)
-Sessions  → "Here's the work being done"
-Projects  → "Here's the long-term goals being pursued"
+Autopilot  → "Here's what we should do and why"  ← THE DIFFERENTIATOR (landing page)
+Sessions   → "Here's the work being done"
+Projects   → "Here's the long-term goals being pursued"
 ```
 
-Three concepts. The PM is first — the strategic entry point. Sessions and Projects are the execution layers beneath it. The hierarchy reads: intelligence → execution → strategy. Without the PM as the entry point, 143 looks like "a dashboard for agent runs." With the PM as the landing page, 143 looks like "an AI engineering team with a PM."
+Three concepts. Autopilot is first — the strategic entry point. Sessions and Projects are the execution layers beneath it. The hierarchy reads: intelligence → execution → strategy. Without the PM as the entry point, 143 looks like "a dashboard for agent runs." With Autopilot as the landing page, 143 looks like "an AI engineering team with a PM."
 
-The previous design had Overview → PM Agent → Sessions → Projects (4 items). Overview answered "here's the state of the world" — but that's exactly what the PM's recommendation zone already does, with intelligence behind it. Merging them removes a concept without losing any capability.
+The previous design had Overview → PM Agent → Sessions → Projects (4 items). Overview answered "here's the state of the world" — but that's exactly what Autopilot's recommendation zone already does, with intelligence behind it. Merging them removes a concept without losing any capability.
 
 ---
 

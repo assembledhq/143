@@ -20,10 +20,6 @@ func (m *mockIssueStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters
 	return nil, nil
 }
 
-func (m *mockIssueStore) CountByOrg(ctx context.Context, orgID uuid.UUID) (int, error) {
-	return 0, nil
-}
-
 func (m *mockIssueStore) UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status string) error {
 	m.updated = append(m.updated, issueID)
 	return nil
