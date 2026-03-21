@@ -8,6 +8,8 @@ import (
 )
 
 func TestGenerateSkillsDoc_WithIntegrations(t *testing.T) {
+	t.Parallel()
+
 	tr := NewToolRegistry(buildTestRegistry())
 	doc := GenerateSkillsDoc(tr)
 
@@ -52,6 +54,8 @@ func TestGenerateSkillsDoc_WithIntegrations(t *testing.T) {
 }
 
 func TestGenerateSkillsDoc_Empty(t *testing.T) {
+	t.Parallel()
+
 	tr := NewToolRegistry(integration.NewRegistry())
 	doc := GenerateSkillsDoc(tr)
 
@@ -61,6 +65,8 @@ func TestGenerateSkillsDoc_Empty(t *testing.T) {
 }
 
 func TestGenerateSkillsDoc_TokenEfficiency(t *testing.T) {
+	t.Parallel()
+
 	tr := NewToolRegistry(buildTestRegistry())
 	doc := GenerateSkillsDoc(tr)
 
@@ -76,6 +82,8 @@ func TestGenerateSkillsDoc_TokenEfficiency(t *testing.T) {
 }
 
 func TestGenerateSkillsDoc_ExamplesIncludeFlags(t *testing.T) {
+	t.Parallel()
+
 	tr := NewToolRegistry(buildTestRegistry())
 	doc := GenerateSkillsDoc(tr)
 
@@ -92,6 +100,8 @@ func TestGenerateSkillsDoc_ExamplesIncludeFlags(t *testing.T) {
 }
 
 func TestGenerateSkillsDoc_SentryOnly(t *testing.T) {
+	t.Parallel()
+
 	reg := integration.NewRegistry()
 	reg.RegisterErrorTracker(&mockErrorTracker{name: "sentry"})
 	tr := NewToolRegistry(reg)
