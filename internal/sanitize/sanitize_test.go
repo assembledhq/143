@@ -6,6 +6,7 @@ import (
 )
 
 func TestSanitizeForPrompt(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		input  string
@@ -67,6 +68,7 @@ func TestSanitizeForPrompt(t *testing.T) {
 }
 
 func TestSanitizeReviewComment(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		input  string
