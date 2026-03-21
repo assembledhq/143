@@ -364,7 +364,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 		// 8b. Create a working branch so the agent operates on a separate
 		// branch from the start, keeping the base branch clean.
-		workingBranch := formatWorkingBranch(run, &issue)
+		workingBranch := formatWorkingBranch(run, issue)
 		checkoutCmd := fmt.Sprintf("git checkout -b '%s'", shellEscapeSingleQuote(workingBranch))
 		var checkoutOut, checkoutErr bytes.Buffer
 		exitCode, execErr := o.provider.Exec(ctx, sandbox, checkoutCmd, &checkoutOut, &checkoutErr)
