@@ -59,6 +59,7 @@ func TestSanitizeForPrompt(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := SanitizeForPrompt(tt.input, tt.maxLen)
 			if got != tt.want {
 				t.Errorf("SanitizeForPrompt() = %q, want %q", got, tt.want)
@@ -115,6 +116,7 @@ func TestSanitizeReviewComment(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := SanitizeReviewComment(tt.input, tt.maxLen)
 			if got != tt.want {
 				t.Errorf("SanitizeReviewComment() = %q, want %q", got, tt.want)

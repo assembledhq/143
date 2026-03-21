@@ -122,6 +122,7 @@ func TestUserCredentialHandler_ListPersonal(t *testing.T) {
 	userID := uuid.New()
 
 	t.Run("returns summaries for all coding agent providers", func(t *testing.T) {
+		t.Parallel()
 		store := &mockUserCredentialStore{
 			listByUserFn: func(_ context.Context, _ uuid.UUID, _ uuid.UUID) ([]models.DecryptedUserCredential, error) {
 				return []models.DecryptedUserCredential{
@@ -157,6 +158,7 @@ func TestUserCredentialHandler_ListPersonal(t *testing.T) {
 	})
 
 	t.Run("returns 401 when no user in context", func(t *testing.T) {
+		t.Parallel()
 		h := newTestUserCredHandler(&mockUserCredentialStore{})
 
 		r := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -176,6 +178,7 @@ func TestUserCredentialHandler_UpsertPersonal(t *testing.T) {
 	userID := uuid.New()
 
 	t.Run("saves a personal credential", func(t *testing.T) {
+		t.Parallel()
 		var savedProvider models.ProviderName
 		store := &mockUserCredentialStore{
 			upsertFn: func(_ context.Context, _ uuid.UUID, _ uuid.UUID, cfg models.ProviderConfig, _ bool) error {
@@ -205,6 +208,7 @@ func TestUserCredentialHandler_UpsertPersonal(t *testing.T) {
 	})
 
 	t.Run("rejects team default from non-admin", func(t *testing.T) {
+		t.Parallel()
 		h := newTestUserCredHandler(&mockUserCredentialStore{})
 
 		body, _ := json.Marshal(map[string]interface{}{
@@ -225,6 +229,7 @@ func TestUserCredentialHandler_UpsertPersonal(t *testing.T) {
 	})
 
 	t.Run("allows team default from admin", func(t *testing.T) {
+		t.Parallel()
 		var isTeamDefault bool
 		store := &mockUserCredentialStore{
 			upsertFn: func(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ models.ProviderConfig, td bool) error {
@@ -253,6 +258,7 @@ func TestUserCredentialHandler_UpsertPersonal(t *testing.T) {
 	})
 
 	t.Run("rejects invalid provider", func(t *testing.T) {
+		t.Parallel()
 		h := newTestUserCredHandler(&mockUserCredentialStore{})
 
 		body, _ := json.Marshal(map[string]interface{}{
@@ -272,6 +278,7 @@ func TestUserCredentialHandler_UpsertPersonal(t *testing.T) {
 	})
 
 	t.Run("rejects non-coding-agent provider like openai_chatgpt", func(t *testing.T) {
+		t.Parallel()
 		h := newTestUserCredHandler(&mockUserCredentialStore{})
 
 		body, _ := json.Marshal(map[string]interface{}{

@@ -246,6 +246,7 @@ func TestParseDuration(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
+			t.Parallel()
 			got := parseDuration(tt.input, 14*24*time.Hour)
 			if got != tt.expected {
 				t.Errorf("parseDuration(%q) = %v, want %v", tt.input, got, tt.expected)

@@ -708,12 +708,12 @@ func TestCanDispatchForProject_DependencyGraphMode(t *testing.T) {
 		ExecutionMode: models.ProjectExecModeDependencyGraph,
 	}
 
-	t.Run("no active tasks allows 1", func(t *testing.T) {
+	t.Run("no active tasks allows 1", func(t *testing.T) { //nolint:paralleltest // subtests share mutable mock state
 		got := svc.canDispatchForProject(context.Background(), uuid.New(), project)
 		require.Equal(t, 1, got)
 	})
 
-	t.Run("active tasks blocks dispatch", func(t *testing.T) {
+	t.Run("active tasks blocks dispatch", func(t *testing.T) { //nolint:paralleltest // subtests share mutable mock state
 		pts.countByStatus = map[string]int{string(models.ProjectTaskStatusRunning): 1}
 		got := svc.canDispatchForProject(context.Background(), uuid.New(), project)
 		require.Equal(t, 0, got)
