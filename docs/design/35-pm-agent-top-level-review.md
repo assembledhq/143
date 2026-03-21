@@ -147,19 +147,31 @@ agents.md could theoretically include product context. But it can't:
 
 5. **Company-specific context deserves visibility.** Product philosophy, direction, focus areas, reference documents, and priority weights are the soul of the PM. They shouldn't be buried in a settings dropdown.
 
-### Arguments against promoting
+### Arguments against promoting (and why they don't hold)
 
-1. **Cruft risk.** Four nav items (Overview, Sessions, Projects, PM) starts to feel heavy. Each new top-level item adds cognitive load.
+1. ~~**Cruft risk.** Four nav items starts to feel heavy.~~ **Resolved.** The PM *replaces* Overview instead of adding a fourth item. We go from 3 (Overview, Sessions, Projects) to 3 (PM Agent, Sessions, Projects). Net-zero nav items.
 
-2. **The PM is infrastructure, not a destination.** Users don't "visit" the PM — they see its effects in Sessions and Projects. Making it a page might create a place nobody goes.
+2. **The PM is infrastructure, not a destination.** Users don't "visit" the PM — they see its effects in Sessions and Projects. Making it a page might create a place nobody goes. **Counter:** The split-view design makes the PM page the place where you *steer* the system, not just observe it. Configuration, autonomy, and documents live here. If users don't visit, the PM runs on stale context — visiting is how they keep the system aligned.
 
-3. **Settings vs. entity confusion.** Unlike Sessions and Projects (which are lists of things), the PM is a mix of config and output. It doesn't fit the "list → detail" pattern of the other nav items.
+3. **Settings vs. entity confusion.** Unlike Sessions and Projects (which are lists of things), the PM is a mix of config and output. It doesn't fit the "list → detail" pattern. **Counter:** This is the point. The PM is a *workspace*, not a list. The split-view makes this explicit — top half is intelligence (output), bottom half is direction (input). Different from Sessions/Projects, but intentionally so.
 
-4. **Design doc 30's original instinct was right.** "Enhance, don't add" is a good principle. The PM's value is best shown through its effects on Sessions and Projects, not on its own page.
+4. **Design doc 30's original instinct was right.** "Enhance, don't add" is a good principle. **Counter:** We're not adding — we're *replacing* Overview with something that earns the slot. The PM's value IS best shown through its effects on Sessions and Projects, but the PM page is where you understand and steer those effects.
 
-### Decision: Promote as an **operator workspace**
+### Decision: PM Agent as the **landing page** and operator workspace
 
-The PM should be top-level because we are committing to it as an **active operating surface** for the PM/engineer hybrid. It must clear a high bar:
+The PM should not just be top-level — it should be the **first nav item and the default landing page**, replacing the current Overview. The PM is not a feature of 143; the PM *is* 143. Making it the entry point tells the product story from the moment a user signs up.
+
+The current Overview page is a setup wizard that becomes dead weight after onboarding. Rather than maintaining a page that outlives its usefulness, the PM Agent page absorbs the setup flow as its empty state. The setup wizard is reframed as "help the PM get started" — every integration step serves the PM's intelligence, not generic admin.
+
+This means:
+
+- **Pre-onboarding**: The PM Agent page shows the setup wizard, framed as giving the PM what it needs to work ("I need repo access to read your code", "More signal = better prioritization")
+- **Post-onboarding, pre-first-analysis**: The page shows the "Your Direction" configuration zone with nudges to set philosophy, direction, and focus areas, plus a prominent "Analyze" button
+- **Post-first-analysis**: The full split-view workspace with current recommendation, decisions, performance, activity, and configuration
+
+The page grows *in place* as the user gives it more context. There is no transition between "setup" and "product." The product starts empty and becomes intelligent.
+
+The bar for this decision:
 
 - users visit it repeatedly, not just during setup
 - users can take a clear action from it
@@ -176,14 +188,15 @@ An operator workspace is:
 
 ```
 ┌──────────────────────────────┐
-│  Overview                    │
+│ ▎PM Agent                    │  ← Landing page. Setup → workspace.
 │  Sessions  ●                 │
 │  Projects                    │
-│  PM Agent                    │  ← Operator workspace
 └──────────────────────────────┘
 ```
 
-Remove "Prioritization" from the dropdown. Remove the orphaned `/plans` route. Consolidate everything PM into one place.
+Three nav items. PM first. The hierarchy tells the product story: intelligence → execution → strategy.
+
+Remove "Overview" as a nav concept. Remove "Prioritization" from the dropdown. Remove the orphaned `/plans` route. The PM Agent page is the single home for setup, intelligence, and steering.
 
 ---
 
@@ -417,14 +430,74 @@ This loop works without any navigation. The user scrolls down to steer, scrolls 
 
 ### Why this works for the empty state
 
-When a new org opens this page for the first time:
+The PM Agent page is the landing page for all users — including brand new ones. It must handle three states gracefully, each growing into the next without a page transition:
 
-- **Zone 2** shows: "No analysis yet — run your first cycle" with a prominent Analyze button
-- **Zone 3** shows: empty state cards with "Decision history builds after your first few cycles"
-- **Zone 4** shows: nothing (hidden until first activity)
-- **Zone 5** shows: the configuration forms with helpful nudges ("Add a short product philosophy to improve recommendation quality", "Define focus areas", "Attach roadmap or strategy docs")
+#### State 1: Pre-onboarding (no integrations connected)
 
-The bottom half is immediately useful — the user can start configuring before the PM has ever run. The top half fills in naturally after the first cycle. This is a much better onboarding experience than a dashboard full of empty cards.
+The setup wizard lives *inside* the PM page, framed as helping the PM get started. Every integration step is presented from the PM's perspective:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                                                              │
+│  Hi. I'm your PM.                                           │
+│                                                              │
+│  I'll analyze your issues, learn what works, and decide      │
+│  what your agents should build. But I need a few things      │
+│  to get started.                                             │
+│                                                              │
+│  ┌─ 1. Connect a coding agent ──────────────────────────┐   │
+│  │  Codex (recommended) · Claude Code · Gemini CLI      │   │
+│  └──────────────────────────────────────────────────────┘   │
+│                                                              │
+│  ┌─ 2. Connect GitHub ──────────────────────────────────┐   │
+│  │  I need repo access to read your code and open PRs   │   │
+│  └──────────────────────────────────────────────────────┘   │
+│                                                              │
+│  ┌─ 3. Optional: Sentry, Linear, Slack ────────────────┐   │
+│  │  More signal = better prioritization                  │   │
+│  └──────────────────────────────────────────────────────┘   │
+│                                                              │
+│  ═══════════════════════════════════════════════════════════ │
+│  Your Direction                                              │
+│  ═══════════════════════════════════════════════════════════ │
+│                                                              │
+│  Once connected, tell me what matters:                       │
+│                                                              │
+│  Philosophy    "What's your team's engineering philosophy?"  │
+│  Direction     "What are you focused on this quarter?"       │
+│  Focus areas   "Which areas should I prioritize?"            │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+```
+
+This reframes onboarding as serving the PM's intelligence. "Connect GitHub" isn't an admin checkbox — it's "I need repo access to read your code." The user is setting up a collaborator, not configuring a tool.
+
+The "Your Direction" zone is visible even during setup. Users can start entering product context before the PM has ever run. This primes the PM for a better first analysis.
+
+#### State 2: Post-onboarding, pre-first-analysis (connected but no PM run yet)
+
+The setup steps collapse into a "Connected" badge or disappear. The intelligence zone shows:
+
+```
+┌─ Current Recommendation ─────────────────────────────────┐
+│                                                          │
+│  Ready to analyze.                                       │
+│                                                          │
+│  I can see 23 open issues across 2 repos.                │
+│  Run my first analysis to see what I'd recommend.        │
+│                                                          │
+│  [✦ Run First Analysis]                                  │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+```
+
+The "Your Direction" zone below shows the configuration forms with helpful nudges. The user can refine context before the first analysis, or just hit Analyze.
+
+#### State 3: Post-first-analysis (full workspace)
+
+The full split-view workspace as designed in the layout above. The recommendation zone fills in. The decisions and performance cards populate. The activity feed starts. The page the user was already on *became* intelligent — no navigation required.
+
+This three-state progression is the entire onboarding and product experience on a single URL. The PM page grows in place.
 
 ---
 
@@ -441,11 +514,10 @@ The PM page should clearly communicate the boundary between:
   - reference documents
   - repo overrides
 - **PM-generated reasoning**
-  - plans
-  - prioritization
+  - recommendations and prioritization
   - clusters
   - skip decisions
-  - recommendations
+  - approach guidance for delegated sessions
 - **system-observed outcomes**
   - success/failure rates
   - merge outcomes
@@ -483,7 +555,7 @@ Represent autonomy as a simple 3-level slider with a capability map behind it.
 
 | Capability | Suggest | Act on low-risk work | Operate broadly |
 |-----------|---------|----------------------|-----------------|
-| Generate plans and recommendations | Yes | Yes | Yes |
+| Analyze and produce recommendations | Yes | Yes | Yes |
 | Recommend sessions | Yes | Yes | Yes |
 | Auto-create sessions | No | Yes, for bounded policy-compliant work | Yes, for most policy-compliant work |
 | Auto-create sessions for project work | No | Yes | Yes |
@@ -801,7 +873,7 @@ The system should not require users to read long prose to understand the recomme
 
 ## 8. Day 1 and Empty-State Experience
 
-The PM must work before the team has a rich body of PM context.
+Since the PM Agent page IS the landing page, the empty state experience is the first impression of the entire product. This is covered in detail in Section 5 under "Why this works for the empty state" — the page progresses through three states (pre-onboarding → post-onboarding → full workspace) on a single URL.
 
 ### Day 1 behavior
 
@@ -814,12 +886,14 @@ If an org has little or no context yet, the PM should still produce a usable fir
 
 ### Empty-state guidance
 
-The PM page should guide the user to improve recommendation quality over time:
+Since the "Your Direction" zone is visible even during onboarding (State 1), context nudges are part of the first experience:
 
-- missing philosophy → "Add a short product philosophy to improve tradeoff quality"
-- no focus areas → "Define one or two current focus areas"
+- missing philosophy → "What's your team's engineering philosophy?"
+- no focus areas → "Which areas should I prioritize?"
 - no documents → "Attach roadmap, architecture, or strategy docs"
-- no decision history → "The PM will get better after a few completed cycles"
+- no decision history → "I'll get better after a few completed cycles"
+
+These are framed as the PM asking for help, not as form labels. The PM is a collaborator being onboarded, not a tool being configured.
 
 ### Initial trust posture
 
@@ -863,13 +937,14 @@ Most AI coding tools: "Give us a ticket, we'll write code."
 ### The information hierarchy tells the story
 
 ```
-Overview  → "Here's the state of the world"
-PM Agent  → "Here's what we should do about it and why"  ← THE DIFFERENTIATOR
+PM Agent  → "Here's what we should do and why"  ← THE DIFFERENTIATOR (landing page)
 Sessions  → "Here's the work being done"
 Projects  → "Here's the long-term goals being pursued"
 ```
 
-Each level answers a different question. The PM is the strategic layer between "what exists" (Overview) and "what's happening" (Sessions/Projects). Without it visible, 143 looks like "a dashboard for agent runs." With it visible, 143 looks like "an AI engineering team with a PM."
+Three concepts. The PM is first — the strategic entry point. Sessions and Projects are the execution layers beneath it. The hierarchy reads: intelligence → execution → strategy. Without the PM as the entry point, 143 looks like "a dashboard for agent runs." With the PM as the landing page, 143 looks like "an AI engineering team with a PM."
+
+The previous design had Overview → PM Agent → Sessions → Projects (4 items). Overview answered "here's the state of the world" — but that's exactly what the PM's recommendation zone already does, with intelligence behind it. Merging them removes a concept without losing any capability.
 
 ---
 
@@ -901,29 +976,29 @@ The PM's context gathering now scales automatically by org size. This replaces t
 
 ## 12. Implementation Sketch
 
-### Phase 1: Consolidate and remove Plans from UI (low effort, high clarity)
-1. Add "PM Agent" to sidebar nav with `Brain` or `Lightbulb` icon
-2. Create `/pm` page with split-view layout (intelligence above, configuration below)
-3. Build "Current Recommendation" zone from existing PM analysis output (reformat plan data into recommendation presentation)
-4. Move `/prioritization` content → "Your Direction" zone (product context, autonomy, documents)
-5. Build Decisions + Performance cards from existing `pm_decision_log` data
-6. Build Recent Activity section from pm_plans + decision log history
-7. Remove `/plans` page from frontend navigation
-8. Remove "Prioritization" from dropdown menu
-9. Move PM status dot from Sessions to PM Agent nav item
-10. Create new `/api/v1/pm/current` endpoint that returns the latest recommendation in a presentation-friendly format (no raw plan structure exposed)
-11. Deprecate `/api/v1/pm/plans`, `/api/v1/pm/plans/{id}`, `/api/v1/pm/plans/latest` from frontend usage (keep for internal/debug)
+### Phase 1: PM Agent as landing page (high clarity, moderate effort)
+1. Replace "Overview" nav item with "PM Agent" (`Brain` or `Lightbulb` icon), make it the first nav item and default route
+2. Create `/pm` page with three-state layout: pre-onboarding (setup wizard), post-onboarding (ready state), full workspace (split-view)
+3. Move setup wizard content from current Overview into the PM page's pre-onboarding state, reframed as "help the PM get started"
+4. Build "Current Recommendation" zone from existing PM analysis output (reformat internal plan data into recommendation presentation)
+5. Move `/prioritization` content → "Your Direction" zone (product context, autonomy, documents)
+6. Build Decisions + Performance cards from existing `pm_decision_log` data
+7. Build Recent Activity section from pm_plans + decision log history
+8. Remove `/plans` page and `/overview` page from frontend
+9. Remove "Prioritization" from dropdown menu
+10. Remove PM status dot from Sessions (no longer needed — PM page is primary)
+11. Create new `/api/v1/pm/current` endpoint that returns the latest recommendation in a presentation-friendly format (no raw plan structure exposed)
+12. Deprecate `/api/v1/pm/plans`, `/api/v1/pm/plans/{id}`, `/api/v1/pm/plans/latest` from frontend usage (keep for internal/debug)
 
 ### Phase 2: Thread PM intelligence (medium effort, high impact)
-12. Add PM reasoning card to session detail (for PM-spawned sessions)
-13. Add "Deprioritized" collapsed section to recommendation zone with skip reasoning
-14. Add context stats to recommendation zone (issues reviewed, decisions learned from)
-15. Add "PM spawned this session" attribution badge on session cards
+13. Add PM reasoning card to session detail (for PM-spawned sessions)
+14. Add "Deprioritized" collapsed section to recommendation zone with skip reasoning
+15. Add context stats to recommendation zone (issues reviewed, decisions learned from)
+16. Add "PM spawned this session" attribution badge on session cards
 
 ### Phase 3: Show learning (higher effort, strongest differentiator)
-16. Build full decision history view with success rate, trends, filtering (linked from "View all decisions →")
-17. Add "context health" indicators to "Your Direction" zone showing how product context influences decisions
-18. Add "PM insights" card to Overview showing patterns and suggestions
+17. Build full decision history view with success rate, trends, filtering (linked from "View all decisions →")
+18. Add "context health" indicators to "Your Direction" zone showing how product context influences decisions
 19. Show effective context inheritance (org → repo) on per-repo settings
 20. Add autonomy readiness signals ("PM has 87% acceptance over 9 cycles — ready to advance?")
 
