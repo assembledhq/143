@@ -70,6 +70,7 @@ func buildTestRegistry() *integration.Registry {
 }
 
 func TestListToolsWithIntegrations(t *testing.T) {
+	t.Parallel()
 	tr := NewToolRegistry(buildTestRegistry())
 	tools := tr.ListTools()
 
@@ -108,6 +109,7 @@ func TestListToolsWithIntegrations(t *testing.T) {
 }
 
 func TestListToolsEmptyRegistry(t *testing.T) {
+	t.Parallel()
 	tr := NewToolRegistry(integration.NewRegistry())
 	tools := tr.ListTools()
 	if len(tools) != 0 {
@@ -116,6 +118,7 @@ func TestListToolsEmptyRegistry(t *testing.T) {
 }
 
 func TestCallToolErrorTrackerListErrors(t *testing.T) {
+	t.Parallel()
 	tr := NewToolRegistry(buildTestRegistry())
 	args := `{"severity":"high","limit":10}`
 	result := tr.CallTool(context.Background(), "sentry_list_errors", json.RawMessage(args))
@@ -138,6 +141,7 @@ func TestCallToolErrorTrackerListErrors(t *testing.T) {
 }
 
 func TestCallToolErrorTrackerGetError(t *testing.T) {
+	t.Parallel()
 	tr := NewToolRegistry(buildTestRegistry())
 	args := `{"error_id":"123"}`
 	result := tr.CallTool(context.Background(), "sentry_get_error", json.RawMessage(args))
@@ -159,6 +163,7 @@ func TestCallToolErrorTrackerGetError(t *testing.T) {
 }
 
 func TestCallToolTaskManagerCreateTask(t *testing.T) {
+	t.Parallel()
 	tr := NewToolRegistry(buildTestRegistry())
 	args := `{"title":"Fix auth bug","team_key":"ENG","priority":"high"}`
 	result := tr.CallTool(context.Background(), "linear_create_task", json.RawMessage(args))
@@ -177,6 +182,7 @@ func TestCallToolTaskManagerCreateTask(t *testing.T) {
 }
 
 func TestCallToolUpdateTask(t *testing.T) {
+	t.Parallel()
 	tr := NewToolRegistry(buildTestRegistry())
 	args := `{"task_id":"t1","comment":"Updated by PM agent"}`
 	result := tr.CallTool(context.Background(), "linear_update_task", json.RawMessage(args))
@@ -190,6 +196,7 @@ func TestCallToolUpdateTask(t *testing.T) {
 }
 
 func TestCallToolUnknown(t *testing.T) {
+	t.Parallel()
 	tr := NewToolRegistry(buildTestRegistry())
 	result := tr.CallTool(context.Background(), "unknown_tool", json.RawMessage("{}"))
 
@@ -202,6 +209,7 @@ func TestCallToolUnknown(t *testing.T) {
 }
 
 func TestCallToolGetTrend(t *testing.T) {
+	t.Parallel()
 	tr := NewToolRegistry(buildTestRegistry())
 	args := `{"error_id":"456","period":"7d"}`
 	result := tr.CallTool(context.Background(), "sentry_get_error_trend", json.RawMessage(args))
@@ -223,6 +231,7 @@ func TestCallToolGetTrend(t *testing.T) {
 }
 
 func TestParseDuration(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input    string
 		expected time.Duration
@@ -246,6 +255,7 @@ func TestParseDuration(t *testing.T) {
 }
 
 func TestToolSchemaHasRequiredFields(t *testing.T) {
+	t.Parallel()
 	tr := NewToolRegistry(buildTestRegistry())
 	tools := tr.ListTools()
 

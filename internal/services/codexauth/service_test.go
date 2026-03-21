@@ -68,6 +68,7 @@ func (m *mockCredentialStore) Disable(_ context.Context, orgID uuid.UUID, provid
 }
 
 func TestInitiateDeviceAuth(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/accounts/deviceauth/usercode" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
@@ -109,6 +110,7 @@ func TestInitiateDeviceAuth(t *testing.T) {
 }
 
 func TestPollForToken_AuthorizationPending(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{
@@ -141,6 +143,7 @@ func TestPollForToken_AuthorizationPending(t *testing.T) {
 }
 
 func TestPollForToken_HTTP403Pending(t *testing.T) {
+	t.Parallel()
 	// OpenAI returns 403 while the user hasn't entered the code yet.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
@@ -170,6 +173,7 @@ func TestPollForToken_HTTP403Pending(t *testing.T) {
 }
 
 func TestPollForToken_HTTP404Pending(t *testing.T) {
+	t.Parallel()
 	// OpenAI may also return 404 while the user hasn't entered the code.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -199,6 +203,7 @@ func TestPollForToken_HTTP404Pending(t *testing.T) {
 }
 
 func TestPollForToken_Success(t *testing.T) {
+	t.Parallel()
 	// The test server handles two requests:
 	// 1. Device code poll → returns authorization_code + code_verifier
 	// 2. Token exchange at /oauth/token → returns access_token + refresh_token
@@ -256,6 +261,7 @@ func TestPollForToken_Success(t *testing.T) {
 }
 
 func TestPollForToken_Expired(t *testing.T) {
+	t.Parallel()
 	store := newMockCredentialStore()
 	svc := NewService(store, zerolog.Nop())
 
@@ -276,6 +282,7 @@ func TestPollForToken_Expired(t *testing.T) {
 }
 
 func TestPollForToken_SlowDown(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{
@@ -313,6 +320,7 @@ func TestPollForToken_SlowDown(t *testing.T) {
 }
 
 func TestGetValidToken_NotConfigured(t *testing.T) {
+	t.Parallel()
 	store := newMockCredentialStore()
 	svc := NewService(store, zerolog.Nop())
 
@@ -326,6 +334,7 @@ func TestGetValidToken_NotConfigured(t *testing.T) {
 }
 
 func TestGetValidToken_ValidToken(t *testing.T) {
+	t.Parallel()
 	store := newMockCredentialStore()
 	svc := NewService(store, zerolog.Nop())
 
@@ -351,6 +360,7 @@ func TestGetValidToken_ValidToken(t *testing.T) {
 }
 
 func TestGetValidToken_AutoRefresh(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -385,6 +395,7 @@ func TestGetValidToken_AutoRefresh(t *testing.T) {
 }
 
 func TestRefreshToken_Revoked(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		w.Write([]byte(`{"error": "invalid_grant"}`))
@@ -416,6 +427,7 @@ func TestRefreshToken_Revoked(t *testing.T) {
 }
 
 func TestDisconnect(t *testing.T) {
+	t.Parallel()
 	store := newMockCredentialStore()
 	svc := NewService(store, zerolog.Nop())
 
@@ -438,6 +450,7 @@ func TestDisconnect(t *testing.T) {
 }
 
 func TestDisconnect_NilCredentials(t *testing.T) {
+	t.Parallel()
 	svc := NewService(nil, zerolog.Nop())
 	// Should not panic when credentials store is nil.
 	err := svc.Disconnect(context.Background(), uuid.New())
@@ -463,6 +476,7 @@ func (s *failingCredentialStore) Disable(_ context.Context, _ uuid.UUID, _ model
 }
 
 func TestGetValidToken_DBError(t *testing.T) {
+	t.Parallel()
 	svc := NewService(&failingCredentialStore{}, zerolog.Nop())
 
 	_, err := svc.GetValidToken(context.Background(), uuid.New())
@@ -472,6 +486,7 @@ func TestGetValidToken_DBError(t *testing.T) {
 }
 
 func TestPollForToken_RateLimited(t *testing.T) {
+	t.Parallel()
 	callCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
@@ -509,6 +524,7 @@ func TestPollForToken_RateLimited(t *testing.T) {
 }
 
 func TestPollForToken_AccessDenied(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{
@@ -547,6 +563,7 @@ func TestPollForToken_AccessDenied(t *testing.T) {
 }
 
 func TestPollForToken_ExpiredToken(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{
@@ -577,6 +594,7 @@ func TestPollForToken_ExpiredToken(t *testing.T) {
 }
 
 func TestPollForToken_UnknownError(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{
@@ -610,6 +628,7 @@ func TestPollForToken_UnknownError(t *testing.T) {
 }
 
 func TestPollForToken_EmptyErrorField(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Simulate a response with no "error" field (e.g. unexpected format).
 		w.WriteHeader(http.StatusInternalServerError)
@@ -643,6 +662,7 @@ func TestPollForToken_EmptyErrorField(t *testing.T) {
 }
 
 func TestPollForToken_RestoreFromDB_Active(t *testing.T) {
+	t.Parallel()
 	store := newMockCredentialStore()
 	svc := NewService(store, zerolog.Nop())
 
@@ -669,6 +689,7 @@ func TestPollForToken_RestoreFromDB_Active(t *testing.T) {
 }
 
 func TestPollForToken_RestoreFromDB_PendingAuth(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{
@@ -708,6 +729,7 @@ func TestPollForToken_RestoreFromDB_PendingAuth(t *testing.T) {
 }
 
 func TestPollForToken_InvalidConfigType(t *testing.T) {
+	t.Parallel()
 	store := newMockCredentialStore()
 	svc := NewService(store, zerolog.Nop())
 
@@ -731,6 +753,7 @@ func TestPollForToken_InvalidConfigType(t *testing.T) {
 }
 
 func TestGetValidToken_NilCredentials(t *testing.T) {
+	t.Parallel()
 	svc := NewService(nil, zerolog.Nop())
 
 	cfg, err := svc.GetValidToken(context.Background(), uuid.New())
@@ -743,6 +766,7 @@ func TestGetValidToken_NilCredentials(t *testing.T) {
 }
 
 func TestGetValidToken_InactiveStatus(t *testing.T) {
+	t.Parallel()
 	store := newMockCredentialStore()
 	svc := NewService(store, zerolog.Nop())
 
@@ -765,6 +789,7 @@ func TestGetValidToken_InactiveStatus(t *testing.T) {
 }
 
 func TestGetValidToken_InvalidConfigType(t *testing.T) {
+	t.Parallel()
 	store := newMockCredentialStore()
 	svc := NewService(store, zerolog.Nop())
 
@@ -784,6 +809,7 @@ func TestGetValidToken_InvalidConfigType(t *testing.T) {
 }
 
 func TestGetValidToken_RefreshFailsButTokenValid(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Refresh endpoint returns 500 error.
 		w.WriteHeader(http.StatusInternalServerError)
@@ -818,6 +844,7 @@ func TestGetValidToken_RefreshFailsButTokenValid(t *testing.T) {
 }
 
 func TestGetValidToken_RefreshFailsTokenExpired(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`{"error": "server_error"}`))
@@ -844,6 +871,7 @@ func TestGetValidToken_RefreshFailsTokenExpired(t *testing.T) {
 }
 
 func TestRefreshToken_NonAuthError(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`internal server error`))
@@ -869,6 +897,7 @@ func TestRefreshToken_NonAuthError(t *testing.T) {
 }
 
 func TestRefreshToken_InvalidConfigType(t *testing.T) {
+	t.Parallel()
 	store := newMockCredentialStore()
 	svc := NewService(store, zerolog.Nop())
 
@@ -888,6 +917,7 @@ func TestRefreshToken_InvalidConfigType(t *testing.T) {
 }
 
 func TestRefreshToken_NotFound(t *testing.T) {
+	t.Parallel()
 	store := newMockCredentialStore()
 	svc := NewService(store, zerolog.Nop())
 
@@ -898,6 +928,7 @@ func TestRefreshToken_NotFound(t *testing.T) {
 }
 
 func TestInitiateDeviceAuth_ServerError(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`server error`))
@@ -915,6 +946,7 @@ func TestInitiateDeviceAuth_ServerError(t *testing.T) {
 }
 
 func TestInitiateDeviceAuth_InvalidJSON(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`not json`))
@@ -932,6 +964,7 @@ func TestInitiateDeviceAuth_InvalidJSON(t *testing.T) {
 }
 
 func TestIsNotFoundError(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		err      error

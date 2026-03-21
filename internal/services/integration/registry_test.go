@@ -81,6 +81,7 @@ func (m *mockMsgSource) GetThread(_ context.Context, _ string) (*Thread, error) 
 // --- registry tests ---
 
 func TestRegistry_RegisterAndRetrieve(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 
 	// Register one of each type.
@@ -128,6 +129,7 @@ func TestRegistry_RegisterAndRetrieve(t *testing.T) {
 }
 
 func TestRegistry_NotFound(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 
 	_, err := r.ErrorTracker("sentry")
@@ -152,6 +154,7 @@ func TestRegistry_NotFound(t *testing.T) {
 }
 
 func TestRegistry_EmptyHasAny(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	if r.HasAny() {
 		t.Fatal("expected HasAny to be false on empty registry")
@@ -159,6 +162,7 @@ func TestRegistry_EmptyHasAny(t *testing.T) {
 }
 
 func TestRegistry_ListAll(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	r.RegisterErrorTracker(&mockErrorTracker{name: "sentry"})
 	r.RegisterErrorTracker(&mockErrorTracker{name: "datadog"})
@@ -181,6 +185,7 @@ func TestRegistry_ListAll(t *testing.T) {
 }
 
 func TestRegistry_Summary(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	r.RegisterErrorTracker(&mockErrorTracker{name: "sentry"})
 	r.RegisterTaskManager(&mockTaskManager{name: "linear"})
@@ -195,6 +200,7 @@ func TestRegistry_Summary(t *testing.T) {
 }
 
 func TestRegistry_OverwriteSameName(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 
 	et1 := &mockErrorTracker{name: "sentry", errors: []ErrorSummary{{ID: "1"}}}
