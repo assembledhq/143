@@ -145,9 +145,7 @@ export default function PrivacyPage() {
           >
             privacy@assembled.com
           </a>
-          . We will notify Organizations that have executed a Data Processing
-          Addendum before adding new subprocessors that materially change how
-          personal data is processed, providing reasonable time to object.
+          .
         </p>
       </Section>
 
@@ -241,60 +239,16 @@ export default function PrivacyPage() {
         <p>
           If you are located in the European Economic Area (EEA), the United
           Kingdom, or Switzerland, you may have additional rights under the
-          General Data Protection Regulation (GDPR) or the UK GDPR, including:
-        </p>
-        <ul className="list-disc pl-5 space-y-1.5">
-          <li>
-            <strong className="font-medium opacity-80">Right of access</strong>{" "}
-            - to obtain confirmation of whether we process your personal data
-            and to receive a copy
-          </li>
-          <li>
-            <strong className="font-medium opacity-80">Right to rectification</strong>{" "}
-            - to correct inaccurate or incomplete personal data
-          </li>
-          <li>
-            <strong className="font-medium opacity-80">Right to erasure</strong>{" "}
-            - to request deletion of your personal data, subject to legal
-            retention requirements
-          </li>
-          <li>
-            <strong className="font-medium opacity-80">Right to restriction</strong>{" "}
-            - to request that we limit processing of your personal data in
-            certain circumstances
-          </li>
-          <li>
-            <strong className="font-medium opacity-80">Right to data portability</strong>{" "}
-            - to receive your personal data in a structured, commonly used,
-            machine-readable format and to transmit it to another controller
-          </li>
-          <li>
-            <strong className="font-medium opacity-80">Right to object</strong>{" "}
-            - to object to processing based on legitimate interests or for
-            direct marketing purposes
-          </li>
-          <li>
-            <strong className="font-medium opacity-80">Right to lodge a complaint</strong>{" "}
-            - to file a complaint with your local data protection supervisory
-            authority
-          </li>
-        </ul>
-        <p>
-          Where we process personal data on the basis of your consent, you have
-          the right to withdraw that consent at any time without affecting the
-          lawfulness of processing carried out before withdrawal. To exercise
-          any of these rights, contact us at{" "}
+          General Data Protection Regulation (GDPR) or the UK GDPR, such as
+          the right to access, correct, delete, restrict, or port your personal
+          data. To exercise any of these rights, contact us at{" "}
           <a
             href="mailto:privacy@assembled.com"
             className="underline underline-offset-2"
           >
             privacy@assembled.com
           </a>
-          . We will respond within the timeframes required by applicable law
-          (generally within one month, with the possibility of extension for
-          complex requests). Where we transfer personal data outside the EEA or
-          UK, we rely on appropriate safeguards such as Standard Contractual
-          Clauses approved by the European Commission.
+          .
         </p>
       </Section>
 

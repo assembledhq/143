@@ -265,15 +265,10 @@ export default function TermsPage() {
 
       <Section heading="Changes">
         <p>
-          We may update these terms from time to time. For material changes, we
-          will provide at least 30 days&apos; advance notice via email to the
-          address associated with your account or your Organization&apos;s
-          primary contact, and we will update the date at the top of this page.
-          If you do not agree with the revised terms, you may terminate your
-          account before the changes take effect. Continued use of the service
-          after the effective date of revised terms constitutes acceptance.
-          Non-material changes (such as corrections, clarifications, or
-          formatting) may take effect immediately upon posting.
+          We may update these terms from time to time. If we make material
+          changes, we will notify you by updating the date at the top of this
+          page. Continued use of the service after changes constitutes
+          acceptance.
         </p>
       </Section>
 
@@ -285,11 +280,7 @@ export default function TermsPage() {
           California. You agree to waive any right to participate in a class
           action, class-wide arbitration, or representative proceeding. Either
           party may seek injunctive relief in a court of competent jurisdiction
-          to protect intellectual property rights. As an alternative to
-          arbitration, either party may bring qualifying claims in small claims
-          court in San Francisco, California, or, if you are an individual, in
-          the county of your residence, provided the claim falls within the
-          court&apos;s jurisdictional limits.
+          to protect intellectual property rights.
         </p>
       </Section>
 
@@ -302,16 +293,11 @@ export default function TermsPage() {
 
       <Section heading="Export controls and sanctions">
         <p>
-          You represent and warrant that you are not located in, under the
-          control of, or a national or resident of any country or territory
-          subject to U.S. government embargo or trade sanctions, and that you
-          are not listed on any U.S. government list of prohibited or restricted
-          parties. You agree not to use the service in violation of any
-          applicable export control, sanctions, or trade compliance laws,
-          including without limitation the U.S. Export Administration
-          Regulations, International Traffic in Arms Regulations, and programs
-          administered by the U.S. Treasury Department&apos;s Office of Foreign
-          Assets Control (OFAC).
+          You represent that you are not located in, or a national or resident
+          of, any country subject to U.S. trade sanctions, and that you are not
+          on any U.S. government list of prohibited or restricted parties. You
+          will not use the service in violation of any applicable export control
+          or sanctions laws.
         </p>
       </Section>
 
