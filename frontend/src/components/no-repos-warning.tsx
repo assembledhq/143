@@ -98,7 +98,14 @@ export function NoReposWarning() {
         <Button
           size="sm"
           variant="outline"
-          onClick={() => api.integrations.loginGitHub()}
+          onClick={async () => {
+            try {
+              await api.integrations.disconnect("github");
+            } catch (err) {
+              console.error("Failed to disconnect GitHub before reconnect:", err);
+            }
+            api.integrations.loginGitHub();
+          }}
           className="shrink-0 gap-1.5"
         >
           Reconnect GitHub

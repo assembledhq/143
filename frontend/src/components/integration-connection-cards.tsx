@@ -19,6 +19,7 @@ import {
 type IntegrationCallbacks = {
   onDisconnect?: (provider: IntegrationKey) => void;
   disconnectingProvider?: IntegrationKey | null;
+  disconnectErrorProvider?: IntegrationKey | null;
   disconnectError?: string | null;
 };
 
@@ -165,6 +166,7 @@ export function SourceControlIntegrationCard({
   onConnectGitHub,
   onDisconnect,
   disconnectingProvider,
+  disconnectErrorProvider,
   disconnectError,
   onSyncRepos,
   isSyncing,
@@ -202,7 +204,7 @@ export function SourceControlIntegrationCard({
                 onConnect={onConnectGitHub}
                 onDisconnect={onDisconnect}
                 disconnecting={disconnectingProvider === "github"}
-                disconnectError={disconnectingProvider === "github" ? disconnectError : null}
+                disconnectError={disconnectErrorProvider === "github" ? disconnectError : null}
               />
             </div>
           ),
@@ -222,6 +224,7 @@ export function AdditionalIntegrationCards({
   onConnectSlack,
   onDisconnect,
   disconnectingProvider,
+  disconnectErrorProvider,
   disconnectError,
 }: AdditionalIntegrationCardsProps) {
   const sentry = getIntegrationByKey("sentry");
@@ -245,7 +248,7 @@ export function AdditionalIntegrationCards({
               onConnect={onConnectSentry}
               onDisconnect={onDisconnect}
               disconnecting={disconnectingProvider === "sentry"}
-              disconnectError={disconnectingProvider === "sentry" ? disconnectError : null}
+              disconnectError={disconnectErrorProvider === "sentry" ? disconnectError : null}
             />
           ),
         },
@@ -263,7 +266,7 @@ export function AdditionalIntegrationCards({
               onConnect={onConnectLinear}
               onDisconnect={onDisconnect}
               disconnecting={disconnectingProvider === "linear"}
-              disconnectError={disconnectingProvider === "linear" ? disconnectError : null}
+              disconnectError={disconnectErrorProvider === "linear" ? disconnectError : null}
               loading={linearLoading}
             />
           ),
@@ -282,7 +285,7 @@ export function AdditionalIntegrationCards({
               onConnect={onConnectSlack}
               onDisconnect={onDisconnect}
               disconnecting={disconnectingProvider === "slack"}
-              disconnectError={disconnectingProvider === "slack" ? disconnectError : null}
+              disconnectError={disconnectErrorProvider === "slack" ? disconnectError : null}
             />
           ),
         },
@@ -298,6 +301,7 @@ export function AllIntegrationCards({
   onConnectSlack,
   onDisconnect,
   disconnectingProvider,
+  disconnectErrorProvider,
   disconnectError,
   githubConnected,
   githubRepoNames = [],
@@ -329,7 +333,7 @@ export function AllIntegrationCards({
               onConnect={onConnectGitHub}
               onDisconnect={onDisconnect}
               disconnecting={disconnectingProvider === "github"}
-              disconnectError={disconnectingProvider === "github" ? disconnectError : null}
+              disconnectError={disconnectErrorProvider === "github" ? disconnectError : null}
             />
           ),
         },
@@ -347,7 +351,7 @@ export function AllIntegrationCards({
               onConnect={onConnectSentry}
               onDisconnect={onDisconnect}
               disconnecting={disconnectingProvider === "sentry"}
-              disconnectError={disconnectingProvider === "sentry" ? disconnectError : null}
+              disconnectError={disconnectErrorProvider === "sentry" ? disconnectError : null}
             />
           ),
         },
@@ -365,7 +369,7 @@ export function AllIntegrationCards({
               onConnect={onConnectLinear}
               onDisconnect={onDisconnect}
               disconnecting={disconnectingProvider === "linear"}
-              disconnectError={disconnectingProvider === "linear" ? disconnectError : null}
+              disconnectError={disconnectErrorProvider === "linear" ? disconnectError : null}
               loading={linearLoading}
             />
           ),
@@ -384,7 +388,7 @@ export function AllIntegrationCards({
               onConnect={onConnectSlack}
               onDisconnect={onDisconnect}
               disconnecting={disconnectingProvider === "slack"}
-              disconnectError={disconnectingProvider === "slack" ? disconnectError : null}
+              disconnectError={disconnectErrorProvider === "slack" ? disconnectError : null}
             />
           ),
         },

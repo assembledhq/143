@@ -967,6 +967,50 @@ func TestIntegrationHandler_HandleGitHubOAuthCallback_TokenExchangeFails(t *test
 	require.Contains(t, w.Body.String(), "TOKEN_EXCHANGE_FAILED")
 }
 
+func TestIntegrationHandler_HandleGitHubOAuthCallback_DelegatesToAppInstalled(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now().UTC()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	handler := NewIntegrationHandler(
+		store, nil, "", "", "http://localhost:8080", "http://localhost:3000",
+		WithGitHubIntegrationOAuth("gh-id", "gh-secret"),
+	)
+
+	// When installation_id and setup_action=install are present, the callback
+	// handler should delegate to HandleGitHubAppInstalled instead of trying
+	// to exchange a code. Expect the ensureIntegration + UpdateConfig queries.
+	mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status = 'active'").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}))
+
+	mock.ExpectQuery("INSERT INTO integrations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
+
+	mock.ExpectExec("UPDATE integrations SET config").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/integrations/github/callback?code=some-code&installation_id=12345&setup_action=install&state=test-state", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.HandleGitHubOAuthCallback(w, req)
+
+	require.Equal(t, http.StatusTemporaryRedirect, w.Code)
+	require.Equal(t, "http://localhost:3000/integrations?github=connected", w.Header().Get("Location"))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestIntegrationHandler_ConnectGitHub_CreatesIntegration(t *testing.T) {
 	t.Parallel()
 

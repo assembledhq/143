@@ -298,6 +298,7 @@ export default function Overview() {
             onConnectGitHub={() => api.integrations.loginGitHub()}
             onDisconnect={(provider) => disconnectMutation.mutate(provider)}
             disconnectingProvider={disconnectMutation.isPending ? disconnectMutation.variables : null}
+            disconnectErrorProvider={disconnectMutation.isError ? disconnectMutation.variables ?? null : null}
             disconnectError={disconnectMutation.isError ? "Failed to disconnect." : null}
             onSyncRepos={syncRepos}
             isSyncing={isSyncingRepos}
@@ -313,6 +314,7 @@ export default function Overview() {
             onConnectSlack={() => api.integrations.loginSlack()}
             onDisconnect={(provider) => disconnectMutation.mutate(provider)}
             disconnectingProvider={disconnectMutation.isPending ? disconnectMutation.variables : null}
+            disconnectErrorProvider={disconnectMutation.isError ? disconnectMutation.variables ?? null : null}
             disconnectError={disconnectMutation.isError ? "Failed to disconnect." : null}
           />
         </div>
