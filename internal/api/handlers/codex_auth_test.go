@@ -126,6 +126,7 @@ func TestCodexAuthHandler_Initiate_Error(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/codex-auth/initiate", nil)
 	req = codexAddOrgContext(req)
+	req = req.WithContext(logger.WithContext(req.Context()))
 	w := httptest.NewRecorder()
 
 	handler.Initiate(w, req)
@@ -135,7 +136,7 @@ func TestCodexAuthHandler_Initiate_Error(t *testing.T) {
 	var resp map[string]interface{}
 	err := json.NewDecoder(w.Body).Decode(&resp)
 	require.NoError(t, err, "error response should be valid JSON")
-	require.Contains(t, logBuf.String(), "failed to initiate codex device auth", "initiate error should be logged with context")
+	require.Contains(t, logBuf.String(), "failed to initiate device auth", "initiate error should be logged with context")
 	require.Contains(t, logBuf.String(), "device auth request", "initiate error log should include wrapped service error details")
 }
 
