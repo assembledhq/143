@@ -235,11 +235,16 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 
 // Callback handles GitHub OAuth callback.
 func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
-	// GitHub App installation redirects here with setup_action=install.
+	// GitHub App installation redirects here with setup_action=install (new)
+	// or setup_action=update (reconfigured existing installation).
 	// This is not an OAuth flow — redirect to the authenticated integration
 	// endpoint that creates the integration record for the user's org.
-	if r.URL.Query().Get("setup_action") == "install" {
-		http.Redirect(w, r, h.cfg.BaseURL+"/api/v1/integrations/github/installed", http.StatusTemporaryRedirect)
+	if sa := r.URL.Query().Get("setup_action"); sa == "install" || sa == "update" {
+		redirectURL := h.cfg.BaseURL + "/api/v1/integrations/github/installed"
+		if qs := r.URL.RawQuery; qs != "" {
+			redirectURL += "?" + qs
+		}
+		http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 		return
 	}
 
