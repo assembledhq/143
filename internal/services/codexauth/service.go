@@ -306,6 +306,7 @@ func (s *Service) PollForToken(ctx context.Context, orgID uuid.UUID) (*AuthStatu
 		var errResp struct {
 			Error string `json:"error"`
 		}
+		// Intentionally ignored: if unmarshal fails, errResp.Error stays empty and the default switch case handles it.
 		_ = json.Unmarshal(body, &errResp)
 
 		switch errResp.Error {
