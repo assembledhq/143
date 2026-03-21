@@ -187,7 +187,9 @@ The nav label is one of the most visible design decisions in the product. It app
 | **Intel** | Sharp, specific | Short for "intelligence." The PM's core function is institutional intelligence. Stands out in a sidebar. | Could feel like surveillance. Military connotation. |
 | **PM** | Honest, minimal | Everyone knows what a PM does. Two characters. Zero learning curve. Matches the internal concept exactly. | Doesn't convey that it's AI-powered. Could be confused with "project management." |
 | **Strategy** | Clear, descriptive | What the PM actually does. No metaphor needed. Self-documenting. | Passive — doesn't convey a living system. Feels like a static page. |
-| **Pulse** | Alive, continuous | Implies a living system with a heartbeat. The PM is continuously analyzing, learning, acting. The page IS the product's pulse. | Vague. Could mean monitoring/health rather than intelligence. |
+| **Pulse** | Alive, continuous | Implies a living system with a heartbeat. The PM is continuously analyzing, learning, acting. The page IS the product's pulse. Linear uses this for their AI-summarized feed of what's happening. | Could mean monitoring/health rather than intelligence. Linear already owns this name in the dev tool space. |
+| **Signal** | Sharp, focused | The PM cuts through noise to surface what matters. Clean, modern, one word. Pairs naturally with prioritization work — the PM finds the signal in your backlog. | Could be confused with the messaging app. Doesn't convey agency — signals are passive. |
+| **Mission Control** | Authoritative, aspirational | NASA-style command. Positions the page as where you oversee everything and launch work. Has an aspirational, slightly playful tone that fits dev tools. | Two words is heavier in a sidebar. Could feel grandiose for small teams. |
 
 #### Recommendation: **Autopilot**
 
@@ -209,7 +211,9 @@ The nav label is one of the most visible design decisions in the product. It app
 
 **Runner-up: Helm.** If "Autopilot" feels too autonomous for early trust-building, "Helm" puts the user in the driver's seat while still implying intelligence and direction. The sidebar reads: Helm → Sessions → Projects. "You're at the helm."
 
-**Decision**: Open — pick based on brand voice and positioning. Both Autopilot and Helm work. Autopilot leans into AI-forward confidence. Helm leans into user control.
+**Also strong: Signal.** If the emphasis is on the PM's prioritization intelligence — cutting through noise, surfacing what matters — "Signal" is clean and sharp. It's more about *awareness* than *agency*, which may be a better fit if the PM starts in Suggest mode.
+
+**Decision**: Open — pick based on brand voice and positioning. Autopilot leans into AI-forward confidence. Helm leans into user control. Signal leans into intelligence.
 
 The bar for this decision:
 
