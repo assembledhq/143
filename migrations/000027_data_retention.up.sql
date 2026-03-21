@@ -1,9 +1,9 @@
 -- Indexes to support the batched retention deletes below.
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_webhook_deliveries_created_at
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_created_at
     ON webhook_deliveries (created_at);
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_session_logs_timestamp
+CREATE INDEX IF NOT EXISTS idx_session_logs_timestamp
     ON session_logs (timestamp);
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_jobs_status_updated_at
+CREATE INDEX IF NOT EXISTS idx_jobs_status_updated_at
     ON jobs (status, updated_at)
     WHERE status IN ('completed', 'failed');
 
