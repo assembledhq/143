@@ -8,6 +8,7 @@ import (
 )
 
 func TestRunCLI_Help(t *testing.T) {
+	t.Parallel()
 	tr := NewToolRegistry(buildTestRegistry())
 	var stdout, stderr bytes.Buffer
 	code := RunCLI(context.Background(), tr, []string{"--help"}, &stdout, &stderr)
@@ -28,6 +29,7 @@ func TestRunCLI_Help(t *testing.T) {
 }
 
 func TestRunCLI_ToolHelp(t *testing.T) {
+	t.Parallel()
 	tr := NewToolRegistry(buildTestRegistry())
 	var stdout, stderr bytes.Buffer
 	code := RunCLI(context.Background(), tr, []string{"sentry_list_errors", "--help"}, &stdout, &stderr)
@@ -45,6 +47,7 @@ func TestRunCLI_ToolHelp(t *testing.T) {
 }
 
 func TestRunCLI_ListErrors(t *testing.T) {
+	t.Parallel()
 	tr := NewToolRegistry(buildTestRegistry())
 	var stdout, stderr bytes.Buffer
 	code := RunCLI(context.Background(), tr, []string{
@@ -61,6 +64,7 @@ func TestRunCLI_ListErrors(t *testing.T) {
 }
 
 func TestRunCLI_GetError(t *testing.T) {
+	t.Parallel()
 	tr := NewToolRegistry(buildTestRegistry())
 	var stdout, stderr bytes.Buffer
 	code := RunCLI(context.Background(), tr, []string{
@@ -77,6 +81,7 @@ func TestRunCLI_GetError(t *testing.T) {
 }
 
 func TestRunCLI_CreateTask(t *testing.T) {
+	t.Parallel()
 	tr := NewToolRegistry(buildTestRegistry())
 	var stdout, stderr bytes.Buffer
 	code := RunCLI(context.Background(), tr, []string{
@@ -93,6 +98,7 @@ func TestRunCLI_CreateTask(t *testing.T) {
 }
 
 func TestRunCLI_UnknownTool(t *testing.T) {
+	t.Parallel()
 	tr := NewToolRegistry(buildTestRegistry())
 	var stdout, stderr bytes.Buffer
 	code := RunCLI(context.Background(), tr, []string{"nonexistent_tool"}, &stdout, &stderr)
@@ -106,6 +112,7 @@ func TestRunCLI_UnknownTool(t *testing.T) {
 }
 
 func TestRunCLI_MissingRequired(t *testing.T) {
+	t.Parallel()
 	tr := NewToolRegistry(buildTestRegistry())
 	var stdout, stderr bytes.Buffer
 	// sentry_get_error requires --error_id
@@ -120,6 +127,7 @@ func TestRunCLI_MissingRequired(t *testing.T) {
 }
 
 func TestRunCLI_NoArgs(t *testing.T) {
+	t.Parallel()
 	tr := NewToolRegistry(buildTestRegistry())
 	var stdout, stderr bytes.Buffer
 	code := RunCLI(context.Background(), tr, []string{}, &stdout, &stderr)
@@ -133,6 +141,7 @@ func TestRunCLI_NoArgs(t *testing.T) {
 }
 
 func TestRunCLI_ArrayFlag(t *testing.T) {
+	t.Parallel()
 	tr := NewToolRegistry(buildTestRegistry())
 	var stdout, stderr bytes.Buffer
 	code := RunCLI(context.Background(), tr, []string{
@@ -145,6 +154,7 @@ func TestRunCLI_ArrayFlag(t *testing.T) {
 }
 
 func TestParseFlagsToJSON(t *testing.T) {
+	t.Parallel()
 	schema := ToolSchema{
 		Type: "object",
 		Properties: map[string]SchemaProperty{
@@ -173,6 +183,7 @@ func TestParseFlagsToJSON(t *testing.T) {
 }
 
 func TestParseFlagsToJSON_InvalidNumber(t *testing.T) {
+	t.Parallel()
 	schema := ToolSchema{
 		Type: "object",
 		Properties: map[string]SchemaProperty{

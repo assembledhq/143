@@ -405,7 +405,7 @@ func TestWorker_Start_StopsOnContextCancel(t *testing.T) {
 	select {
 	case <-done:
 		// Worker stopped as expected.
-	case <-time.After(2 * time.Second):
+	case <-time.After(500 * time.Millisecond):
 		t.Fatal("Worker.Start did not stop after context cancellation")
 	}
 }
