@@ -41,7 +41,7 @@ export default function AboutPage() {
                 How it started
               </h2>
               <p>
-                143 began as an internal project at{" "}
+                143 started as an internal project at{" "}
                 <a
                   href="https://www.assembled.com"
                   target="_blank"
@@ -50,11 +50,10 @@ export default function AboutPage() {
                 >
                   Assembled
                 </a>
-                . Our engineering team needed a way to move faster, and we
-                looked everywhere for the right tool. Nothing quite had the
-                combination we were after: agentic thinking, cloud-based coding,
-                and the ability for non-technical teammates to jump in and build
-                product alongside engineers.
+                . We wanted to speed up our engineering team and looked at
+                everything out there. None of the existing tools had what we
+                needed: agentic thinking, cloud-based coding, and a way for
+                non-technical people to build product too.
               </p>
             </section>
 
@@ -65,19 +64,18 @@ export default function AboutPage() {
                 Built for ourselves first
               </h2>
               <p>
-                So we built one. 143 started as the tool we really wanted to
-                use&mdash;an autopilot for coding agents that let anyone on the
-                team spin up cloud sessions, describe what they needed, and watch
-                it come to life. Engineers used it to accelerate day-to-day
-                development. Product managers and designers used it to prototype
-                features and ship small fixes without waiting on a sprint cycle.
+                So we built it ourselves. 143 is an autopilot for coding agents
+                that lets anyone on the team spin up a cloud session, describe
+                what they need, and watch it get built. Engineers use it to move
+                faster day to day. PMs and designers use it to prototype features
+                and ship fixes without waiting on a sprint.
               </p>
               <p>
                 The name comes from the 143 days it took a small team of
-                Lockheed engineers to build the XP-80 Shooting
-                Star&mdash;America&rsquo;s first jet fighter&mdash;in 1943.
-                Proof that a small, focused team with the right tools can do the
-                impossible. That spirit is what we wanted to capture.
+                Lockheed engineers to build the XP-80 Shooting Star, America's
+                first jet fighter, in 1943. A small focused team with the right
+                tools doing the impossible. That's the spirit we wanted to
+                capture.
               </p>
             </section>
 
@@ -88,14 +86,12 @@ export default function AboutPage() {
                 Open source from day one
               </h2>
               <p>
-                143 was built from the beginning to be open-source software. Our
-                founders have been involved in open source for a long time and
-                always wanted to find a way to contribute back to the community.
-                143 was that opportunity. We believe the best developer tools are
-                built in the open, shaped by the people who use them, and we hope
-                143 helps other teams&mdash;whether they have five engineers or
-                five hundred&mdash;move faster and bring more people into the
-                building process.
+                We built 143 as open source from the start. Our founders have
+                been in open source for a long time and always wanted to
+                contribute back to the community. 143 was that chance. We think
+                the best developer tools are built in the open and shaped by the
+                people who use them. We hope it helps other teams move faster and
+                bring more people into the building process.
               </p>
             </section>
 
@@ -106,26 +102,24 @@ export default function AboutPage() {
                 One platform, every model, every agent
               </h2>
               <p>
-                One of our biggest frustrations was that every model provider
-                only supported their own models. We wanted something
-                cross-platform&mdash;a single place where different members of
-                the team could use the coding agents they preferred, whether that
-                was Claude, GPT, Gemini, or anything else, without being locked
-                into one vendor&rsquo;s ecosystem.
+                Every model provider only supports their own models. That
+                frustrated us. We wanted one place where different people on the
+                team could use whatever coding agent they preferred, whether
+                that's Claude, GPT, Gemini, or something else, without getting
+                locked into a single vendor.
               </p>
               <p>
-                But it wasn&rsquo;t just about model choice. We wanted a single
-                experience for the entire team that let you see all coding agent
-                usage in one place, collaborate on projects that spanned multiple
-                PRs and multiple commits, and keep context alive across
-                sessions&mdash;not start from scratch every time.
+                It's not just about model choice though. We wanted a single
+                experience for the whole team where you can see all coding agent
+                usage in one place, collaborate on projects that span multiple
+                PRs and commits, and keep context alive across sessions instead
+                of starting from scratch every time.
               </p>
               <p>
-                Most importantly, we wanted to build a PM agent that truly
-                understood your company&rsquo;s context&mdash;your codebase,
-                your product, your priorities&mdash;and could keep building on
-                top of that knowledge over time. Not a generic assistant, but one
-                that gets smarter the more your team uses it.
+                We also wanted to build a PM agent that actually knows your
+                company's context. Your codebase, your product, your priorities.
+                One that keeps building on that knowledge over time and gets
+                smarter the more your team uses it.
               </p>
             </section>
 
@@ -145,10 +139,9 @@ export default function AboutPage() {
                   Assembled
                 </a>{" "}
                 is a workforce management platform that helps support teams
-                deliver better customer experiences. 143 is our way of sharing a
-                piece of the engineering culture that makes Assembled
-                possible&mdash;a belief that great tools should empower everyone
-                to build.
+                deliver better customer experiences. 143 is a piece of the
+                engineering culture behind Assembled that we wanted to share with
+                everyone.
               </p>
             </section>
           </div>
