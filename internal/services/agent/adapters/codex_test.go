@@ -56,7 +56,7 @@ func TestCodexAdapter_PreparePrompt(t *testing.T) {
 				TokenMode: "low",
 			},
 			wantErr:   false,
-			wantToken: lowTokenMax,
+			wantToken: defaultLowTokenMax,
 		},
 		{
 			name: "high token mode",
@@ -69,7 +69,7 @@ func TestCodexAdapter_PreparePrompt(t *testing.T) {
 				TokenMode: "high",
 			},
 			wantErr:   false,
-			wantToken: highTokenMax,
+			wantToken: defaultHighTokenMax,
 		},
 	}
 

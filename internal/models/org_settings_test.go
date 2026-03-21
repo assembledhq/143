@@ -225,3 +225,147 @@ func TestConfidenceThresholdsForAutonomy(t *testing.T) {
 	unknown := ConfidenceThresholdsForAutonomy("unknown")
 	require.Equal(t, balanced, unknown)
 }
+
+func TestOrgSize_Validate(t *testing.T) {
+	t.Parallel()
+
+	require.NoError(t, OrgSizeSmall.Validate())
+	require.NoError(t, OrgSizeMedium.Validate())
+	require.NoError(t, OrgSizeLarge.Validate())
+	require.NoError(t, OrgSizeEnterprise.Validate())
+	require.Error(t, OrgSize("").Validate(), "empty string should be invalid")
+	require.Error(t, OrgSize("huge").Validate())
+}
+
+func TestOrgSize_ContextLimits(t *testing.T) {
+	t.Parallel()
+
+	small := OrgSizeSmall.ContextLimits()
+	require.Equal(t, 50, small.MaxOpenIssues, "small orgs should have lower issue limit")
+	require.Equal(t, 30_000, small.PMMaxTokens, "small orgs should have lower PM token limit")
+
+	medium := OrgSizeMedium.ContextLimits()
+	require.Equal(t, 100, medium.MaxOpenIssues, "medium should match previous defaults")
+	require.Equal(t, 50_000, medium.PMMaxTokens, "medium should match previous PM token default")
+	require.Equal(t, 50_000, medium.AgentLowTokenMax, "medium low token should match previous default")
+	require.Equal(t, 200_000, medium.AgentHighTokenMax, "medium high token should match previous default")
+
+	large := OrgSizeLarge.ContextLimits()
+	require.Equal(t, 300, large.MaxOpenIssues, "large orgs should see more issues")
+	require.Equal(t, 100_000, large.PMMaxTokens, "large orgs should have higher PM token limit")
+
+	enterprise := OrgSizeEnterprise.ContextLimits()
+	require.Equal(t, 500, enterprise.MaxOpenIssues, "enterprise orgs should see most issues")
+	require.Equal(t, 150_000, enterprise.PMMaxTokens, "enterprise orgs should have highest PM token limit")
+	require.Equal(t, 75_000, enterprise.AgentLowTokenMax, "enterprise low tokens should be elevated")
+	require.Equal(t, 250_000, enterprise.AgentHighTokenMax, "enterprise high tokens should be elevated")
+
+	// Verify description truncation decreases for larger orgs (more issues = less per-issue budget)
+	require.Greater(t, small.IssueDescriptionMax, enterprise.IssueDescriptionMax,
+		"larger orgs should have shorter per-issue descriptions to fit more issues in context")
+}
+
+func TestOrgSize_PMScheduleHours(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, 6, OrgSizeSmall.PMScheduleHours(), "small orgs run PM less often")
+	require.Equal(t, 4, OrgSizeMedium.PMScheduleHours(), "medium matches previous default")
+	require.Equal(t, 2, OrgSizeLarge.PMScheduleHours(), "large orgs need more frequent PM")
+	require.Equal(t, 1, OrgSizeEnterprise.PMScheduleHours(), "enterprise orgs need hourly PM")
+}
+
+func TestOrgSize_MaxConcurrentRuns(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, 3, OrgSizeSmall.MaxConcurrentRuns())
+	require.Equal(t, 5, OrgSizeMedium.MaxConcurrentRuns())
+	require.Equal(t, 10, OrgSizeLarge.MaxConcurrentRuns())
+	require.Equal(t, 20, OrgSizeEnterprise.MaxConcurrentRuns())
+}
+
+func TestContextLimits_WithDefaults(t *testing.T) {
+	t.Parallel()
+
+	defaults := OrgSizeLarge.ContextLimits()
+
+	t.Run("fills all zero fields", func(t *testing.T) {
+		t.Parallel()
+		empty := ContextLimits{}
+		result := empty.WithDefaults(defaults)
+		require.Equal(t, defaults, result, "all-zero input should produce the defaults")
+	})
+
+	t.Run("preserves explicit values", func(t *testing.T) {
+		t.Parallel()
+		partial := ContextLimits{
+			MaxOpenIssues: 400,
+			PMMaxTokens:   120_000,
+		}
+		result := partial.WithDefaults(defaults)
+		require.Equal(t, 400, result.MaxOpenIssues, "explicit value should be preserved")
+		require.Equal(t, 120_000, result.PMMaxTokens, "explicit value should be preserved")
+		require.Equal(t, defaults.MaxTriagedIssues, result.MaxTriagedIssues, "zero field should get default")
+		require.Equal(t, defaults.AgentHighTokenMax, result.AgentHighTokenMax, "zero field should get default")
+	})
+
+	t.Run("idempotent on complete input", func(t *testing.T) {
+		t.Parallel()
+		complete := OrgSizeEnterprise.ContextLimits()
+		result := complete.WithDefaults(defaults)
+		require.Equal(t, complete, result, "already-complete input should be unchanged")
+	})
+}
+
+func TestParseOrgSettings_OrgSizeDefaults(t *testing.T) {
+	t.Parallel()
+
+	// Large org should get size-appropriate defaults
+	raw := json.RawMessage(`{"org_size": "large"}`)
+	s, err := ParseOrgSettings(raw)
+	require.NoError(t, err)
+
+	require.Equal(t, OrgSizeLarge, s.OrgSize)
+	require.Equal(t, 10, s.MaxConcurrentRuns, "large org should default to 10 concurrent runs")
+	require.Equal(t, 2, s.PMScheduleHours, "large org should default to 2-hour PM schedule")
+	require.Equal(t, 300, s.ContextLimits.MaxOpenIssues, "large org should see 300 open issues")
+	require.Equal(t, 100_000, s.ContextLimits.PMMaxTokens, "large org should get 100k PM tokens")
+}
+
+func TestParseOrgSettings_OrgSizeWithOverrides(t *testing.T) {
+	t.Parallel()
+
+	// Explicit overrides should take precedence over size defaults
+	raw := json.RawMessage(`{
+		"org_size": "large",
+		"max_concurrent_runs": 15,
+		"pm_schedule_hours": 3,
+		"context_limits": {
+			"max_open_issues": 400,
+			"pm_max_tokens": 120000
+		}
+	}`)
+	s, err := ParseOrgSettings(raw)
+	require.NoError(t, err)
+
+	require.Equal(t, 15, s.MaxConcurrentRuns, "explicit override should win over size default")
+	require.Equal(t, 3, s.PMScheduleHours, "explicit override should win over size default")
+	require.Equal(t, 400, s.ContextLimits.MaxOpenIssues, "explicit context limit should win")
+	require.Equal(t, 120_000, s.ContextLimits.PMMaxTokens, "explicit token limit should win")
+	// Non-overridden fields should still get size defaults
+	require.Equal(t, 200, s.ContextLimits.MaxTriagedIssues, "non-overridden should use size default")
+}
+
+func TestParseOrgSettings_DefaultOrgSizeIsMedium(t *testing.T) {
+	t.Parallel()
+
+	s, err := ParseOrgSettings(nil)
+	require.NoError(t, err)
+
+	// With no org_size set, defaults should match medium profile (backward compatible)
+	require.Equal(t, 5, s.MaxConcurrentRuns, "default should match medium concurrent runs")
+	require.Equal(t, 4, s.PMScheduleHours, "default should match medium PM schedule")
+	require.Equal(t, 100, s.ContextLimits.MaxOpenIssues, "default should match medium open issues")
+	require.Equal(t, 50_000, s.ContextLimits.PMMaxTokens, "default should match medium PM tokens")
+	require.Equal(t, 50_000, s.ContextLimits.AgentLowTokenMax, "default should match medium low tokens")
+	require.Equal(t, 200_000, s.ContextLimits.AgentHighTokenMax, "default should match medium high tokens")
+}

@@ -92,10 +92,15 @@ func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID
 		return fmt.Errorf("write project context: %w", err)
 	}
 
+	pmTokenLimit := settings.ContextLimits.PMMaxTokens
+	if pmTokenLimit <= 0 {
+		pmTokenLimit = defaultPMMaxTokens
+	}
+
 	prompt := &agent.AgentPrompt{
 		SystemPrompt: buildProjectCycleSystemPrompt(&projectSummary),
 		UserPrompt:   string(contextJSON),
-		MaxTokens:    pmMaxTokens,
+		MaxTokens:    pmTokenLimit,
 	}
 
 	logCh := make(chan agent.LogEntry, 100)

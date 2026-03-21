@@ -261,10 +261,15 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		available = 0
 	}
 
+	pmTokenLimit := ctxBundle.settings.ContextLimits.PMMaxTokens
+	if pmTokenLimit <= 0 {
+		pmTokenLimit = defaultPMMaxTokens
+	}
+
 	prompt := &agent.AgentPrompt{
 		SystemPrompt: buildPMSystemPrompt(available, ctxBundle.pmContext.MaxConcurrentRuns, len(ctxBundle.pmContext.ActiveProjects)),
 		UserPrompt:   string(contextJSON),
-		MaxTokens:    pmMaxTokens,
+		MaxTokens:    pmTokenLimit,
 	}
 
 	logCh := make(chan agent.LogEntry, 100)
