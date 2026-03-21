@@ -230,7 +230,7 @@ describe("integration connection cards", () => {
         githubConnected
         onConnectGitHub={vi.fn()}
         onDisconnect={vi.fn()}
-        disconnectingProvider="github"
+        disconnectErrorProvider="github"
         disconnectError="Failed to disconnect."
       />
     );
