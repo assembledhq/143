@@ -47,6 +47,14 @@ export default function Footer({ isDark }: FooterProps) {
               </p>
               <ul className="space-y-2">
                 <li>
+                  <Link
+                    href="/about"
+                    className={`text-xs ${isDark ? "text-white/30 hover:text-white/60" : "text-slate-500 hover:text-slate-700"} transition-colors`}
+                  >
+                    About
+                  </Link>
+                </li>
+                <li>
                   <a
                     href="https://github.com/assembledhq/143"
                     target="_blank"
