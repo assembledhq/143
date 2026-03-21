@@ -462,11 +462,11 @@ func TestScoringAndHelpers(t *testing.T) {
 		{
 			name: "org settings parsing uses defaults for invalid json",
 			validate: func(t *testing.T) {
-				settings := parseOrgSettings(json.RawMessage(`{"autonomy_level":"auto","execution_aggressiveness":4}`))
+				settings := parseOrgSettings(zerolog.Nop(), json.RawMessage(`{"autonomy_level":"auto","execution_aggressiveness":4}`))
 				require.Equal(t, "auto", settings.AutonomyLevel, "parseOrgSettings should parse autonomy level when provided")
 				require.Equal(t, 4, settings.Aggressiveness, "parseOrgSettings should parse aggressiveness when provided")
 
-				badSettings := parseOrgSettings(json.RawMessage(`{"autonomy_level":`))
+				badSettings := parseOrgSettings(zerolog.Nop(), json.RawMessage(`{"autonomy_level":`))
 				require.Equal(t, "", badSettings.AutonomyLevel, "parseOrgSettings should return zero values for invalid json")
 			},
 		},

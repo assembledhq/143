@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/rs/zerolog"
 )
 
 // VerifyWebhookSignature verifies HMAC-SHA256 signatures on inbound webhooks.
@@ -25,6 +27,7 @@ func VerifyWebhookSignature(headerName, secret, prefixToStrip string) func(http.
 
 			signature := r.Header.Get(headerName)
 			if signature == "" {
+				zerolog.Ctx(r.Context()).Warn().Str("header", headerName).Msg("missing webhook signature")
 				http.Error(w, `{"error":{"code":"UNAUTHORIZED","message":"missing webhook signature"}}`, http.StatusUnauthorized)
 				return
 			}
@@ -36,6 +39,7 @@ func VerifyWebhookSignature(headerName, secret, prefixToStrip string) func(http.
 			// Read the body for verification, then restore it
 			body, err := io.ReadAll(r.Body)
 			if err != nil {
+				zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to read webhook request body")
 				http.Error(w, `{"error":{"code":"BAD_REQUEST","message":"failed to read request body"}}`, http.StatusBadRequest)
 				return
 			}
@@ -47,6 +51,7 @@ func VerifyWebhookSignature(headerName, secret, prefixToStrip string) func(http.
 			expectedMAC := hex.EncodeToString(mac.Sum(nil))
 
 			if !hmac.Equal([]byte(signature), []byte(expectedMAC)) {
+				zerolog.Ctx(r.Context()).Warn().Str("header", headerName).Msg("invalid webhook signature")
 				http.Error(w, `{"error":{"code":"UNAUTHORIZED","message":"invalid webhook signature"}}`, http.StatusUnauthorized)
 				return
 			}

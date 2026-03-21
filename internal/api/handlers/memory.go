@@ -31,7 +31,7 @@ func (h *MemoryHandler) ListByRepo(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	repo := chi.URLParam(r, "*")
 	if repo == "" {
-		writeError(w, http.StatusBadRequest, "MISSING_REPO", "repo path is required")
+		writeError(w, r, http.StatusBadRequest, "MISSING_REPO", "repo path is required")
 		return
 	}
 
@@ -44,7 +44,7 @@ func (h *MemoryHandler) ListByRepo(w http.ResponseWriter, r *http.Request) {
 
 	memories, err := h.memoryStore.ListByRepo(r.Context(), orgID, repo, filters)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list memories")
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list memories", err)
 		return
 	}
 	if memories == nil {
@@ -67,7 +67,7 @@ func (h *MemoryHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	memoryID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid memory ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid memory ID")
 		return
 	}
 
@@ -75,18 +75,18 @@ func (h *MemoryHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 		Status string `json:"status"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
 
 	if req.Status != "active" && req.Status != "dismissed" {
-		writeError(w, http.StatusBadRequest, "INVALID_STATUS", "status must be 'active' or 'dismissed'")
+		writeError(w, r, http.StatusBadRequest, "INVALID_STATUS", "status must be 'active' or 'dismissed'")
 		return
 	}
 
 	memory, err := h.memoryStore.UpdateMemoryAndGet(r.Context(), orgID, memoryID, nil, &req.Status)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update memory status")
+		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update memory status", err)
 		return
 	}
 
@@ -98,7 +98,7 @@ func (h *MemoryHandler) UpdateRule(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	memoryID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid memory ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid memory ID")
 		return
 	}
 
@@ -106,18 +106,18 @@ func (h *MemoryHandler) UpdateRule(w http.ResponseWriter, r *http.Request) {
 		Rule string `json:"rule"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
 
 	if req.Rule == "" {
-		writeError(w, http.StatusBadRequest, "MISSING_RULE", "rule text is required")
+		writeError(w, r, http.StatusBadRequest, "MISSING_RULE", "rule text is required")
 		return
 	}
 
 	memory, err := h.memoryStore.UpdateMemoryAndGet(r.Context(), orgID, memoryID, &req.Rule, nil)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update memory rule")
+		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update memory rule", err)
 		return
 	}
 
@@ -144,7 +144,7 @@ func (h *MemoryHandler) ListComments(w http.ResponseWriter, r *http.Request) {
 
 	comments, err := h.commentStore.ListByOrg(r.Context(), orgID, filters)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list review comments")
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list review comments", err)
 		return
 	}
 	if comments == nil {
@@ -174,12 +174,12 @@ func (h *MemoryHandler) Create(w http.ResponseWriter, r *http.Request) {
 		FilePatterns []string `json:"file_patterns,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
 
 	if req.Rule == "" {
-		writeError(w, http.StatusBadRequest, "MISSING_RULE", "rule text is required")
+		writeError(w, r, http.StatusBadRequest, "MISSING_RULE", "rule text is required")
 		return
 	}
 	if req.Category == "" {
@@ -189,18 +189,18 @@ func (h *MemoryHandler) Create(w http.ResponseWriter, r *http.Request) {
 		req.Scope = "repo"
 	}
 	if req.Scope != "repo" && req.Scope != "org" {
-		writeError(w, http.StatusBadRequest, "INVALID_SCOPE", "scope must be 'repo' or 'org'")
+		writeError(w, r, http.StatusBadRequest, "INVALID_SCOPE", "scope must be 'repo' or 'org'")
 		return
 	}
 	if req.Scope == "repo" && req.Repo == "" {
-		writeError(w, http.StatusBadRequest, "MISSING_REPO", "repo is required for repo-scoped memories")
+		writeError(w, r, http.StatusBadRequest, "MISSING_REPO", "repo is required for repo-scoped memories")
 		return
 	}
 
 	// Validate file patterns are syntactically valid globs.
 	for _, pattern := range req.FilePatterns {
 		if pattern == "" {
-			writeError(w, http.StatusBadRequest, "INVALID_PATTERN", "file patterns must not be empty")
+			writeError(w, r, http.StatusBadRequest, "INVALID_PATTERN", "file patterns must not be empty")
 			return
 		}
 		// Strip "**" segments before validation since filepath.Match doesn't
@@ -211,31 +211,31 @@ func (h *MemoryHandler) Create(w http.ResponseWriter, r *http.Request) {
 			continue // pure recursive glob, always valid
 		}
 		if testPattern == "" {
-			writeError(w, http.StatusBadRequest, "INVALID_PATTERN", fmt.Sprintf("invalid glob pattern %q: trailing separator after **", pattern))
+			writeError(w, r, http.StatusBadRequest, "INVALID_PATTERN", fmt.Sprintf("invalid glob pattern %q: trailing separator after **", pattern))
 			return
 		}
 		if _, err := filepath.Match(testPattern, ""); err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_PATTERN", fmt.Sprintf("invalid glob pattern %q: %v", pattern, err))
+			writeError(w, r, http.StatusBadRequest, "INVALID_PATTERN", fmt.Sprintf("invalid glob pattern %q: %v", pattern, err))
 			return
 		}
 	}
 
 	memory := &models.Memory{
-		OrgID:           orgID,
-		Repo:            req.Repo,
-		Rule:            req.Rule,
-		Category:        req.Category,
+		OrgID:            orgID,
+		Repo:             req.Repo,
+		Rule:             req.Rule,
+		Category:         req.Category,
 		SourceCommentIDs: []uuid.UUID{},
-		OccurrenceCount: 1,
-		Status:          "active", // manual memories start active
-		ManuallyCurated: true,
-		Scope:           req.Scope,
-		Source:          "manual",
-		FilePatterns:    req.FilePatterns,
+		OccurrenceCount:  1,
+		Status:           "active", // manual memories start active
+		ManuallyCurated:  true,
+		Scope:            req.Scope,
+		Source:           "manual",
+		FilePatterns:     req.FilePatterns,
 	}
 
 	if err := h.memoryStore.Create(r.Context(), memory); err != nil {
-		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create memory")
+		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create memory", err)
 		return
 	}
 

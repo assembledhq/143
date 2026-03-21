@@ -24,7 +24,7 @@ func (h *PMDocumentHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	docs, err := h.store.ListByOrg(r.Context(), orgID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list PM documents")
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list PM documents", err)
 		return
 	}
 	if docs == nil {
@@ -42,22 +42,22 @@ func (h *PMDocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserFromContext(r.Context())
 
 	var req struct {
-		Title      string           `json:"title"`
-		Content    *string          `json:"content"`
-		DocType    *string          `json:"doc_type"`
-		SourceType *string          `json:"source_type"`
-		SourceURL  *string          `json:"source_url"`
-		SourceID   *string          `json:"source_id"`
-		SourceMeta json.RawMessage  `json:"source_meta,omitempty"`
+		Title      string          `json:"title"`
+		Content    *string         `json:"content"`
+		DocType    *string         `json:"doc_type"`
+		SourceType *string         `json:"source_type"`
+		SourceURL  *string         `json:"source_url"`
+		SourceID   *string         `json:"source_id"`
+		SourceMeta json.RawMessage `json:"source_meta,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
 
 	if req.Title == "" {
-		writeError(w, http.StatusBadRequest, "MISSING_FIELD", "title is required")
+		writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", "title is required")
 		return
 	}
 
@@ -89,7 +89,7 @@ func (h *PMDocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.store.Create(r.Context(), &doc); err != nil {
-		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create PM document")
+		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create PM document", err)
 		return
 	}
 
@@ -100,13 +100,13 @@ func (h *PMDocumentHandler) Get(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	docID, err := uuid.Parse(chi.URLParam(r, "docId"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid document ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid document ID")
 		return
 	}
 
 	doc, err := h.store.GetByID(r.Context(), orgID, docID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "document not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "document not found")
 		return
 	}
 
@@ -117,28 +117,28 @@ func (h *PMDocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	docID, err := uuid.Parse(chi.URLParam(r, "docId"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid document ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid document ID")
 		return
 	}
 
 	doc, err := h.store.GetByID(r.Context(), orgID, docID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "document not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "document not found")
 		return
 	}
 
 	var req struct {
-		Title      *string          `json:"title"`
-		Content    *string          `json:"content"`
-		DocType    *string          `json:"doc_type"`
-		SourceType *string          `json:"source_type"`
-		SourceURL  *string          `json:"source_url"`
-		SourceID   *string          `json:"source_id"`
-		SourceMeta json.RawMessage  `json:"source_meta,omitempty"`
+		Title      *string         `json:"title"`
+		Content    *string         `json:"content"`
+		DocType    *string         `json:"doc_type"`
+		SourceType *string         `json:"source_type"`
+		SourceURL  *string         `json:"source_url"`
+		SourceID   *string         `json:"source_id"`
+		SourceMeta json.RawMessage `json:"source_meta,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
 
@@ -165,7 +165,7 @@ func (h *PMDocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.store.Update(r.Context(), &doc); err != nil {
-		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update PM document")
+		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update PM document", err)
 		return
 	}
 
@@ -176,17 +176,17 @@ func (h *PMDocumentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	docID, err := uuid.Parse(chi.URLParam(r, "docId"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid document ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid document ID")
 		return
 	}
 
 	if _, err := h.store.GetByID(r.Context(), orgID, docID); err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "document not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "document not found")
 		return
 	}
 
 	if err := h.store.Delete(r.Context(), orgID, docID); err != nil {
-		writeError(w, http.StatusInternalServerError, "DELETE_FAILED", "failed to delete PM document")
+		writeError(w, r, http.StatusInternalServerError, "DELETE_FAILED", "failed to delete PM document", err)
 		return
 	}
 

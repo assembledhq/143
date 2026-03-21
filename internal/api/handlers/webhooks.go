@@ -39,14 +39,14 @@ func NewWebhookHandler(cfg *config.Config, orgStore *db.OrganizationStore, userS
 func (h *WebhookHandler) HandleGitHub(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "READ_FAILED", "failed to read request body")
+		writeError(w, r, http.StatusBadRequest, "READ_FAILED", "failed to read request body")
 		return
 	}
 
 	// Validate HMAC-SHA256 signature
 	signature := r.Header.Get("X-Hub-Signature-256")
 	if !h.verifySignature(body, signature) {
-		writeError(w, http.StatusUnauthorized, "INVALID_SIGNATURE", "webhook signature verification failed")
+		writeError(w, r, http.StatusUnauthorized, "INVALID_SIGNATURE", "webhook signature verification failed")
 		return
 	}
 
@@ -116,7 +116,7 @@ type installationReposEvent struct {
 func (h *WebhookHandler) handleInstallation(w http.ResponseWriter, r *http.Request, body []byte) {
 	var event installationEvent
 	if err := json.Unmarshal(body, &event); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "failed to parse installation event")
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse installation event")
 		return
 	}
 
@@ -156,7 +156,7 @@ func (h *WebhookHandler) handleInstallation(w http.ResponseWriter, r *http.Reque
 				Settings: json.RawMessage(`{}`),
 			}
 			if createErr := h.orgStore.Create(ctx, newOrg); createErr != nil {
-				writeError(w, http.StatusInternalServerError, "ORG_CREATE_FAILED", "failed to create organization")
+				writeError(w, r, http.StatusInternalServerError, "ORG_CREATE_FAILED", "failed to create organization", createErr)
 				return
 			}
 			org = newOrg
@@ -170,7 +170,7 @@ func (h *WebhookHandler) handleInstallation(w http.ResponseWriter, r *http.Reque
 			})
 			if marshalErr != nil {
 				zerolog.Ctx(r.Context()).Warn().Err(marshalErr).Msg("failed to marshal integration config")
-				writeError(w, http.StatusInternalServerError, "MARSHAL_FAILED", "failed to marshal integration config")
+				writeError(w, r, http.StatusInternalServerError, "MARSHAL_FAILED", "failed to marshal integration config", marshalErr)
 				return
 			}
 			integration = &models.Integration{
@@ -180,7 +180,7 @@ func (h *WebhookHandler) handleInstallation(w http.ResponseWriter, r *http.Reque
 				Status:   models.IntegrationStatusActive,
 			}
 			if err := h.integrationStore.Create(ctx, integration); err != nil {
-				writeError(w, http.StatusInternalServerError, "INTEGRATION_CREATE_FAILED", "failed to create integration")
+				writeError(w, r, http.StatusInternalServerError, "INTEGRATION_CREATE_FAILED", "failed to create integration", err)
 				return
 			}
 		}
@@ -200,7 +200,7 @@ func (h *WebhookHandler) handleInstallation(w http.ResponseWriter, r *http.Reque
 				Settings:       json.RawMessage(`{}`),
 			}
 			if err := h.repoStore.UpsertFromGitHub(ctx, repo); err != nil {
-				writeError(w, http.StatusInternalServerError, "REPOSITORY_UPSERT_FAILED", "failed to upsert repository")
+				writeError(w, r, http.StatusInternalServerError, "REPOSITORY_UPSERT_FAILED", "failed to upsert repository", err)
 				return
 			}
 		}
@@ -210,7 +210,7 @@ func (h *WebhookHandler) handleInstallation(w http.ResponseWriter, r *http.Reque
 	case "deleted":
 		// Disconnect all repos for this installation
 		if err := h.repoStore.DisconnectByInstallationID(ctx, event.Installation.ID); err != nil {
-			writeError(w, http.StatusInternalServerError, "DISCONNECT_FAILED", "failed to disconnect repositories")
+			writeError(w, r, http.StatusInternalServerError, "DISCONNECT_FAILED", "failed to disconnect repositories", err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "installation deleted"})
@@ -223,7 +223,7 @@ func (h *WebhookHandler) handleInstallation(w http.ResponseWriter, r *http.Reque
 func (h *WebhookHandler) handleInstallationRepositories(w http.ResponseWriter, r *http.Request, body []byte) {
 	var event installationReposEvent
 	if err := json.Unmarshal(body, &event); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "failed to parse installation_repositories event")
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse installation_repositories event")
 		return
 	}
 
@@ -232,7 +232,7 @@ func (h *WebhookHandler) handleInstallationRepositories(w http.ResponseWriter, r
 	// Look up the integration by installation_id to get org_id and integration_id
 	integration, err := h.integrationStore.GetByGitHubInstallationID(ctx, event.Installation.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTEGRATION_LOOKUP_FAILED", "failed to find integration for installation")
+		writeError(w, r, http.StatusInternalServerError, "INTEGRATION_LOOKUP_FAILED", "failed to find integration for installation", err)
 		return
 	}
 
@@ -251,7 +251,7 @@ func (h *WebhookHandler) handleInstallationRepositories(w http.ResponseWriter, r
 			Settings:       json.RawMessage(`{}`),
 		}
 		if err := h.repoStore.UpsertFromGitHub(ctx, repo); err != nil {
-			writeError(w, http.StatusInternalServerError, "REPOSITORY_UPSERT_FAILED", "failed to upsert repository")
+			writeError(w, r, http.StatusInternalServerError, "REPOSITORY_UPSERT_FAILED", "failed to upsert repository", err)
 			return
 		}
 	}
@@ -259,7 +259,7 @@ func (h *WebhookHandler) handleInstallationRepositories(w http.ResponseWriter, r
 	// For removed repos, mark as disconnected
 	for _, whRepo := range event.RepositoriesRemoved {
 		if err := h.repoStore.DisconnectByGitHubID(ctx, event.Installation.ID, whRepo.ID); err != nil {
-			writeError(w, http.StatusInternalServerError, "REPOSITORY_DISCONNECT_FAILED", "failed to disconnect repository")
+			writeError(w, r, http.StatusInternalServerError, "REPOSITORY_DISCONNECT_FAILED", "failed to disconnect repository", err)
 			return
 		}
 	}
@@ -275,12 +275,12 @@ func (h *WebhookHandler) handlePullRequest(w http.ResponseWriter, r *http.Reques
 
 	var event ghservice.PullRequestEvent
 	if err := json.Unmarshal(body, &event); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "failed to parse pull_request event")
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse pull_request event")
 		return
 	}
 
 	if err := h.prService.HandlePullRequestEvent(r.Context(), event); err != nil {
-		writeError(w, http.StatusInternalServerError, "PR_EVENT_FAILED", "failed to process pull_request event")
+		writeError(w, r, http.StatusInternalServerError, "PR_EVENT_FAILED", "failed to process pull_request event", err)
 		return
 	}
 
@@ -295,12 +295,12 @@ func (h *WebhookHandler) handlePullRequestReview(w http.ResponseWriter, r *http.
 
 	var event ghservice.PullRequestReviewEvent
 	if err := json.Unmarshal(body, &event); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "failed to parse pull_request_review event")
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse pull_request_review event")
 		return
 	}
 
 	if err := h.prService.HandlePullRequestReviewEvent(r.Context(), event); err != nil {
-		writeError(w, http.StatusInternalServerError, "REVIEW_EVENT_FAILED", "failed to process pull_request_review event")
+		writeError(w, r, http.StatusInternalServerError, "REVIEW_EVENT_FAILED", "failed to process pull_request_review event", err)
 		return
 	}
 
@@ -315,12 +315,12 @@ func (h *WebhookHandler) handlePullRequestReviewComment(w http.ResponseWriter, r
 
 	var event ghservice.PullRequestReviewCommentEvent
 	if err := json.Unmarshal(body, &event); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "failed to parse pull_request_review_comment event")
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse pull_request_review_comment event")
 		return
 	}
 
 	if err := h.prService.HandlePullRequestReviewCommentEvent(r.Context(), event); err != nil {
-		writeError(w, http.StatusInternalServerError, "REVIEW_COMMENT_EVENT_FAILED", "failed to process pull_request_review_comment event")
+		writeError(w, r, http.StatusInternalServerError, "REVIEW_COMMENT_EVENT_FAILED", "failed to process pull_request_review_comment event", err)
 		return
 	}
 

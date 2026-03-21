@@ -619,11 +619,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		go func() {
 			defer restoreWg.Done()
 			restoreErr = o.snapshots.Load(ctx, *session.SnapshotKey, snapshotWriter)
-			_ = snapshotWriter.Close()
+			_ = snapshotWriter.Close() // Intentionally ignored: pipe close error is not actionable here; restoreErr captures the real failure.
 		}()
 
 		if err := o.provider.Restore(ctx, sandbox, snapshotReader); err != nil {
-			_ = snapshotReader.Close()
+			_ = snapshotReader.Close() // Intentionally ignored: we already have the restore error.
 			restoreWg.Wait()
 			o.failRun(ctx, session, fmt.Sprintf("restore snapshot: %s", err))
 			return fmt.Errorf("restore snapshot: %w", err)

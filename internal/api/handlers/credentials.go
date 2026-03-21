@@ -43,7 +43,7 @@ func (h *CredentialHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	summaries, err := h.store.ListSummaries(r.Context(), orgID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list credentials")
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list credentials", err)
 		return
 	}
 	if summaries == nil {
@@ -59,30 +59,30 @@ func (h *CredentialHandler) Update(w http.ResponseWriter, r *http.Request) {
 	provider := models.ProviderName(providerStr)
 
 	if !provider.Valid() {
-		writeError(w, http.StatusBadRequest, "INVALID_PROVIDER", "unknown provider: "+providerStr)
+		writeError(w, r, http.StatusBadRequest, "INVALID_PROVIDER", "unknown provider: "+providerStr)
 		return
 	}
 
 	// Read the raw JSON body, then parse into the correct typed config.
 	var raw json.RawMessage
 	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
 
 	cfg, err := models.ParseProviderConfig(provider, raw)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_CONFIG", err.Error())
+		writeError(w, r, http.StatusBadRequest, "INVALID_CONFIG", err.Error())
 		return
 	}
 
 	if err := cfg.Validate(); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_CONFIG", err.Error())
+		writeError(w, r, http.StatusBadRequest, "INVALID_CONFIG", err.Error())
 		return
 	}
 
 	if err := h.store.Upsert(r.Context(), orgID, cfg); err != nil {
-		writeError(w, http.StatusInternalServerError, "UPSERT_FAILED", "failed to save credential")
+		writeError(w, r, http.StatusInternalServerError, "UPSERT_FAILED", "failed to save credential", err)
 		return
 	}
 
@@ -98,12 +98,12 @@ func (h *CredentialHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	provider := models.ProviderName(providerStr)
 
 	if !provider.Valid() {
-		writeError(w, http.StatusBadRequest, "INVALID_PROVIDER", "unknown provider: "+providerStr)
+		writeError(w, r, http.StatusBadRequest, "INVALID_PROVIDER", "unknown provider: "+providerStr)
 		return
 	}
 
 	if err := h.store.Disable(r.Context(), orgID, provider); err != nil {
-		writeError(w, http.StatusInternalServerError, "DELETE_FAILED", "failed to disable credential")
+		writeError(w, r, http.StatusInternalServerError, "DELETE_FAILED", "failed to disable credential", err)
 		return
 	}
 
