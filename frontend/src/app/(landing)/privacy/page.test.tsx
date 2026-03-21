@@ -32,6 +32,6 @@ describe('PrivacyPage', () => {
     renderWithProviders(<PrivacyPage />);
 
     expect(screen.getByText(/session, csrf, and short-lived oauth flow cookies/i)).toBeInTheDocument();
-    expect(screen.getByText(/session messages, logs, and snapshots/i)).toBeInTheDocument();
+    expect(screen.getByText(/session messages, generated diffs, and logs are retained/i)).toBeInTheDocument();
   });
 });

@@ -4,7 +4,7 @@ import LegalPageLayout, {
 
 export default function SecurityPage() {
   return (
-    <LegalPageLayout title="Security" lastUpdated="March 18, 2026">
+    <LegalPageLayout title="Security" lastUpdated="March 20, 2026">
       <Section heading="Reporting a vulnerability">
         <p>
           If you discover a security vulnerability in 143, please report it
@@ -82,22 +82,36 @@ export default function SecurityPage() {
         <ul className="list-disc pl-5 space-y-1.5">
           <li>
             <strong className="font-medium opacity-80">Acknowledgment:</strong>{" "}
-            within 30 days
+            within 14 calendar days
           </li>
           <li>
-            <strong className="font-medium opacity-80">Investigation:</strong>{" "}
-            within 60 days
+            <strong className="font-medium opacity-80">Triage and severity assessment:</strong>{" "}
+            within 30 calendar days
+          </li>
+          <li>
+            <strong className="font-medium opacity-80">Investigation complete:</strong>{" "}
+            within 60 calendar days
           </li>
           <li>
             <strong className="font-medium opacity-80">Remediation target:</strong>{" "}
-            we aim to remediate confirmed issues within 180 days when feasible,
-            with coordinated disclosure timing based on severity,
-            exploitability, and user impact
+            we aim to remediate confirmed issues according to severity, with
+            coordinated disclosure timing based on exploitability and user
+            impact
           </li>
         </ul>
         <p>
-          We will keep you informed throughout the process. If you have not
-          heard from us within the acknowledgment window, please follow up.
+          These targets are best-effort goals. We will keep you informed
+          throughout the process. If you have not heard from us within the
+          acknowledgment window, please follow up. See the repository&apos;s{" "}
+          <a
+            href="https://github.com/assembledhq/143/blob/main/SECURITY.md"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline underline-offset-2"
+          >
+            SECURITY.md
+          </a>{" "}
+          for full details including severity tiers.
         </p>
       </Section>
 
@@ -145,11 +159,13 @@ export default function SecurityPage() {
         </p>
       </Section>
 
-      <Section heading="Recognition">
+      <Section heading="Recognition and rewards">
         <p>
           We appreciate the work of security researchers. With your permission,
           we are happy to credit you in the security advisory and release notes
-          when a fix is available.
+          when a fix is available. We do not currently operate a formal bug
+          bounty program, but we may offer recognition or rewards at our
+          discretion for reports of significant vulnerabilities.
         </p>
       </Section>
 

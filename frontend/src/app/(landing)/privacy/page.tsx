@@ -5,7 +5,7 @@ import LegalPageLayout, {
 
 export default function PrivacyPage() {
   return (
-    <LegalPageLayout title="Privacy Policy" lastUpdated="March 18, 2026">
+    <LegalPageLayout title="Privacy Policy" lastUpdated="March 20, 2026">
       <Section heading="Scope">
         <p>
           This policy covers the 143 website and hosted service at 143.dev,
@@ -136,6 +136,17 @@ export default function PrivacyPage() {
           inference providers. We do not sell personal information and we do not
           share personal information for cross-context behavioral advertising.
         </p>
+        <p>
+          A current list of our subprocessors is available upon request by
+          contacting{" "}
+          <a
+            href="mailto:privacy@assembled.com"
+            className="underline underline-offset-2"
+          >
+            privacy@assembled.com
+          </a>
+          .
+        </p>
       </Section>
 
       <Section heading="International transfers">
@@ -148,13 +159,50 @@ export default function PrivacyPage() {
 
       <Section heading="Retention">
         <p>
-          We retain data for different periods depending on the category and why
-          we need it. Account records are generally kept while the account is
-          active. Session messages, logs, and snapshots may be retained while a
-          workspace is active, for debugging, or for security review, and then
-          deleted according to product settings, retention jobs, backups, and
-          legal obligations. Some information may persist in backups for a
-          limited period after deletion.
+          We retain data for different periods depending on the category and
+          purpose:
+        </p>
+        <ul className="list-disc pl-5 space-y-1.5">
+          <li>
+            <strong className="font-medium opacity-80">Account information</strong>{" "}
+            - retained while the account is active and for a reasonable period
+            after account closure to support recovery, dispute resolution, or
+            legal obligations
+          </li>
+          <li>
+            <strong className="font-medium opacity-80">Authentication and session data</strong>{" "}
+            - session tokens expire after 30 days; audit records (including
+            login events) are retained for a default of 90 days, configurable
+            by your Organization
+          </li>
+          <li>
+            <strong className="font-medium opacity-80">Agent and workspace data</strong>{" "}
+            - session messages, generated diffs, and logs are retained while the
+            workspace is active; temporary workspace snapshots are cleaned up
+            shortly after a session becomes idle or completes
+          </li>
+          <li>
+            <strong className="font-medium opacity-80">Technical and security data</strong>{" "}
+            - IP addresses, request identifiers, and audit events are retained
+            for a default of 90 days for security and compliance purposes,
+            configurable by your Organization
+          </li>
+          <li>
+            <strong className="font-medium opacity-80">Webhook data</strong>{" "}
+            - webhook payloads may be retained for operational and debugging
+            purposes and deleted according to internal retention schedules
+          </li>
+          <li>
+            <strong className="font-medium opacity-80">Backups</strong>{" "}
+            - deleted data may persist in backups for a limited period after
+            deletion before being purged
+          </li>
+        </ul>
+        <p>
+          Specific retention periods may vary based on product settings
+          configured by your Organization, applicable legal obligations, or
+          ongoing security investigations. Where required by law, we will
+          retain data for the minimum period necessary to comply.
         </p>
       </Section>
 
@@ -175,6 +223,23 @@ export default function PrivacyPage() {
           right to opt out of the sale or sharing of personal data (we do not
           sell personal data), and the right to non-discrimination for
           exercising your rights. To make a request, contact us at{" "}
+          <a
+            href="mailto:privacy@assembled.com"
+            className="underline underline-offset-2"
+          >
+            privacy@assembled.com
+          </a>
+          .
+        </p>
+      </Section>
+
+      <Section heading="European and UK users">
+        <p>
+          If you are located in the European Economic Area (EEA), the United
+          Kingdom, or Switzerland, you may have additional rights under the
+          General Data Protection Regulation (GDPR) or the UK GDPR, such as
+          the right to access, correct, delete, restrict, or port your personal
+          data. To exercise any of these rights, contact us at{" "}
           <a
             href="mailto:privacy@assembled.com"
             className="underline underline-offset-2"
