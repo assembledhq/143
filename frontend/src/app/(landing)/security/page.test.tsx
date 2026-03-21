@@ -22,15 +22,15 @@ describe('SecurityPage', () => {
   it('links repository security policy and supported versions guidance', () => {
     renderWithProviders(<SecurityPage />);
 
-    expect(screen.getByText(/security\.md/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/security\.md/i).length).toBeGreaterThan(0);
     expect(screen.getByText('Supported versions')).toBeInTheDocument();
   });
 
   it('displays vulnerability response timelines', () => {
     renderWithProviders(<SecurityPage />);
 
-    expect(screen.getByText(/within 30 days/i)).toBeInTheDocument();
-    expect(screen.getByText(/within 60 days/i)).toBeInTheDocument();
-    expect(screen.getByText(/within 180 days/i)).toBeInTheDocument();
+    expect(screen.getByText(/within 14 calendar days/i)).toBeInTheDocument();
+    expect(screen.getByText(/within 30 calendar days/i)).toBeInTheDocument();
+    expect(screen.getByText(/within 60 calendar days/i)).toBeInTheDocument();
   });
 });
