@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -11,6 +12,9 @@ import (
 )
 
 type Config struct {
+	// Environment
+	Env string `env:"ENV" envDefault:"development"`
+
 	// Core
 	DatabaseURL        string   `env:"DATABASE_URL"          envDefault:"postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable"`
 	Port               int      `env:"PORT"                  envDefault:"8080"`
@@ -75,7 +79,12 @@ type Config struct {
 	GeminiModel  string `env:"GEMINI_MODEL"`
 
 	// Sandbox
-	SandboxRuntime string `env:"SANDBOX_RUNTIME" envDefault:"runc"`
+	SandboxRuntime     string `env:"SANDBOX_RUNTIME" envDefault:"runc"`
+	SandboxRequireGVisor bool   `env:"SANDBOX_REQUIRE_GVISOR" envDefault:"false"`
+	// Data retention
+	DataRetentionWebhookDays int `env:"DATA_RETENTION_WEBHOOK_DAYS" envDefault:"30"`
+	DataRetentionLogsDays    int `env:"DATA_RETENTION_LOGS_DAYS"    envDefault:"90"`
+	DataRetentionJobsDays    int `env:"DATA_RETENTION_JOBS_DAYS"    envDefault:"30"`
 
 	// Interactive session snapshots
 	SnapshotStorageDir    string        `env:"SNAPSHOT_STORAGE_DIR"    envDefault:".data/snapshots"`
@@ -310,4 +319,34 @@ func (c *Config) LogStatus(logger zerolog.Logger) {
 	if c.CSRFSigningKey == "" {
 		logger.Warn().Msg("CSRF_SIGNING_KEY is empty — CSRF protection will be ineffective")
 	}
+}
+
+// ValidateSecrets checks that security-sensitive configuration values meet
+// minimum strength requirements when running in production.
+func (c *Config) ValidateSecrets() error {
+	// Retention day validation applies in all environments.
+	if c.DataRetentionWebhookDays < 0 || c.DataRetentionLogsDays < 0 || c.DataRetentionJobsDays < 0 {
+		return errors.New("DATA_RETENTION_*_DAYS values must not be negative")
+	}
+
+	if c.Env != "production" {
+		return nil
+	}
+
+	if c.SessionSecret == "" || c.SessionSecret == "changeme" || len(c.SessionSecret) < 32 {
+		return errors.New("SESSION_SECRET must be set to a strong random value in production (min 32 characters)")
+	}
+
+	if c.EncryptionMasterKey == "" {
+		return errors.New("ENCRYPTION_MASTER_KEY must be set in production")
+	}
+	if len(c.EncryptionMasterKey) < 32 {
+		return errors.New("ENCRYPTION_MASTER_KEY must be at least 32 characters")
+	}
+
+	if c.CSRFSigningKey == "" || len(c.CSRFSigningKey) < 32 {
+		return errors.New("CSRF_SIGNING_KEY must be set to a strong random value in production (min 32 characters)")
+	}
+
+	return nil
 }
