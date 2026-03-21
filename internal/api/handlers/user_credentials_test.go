@@ -258,6 +258,7 @@ func TestUserCredentialHandler_UpsertPersonal(t *testing.T) {
 	})
 
 	t.Run("rejects invalid provider", func(t *testing.T) {
+		t.Parallel()
 		h := newTestUserCredHandler(&mockUserCredentialStore{})
 
 		body, _ := json.Marshal(map[string]interface{}{
@@ -277,6 +278,7 @@ func TestUserCredentialHandler_UpsertPersonal(t *testing.T) {
 	})
 
 	t.Run("rejects non-coding-agent provider like openai_chatgpt", func(t *testing.T) {
+		t.Parallel()
 		h := newTestUserCredHandler(&mockUserCredentialStore{})
 
 		body, _ := json.Marshal(map[string]interface{}{
