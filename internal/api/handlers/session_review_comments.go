@@ -81,6 +81,10 @@ func (h *SessionReviewCommentHandler) Create(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "VALIDATION", "file_path and body are required")
 		return
 	}
+	if len(body.FilePath) > 1024 {
+		writeError(w, http.StatusBadRequest, "VALIDATION", "file_path must be 1024 characters or less")
+		return
+	}
 
 	side := body.Side
 	if side == "" {
@@ -92,12 +96,19 @@ func (h *SessionReviewCommentHandler) Create(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Look up the session's current turn to associate the comment with the right pass.
-	passNumber := 1
-	if h.sessionStore != nil {
-		session, err := h.sessionStore.GetByID(r.Context(), orgID, sessionID)
-		if err == nil && session.CurrentTurn > 0 {
-			passNumber = session.CurrentTurn
-		}
+	if h.sessionStore == nil {
+		writeError(w, http.StatusInternalServerError, "SESSION_LOOKUP_FAILED", "session store not available")
+		return
+	}
+	session, err := h.sessionStore.GetByID(r.Context(), orgID, sessionID)
+	if err != nil {
+		h.logger.Error().Err(err).Str("session_id", sessionID.String()).Msg("failed to look up session for review comment")
+		writeError(w, http.StatusNotFound, "SESSION_NOT_FOUND", "session not found")
+		return
+	}
+	passNumber := session.CurrentTurn
+	if passNumber < 1 {
+		passNumber = 1
 	}
 
 	comment := &models.SessionReviewComment{
@@ -170,7 +181,7 @@ func (h *SessionReviewCommentHandler) Update(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	comment, err := h.store.Update(r.Context(), orgID, commentID, body.Body, body.Resolved, resolvedByPass)
+	comment, err := h.store.Update(r.Context(), orgID, sessionID, commentID, body.Body, body.Resolved, resolvedByPass)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "review comment not found")
 		return

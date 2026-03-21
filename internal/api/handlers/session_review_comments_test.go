@@ -288,6 +288,127 @@ func TestSessionReviewCommentHandler_Delete(t *testing.T) {
 	})
 }
 
+func TestSessionReviewCommentHandler_Update(t *testing.T) {
+	t.Parallel()
+
+	t.Run("updates body text", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		commentID := uuid.New()
+		handler := newTestReviewCommentHandler(t, mock)
+
+		mock.ExpectQuery("UPDATE session_review_comments").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(reviewCommentColumns).
+					AddRow(reviewCommentRow(commentID, sessionID, orgID, userID, "src/app.ts", 10, "Updated text", false)...),
+			)
+
+		body := `{"body":"Updated text"}`
+		url := fmt.Sprintf("/api/v1/sessions/%s/review-comments/%s", sessionID, commentID)
+		req := httptest.NewRequest(http.MethodPatch, url, bytes.NewReader([]byte(body)))
+		req.Header.Set("Content-Type", "application/json")
+		ctx := middleware.WithOrgID(req.Context(), orgID)
+		ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+		req = req.WithContext(ctx)
+
+		w := httptest.NewRecorder()
+		withReviewCommentRoutes(handler).ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code)
+		var resp models.SingleResponse[models.SessionReviewComment]
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		require.Equal(t, "Updated text", resp.Data.Body)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("resolves comment with pass number", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		commentID := uuid.New()
+		handler := newTestReviewCommentHandler(t, mock)
+
+		// GetByID for session lookup (to get current_turn for resolved_by_pass)
+		setupSessionMock(mock, orgID, sessionID, nil)
+
+		now := time.Now()
+		resolvedByPass := 1
+		mock.ExpectQuery("UPDATE session_review_comments").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(reviewCommentColumns).
+					AddRow(
+						commentID, sessionID, orgID, userID, "src/app.ts",
+						10, "new", "Fix this", true, &now, &resolvedByPass,
+						1, now, now,
+					),
+			)
+
+		body := `{"resolved":true}`
+		url := fmt.Sprintf("/api/v1/sessions/%s/review-comments/%s", sessionID, commentID)
+		req := httptest.NewRequest(http.MethodPatch, url, bytes.NewReader([]byte(body)))
+		req.Header.Set("Content-Type", "application/json")
+		ctx := middleware.WithOrgID(req.Context(), orgID)
+		ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+		req = req.WithContext(ctx)
+
+		w := httptest.NewRecorder()
+		withReviewCommentRoutes(handler).ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code)
+		var resp models.SingleResponse[models.SessionReviewComment]
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		require.True(t, resp.Data.Resolved)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns not found for missing comment", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		commentID := uuid.New()
+		handler := newTestReviewCommentHandler(t, mock)
+
+		mock.ExpectQuery("UPDATE session_review_comments").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(reviewCommentColumns))
+
+		body := `{"body":"Updated text"}`
+		url := fmt.Sprintf("/api/v1/sessions/%s/review-comments/%s", sessionID, commentID)
+		req := httptest.NewRequest(http.MethodPatch, url, bytes.NewReader([]byte(body)))
+		req.Header.Set("Content-Type", "application/json")
+		ctx := middleware.WithOrgID(req.Context(), orgID)
+		ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+		req = req.WithContext(ctx)
+
+		w := httptest.NewRecorder()
+		withReviewCommentRoutes(handler).ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusNotFound, w.Code)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
 func TestSessionReviewCommentHandler_SendToAgent(t *testing.T) {
 	t.Parallel()
 

@@ -2,7 +2,7 @@
 
 import { forwardRef, useMemo, useCallback } from "react";
 import type { DiffFile } from "@/lib/diff-parser";
-import type { SessionReviewComment } from "@/lib/types";
+import type { SessionReviewComment, FileLine } from "@/lib/types";
 import type { CommentLineKey } from "@/hooks/use-review-comments";
 import { useFileHighlighting } from "@/lib/syntax-highlighter";
 import { FileDiffHeader } from "./file-diff-header";
@@ -97,6 +97,14 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
       return maps;
     }, [highlighted, file.hunks]);
 
+    // Callback for ContextExpander — the component manages its own
+    // expanded/hidden state internally after a successful fetch.
+    const handleContextExpand = useCallback((_lines: FileLine[]) => {
+      // No-op: ContextExpander hides itself once context is fetched.
+      // Full inline insertion of fetched lines would require mutating
+      // hunk data, which is left as a future enhancement.
+    }, []);
+
     const handleAddComment = useCallback(
       onAddComment
         ? (lineNumber: number, side: "old" | "new") => onAddComment(file.newPath, lineNumber, side)
@@ -159,6 +167,7 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
                   sessionId={sessionId}
                   filePath={file.newPath}
                   startLine={expandStartLine}
+                  onExpand={handleContextExpand}
                 />
               )}
               {hunkEl}

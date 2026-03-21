@@ -84,12 +84,13 @@ func (s *SessionReviewCommentStore) ListBySession(ctx context.Context, orgID, se
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionReviewComment])
 }
 
-func (s *SessionReviewCommentStore) Update(ctx context.Context, orgID, id uuid.UUID, body *string, resolved *bool, resolvedByPass *int) (models.SessionReviewComment, error) {
+func (s *SessionReviewCommentStore) Update(ctx context.Context, orgID, sessionID, id uuid.UUID, body *string, resolved *bool, resolvedByPass *int) (models.SessionReviewComment, error) {
 	// Build dynamic SET clauses.
 	sets := "updated_at = now()"
 	args := pgx.NamedArgs{
-		"id":     id,
-		"org_id": orgID,
+		"id":         id,
+		"org_id":     orgID,
+		"session_id": sessionID,
 	}
 
 	if body != nil {
@@ -115,7 +116,7 @@ func (s *SessionReviewCommentStore) Update(ctx context.Context, orgID, id uuid.U
 	query := fmt.Sprintf(`
 		UPDATE session_review_comments
 		SET %s
-		WHERE id = @id AND org_id = @org_id
+		WHERE id = @id AND org_id = @org_id AND session_id = @session_id
 		RETURNING `+sessionReviewCommentColumns, sets)
 
 	rows, err := s.db.Query(ctx, query, args)

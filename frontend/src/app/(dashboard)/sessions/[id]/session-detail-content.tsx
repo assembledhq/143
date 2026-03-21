@@ -467,13 +467,14 @@ function ChangesTab({
   const handleCommentClick = useCallback(
     (filePath: string) => {
       // Scroll to the file containing the comment
-      const fileIndex = files.findIndex((f) => f.newPath === filePath);
+      // Search filteredFiles since DiffPane receives filteredFiles
+      const fileIndex = filteredFiles.findIndex((f) => f.newPath === filePath);
       if (fileIndex >= 0) {
         setActiveFileIndex(fileIndex);
         diffPaneRef.current?.scrollToFile(fileIndex);
       }
     },
-    [files]
+    [filteredFiles]
   );
 
   // --- View & nav ---
@@ -558,6 +559,7 @@ function ChangesTab({
     onFileChange: handleFileSelect,
     onToggleFileTree: toggleFileTree,
     onToggleViewMode: toggleViewMode,
+    onSetViewMode: handleViewModeChange,
     onToggleMaximize,
     onNextHunk: handleNextHunk,
     onPrevHunk: handlePrevHunk,

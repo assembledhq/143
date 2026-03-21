@@ -75,6 +75,7 @@ func main() {
 	// to a no-op reader if Docker is not available).
 	var fileReader sandbox.FileReader
 	if apiDockerCli, dockerErr := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation()); dockerErr == nil {
+		defer apiDockerCli.Close()
 		fileReader = sandbox.NewDockerFileReader(apiDockerCli)
 	} else {
 		logger.Warn().Err(dockerErr).Msg("Docker not available for API file browsing — repo explorer will be disabled")

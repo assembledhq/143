@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import type { ViewMode } from "@/components/code-review/review-toolbar";
 
 interface UseDiffKeyboardNavOptions {
   fileCount: number;
@@ -6,6 +7,7 @@ interface UseDiffKeyboardNavOptions {
   onFileChange: (index: number) => void;
   onToggleFileTree: () => void;
   onToggleViewMode: () => void;
+  onSetViewMode?: (mode: ViewMode) => void;
   onToggleMaximize: () => void;
   onNextHunk: () => void;
   onPrevHunk: () => void;
@@ -28,6 +30,7 @@ export function useDiffKeyboardNav({
   onFileChange,
   onToggleFileTree,
   onToggleViewMode,
+  onSetViewMode,
   onToggleMaximize,
   onNextHunk,
   onPrevHunk,
@@ -40,6 +43,14 @@ export function useDiffKeyboardNav({
 }: UseDiffKeyboardNavOptions) {
   useEffect(() => {
     if (!enabled) return;
+
+    function setViewModeOrToggle(mode: ViewMode) {
+      if (onSetViewMode) {
+        onSetViewMode(mode);
+      } else {
+        onToggleViewMode();
+      }
+    }
 
     function handleKeyDown(e: KeyboardEvent) {
       // Don't capture when typing in an input/textarea
@@ -87,9 +98,12 @@ export function useDiffKeyboardNav({
           onToggleFileTree();
           break;
         case "u":
+          e.preventDefault();
+          setViewModeOrToggle("unified");
+          break;
         case "s":
           e.preventDefault();
-          onToggleViewMode();
+          setViewModeOrToggle("split");
           break;
         case "m":
           e.preventDefault();
@@ -123,6 +137,7 @@ export function useDiffKeyboardNav({
     onFileChange,
     onToggleFileTree,
     onToggleViewMode,
+    onSetViewMode,
     onToggleMaximize,
     onNextHunk,
     onPrevHunk,
