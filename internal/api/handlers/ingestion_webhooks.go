@@ -125,7 +125,7 @@ func (h *IngestionWebhookHandler) handleProvider(w http.ResponseWriter, r *http.
 		if markErr := h.webhookStore.MarkProcessed(r.Context(), delivery, &errMsg); markErr != nil {
 			zerolog.Ctx(r.Context()).Warn().Err(markErr).Msg("failed to mark webhook processed")
 		}
-		writeError(w, r, http.StatusBadRequest, "PARSE_FAILED", "failed to parse webhook payload")
+		writeError(w, r, http.StatusBadRequest, "PARSE_FAILED", "failed to parse webhook payload", err)
 		return
 	}
 

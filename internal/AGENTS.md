@@ -10,7 +10,7 @@ Use `zerolog` for all log output. Never use `fmt.Printf`, `fmt.Println`, or the 
 
 ### Rule: Always use `writeError` for error responses — it logs automatically
 
-`writeError` in `handlers/helpers.go` both logs and writes the JSON error response. It logs at `Error` level for 5xx and `Warn` level for 4xx, using the request-scoped logger (enriched with `org_id`, `user_id`, `request_id`).
+`writeError` in `handlers/helpers.go` both logs and writes the JSON error response. It logs at `Error` level for 5xx and `Info` level for 4xx, using the request-scoped logger (enriched with `org_id`, `user_id`, `request_id`).
 
 ```go
 // Signature:
@@ -22,7 +22,7 @@ if err != nil {
     return
 }
 
-// 4xx — no error variable needed, but the code+message are still logged at Warn:
+// 4xx — no error variable needed, but the code+message are still logged at Info:
 writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid widget ID")
 ```
 
