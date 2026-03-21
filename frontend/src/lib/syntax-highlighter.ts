@@ -1,0 +1,117 @@
+// syntax-highlighter.ts — Thin wrapper around Shiki for lazy-loaded syntax highlighting.
+
+import { useEffect, useState } from "react";
+
+type Highlighter = Awaited<ReturnType<typeof import("shiki")["createHighlighter"]>>;
+
+let highlighterPromise: Promise<Highlighter> | null = null;
+const loadedLanguages = new Set<string>();
+
+async function getHighlighter(): Promise<Highlighter> {
+  if (!highlighterPromise) {
+    highlighterPromise = import("shiki").then((shiki) =>
+      shiki.createHighlighter({
+        themes: ["github-dark", "github-light"],
+        langs: [], // load on demand
+      })
+    );
+  }
+  return highlighterPromise;
+}
+
+/**
+ * Highlight a block of code and return the inner HTML (tokens only, no wrapper).
+ * Uses Shiki's `codeToTokens` for structured output we can split by line.
+ */
+export async function highlightLines(
+  lines: string[],
+  lang: string,
+  theme: "github-dark" | "github-light" = "github-dark"
+): Promise<string[]> {
+  if (lines.length === 0) return [];
+
+  try {
+    const highlighter = await getHighlighter();
+
+    // Load grammar lazily
+    if (!loadedLanguages.has(lang)) {
+      try {
+        await highlighter.loadLanguage(lang as Parameters<typeof highlighter.loadLanguage>[0]);
+        loadedLanguages.add(lang);
+      } catch {
+        loadedLanguages.add(lang); // prevent repeated attempts
+        return lines.map(escapeHtml);
+      }
+    }
+
+    // Highlight the full block as one string, then split back into lines.
+    // This gives Shiki full context for multi-line tokens (e.g. template literals).
+    const code = lines.join("\n");
+    const result = highlighter.codeToTokens(code, {
+      lang: lang as Parameters<typeof highlighter.codeToTokens>[1]["lang"],
+      theme,
+    });
+
+    // result.tokens is an array of lines, each line is an array of tokens
+    return result.tokens.map((lineTokens) =>
+      lineTokens
+        .map((token) => {
+          const escaped = escapeHtml(token.content);
+          if (token.color) {
+            return `<span style="color:${token.color}">${escaped}</span>`;
+          }
+          return escaped;
+        })
+        .join("")
+    );
+  } catch {
+    return lines.map(escapeHtml);
+  }
+}
+
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/**
+ * React hook that highlights all lines in a file's diff at once.
+ * Returns a flat array of highlighted HTML strings, one per line across all hunks.
+ * The caller maps these back to hunk/line positions using the hunk structure.
+ */
+export function useFileHighlighting(
+  allLineContents: string[],
+  lang: string,
+  theme: "github-dark" | "github-light" = "github-dark"
+): string[] | null {
+  const [highlighted, setHighlighted] = useState<string[] | null>(null);
+
+  // Compute a stable key to avoid re-highlighting when nothing changed
+  const lineCount = allLineContents.length;
+  const contentKey = lineCount > 0 ? `${lang}:${lineCount}:${allLineContents[0]}:${allLineContents[lineCount - 1]}` : "";
+
+  useEffect(() => {
+    if (lineCount === 0) {
+      setHighlighted(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    highlightLines(allLineContents, lang, theme).then((result) => {
+      if (!cancelled) {
+        setHighlighted(result);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- contentKey is a stable digest
+  }, [contentKey, lang, theme]);
+
+  return highlighted;
+}

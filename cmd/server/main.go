@@ -29,6 +29,7 @@ import (
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/pm"
 	"github.com/assembledhq/143/internal/services/prioritization"
+	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/storage"
 	"github.com/assembledhq/143/internal/services/validation"
 	"github.com/assembledhq/143/internal/worker"
@@ -70,7 +71,17 @@ func main() {
 		logger.Warn().Err(err).Msg("LLM client initialization failed — LLM-dependent features will be unavailable")
 	}
 
-	router, err := api.NewRouter(cfg, pool, logger, codexAuthSvc, llmClient)
+	// Create file reader for sandbox file browsing (optional — gracefully degrades
+	// to a no-op reader if Docker is not available).
+	var fileReader sandbox.FileReader
+	if apiDockerCli, dockerErr := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation()); dockerErr == nil {
+		fileReader = sandbox.NewDockerFileReader(apiDockerCli)
+	} else {
+		logger.Warn().Err(dockerErr).Msg("Docker not available for API file browsing — repo explorer will be disabled")
+		fileReader = sandbox.NoOpFileReader{}
+	}
+
+	router, err := api.NewRouter(cfg, pool, logger, codexAuthSvc, llmClient, fileReader)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}
@@ -272,19 +283,19 @@ func buildServices(
 		Sessions:         sessionStore,
 		SessionLogs:      sessionLogStore,
 		SessionQuestions: sessionQuestionStore,
-		SessionMessages:   sessionMessageStore,
-		DecisionLog:       pmDecisionLogStore,
-		ProjectTasks:      projectTaskUpdater,
-		Issues:            issueStore,
-		Repositories:      repoStore,
-		Orgs:              orgStore,
-		Jobs:              jobStore,
-		GitHub:            ghSvc,
-		CodexAuth:         codexAuthSvc,
-		Credentials:       credentialStore,
-		UserCredentials:   userCredentialStore,
-		Snapshots:         snapshotStore,
-		Logger:            logger,
+		SessionMessages:  sessionMessageStore,
+		DecisionLog:      pmDecisionLogStore,
+		ProjectTasks:     projectTaskUpdater,
+		Issues:           issueStore,
+		Repositories:     repoStore,
+		Orgs:             orgStore,
+		Jobs:             jobStore,
+		GitHub:           ghSvc,
+		CodexAuth:        codexAuthSvc,
+		Credentials:      credentialStore,
+		UserCredentials:  userCredentialStore,
+		Snapshots:        snapshotStore,
+		Logger:           logger,
 	})
 
 	// Validation service.

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -27,6 +28,7 @@ type SessionFilters struct {
 	RepositoryID uuid.UUID // When non-zero, filter sessions by repository via issues table.
 }
 
+// sessionSelectColumns is used for single-session queries where we want all fields.
 const sessionSelectColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-000000000000'::uuid) AS issue_id,
 	org_id, agent_type, status, autonomy_level, token_mode,
 	complexity_tier, confidence_score, confidence_reasoning, risk_factors,
@@ -35,13 +37,57 @@ const sessionSelectColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-00
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
-	sandbox_state, snapshot_key, target_branch, working_branch, repository_id, created_at`
+	sandbox_state, snapshot_key, target_branch, working_branch, repository_id, diff_stats, diff_history, created_at`
+
+// sessionListColumns excludes large JSONB blobs (diff_history) from list queries
+// to avoid returning multi-megabyte payloads when listing many sessions.
+const sessionListColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-000000000000'::uuid) AS issue_id,
+	org_id, agent_type, status, autonomy_level, token_mode,
+	complexity_tier, confidence_score, confidence_reasoning, risk_factors,
+	container_id, started_at, completed_at, token_usage,
+	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
+	parent_session_id, revision_context, error, result_summary, diff,
+	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
+	model_override, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
+	sandbox_state, snapshot_key, target_branch, working_branch, repository_id, diff_stats, NULL::jsonb AS diff_history, created_at`
+
+// maxDiffHistoryEntries caps the number of entries kept in diff_history.
+// Older entries beyond this limit are pruned when a new entry is appended.
+const maxDiffHistoryEntries = 20
+
+// diffHistoryAppendSQL returns the SQL fragment for appending to diff_history
+// with a cap of maxDiffHistoryEntries. The caller must supply @diff, @diff_stats,
+// and a pass-number expression (e.g. "@current_turn::int" or "COALESCE(current_turn, 0) + 1").
+func diffHistoryAppendSQL(passExpr string) string {
+	return fmt.Sprintf(`CASE WHEN @diff IS NOT NULL THEN
+	  (SELECT jsonb_agg(elem) FROM (
+	    SELECT elem FROM jsonb_array_elements(
+	      COALESCE(diff_history, '[]'::jsonb) || jsonb_build_array(jsonb_build_object(
+	        'pass', %s,
+	        'diff', @diff::text,
+	        'diff_stats', COALESCE(@diff_stats::jsonb, '{}'::jsonb),
+	        'created_at', now()
+	      ))
+	    ) WITH ORDINALITY AS t(elem, ord)
+	    ORDER BY ord DESC
+	    LIMIT %d
+	  ) AS trimmed)
+	ELSE diff_history END`, passExpr, maxDiffHistoryEntries)
+}
+
+// computeDiffStatsForResult computes diff stats from a SessionResult's diff.
+func computeDiffStatsForResult(result *models.SessionResult) json.RawMessage {
+	if result.Diff == nil {
+		return nil
+	}
+	return models.ComputeDiffStats(*result.Diff)
+}
 
 func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters SessionFilters) ([]models.Session, error) {
 	args := pgx.NamedArgs{"org_id": orgID}
 
 	query := `
-		SELECT ` + sessionSelectColumns + `
+		SELECT ` + sessionListColumns + `
 		FROM sessions
 		WHERE org_id = @org_id`
 
@@ -163,6 +209,8 @@ func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID,
 }
 
 func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.SessionResult) error {
+	diffStats := computeDiffStatsForResult(result)
+
 	query := `
 		UPDATE sessions
 		SET status = @status,
@@ -173,7 +221,9 @@ func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 		    END,
 		    confidence_score = @confidence_score, confidence_reasoning = @confidence_reasoning,
 		    risk_factors = @risk_factors, token_usage = @token_usage,
-		    result_summary = @result_summary, diff = @diff, error = @error
+		    result_summary = @result_summary, diff = @diff, error = @error,
+		    diff_stats = @diff_stats,
+		    diff_history = ` + diffHistoryAppendSQL("COALESCE(current_turn, 0) + 1") + `
 		WHERE id = @id AND org_id = @org_id`
 
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
@@ -187,6 +237,7 @@ func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 		"result_summary":       result.ResultSummary,
 		"diff":                 result.Diff,
 		"error":                result.Error,
+		"diff_stats":           diffStats,
 	})
 	return err
 }
@@ -269,7 +320,7 @@ func (s *SessionStore) CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (
 
 func (s *SessionStore) ListByIssue(ctx context.Context, orgID, issueID uuid.UUID) ([]models.Session, error) {
 	query := `
-		SELECT ` + sessionSelectColumns + `
+		SELECT ` + sessionListColumns + `
 		FROM sessions
 		WHERE org_id = @org_id AND issue_id = @issue_id
 		ORDER BY created_at DESC`
@@ -286,7 +337,7 @@ func (s *SessionStore) ListByIssue(ctx context.Context, orgID, issueID uuid.UUID
 
 func (s *SessionStore) ListRecentByOrg(ctx context.Context, orgID uuid.UUID, statuses []string, limit int) ([]models.Session, error) {
 	query := `
-		SELECT ` + sessionSelectColumns + `
+		SELECT ` + sessionListColumns + `
 		FROM sessions
 		WHERE org_id = @org_id AND status = ANY(@statuses)
 		ORDER BY created_at DESC`
@@ -312,7 +363,7 @@ func (s *SessionStore) ListByIDs(ctx context.Context, orgID uuid.UUID, ids []uui
 	}
 
 	query := `
-		SELECT ` + sessionSelectColumns + `
+		SELECT ` + sessionListColumns + `
 		FROM sessions
 		WHERE org_id = @org_id AND id = ANY(@ids)`
 
@@ -327,8 +378,11 @@ func (s *SessionStore) ListByIDs(ctx context.Context, orgID uuid.UUID, ids []uui
 }
 
 // UpdateTurnComplete sets the session to idle, persists the latest turn result,
-// and updates multi-turn metadata.
+// and updates multi-turn metadata. It also computes diff_stats and appends
+// a snapshot to diff_history for diff-between-passes review.
 func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string) error {
+	diffStats := computeDiffStatsForResult(result)
+
 	query := `
 		UPDATE sessions
 		SET status = 'idle', current_turn = @current_turn, last_activity_at = now(),
@@ -336,7 +390,9 @@ func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID 
 		    sandbox_state = 'snapshotted',
 		    confidence_score = @confidence_score, confidence_reasoning = @confidence_reasoning,
 		    risk_factors = @risk_factors, token_usage = @token_usage,
-		    result_summary = @result_summary, diff = @diff, error = @error
+		    result_summary = @result_summary, diff = @diff, error = @error,
+		    diff_stats = @diff_stats,
+		    diff_history = ` + diffHistoryAppendSQL("@current_turn::int") + `
 		WHERE id = @id AND org_id = @org_id`
 
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
@@ -352,6 +408,7 @@ func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID 
 		"result_summary":       result.ResultSummary,
 		"diff":                 result.Diff,
 		"error":                result.Error,
+		"diff_stats":           diffStats,
 	})
 	return err
 }
@@ -402,7 +459,7 @@ func (s *SessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessionID
 // but their snapshots are preserved for later resumption.
 func (s *SessionStore) ListStaleIdleSessions(ctx context.Context, olderThan time.Time) ([]models.Session, error) {
 	query := `
-		SELECT ` + sessionSelectColumns + `
+		SELECT ` + sessionListColumns + `
 		FROM sessions
 		WHERE status = 'idle'
 		  AND last_activity_at < @older_than

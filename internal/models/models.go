@@ -141,6 +141,8 @@ type Session struct {
 	TargetBranch         *string         `db:"target_branch" json:"target_branch,omitempty"`
 	WorkingBranch        *string         `db:"working_branch" json:"working_branch,omitempty"`
 	RepositoryID         *uuid.UUID      `db:"repository_id" json:"repository_id,omitempty"`
+	DiffStats            json.RawMessage `db:"diff_stats" json:"diff_stats,omitempty"`
+	DiffHistory          json.RawMessage `db:"diff_history" json:"diff_history,omitempty"`
 	CreatedAt            time.Time       `db:"created_at" json:"created_at"`
 }
 
@@ -349,6 +351,24 @@ type Job struct {
 	CreatedAt      time.Time       `db:"created_at" json:"created_at"`
 	UpdatedAt      time.Time       `db:"updated_at" json:"updated_at"`
 	CompletedAt    *time.Time      `db:"completed_at" json:"completed_at,omitempty"`
+}
+
+// SessionReviewComment represents an inline review comment on a session diff.
+type SessionReviewComment struct {
+	ID             uuid.UUID  `db:"id" json:"id"`
+	SessionID      uuid.UUID  `db:"session_id" json:"session_id"`
+	OrgID          uuid.UUID  `db:"org_id" json:"org_id"`
+	UserID         uuid.UUID  `db:"user_id" json:"user_id"`
+	FilePath       string     `db:"file_path" json:"file_path"`
+	LineNumber     int        `db:"line_number" json:"line_number"`
+	DiffSide       string     `db:"diff_side" json:"diff_side"`
+	Body           string     `db:"body" json:"body"`
+	Resolved       bool       `db:"resolved" json:"resolved"`
+	ResolvedAt     *time.Time `db:"resolved_at" json:"resolved_at,omitempty"`
+	ResolvedByPass *int       `db:"resolved_by_pass" json:"resolved_by_pass,omitempty"`
+	PassNumber     int        `db:"pass_number" json:"pass_number"`
+	CreatedAt      time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt      time.Time  `db:"updated_at" json:"updated_at"`
 }
 
 // ReviewComment represents a captured review comment on a 143-generated PR.
