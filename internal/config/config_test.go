@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/assembledhq/143/internal/llm"
@@ -270,4 +271,98 @@ func TestAgentEnv_OnlyAnthropicKey(t *testing.T) {
 	require.NotContains(t, env["claude_code"], "ANTHROPIC_BASE_URL", "base URL should be omitted when empty")
 	require.NotContains(t, env["claude_code"], "ANTHROPIC_MODEL", "model should be omitted when empty")
 	require.NotContains(t, env, "codex")
+}
+
+func TestValidateSecrets_DevelopmentAllowsMissing(t *testing.T) {
+	cfg := &Config{Env: "development"}
+	require.NoError(t, cfg.ValidateSecrets(), "development env should allow missing secrets")
+}
+
+func TestValidateSecrets_ProductionMissingSessionSecret(t *testing.T) {
+	cfg := &Config{
+		Env:                 "production",
+		SessionSecret:       "",
+		EncryptionMasterKey: strings.Repeat("k", 32),
+	}
+	err := cfg.ValidateSecrets()
+	require.Error(t, err, "missing SessionSecret in production should error")
+	require.Contains(t, err.Error(), "SESSION_SECRET")
+}
+
+func TestValidateSecrets_ProductionWeakSessionSecret(t *testing.T) {
+	cfg := &Config{
+		Env:                 "production",
+		SessionSecret:       "changeme",
+		EncryptionMasterKey: strings.Repeat("k", 32),
+	}
+	err := cfg.ValidateSecrets()
+	require.Error(t, err, "weak SessionSecret in production should error")
+	require.Contains(t, err.Error(), "SESSION_SECRET")
+}
+
+func TestValidateSecrets_ProductionShortSessionSecret(t *testing.T) {
+	cfg := &Config{
+		Env:                 "production",
+		SessionSecret:       "short",
+		EncryptionMasterKey: strings.Repeat("k", 32),
+	}
+	err := cfg.ValidateSecrets()
+	require.Error(t, err, "short SessionSecret in production should error")
+	require.Contains(t, err.Error(), "SESSION_SECRET")
+}
+
+func TestValidateSecrets_ProductionMissingEncryptionKey(t *testing.T) {
+	cfg := &Config{
+		Env:                 "production",
+		SessionSecret:       strings.Repeat("s", 32),
+		EncryptionMasterKey: "",
+		CSRFSigningKey:      strings.Repeat("c", 32),
+	}
+	err := cfg.ValidateSecrets()
+	require.Error(t, err, "missing EncryptionMasterKey in production should error")
+	require.Contains(t, err.Error(), "ENCRYPTION_MASTER_KEY")
+}
+
+func TestValidateSecrets_ProductionShortEncryptionKey(t *testing.T) {
+	cfg := &Config{
+		Env:                 "production",
+		SessionSecret:       strings.Repeat("s", 32),
+		EncryptionMasterKey: "short",
+		CSRFSigningKey:      strings.Repeat("c", 32),
+	}
+	err := cfg.ValidateSecrets()
+	require.Error(t, err, "short EncryptionMasterKey in production should error")
+	require.Contains(t, err.Error(), "ENCRYPTION_MASTER_KEY")
+}
+
+func TestValidateSecrets_ProductionAllValid(t *testing.T) {
+	cfg := &Config{
+		Env:                 "production",
+		SessionSecret:       strings.Repeat("s", 32),
+		EncryptionMasterKey: strings.Repeat("k", 32),
+		CSRFSigningKey:      strings.Repeat("c", 32),
+	}
+	require.NoError(t, cfg.ValidateSecrets(), "valid production config should not error")
+}
+
+func TestValidateSecrets_NegativeRetentionDays(t *testing.T) {
+	cfg := &Config{
+		Env:                      "development",
+		DataRetentionWebhookDays: -1,
+	}
+	err := cfg.ValidateSecrets()
+	require.Error(t, err, "negative retention days should error")
+	require.Contains(t, err.Error(), "DATA_RETENTION")
+}
+
+func TestValidateSecrets_ProductionMissingCSRFKey(t *testing.T) {
+	cfg := &Config{
+		Env:                 "production",
+		SessionSecret:       strings.Repeat("s", 32),
+		EncryptionMasterKey: strings.Repeat("k", 32),
+		CSRFSigningKey:      "",
+	}
+	err := cfg.ValidateSecrets()
+	require.Error(t, err, "missing CSRF_SIGNING_KEY in production should error")
+	require.Contains(t, err.Error(), "CSRF_SIGNING_KEY")
 }

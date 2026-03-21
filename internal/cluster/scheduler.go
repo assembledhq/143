@@ -54,7 +54,7 @@ type Scheduler struct {
 	projects     schedulerProjectStore // nil-safe: project scheduling disabled if nil
 	logger       zerolog.Logger
 
-	lastAuditCleanupDate string // tracks the UTC date of last audit cleanup scheduling
+	lastCleanupDates map[string]string // tracks UTC date of last cleanup scheduling per job type
 }
 
 func NewScheduler(
@@ -67,13 +67,14 @@ func NewScheduler(
 	logger zerolog.Logger,
 ) *Scheduler {
 	return &Scheduler{
-		lock:         lock,
-		jobs:         jobs,
-		orgs:         orgs,
-		integrations: integrations,
-		plans:        plans,
-		repos:        repos,
-		logger:       logger,
+		lock:             lock,
+		jobs:             jobs,
+		orgs:             orgs,
+		integrations:     integrations,
+		plans:            plans,
+		repos:            repos,
+		logger:           logger,
+		lastCleanupDates: make(map[string]string),
 	}
 }
 
@@ -199,31 +200,41 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 
 	// Enqueue daily audit retention cleanup for each org (deduplicated per day).
 	s.scheduleAuditRetentionCleanup(ctx, orgIDs, now)
+	s.scheduleDataRetentionCleanup(ctx, orgIDs, now)
 
 	// Second pass: enqueue project_cycle jobs for scheduled projects that are due.
 	s.scheduleProjectCycles(ctx, now)
 }
 
 func (s *Scheduler) scheduleAuditRetentionCleanup(ctx context.Context, orgIDs []uuid.UUID, now time.Time) {
-	dateKey := now.UTC().Format("2006-01-02")
+	s.scheduleDailyCleanupJob(ctx, "audit_retention_cleanup", orgIDs, now)
+}
 
-	// Skip if we already enqueued cleanup jobs for today's date. This avoids
-	// N redundant Enqueue calls (one per org) on every scheduler tick after
-	// the first tick of the day — matching the selective-query pattern used
-	// by scheduleProjectCycles.
-	if s.lastAuditCleanupDate == dateKey {
+func (s *Scheduler) scheduleDataRetentionCleanup(ctx context.Context, orgIDs []uuid.UUID, now time.Time) {
+	s.scheduleDailyCleanupJob(ctx, "data_retention_cleanup", orgIDs, now)
+}
+
+// scheduleDailyCleanupJob enqueues one job per org, deduplicated per UTC day.
+// It avoids N redundant Enqueue calls on every scheduler tick after the first
+// tick of the day — matching the selective-query pattern used by scheduleProjectCycles.
+func (s *Scheduler) scheduleDailyCleanupJob(ctx context.Context, jobType string, orgIDs []uuid.UUID, now time.Time) {
+	dateKey := now.UTC().Format("2006-01-02")
+	if s.lastCleanupDates == nil {
+		s.lastCleanupDates = make(map[string]string)
+	}
+	if s.lastCleanupDates[jobType] == dateKey {
 		return
 	}
 
 	for _, orgID := range orgIDs {
-		dedupeKey := fmt.Sprintf("audit_retention_cleanup:%s:%s", orgID.String(), dateKey)
+		dedupeKey := fmt.Sprintf("%s:%s:%s", jobType, orgID.String(), dateKey)
 		payload := map[string]string{"org_id": orgID.String()}
-		if _, err := s.jobs.Enqueue(ctx, orgID, "default", "audit_retention_cleanup", payload, 1, &dedupeKey); err != nil {
-			s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to enqueue audit_retention_cleanup job")
+		if _, err := s.jobs.Enqueue(ctx, orgID, "default", jobType, payload, 1, &dedupeKey); err != nil {
+			s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msgf("failed to enqueue %s job", jobType)
 		}
 	}
 
-	s.lastAuditCleanupDate = dateKey
+	s.lastCleanupDates[jobType] = dateKey
 }
 
 func (s *Scheduler) scheduleProjectCycles(ctx context.Context, now time.Time) {

@@ -107,13 +107,13 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 	result := &agent.AgentResult{}
 	var stderr bytes.Buffer
 	var summaryParts []string
-	var lastOutput string
+	lastOutputByType := make(map[string]string)
 
 	exitCode, err := provider.ExecStream(ctx, sandbox, cmd, func(line []byte) {
 		if len(bytes.TrimSpace(line)) == 0 {
 			return
 		}
-		parseCodexStreamLine(line, result, logCh, &summaryParts, &lastOutput)
+		parseCodexStreamLine(line, result, logCh, &summaryParts, lastOutputByType)
 	}, &stderr)
 	if err != nil {
 		return nil, fmt.Errorf("exec codex CLI: %w", err)
@@ -122,28 +122,23 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 	result.ExitCode = exitCode
 	result.Summary = strings.Join(summaryParts, "\n")
 
+	// Filter refresh-token errors once and reuse the result.
+	var filteredStderr string
 	if stderr.Len() > 0 {
-		stderrStr := stderr.String()
-		// Strip refresh-token errors entirely — these are expected when the
-		// user shares their ChatGPT OAuth tokens between a local Codex CLI
-		// and 143. Showing them is alarming and unhelpful.
-		filtered := filterRefreshTokenLines(stderrStr)
-		if filtered != "" {
+		filteredStderr = filterRefreshTokenLines(stderr.String())
+		if filteredStderr != "" {
 			logCh <- agent.LogEntry{
 				Timestamp: time.Now(),
 				Level:     "error",
-				Message:   filtered,
+				Message:   filteredStderr,
 			}
 		}
 	}
 
 	if exitCode != 0 {
 		result.Error = fmt.Sprintf("codex CLI exited with code %d", exitCode)
-		if stderr.Len() > 0 {
-			filtered := filterRefreshTokenLines(stderr.String())
-			if filtered != "" {
-				result.Error += ": " + filtered
-			}
+		if filteredStderr != "" {
+			result.Error += ": " + filteredStderr
 		}
 	}
 
@@ -168,20 +163,22 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 	return result, nil
 }
 
-// isDuplicateOutput returns true if content matches the previous output and
-// should be suppressed. It tracks the last emitted content via lastOutput.
-func isDuplicateOutput(content string, lastOutput *string) bool {
-	if lastOutput != nil && content != "" && *lastOutput == content {
+// isDuplicateOutput returns true if content matches the previous output of the
+// same event type and should be suppressed. Tracks per-type to avoid cross-type
+// deduplication (e.g. a "message" and "item.completed" with the same text).
+func isDuplicateOutput(eventType, content string, lastByType map[string]string) bool {
+	if content == "" {
+		return false
+	}
+	if prev, ok := lastByType[eventType]; ok && prev == content {
 		return true
 	}
-	if lastOutput != nil && content != "" {
-		*lastOutput = content
-	}
+	lastByType[eventType] = content
 	return false
 }
 
 // parseCodexStreamLine processes a single line of Codex streaming output.
-func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- agent.LogEntry, summaryParts *[]string, lastOutput *string) {
+func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- agent.LogEntry, summaryParts *[]string, lastByType map[string]string) {
 	// Suppress refresh-token errors regardless of how they arrive (stdout or
 	// stderr). The Codex CLI sometimes writes these to stdout at shutdown.
 	if isRefreshTokenError(string(line)) {
@@ -191,7 +188,7 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 	var event codexStreamEvent
 	if err := json.Unmarshal(line, &event); err != nil {
 		text := string(line)
-		if isDuplicateOutput(text, lastOutput) {
+		if isDuplicateOutput("raw", text, lastByType) {
 			return
 		}
 		logCh <- agent.LogEntry{
@@ -208,7 +205,7 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 	if event.Type == "" {
 		var legacy codexJSONOutput
 		if err := json.Unmarshal(line, &legacy); err == nil && legacy.Response != "" {
-			if !isDuplicateOutput(legacy.Response, lastOutput) {
+			if !isDuplicateOutput("legacy", legacy.Response, lastByType) {
 				logCh <- agent.LogEntry{
 					Timestamp: time.Now(),
 					Level:     "output",
@@ -233,7 +230,7 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 		if content == "" {
 			content = event.Message
 		}
-		if isDuplicateOutput(content, lastOutput) {
+		if isDuplicateOutput(event.Type, content, lastByType) {
 			return
 		}
 		logCh <- agent.LogEntry{
@@ -349,7 +346,7 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 			case "agent_message":
 				text := event.Item.Text
 				if text != "" {
-					if isDuplicateOutput(text, lastOutput) {
+					if isDuplicateOutput("item.completed.agent_message", text, lastByType) {
 						return
 					}
 					logCh <- agent.LogEntry{
@@ -524,215 +521,20 @@ func parseCodexStreamOutput(output []byte, result *agent.AgentResult, logCh chan
 		return
 	}
 
-	// Parse as streaming JSONL line by line.
+	// Parse as streaming JSONL line by line, reusing parseCodexStreamLine
+	// for consistent deduplication and refresh-token filtering. Note: this
+	// intentionally adds dedup + refresh-token suppression to buffered
+	// output parsing that previously lacked it.
 	scanner := bufio.NewScanner(bytes.NewReader(output))
 	var summaryParts []string
+	lastByType := make(map[string]string)
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
-
-		var event codexStreamEvent
-		if err := json.Unmarshal(line, &event); err != nil {
-			// Not JSON — emit as raw output and include in summary.
-			text := string(line)
-			logCh <- agent.LogEntry{
-				Timestamp: time.Now(),
-				Level:     "output",
-				Message:   text,
-			}
-			summaryParts = append(summaryParts, text)
-			tryExtractConfidence(text, result)
-			continue
-		}
-
-		switch event.Type {
-		case "message", "text", "assistant":
-			content := event.Content
-			if content == "" {
-				content = event.Message
-			}
-			logCh <- agent.LogEntry{
-				Timestamp: time.Now(),
-				Level:     "output",
-				Message:   content,
-			}
-			summaryParts = append(summaryParts, content)
-			tryExtractConfidence(content, result)
-
-		case "function_call", "tool_use", "tool_call":
-			toolName := event.Name
-			metadata := map[string]interface{}{"tool": toolName}
-			if len(event.Arguments) > 0 {
-				var argsMap map[string]interface{}
-				if err := json.Unmarshal(event.Arguments, &argsMap); err == nil {
-					metadata["input"] = argsMap
-				} else {
-					// Arguments might be a string (double-encoded JSON).
-					var argsStr string
-					if err := json.Unmarshal(event.Arguments, &argsStr); err == nil {
-						var innerArgs map[string]interface{}
-						if err := json.Unmarshal([]byte(argsStr), &innerArgs); err == nil {
-							metadata["input"] = innerArgs
-						} else {
-							metadata["input"] = argsStr
-						}
-					}
-				}
-			}
-			if event.CallID != "" {
-				metadata["call_id"] = event.CallID
-			}
-			logCh <- agent.LogEntry{
-				Timestamp: time.Now(),
-				Level:     "tool_use",
-				Message:   fmt.Sprintf("using tool: %s", toolName),
-				Metadata:  metadata,
-			}
-
-		case "function_call_output", "tool_result":
-			metadata := map[string]interface{}{"type": "tool_result"}
-			if event.Name != "" {
-				metadata["tool"] = event.Name
-			}
-			if event.CallID != "" {
-				metadata["call_id"] = event.CallID
-			}
-			outputMsg := event.Output
-			if outputMsg == "" && len(event.Result) > 0 {
-				outputMsg = string(event.Result)
-			}
-			logCh <- agent.LogEntry{
-				Timestamp: time.Now(),
-				Level:     "output",
-				Message:   outputMsg,
-				Metadata:  metadata,
-			}
-
-		case "thinking":
-			logCh <- agent.LogEntry{
-				Timestamp: time.Now(),
-				Level:     "debug",
-				Message:   event.Content,
-				Metadata:  map[string]interface{}{"type": "thinking"},
-			}
-
-		case "error":
-			msg := event.Error
-			if msg == "" {
-				msg = event.Message
-			}
-			if msg == "" {
-				msg = event.Content
-			}
-			if isRefreshTokenError(msg) {
-				continue
-			}
-			logCh <- agent.LogEntry{
-				Timestamp: time.Now(),
-				Level:     "error",
-				Message:   msg,
-			}
-
-		case "usage", "result":
-			content := event.Content
-			logCh <- agent.LogEntry{
-				Timestamp: time.Now(),
-				Level:     "info",
-				Message:   content,
-			}
-			if content != "" {
-				summaryParts = append(summaryParts, content)
-				tryExtractConfidence(content, result)
-			}
-			if event.Stats != nil {
-				result.TokenUsage = agent.TokenUsage{
-					InputTokens:  event.Stats.InputTokens,
-					OutputTokens: event.Stats.OutputTokens,
-				}
-			}
-			if len(event.Result) > 0 {
-				var usage agent.TokenUsage
-				if err := json.Unmarshal(event.Result, &usage); err == nil && usage.InputTokens > 0 {
-					result.TokenUsage = usage
-				}
-			}
-
-		case "item.completed":
-			if event.Item != nil {
-				switch event.Item.Type {
-				case "agent_message":
-					text := event.Item.Text
-					if text != "" {
-						logCh <- agent.LogEntry{
-							Timestamp: time.Now(),
-							Level:     "output",
-							Message:   text,
-						}
-						summaryParts = append(summaryParts, text)
-						tryExtractConfidence(text, result)
-					}
-				case "command_execution":
-					metadata := map[string]interface{}{
-						"tool":   "command_execution",
-						"input":  map[string]interface{}{"command": event.Item.Command},
-						"status": event.Item.Status,
-					}
-					if event.Item.ExitCode != nil {
-						metadata["exit_code"] = *event.Item.ExitCode
-					}
-					logCh <- agent.LogEntry{
-						Timestamp: time.Now(),
-						Level:     "tool_use",
-						Message:   "using tool: command_execution",
-						Metadata:  metadata,
-					}
-					if event.Item.AggregatedOutput != "" {
-						logCh <- agent.LogEntry{
-							Timestamp: time.Now(),
-							Level:     "output",
-							Message:   event.Item.AggregatedOutput,
-							Metadata:  map[string]interface{}{"type": "tool_result"},
-						}
-					}
-				default:
-					logCh <- agent.LogEntry{
-						Timestamp: time.Now(),
-						Level:     "debug",
-						Message:   string(line),
-					}
-				}
-			}
-
-		case "turn.completed":
-			if len(event.Usage) > 0 {
-				var usage struct {
-					InputTokens       int `json:"input_tokens"`
-					CachedInputTokens int `json:"cached_input_tokens"`
-					OutputTokens      int `json:"output_tokens"`
-				}
-				if err := json.Unmarshal(event.Usage, &usage); err == nil && usage.InputTokens > 0 {
-					result.TokenUsage = agent.TokenUsage{
-						InputTokens:  usage.InputTokens,
-						OutputTokens: usage.OutputTokens,
-					}
-				}
-			}
-			logCh <- agent.LogEntry{
-				Timestamp: time.Now(),
-				Level:     "debug",
-				Message:   string(line),
-			}
-
-		default:
-			logCh <- agent.LogEntry{
-				Timestamp: time.Now(),
-				Level:     "debug",
-				Message:   string(line),
-			}
-		}
+		parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType)
 	}
 
 	result.Summary = strings.Join(summaryParts, "\n")
@@ -742,19 +544,26 @@ func parseCodexStreamOutput(output []byte, result *agent.AgentResult, logCh chan
 // indicators that should be suppressed from user-visible logs.
 func isRefreshTokenError(msg string) bool {
 	return strings.Contains(msg, "refresh_token_reused") ||
-		strings.Contains(msg, "refresh token") ||
-		strings.Contains(msg, "Failed to refresh token")
+		strings.Contains(msg, "Failed to refresh token") ||
+		strings.Contains(msg, "refresh token was already used") ||
+		strings.Contains(msg, "invalid_grant")
 }
 
-// filterRefreshTokenLines removes refresh-token error content from stderr
-// output. If the entire blob is refresh-token noise, returns "". Otherwise
-// returns the original stderr unchanged (we can't reliably split multi-line
-// error messages by newline).
+// filterRefreshTokenLines removes refresh-token error lines from stderr
+// output. Splits by newline and removes only lines matching refresh-token
+// errors, preserving any real error lines mixed in.
 func filterRefreshTokenLines(stderr string) string {
-	if isRefreshTokenError(stderr) {
-		return ""
+	lines := strings.Split(stderr, "\n")
+	var kept []string
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if !isRefreshTokenError(line) {
+			kept = append(kept, line)
+		}
 	}
-	return stderr
+	return strings.Join(kept, "\n")
 }
 
 // shellEscapeCodex escapes single quotes in a path for use inside a

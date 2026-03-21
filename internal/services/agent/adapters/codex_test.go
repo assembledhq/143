@@ -768,69 +768,39 @@ func TestCodexAdapter_Execute_ContinuationWithoutSessionIDUsesResumeLast(t *test
 func TestIsDuplicateOutput(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name       string
-		content    string
-		lastOutput *string
-		wantDup    bool
-		wantLast   string // expected *lastOutput after call; ignored when lastOutput is nil
-	}{
-		{
-			name:       "nil lastOutput pointer never duplicates",
-			content:    "hello",
-			lastOutput: nil,
-			wantDup:    false,
-		},
-		{
-			name:       "first content is not a duplicate",
-			content:    "hello",
-			lastOutput: strPtr(""),
-			wantDup:    false,
-			wantLast:   "hello",
-		},
-		{
-			name:       "same content is a duplicate",
-			content:    "hello",
-			lastOutput: strPtr("hello"),
-			wantDup:    true,
-			wantLast:   "hello",
-		},
-		{
-			name:       "different content is not a duplicate",
-			content:    "world",
-			lastOutput: strPtr("hello"),
-			wantDup:    false,
-			wantLast:   "world",
-		},
-		{
-			name:       "empty content is never a duplicate",
-			content:    "",
-			lastOutput: strPtr("hello"),
-			wantDup:    false,
-			wantLast:   "hello",
-		},
-		{
-			name:       "empty content with empty lastOutput",
-			content:    "",
-			lastOutput: strPtr(""),
-			wantDup:    false,
-			wantLast:   "",
-		},
-	}
+	t.Run("first content is not a duplicate", func(t *testing.T) {
+		t.Parallel()
+		m := make(map[string]string)
+		require.False(t, isDuplicateOutput("message", "hello", m))
+		require.Equal(t, "hello", m["message"])
+	})
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := isDuplicateOutput(tt.content, tt.lastOutput)
-			require.Equal(t, tt.wantDup, got)
-			if tt.lastOutput != nil {
-				require.Equal(t, tt.wantLast, *tt.lastOutput)
-			}
-		})
-	}
+	t.Run("same content same type is a duplicate", func(t *testing.T) {
+		t.Parallel()
+		m := map[string]string{"message": "hello"}
+		require.True(t, isDuplicateOutput("message", "hello", m))
+	})
+
+	t.Run("different content is not a duplicate", func(t *testing.T) {
+		t.Parallel()
+		m := map[string]string{"message": "hello"}
+		require.False(t, isDuplicateOutput("message", "world", m))
+		require.Equal(t, "world", m["message"])
+	})
+
+	t.Run("same content different type is not a duplicate", func(t *testing.T) {
+		t.Parallel()
+		m := map[string]string{"message": "hello"}
+		require.False(t, isDuplicateOutput("item.completed.agent_message", "hello", m))
+	})
+
+	t.Run("empty content is never a duplicate", func(t *testing.T) {
+		t.Parallel()
+		m := map[string]string{"message": "hello"}
+		require.False(t, isDuplicateOutput("message", "", m))
+	})
 }
 
-func strPtr(s string) *string { return &s }
 
 func TestParseCodexStreamLine_DeduplicatesConsecutiveOutput(t *testing.T) {
 	t.Parallel()
@@ -838,13 +808,13 @@ func TestParseCodexStreamLine_DeduplicatesConsecutiveOutput(t *testing.T) {
 	result := &agent.AgentResult{}
 	logCh := make(chan agent.LogEntry, 100)
 	var summaryParts []string
-	var lastOutput string
+	lastByType := make(map[string]string)
 
 	line := []byte(`{"type":"message","content":"Hello world"}`)
 
 	// Send the same line twice — only one log entry should be emitted.
-	parseCodexStreamLine(line, result, logCh, &summaryParts, &lastOutput)
-	parseCodexStreamLine(line, result, logCh, &summaryParts, &lastOutput)
+	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType)
+	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType)
 	close(logCh)
 
 	var logs []agent.LogEntry
@@ -862,15 +832,15 @@ func TestParseCodexStreamLine_AllowsNonConsecutiveDuplicates(t *testing.T) {
 	result := &agent.AgentResult{}
 	logCh := make(chan agent.LogEntry, 100)
 	var summaryParts []string
-	var lastOutput string
+	lastByType := make(map[string]string)
 
 	lineA := []byte(`{"type":"message","content":"A"}`)
 	lineB := []byte(`{"type":"message","content":"B"}`)
 
 	// A, B, A — all 3 should pass through because A is non-consecutive.
-	parseCodexStreamLine(lineA, result, logCh, &summaryParts, &lastOutput)
-	parseCodexStreamLine(lineB, result, logCh, &summaryParts, &lastOutput)
-	parseCodexStreamLine(lineA, result, logCh, &summaryParts, &lastOutput)
+	parseCodexStreamLine(lineA, result, logCh, &summaryParts, lastByType)
+	parseCodexStreamLine(lineB, result, logCh, &summaryParts, lastByType)
+	parseCodexStreamLine(lineA, result, logCh, &summaryParts, lastByType)
 	close(logCh)
 
 	var logs []agent.LogEntry
@@ -890,13 +860,13 @@ func TestParseCodexStreamLine_DeduplicatesItemCompleted(t *testing.T) {
 	result := &agent.AgentResult{}
 	logCh := make(chan agent.LogEntry, 100)
 	var summaryParts []string
-	var lastOutput string
+	lastByType := make(map[string]string)
 
 	line := []byte(`{"type":"item.completed","item":{"type":"agent_message","text":"Final answer"}}`)
 
 	// Same item.completed agent_message twice.
-	parseCodexStreamLine(line, result, logCh, &summaryParts, &lastOutput)
-	parseCodexStreamLine(line, result, logCh, &summaryParts, &lastOutput)
+	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType)
+	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType)
 	close(logCh)
 
 	var logs []agent.LogEntry
@@ -914,7 +884,7 @@ func TestParseCodexStreamLine_SuppressesRefreshTokenFromStdout(t *testing.T) {
 	result := &agent.AgentResult{}
 	logCh := make(chan agent.LogEntry, 100)
 	var summaryParts []string
-	var lastOutput string
+	lastByType := make(map[string]string)
 
 	// Simulate the exact stderr-style errors that arrive via stdout at session end.
 	lines := [][]byte{
@@ -922,7 +892,7 @@ func TestParseCodexStreamLine_SuppressesRefreshTokenFromStdout(t *testing.T) {
 		[]byte(`2026-03-20T04:36:19.827634Z ERROR codex_core::auth: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.`),
 	}
 	for _, line := range lines {
-		parseCodexStreamLine(line, result, logCh, &summaryParts, &lastOutput)
+		parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType)
 	}
 	close(logCh)
 
@@ -972,9 +942,9 @@ func TestFilterRefreshTokenLines(t *testing.T) {
 			expect: "",
 		},
 		{
-			name:   "multi-line blob with refresh_token_reused keyword anywhere",
+			name:   "mixed lines: refresh lines removed, real errors preserved",
 			input:  "\"error\": { \"type\": \"invalid_request_error\", \"param\": null, } }\nFailed to refresh token: refresh_token_reused\n\"error\": { \"type\": \"invalid_request_error\" }",
-			expect: "",
+			expect: "\"error\": { \"type\": \"invalid_request_error\", \"param\": null, } }\n\"error\": { \"type\": \"invalid_request_error\" }",
 		},
 		{
 			name:   "empty input",
@@ -1001,10 +971,10 @@ func TestParseCodexStreamLine_SuppressesRefreshTokenError(t *testing.T) {
 	result := &agent.AgentResult{}
 	logCh := make(chan agent.LogEntry, 100)
 	var summaryParts []string
-	var lastOutput string
+	lastByType := make(map[string]string)
 
 	line := []byte(`{"type":"error","error":"401 Unauthorized: refresh_token_reused"}`)
-	parseCodexStreamLine(line, result, logCh, &summaryParts, &lastOutput)
+	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType)
 	close(logCh)
 
 	var logs []agent.LogEntry

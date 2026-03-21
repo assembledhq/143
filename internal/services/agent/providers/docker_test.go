@@ -129,6 +129,113 @@ func newTestLogger() zerolog.Logger {
 	return zerolog.Nop()
 }
 
+func TestDockerProvider_HealthCheck(t *testing.T) {
+	t.Parallel()
+
+	t.Run("runc skips health check", func(t *testing.T) {
+		t.Parallel()
+
+		mock := &mockDockerClient{}
+		// If ContainerCreate were called, it would panic or return default — but we
+		// verify it's never called by setting a function that fails the test.
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			t.Fatal("ContainerCreate should not be called for runc runtime")
+			return container.CreateResponse{}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger(), WithRuntime("runc"))
+
+		err := p.HealthCheck(context.Background())
+		require.NoError(t, err, "HealthCheck should return nil for runc runtime")
+	})
+
+	t.Run("success with non-runc runtime", func(t *testing.T) {
+		t.Parallel()
+
+		var createCalled, startCalled, removeCalled bool
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			createCalled = true
+			require.Equal(t, "busybox:latest", config.Image, "health check should use busybox image")
+			require.Equal(t, []string(config.Cmd), []string{"echo", "runtime-ok"}, "health check should run echo command")
+			require.Equal(t, "runsc", hostConfig.Runtime, "health check should use configured runtime")
+			require.NotNil(t, hostConfig.Resources.PidsLimit)
+			require.Equal(t, int64(16), *hostConfig.Resources.PidsLimit)
+			return container.CreateResponse{ID: "health-check-container"}, nil
+		}
+		mock.containerStartFn = func(ctx context.Context, containerID string, options container.StartOptions) error {
+			startCalled = true
+			require.Equal(t, "health-check-container", containerID)
+			return nil
+		}
+		mock.containerInspectFn = func(ctx context.Context, containerID string) (container.InspectResponse, error) {
+			return container.InspectResponse{
+				ContainerJSONBase: &container.ContainerJSONBase{
+					State: &container.State{Running: false, ExitCode: 0},
+					HostConfig: &container.HostConfig{
+						NetworkMode: "143-sandbox",
+					},
+				},
+			}, nil
+		}
+		mock.containerRemoveFn = func(ctx context.Context, containerID string, options container.RemoveOptions) error {
+			removeCalled = true
+			require.Equal(t, "health-check-container", containerID)
+			require.True(t, options.Force, "cleanup should force-remove")
+			return nil
+		}
+		p := NewDockerProvider(mock, newTestLogger(), WithRuntime("runsc"))
+
+		err := p.HealthCheck(context.Background())
+		require.NoError(t, err, "HealthCheck should succeed")
+		require.True(t, createCalled, "ContainerCreate should have been called")
+		require.True(t, startCalled, "ContainerStart should have been called")
+		require.True(t, removeCalled, "ContainerRemove should have been called for cleanup")
+	})
+
+	t.Run("returns error when container create fails", func(t *testing.T) {
+		t.Parallel()
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			return container.CreateResponse{}, fmt.Errorf("runtime not found")
+		}
+		p := NewDockerProvider(mock, newTestLogger(), WithRuntime("runsc"))
+
+		err := p.HealthCheck(context.Background())
+		require.Error(t, err, "HealthCheck should return an error")
+		require.Contains(t, err.Error(), "health check")
+		require.Contains(t, err.Error(), "failed to create test container")
+		require.Contains(t, err.Error(), "runtime not found")
+	})
+
+	t.Run("returns error when container start fails and cleans up", func(t *testing.T) {
+		t.Parallel()
+
+		var removeCalled bool
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			return container.CreateResponse{ID: "health-fail"}, nil
+		}
+		mock.containerStartFn = func(ctx context.Context, containerID string, options container.StartOptions) error {
+			return fmt.Errorf("OCI runtime create failed")
+		}
+		mock.containerRemoveFn = func(ctx context.Context, containerID string, options container.RemoveOptions) error {
+			removeCalled = true
+			require.Equal(t, "health-fail", containerID)
+			return nil
+		}
+		p := NewDockerProvider(mock, newTestLogger(), WithRuntime("runsc"))
+
+		err := p.HealthCheck(context.Background())
+		require.Error(t, err, "HealthCheck should return an error")
+		require.Contains(t, err.Error(), "health check")
+		require.Contains(t, err.Error(), "failed to start test container")
+		require.True(t, removeCalled, "ContainerRemove should be called for cleanup even on start failure")
+	})
+}
+
 func TestDockerProvider_Name(t *testing.T) {
 	t.Parallel()
 
