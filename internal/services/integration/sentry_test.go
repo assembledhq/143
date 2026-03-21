@@ -127,6 +127,8 @@ func TestComputeTrendDirection(t *testing.T) {
 }
 
 func TestMapSeverityToSentryLevel(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		severity string
 		expected string
@@ -147,6 +149,8 @@ func TestMapSeverityToSentryLevel(t *testing.T) {
 }
 
 func TestSentryErrorTracker_Name(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewSentryErrorTracker(SentryTrackerConfig{
 		AuthToken: "test-token",
 		OrgSlug:   "test-org",
@@ -157,6 +161,8 @@ func TestSentryErrorTracker_Name(t *testing.T) {
 }
 
 func TestSentryErrorTracker_DefaultBaseURL(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewSentryErrorTracker(SentryTrackerConfig{
 		AuthToken: "test-token",
 		OrgSlug:   "test-org",
@@ -167,6 +173,8 @@ func TestSentryErrorTracker_DefaultBaseURL(t *testing.T) {
 }
 
 func TestSentryErrorTracker_CustomBaseURL(t *testing.T) {
+	t.Parallel()
+
 	tracker := NewSentryErrorTracker(SentryTrackerConfig{
 		BaseURL:   "https://sentry.example.com/",
 		AuthToken: "test-token",

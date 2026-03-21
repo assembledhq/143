@@ -15,6 +15,8 @@ import (
 )
 
 func TestCodexAdapter_Name(t *testing.T) {
+	t.Parallel()
+
 	a := NewCodexAdapter(zerolog.Nop())
 	if a.Name() != models.AgentTypeCodex {
 		t.Errorf("expected name 'codex', got %q", a.Name())
@@ -22,8 +24,9 @@ func TestCodexAdapter_Name(t *testing.T) {
 }
 
 func TestCodexAdapter_PreparePrompt(t *testing.T) {
-	a := NewCodexAdapter(zerolog.Nop())
+	t.Parallel()
 
+	a := NewCodexAdapter(zerolog.Nop())
 	tests := []struct {
 		name      string
 		input     *agent.AgentInput
@@ -72,6 +75,7 @@ func TestCodexAdapter_PreparePrompt(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			prompt, err := a.PreparePrompt(context.Background(), tt.input)
 			if tt.wantErr {
 				if err == nil {
@@ -96,8 +100,9 @@ func TestCodexAdapter_PreparePrompt(t *testing.T) {
 }
 
 func TestParseCodexOutput_JSON(t *testing.T) {
-	output := []byte(`{"response": "Fixed the null pointer by adding a nil check.", "stats": {"inputTokens": 1500, "outputTokens": 500}}`)
+	t.Parallel()
 
+	output := []byte(`{"response": "Fixed the null pointer by adding a nil check.", "stats": {"inputTokens": 1500, "outputTokens": 500}}`)
 	result := &agent.AgentResult{}
 	logCh := make(chan agent.LogEntry, 100)
 
@@ -116,8 +121,9 @@ func TestParseCodexOutput_JSON(t *testing.T) {
 }
 
 func TestParseCodexOutput_PlainText(t *testing.T) {
-	output := []byte("I fixed the bug by adding a nil check on line 42.")
+	t.Parallel()
 
+	output := []byte("I fixed the bug by adding a nil check on line 42.")
 	result := &agent.AgentResult{}
 	logCh := make(chan agent.LogEntry, 100)
 
@@ -130,8 +136,9 @@ func TestParseCodexOutput_PlainText(t *testing.T) {
 }
 
 func TestParseCodexOutput_WithConfidence(t *testing.T) {
-	output := []byte(`{"response": "Fixed it.\n\n` + "```json\\n{\\\"confidence_score\\\": 0.85, \\\"confidence_reasoning\\\": \\\"Simple nil check\\\", \\\"risk_factors\\\": [\\\"none\\\"]}\\n```" + `"}`)
+	t.Parallel()
 
+	output := []byte(`{"response": "Fixed it.\n\n` + "```json\\n{\\\"confidence_score\\\": 0.85, \\\"confidence_reasoning\\\": \\\"Simple nil check\\\", \\\"risk_factors\\\": [\\\"none\\\"]}\\n```" + `"}`)
 	result := &agent.AgentResult{}
 	logCh := make(chan agent.LogEntry, 100)
 
@@ -144,6 +151,8 @@ func TestParseCodexOutput_WithConfidence(t *testing.T) {
 }
 
 func TestParseCodexOutput_Empty(t *testing.T) {
+	t.Parallel()
+
 	result := &agent.AgentResult{}
 	logCh := make(chan agent.LogEntry, 100)
 
@@ -156,8 +165,9 @@ func TestParseCodexOutput_Empty(t *testing.T) {
 }
 
 func TestParseCodexOutput_JSONWithError(t *testing.T) {
-	output := []byte(`{"response": "Attempted fix.", "error": "rate limit exceeded"}`)
+	t.Parallel()
 
+	output := []byte(`{"response": "Attempted fix.", "error": "rate limit exceeded"}`)
 	result := &agent.AgentResult{}
 	logCh := make(chan agent.LogEntry, 100)
 
@@ -986,6 +996,8 @@ func TestParseCodexStreamLine_SuppressesRefreshTokenError(t *testing.T) {
 }
 
 func TestShellEscapeCodex(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		input    string
@@ -999,6 +1011,7 @@ func TestShellEscapeCodex(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := shellEscapeCodex(tt.input)
 			if got != tt.expected {
 				t.Errorf("shellEscapeCodex(%q) = %q, want %q", tt.input, got, tt.expected)

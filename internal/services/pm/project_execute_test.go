@@ -183,11 +183,13 @@ func TestPlaceholderIssueID(t *testing.T) {
 	t.Parallel()
 
 	t.Run("nil issue ID returns uuid.Nil", func(t *testing.T) {
+		t.Parallel()
 		task := &models.ProjectTask{}
 		require.Equal(t, uuid.Nil, placeholderIssueID(task))
 	})
 
 	t.Run("non-nil issue ID returns it", func(t *testing.T) {
+		t.Parallel()
 		id := uuid.New()
 		task := &models.ProjectTask{IssueID: &id}
 		require.Equal(t, id, placeholderIssueID(task))
@@ -230,13 +232,13 @@ func TestCanDispatchForProject_Sequential(t *testing.T) {
 		ExecutionMode: models.ProjectExecModeSequential,
 	}
 
-	t.Run("no active tasks allows 1", func(t *testing.T) {
+	t.Run("no active tasks allows 1", func(t *testing.T) { //nolint:paralleltest // subtests share mutable mock state
 		pts.countByStatus = map[string]int{}
 		got := svc.canDispatchForProject(context.Background(), uuid.New(), project)
 		require.Equal(t, 1, got)
 	})
 
-	t.Run("active tasks blocks dispatch", func(t *testing.T) {
+	t.Run("active tasks blocks dispatch", func(t *testing.T) { //nolint:paralleltest // subtests share mutable mock state
 		pts.countByStatus = map[string]int{string(models.ProjectTaskStatusRunning): 1}
 		got := svc.canDispatchForProject(context.Background(), uuid.New(), project)
 		require.Equal(t, 0, got)
@@ -255,19 +257,19 @@ func TestCanDispatchForProject_Parallel(t *testing.T) {
 		MaxConcurrent: 3,
 	}
 
-	t.Run("no active tasks returns max", func(t *testing.T) {
+	t.Run("no active tasks returns max", func(t *testing.T) { //nolint:paralleltest // subtests share mutable mock state
 		pts.countByStatus = map[string]int{}
 		got := svc.canDispatchForProject(context.Background(), uuid.New(), project)
 		require.Equal(t, 3, got)
 	})
 
-	t.Run("some active tasks returns remaining", func(t *testing.T) {
+	t.Run("some active tasks returns remaining", func(t *testing.T) { //nolint:paralleltest // subtests share mutable mock state
 		pts.countByStatus = map[string]int{string(models.ProjectTaskStatusRunning): 1, string(models.ProjectTaskStatusDelegated): 1}
 		got := svc.canDispatchForProject(context.Background(), uuid.New(), project)
 		require.Equal(t, 1, got)
 	})
 
-	t.Run("all slots used returns 0", func(t *testing.T) {
+	t.Run("all slots used returns 0", func(t *testing.T) { //nolint:paralleltest // subtests share mutable mock state
 		pts.countByStatus = map[string]int{string(models.ProjectTaskStatusRunning): 3}
 		got := svc.canDispatchForProject(context.Background(), uuid.New(), project)
 		require.Equal(t, 0, got)
