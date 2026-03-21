@@ -103,6 +103,36 @@ export default function AboutPage() {
               <h2
                 className={`text-base font-medium ${isDark ? "text-white/70" : "text-slate-800"}`}
               >
+                One platform, every model, every agent
+              </h2>
+              <p>
+                One of our biggest frustrations was that every model provider
+                only supported their own models. We wanted something
+                cross-platform&mdash;a single place where different members of
+                the team could use the coding agents they preferred, whether that
+                was Claude, GPT, Gemini, or anything else, without being locked
+                into one vendor&rsquo;s ecosystem.
+              </p>
+              <p>
+                But it wasn&rsquo;t just about model choice. We wanted a single
+                experience for the entire team that let you see all coding agent
+                usage in one place, collaborate on projects that spanned multiple
+                PRs and multiple commits, and keep context alive across
+                sessions&mdash;not start from scratch every time.
+              </p>
+              <p>
+                Most importantly, we wanted to build a PM agent that truly
+                understood your company&rsquo;s context&mdash;your codebase,
+                your product, your priorities&mdash;and could keep building on
+                top of that knowledge over time. Not a generic assistant, but one
+                that gets smarter the more your team uses it.
+              </p>
+            </section>
+
+            <section className="space-y-3">
+              <h2
+                className={`text-base font-medium ${isDark ? "text-white/70" : "text-slate-800"}`}
+              >
                 About Assembled
               </h2>
               <p>
