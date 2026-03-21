@@ -167,7 +167,7 @@ func TestSchedulerRunOnce(t *testing.T) {
 			},
 			repos:           &schedulerRuntimeRepoStoreMock{},
 			jobs:            &schedulerRuntimeJobsMock{},
-			expectedEnqueue: 6, // 2 orgs × (sync_slack + pm_analyze + audit_retention_cleanup)
+			expectedEnqueue: 8, // 2 orgs × (sync_slack + pm_analyze + audit_retention_cleanup + data_retention_cleanup)
 			expectedRelease: 1,
 		},
 	}
