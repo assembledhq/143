@@ -282,6 +282,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Post("/api/v1/integrations/slack/connect", integrationHandler.ConnectSlack)
 			r.Get("/api/v1/integrations/slack/channels", integrationHandler.ListSlackChannels)
 			r.Patch("/api/v1/integrations/slack/channels", integrationHandler.UpdateSlackChannels)
+			r.Delete("/api/v1/integrations/{provider}/disconnect", integrationHandler.DisconnectIntegration)
 			// Personal credential management
 			r.Put("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.UpsertPersonal)
 			r.Delete("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.DeletePersonal)

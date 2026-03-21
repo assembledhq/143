@@ -75,7 +75,7 @@ describe("integration connection cards", () => {
     expect(screen.queryByText("acme/api")).not.toBeInTheDocument();
   });
 
-  it("disables Linear connect when already connected", () => {
+  it("disables Linear connect when already connected and no disconnect handler", () => {
     renderWithProviders(
       <AllIntegrationCards
         githubConnected={false}
@@ -111,7 +111,7 @@ describe("integration connection cards", () => {
     expect(screen.getByRole("button", { name: "Connect Slack" })).toBeEnabled();
   });
 
-  it("shows Slack as Connected when slackConnected is true", () => {
+  it("shows Slack as Connected with no disconnect when no handler provided", () => {
     renderWithProviders(
       <AdditionalIntegrationCards
         sentryConnected={false}
@@ -146,5 +146,95 @@ describe("integration connection cards", () => {
     await user.click(screen.getByRole("button", { name: "Connect Slack" }));
 
     expect(onConnectSlack).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows Disconnect button when connected and onDisconnect is provided", () => {
+    renderWithProviders(
+      <SourceControlIntegrationCard
+        githubConnected
+        onConnectGitHub={vi.fn()}
+        onDisconnect={vi.fn()}
+      />
+    );
+
+    const disconnectButton = screen.getByRole("button", { name: "Disconnect GitHub" });
+    expect(disconnectButton).toBeInTheDocument();
+    expect(disconnectButton).toBeEnabled();
+  });
+
+  it("opens confirmation dialog and calls onDisconnect on confirm", async () => {
+    const user = userEvent.setup();
+    const onDisconnect = vi.fn();
+
+    renderWithProviders(
+      <SourceControlIntegrationCard
+        githubConnected
+        onConnectGitHub={vi.fn()}
+        onDisconnect={onDisconnect}
+      />
+    );
+
+    // Click Disconnect to open dialog
+    await user.click(screen.getByRole("button", { name: "Disconnect GitHub" }));
+
+    // Confirmation dialog should appear
+    expect(screen.getByText("Disconnect GitHub")).toBeInTheDocument();
+    expect(screen.getByText(/This will disconnect GitHub/)).toBeInTheDocument();
+
+    // Confirm the disconnect
+    await user.click(screen.getByRole("button", { name: "Disconnect" }));
+
+    expect(onDisconnect).toHaveBeenCalledWith("github");
+  });
+
+  it("cancels disconnect when Cancel is clicked in dialog", async () => {
+    const user = userEvent.setup();
+    const onDisconnect = vi.fn();
+
+    renderWithProviders(
+      <SourceControlIntegrationCard
+        githubConnected
+        onConnectGitHub={vi.fn()}
+        onDisconnect={onDisconnect}
+      />
+    );
+
+    await user.click(screen.getByRole("button", { name: "Disconnect GitHub" }));
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(onDisconnect).not.toHaveBeenCalled();
+  });
+
+  it("shows Disconnect buttons for additional integrations when connected with handler", () => {
+    renderWithProviders(
+      <AdditionalIntegrationCards
+        sentryConnected
+        linearConnected
+        linearLoading={false}
+        slackConnected
+        onConnectSentry={vi.fn()}
+        onConnectLinear={vi.fn()}
+        onConnectSlack={vi.fn()}
+        onDisconnect={vi.fn()}
+      />
+    );
+
+    expect(screen.getByRole("button", { name: "Disconnect Sentry" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Disconnect Linear" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Disconnect Slack" })).toBeInTheDocument();
+  });
+
+  it("shows error message when disconnect fails", () => {
+    renderWithProviders(
+      <SourceControlIntegrationCard
+        githubConnected
+        onConnectGitHub={vi.fn()}
+        onDisconnect={vi.fn()}
+        disconnectingProvider="github"
+        disconnectError="Failed to disconnect."
+      />
+    );
+
+    expect(screen.getByText("Failed to disconnect.")).toBeInTheDocument();
   });
 });

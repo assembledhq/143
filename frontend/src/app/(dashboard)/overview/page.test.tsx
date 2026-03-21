@@ -183,7 +183,7 @@ describe('OverviewPage', () => {
 
     renderWithProviders(<Overview />);
 
-    expect(await screen.findByRole('button', { name: 'Linear Connected' })).toBeDisabled();
+    expect(await screen.findByRole('button', { name: 'Disconnect Linear' })).toBeInTheDocument();
   });
 
   it('shows Codex as connected when ChatGPT auth status is completed', async () => {
