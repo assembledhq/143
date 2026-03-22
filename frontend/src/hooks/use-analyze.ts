@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { captureError } from "@/lib/errors";
 
 const STORAGE_KEY = "143:analyze-started-at";
 const TIMEOUT_MS = 90_000;
@@ -93,7 +94,8 @@ export function useAnalyze(hasActivePlanSession: boolean) {
       queryClient.invalidateQueries({ queryKey: ["pm", "latest"] });
       queryClient.invalidateQueries({ queryKey: ["pm", "plans"] });
     },
-    onError: () => {
+    onError: (error) => {
+      captureError(error, { feature: "pm-analyze" });
       setAnalyzeError("Failed to start analysis. Make sure the backend is running.");
     },
   });

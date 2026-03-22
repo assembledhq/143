@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Bot, Check } from "lucide-react";
 import { api } from "@/lib/api";
+import { captureError } from "@/lib/errors";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -116,15 +117,15 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
   const [selectedAgentType, setSelectedAgentType] = useState<AgentType>("codex");
 
   const fetchData = useCallback(() => {
-    api.codexAuth.status().then((res) => setCodexAuthStatus(res.data)).catch((err) => console.error("failed to load codex auth status:", err));
+    api.codexAuth.status().then((res) => setCodexAuthStatus(res.data)).catch((err) => captureError(err, { feature: "overview-codex-status" }));
     api.settings.get().then((res) => {
       const settings = res.data?.settings as OrgSettings | undefined;
       setAgentConfig(settings?.agent_config ?? {});
       setSelectedAgentType(settings?.default_agent_type ?? "codex");
-    }).catch((err) => console.error("failed to load settings:", err));
+    }).catch((err) => captureError(err, { feature: "overview-settings" }));
     api.settings.getAgentDefaults().then((res) => {
       setAgentDefaults(res.data ?? {});
-    }).catch((err) => console.error("failed to load agent defaults:", err));
+    }).catch((err) => captureError(err, { feature: "overview-agent-defaults" }));
   }, []);
 
   useEffect(() => { fetchData(); }, [fetchData]);
