@@ -4,6 +4,7 @@ import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { captureError } from "@/lib/errors";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
@@ -67,7 +68,8 @@ function AcceptInvitationContent() {
           // Fallback: redirect to autopilot
           router.replace("/autopilot");
         }
-      } catch {
+      } catch (err) {
+        captureError(err, { feature: "invite-accept" });
         setStatus("error");
         setErrorMessage("Something went wrong. Please try again.");
       }

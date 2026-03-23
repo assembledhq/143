@@ -24,13 +24,19 @@ This creates the database, copies `.env.example` to `.env`, installs dependencie
 
 ### Running
 
-**Option A — with Docker Compose**:
+**Option A — with ngrok tunnel** (recommended for GitHub OAuth / webhook testing):
+
+```bash
+make dev-ngrok NGROK_DOMAIN=yourname.ngrok.dev
+```
+
+**Option B — with Docker Compose**:
 
 ```bash
 make dev              # starts Postgres, API server, and frontend
 ```
 
-**Option B — without Docker** (two terminals):
+**Option C — without Docker** (two terminals):
 
 ```bash
 make server-dev       # Go API on localhost:8080
@@ -42,12 +48,17 @@ The frontend proxies `/api/*` to the Go server automatically.
 ### Common commands
 
 ```bash
+make setup            # run setup.sh (install deps, create DB, run migrations)
+make build            # compile server and migrate binaries to bin/
 make test             # run all tests
 make test-race        # run tests with race detector
 make test-coverage    # generate coverage.html
 make migrate-up       # apply pending migrations
 make migrate-down     # roll back last migration
 make lint             # run golangci-lint
+make frontend-lint    # run frontend linter
+make frontend-typecheck  # run TypeScript type checking
+make frontend-check   # typecheck + lint + build (all frontend checks)
 ```
 
 ### Environment
@@ -71,6 +82,7 @@ make secrets-encrypt                 # encrypt .env → .env.enc
 make secrets-decrypt                 # decrypt .env.enc → .env
 make secrets-encrypt ENV=production  # encrypt production secrets
 make secrets-decrypt ENV=production  # decrypt production secrets
+make secrets-edit                    # edit encrypted .env.enc in-place
 make secrets-rotate                  # re-encrypt after adding a team member's key
 ```
 
