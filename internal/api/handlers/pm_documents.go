@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
@@ -287,7 +288,7 @@ func (h *PMDocumentHandler) DiscoverNotion(w http.ResponseWriter, r *http.Reques
 		return // error already written
 	}
 
-	// Product-relevant search queries.
+	// Product-relevant search queries, run concurrently.
 	queries := []string{
 		"roadmap",
 		"product direction",
@@ -299,16 +300,30 @@ func (h *PMDocumentHandler) DiscoverNotion(w http.ResponseWriter, r *http.Reques
 		"RFC",
 	}
 
+	type queryResult struct {
+		docs []integration.DocSummary
+	}
+
+	queryResults := make([]queryResult, len(queries))
+	var wg sync.WaitGroup
+	for i, q := range queries {
+		wg.Add(1)
+		go func(idx int, query string) {
+			defer wg.Done()
+			docs, err := store.SearchDocuments(r.Context(), query, integration.DocFilter{Limit: 10})
+			if err != nil {
+				return // skip failed queries
+			}
+			queryResults[idx] = queryResult{docs: docs}
+		}(i, q)
+	}
+	wg.Wait()
+
+	// Deduplicate results across all queries.
 	seen := make(map[string]bool)
 	var results []integration.DocSummary
-
-	for _, q := range queries {
-		docs, err := store.SearchDocuments(r.Context(), q, integration.DocFilter{Limit: 10})
-		if err != nil {
-			// Log but continue with other queries.
-			continue
-		}
-		for _, doc := range docs {
+	for _, qr := range queryResults {
+		for _, doc := range qr.docs {
 			if !seen[doc.ID] {
 				seen[doc.ID] = true
 				results = append(results, doc)

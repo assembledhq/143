@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -35,10 +36,9 @@ type NotionDocumentStoreConfig struct {
 const (
 	notionDefaultAPIURL     = "https://api.notion.com"
 	notionDefaultAPIVersion = "2022-06-28"
-	notionMaxBlockDepth     = 3
-	notionMaxTotalBlocks    = 500
-	notionPageSize          = 100
-	notionSnippetMaxLen     = 200
+	notionMaxBlockDepth  = 3
+	notionMaxTotalBlocks = 500
+	notionPageSize       = 100
 )
 
 // NewNotionDocumentStore creates a Notion DocumentStore from the given config.
@@ -66,6 +66,9 @@ func (n *NotionDocumentStore) Name() string { return "notion" }
 
 // SearchDocuments finds pages in Notion matching the text query.
 // An empty query returns all accessible pages (useful for discovery).
+//
+// TODO: Use filter.Workspace to scope search to a specific database
+// via the Notion search API's filter parameter.
 func (n *NotionDocumentStore) SearchDocuments(ctx context.Context, query string, filter DocFilter) ([]DocSummary, error) {
 	limit := filter.Limit
 	if limit <= 0 {
@@ -101,12 +104,13 @@ func (n *NotionDocumentStore) SearchDocuments(ctx context.Context, query string,
 func (n *NotionDocumentStore) GetDocument(ctx context.Context, docID string) (*Document, error) {
 	// Fetch page metadata.
 	var page notionPage
-	if err := n.doRequest(ctx, http.MethodGet, "/v1/pages/"+docID, nil, &page); err != nil {
+	if err := n.doRequest(ctx, http.MethodGet, "/v1/pages/"+url.PathEscape(docID), nil, &page); err != nil {
 		return nil, fmt.Errorf("notion get page: %w", err)
 	}
 
 	// Fetch all blocks (content).
-	blocks, err := n.fetchAllBlocks(ctx, docID, 0)
+	var totalFetched int
+	blocks, err := n.fetchAllBlocks(ctx, docID, 0, &totalFetched)
 	if err != nil {
 		return nil, fmt.Errorf("notion get page blocks: %w", err)
 	}
@@ -234,20 +238,21 @@ func (n *NotionDocumentStore) doRequest(ctx context.Context, method, path string
 // --- Block fetching ---
 
 // fetchAllBlocks recursively fetches all blocks for a page/block, handling
-// pagination and nested children up to notionMaxBlockDepth levels.
-func (n *NotionDocumentStore) fetchAllBlocks(ctx context.Context, blockID string, depth int) ([]notionBlock, error) {
+// pagination and nested children up to notionMaxBlockDepth levels. The
+// totalFetched counter is shared across recursion levels to enforce the
+// global notionMaxTotalBlocks limit.
+func (n *NotionDocumentStore) fetchAllBlocks(ctx context.Context, blockID string, depth int, totalFetched *int) ([]notionBlock, error) {
 	if depth >= notionMaxBlockDepth {
 		return nil, nil
 	}
 
 	var allBlocks []notionBlock
 	var cursor string
-	totalFetched := 0
 
 	for {
-		path := fmt.Sprintf("/v1/blocks/%s/children?page_size=%d", blockID, notionPageSize)
+		path := fmt.Sprintf("/v1/blocks/%s/children?page_size=%d", url.PathEscape(blockID), notionPageSize)
 		if cursor != "" {
-			path += "&start_cursor=" + cursor
+			path += "&start_cursor=" + url.QueryEscape(cursor)
 		}
 
 		var resp notionBlocksResponse
@@ -260,18 +265,18 @@ func (n *NotionDocumentStore) fetchAllBlocks(ctx context.Context, blockID string
 
 			// Recursively fetch children if present and within depth limit.
 			if block.HasChildren && depth+1 < notionMaxBlockDepth {
-				children, err := n.fetchAllBlocks(ctx, block.ID, depth+1)
+				children, err := n.fetchAllBlocks(ctx, block.ID, depth+1, totalFetched)
 				if err != nil {
-					// Log-level: continue with what we have rather than fail entirely.
+					// Continue with what we have rather than fail entirely.
 					break
 				}
 				block.Children = children
 			}
 
 			allBlocks = append(allBlocks, block)
-			totalFetched++
+			*totalFetched++
 
-			if totalFetched >= notionMaxTotalBlocks {
+			if *totalFetched >= notionMaxTotalBlocks {
 				return allBlocks, nil
 			}
 		}
@@ -295,6 +300,9 @@ func blocksToMarkdown(blocks []notionBlock, indent int) string {
 	for i, block := range blocks {
 		switch block.Type {
 		case "paragraph":
+			if block.Paragraph == nil {
+				break
+			}
 			text := richTextToMarkdown(block.Paragraph.RichText)
 			if text != "" {
 				sb.WriteString(prefix + text + "\n")
@@ -302,15 +310,27 @@ func blocksToMarkdown(blocks []notionBlock, indent int) string {
 			sb.WriteString("\n")
 
 		case "heading_1":
+			if block.Heading1 == nil {
+				break
+			}
 			sb.WriteString("# " + richTextToMarkdown(block.Heading1.RichText) + "\n\n")
 
 		case "heading_2":
+			if block.Heading2 == nil {
+				break
+			}
 			sb.WriteString("## " + richTextToMarkdown(block.Heading2.RichText) + "\n\n")
 
 		case "heading_3":
+			if block.Heading3 == nil {
+				break
+			}
 			sb.WriteString("### " + richTextToMarkdown(block.Heading3.RichText) + "\n\n")
 
 		case "bulleted_list_item":
+			if block.BulletedListItem == nil {
+				break
+			}
 			text := richTextToMarkdown(block.BulletedListItem.RichText)
 			sb.WriteString(prefix + "- " + text + "\n")
 			if len(block.Children) > 0 {
@@ -318,6 +338,9 @@ func blocksToMarkdown(blocks []notionBlock, indent int) string {
 			}
 
 		case "numbered_list_item":
+			if block.NumberedListItem == nil {
+				break
+			}
 			text := richTextToMarkdown(block.NumberedListItem.RichText)
 			sb.WriteString(prefix + "1. " + text + "\n")
 			if len(block.Children) > 0 {
@@ -325,6 +348,9 @@ func blocksToMarkdown(blocks []notionBlock, indent int) string {
 			}
 
 		case "to_do":
+			if block.ToDo == nil {
+				break
+			}
 			checkbox := "[ ]"
 			if block.ToDo.Checked {
 				checkbox = "[x]"
@@ -333,6 +359,9 @@ func blocksToMarkdown(blocks []notionBlock, indent int) string {
 			sb.WriteString(prefix + "- " + checkbox + " " + text + "\n")
 
 		case "toggle":
+			if block.Toggle == nil {
+				break
+			}
 			text := richTextToMarkdown(block.Toggle.RichText)
 			sb.WriteString(prefix + "**" + text + "**\n")
 			if len(block.Children) > 0 {
@@ -341,11 +370,17 @@ func blocksToMarkdown(blocks []notionBlock, indent int) string {
 			sb.WriteString("\n")
 
 		case "code":
+			if block.Code == nil {
+				break
+			}
 			lang := block.Code.Language
 			text := richTextToMarkdown(block.Code.RichText)
 			sb.WriteString("```" + lang + "\n" + text + "\n```\n\n")
 
 		case "quote":
+			if block.Quote == nil {
+				break
+			}
 			text := richTextToMarkdown(block.Quote.RichText)
 			for _, line := range strings.Split(text, "\n") {
 				sb.WriteString(prefix + "> " + line + "\n")
@@ -356,6 +391,9 @@ func blocksToMarkdown(blocks []notionBlock, indent int) string {
 			sb.WriteString("\n")
 
 		case "callout":
+			if block.Callout == nil {
+				break
+			}
 			icon := ""
 			if block.Callout.Icon != nil && block.Callout.Icon.Emoji != "" {
 				icon = block.Callout.Icon.Emoji + " "
@@ -367,6 +405,9 @@ func blocksToMarkdown(blocks []notionBlock, indent int) string {
 			sb.WriteString("---\n\n")
 
 		case "image":
+			if block.Image == nil {
+				break
+			}
 			caption := richTextToMarkdown(block.Image.Caption)
 			url := ""
 			if block.Image.File != nil {
@@ -379,6 +420,9 @@ func blocksToMarkdown(blocks []notionBlock, indent int) string {
 			}
 
 		case "bookmark":
+			if block.Bookmark == nil {
+				break
+			}
 			url := block.Bookmark.URL
 			caption := richTextToMarkdown(block.Bookmark.Caption)
 			if caption == "" {
@@ -387,15 +431,24 @@ func blocksToMarkdown(blocks []notionBlock, indent int) string {
 			sb.WriteString("[" + caption + "](" + url + ")\n\n")
 
 		case "table":
+			if block.Table == nil {
+				break
+			}
 			if len(block.Children) > 0 {
 				sb.WriteString(tableBlocksToMarkdown(block.Children, block.Table.HasColumnHeader))
 				sb.WriteString("\n")
 			}
 
 		case "child_page":
+			if block.ChildPage == nil {
+				break
+			}
 			sb.WriteString(prefix + "[Page: " + block.ChildPage.Title + "]\n\n")
 
 		case "child_database":
+			if block.ChildDatabase == nil {
+				break
+			}
 			sb.WriteString(prefix + "[Database: " + block.ChildDatabase.Title + "]\n\n")
 
 		case "column_list":
@@ -433,8 +486,9 @@ func tableBlocksToMarkdown(rows []notionBlock, hasHeader bool) string {
 	}
 
 	var sb strings.Builder
+	rowCount := 0
 
-	for i, row := range rows {
+	for _, row := range rows {
 		if row.Type != "table_row" || row.TableRow == nil {
 			continue
 		}
@@ -446,14 +500,15 @@ func tableBlocksToMarkdown(rows []notionBlock, hasHeader bool) string {
 
 		sb.WriteString("| " + strings.Join(cells, " | ") + " |\n")
 
-		// Add header separator after first row if it's a header.
-		if i == 0 && hasHeader {
+		// Add header separator after first data row if it's a header.
+		if rowCount == 0 && hasHeader {
 			separators := make([]string, len(cells))
 			for j := range separators {
 				separators[j] = "---"
 			}
 			sb.WriteString("| " + strings.Join(separators, " | ") + " |\n")
 		}
+		rowCount++
 	}
 
 	return sb.String()

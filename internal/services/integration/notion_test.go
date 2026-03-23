@@ -455,6 +455,28 @@ func TestBlocksToMarkdown(t *testing.T) {
 			},
 			contains: []string{"| Name | Value |", "| --- | --- |", "| foo | bar |"},
 		},
+		{
+			name: "nil content fields do not panic",
+			blocks: []notionBlock{
+				{Type: "paragraph", Paragraph: nil},
+				{Type: "heading_1", Heading1: nil},
+				{Type: "heading_2", Heading2: nil},
+				{Type: "heading_3", Heading3: nil},
+				{Type: "bulleted_list_item", BulletedListItem: nil},
+				{Type: "numbered_list_item", NumberedListItem: nil},
+				{Type: "to_do", ToDo: nil},
+				{Type: "toggle", Toggle: nil},
+				{Type: "code", Code: nil},
+				{Type: "quote", Quote: nil},
+				{Type: "callout", Callout: nil},
+				{Type: "image", Image: nil},
+				{Type: "bookmark", Bookmark: nil},
+				{Type: "table", Table: nil},
+				{Type: "child_page", ChildPage: nil},
+				{Type: "child_database", ChildDatabase: nil},
+			},
+			contains: []string{}, // should produce empty output without panicking
+		},
 	}
 
 	for _, tt := range tests {

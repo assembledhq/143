@@ -1016,8 +1016,8 @@ type integrationCredentials struct {
 	Notion *models.NotionConfig
 }
 
-// fetchIntegrationCredentials retrieves the Sentry and Linear configs for
-// an org from the credential provider. Returns nil configs if unavailable.
+// fetchIntegrationCredentials retrieves the Sentry, Linear, and Notion configs
+// for an org from the credential provider. Returns nil configs if unavailable.
 func (o *Orchestrator) fetchIntegrationCredentials(ctx context.Context, orgID uuid.UUID) integrationCredentials {
 	var ic integrationCredentials
 	if o.credentials == nil {
