@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/docker/docker/api/types"
@@ -84,16 +83,11 @@ func (d *DockerFileReader) ListDir(ctx context.Context, containerID, workDir, di
 		return nil, fmt.Errorf("list directory %s: %w", dirPath, err)
 	}
 
-	// Use find with null-delimited output for safe parsing of filenames
-	// that may contain tabs or newlines.
-	// The format string uses find's own escape sequences (not Go's):
-	// \t = tab, \0 = null byte. Go's raw string literal (`...`) passes
-	// the backslash-t and backslash-zero through literally, which find
-	// then interprets as its own escapes.
-	argv := []string{
-		"find", absPath, "-maxdepth", "1", "-mindepth", "1",
-		"-printf", `%y\t%s\t%P\0`,
-	}
+	// Use "ls -1ApL" + "stat" as a portable alternative to GNU find -printf,
+	// which is not available on Alpine/BusyBox containers.
+	// ls -1: one entry per line, -A: include hidden files except . and ..,
+	// -p: append / to directories, -L: follow symlinks.
+	argv := []string{"ls", "-1ApL", absPath}
 
 	stdout, _, exitCode, err := d.execCmd(ctx, containerID, workDir, argv)
 	if err != nil {
@@ -104,60 +98,59 @@ func (d *DockerFileReader) ListDir(ctx context.Context, containerID, workDir, di
 	}
 
 	var entries []FileEntry
-	for _, record := range strings.Split(stdout, "\x00") {
-		if record == "" {
-			continue
-		}
-		parts := strings.SplitN(record, "\t", 3)
-		if len(parts) < 3 {
+	for _, name := range strings.Split(strings.TrimRight(stdout, "\n"), "\n") {
+		if name == "" {
 			continue
 		}
 
 		entryType := "file"
-		if parts[0] == "d" {
+		if strings.HasSuffix(name, "/") {
 			entryType = "dir"
+			name = strings.TrimSuffix(name, "/")
 		}
-
-		size, _ := strconv.ParseInt(parts[1], 10, 64)
-		entryPath := parts[2]
 
 		// Construct relative path from workDir
 		relPath := dirPath
 		if relPath == "" || relPath == "." {
-			relPath = entryPath
+			relPath = name
 		} else {
-			relPath = relPath + "/" + entryPath
+			relPath = relPath + "/" + name
 		}
 
 		entries = append(entries, FileEntry{
 			Path: relPath,
 			Type: entryType,
-			Size: size,
+			Size: 0, // Size omitted for portability; frontend doesn't depend on it for listing.
 		})
 	}
 
 	return entries, nil
 }
 
-// ReadFile returns the full content of a file.
-func (d *DockerFileReader) ReadFile(ctx context.Context, containerID, workDir, filePath string) (string, error) {
+// maxFileReadBytes is the maximum number of bytes to read from a file.
+const maxFileReadBytes = 1048576 // 1MB
+
+// ReadFile returns the full content of a file (up to 1MB).
+// If the file is larger than 1MB, a truncation notice is appended.
+func (d *DockerFileReader) ReadFile(ctx context.Context, containerID, workDir, filePath string) (string, bool, error) {
 	absPath := resolvePathInWorkDir(workDir, filePath)
 	if err := validateExecPath(absPath); err != nil {
-		return "", fmt.Errorf("read file %s: %w", filePath, err)
+		return "", false, fmt.Errorf("read file %s: %w", filePath, err)
 	}
 
 	// Limit to 1MB to prevent reading huge files.
 	// Pass path as an argument to head, not through sh -c.
-	argv := []string{"head", "-c", "1048576", absPath}
+	argv := []string{"head", "-c", fmt.Sprintf("%d", maxFileReadBytes), absPath}
 	stdout, stderrOut, exitCode, err := d.execCmd(ctx, containerID, workDir, argv)
 	if err != nil {
-		return "", fmt.Errorf("read file %s: %w", filePath, err)
+		return "", false, fmt.Errorf("read file %s: %w", filePath, err)
 	}
 	if exitCode != 0 {
-		return "", fmt.Errorf("read file %s: %s", filePath, strings.TrimSpace(stderrOut))
+		return "", false, fmt.Errorf("read file %s: %s", filePath, strings.TrimSpace(stderrOut))
 	}
 
-	return stdout, nil
+	truncated := len(stdout) >= maxFileReadBytes
+	return stdout, truncated, nil
 }
 
 // ReadFileContext returns lines around a specific line number.

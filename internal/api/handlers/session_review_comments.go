@@ -2,18 +2,26 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 )
+
+// sendToAgentResponse is the response shape for the SendToAgent endpoint.
+type sendToAgentResponse struct {
+	Message string `json:"message"`
+	Sent    bool   `json:"sent"`
+}
 
 type SessionReviewCommentHandler struct {
 	store        *db.SessionReviewCommentStore
@@ -174,6 +182,16 @@ func (h *SessionReviewCommentHandler) Update(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Parse body first to fail fast on bad input before doing DB lookups.
+	var body struct {
+		Body     *string `json:"body"`
+		Resolved *bool   `json:"resolved"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+
 	// Verify the requesting user owns this comment.
 	existing, err := h.store.GetByID(r.Context(), orgID, commentID)
 	if err != nil {
@@ -182,15 +200,6 @@ func (h *SessionReviewCommentHandler) Update(w http.ResponseWriter, r *http.Requ
 	}
 	if existing.UserID != user.ID {
 		writeError(w, http.StatusForbidden, "FORBIDDEN", "you can only edit your own comments")
-		return
-	}
-
-	var body struct {
-		Body     *string `json:"body"`
-		Resolved *bool   `json:"resolved"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
 		return
 	}
 
@@ -322,14 +331,16 @@ func (h *SessionReviewCommentHandler) SendToAgent(w http.ResponseWriter, r *http
 	if h.messageStore != nil && h.jobStore != nil && h.sessionStore != nil {
 		session, err := h.sessionStore.ClaimIdle(r.Context(), orgID, sessionID)
 		if err != nil {
-			// Session may not be idle — fall back to returning the message.
-			writeJSON(w, http.StatusOK, models.SingleResponse[struct {
-				Message string `json:"message"`
-				Sent    bool   `json:"sent"`
-			}]{Data: struct {
-				Message string `json:"message"`
-				Sent    bool   `json:"sent"`
-			}{Message: message, Sent: false}})
+			// Distinguish "session not idle" (no row updated → pgx.ErrNoRows) from real DB errors.
+			if errors.Is(err, pgx.ErrNoRows) {
+				// Session isn't idle — fall back to returning the message for manual send.
+				writeJSON(w, http.StatusOK, models.SingleResponse[sendToAgentResponse]{
+					Data: sendToAgentResponse{Message: message, Sent: false},
+				})
+				return
+			}
+			h.logger.Error().Err(err).Str("session_id", sessionID.String()).Msg("failed to claim idle session")
+			writeError(w, http.StatusInternalServerError, "CLAIM_FAILED", "failed to claim session")
 			return
 		}
 
@@ -361,6 +372,12 @@ func (h *SessionReviewCommentHandler) SendToAgent(w http.ResponseWriter, r *http
 			"org_id":     orgID.String(),
 		}
 		if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "continue_session", payload, 5, nil); err != nil {
+			// Delete the orphaned message and revert session status.
+			if msg.ID != 0 {
+				if delErr := h.messageStore.Delete(r.Context(), msg.ID); delErr != nil {
+					h.logger.Error().Err(delErr).Int64("message_id", msg.ID).Msg("failed to delete orphaned message after enqueue failure")
+				}
+			}
 			if revertErr := h.sessionStore.UpdateStatus(r.Context(), orgID, sessionID, string(models.SessionStatusIdle)); revertErr != nil {
 				h.logger.Error().Err(revertErr).Str("session_id", sessionID.String()).Msg("failed to revert session to idle after enqueue failure")
 			}
@@ -368,22 +385,14 @@ func (h *SessionReviewCommentHandler) SendToAgent(w http.ResponseWriter, r *http
 			return
 		}
 
-		writeJSON(w, http.StatusOK, models.SingleResponse[struct {
-			Message string `json:"message"`
-			Sent    bool   `json:"sent"`
-		}]{Data: struct {
-			Message string `json:"message"`
-			Sent    bool   `json:"sent"`
-		}{Message: message, Sent: true}})
+		writeJSON(w, http.StatusOK, models.SingleResponse[sendToAgentResponse]{
+			Data: sendToAgentResponse{Message: message, Sent: true},
+		})
 		return
 	}
 
 	// Fallback: return the formatted message for the frontend to send.
-	writeJSON(w, http.StatusOK, models.SingleResponse[struct {
-		Message string `json:"message"`
-		Sent    bool   `json:"sent"`
-	}]{Data: struct {
-		Message string `json:"message"`
-		Sent    bool   `json:"sent"`
-	}{Message: message, Sent: false}})
+	writeJSON(w, http.StatusOK, models.SingleResponse[sendToAgentResponse]{
+		Data: sendToAgentResponse{Message: message, Sent: false},
+	})
 }

@@ -753,6 +753,7 @@ export interface FileContent {
   path: string;
   content: string;
   language: string;
+  truncated: boolean;
 }
 
 export interface FileLine {

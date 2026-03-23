@@ -141,8 +141,11 @@ type Session struct {
 	TargetBranch         *string         `db:"target_branch" json:"target_branch,omitempty"`
 	WorkingBranch        *string         `db:"working_branch" json:"working_branch,omitempty"`
 	RepositoryID         *uuid.UUID      `db:"repository_id" json:"repository_id,omitempty"`
-	DiffStats            json.RawMessage `db:"diff_stats" json:"diff_stats,omitempty"`   // nil for list queries (excluded to reduce payload size)
-	DiffHistory          json.RawMessage `db:"diff_history" json:"diff_history,omitempty"` // nil for list queries (excluded to reduce payload size)
+	DiffStats   json.RawMessage `db:"diff_stats" json:"diff_stats,omitempty"`   // nil for list queries (excluded to reduce payload size)
+	// DiffHistory is only populated on single-session fetches (GetByID, ClaimIdle, etc.).
+	// List queries return NULL to avoid multi-megabyte payloads — do not rely on this
+	// field being non-nil unless the session was fetched individually.
+	DiffHistory json.RawMessage `db:"diff_history" json:"diff_history,omitempty"`
 	CreatedAt            time.Time       `db:"created_at" json:"created_at"`
 }
 

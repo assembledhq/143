@@ -5,7 +5,10 @@ import (
 	"strings"
 )
 
-// ComputeDiffStats parses a unified diff string and returns JSON-encoded stats.
+// ComputeDiffStats parses a standard unified diff string and returns JSON-encoded stats.
+// It assumes "diff --git" format and counts lines starting with +/- (excluding +++/---
+// markers). Binary diffs and combined diff formats are not handled — binary files will
+// report 0 added/removed but will be counted as a changed file.
 // Returns nil when the diff is empty.
 func ComputeDiffStats(diff string) json.RawMessage {
 	if diff == "" {

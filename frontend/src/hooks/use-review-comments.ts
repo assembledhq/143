@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useCallback, useState } from "react";
+import { useMemo, useCallback } from "react";
 import { api } from "@/lib/api";
 import type { SessionReviewComment } from "@/lib/types";
 
@@ -73,17 +73,9 @@ export function useReviewComments(sessionId: string): UseReviewCommentsResult {
     [comments]
   );
 
-  const [mutationError, setMutationError] = useState<string | null>(null);
-
   const invalidate = useCallback(() => {
-    setMutationError(null);
     queryClient.invalidateQueries({ queryKey });
   }, [queryClient, queryKey]);
-
-  const onMutationError = useCallback((err: unknown) => {
-    const message = err instanceof Error ? err.message : "An error occurred";
-    setMutationError(message);
-  }, []);
 
   const createMutation = useMutation({
     mutationFn: (body: {
@@ -93,7 +85,6 @@ export function useReviewComments(sessionId: string): UseReviewCommentsResult {
       body: string;
     }) => api.sessions.createReviewComment(sessionId, body),
     onSuccess: invalidate,
-    onError: onMutationError,
   });
 
   const updateMutation = useMutation({
@@ -105,14 +96,12 @@ export function useReviewComments(sessionId: string): UseReviewCommentsResult {
       data: { body?: string; resolved?: boolean };
     }) => api.sessions.updateReviewComment(sessionId, commentId, data),
     onSuccess: invalidate,
-    onError: onMutationError,
   });
 
   const deleteMutation = useMutation({
     mutationFn: (commentId: string) =>
       api.sessions.deleteReviewComment(sessionId, commentId),
     onSuccess: invalidate,
-    onError: onMutationError,
   });
 
   const createComment = useCallback(
@@ -141,13 +130,21 @@ export function useReviewComments(sessionId: string): UseReviewCommentsResult {
     [deleteMutation]
   );
 
+  // Derive error from per-mutation state so concurrent mutations don't clear each other's errors.
+  const mutationError = createMutation.error ?? updateMutation.error ?? deleteMutation.error;
+  const errorMessage = mutationError
+    ? mutationError instanceof Error
+      ? mutationError.message
+      : "An error occurred"
+    : null;
+
   return {
     comments,
     commentsByLine,
     openCount,
     resolvedCount,
     isLoading,
-    error: mutationError,
+    error: errorMessage,
     createComment,
     updateComment,
     deleteComment,

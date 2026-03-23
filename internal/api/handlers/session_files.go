@@ -60,6 +60,9 @@ func (h *SessionFileHandler) getSessionContainer(w http.ResponseWriter, r *http.
 }
 
 // validatePath checks that a path is safe (no traversal attacks) and normalizes it.
+// Note: This runs on the host but the path is interpreted inside the Docker container.
+// Symlinks inside the container could still escape the workspace — resolvePathInWorkDir
+// in docker_filereader.go provides the second layer of containment.
 func validatePath(rawPath string) (string, bool) {
 	if rawPath == "" || rawPath == "." || rawPath == "/" {
 		return ".", true
@@ -185,7 +188,7 @@ func (h *SessionFileHandler) GetFileContent(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	content, err := h.fileReader.ReadFile(r.Context(), containerID, workDir, cleanPath)
+	content, truncated, err := h.fileReader.ReadFile(r.Context(), containerID, workDir, cleanPath)
 	if err != nil {
 		h.logger.Warn().Err(err).Str("path", cleanPath).Msg("failed to read file")
 		writeError(w, http.StatusNotFound, "FILE_NOT_FOUND", "file not found or not readable")
@@ -196,9 +199,10 @@ func (h *SessionFileHandler) GetFileContent(w http.ResponseWriter, r *http.Reque
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[sandbox.FileContent]{
 		Data: sandbox.FileContent{
-			Path:     cleanPath,
-			Content:  content,
-			Language: lang,
+			Path:      cleanPath,
+			Content:   content,
+			Language:  lang,
+			Truncated: truncated,
 		},
 	})
 }

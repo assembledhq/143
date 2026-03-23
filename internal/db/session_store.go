@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/google/uuid"
@@ -11,6 +12,11 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 )
+
+// safePassExprRE validates that a pass expression only contains safe SQL tokens
+// (column names, casts, functions like COALESCE). This prevents accidental SQL
+// injection if a non-constant expression is ever passed to diffHistoryAppendSQL.
+var safePassExprRE = regexp.MustCompile(`^[a-zA-Z0-9_():@, +]+$`)
 
 type SessionStore struct {
 	db DBTX
@@ -61,7 +67,11 @@ const maxDiffHistoryEntries = 20
 //
 // IMPORTANT: passExpr is interpolated directly into SQL via fmt.Sprintf.
 // It MUST be a trusted constant expression — never pass user-controlled input.
+// The function panics if passExpr contains characters outside [a-zA-Z0-9_():@, +].
 func diffHistoryAppendSQL(passExpr string) string {
+	if !safePassExprRE.MatchString(passExpr) {
+		panic(fmt.Sprintf("diffHistoryAppendSQL: unsafe passExpr: %q", passExpr))
+	}
 	return fmt.Sprintf(`CASE WHEN @diff IS NOT NULL THEN
 	  (SELECT jsonb_agg(elem) FROM (
 	    SELECT elem FROM jsonb_array_elements(

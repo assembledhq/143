@@ -1,6 +1,6 @@
 // syntax-highlighter.ts — Thin wrapper around Shiki for lazy-loaded syntax highlighting.
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 type Highlighter = Awaited<ReturnType<typeof import("shiki")["createHighlighter"]>>;
 
@@ -90,9 +90,19 @@ export function useFileHighlighting(
 ): string[] | null {
   const [highlighted, setHighlighted] = useState<string[] | null>(null);
 
-  // Compute a stable key to avoid re-highlighting when nothing changed.
-  // We join all lines to ensure any content change triggers re-highlighting.
-  const contentKey = allLineContents.length > 0 ? `${lang}:${allLineContents.join("\n")}` : "";
+  // Compute a lightweight content key using a simple hash instead of joining
+  // all lines into one large string on every render.
+  const contentKey = useMemo(() => {
+    if (allLineContents.length === 0) return "";
+    let hash = 0;
+    for (const line of allLineContents) {
+      for (let i = 0; i < line.length; i++) {
+        hash = ((hash << 5) - hash + line.charCodeAt(i)) | 0;
+      }
+      hash = ((hash << 5) - hash + 10) | 0; // newline separator
+    }
+    return `${lang}:${allLineContents.length}:${hash}`;
+  }, [allLineContents, lang]);
 
   useEffect(() => {
     if (!enabled || allLineContents.length === 0) {

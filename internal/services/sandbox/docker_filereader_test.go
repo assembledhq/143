@@ -126,27 +126,27 @@ func TestDockerFileReader_ListDir(t *testing.T) {
 		expectErr bool
 	}{
 		{
-			name: "parses null-delimited find output",
+			name: "parses ls output with dirs and files",
 			client: newMockClient(
-				"d\t4096\tsrc\x00f\t1234\tmain.go\x00f\t567\tREADME.md\x00",
+				"src/\nmain.go\nREADME.md\n",
 				0,
 			),
 			dirPath: ".",
 			expected: []FileEntry{
-				{Path: "src", Type: "dir", Size: 4096},
-				{Path: "main.go", Type: "file", Size: 1234},
-				{Path: "README.md", Type: "file", Size: 567},
+				{Path: "src", Type: "dir", Size: 0},
+				{Path: "main.go", Type: "file", Size: 0},
+				{Path: "README.md", Type: "file", Size: 0},
 			},
 		},
 		{
 			name: "constructs relative paths with parent dir",
 			client: newMockClient(
-				"f\t100\tutils.go\x00",
+				"utils.go\n",
 				0,
 			),
 			dirPath: "src/lib",
 			expected: []FileEntry{
-				{Path: "src/lib/utils.go", Type: "file", Size: 100},
+				{Path: "src/lib/utils.go", Type: "file", Size: 0},
 			},
 		},
 		{
@@ -196,11 +196,12 @@ func TestDockerFileReader_ReadFile(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		client    *mockDockerClient
-		filePath  string
-		expected  string
-		expectErr bool
+		name            string
+		client          *mockDockerClient
+		filePath        string
+		expected        string
+		expectTruncated bool
+		expectErr       bool
 	}{
 		{
 			name:     "returns file contents",
@@ -235,13 +236,14 @@ func TestDockerFileReader_ReadFile(t *testing.T) {
 			t.Parallel()
 
 			reader := NewDockerFileReader(tt.client)
-			content, err := reader.ReadFile(context.Background(), "container-1", "/workspace", tt.filePath)
+			content, truncated, err := reader.ReadFile(context.Background(), "container-1", "/workspace", tt.filePath)
 			if tt.expectErr {
 				require.Error(t, err, "ReadFile should return an error")
 				return
 			}
 			require.NoError(t, err, "ReadFile should not return an error")
 			require.Equal(t, tt.expected, content, "ReadFile should return the expected content")
+			require.Equal(t, tt.expectTruncated, truncated, "ReadFile truncation flag should match")
 		})
 	}
 }

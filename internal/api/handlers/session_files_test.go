@@ -23,7 +23,7 @@ import (
 // mockFileReader is a test implementation of sandbox.FileReader.
 type mockFileReader struct {
 	listDirFn      func(ctx context.Context, containerID, workDir, dirPath string) ([]sandbox.FileEntry, error)
-	readFileFn     func(ctx context.Context, containerID, workDir, filePath string) (string, error)
+	readFileFn     func(ctx context.Context, containerID, workDir, filePath string) (string, bool, error)
 	readContextFn  func(ctx context.Context, containerID, workDir, filePath string, line, above, below int) ([]sandbox.FileLine, error)
 }
 
@@ -34,11 +34,11 @@ func (m *mockFileReader) ListDir(ctx context.Context, containerID, workDir, dirP
 	return nil, nil
 }
 
-func (m *mockFileReader) ReadFile(ctx context.Context, containerID, workDir, filePath string) (string, error) {
+func (m *mockFileReader) ReadFile(ctx context.Context, containerID, workDir, filePath string) (string, bool, error) {
 	if m.readFileFn != nil {
 		return m.readFileFn(ctx, containerID, workDir, filePath)
 	}
-	return "", nil
+	return "", false, nil
 }
 
 func (m *mockFileReader) ReadFileContext(ctx context.Context, containerID, workDir, filePath string, line, above, below int) ([]sandbox.FileLine, error) {
@@ -244,8 +244,8 @@ func TestSessionFileHandler_GetFileContent(t *testing.T) {
 				setupSessionMock(mock, orgID, sessionID, &containerID)
 			},
 			fileReader: &mockFileReader{
-				readFileFn: func(_ context.Context, _, _, filePath string) (string, error) {
-					return "package main\n\nfunc main() {}\n", nil
+				readFileFn: func(_ context.Context, _, _, filePath string) (string, bool, error) {
+					return "package main\n\nfunc main() {}\n", false, nil
 				},
 			},
 			expectedCode: http.StatusOK,
@@ -273,8 +273,8 @@ func TestSessionFileHandler_GetFileContent(t *testing.T) {
 				setupSessionMock(mock, orgID, sessionID, &containerID)
 			},
 			fileReader: &mockFileReader{
-				readFileFn: func(_ context.Context, _, _, _ string) (string, error) {
-					return "", fmt.Errorf("file not found")
+				readFileFn: func(_ context.Context, _, _, _ string) (string, bool, error) {
+					return "", false, fmt.Errorf("file not found")
 				},
 			},
 			expectedCode: http.StatusNotFound,
@@ -286,8 +286,8 @@ func TestSessionFileHandler_GetFileContent(t *testing.T) {
 				setupSessionMock(mock, orgID, sessionID, &containerID)
 			},
 			fileReader: &mockFileReader{
-				readFileFn: func(_ context.Context, _, _, _ string) (string, error) {
-					return "export function Button() {}", nil
+				readFileFn: func(_ context.Context, _, _, _ string) (string, bool, error) {
+					return "export function Button() {}", false, nil
 				},
 			},
 			expectedCode: http.StatusOK,
