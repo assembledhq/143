@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Clock } from "lucide-react";
 import { api } from "@/lib/api";
+import { captureError } from "@/lib/errors";
 import { formatTimeAgo } from "@/lib/utils";
 import { useAuth } from "@/hooks/use-auth";
 import type { User } from "@/lib/types";
@@ -40,7 +41,7 @@ export function AuditLogTrigger({ filters, members: membersProp, title }: AuditL
   });
 
   if (error) {
-    console.error("Failed to load latest audit log entry:", error);
+    captureError(error, { feature: "audit-log" });
   }
 
   const latestEntry = data?.data?.[0];

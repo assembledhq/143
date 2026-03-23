@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { captureError } from "@/lib/errors";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -60,6 +61,7 @@ export default function TeamSettingsPage() {
       setActionError("");
     },
     onError: (error: Error) => {
+      captureError(error, { feature: "team-change-role" });
       setActionError(error.message || "Failed to change role.");
     },
   });
@@ -71,6 +73,7 @@ export default function TeamSettingsPage() {
       setActionError("");
     },
     onError: (error: Error) => {
+      captureError(error, { feature: "team-remove-member" });
       setActionError(error.message || "Failed to remove member.");
     },
   });
@@ -86,6 +89,7 @@ export default function TeamSettingsPage() {
       setIsInviteDialogOpen(false);
     },
     onError: (error: Error & { code?: string }) => {
+      captureError(error, { feature: "team-invite" });
       if (error.message) {
         setInviteError(error.message);
       } else {
@@ -98,6 +102,9 @@ export default function TeamSettingsPage() {
     mutationFn: (id: string) => api.team.revokeInvitation(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["team-invitations"] });
+    },
+    onError: (error: Error) => {
+      captureError(error, { feature: "team-revoke-invite" });
     },
   });
 

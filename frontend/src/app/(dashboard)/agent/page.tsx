@@ -4,6 +4,7 @@ import { type ReactNode, useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, KeyRound, Sparkles, Check, Eye, EyeOff, Shield } from "lucide-react";
 import { api } from "@/lib/api";
+import { captureError } from "@/lib/errors";
 import { useAuth } from "@/hooks/use-auth";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -235,7 +236,8 @@ export default function AgentPage() {
       setApiKeys((prev) => ({ ...prev, [variables.provider]: "" }));
       setTimeout(() => setKeySaveStatus((prev) => ({ ...prev, [variables.provider]: "idle" })), 2000);
     },
-    onError: (_err, variables) => {
+    onError: (err, variables) => {
+      captureError(err, { feature: "agent-key-save" });
       setKeySaveStatus((prev) => ({ ...prev, [variables.provider]: "error" }));
       setTimeout(() => setKeySaveStatus((prev) => ({ ...prev, [variables.provider]: "idle" })), 3000);
     },
@@ -247,6 +249,9 @@ export default function AgentPage() {
       queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
       setRemovingProvider(null);
     },
+    onError: (error) => {
+      captureError(error, { feature: "agent-key-delete" });
+    },
   });
 
   const removeTeamMutation = useMutation({
@@ -254,6 +259,9 @@ export default function AgentPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
       setRemovingTeamProvider(null);
+    },
+    onError: (error) => {
+      captureError(error, { feature: "agent-team-key-remove" });
     },
   });
 
@@ -339,7 +347,8 @@ export default function AgentPage() {
       setOrgSaveStatus("success");
       setTimeout(() => setOrgSaveStatus("idle"), 2000);
     },
-    onError: () => {
+    onError: (error) => {
+      captureError(error, { feature: "agent-org-settings" });
       setOrgSaveStatus("error");
       setTimeout(() => setOrgSaveStatus("idle"), 3000);
     },

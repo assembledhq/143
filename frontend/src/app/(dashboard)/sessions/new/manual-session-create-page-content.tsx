@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
+import { captureError } from "@/lib/errors";
 import { queryKeys } from "@/lib/query-keys";
 import { AGENT_TYPE_OPTIONS } from "@/lib/model-constants";
 import { NoReposWarning } from "@/components/no-repos-warning";
@@ -150,6 +151,7 @@ export function ManualSessionCreatePageContent() {
       router.push(`/sessions/${response.data.id}`);
     },
     onError: (error, _variables, context) => {
+      captureError(error, { feature: "session-create" });
       if (context?.optimisticId) {
         removeOptimisticSession(context.optimisticId);
       }
