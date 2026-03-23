@@ -128,7 +128,7 @@ export function DirectionSection() {
       recency: String(s.priority_weights?.recency ?? DEFAULT_SETTINGS.priority_weights.recency),
       revenueRisk: String(s.priority_weights?.revenue_risk ?? DEFAULT_SETTINGS.priority_weights.revenue_risk),
     });
-  }, [settings?.data?.settings, orgSettings]);
+  }, [settings?.data?.settings]); // eslint-disable-line react-hooks/exhaustive-deps -- orgSettings is derived from settings?.data?.settings
 
   const mutation = useMutation({
     mutationFn: (data: Record<string, unknown>) => api.settings.update(data),

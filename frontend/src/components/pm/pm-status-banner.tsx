@@ -23,7 +23,6 @@ export function PMStatusBanner({ hasActivePlanSession }: PMStatusBannerProps) {
   const { isAnalyzing, isPending, analyzeError, handleAnalyze, dismissError } = useAnalyze(hasActivePlanSession);
 
   const agentStatus = deriveAgentStatus(pmStatus, isAnalyzing);
-  const isRunning = agentStatus === "running";
 
   return (
     <div className="space-y-2">
@@ -31,7 +30,6 @@ export function PMStatusBanner({ hasActivePlanSession }: PMStatusBannerProps) {
         label="PM Agent"
         pmStatus={pmStatus}
         agentStatus={agentStatus}
-        isRunning={isRunning}
       >
         <Button size="sm" variant="outline" className="h-7 text-[12px]" asChild>
           <Link href="/sessions/new">

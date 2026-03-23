@@ -2,7 +2,8 @@
 
 import { RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { AgentStatusBar, deriveAgentStatus } from "@/components/autopilot/agent-status-bar";
+import { AgentStatusBar } from "@/components/autopilot/agent-status-bar";
+import { deriveAgentStatus } from "@/components/autopilot/agent-status-bar";
 import type { PMStatus } from "@/lib/types";
 
 // Re-export for consumers that imported from here.
@@ -19,7 +20,6 @@ interface ControlStripProps {
 
 export function ControlStrip({ pmStatus, isAnalyzing, isPending, onAnalyze, analyzeError, dismissError }: ControlStripProps) {
   const agentStatus = deriveAgentStatus(pmStatus, isAnalyzing);
-  const isRunning = agentStatus === "running";
 
   return (
     <div className="space-y-2">
@@ -27,7 +27,6 @@ export function ControlStrip({ pmStatus, isAnalyzing, isPending, onAnalyze, anal
         label="Autopilot"
         pmStatus={pmStatus}
         agentStatus={agentStatus}
-        isRunning={isRunning}
       >
         <Button
           size="sm"

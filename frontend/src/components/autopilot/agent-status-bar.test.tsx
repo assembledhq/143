@@ -34,7 +34,7 @@ describe("AgentStatusBar", () => {
         label="Autopilot"
         pmStatus={undefined}
         agentStatus="idle"
-        isRunning={false}
+
       />
     );
 
@@ -52,7 +52,7 @@ describe("AgentStatusBar", () => {
         label="Autopilot"
         pmStatus={makePMStatus()}
         agentStatus={status}
-        isRunning={status === "running"}
+
       />
     );
 
@@ -65,7 +65,7 @@ describe("AgentStatusBar", () => {
         label="Autopilot"
         pmStatus={makePMStatus({ is_running: true })}
         agentStatus="running"
-        isRunning={true}
+
       />
     );
 
@@ -84,7 +84,7 @@ describe("AgentStatusBar", () => {
           last_run_status: "completed",
         })}
         agentStatus="completed"
-        isRunning={false}
+
       />
     );
 
@@ -100,7 +100,7 @@ describe("AgentStatusBar", () => {
           last_run_status: "completed",
         })}
         agentStatus="completed"
-        isRunning={false}
+
       />
     );
 
@@ -117,7 +117,7 @@ describe("AgentStatusBar", () => {
           last_run_status: "completed",
         })}
         agentStatus="completed"
-        isRunning={false}
+
       />
     );
 
@@ -130,7 +130,7 @@ describe("AgentStatusBar", () => {
         label="Autopilot"
         pmStatus={undefined}
         agentStatus="idle"
-        isRunning={false}
+
       >
         <button>Run now</button>
       </AgentStatusBar>

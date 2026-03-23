@@ -36,12 +36,12 @@ interface AgentStatusBarProps {
   label: string;
   pmStatus: PMStatus | undefined;
   agentStatus: AgentStatusValue;
-  isRunning: boolean;
   /** Optional extra actions rendered on the right side of the bar. */
   children?: React.ReactNode;
 }
 
-export function AgentStatusBar({ label, pmStatus, agentStatus, isRunning, children }: AgentStatusBarProps) {
+export function AgentStatusBar({ label, pmStatus, agentStatus, children }: AgentStatusBarProps) {
+  const isRunning = agentStatus === "running";
   const dotColor = agentStatusDotColors[agentStatus] || "bg-muted-foreground/30";
   const statusText = agentStatusLabel(agentStatus);
 
@@ -53,7 +53,7 @@ export function AgentStatusBar({ label, pmStatus, agentStatus, isRunning, childr
           : "border-border bg-muted/30"
       }`}
     >
-      {agentStatus === "running" ? (
+      {isRunning ? (
         <StatusDot animate color={dotColor} pingColor="bg-primary/60" />
       ) : (
         <StatusDot color={dotColor} />
@@ -102,11 +102,9 @@ export function AgentStatusBar({ label, pmStatus, agentStatus, isRunning, childr
         </div>
       )}
 
-      {children && (
-        <div className="ml-auto shrink-0 flex items-center gap-2">
-          {children}
-        </div>
-      )}
+      <div className="ml-auto shrink-0 flex items-center gap-2">
+        {children}
+      </div>
     </div>
   );
 }

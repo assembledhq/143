@@ -181,25 +181,8 @@ describe("DocumentsManager", () => {
 
     expect(screen.getByRole("button", { name: /Confirm/ })).toBeInTheDocument();
 
-    // Click the X button to cancel - find the button next to Confirm that has the X icon
-    const cancelButtons = screen.getAllByRole("button").filter((btn) => {
-      // The cancel button is a ghost button with an X icon, appearing within the confirm span
-      const parent = btn.closest("span");
-      return parent !== null && parent.querySelector('[class*="destructive"]') !== null && btn.textContent === "";
-    });
-
-    // There should be a cancel button (the X icon) next to Confirm
-    if (cancelButtons.length > 0) {
-      await user.click(cancelButtons[cancelButtons.length - 1]);
-    } else {
-      // Fallback: the X button is the last small ghost button
-      const allButtons = screen.getAllByRole("button");
-      const xButton = allButtons.find((btn) => {
-        const svg = btn.querySelector("svg");
-        return svg && btn.closest("span") && btn !== screen.getByRole("button", { name: /Confirm/ });
-      });
-      if (xButton) await user.click(xButton);
-    }
+    // Click the cancel button (X icon with aria-label)
+    await user.click(screen.getByRole("button", { name: "Cancel delete" }));
 
     // After cancelling, the Confirm button should be gone and the document still visible
     await waitFor(() => {

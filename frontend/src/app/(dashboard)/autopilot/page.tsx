@@ -22,14 +22,7 @@ import { NoReposWarning } from "@/components/no-repos-warning";
 import { useDisconnectIntegration } from "@/hooks/use-disconnect-integration";
 import { useGitHubRepoSync } from "@/hooks/use-github-repo-sync";
 import { queryKeys } from "@/lib/query-keys";
-import type { CodexAuthStatus, OrgSettings, PMDecisionsResponse } from "@/lib/types";
-
-interface Integration {
-  id: string;
-  provider: string;
-  status: string;
-  created_at: string;
-}
+import type { CodexAuthStatus, Integration, OrgSettings, PMDecisionsResponse } from "@/lib/types";
 
 interface PreOnboardingStateProps {
   agentConnected: boolean;

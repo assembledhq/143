@@ -339,6 +339,7 @@ export function DocumentsManager() {
                               variant="ghost"
                               size="sm"
                               className="h-7 w-7 p-0"
+                              aria-label="Cancel delete"
                               onClick={() => setDeleteConfirmId(null)}
                             >
                               <X className="h-3 w-3" />
