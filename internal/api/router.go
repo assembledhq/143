@@ -287,6 +287,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Delete("/api/v1/integrations/sentry/disconnect", integrationHandler.DisconnectIntegration)
 			r.Delete("/api/v1/integrations/linear/disconnect", integrationHandler.DisconnectIntegration)
 			r.Delete("/api/v1/integrations/slack/disconnect", integrationHandler.DisconnectIntegration)
+			r.Post("/api/v1/integrations/notion/connect", integrationHandler.ConnectNotion)
+			r.Delete("/api/v1/integrations/notion/disconnect", integrationHandler.DisconnectIntegration)
 			// Personal credential management
 			r.Put("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.UpsertPersonal)
 			r.Delete("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.DeletePersonal)

@@ -1293,3 +1293,93 @@ func (h *IntegrationHandler) getSlackCredential(ctx context.Context, orgID uuid.
 
 	return &cfg, nil
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Notion (token-based, no OAuth)
+// ──────────────────────────────────────────────────────────────────────────────
+
+// ConnectNotion accepts an API token, validates it against the Notion API,
+// stores the credential, and creates an active integration record.
+// Unlike other integrations, Notion uses a simple internal integration token
+// rather than an OAuth flow.
+func (h *IntegrationHandler) ConnectNotion(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+
+	var req struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+	if req.AccessToken == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_TOKEN", "access_token is required")
+		return
+	}
+
+	// Validate the token by calling the Notion API.
+	workspaceName, err := h.validateNotionToken(r.Context(), req.AccessToken)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_TOKEN", "failed to validate Notion token: "+err.Error())
+		return
+	}
+
+	// Store the credential.
+	cfg := models.NotionConfig{
+		AccessToken:   req.AccessToken,
+		WorkspaceName: workspaceName,
+	}
+	if err := h.credentialStore.Upsert(r.Context(), orgID, cfg); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CREDENTIAL_SAVE_FAILED", "failed to save Notion credentials", err)
+		return
+	}
+
+	// Ensure the integration record exists.
+	integration, created, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderNotion)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CONNECT_NOTION_FAILED", "failed to create Notion integration", err)
+		return
+	}
+
+	if created {
+		writeJSON(w, http.StatusCreated, models.SingleResponse[models.Integration]{Data: integration})
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.Integration]{Data: integration})
+}
+
+// validateNotionToken calls the Notion /v1/users/me endpoint to verify the
+// token is valid and extract the workspace name. Returns the bot's workspace
+// name on success, or an error if the token is invalid.
+func (h *IntegrationHandler) validateNotionToken(ctx context.Context, token string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.notion.com/v1/users/me", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Notion-Version", "2022-06-28")
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return "", fmt.Errorf("invalid or expired token")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("Notion API returned %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Bot struct {
+			WorkspaceName string `json:"workspace_name"`
+		} `json:"bot"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	return result.Bot.WorkspaceName, nil
+}
