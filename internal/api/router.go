@@ -321,10 +321,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Post("/api/v1/projects/ai/generate", projectGenerateHandler.Generate)
 			r.Post("/api/v1/projects/{id}/ai/improve", projectAnalysisHandler.Improve)
 			r.Post("/api/v1/pm/documents", pmDocumentHandler.Create)
+			r.Post("/api/v1/pm/documents/discover/notion", pmDocumentHandler.DiscoverNotion)
 			r.Patch("/api/v1/pm/documents/{docId}", pmDocumentHandler.Update)
 			r.Delete("/api/v1/pm/documents/{docId}", pmDocumentHandler.Delete)
 			r.Post("/api/v1/pm/documents/{docId}/sync", pmDocumentHandler.SyncFromNotion)
-			r.Post("/api/v1/pm/documents/discover/notion", pmDocumentHandler.DiscoverNotion)
 		})
 
 		// Admin-only routes

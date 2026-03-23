@@ -36,9 +36,9 @@ type NotionDocumentStoreConfig struct {
 const (
 	notionDefaultAPIURL     = "https://api.notion.com"
 	notionDefaultAPIVersion = "2022-06-28"
-	notionMaxBlockDepth  = 3
-	notionMaxTotalBlocks = 500
-	notionPageSize       = 100
+	notionMaxBlockDepth     = 3
+	notionMaxTotalBlocks    = 500
+	notionPageSize          = 100
 )
 
 // NewNotionDocumentStore creates a Notion DocumentStore from the given config.
