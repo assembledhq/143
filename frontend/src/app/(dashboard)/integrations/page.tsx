@@ -226,10 +226,8 @@ export default function IntegrationsPage() {
               . Make sure to share the pages you want accessible with the integration.
             </AlertDialogDescription>
           </AlertDialogHeader>
-          <div className="px-6 pb-2">
-            <Label htmlFor="notion-token" className="text-sm font-medium">
-              Integration Token
-            </Label>
+          <div className="grid gap-1.5">
+            <Label htmlFor="notion-token">Integration Token</Label>
             <Input
               id="notion-token"
               type="password"
@@ -239,10 +237,9 @@ export default function IntegrationsPage() {
                 setNotionToken(e.target.value);
                 setNotionError(null);
               }}
-              className="mt-1.5"
             />
             {notionError && (
-              <p className="mt-1.5 text-xs text-destructive">{notionError}</p>
+              <p className="text-xs text-destructive">{notionError}</p>
             )}
           </div>
           <AlertDialogFooter>

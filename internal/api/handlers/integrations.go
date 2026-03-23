@@ -1377,7 +1377,7 @@ func (h *IntegrationHandler) validateNotionToken(ctx context.Context, token stri
 			WorkspaceName string `json:"workspace_name"`
 		} `json:"bot"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&result); err != nil {
 		return "", fmt.Errorf("failed to parse response: %w", err)
 	}
 
