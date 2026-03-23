@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { captureError } from "@/lib/errors";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -143,7 +144,8 @@ export default function LLMPage() {
       setSaveStatus("success");
       setTimeout(() => setSaveStatus("idle"), 2000);
     },
-    onError: () => {
+    onError: (error) => {
+      captureError(error, { feature: "llm-model-save" });
       setSaveStatus("error");
       setTimeout(() => setSaveStatus("idle"), 3000);
     },
@@ -161,7 +163,8 @@ export default function LLMPage() {
         setKeySaveStatus((prev) => ({ ...prev, [variables.provider]: "idle" }));
       }, 2000);
     },
-    onError: (_err, variables) => {
+    onError: (err, variables) => {
+      captureError(err, { feature: "llm-key-save" });
       setKeySaveStatus((prev) => ({ ...prev, [variables.provider]: "error" }));
       setTimeout(() => {
         setKeySaveStatus((prev) => ({ ...prev, [variables.provider]: "idle" }));
@@ -175,6 +178,9 @@ export default function LLMPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["credentials"] });
       setRemovingProvider(null);
+    },
+    onError: (error) => {
+      captureError(error, { feature: "llm-key-delete" });
     },
   });
 

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
+import { captureError } from "@/lib/errors";
 import { Button } from "@/components/ui/button";
 import { Check, Copy } from "lucide-react";
 import type { CodexDeviceAuth } from "@/lib/types";
@@ -35,7 +36,8 @@ export function CodexDeviceCodeModal({
       setDeviceAuth(resp.data);
       setTimeLeft(resp.data.expires_in);
       setStatus("pending");
-    } catch {
+    } catch (err) {
+      captureError(err, { feature: "codex-auth" });
       setError("Failed to start authentication. Please try again.");
       setStatus("error");
     }
@@ -73,7 +75,7 @@ export function CodexDeviceCodeModal({
           if (timerRef.current) clearInterval(timerRef.current);
         }
       } catch (err) {
-        console.warn("codex auth poll failed:", err);
+        captureError(err, { feature: "codex-auth-poll" });
       }
     }, 3000);
 
