@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useMemo, useRef, useState, useEffect } from "react";
+import { useQueryState } from "nuqs";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -19,15 +20,20 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
-import { DiffViewer } from "@/components/diff-viewer";
 import { ChatTimeline } from "@/components/chat-timeline";
 import { api } from "@/lib/api";
 import { SSE_EVENT, addSSEListener } from "@/lib/sse";
 import { buildTimeline } from "@/lib/timeline";
+import { parseDiffStats } from "@/lib/diff-parser";
 import type { Session, SessionLog, SessionMessage, User, Validation } from "@/lib/types";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
 import { cn, sessionTitle } from "@/lib/utils";
+import { DiffStatsBadge, FileTree, ReviewToolbar, DiffPane, SessionFooter, KeyboardHelpOverlay, CommentsSummary, RepoExplorer, type ViewMode, type DiffPaneHandle } from "@/components/code-review";
+import { useDiffKeyboardNav } from "@/hooks/use-diff-keyboard-nav";
+import { useReviewComments } from "@/hooks/use-review-comments";
+import { useDiffViewState } from "@/hooks/use-diff-view-state";
+import { useReviewedFiles } from "@/hooks/use-reviewed-files";
 
 const statusConfig: Record<string, { color: string; label: string }> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
@@ -310,75 +316,358 @@ function ValidationTab({ sessionId }: { sessionId: string }) {
   );
 }
 
-function ChangesTab({ session, sessionId }: { session: Session; sessionId: string }) {
+const prStatusColor: Record<string, string> = {
+  open: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
+  merged: "bg-purple-500/10 text-purple-700 dark:text-purple-400",
+  closed: "bg-red-500/10 text-red-700 dark:text-red-400",
+};
+
+function PRCard({ sessionId }: { sessionId: string }) {
   const { data: prData, isLoading: prLoading } = useQuery({
     queryKey: ["session", sessionId, "pr"],
     queryFn: () => api.sessions.getPR(sessionId),
   });
 
   const pr = prData?.data;
-
-  const prStatusColor: Record<string, string> = {
-    open: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
-    merged: "bg-purple-500/10 text-purple-700 dark:text-purple-400",
-    closed: "bg-red-500/10 text-red-700 dark:text-red-400",
-  };
+  if (prLoading) return <div className="py-2 text-center text-sm text-muted-foreground">Loading PR...</div>;
+  if (!pr) return null;
 
   return (
-    <div className="space-y-4">
-      {pr && (
-        <Card>
-          <CardContent className="pt-6 space-y-4">
-            <div className="flex items-start justify-between">
-              <div>
-                <h3 className="text-sm font-medium">{pr.title}</h3>
-                <p className="text-xs text-muted-foreground mt-1">{pr.github_repo} #{pr.github_pr_number}</p>
-              </div>
-              <a href={pr.github_pr_url} target="_blank" rel="noopener noreferrer">
-                <Button variant="outline" size="sm">
-                  <ExternalLink className="mr-1.5 h-3 w-3" />
-                  View on GitHub
-                </Button>
-              </a>
+    <Card className="mx-4 mt-3">
+      <CardContent className="pt-4 pb-3 space-y-3">
+        <div className="flex items-start justify-between">
+          <div className="min-w-0">
+            <h3 className="text-sm font-medium truncate">{pr.title}</h3>
+            <p className="text-xs text-muted-foreground mt-0.5">{pr.github_repo} #{pr.github_pr_number}</p>
+          </div>
+          <a href={pr.github_pr_url} target="_blank" rel="noopener noreferrer">
+            <Button variant="outline" size="sm">
+              <ExternalLink className="mr-1.5 h-3 w-3" />
+              GitHub
+            </Button>
+          </a>
+        </div>
+        <div className="flex items-center gap-3 text-sm">
+          <div>
+            <span className="text-muted-foreground">Status: </span>
+            <Badge variant="secondary" className={`text-[11px] ${prStatusColor[pr.status] || "bg-muted text-muted-foreground"}`}>
+              {pr.status}
+            </Badge>
+          </div>
+          {pr.review_status && (
+            <div>
+              <span className="text-muted-foreground">Review: </span>
+              <Badge variant="secondary" className="text-[11px]">{pr.review_status}</Badge>
             </div>
+          )}
+          <div className="min-w-0">
+            <span className="text-muted-foreground">Branch: </span>
+            <code className="text-xs bg-muted px-1 py-0.5 rounded">{pr.branch_name}</code>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
 
-            <div className="flex items-center gap-3 text-sm">
-              <div>
-                <span className="text-muted-foreground">Status: </span>
-                <Badge variant="secondary" className={`text-[11px] ${prStatusColor[pr.status] || "bg-muted text-muted-foreground"}`}>
-                  {pr.status}
-                </Badge>
-              </div>
-              {pr.review_status && (
-                <div>
-                  <span className="text-muted-foreground">Review: </span>
-                  <Badge variant="secondary" className="text-[11px]">{pr.review_status}</Badge>
-                </div>
-              )}
-              <div>
-                <span className="text-muted-foreground">Branch: </span>
-                <code className="text-xs bg-muted px-1 py-0.5 rounded">{pr.branch_name}</code>
-              </div>
-            </div>
+function ChangesTab({
+  session,
+  sessionId,
+  maximized,
+  onToggleMaximize,
+}: {
+  session: Session;
+  sessionId: string;
+  maximized: boolean;
+  onToggleMaximize: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const [activeFileIndex, setActiveFileIndex] = useState(0);
+  const [showFileTree, setShowFileTree] = useState(true);
+  const [showKeyboardHelp, setShowKeyboardHelp] = useState(false);
+  const [explorerMode, setExplorerMode] = useState(false);
+  const [explorerInitialPath, setExplorerInitialPath] = useState<string | undefined>(undefined);
+  const [activeCommentLine, setActiveCommentLine] = useState<{
+    filePath: string;
+    lineNumber: number;
+    side: "old" | "new";
+  } | null>(null);
+  const [viewMode, setViewMode] = useState<ViewMode>(() => {
+    if (typeof window !== "undefined") {
+      return (localStorage.getItem("diff-view-mode") as ViewMode) || "unified";
+    }
+    return "unified";
+  });
+  const diffPaneRef = useRef<DiffPaneHandle>(null);
 
-            {pr.body && (
-              <div className="text-sm text-muted-foreground border-t border-border pt-3">
-                <p className="whitespace-pre-wrap">{pr.body}</p>
-              </div>
-            )}
-          </CardContent>
-        </Card>
+  // --- Pass selection & diff parsing (extracted to hook) ---
+  const {
+    files,
+    filteredFiles,
+    passes,
+    passRange,
+    setPassRange,
+    diffSearchQuery,
+    setDiffSearchQuery,
+  } = useDiffViewState(session);
+
+  // --- Reviewed files (extracted to hook) ---
+  const { reviewedFiles, toggleReviewed: handleToggleReviewed } = useReviewedFiles(sessionId);
+
+  // --- Review comments ---
+  const {
+    comments,
+    commentsByLine,
+    createComment,
+    updateComment,
+    deleteComment,
+  } = useReviewComments(sessionId);
+
+  // Use backend endpoint to compile and send review comments in one call.
+  // The backend formats the comments and sends the message directly.
+  // If the backend cannot send (e.g., session not idle), it returns sent=false
+  // and the frontend falls back to sending manually.
+  const sendToAgentMutation = useMutation({
+    mutationFn: async () => {
+      const resp = await api.sessions.sendReviewComments(sessionId);
+      if (!resp.data.sent) {
+        // Fallback: backend could not send directly, send manually
+        const message = resp.data.message;
+        return api.sessions.sendMessage(sessionId, message);
+      }
+      return resp;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+      queryClient.invalidateQueries({ queryKey: ["session", sessionId, "messages"] });
+    },
+    onError: (err: Error) => {
+      console.error("Failed to send review comments to agent:", err.message);
+    },
+  });
+
+  const handleAddComment = useCallback(
+    (filePath: string, lineNumber: number, side: "old" | "new") => {
+      setActiveCommentLine({ filePath, lineNumber, side });
+    },
+    []
+  );
+
+  const handleSubmitComment = useCallback(
+    (body: string) => {
+      if (!activeCommentLine) return;
+      createComment({
+        file_path: activeCommentLine.filePath,
+        line_number: activeCommentLine.lineNumber,
+        side: activeCommentLine.side,
+        body,
+      });
+      setActiveCommentLine(null);
+    },
+    [activeCommentLine, createComment]
+  );
+
+  const handleCancelComment = useCallback(() => {
+    setActiveCommentLine(null);
+  }, []);
+
+  const handleCommentClick = useCallback(
+    (filePath: string) => {
+      // Scroll to the file containing the comment
+      // Search filteredFiles since DiffPane receives filteredFiles
+      const fileIndex = filteredFiles.findIndex((f) => f.newPath === filePath);
+      if (fileIndex >= 0) {
+        setActiveFileIndex(fileIndex);
+        diffPaneRef.current?.scrollToFile(fileIndex);
+      }
+    },
+    [filteredFiles]
+  );
+
+  // --- View & nav ---
+  const handleViewModeChange = useCallback((mode: ViewMode) => {
+    setViewMode(mode);
+    if (typeof window !== "undefined") {
+      localStorage.setItem("diff-view-mode", mode);
+    }
+  }, []);
+
+  const handleFileSelect = useCallback((index: number) => {
+    setActiveFileIndex(index);
+    diffPaneRef.current?.scrollToFile(index);
+  }, []);
+
+  const toggleViewMode = useCallback(() => {
+    handleViewModeChange(viewMode === "unified" ? "split" : "unified");
+  }, [viewMode, handleViewModeChange]);
+
+  const toggleFileTree = useCallback(() => {
+    setShowFileTree((v) => !v);
+  }, []);
+
+  const handleNextHunk = useCallback(() => {
+    diffPaneRef.current?.scrollToNextHunk();
+  }, []);
+
+  const handlePrevHunk = useCallback(() => {
+    diffPaneRef.current?.scrollToPrevHunk();
+  }, []);
+
+  const handleJumpToFile = useCallback(() => {
+    diffPaneRef.current?.scrollToFile(activeFileIndex);
+  }, [activeFileIndex]);
+
+  const toggleShowHelp = useCallback(() => {
+    setShowKeyboardHelp((v) => !v);
+  }, []);
+
+  const handleBrowseRepo = useCallback(() => {
+    setExplorerMode(true);
+    setExplorerInitialPath(undefined);
+  }, []);
+
+  const handleBackToDiff = useCallback(() => {
+    setExplorerMode(false);
+    setExplorerInitialPath(undefined);
+  }, []);
+
+  const handleBrowseFile = useCallback((filePath: string) => {
+    setExplorerInitialPath(filePath);
+    setExplorerMode(true);
+  }, []);
+
+  const toggleExplorer = useCallback(() => {
+    setExplorerMode((v) => !v);
+    setExplorerInitialPath(undefined);
+  }, []);
+
+  // `c` key: open comment input on the first changed line of the active file
+  const handleAddCommentOnSelectedLine = useCallback(() => {
+    const activeFile = filteredFiles[activeFileIndex];
+    if (!activeFile) return;
+    // Find the first add or remove line to comment on
+    for (const hunk of activeFile.hunks) {
+      for (const line of hunk.lines) {
+        if (line.type === "add" && line.newLineNumber != null) {
+          handleAddComment(activeFile.newPath, line.newLineNumber, "new");
+          return;
+        }
+        if (line.type === "remove" && line.oldLineNumber != null) {
+          handleAddComment(activeFile.newPath, line.oldLineNumber, "old");
+          return;
+        }
+      }
+    }
+  }, [filteredFiles, activeFileIndex, handleAddComment]);
+
+  useDiffKeyboardNav({
+    fileCount: files.length,
+    activeFileIndex,
+    onFileChange: handleFileSelect,
+    onToggleFileTree: toggleFileTree,
+    onToggleViewMode: toggleViewMode,
+    onSetViewMode: handleViewModeChange,
+    onToggleMaximize,
+    onNextHunk: handleNextHunk,
+    onPrevHunk: handlePrevHunk,
+    onJumpToFile: handleJumpToFile,
+    onShowHelp: toggleShowHelp,
+    onToggleExplorer: toggleExplorer,
+    onAddCommentOnSelectedLine: handleAddCommentOnSelectedLine,
+    enabled: activeCommentLine === null && !explorerMode,
+  });
+
+  const hasDiff = files.length > 0;
+
+  // If explorer mode, render the repo explorer instead of the diff view
+  if (explorerMode) {
+    return (
+      <div className="flex flex-col h-full">
+        <RepoExplorer
+          sessionId={sessionId}
+          diffFiles={files}
+          onBack={handleBackToDiff}
+          initialPath={explorerInitialPath}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Toolbar */}
+      {hasDiff && (
+        <ReviewToolbar
+          viewMode={viewMode}
+          onViewModeChange={handleViewModeChange}
+          maximized={maximized}
+          onToggleMaximize={onToggleMaximize}
+          showFileTree={showFileTree}
+          onToggleFileTree={toggleFileTree}
+          onBrowseRepo={handleBrowseRepo}
+          passes={passes}
+          selectedPassRange={passRange}
+          onPassRangeChange={setPassRange}
+          searchQuery={diffSearchQuery}
+          onSearchChange={setDiffSearchQuery}
+        />
       )}
 
-      {prLoading ? (
-        <div className="py-8 text-center text-sm text-muted-foreground">Loading PR details...</div>
-      ) : !pr && !session.diff ? (
-        <div className="py-8 text-center text-sm text-muted-foreground">
-          No PR or diff available for this session.
+      {/* Comments summary */}
+      {comments.length > 0 && (
+        <CommentsSummary
+          comments={comments}
+          onCommentClick={handleCommentClick}
+          onSendToAgent={() => sendToAgentMutation.mutate()}
+          isSending={sendToAgentMutation.isPending}
+        />
+      )}
+
+      {/* PR Card */}
+      <PRCard sessionId={sessionId} />
+
+      {/* Main content area */}
+      {hasDiff ? (
+        <div className="flex flex-1 min-h-0">
+          {/* File tree */}
+          {showFileTree && (
+            <div className="w-[220px] shrink-0 border-r border-border overflow-hidden">
+              <FileTree
+                files={filteredFiles}
+                activeFileIndex={activeFileIndex}
+                onFileSelect={handleFileSelect}
+                reviewedFiles={reviewedFiles}
+                onToggleReviewed={handleToggleReviewed}
+              />
+            </div>
+          )}
+          {/* Diff pane */}
+          <DiffPane
+            ref={diffPaneRef}
+            files={filteredFiles}
+            viewMode={viewMode}
+            sessionId={sessionId}
+            activeFileIndex={activeFileIndex}
+            commentsByLine={commentsByLine}
+            activeCommentLine={activeCommentLine}
+            onAddComment={handleAddComment}
+            onSubmitComment={handleSubmitComment}
+            onCancelComment={handleCancelComment}
+            onUpdateComment={updateComment}
+            onDeleteComment={deleteComment}
+            onBrowseFile={handleBrowseFile}
+          />
         </div>
-      ) : session.diff ? (
-        <DiffViewer diff={session.diff} />
-      ) : null}
+      ) : (
+        <div className="flex-1 flex items-center justify-center py-12">
+          <p className="text-sm text-muted-foreground">
+            No diff available for this session.
+          </p>
+        </div>
+      )}
+
+      {/* Keyboard help overlay */}
+      <KeyboardHelpOverlay open={showKeyboardHelp} onClose={toggleShowHelp} />
     </div>
   );
 }
@@ -653,7 +942,9 @@ const DEFAULT_DETAIL = 384;
 
 export function SessionDetailContent({ id }: { id: string }) {
   const terminalStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
-  const [detailTab, setDetailTab] = useState<DetailTab>("overview");
+  const [reviewParam, setReviewParam] = useQueryState("review");
+  const maximized = reviewParam === "maximized";
+  const [detailTab, setDetailTab] = useState<DetailTab>(maximized ? "changes" : "overview");
   const [showDetailPanel, setShowDetailPanel] = useState(true);
   const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL);
 
@@ -661,6 +952,21 @@ export function SessionDetailContent({ id }: { id: string }) {
     // Negative delta = dragging left = panel gets wider
     setDetailWidth((w) => Math.min(MAX_DETAIL, Math.max(MIN_DETAIL, w - delta)));
   }, []);
+
+  const openChangesTab = useCallback(() => {
+    setDetailTab("changes");
+    setShowDetailPanel(true);
+  }, []);
+
+  const toggleMaximize = useCallback(() => {
+    if (maximized) {
+      setReviewParam(null);
+    } else {
+      setReviewParam("maximized");
+      setDetailTab("changes");
+      setShowDetailPanel(true);
+    }
+  }, [maximized, setReviewParam]);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["session", id],
@@ -676,6 +982,15 @@ export function SessionDetailContent({ id }: { id: string }) {
   const members = membersData?.data ?? [];
   const isActive = session ? !terminalStatuses.has(session.status) : false;
   const isMultiTurn = session && session.current_turn > 0;
+
+  const sessionDiff = session?.diff;
+  const diffStats = useMemo(() => {
+    if (!sessionDiff) return null;
+    return parseDiffStats(sessionDiff);
+  }, [sessionDiff]);
+
+  // Comment count for the footer — React Query deduplicates with ChangesTab's query
+  const { openCount: footerOpenCommentCount } = useReviewComments(id);
 
   if (isLoading) {
     return (
@@ -704,7 +1019,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   return (
     <div className="flex h-full">
       {/* Main chat area */}
-      <div className="flex-1 min-w-0 flex flex-col">
+      <div className={cn("flex-1 min-w-0 flex flex-col", maximized && "hidden")}>
         {/* Session header bar */}
         <div className="border-b border-border px-4 py-3 bg-background flex items-center justify-between shrink-0">
           <div className="min-w-0 flex-1">
@@ -715,6 +1030,13 @@ export function SessionDetailContent({ id }: { id: string }) {
               <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium shrink-0 ${status.color}`}>
                 {status.label}
               </span>
+              {diffStats && (
+                <DiffStatsBadge
+                  added={diffStats.added}
+                  removed={diffStats.removed}
+                  onClick={openChangesTab}
+                />
+              )}
             </div>
             <p className="text-[12px] text-muted-foreground mt-0.5">
               {agentTypeLabels[session.agent_type] || session.agent_type}
@@ -743,13 +1065,29 @@ export function SessionDetailContent({ id }: { id: string }) {
         <div className="flex-1 min-h-0">
           <ChatPanel session={session} sessionId={id} isActive={isActive} />
         </div>
+
+        {/* Session footer bar */}
+        <SessionFooter
+          status={session.status}
+          currentTurn={session.current_turn}
+          diffStats={diffStats}
+          onDiffClick={openChangesTab}
+          openCommentCount={footerOpenCommentCount}
+          onCommentsClick={openChangesTab}
+        />
       </div>
 
       {/* Detail panel (collapsible right sidebar) */}
-      {showDetailPanel && (
+      {(showDetailPanel || maximized) && (
         <>
-        <ResizeHandle onResize={handleDetailResize} />
-        <div style={{ width: detailWidth }} className="border-l border-border bg-muted/20 flex flex-col shrink-0 overflow-hidden">
+        {!maximized && <ResizeHandle onResize={handleDetailResize} />}
+        <div
+          style={maximized ? undefined : { width: detailWidth }}
+          className={cn(
+            "border-l border-border bg-muted/20 flex flex-col shrink-0 overflow-hidden",
+            maximized && "flex-1 border-l-0"
+          )}
+        >
           {/* Detail tabs */}
           <div className="flex items-center gap-0 border-b border-border px-2 shrink-0">
             {detailTabs.map((tab) => (
@@ -772,11 +1110,19 @@ export function SessionDetailContent({ id }: { id: string }) {
           </div>
 
           {/* Detail content */}
-          <div className="flex-1 overflow-y-auto p-4">
-            {detailTab === "overview" && <OverviewTab session={session} members={members} />}
-            {detailTab === "changes" && <ChangesTab session={session} sessionId={id} />}
-            {detailTab === "validation" && <ValidationTab sessionId={id} />}
-          </div>
+          {detailTab === "changes" ? (
+            <ChangesTab
+              session={session}
+              sessionId={id}
+              maximized={maximized}
+              onToggleMaximize={toggleMaximize}
+            />
+          ) : (
+            <div className="flex-1 overflow-y-auto p-4">
+              {detailTab === "overview" && <OverviewTab session={session} members={members} />}
+              {detailTab === "validation" && <ValidationTab sessionId={id} />}
+            </div>
+          )}
         </div>
         </>
       )}

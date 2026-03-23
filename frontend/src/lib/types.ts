@@ -115,6 +115,8 @@ export interface Session {
   error?: string;
   result_summary?: string;
   diff?: string;
+  diff_stats?: { added: number; removed: number; files_changed: number };
+  diff_history?: Array<{ pass: number; diff: string; diff_stats: { added: number; removed: number; files_changed: number }; created_at: string }>;
   created_at: string;
 }
 
@@ -222,6 +224,23 @@ export interface PullRequest {
   review_status: string | null;
   merged_at: string | null;
   closed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SessionReviewComment {
+  id: string;
+  session_id: string;
+  org_id: string;
+  user_id: string;
+  file_path: string;
+  line_number: number;
+  diff_side: 'old' | 'new';
+  body: string;
+  resolved: boolean;
+  resolved_at?: string;
+  resolved_by_pass?: number;
+  pass_number: number;
   created_at: string;
   updated_at: string;
 }
@@ -721,3 +740,27 @@ export const projectStatusDotColor: Record<string, string> = {
   completed: "bg-emerald-500",
   cancelled: "bg-red-500",
 };
+
+// --- Session file browsing types ---
+
+export interface FileEntry {
+  path: string;
+  type: 'file' | 'dir';
+  size: number;
+}
+
+export interface FileContent {
+  path: string;
+  content: string;
+  language: string;
+  truncated: boolean;
+}
+
+export interface FileLine {
+  number: number;
+  content: string;
+}
+
+export interface FileContextResponse {
+  lines: FileLine[];
+}

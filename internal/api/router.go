@@ -16,10 +16,11 @@ import (
 	"github.com/assembledhq/143/internal/services/codexauth"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
+	"github.com/assembledhq/143/internal/services/sandbox"
 	threadservice "github.com/assembledhq/143/internal/services/thread"
 )
 
-func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, codexAuthSvc *codexauth.Service, llmClient llm.Client) (*chi.Mux, error) {
+func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, codexAuthSvc *codexauth.Service, llmClient llm.Client, fileReader sandbox.FileReader) (*chi.Mux, error) {
 	// Create stores
 	orgStore := db.NewOrganizationStore(pool)
 	userStore := db.NewUserStore(pool)
@@ -49,6 +50,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	projectAttachmentStore := db.NewProjectAttachmentStore(pool)
 	projectSpecStore := db.NewProjectSpecStore(pool)
 	pmDocumentStore := db.NewPMDocumentStore(pool)
+	sessionReviewCommentStore := db.NewSessionReviewCommentStore(pool)
 	auditLogStore := db.NewAuditLogStore(pool)
 	auditEmitter := db.NewAuditEmitter(auditLogStore, logger)
 
@@ -164,6 +166,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	codexAuthHandler := handlers.NewCodexAuthHandler(codexAuthSvc, logger)
 	pmDocumentHandler := handlers.NewPMDocumentHandler(pmDocumentStore)
 	auditLogHandler := handlers.NewAuditLogHandler(auditLogStore)
+	sessionReviewCommentHandler := handlers.NewSessionReviewCommentHandler(sessionReviewCommentStore, sessionStore, logger)
+	sessionReviewCommentHandler.SetAuditEmitter(auditEmitter)
+	sessionReviewCommentHandler.SetMessageAndJobStores(sessionMessageStore, jobStore)
+	sessionFileHandler := handlers.NewSessionFileHandler(sessionStore, fileReader, logger)
 
 	r := chi.NewRouter()
 
@@ -242,6 +248,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/sessions/{id}/threads/{tid}", sessionThreadHandler.GetThread)
 			r.Get("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.GetThreadMessages)
 			r.Get("/api/v1/sessions/{id}/threads/{tid}/logs", sessionThreadHandler.GetThreadLogs)
+			r.Get("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.List)
+			r.Get("/api/v1/sessions/{id}/files", sessionFileHandler.ListFiles)
+			r.Get("/api/v1/sessions/{id}/files/content", sessionFileHandler.GetFileContent)
+			r.Get("/api/v1/sessions/{id}/files/context", sessionFileHandler.GetFileContext)
 			r.Get("/api/v1/settings", settingsHandler.Get)
 			r.Get("/api/v1/settings/agent-defaults", settingsHandler.GetAgentDefaults)
 			r.Get("/api/v1/settings/llm-defaults", settingsHandler.GetLLMDefaults)
@@ -299,6 +309,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Post("/api/v1/sessions/{id}/threads", sessionThreadHandler.CreateThread)
 			r.Post("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.SendThreadMessage)
 			r.Post("/api/v1/sessions/{id}/threads/{tid}/end", sessionThreadHandler.EndThread)
+			r.Post("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.Create)
+			r.Post("/api/v1/sessions/{id}/review-comments/send", sessionReviewCommentHandler.SendToAgent)
+			r.Patch("/api/v1/sessions/{id}/review-comments/{commentId}", sessionReviewCommentHandler.Update)
+			r.Delete("/api/v1/sessions/{id}/review-comments/{commentId}", sessionReviewCommentHandler.Delete)
 			r.Post("/api/v1/projects", projectHandler.Create)
 			r.Patch("/api/v1/projects/{id}", projectHandler.Update)
 			r.Delete("/api/v1/projects/{id}", projectHandler.Delete)
