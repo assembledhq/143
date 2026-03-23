@@ -24,7 +24,7 @@ var sessionColumns = []string{
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at",
 	"sandbox_state", "snapshot_key", "target_branch", "working_branch",
-	"repository_id",
+	"repository_id", "diff_stats", "diff_history",
 	"created_at",
 }
 
@@ -47,6 +47,8 @@ func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 		nil,    // target_branch
 		nil,    // working_branch
 		nil,    // repository_id
+		nil,    // diff_stats
+		nil,    // diff_history
 		now,
 	}
 }

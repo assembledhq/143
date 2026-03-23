@@ -59,6 +59,13 @@ func (s *SessionMessageStore) ListBySession(ctx context.Context, orgID, sessionI
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionMessage])
 }
 
+// Delete removes a session message by ID. Used to clean up orphaned messages
+// when a follow-up operation (e.g. job enqueue) fails after message creation.
+func (s *SessionMessageStore) Delete(ctx context.Context, id int64) error {
+	_, err := s.db.Exec(ctx, `DELETE FROM session_messages WHERE id = @id`, pgx.NamedArgs{"id": id})
+	return err
+}
+
 func (s *SessionMessageStore) ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionMessage, error) {
 	query := `
 		SELECT ` + sessionMessageSelectColumns + `
