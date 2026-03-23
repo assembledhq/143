@@ -452,12 +452,13 @@ Inline review comments left by users on session diffs, feeding directives back i
 | body | text | comment markdown |
 | resolved | boolean | default false |
 | resolved_at | timestamptz | |
+| resolved_by_pass | int | agent pass that addressed this comment |
 | pass_number | int | which agent pass this comment targets |
 | created_at | timestamptz | |
 | updated_at | timestamptz | |
 
 **Indexes:**
-- `(session_id)` — comments per session
+- `(org_id, session_id)` — comments per session (org-scoped)
 - `(session_id, file_path)` — comments per file in a session
 
 ### `review_patterns`
