@@ -38,5 +38,13 @@ func BuildRegistryFromEnv(logger io.Writer) *integration.Registry {
 		fmt.Fprintln(logger, "143-tools: registered linear")
 	}
 
+	if token := os.Getenv("NOTION_ACCESS_TOKEN"); token != "" {
+		store := integration.NewNotionDocumentStore(integration.NotionDocumentStoreConfig{
+			AuthToken: token,
+		})
+		reg.RegisterDocumentStore(store)
+		fmt.Fprintln(logger, "143-tools: registered notion")
+	}
+
 	return reg
 }

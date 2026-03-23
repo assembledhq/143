@@ -36,9 +36,12 @@ type AdditionalIntegrationCardsProps = IntegrationCallbacks & {
   linearConnected: boolean;
   linearLoading: boolean;
   slackConnected: boolean;
+  notionConnected: boolean;
+  notionLoading?: boolean;
   onConnectSentry: () => void;
   onConnectLinear: () => void;
   onConnectSlack: () => void;
+  onConnectNotion: () => void;
 };
 
 type AllIntegrationCardsProps = SourceControlIntegrationCardProps & AdditionalIntegrationCardsProps;
@@ -79,6 +82,7 @@ const DISCONNECT_DESCRIPTIONS: Record<IntegrationKey, string> = {
   sentry: "This will disconnect Sentry from your organization. Error tracking data will no longer sync.",
   linear: "This will disconnect Linear from your organization. Issues will no longer sync.",
   slack: "This will disconnect Slack from your organization. Channel monitoring will stop.",
+  notion: "This will disconnect Notion from your organization. Product docs will no longer sync.",
 };
 
 function IntegrationAction({
@@ -219,9 +223,12 @@ export function AdditionalIntegrationCards({
   linearConnected,
   linearLoading,
   slackConnected,
+  notionConnected,
+  notionLoading,
   onConnectSentry,
   onConnectLinear,
   onConnectSlack,
+  onConnectNotion,
   onDisconnect,
   disconnectingProvider,
   disconnectErrorProvider,
@@ -230,6 +237,7 @@ export function AdditionalIntegrationCards({
   const sentry = getIntegrationByKey("sentry");
   const linear = getIntegrationByKey("linear");
   const slack = getIntegrationByKey("slack");
+  const notion = getIntegrationByKey("notion");
 
   return (
     <IntegrationsCard
@@ -289,6 +297,25 @@ export function AdditionalIntegrationCards({
             />
           ),
         },
+        {
+          id: notion.key,
+          title: notion.name,
+          description: notion.description,
+          logo: <IntegrationLogo name={notion.name} src={notion.logoSrc} />,
+          badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
+          action: (
+            <IntegrationAction
+              connected={notionConnected}
+              integrationKey="notion"
+              integrationName={notion.name}
+              onConnect={onConnectNotion}
+              onDisconnect={onDisconnect}
+              disconnecting={disconnectingProvider === "notion"}
+              disconnectError={disconnectErrorProvider === "notion" ? disconnectError : null}
+              loading={notionLoading}
+            />
+          ),
+        },
       ]}
     />
   );
@@ -299,6 +326,7 @@ export function AllIntegrationCards({
   onConnectSentry,
   onConnectLinear,
   onConnectSlack,
+  onConnectNotion,
   onDisconnect,
   disconnectingProvider,
   disconnectErrorProvider,
@@ -309,11 +337,14 @@ export function AllIntegrationCards({
   linearConnected,
   linearLoading,
   slackConnected,
+  notionConnected,
+  notionLoading,
 }: AllIntegrationCardsProps) {
   const github = getIntegrationByKey("github");
   const sentry = getIntegrationByKey("sentry");
   const linear = getIntegrationByKey("linear");
   const slack = getIntegrationByKey("slack");
+  const notion = getIntegrationByKey("notion");
 
   return (
     <IntegrationsCard
@@ -389,6 +420,25 @@ export function AllIntegrationCards({
               onDisconnect={onDisconnect}
               disconnecting={disconnectingProvider === "slack"}
               disconnectError={disconnectErrorProvider === "slack" ? disconnectError : null}
+            />
+          ),
+        },
+        {
+          id: notion.key,
+          title: notion.name,
+          description: notion.description,
+          logo: <IntegrationLogo name={notion.name} src={notion.logoSrc} />,
+          badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
+          action: (
+            <IntegrationAction
+              connected={notionConnected}
+              integrationKey="notion"
+              integrationName={notion.name}
+              onConnect={onConnectNotion}
+              onDisconnect={onDisconnect}
+              disconnecting={disconnectingProvider === "notion"}
+              disconnectError={disconnectErrorProvider === "notion" ? disconnectError : null}
+              loading={notionLoading}
             />
           ),
         },
