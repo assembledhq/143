@@ -164,7 +164,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	projectAnalysisHandler := handlers.NewProjectAnalysisHandler(projectStore, projectSpecStore, projectAttachmentStore, projectTaskStore)
 	projectGenerateHandler := handlers.NewProjectGenerateHandler(llmClient)
 	codexAuthHandler := handlers.NewCodexAuthHandler(codexAuthSvc, logger)
-	pmDocumentHandler := handlers.NewPMDocumentHandler(pmDocumentStore)
+	pmDocumentHandler := handlers.NewPMDocumentHandler(pmDocumentStore, credentialStore)
 	auditLogHandler := handlers.NewAuditLogHandler(auditLogStore)
 	sessionReviewCommentHandler := handlers.NewSessionReviewCommentHandler(sessionReviewCommentStore, sessionStore, logger)
 	sessionReviewCommentHandler.SetAuditEmitter(auditEmitter)
@@ -297,6 +297,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Delete("/api/v1/integrations/sentry/disconnect", integrationHandler.DisconnectIntegration)
 			r.Delete("/api/v1/integrations/linear/disconnect", integrationHandler.DisconnectIntegration)
 			r.Delete("/api/v1/integrations/slack/disconnect", integrationHandler.DisconnectIntegration)
+			r.Post("/api/v1/integrations/notion/connect", integrationHandler.ConnectNotion)
+			r.Delete("/api/v1/integrations/notion/disconnect", integrationHandler.DisconnectIntegration)
 			// Personal credential management
 			r.Put("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.UpsertPersonal)
 			r.Delete("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.DeletePersonal)
@@ -335,8 +337,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Post("/api/v1/projects/ai/generate", projectGenerateHandler.Generate)
 			r.Post("/api/v1/projects/{id}/ai/improve", projectAnalysisHandler.Improve)
 			r.Post("/api/v1/pm/documents", pmDocumentHandler.Create)
+			r.Post("/api/v1/pm/documents/discover/notion", pmDocumentHandler.DiscoverNotion)
 			r.Patch("/api/v1/pm/documents/{docId}", pmDocumentHandler.Update)
 			r.Delete("/api/v1/pm/documents/{docId}", pmDocumentHandler.Delete)
+			r.Post("/api/v1/pm/documents/{docId}/sync", pmDocumentHandler.SyncFromNotion)
 		})
 
 		// Admin-only routes
