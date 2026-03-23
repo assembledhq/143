@@ -64,8 +64,8 @@ function AcceptInvitationContent() {
         if (data?.action === "login" || data?.action === "register") {
           setStatus(data.action);
         } else {
-          // Fallback: redirect to overview
-          router.replace("/overview");
+          // Fallback: redirect to autopilot
+          router.replace("/autopilot");
         }
       } catch {
         setStatus("error");

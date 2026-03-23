@@ -1,48 +1,38 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
-import { RefreshCw, Plus } from "lucide-react";
-import Link from "next/link";
+import { RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { api } from "@/lib/api";
-import { useAnalyze } from "@/hooks/use-analyze";
 import { AgentStatusBar, deriveAgentStatus } from "@/components/autopilot/agent-status-bar";
+import type { PMStatus } from "@/lib/types";
 
-interface PMStatusBannerProps {
-  hasActivePlanSession: boolean;
+// Re-export for consumers that imported from here.
+export { deriveAgentStatus } from "@/components/autopilot/agent-status-bar";
+
+interface ControlStripProps {
+  pmStatus: PMStatus | undefined;
+  isAnalyzing: boolean;
+  isPending: boolean;
+  onAnalyze: () => void;
+  analyzeError: string | null;
+  dismissError: () => void;
 }
 
-export function PMStatusBanner({ hasActivePlanSession }: PMStatusBannerProps) {
-  const { data: statusData } = useQuery({
-    queryKey: ["pm", "status"],
-    queryFn: () => api.pm.status(),
-    refetchInterval: 15000,
-  });
-
-  const pmStatus = statusData?.data;
-  const { isAnalyzing, isPending, analyzeError, handleAnalyze, dismissError } = useAnalyze(hasActivePlanSession);
-
+export function ControlStrip({ pmStatus, isAnalyzing, isPending, onAnalyze, analyzeError, dismissError }: ControlStripProps) {
   const agentStatus = deriveAgentStatus(pmStatus, isAnalyzing);
   const isRunning = agentStatus === "running";
 
   return (
     <div className="space-y-2">
       <AgentStatusBar
-        label="PM Agent"
+        label="Autopilot"
         pmStatus={pmStatus}
         agentStatus={agentStatus}
         isRunning={isRunning}
       >
-        <Button size="sm" variant="outline" className="h-7 text-[12px]" asChild>
-          <Link href="/sessions/new">
-            <Plus className="mr-1 h-3 w-3" />
-            Manual Session
-          </Link>
-        </Button>
         <Button
           size="sm"
           className="h-7 text-[12px]"
-          onClick={handleAnalyze}
+          onClick={onAnalyze}
           disabled={isPending || isAnalyzing}
           title="Run the PM agent now without waiting for the next scheduled run"
         >

@@ -11,7 +11,7 @@ const { pushMock, replaceMock, logoutMock } = vi.hoisted(() => ({
 }));
 
 vi.mock("next/navigation", () => ({
-  usePathname: () => "/overview",
+  usePathname: () => "/autopilot",
   useRouter: () => ({
     push: pushMock,
     replace: replaceMock,
@@ -70,7 +70,6 @@ describe("AuthenticatedLayout", () => {
     expect(await screen.findByRole("menuitem", { name: "General" })).toBeInTheDocument();
     expect(await screen.findByRole("menuitem", { name: "Integrations" })).toBeInTheDocument();
     expect(await screen.findByRole("menuitem", { name: "Coding agents" })).toBeInTheDocument();
-    expect(await screen.findByRole("menuitem", { name: "Prioritization" })).toBeInTheDocument();
     expect(await screen.findByRole("menuitem", { name: "Team" })).toBeInTheDocument();
   });
 
