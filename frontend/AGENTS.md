@@ -385,6 +385,35 @@ Always include `dark:` variants for banners that use **hardcoded Tailwind color 
 - Acronyms: PM, LLM, PR, API
 - The word after an acronym stays lowercase: "PM agent", "LLM model", "PR status"
 
+## Error Reporting (Sentry)
+
+Errors are reported to Sentry via `@sentry/nextjs`. Three layers handle this automatically:
+
+1. **`sentry.client.config.ts`** — catches unhandled browser errors and promise rejections
+2. **`src/app/global-error.tsx`** — Next.js root error boundary (catches rendering errors outside the app layout)
+3. **`src/components/error-boundary.tsx`** — React error boundary for component-level crashes
+
+For **caught errors** (try/catch, error callbacks), use the helpers in `src/lib/errors.ts`:
+
+```tsx
+import { captureError, captureMessage } from "@/lib/errors";
+
+// In a catch block — error is still handled, but Sentry gets visibility
+try {
+  await riskyOperation();
+} catch (err) {
+  captureError(err, { feature: "session-polling" });
+  // show fallback UI
+}
+
+// For unexpected-but-not-crashing states
+if (!expectedData) {
+  captureMessage("Missing expected data", { endpoint: "/api/sessions" });
+}
+```
+
+Use the `tags` parameter to add searchable context (feature name, endpoint, component). Do **not** call `Sentry.*` directly — always use the helpers so error reporting stays centralized.
+
 ## Anti-Patterns to Avoid
 
 1. **Hardcoded colors** — Never `text-gray-*`, `bg-white`, `border-gray-*` in dashboard. Use tokens.

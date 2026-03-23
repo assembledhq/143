@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { captureError } from "@/lib/errors";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -207,7 +208,8 @@ export default function PrioritizationPage() {
       setSaveStatus("success");
       setTimeout(() => setSaveStatus("idle"), 2000);
     },
-    onError: () => {
+    onError: (error) => {
+      captureError(error, { feature: "prioritization-settings" });
       setSaveStatus("error");
       setTimeout(() => setSaveStatus("idle"), 3000);
     },
