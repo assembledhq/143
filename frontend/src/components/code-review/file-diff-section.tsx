@@ -122,9 +122,11 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
     }, []);
 
     const handleAddComment = useCallback(
-      onAddComment
-        ? (lineNumber: number, side: "old" | "new") => onAddComment(file.newPath, lineNumber, side)
-        : () => {},
+      (lineNumber: number, side: "old" | "new") => {
+        if (onAddComment) {
+          onAddComment(file.newPath, lineNumber, side);
+        }
+      },
       [onAddComment, file.newPath]
     );
 

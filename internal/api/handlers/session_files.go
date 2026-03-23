@@ -40,18 +40,18 @@ func (h *SessionFileHandler) getSessionContainer(w http.ResponseWriter, r *http.
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
 		return "", "", false
 	}
 
 	session, err := h.sessionStore.GetByID(r.Context(), orgID, sessionID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "session not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
 		return "", "", false
 	}
 
 	if session.ContainerID == nil || *session.ContainerID == "" {
-		writeError(w, http.StatusConflict, "NO_SANDBOX", "session has no active sandbox container")
+		writeError(w, r, http.StatusConflict, "NO_SANDBOX", "session has no active sandbox container")
 		return "", "", false
 	}
 
@@ -151,14 +151,14 @@ func (h *SessionFileHandler) ListFiles(w http.ResponseWriter, r *http.Request) {
 	dirPath := r.URL.Query().Get("path")
 	cleanPath, valid := validatePath(dirPath)
 	if !valid {
-		writeError(w, http.StatusBadRequest, "INVALID_PATH", "path contains invalid characters")
+		writeError(w, r, http.StatusBadRequest, "INVALID_PATH", "path contains invalid characters")
 		return
 	}
 
 	entries, err := h.fileReader.ListDir(r.Context(), containerID, workDir, cleanPath)
 	if err != nil {
 		h.logger.Warn().Err(err).Str("path", cleanPath).Msg("failed to list directory")
-		writeError(w, http.StatusNotFound, "DIR_NOT_FOUND", "directory not found or not accessible")
+		writeError(w, r, http.StatusNotFound, "DIR_NOT_FOUND", "directory not found or not accessible")
 		return
 	}
 
@@ -178,20 +178,20 @@ func (h *SessionFileHandler) GetFileContent(w http.ResponseWriter, r *http.Reque
 
 	filePath := r.URL.Query().Get("path")
 	if filePath == "" {
-		writeError(w, http.StatusBadRequest, "MISSING_PATH", "path query parameter is required")
+		writeError(w, r, http.StatusBadRequest, "MISSING_PATH", "path query parameter is required")
 		return
 	}
 
 	cleanPath, valid := validatePath(filePath)
 	if !valid {
-		writeError(w, http.StatusBadRequest, "INVALID_PATH", "path contains invalid characters")
+		writeError(w, r, http.StatusBadRequest, "INVALID_PATH", "path contains invalid characters")
 		return
 	}
 
 	content, truncated, err := h.fileReader.ReadFile(r.Context(), containerID, workDir, cleanPath)
 	if err != nil {
 		h.logger.Warn().Err(err).Str("path", cleanPath).Msg("failed to read file")
-		writeError(w, http.StatusNotFound, "FILE_NOT_FOUND", "file not found or not readable")
+		writeError(w, r, http.StatusNotFound, "FILE_NOT_FOUND", "file not found or not readable")
 		return
 	}
 
@@ -216,13 +216,13 @@ func (h *SessionFileHandler) GetFileContext(w http.ResponseWriter, r *http.Reque
 
 	filePath := r.URL.Query().Get("path")
 	if filePath == "" {
-		writeError(w, http.StatusBadRequest, "MISSING_PATH", "path query parameter is required")
+		writeError(w, r, http.StatusBadRequest, "MISSING_PATH", "path query parameter is required")
 		return
 	}
 
 	cleanPath, valid := validatePath(filePath)
 	if !valid {
-		writeError(w, http.StatusBadRequest, "INVALID_PATH", "path contains invalid characters")
+		writeError(w, r, http.StatusBadRequest, "INVALID_PATH", "path contains invalid characters")
 		return
 	}
 
@@ -241,7 +241,7 @@ func (h *SessionFileHandler) GetFileContext(w http.ResponseWriter, r *http.Reque
 	lines, err := h.fileReader.ReadFileContext(r.Context(), containerID, workDir, cleanPath, line, above, below)
 	if err != nil {
 		h.logger.Warn().Err(err).Str("path", cleanPath).Int("line", line).Msg("failed to read file context")
-		writeError(w, http.StatusNotFound, "FILE_NOT_FOUND", "file not found or line out of range")
+		writeError(w, r, http.StatusNotFound, "FILE_NOT_FOUND", "file not found or line out of range")
 		return
 	}
 

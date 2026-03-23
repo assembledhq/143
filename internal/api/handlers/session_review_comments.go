@@ -55,13 +55,13 @@ func (h *SessionReviewCommentHandler) List(w http.ResponseWriter, r *http.Reques
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
 		return
 	}
 
 	comments, err := h.store.ListBySession(r.Context(), orgID, sessionID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list review comments")
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list review comments")
 		return
 	}
 
@@ -79,7 +79,7 @@ func (h *SessionReviewCommentHandler) Create(w http.ResponseWriter, r *http.Requ
 	user := middleware.UserFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
 		return
 	}
 
@@ -90,24 +90,24 @@ func (h *SessionReviewCommentHandler) Create(w http.ResponseWriter, r *http.Requ
 		Body       string `json:"body"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
 		return
 	}
 
 	if body.FilePath == "" || body.Body == "" {
-		writeError(w, http.StatusBadRequest, "VALIDATION", "file_path and body are required")
+		writeError(w, r, http.StatusBadRequest, "VALIDATION", "file_path and body are required")
 		return
 	}
 	if len(body.FilePath) > 1024 {
-		writeError(w, http.StatusBadRequest, "VALIDATION", "file_path must be 1024 characters or less")
+		writeError(w, r, http.StatusBadRequest, "VALIDATION", "file_path must be 1024 characters or less")
 		return
 	}
 	if len(body.Body) > 10240 {
-		writeError(w, http.StatusBadRequest, "VALIDATION", "body must be 10KB or less")
+		writeError(w, r, http.StatusBadRequest, "VALIDATION", "body must be 10KB or less")
 		return
 	}
 	if body.LineNumber < 1 {
-		writeError(w, http.StatusBadRequest, "VALIDATION", "line_number must be a positive integer")
+		writeError(w, r, http.StatusBadRequest, "VALIDATION", "line_number must be a positive integer")
 		return
 	}
 
@@ -116,19 +116,19 @@ func (h *SessionReviewCommentHandler) Create(w http.ResponseWriter, r *http.Requ
 		side = "new"
 	}
 	if side != "old" && side != "new" {
-		writeError(w, http.StatusBadRequest, "VALIDATION", "side must be 'old' or 'new'")
+		writeError(w, r, http.StatusBadRequest, "VALIDATION", "side must be 'old' or 'new'")
 		return
 	}
 
 	// Look up the session's current turn to associate the comment with the right pass.
 	if h.sessionStore == nil {
-		writeError(w, http.StatusInternalServerError, "SESSION_LOOKUP_FAILED", "session store not available")
+		writeError(w, r, http.StatusInternalServerError, "SESSION_LOOKUP_FAILED", "session store not available")
 		return
 	}
 	session, err := h.sessionStore.GetByID(r.Context(), orgID, sessionID)
 	if err != nil {
 		h.logger.Error().Err(err).Str("session_id", sessionID.String()).Msg("failed to look up session for review comment")
-		writeError(w, http.StatusNotFound, "SESSION_NOT_FOUND", "session not found")
+		writeError(w, r, http.StatusNotFound, "SESSION_NOT_FOUND", "session not found")
 		return
 	}
 	passNumber := session.CurrentTurn
@@ -149,7 +149,7 @@ func (h *SessionReviewCommentHandler) Create(w http.ResponseWriter, r *http.Requ
 
 	if err := h.store.Create(r.Context(), comment); err != nil {
 		h.logger.Error().Err(err).Msg("failed to create session review comment")
-		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create review comment")
+		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create review comment")
 		return
 	}
 
@@ -173,12 +173,12 @@ func (h *SessionReviewCommentHandler) Update(w http.ResponseWriter, r *http.Requ
 	user := middleware.UserFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
 		return
 	}
 	commentID, err := uuid.Parse(chi.URLParam(r, "commentId"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid comment ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid comment ID")
 		return
 	}
 
@@ -188,18 +188,18 @@ func (h *SessionReviewCommentHandler) Update(w http.ResponseWriter, r *http.Requ
 		Resolved *bool   `json:"resolved"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
 		return
 	}
 
 	// Verify the requesting user owns this comment.
 	existing, err := h.store.GetByID(r.Context(), orgID, commentID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "review comment not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "review comment not found")
 		return
 	}
 	if existing.UserID != user.ID {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "you can only edit your own comments")
+		writeError(w, r, http.StatusForbidden, "FORBIDDEN", "you can only edit your own comments")
 		return
 	}
 
@@ -220,7 +220,7 @@ func (h *SessionReviewCommentHandler) Update(w http.ResponseWriter, r *http.Requ
 
 	comment, err := h.store.Update(r.Context(), orgID, sessionID, commentID, body.Body, body.Resolved, resolvedByPass)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "review comment not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "review comment not found")
 		return
 	}
 
@@ -245,28 +245,28 @@ func (h *SessionReviewCommentHandler) Delete(w http.ResponseWriter, r *http.Requ
 	user := middleware.UserFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
 		return
 	}
 	commentID, err := uuid.Parse(chi.URLParam(r, "commentId"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid comment ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid comment ID")
 		return
 	}
 
 	// Verify the requesting user owns this comment.
 	existing, err := h.store.GetByID(r.Context(), orgID, commentID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "review comment not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "review comment not found")
 		return
 	}
 	if existing.UserID != user.ID {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "you can only delete your own comments")
+		writeError(w, r, http.StatusForbidden, "FORBIDDEN", "you can only delete your own comments")
 		return
 	}
 
 	if err := h.store.Delete(r.Context(), orgID, sessionID, commentID); err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "review comment not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "review comment not found")
 		return
 	}
 
@@ -293,13 +293,13 @@ func (h *SessionReviewCommentHandler) SendToAgent(w http.ResponseWriter, r *http
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
 		return
 	}
 
 	comments, err := h.store.ListBySession(r.Context(), orgID, sessionID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list review comments")
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list review comments")
 		return
 	}
 
@@ -312,7 +312,7 @@ func (h *SessionReviewCommentHandler) SendToAgent(w http.ResponseWriter, r *http
 	}
 
 	if len(open) == 0 {
-		writeError(w, http.StatusBadRequest, "NO_OPEN_COMMENTS", "no open review comments to send")
+		writeError(w, r, http.StatusBadRequest, "NO_OPEN_COMMENTS", "no open review comments to send")
 		return
 	}
 
@@ -340,7 +340,7 @@ func (h *SessionReviewCommentHandler) SendToAgent(w http.ResponseWriter, r *http
 				return
 			}
 			h.logger.Error().Err(err).Str("session_id", sessionID.String()).Msg("failed to claim idle session")
-			writeError(w, http.StatusInternalServerError, "CLAIM_FAILED", "failed to claim session")
+			writeError(w, r, http.StatusInternalServerError, "CLAIM_FAILED", "failed to claim session")
 			return
 		}
 
@@ -363,7 +363,7 @@ func (h *SessionReviewCommentHandler) SendToAgent(w http.ResponseWriter, r *http
 			if revertErr := h.sessionStore.UpdateStatus(r.Context(), orgID, sessionID, string(models.SessionStatusIdle)); revertErr != nil {
 				h.logger.Error().Err(revertErr).Str("session_id", sessionID.String()).Msg("failed to revert session to idle after message creation failure")
 			}
-			writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message")
+			writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message")
 			return
 		}
 
@@ -381,7 +381,7 @@ func (h *SessionReviewCommentHandler) SendToAgent(w http.ResponseWriter, r *http
 			if revertErr := h.sessionStore.UpdateStatus(r.Context(), orgID, sessionID, string(models.SessionStatusIdle)); revertErr != nil {
 				h.logger.Error().Err(revertErr).Str("session_id", sessionID.String()).Msg("failed to revert session to idle after enqueue failure")
 			}
-			writeError(w, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue continue_session job")
+			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue continue_session job")
 			return
 		}
 

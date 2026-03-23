@@ -190,9 +190,10 @@ function FileViewer({
   const { data, isLoading, error } = useSessionFileContent(sessionId, filePath);
 
   const fileContent = data?.data;
+  const content = fileContent?.content;
   const lines = useMemo(
-    () => (fileContent?.content ? fileContent.content.split("\n") : []),
-    [fileContent?.content]
+    () => (content ? content.split("\n") : []),
+    [content]
   );
 
   const lang = fileContent?.language || inferLanguage(filePath);
