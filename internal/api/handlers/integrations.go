@@ -1369,7 +1369,7 @@ func (h *IntegrationHandler) validateNotionToken(ctx context.Context, token stri
 		return "", fmt.Errorf("invalid or expired token")
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("Notion API returned %d", resp.StatusCode)
+		return "", fmt.Errorf("notion API returned %d", resp.StatusCode)
 	}
 
 	var result struct {

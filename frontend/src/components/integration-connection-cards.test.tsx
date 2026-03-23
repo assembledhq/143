@@ -32,9 +32,11 @@ describe("integration connection cards", () => {
         linearConnected={false}
         linearLoading={false}
         slackConnected={false}
+        notionConnected={false}
         onConnectSentry={onConnectSentry}
         onConnectLinear={onConnectLinear}
         onConnectSlack={vi.fn()}
+        onConnectNotion={vi.fn()}
       />
     );
 
@@ -83,10 +85,12 @@ describe("integration connection cards", () => {
         linearConnected
         linearLoading={false}
         slackConnected={false}
+        notionConnected={false}
         onConnectGitHub={vi.fn()}
         onConnectSentry={vi.fn()}
         onConnectLinear={vi.fn()}
         onConnectSlack={vi.fn()}
+        onConnectNotion={vi.fn()}
       />
     );
 
@@ -100,9 +104,11 @@ describe("integration connection cards", () => {
         linearConnected={false}
         linearLoading={false}
         slackConnected={false}
+        notionConnected={false}
         onConnectSentry={vi.fn()}
         onConnectLinear={vi.fn()}
         onConnectSlack={vi.fn()}
+        onConnectNotion={vi.fn()}
       />
     );
 
@@ -118,9 +124,11 @@ describe("integration connection cards", () => {
         linearConnected={false}
         linearLoading={false}
         slackConnected
+        notionConnected={false}
         onConnectSentry={vi.fn()}
         onConnectLinear={vi.fn()}
         onConnectSlack={vi.fn()}
+        onConnectNotion={vi.fn()}
       />
     );
 
@@ -137,9 +145,11 @@ describe("integration connection cards", () => {
         linearConnected={false}
         linearLoading={false}
         slackConnected={false}
+        notionConnected={false}
         onConnectSentry={vi.fn()}
         onConnectLinear={vi.fn()}
         onConnectSlack={onConnectSlack}
+        onConnectNotion={vi.fn()}
       />
     );
 
@@ -212,9 +222,11 @@ describe("integration connection cards", () => {
         linearConnected
         linearLoading={false}
         slackConnected
+        notionConnected
         onConnectSentry={vi.fn()}
         onConnectLinear={vi.fn()}
         onConnectSlack={vi.fn()}
+        onConnectNotion={vi.fn()}
         onDisconnect={vi.fn()}
       />
     );
@@ -222,6 +234,7 @@ describe("integration connection cards", () => {
     expect(screen.getByRole("button", { name: "Disconnect Sentry" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Disconnect Linear" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Disconnect Slack" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Disconnect Notion" })).toBeInTheDocument();
   });
 
   it("shows error message when disconnect fails", () => {

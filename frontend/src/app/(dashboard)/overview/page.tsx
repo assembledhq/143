@@ -251,6 +251,9 @@ export default function Overview() {
   const slackIntegration = integrationsResp?.data?.find(
     (integration) => integration.provider === "slack" && integration.status === "active"
   );
+  const notionIntegration = integrationsResp?.data?.find(
+    (integration) => integration.provider === "notion" && integration.status === "active"
+  );
 
   // Count completed setup stages (step 1: coding agent, step 2: integrations with repos)
   const githubReady = Boolean(githubIntegration) && repos.length > 0;
@@ -308,10 +311,12 @@ export default function Overview() {
             sentryConnected={Boolean(sentryIntegration)}
             linearConnected={Boolean(linearIntegration)}
             slackConnected={Boolean(slackIntegration)}
+            notionConnected={Boolean(notionIntegration)}
             linearLoading={false}
             onConnectSentry={() => api.auth.loginSentry()}
             onConnectLinear={() => api.integrations.loginLinear()}
             onConnectSlack={() => api.integrations.loginSlack()}
+            onConnectNotion={() => {}}
             onDisconnect={(provider) => disconnectMutation.mutate(provider)}
             disconnectingProvider={disconnectMutation.isPending ? disconnectMutation.variables : null}
             disconnectErrorProvider={disconnectMutation.isError ? disconnectMutation.variables ?? null : null}
