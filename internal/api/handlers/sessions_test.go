@@ -50,7 +50,7 @@ var sessionColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
-	"target_branch", "working_branch", "repository_id", "created_at",
+	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "created_at",
 }
 
 func TestSessionHandler_List(t *testing.T) {
@@ -85,6 +85,8 @@ func TestSessionHandler_List(t *testing.T) {
 							nil, // target_branch
 							nil, // working_branch
 							nil, // repository_id
+							nil, // diff_stats
+							nil, // diff_history
 							now,
 						),
 					)
@@ -164,6 +166,8 @@ func TestSessionHandler_List_WithRepositoryID(t *testing.T) {
 				nil, // target_branch
 				nil, // working_branch
 				nil, // repository_id
+				nil, // diff_stats
+				nil, // diff_history
 				now,
 			),
 		)
@@ -254,6 +258,8 @@ func TestSessionHandler_List_CommaSeparatedStatuses(t *testing.T) {
 				nil, // target_branch
 				nil, // working_branch
 				nil, // repository_id
+				nil, // diff_stats
+				nil, // diff_history
 				now,
 			),
 		)
@@ -307,6 +313,8 @@ func TestSessionHandler_Get(t *testing.T) {
 							nil, // target_branch
 							nil, // working_branch
 							nil, // repository_id
+							nil, // diff_stats
+							nil, // diff_history
 							now,
 						),
 					)
@@ -1017,6 +1025,8 @@ func TestSessionHandler_GetLogs_Success(t *testing.T) {
 				nil, // target_branch
 				nil, // working_branch
 				nil, // repository_id
+				nil, // diff_stats
+				nil, // diff_history
 				now,
 			),
 		)
@@ -1101,6 +1111,8 @@ func TestSessionHandler_GetLogs_EmptyLogs(t *testing.T) {
 				nil, // target_branch
 				nil, // working_branch
 				nil, // repository_id
+				nil, // diff_stats
+				nil, // diff_history
 				now,
 			),
 		)
@@ -1158,6 +1170,8 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil, // target_branch
 				nil, // working_branch
 				nil, // repository_id
+				nil, // diff_stats
+				nil, // diff_history
 				now,
 			),
 		)
@@ -1179,6 +1193,8 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil, // target_branch
 				nil, // working_branch
 				nil, // repository_id
+				nil, // diff_stats
+				nil, // diff_history
 				now,
 			),
 		)
@@ -1435,6 +1451,8 @@ func TestSessionHandler_EndSession_EnqueuesValidation(t *testing.T) {
 				nil, // target_branch
 				nil, // working_branch
 				nil, // repository_id
+				nil, // diff_stats
+				nil, // diff_history
 				now,
 			),
 		)
@@ -1611,6 +1629,8 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							nil, // target_branch
 							nil, // working_branch
 							nil, // repository_id
+							nil, // diff_stats
+							nil, // diff_history
 							now,
 						),
 					)
@@ -1647,6 +1667,8 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							nil, // target_branch
 							nil, // working_branch
 							nil, // repository_id
+							nil, // diff_stats
+							nil, // diff_history
 							now,
 						),
 					)
@@ -1725,6 +1747,8 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // target_branch
 							nil, // working_branch
 							nil, // repository_id
+							nil, // diff_stats
+							nil, // diff_history
 							now,
 						),
 					)
@@ -1774,6 +1798,8 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // target_branch
 							nil, // working_branch
 							nil, // repository_id
+							nil, // diff_stats
+							nil, // diff_history
 							now,
 						),
 					)
@@ -1811,6 +1837,8 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // target_branch
 							nil, // working_branch
 							nil, // repository_id
+							nil, // diff_stats
+							nil, // diff_history
 							now,
 						),
 					)
@@ -1831,6 +1859,8 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // target_branch
 							nil, // working_branch
 							nil, // repository_id
+							nil, // diff_stats
+							nil, // diff_history
 							now,
 						),
 					)

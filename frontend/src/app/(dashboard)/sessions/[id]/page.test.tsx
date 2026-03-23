@@ -172,8 +172,9 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id={idleSession.id} />);
     expect(await screen.findByText('Fix the bug')).toBeInTheDocument();
     expect(screen.getByText('Done fixing')).toBeInTheDocument();
-    // Turn indicator shown in header
-    expect(screen.getByText(/Turn 2/)).toBeInTheDocument();
+    // Turn indicator shown in header and footer
+    const turnElements = screen.getAllByText(/Turn 2/);
+    expect(turnElements.length).toBeGreaterThanOrEqual(1);
   });
 
   it('shows empty message state when no messages', async () => {
@@ -299,7 +300,7 @@ describe('SessionDetailPage', () => {
     const user = userEvent.setup();
     const changesTab = screen.getByRole('button', { name: 'Changes' });
     await user.click(changesTab);
-    expect(await screen.findByText('View on GitHub')).toBeInTheDocument();
+    expect(await screen.findByText('GitHub')).toBeInTheDocument();
     expect(screen.getByText('example/repo #42')).toBeInTheDocument();
   });
 
@@ -332,6 +333,37 @@ describe('SessionDetailPage', () => {
     expect(screen.getByText('Duration')).toBeInTheDocument();
     // 5m 30s duration between started_at and completed_at
     expect(screen.getByText('5m 30s')).toBeInTheDocument();
+  });
+
+  it('shows pass selector when session has diff_history with multiple passes', async () => {
+    const pass1Diff = 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);';
+    const pass2Diff = 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);\ndiff --git a/src/new.ts b/src/new.ts\n--- /dev/null\n+++ b/src/new.ts\n@@ -0,0 +1 @@\n+export const x = 1;';
+
+    const sessionWithHistory: Session = {
+      ...mockSessions[0],
+      diff: pass2Diff,
+      diff_history: [
+        { pass: 1, diff: pass1Diff, diff_stats: { added: 1, removed: 0, files_changed: 1 }, created_at: '2026-03-19T10:00:00Z' },
+        { pass: 2, diff: pass2Diff, diff_stats: { added: 2, removed: 0, files_changed: 2 }, created_at: '2026-03-19T10:05:00Z' },
+      ],
+      current_turn: 2,
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithHistory } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const user = userEvent.setup();
+    const changesTab = screen.getByRole('button', { name: 'Changes' });
+    await user.click(changesTab);
+
+    // Pass selector should be visible with "All changes" label
+    expect(await screen.findByText('All changes')).toBeInTheDocument();
   });
 
   it('shows PM context when pm_plan_id is set', async () => {
