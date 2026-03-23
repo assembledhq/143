@@ -73,7 +73,7 @@ func TestSessionReviewCommentHandler_List(t *testing.T) {
 		handler := newTestReviewCommentHandler(t, mock)
 
 		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE session_id").
-			WithArgs(pgxmock.AnyArg()).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows(reviewCommentColumns))
 
 		url := fmt.Sprintf("/api/v1/sessions/%s/review-comments", sessionID)
@@ -105,7 +105,7 @@ func TestSessionReviewCommentHandler_List(t *testing.T) {
 		handler := newTestReviewCommentHandler(t, mock)
 
 		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE session_id").
-			WithArgs(pgxmock.AnyArg()).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(
 				pgxmock.NewRows(reviewCommentColumns).
 					AddRow(reviewCommentRow(commentID, sessionID, orgID, userID, "src/app.ts", 10, "Fix this", false)...),
@@ -149,7 +149,8 @@ func TestSessionReviewCommentHandler_Create(t *testing.T) {
 
 		// INSERT returning the new comment
 		mock.ExpectQuery("INSERT INTO session_review_comments").
-			WithArgs(pgxmock.AnyArg()).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(
 				pgxmock.NewRows(reviewCommentColumns).
 					AddRow(reviewCommentRow(commentID, sessionID, orgID, userID, "src/app.ts", 10, "Add tests", false)...),
@@ -297,7 +298,7 @@ func TestSessionReviewCommentHandler_Delete(t *testing.T) {
 
 		// Ownership check: GetByID returns the comment owned by the requesting user
 		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id").
-			WithArgs(pgxmock.AnyArg()).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(
 				pgxmock.NewRows(reviewCommentColumns).
 					AddRow(reviewCommentRow(commentID, sessionID, orgID, userID, "src/app.ts", 10, "Fix this", false)...),
@@ -305,7 +306,7 @@ func TestSessionReviewCommentHandler_Delete(t *testing.T) {
 
 		// Expect DELETE with session_id in WHERE clause
 		mock.ExpectExec("DELETE FROM session_review_comments WHERE id = .+ AND org_id = .+ AND session_id").
-			WithArgs(pgxmock.AnyArg()).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("DELETE", 1))
 
 		url := fmt.Sprintf("/api/v1/sessions/%s/review-comments/%s", sessionID, commentID)
@@ -337,7 +338,7 @@ func TestSessionReviewCommentHandler_Delete(t *testing.T) {
 
 		// Ownership check: comment is owned by a different user
 		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id").
-			WithArgs(pgxmock.AnyArg()).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(
 				pgxmock.NewRows(reviewCommentColumns).
 					AddRow(reviewCommentRow(commentID, sessionID, orgID, ownerID, "src/app.ts", 10, "Fix this", false)...),
@@ -371,7 +372,7 @@ func TestSessionReviewCommentHandler_Delete(t *testing.T) {
 
 		// Ownership check: comment not found
 		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id").
-			WithArgs(pgxmock.AnyArg()).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows(reviewCommentColumns))
 
 		url := fmt.Sprintf("/api/v1/sessions/%s/review-comments/%s", sessionID, commentID)
@@ -406,14 +407,14 @@ func TestSessionReviewCommentHandler_Update(t *testing.T) {
 
 		// Ownership check: GetByID returns the comment owned by the requesting user
 		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id").
-			WithArgs(pgxmock.AnyArg()).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(
 				pgxmock.NewRows(reviewCommentColumns).
 					AddRow(reviewCommentRow(commentID, sessionID, orgID, userID, "src/app.ts", 10, "Fix this", false)...),
 			)
 
 		mock.ExpectQuery("UPDATE session_review_comments").
-			WithArgs(pgxmock.AnyArg()).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(
 				pgxmock.NewRows(reviewCommentColumns).
 					AddRow(reviewCommentRow(commentID, sessionID, orgID, userID, "src/app.ts", 10, "Updated text", false)...),
@@ -452,7 +453,7 @@ func TestSessionReviewCommentHandler_Update(t *testing.T) {
 
 		// Ownership check
 		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id").
-			WithArgs(pgxmock.AnyArg()).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(
 				pgxmock.NewRows(reviewCommentColumns).
 					AddRow(reviewCommentRow(commentID, sessionID, orgID, userID, "src/app.ts", 10, "Fix this", false)...),
@@ -464,7 +465,8 @@ func TestSessionReviewCommentHandler_Update(t *testing.T) {
 		now := time.Now()
 		resolvedByPass := 1
 		mock.ExpectQuery("UPDATE session_review_comments").
-			WithArgs(pgxmock.AnyArg()).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(
 				pgxmock.NewRows(reviewCommentColumns).
 					AddRow(
@@ -508,7 +510,7 @@ func TestSessionReviewCommentHandler_Update(t *testing.T) {
 
 		// Ownership check: comment is owned by a different user
 		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id").
-			WithArgs(pgxmock.AnyArg()).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(
 				pgxmock.NewRows(reviewCommentColumns).
 					AddRow(reviewCommentRow(commentID, sessionID, orgID, ownerID, "src/app.ts", 10, "Fix this", false)...),
@@ -544,7 +546,7 @@ func TestSessionReviewCommentHandler_Update(t *testing.T) {
 
 		// Ownership check: comment not found
 		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id").
-			WithArgs(pgxmock.AnyArg()).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows(reviewCommentColumns))
 
 		body := `{"body":"Updated text"}`
@@ -579,7 +581,7 @@ func TestSessionReviewCommentHandler_SendToAgent(t *testing.T) {
 		handler := newTestReviewCommentHandler(t, mock)
 
 		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE session_id").
-			WithArgs(pgxmock.AnyArg()).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(
 				pgxmock.NewRows(reviewCommentColumns).
 					AddRow(reviewCommentRow(uuid.New(), sessionID, orgID, userID, "src/app.ts", 10, "Fix error handling", false)...).
@@ -620,7 +622,7 @@ func TestSessionReviewCommentHandler_SendToAgent(t *testing.T) {
 
 		// All comments are resolved
 		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE session_id").
-			WithArgs(pgxmock.AnyArg()).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(
 				pgxmock.NewRows(reviewCommentColumns).
 					AddRow(reviewCommentRow(uuid.New(), sessionID, orgID, userID, "src/app.ts", 10, "Done", true)...),

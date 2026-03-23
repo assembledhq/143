@@ -56,6 +56,9 @@ func TestMultiTenancyAudit(t *testing.T) {
 	exemptions := []exemption{
 		{"sessions", "where token"},
 		{"sessions", "where user_id"},
+		{"sessions", "where status = 'idle'"},   // ListStaleIdleSessions: system-wide cleanup across all orgs
+		{"sessions", "where sandbox_state"},      // ListExpiredSnapshots: system-wide snapshot cleanup across all orgs
+		{"sessions", "diff_history"},             // UpdateResult/UpdateTurnComplete: org_id is in a concatenated string fragment
 		{"repositories", "installation_id"},
 		{"integrations", "from integrations"},
 		{"session_logs", "from session_logs"}, // no org_id column; scoped via session_id FK

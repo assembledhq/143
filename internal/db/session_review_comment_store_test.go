@@ -248,7 +248,7 @@ func TestSessionReviewCommentStore_Update(t *testing.T) {
 			body:     &bodyStr,
 			resolved: nil,
 			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery("UPDATE session_review_comments .+ SET .+body.+ WHERE id .+ AND org_id .+ AND session_id").
+				mock.ExpectQuery("UPDATE session_review_comments SET .+body.+ WHERE id .+ AND org_id .+ AND session_id").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(srcColumns).
@@ -263,7 +263,7 @@ func TestSessionReviewCommentStore_Update(t *testing.T) {
 			body:     nil,
 			resolved: &resolvedTrue,
 			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery("UPDATE session_review_comments .+ SET .+resolved.+ WHERE id .+ AND org_id .+ AND session_id").
+				mock.ExpectQuery("UPDATE session_review_comments SET .+resolved.+ WHERE id .+ AND org_id .+ AND session_id").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(srcColumns).
@@ -278,7 +278,7 @@ func TestSessionReviewCommentStore_Update(t *testing.T) {
 			body:     nil,
 			resolved: &resolvedFalse,
 			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery("UPDATE session_review_comments .+ SET .+resolved.+ WHERE id .+ AND org_id .+ AND session_id").
+				mock.ExpectQuery("UPDATE session_review_comments SET .+resolved.+ WHERE id .+ AND org_id .+ AND session_id").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(srcColumns).
@@ -293,7 +293,7 @@ func TestSessionReviewCommentStore_Update(t *testing.T) {
 			body:     &bodyStr,
 			resolved: &resolvedTrue,
 			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery("UPDATE session_review_comments .+ SET .+body.+resolved.+ WHERE id .+ AND org_id .+ AND session_id").
+				mock.ExpectQuery("UPDATE session_review_comments SET .+body.+resolved.+ WHERE id .+ AND org_id .+ AND session_id").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(srcColumns).
@@ -309,7 +309,7 @@ func TestSessionReviewCommentStore_Update(t *testing.T) {
 			resolved:       &resolvedTrue,
 			resolvedByPass: &resolvedByPass,
 			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery("UPDATE session_review_comments .+ SET .+resolved.+resolved_by_pass.+ WHERE id .+ AND org_id .+ AND session_id").
+				mock.ExpectQuery("UPDATE session_review_comments SET .+resolved.+resolved_by_pass.+ WHERE id .+ AND org_id .+ AND session_id").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(srcColumns).
@@ -472,7 +472,7 @@ func TestSessionReviewCommentStore_MultiTenancy(t *testing.T) {
 		{
 			name: "Update filters by org_id",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery("UPDATE session_review_comments .+ WHERE id .+ AND org_id .+ AND session_id").
+				mock.ExpectQuery("UPDATE session_review_comments SET .+ WHERE id .+ AND org_id .+ AND session_id").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(srcColumns))
 			},
