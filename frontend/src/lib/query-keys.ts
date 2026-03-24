@@ -22,6 +22,7 @@ export const queryKeys = {
   },
   repositories: {
     all: ["repositories"] as const,
+    branches: (id: string) => ["repositories", id, "branches"] as const,
   },
   settings: {
     all: ["settings"] as const,

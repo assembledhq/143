@@ -617,6 +617,40 @@ func (s *PRService) doGitHubRequest(ctx context.Context, token, method, path str
 	return respBody, nil
 }
 
+// GetInstallationToken returns a GitHub installation token for the given installation ID.
+func (s *PRService) GetInstallationToken(ctx context.Context, installationID int64) (string, error) {
+	return s.tokenProvider.GetInstallationToken(ctx, installationID)
+}
+
+// GitHubBranch represents a branch returned by the GitHub API.
+type GitHubBranch struct {
+	Name      string `json:"name"`
+	Protected bool   `json:"protected"`
+}
+
+// ListBranches returns the branches for a repository from the GitHub API.
+func (s *PRService) ListBranches(ctx context.Context, token, owner, repo string) ([]GitHubBranch, error) {
+	var all []GitHubBranch
+	page := 1
+	for {
+		path := fmt.Sprintf("/repos/%s/%s/branches?per_page=100&page=%d", owner, repo, page)
+		body, err := s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
+		if err != nil {
+			return nil, fmt.Errorf("list branches: %w", err)
+		}
+		var branches []GitHubBranch
+		if err := json.Unmarshal(body, &branches); err != nil {
+			return nil, fmt.Errorf("decode branches: %w", err)
+		}
+		all = append(all, branches...)
+		if len(branches) < 100 || page >= 10 {
+			break
+		}
+		page++
+	}
+	return all, nil
+}
+
 func (s *PRService) getRef(ctx context.Context, token, owner, repo, ref string) (string, error) {
 	path := fmt.Sprintf("/repos/%s/%s/git/ref/%s", owner, repo, strings.TrimPrefix(ref, "refs/"))
 	body, err := s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
