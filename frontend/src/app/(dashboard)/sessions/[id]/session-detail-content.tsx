@@ -692,13 +692,10 @@ function ChatPanel({ session, sessionId, isActive }: { session: Session; session
 
   const isIdle = session.status === "idle";
   const isRunning = session.status === "running";
-  const isCompleted = session.status === "completed";
-  const isPrCreated = session.status === "pr_created";
-  const isFailed = session.status === "failed";
-  const isCancelled = session.status === "cancelled";
-  // "skipped" sessions are intentionally excluded — they were never run,
-  // so there is no workspace state or context to resume from.
-  const canSendMessage = isIdle || isCompleted || isPrCreated || isFailed || isCancelled;
+  // Allow messaging in any state except "skipped" (never ran, no workspace)
+  // and "pending" (agent not started yet). The backend will reject statuses
+  // it cannot handle, so this is safe to be permissive.
+  const canSendMessage = session.status !== "skipped" && session.status !== "pending";
 
   const { data: messagesData } = useQuery({
     queryKey: ["session", sessionId, "messages"],
@@ -899,7 +896,7 @@ function ChatPanel({ session, sessionId, isActive }: { session: Session; session
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder={canSendMessage ? "Send a follow-up message..." : isRunning ? "Agent is working..." : "Session is not active"}
+            placeholder={canSendMessage ? (isRunning ? "Send a message to the agent..." : "Send a follow-up message...") : "Session is not active"}
             disabled={!canSendMessage || sendMutation.isPending}
             className="min-h-[44px] max-h-[200px] resize-none"
           />
