@@ -3,20 +3,27 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
 
 type RepositoryHandler struct {
 	repoStore *db.RepositoryStore
+	prService *ghservice.PRService
 }
 
 func NewRepositoryHandler(repoStore *db.RepositoryStore) *RepositoryHandler {
 	return &RepositoryHandler{repoStore: repoStore}
+}
+
+func (h *RepositoryHandler) SetPRService(svc *ghservice.PRService) {
+	h.prService = svc
 }
 
 func (h *RepositoryHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -130,4 +137,53 @@ func (h *RepositoryHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type branchResponse struct {
+	Name      string `json:"name"`
+	Protected bool   `json:"protected"`
+}
+
+func (h *RepositoryHandler) ListBranches(w http.ResponseWriter, r *http.Request) {
+	if h.prService == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "GITHUB_NOT_CONFIGURED", "GitHub App is not configured")
+		return
+	}
+
+	orgID := middleware.OrgIDFromContext(r.Context())
+	repoID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid repository ID")
+		return
+	}
+
+	repo, err := h.repoStore.GetByID(r.Context(), orgID, repoID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "repository not found")
+		return
+	}
+
+	parts := strings.SplitN(repo.FullName, "/", 2)
+	if len(parts) != 2 {
+		writeError(w, r, http.StatusInternalServerError, "INVALID_REPO", "invalid repository full name")
+		return
+	}
+
+	token, err := h.prService.GetInstallationToken(r.Context(), repo.InstallationID)
+	if err != nil {
+		writeError(w, r, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "failed to get GitHub token")
+		return
+	}
+
+	ghBranches, err := h.prService.ListBranches(r.Context(), token, parts[0], parts[1])
+	if err != nil {
+		writeError(w, r, http.StatusBadGateway, "GITHUB_API_FAILED", "failed to list branches from GitHub")
+		return
+	}
+
+	branches := make([]branchResponse, len(ghBranches))
+	for i, b := range ghBranches {
+		branches[i] = branchResponse{Name: b.Name, Protected: b.Protected}
+	}
+	writeJSON(w, http.StatusOK, models.ListResponse[branchResponse]{Data: branches})
 }
