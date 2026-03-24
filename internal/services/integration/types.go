@@ -13,6 +13,7 @@ package integration
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -266,6 +267,80 @@ type Document struct {
 	DocSummary
 	Content    string            `json:"content"`    // markdown or plain text
 	Properties map[string]string `json:"properties,omitempty"` // custom fields
+}
+
+// --------------------------------------------------------------------------
+// CodeReviewSource — GitHub, GitLab, Bitbucket, etc.
+// --------------------------------------------------------------------------
+
+// CodeReviewSource provides access to code review data from pull/merge requests.
+// The PM agent uses this to identify recurring review themes, quality patterns,
+// and areas of the codebase that consistently generate review friction.
+type CodeReviewSource interface {
+	// Name returns the provider identifier (e.g. "github").
+	Name() string
+
+	// ListRecentPRs returns recently merged pull requests matching the filter.
+	// The PM agent uses this to understand what's shipping and identify review patterns.
+	ListRecentPRs(ctx context.Context, filter PRFilter) ([]PRSummary, error)
+
+	// GetPRReviews returns all review comments and review decisions for a PR.
+	// The PM agent uses this to extract quality signals and recurring feedback themes.
+	GetPRReviews(ctx context.Context, prNumber int) ([]PRReview, error)
+}
+
+// PRFilter constrains which PRs to return from ListRecentPRs.
+type PRFilter struct {
+	State string // "merged", "open", "closed"; empty = "merged"
+	Limit int    // max results; 0 = provider default (20)
+}
+
+// PRSummary is a compact representation of a pull request for list views.
+type PRSummary struct {
+	Number       int       `json:"number"`
+	Title        string    `json:"title"`
+	Author       string    `json:"author"`
+	State        string    `json:"state"`         // "merged", "open", "closed"
+	ReviewStatus string    `json:"review_status"` // "has_reviews", "pending" (list endpoint can't distinguish approved/changes_requested)
+	Additions    int       `json:"additions"`
+	Deletions    int       `json:"deletions"`
+	ChangedFiles int       `json:"changed_files"`
+	CreatedAt    time.Time `json:"created_at"`
+	MergedAt     time.Time `json:"merged_at,omitempty"`
+	WebURL       string    `json:"web_url,omitempty"`
+}
+
+// PRReview is a single review or review comment on a pull request.
+type PRReview struct {
+	Author    string    `json:"author"`
+	State     string    `json:"state"` // "APPROVED", "CHANGES_REQUESTED", "COMMENTED"
+	Body      string    `json:"body,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	// Comments are inline review comments attached to specific lines.
+	Comments []PRReviewComment `json:"comments,omitempty"`
+}
+
+// PRReviewComment is an inline comment attached to a specific file/line in a review.
+type PRReviewComment struct {
+	Path     string `json:"path"`
+	Line     int    `json:"line,omitempty"`
+	Body     string `json:"body"`
+	Author   string `json:"author"`
+	DiffHunk string `json:"diff_hunk,omitempty"`
+}
+
+// StubCodeReviewSource is a no-op CodeReviewSource used only for skills doc
+// generation. It registers the tool names without making any HTTP requests.
+type StubCodeReviewSource struct {
+	ProviderName string
+}
+
+func (s *StubCodeReviewSource) Name() string { return s.ProviderName }
+func (s *StubCodeReviewSource) ListRecentPRs(_ context.Context, _ PRFilter) ([]PRSummary, error) {
+	return nil, fmt.Errorf("stub: use sandbox CLI tools (143-tools %s_list_recent_prs) instead of direct API calls", s.ProviderName)
+}
+func (s *StubCodeReviewSource) GetPRReviews(_ context.Context, _ int) ([]PRReview, error) {
+	return nil, fmt.Errorf("stub: use sandbox CLI tools (143-tools %s_get_pr_reviews) instead of direct API calls", s.ProviderName)
 }
 
 // --------------------------------------------------------------------------

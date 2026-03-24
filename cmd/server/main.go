@@ -162,6 +162,7 @@ func main() {
 			logger,
 		)
 		scheduler.SetProjectStore(projectStore)
+		scheduler.SetPMDocStore(pmDocumentStore)
 		go scheduler.Start(ctx, 10*time.Minute)
 	}
 
@@ -337,6 +338,7 @@ func buildServices(
 	pmSvc.SetProjectStores(projectStore, projectTaskStore, projectCycleStore)
 	pmSvc.SetPMDocumentStore(pmDocumentStore)
 	pmSvc.SetSlackStores(integrationStore, credentialStore)
+	pmSvc.SetSkillsBuilder(orchestrator)
 
 	logger.Info().
 		Int("adapters", len(agentAdapters)).

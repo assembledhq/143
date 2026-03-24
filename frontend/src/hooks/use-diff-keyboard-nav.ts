@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import type { ViewMode } from "@/components/code-review/review-toolbar";
 
 interface UseDiffKeyboardNavOptions {
@@ -23,36 +23,23 @@ interface UseDiffKeyboardNavOptions {
  * Keyboard navigation hook for the code review / Changes tab.
  * Only active when `enabled` is true. Ignores events when focus is
  * inside a textarea or input.
+ *
+ * Uses a ref to hold the latest options so the keydown listener is
+ * attached only once (when enabled changes), avoiding re-registration
+ * on every parent render.
  */
-export function useDiffKeyboardNav({
-  fileCount,
-  activeFileIndex,
-  onFileChange,
-  onToggleFileTree,
-  onToggleViewMode,
-  onSetViewMode,
-  onToggleMaximize,
-  onNextHunk,
-  onPrevHunk,
-  onJumpToFile,
-  onShowHelp,
-  onToggleExplorer,
-  onAddCommentOnSelectedLine,
-  onExpandContext,
-  enabled,
-}: UseDiffKeyboardNavOptions) {
+export function useDiffKeyboardNav(options: UseDiffKeyboardNavOptions) {
+  const optionsRef = useRef(options);
   useEffect(() => {
-    if (!enabled) return;
+    optionsRef.current = options;
+  });
 
-    function setViewModeOrToggle(mode: ViewMode) {
-      if (onSetViewMode) {
-        onSetViewMode(mode);
-      } else {
-        onToggleViewMode();
-      }
-    }
+  useEffect(() => {
+    if (!options.enabled) return;
 
     function handleKeyDown(e: KeyboardEvent) {
+      const opts = optionsRef.current;
+
       // Don't capture when typing in an input/textarea
       const target = e.target as HTMLElement;
       if (
@@ -68,34 +55,42 @@ export function useDiffKeyboardNav({
         return;
       }
 
+      function setViewModeOrToggle(mode: ViewMode) {
+        if (opts.onSetViewMode) {
+          opts.onSetViewMode(mode);
+        } else {
+          opts.onToggleViewMode();
+        }
+      }
+
       switch (e.key) {
         case "j":
           e.preventDefault();
-          if (activeFileIndex < fileCount - 1) {
-            onFileChange(activeFileIndex + 1);
+          if (opts.activeFileIndex < opts.fileCount - 1) {
+            opts.onFileChange(opts.activeFileIndex + 1);
           }
           break;
         case "k":
           e.preventDefault();
-          if (activeFileIndex > 0) {
-            onFileChange(activeFileIndex - 1);
+          if (opts.activeFileIndex > 0) {
+            opts.onFileChange(opts.activeFileIndex - 1);
           }
           break;
         case "n":
           e.preventDefault();
-          onNextHunk();
+          opts.onNextHunk();
           break;
         case "p":
           e.preventDefault();
-          onPrevHunk();
+          opts.onPrevHunk();
           break;
         case "Enter":
           e.preventDefault();
-          onJumpToFile();
+          opts.onJumpToFile();
           break;
         case "f":
           e.preventDefault();
-          onToggleFileTree();
+          opts.onToggleFileTree();
           break;
         case "u":
           e.preventDefault();
@@ -107,44 +102,28 @@ export function useDiffKeyboardNav({
           break;
         case "m":
           e.preventDefault();
-          onToggleMaximize();
+          opts.onToggleMaximize();
           break;
         case "e":
           e.preventDefault();
-          onToggleExplorer?.();
+          opts.onToggleExplorer?.();
           break;
         case "c":
           e.preventDefault();
-          onAddCommentOnSelectedLine?.();
+          opts.onAddCommentOnSelectedLine?.();
           break;
         case "x":
           e.preventDefault();
-          onExpandContext?.();
+          opts.onExpandContext?.();
           break;
         case "?":
           e.preventDefault();
-          onShowHelp();
+          opts.onShowHelp();
           break;
       }
     }
 
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [
-    enabled,
-    fileCount,
-    activeFileIndex,
-    onFileChange,
-    onToggleFileTree,
-    onToggleViewMode,
-    onSetViewMode,
-    onToggleMaximize,
-    onNextHunk,
-    onPrevHunk,
-    onJumpToFile,
-    onShowHelp,
-    onToggleExplorer,
-    onAddCommentOnSelectedLine,
-    onExpandContext,
-  ]);
+  }, [options.enabled]);
 }

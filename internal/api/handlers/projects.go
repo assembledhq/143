@@ -514,7 +514,7 @@ func (h *ProjectHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 		"org_id":     orgID.String(),
 		"project_id": projectID.String(),
 	}
-	jobID, err := h.jobStore.Enqueue(r.Context(), orgID, "default", "project_cycle", payload, 5, &dedupeKey)
+	jobID, err := h.jobStore.Enqueue(r.Context(), orgID, "default", models.JobTypeProjectCycle, payload, 5, &dedupeKey)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue project cycle job", err)
 		return
