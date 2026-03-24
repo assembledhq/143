@@ -7,6 +7,7 @@ import {
   AlertTriangle,
   ArrowUp,
   ExternalLink,
+  GitPullRequest,
   RefreshCw,
   CheckCircle2,
   XCircle,
@@ -844,6 +845,30 @@ function ChatPanel({ session, sessionId, isActive }: { session: Session; session
     },
   });
 
+  const { data: prData } = useQuery({
+    queryKey: ["session", sessionId, "pr"],
+    queryFn: () => api.sessions.getPR(sessionId).catch((err) => {
+      // 404 means no PR exists yet — treat as empty data, not an error.
+      if (err?.code === "NOT_FOUND") return { data: null };
+      throw err;
+    }),
+  });
+  const hasPR = !!prData?.data;
+  const hasDiff = !!session.diff_stats;
+  const canCreatePR = hasDiff && !hasPR && !isRunning;
+
+  const [prQueued, setPRQueued] = useState(false);
+  const createPRMutation = useMutation({
+    mutationFn: () => api.sessions.createPR(sessionId),
+    onSuccess: () => {
+      setPRQueued(true);
+      // Clear the queued banner after 30s if the PR hasn't appeared yet.
+      setTimeout(() => setPRQueued(false), 30_000);
+      queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+      queryClient.invalidateQueries({ queryKey: ["session", sessionId, "pr"] });
+    },
+  });
+
   // Auto-resize textarea
   useEffect(() => {
     const el = textareaRef.current;
@@ -880,13 +905,25 @@ function ChatPanel({ session, sessionId, isActive }: { session: Session; session
         <ChatTimeline entries={timelineEntries} isRunning={isRunning} />
       </div>
 
-      {/* Error display */}
-      {(sendMutation.error || endMutation.error) && (
-        <div className="flex items-center gap-2 px-4 py-2 text-xs text-destructive border-t bg-destructive/5">
-          <AlertTriangle className="h-3 w-3 shrink-0" />
-          {sendMutation.error instanceof Error ? sendMutation.error.message : endMutation.error instanceof Error ? endMutation.error.message : "An error occurred"}
+      {/* PR queued indicator */}
+      {prQueued && !hasPR && (
+        <div className="flex items-center gap-2 px-4 py-2 text-xs text-muted-foreground border-t bg-muted/30">
+          <GitPullRequest className="h-3 w-3 shrink-0" />
+          PR creation queued — it will appear shortly.
         </div>
       )}
+
+      {/* Error display */}
+      {(() => {
+        const firstError = [sendMutation, endMutation, createPRMutation].find(m => m.error)?.error;
+        if (!firstError) return null;
+        return (
+          <div className="flex items-center gap-2 px-4 py-2 text-xs text-destructive border-t bg-destructive/5">
+            <AlertTriangle className="h-3 w-3 shrink-0" />
+            {firstError instanceof Error ? firstError.message : "An error occurred"}
+          </div>
+        );
+      })()}
 
       {/* Input bar */}
       <div className="border-t border-border p-3 bg-background">
@@ -920,6 +957,18 @@ function ChatPanel({ session, sessionId, isActive }: { session: Session; session
                 onClick={() => endMutation.mutate()}
               >
                 <Square className="h-3 w-3" />
+              </Button>
+            )}
+            {canCreatePR && (
+              <Button
+                size="icon"
+                variant="outline"
+                className="h-8 w-8 shrink-0"
+                title="Create PR"
+                disabled={createPRMutation.isPending}
+                onClick={() => createPRMutation.mutate()}
+              >
+                <GitPullRequest className="h-3.5 w-3.5" />
               </Button>
             )}
           </div>
