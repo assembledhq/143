@@ -30,6 +30,8 @@ import { NoReposWarning } from "@/components/no-repos-warning";
 import { useOptimisticSessions } from "@/contexts/optimistic-sessions";
 import type { OrgSettings, Organization, Repository, SingleResponse, ListResponse } from "@/lib/types";
 
+type BranchInfo = { name: string; protected: boolean };
+
 type DictationResult = {
   transcript: string;
 };
@@ -107,6 +109,14 @@ export function ManualSessionCreatePageContent() {
   }, [userSelectedRepoId, repositories]);
 
   const selectedRepo = repositories.find((r) => r.id === selectedRepoId);
+
+  const { data: branchesResponse, isLoading: branchesLoading, isError: branchesFailed } = useQuery<ListResponse<BranchInfo>>({
+    queryKey: queryKeys.repositories.branches(selectedRepoId),
+    queryFn: () => api.repositories.branches(selectedRepoId),
+    enabled: !!selectedRepoId,
+    staleTime: 5 * 60 * 1000,
+  });
+  const branches = useMemo(() => branchesResponse?.data ?? [], [branchesResponse]);
 
   // Derive branch: use user override if set, otherwise the repo's default.
   const selectedBranch = useMemo(() => {
@@ -396,16 +406,51 @@ export function ManualSessionCreatePageContent() {
               )}
 
               {selectedRepo && (
-                <div className="flex items-center gap-1">
-                  <GitBranch className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                  <Input
-                    value={selectedBranch}
-                    onChange={(e) => setSelectedBranch(e.target.value)}
-                    placeholder={selectedRepo.default_branch || "main"}
-                    className="h-7 w-36 text-[13px] px-2"
-                    aria-label="Target branch"
-                  />
-                </div>
+                branchesFailed ? (
+                  <div className="flex items-center gap-1">
+                    <GitBranch className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                    <Input
+                      value={selectedBranch}
+                      onChange={(e) => setSelectedBranch(e.target.value)}
+                      placeholder={selectedRepo.default_branch || "main"}
+                      className="h-7 w-36 text-[13px] px-2"
+                      aria-label="Target branch"
+                    />
+                  </div>
+                ) : (
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-8 gap-1.5 rounded-full px-3 text-[13px] text-muted-foreground hover:text-foreground"
+                        aria-label="Target branch"
+                      >
+                        <GitBranch className="h-3.5 w-3.5" />
+                        <span>{selectedBranch || selectedRepo.default_branch || "main"}</span>
+                        <ChevronDown className="h-3 w-3 opacity-50" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start" className="w-64 max-h-72 overflow-y-auto">
+                      {branchesLoading && (
+                        <DropdownMenuItem disabled>Loading branches…</DropdownMenuItem>
+                      )}
+                      {!branchesLoading && branches.length === 0 && (
+                        <DropdownMenuItem disabled>No branches found</DropdownMenuItem>
+                      )}
+                      {branches.map((branch) => (
+                        <DropdownMenuItem
+                          key={branch.name}
+                          onClick={() => setSelectedBranch(branch.name)}
+                          className={selectedBranch === branch.name ? "font-medium" : ""}
+                        >
+                          <GitBranch className="mr-2 h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                          <span className="truncate">{branch.name}</span>
+                        </DropdownMenuItem>
+                      ))}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                )
               )}
 
               <Select value={selectedModel} onValueChange={setSelectedModel}>

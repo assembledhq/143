@@ -52,6 +52,16 @@ describe("queryKeys", () => {
     });
   });
 
+  describe("repositories", () => {
+    it("all returns static key", () => {
+      expect(queryKeys.repositories.all).toEqual(["repositories"]);
+    });
+
+    it("branches includes repository id", () => {
+      expect(queryKeys.repositories.branches("repo-1")).toEqual(["repositories", "repo-1", "branches"]);
+    });
+  });
+
   describe("settings", () => {
     it("all returns static key", () => {
       expect(queryKeys.settings.all).toEqual(["settings"]);
