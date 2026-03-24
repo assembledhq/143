@@ -141,6 +141,7 @@ export const api = {
   pm: {
     // Cursor format for /pm/plans: "<created_at RFC3339Nano>|<uuid>" (treat as opaque).
     analyze: () => post<{ data: { job_id: string } }>('/api/v1/pm/analyze'),
+    current: () => get<import('./types').SingleResponse<import('./types').PMCurrentRecommendation>>('/api/v1/pm/current'),
     list: (params?: { cursor?: string; limit?: number }) => {
       const searchParams = new URLSearchParams();
       if (params?.cursor) searchParams.set('cursor', params.cursor);

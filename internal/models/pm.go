@@ -64,6 +64,39 @@ type PMDecisionSummary struct {
 	StillOpen      int `json:"still_open"`
 }
 
+// PMCurrentRecommendation is the presentation-friendly response for the
+// /api/v1/pm/current endpoint. It combines the latest plan output with
+// context stats and decision summary — without exposing raw plan structure.
+type PMCurrentRecommendation struct {
+	// Analysis summary
+	Analysis      string          `json:"analysis"`
+	Tasks         json.RawMessage `json:"tasks"`
+	Clusters      json.RawMessage `json:"clusters"`
+	SkippedIssues json.RawMessage `json:"skipped_issues"`
+
+	// Context stats — how much the PM considered
+	ContextStats PMContextStats `json:"context_stats"`
+
+	// Decision summary — historical performance
+	DecisionSummary PMDecisionSummary `json:"decision_summary"`
+
+	// Metadata
+	AnalyzedAt  time.Time  `json:"analyzed_at"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	Status      string     `json:"status"`
+	TriggeredBy string     `json:"triggered_by"`
+}
+
+// PMContextStats captures how much context the PM ingested during analysis.
+type PMContextStats struct {
+	IssuesReviewed        int `json:"issues_reviewed"`
+	InFlightRunsChecked   int `json:"in_flight_runs_checked"`
+	PastOutcomesReviewed  int `json:"past_outcomes_reviewed"`
+	RecentPRsChecked      int `json:"recent_prs_checked"`
+	PastDecisionsReviewed int `json:"past_decisions_reviewed"`
+	CommitsAnalyzed       int `json:"commits_analyzed"`
+}
+
 // PMStatus represents the PM agent's current state for the status banner.
 type PMStatus struct {
 	IsRunning      bool       `json:"is_running"`

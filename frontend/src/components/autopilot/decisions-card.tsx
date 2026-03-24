@@ -1,6 +1,7 @@
 "use client";
 
-import { CheckCircle2, XCircle, Clock, Minus } from "lucide-react";
+import Link from "next/link";
+import { CheckCircle2, XCircle, Clock, Minus, ArrowRight } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import type { PMDecisionView } from "@/lib/types";
 
@@ -96,11 +97,15 @@ export function DecisionsCard({ decisions, isLoading }: DecisionsCardProps) {
                 </div>
               </div>
             ))}
-            {decisions.length > 5 && (
-              <div className="px-4 py-2 text-xs text-muted-foreground">
-                {decisions.length - 5} more decisions not shown
-              </div>
-            )}
+            <div className="px-4 py-2 border-t border-border">
+              <Link
+                href="/autopilot/decisions"
+                className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              >
+                View all decisions
+                <ArrowRight className="h-3 w-3" />
+              </Link>
+            </div>
           </>
         )}
       </CardContent>

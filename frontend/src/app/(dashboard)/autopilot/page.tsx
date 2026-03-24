@@ -22,7 +22,7 @@ import { NoReposWarning } from "@/components/no-repos-warning";
 import { useDisconnectIntegration } from "@/hooks/use-disconnect-integration";
 import { useGitHubRepoSync } from "@/hooks/use-github-repo-sync";
 import { queryKeys } from "@/lib/query-keys";
-import type { CodexAuthStatus, Integration, OrgSettings, PMDecisionsResponse } from "@/lib/types";
+import type { CodexAuthStatus, Integration, OrgSettings, PMDecisionsResponse, PMCurrentRecommendation } from "@/lib/types";
 
 interface PreOnboardingStateProps {
   agentConnected: boolean;
@@ -203,9 +203,9 @@ export default function AutopilotPage() {
     enabled: !isPreOnboarding,
   });
 
-  const { data: latestPlanData } = useQuery({
-    queryKey: ["pm", "latest"],
-    queryFn: () => api.pm.latest(),
+  const { data: currentRecData } = useQuery({
+    queryKey: ["pm", "current"],
+    queryFn: () => api.pm.current(),
     retry: false,
     enabled: !isPreOnboarding,
   });
@@ -225,15 +225,17 @@ export default function AutopilotPage() {
   });
 
   const pmStatus = pmStatusData?.data;
-  const latestPlan = latestPlanData?.data;
-  const hasActivePlan = latestPlan?.status === "executing";
+  const currentRec = currentRecData?.data;
+  const hasActivePlan = currentRec?.status === "executing";
   const decisions = decisionsData?.data ?? [];
-  const decisionSummary = decisionsData?.summary;
+  // Prefer decisions endpoint summary (computed from full decision set) over
+  // the snapshot embedded in the current recommendation.
+  const decisionSummary = decisionsData?.summary ?? currentRec?.decision_summary;
   const plansHistory = plansHistoryData?.data ?? [];
 
   const { isAnalyzing, isPending, analyzeError, handleAnalyze, dismissError } = useAnalyze(hasActivePlan);
 
-  const isPostOnboardingNoAnalysis = !isPreOnboarding && !latestPlan;
+  const isPostOnboardingNoAnalysis = !isPreOnboarding && !currentRec;
 
   if (isPreOnboarding) {
     return (
@@ -300,7 +302,7 @@ export default function AutopilotPage() {
           /* Full workspace */
           <>
             {/* Zone 2: Current Recommendation */}
-            <CurrentRecommendation plan={latestPlan} />
+            <CurrentRecommendation recommendation={currentRec} />
 
             {/* Zone 3: Decisions + Performance side by side */}
             <div className="grid gap-4 md:grid-cols-2">

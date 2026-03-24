@@ -17,6 +17,8 @@ vi.mock("lucide-react", () => {
     XCircle: icon("XCircle"),
     Clock: icon("Clock"),
     Minus: icon("Minus"),
+    TrendingUp: icon("TrendingUp"),
+    TrendingDown: icon("TrendingDown"),
   };
 });
 
@@ -114,14 +116,15 @@ describe("DecisionsView", () => {
 
     expect(screen.getByText("Payment bug")).toBeInTheDocument();
     expect(screen.getByText("CSS issue")).toBeInTheDocument();
-    expect(screen.getByText("Delegated")).toBeInTheDocument();
-    expect(screen.getByText("Skipped")).toBeInTheDocument();
-    expect(screen.getByText("Clustered")).toBeInTheDocument();
-    expect(screen.getByText("Succeeded")).toBeInTheDocument();
-    expect(screen.getByText("Failed")).toBeInTheDocument();
+    // Filter buttons + decision badges both show these labels
+    expect(screen.getAllByText("Delegated").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("Skipped").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("Clustered").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("Succeeded").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("Failed").length).toBeGreaterThanOrEqual(1);
   });
 
-  it("renders summary bar with success rate", async () => {
+  it("renders summary bar with stat cards", async () => {
     server.use(
       http.get("*/api/v1/pm/decisions", () => {
         return HttpResponse.json({
@@ -151,12 +154,11 @@ describe("DecisionsView", () => {
     renderWithProviders(<DecisionsView />);
 
     await waitFor(() => {
-      expect(screen.getByText("Success rate: 80%")).toBeInTheDocument();
+      expect(screen.getByText("80%")).toBeInTheDocument();
     });
-    expect(
-      screen.getByText("(8/10 delegated tasks succeeded)"),
-    ).toBeInTheDocument();
-    expect(screen.getByText("1 still open")).toBeInTheDocument();
+    expect(screen.getByText("Success rate")).toBeInTheDocument();
+    expect(screen.getByText("8")).toBeInTheDocument();
+    expect(screen.getAllByText("Succeeded").length).toBeGreaterThanOrEqual(1);
   });
 
   it("renders Still open outcome for decisions without outcome", async () => {
@@ -190,7 +192,7 @@ describe("DecisionsView", () => {
     await waitFor(() => {
       expect(screen.getByText("Pending fix")).toBeInTheDocument();
     });
-    expect(screen.getByText("Still open")).toBeInTheDocument();
+    expect(screen.getAllByText("Still open").length).toBeGreaterThanOrEqual(1);
   });
 
   it("does not render summary bar when total_delegated is 0", async () => {
