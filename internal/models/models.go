@@ -335,6 +335,14 @@ type WebhookDelivery struct {
 	CreatedAt      time.Time       `db:"created_at" json:"created_at"`
 }
 
+// Job type constants for async work queue items.
+const (
+	JobTypePMAnalyze        = "pm_analyze"
+	JobTypePMBootstrap      = "pm_bootstrap"
+	JobTypePMContextRefresh = "pm_context_refresh"
+	JobTypeProjectCycle     = "project_cycle"
+)
+
 // Job represents an async work queue item.
 type Job struct {
 	ID             uuid.UUID       `db:"id" json:"id"`

@@ -62,9 +62,13 @@ const (
 	AuditActionIssueReprioritized AuditAction = "issue.reprioritized"
 
 	// PM actions
-	AuditActionPMAnalysisTriggered AuditAction = "pm.analysis_triggered"
-	AuditActionPMPlanCreated       AuditAction = "pm.plan_created"
-	AuditActionPMDecisionMade      AuditAction = "pm.decision_made"
+	AuditActionPMAnalysisTriggered  AuditAction = "pm.analysis_triggered"
+	AuditActionPMPlanCreated        AuditAction = "pm.plan_created"
+	AuditActionPMDecisionMade       AuditAction = "pm.decision_made"
+	AuditActionPMBootstrapTriggered AuditAction = "pm.bootstrap_triggered"
+	AuditActionPMRefreshTriggered   AuditAction = "pm.refresh_triggered"
+	AuditActionPMRefreshAccepted    AuditAction = "pm.refresh_accepted"
+	AuditActionPMRefreshRejected    AuditAction = "pm.refresh_rejected"
 
 	// Team & settings actions
 	AuditActionSettingsUpdated        AuditAction = "settings.updated"
@@ -99,6 +103,8 @@ func (a AuditAction) Validate() error {
 		AuditActionProjectTaskDeleted, AuditActionProjectTaskRetried,
 		AuditActionIssueCreated, AuditActionIssueReprioritized,
 		AuditActionPMAnalysisTriggered, AuditActionPMPlanCreated, AuditActionPMDecisionMade,
+		AuditActionPMBootstrapTriggered, AuditActionPMRefreshTriggered,
+		AuditActionPMRefreshAccepted, AuditActionPMRefreshRejected,
 		AuditActionSettingsUpdated, AuditActionTeamMemberInvited, AuditActionTeamMemberRoleChanged,
 		AuditActionTeamMemberRemoved, AuditActionTeamInvitationRevoked, AuditActionTeamInvitationAccepted,
 		AuditActionIntegrationConnected, AuditActionCredentialUpdated, AuditActionCredentialDeleted,
@@ -126,6 +132,7 @@ const (
 	AuditResourceCredential           AuditResourceType = "credential"
 	AuditResourceUser                 AuditResourceType = "user"
 	AuditResourceSessionReviewComment AuditResourceType = "session_review_comment"
+	AuditResourcePMDocument           AuditResourceType = "pm_document"
 )
 
 func (t AuditResourceType) Validate() error {
@@ -134,7 +141,7 @@ func (t AuditResourceType) Validate() error {
 		AuditResourceIssue, AuditResourcePMPlan, AuditResourcePMDecision,
 		AuditResourceSettings, AuditResourceTeamMember, AuditResourceInvitation,
 		AuditResourceIntegration, AuditResourceCredential, AuditResourceUser,
-		AuditResourceSessionReviewComment:
+		AuditResourceSessionReviewComment, AuditResourcePMDocument:
 		return nil
 	default:
 		return fmt.Errorf("invalid AuditResourceType: %q", t)

@@ -365,6 +365,16 @@ func (m *mockPMService) AnalyzeProject(ctx context.Context, orgID, projectID uui
 	return nil
 }
 
+func (m *mockPMService) RunBootstrap(ctx context.Context, orgID uuid.UUID) error {
+	m.calledOrgID = orgID
+	return nil
+}
+
+func (m *mockPMService) RunRefresh(ctx context.Context, orgID uuid.UUID) error {
+	m.calledOrgID = orgID
+	return nil
+}
+
 func TestPMAnalyzeHandler_InvalidJSON(t *testing.T) {
 	t.Parallel()
 
@@ -1052,6 +1062,14 @@ func (m *mockPMServiceError) Analyze(ctx context.Context, orgID uuid.UUID, trigg
 
 func (m *mockPMServiceError) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID) error {
 	return errors.New("project analysis failed")
+}
+
+func (m *mockPMServiceError) RunBootstrap(ctx context.Context, orgID uuid.UUID) error {
+	return errors.New("bootstrap failed")
+}
+
+func (m *mockPMServiceError) RunRefresh(ctx context.Context, orgID uuid.UUID) error {
+	return errors.New("refresh failed")
 }
 
 func TestPMAnalyzeHandler_ServiceError(t *testing.T) {

@@ -46,5 +46,19 @@ func BuildRegistryFromEnv(logger io.Writer) *integration.Registry {
 		fmt.Fprintln(logger, "143-tools: registered notion")
 	}
 
+	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
+		owner := os.Getenv("GITHUB_REPO_OWNER")
+		repo := os.Getenv("GITHUB_REPO_NAME")
+		if owner != "" && repo != "" {
+			source := integration.NewGitHubCodeReviewSource(integration.GitHubCodeReviewConfig{
+				Token: token,
+				Owner: owner,
+				Repo:  repo,
+			})
+			reg.RegisterCodeReviewSource(source)
+			fmt.Fprintf(logger, "143-tools: registered github (%s/%s)\n", owner, repo)
+		}
+	}
+
 	return reg
 }

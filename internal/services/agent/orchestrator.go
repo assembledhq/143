@@ -327,7 +327,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 	// 6b. Generate integration skills doc from org credentials.
 	// This tells the agent what CLI tools are available in the sandbox.
-	input.IntegrationSkills = o.buildIntegrationSkills(ctx, run.OrgID)
+	input.IntegrationSkills = o.BuildIntegrationSkills(ctx, run.OrgID)
 
 	prompt, err := adapter.PreparePrompt(ctx, input)
 	if err != nil {
@@ -343,6 +343,19 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// resolving ~/.codex/auth.json) find files written to the workdir.
 	if sandboxCfg.Env == nil {
 		sandboxCfg.Env = make(map[string]string)
+	}
+	// Inject GitHub token and repo info for 143-tools CLI only when the agent
+	// has integration skills (i.e. the prompt references CLI tools). This avoids
+	// giving every agent session GitHub write access unnecessarily.
+	if input.IntegrationSkills != "" && token != "" {
+		sandboxCfg.Env["GITHUB_TOKEN"] = token
+		if repoFullName != "" {
+			parts := strings.SplitN(repoFullName, "/", 2)
+			if len(parts) == 2 {
+				sandboxCfg.Env["GITHUB_REPO_OWNER"] = parts[0]
+				sandboxCfg.Env["GITHUB_REPO_NAME"] = parts[1]
+			}
+		}
 	}
 	// Apply per-run model override if set.
 	if run.ModelOverride != nil && *run.ModelOverride != "" {
@@ -688,7 +701,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			Issue:     &issue,
 			TokenMode: session.TokenMode,
 		}
-		input.IntegrationSkills = o.buildIntegrationSkills(ctx, session.OrgID)
+		input.IntegrationSkills = o.BuildIntegrationSkills(ctx, session.OrgID)
 		if o.memory != nil && repoFullName != "" {
 			memResult, memErr := o.memory.GetContextMemories(ctx, MemoryContextRequest{
 				OrgID: session.OrgID,
@@ -1241,10 +1254,10 @@ func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, san
 	return true, nil
 }
 
-// buildIntegrationSkills generates a CLI skills doc from the org's integration
+// BuildIntegrationSkills generates a CLI skills doc from the org's integration
 // credentials. The doc is injected into the agent's system prompt so it knows
 // what 143-tools commands are available in the sandbox.
-func (o *Orchestrator) buildIntegrationSkills(ctx context.Context, orgID uuid.UUID) string {
+func (o *Orchestrator) BuildIntegrationSkills(ctx context.Context, orgID uuid.UUID) string {
 	if o.credentials == nil {
 		return ""
 	}
@@ -1271,6 +1284,13 @@ func (o *Orchestrator) buildIntegrationSkills(ctx context.Context, orgID uuid.UU
 			AuthToken: ic.Notion.AccessToken,
 		})
 		reg.RegisterDocumentStore(store)
+	}
+
+	// Register a stub GitHub code review source for skills doc generation.
+	// This only describes available tools — actual API calls use real credentials
+	// injected via sandbox env vars. The stub never makes HTTP requests.
+	if o.github != nil {
+		reg.RegisterCodeReviewSource(&integration.StubCodeReviewSource{ProviderName: "github"})
 	}
 
 	if !reg.HasAny() {

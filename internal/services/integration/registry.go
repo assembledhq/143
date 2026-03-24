@@ -14,11 +14,12 @@ import (
 //   - MCP servers (for runtime tool access inside sandboxes)
 //   - Static context writers (for pre-populating sandbox files)
 type Registry struct {
-	mu             sync.RWMutex
-	errorTrackers  map[string]ErrorTracker
-	taskManagers   map[string]TaskManager
-	documentStores map[string]DocumentStore
-	messageSources map[string]MessageSource
+	mu                sync.RWMutex
+	errorTrackers     map[string]ErrorTracker
+	taskManagers      map[string]TaskManager
+	documentStores    map[string]DocumentStore
+	messageSources    map[string]MessageSource
+	codeReviewSources map[string]CodeReviewSource
 }
 
 // NewRegistry creates an empty integration registry.
@@ -28,6 +29,7 @@ func NewRegistry() *Registry {
 		taskManagers:   make(map[string]TaskManager),
 		documentStores: make(map[string]DocumentStore),
 		messageSources: make(map[string]MessageSource),
+		codeReviewSources: make(map[string]CodeReviewSource),
 	}
 }
 
@@ -147,6 +149,35 @@ func (r *Registry) MessageSource(name string) (MessageSource, error) {
 	return ms, nil
 }
 
+// RegisterCodeReviewSource adds a code review source (e.g. GitHub, GitLab).
+func (r *Registry) RegisterCodeReviewSource(provider CodeReviewSource) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.codeReviewSources[provider.Name()] = provider
+}
+
+// CodeReviewSources returns all registered code review sources.
+func (r *Registry) CodeReviewSources() []CodeReviewSource {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result := make([]CodeReviewSource, 0, len(r.codeReviewSources))
+	for _, cr := range r.codeReviewSources {
+		result = append(result, cr)
+	}
+	return result
+}
+
+// CodeReviewSource returns a specific code review source by name, or an error if not found.
+func (r *Registry) CodeReviewSource(name string) (CodeReviewSource, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	cr, ok := r.codeReviewSources[name]
+	if !ok {
+		return nil, fmt.Errorf("code review source %q not registered", name)
+	}
+	return cr, nil
+}
+
 // HasAny returns true if at least one provider is registered.
 func (r *Registry) HasAny() bool {
 	r.mu.RLock()
@@ -154,7 +185,8 @@ func (r *Registry) HasAny() bool {
 	return len(r.errorTrackers) > 0 ||
 		len(r.taskManagers) > 0 ||
 		len(r.documentStores) > 0 ||
-		len(r.messageSources) > 0
+		len(r.messageSources) > 0 ||
+		len(r.codeReviewSources) > 0
 }
 
 // Summary returns a human-readable summary of registered providers.
@@ -173,6 +205,9 @@ func (r *Registry) Summary() map[string][]string {
 	}
 	for name := range r.messageSources {
 		m["message_sources"] = append(m["message_sources"], name)
+	}
+	for name := range r.codeReviewSources {
+		m["code_review_sources"] = append(m["code_review_sources"], name)
 	}
 	return m
 }

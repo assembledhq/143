@@ -162,12 +162,13 @@ type OrgSettings struct {
 	PMScheduleHours      int                  `json:"pm_schedule_hours"`
 	PMModel              string               `json:"pm_model"`
 	LLMModel             string               `json:"llm_model"`
-	LLMReasoningEffort   ReasoningEffort      `json:"llm_reasoning_effort,omitempty"`
-	AgentConfig          AgentEnvConfig       `json:"agent_config,omitempty"`
-	DefaultAgentType     AgentType            `json:"default_agent_type,omitempty"`
-	AuditRetentionDays   int                  `json:"audit_retention_days,omitempty"`
-	OrgSize              OrgSize              `json:"org_size,omitempty"`
-	ContextLimits        ContextLimits        `json:"context_limits,omitempty"`
+	LLMReasoningEffort         ReasoningEffort `json:"llm_reasoning_effort,omitempty"`
+	AgentConfig                AgentEnvConfig  `json:"agent_config,omitempty"`
+	DefaultAgentType           AgentType       `json:"default_agent_type,omitempty"`
+	AuditRetentionDays         int             `json:"audit_retention_days,omitempty"`
+	ContextRefreshIntervalDays int             `json:"context_refresh_interval_days,omitempty"`
+	OrgSize                    OrgSize         `json:"org_size,omitempty"`
+	ContextLimits              ContextLimits   `json:"context_limits,omitempty"`
 }
 
 // Agent autonomy mode constants.
@@ -212,10 +213,11 @@ const (
 	DefaultAgentAutonomy                      = AgentAutonomyAggressive
 	DefaultMinPriorityThreshold               = 30.0
 	DefaultDefaultAgentType     AgentType     = AgentTypeCodex
-	DefaultPMScheduleHours      = 4
-	DefaultPMModel              = PMModelSonnet
-	DefaultAuditRetentionDays   = 90
-	DefaultOrgSize              OrgSize       = OrgSizeMedium
+	DefaultPMScheduleHours                    = 4
+	DefaultPMModel                            = PMModelSonnet
+	DefaultAuditRetentionDays                 = 90
+	DefaultContextRefreshIntervalDays         = 14
+	DefaultOrgSize                    OrgSize = OrgSizeMedium
 
 	DefaultWeightCustomerImpact = 0.35
 	DefaultWeightSeverity       = 0.25
@@ -378,6 +380,9 @@ func ParseOrgSettings(raw json.RawMessage) (OrgSettings, error) {
 	}
 	if s.AuditRetentionDays == 0 {
 		s.AuditRetentionDays = DefaultAuditRetentionDays
+	}
+	if s.ContextRefreshIntervalDays == 0 {
+		s.ContextRefreshIntervalDays = DefaultContextRefreshIntervalDays
 	}
 	if s.ProductContext == nil && s.ProductDirection != "" {
 		s.ProductContext = &ProductContext{
