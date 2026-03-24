@@ -168,6 +168,34 @@ func (tr *ToolRegistry) ListTools() []Tool {
 		)
 	}
 
+	for _, cr := range tr.integrations.CodeReviewSources() {
+		prefix := cr.Name()
+		tools = append(tools,
+			Tool{
+				Name:        prefix + "_list_recent_prs",
+				Description: fmt.Sprintf("List recently merged pull requests from %s. Returns PR summaries with titles, authors, review status, and change size.", prefix),
+				InputSchema: ToolSchema{
+					Type: "object",
+					Properties: map[string]SchemaProperty{
+						"state": {Type: "string", Description: "PR state filter", Enum: []string{"merged", "open", "closed"}, Default: "merged"},
+						"limit": {Type: "number", Description: "Max results to return (default: 20)", Default: 20},
+					},
+				},
+			},
+			Tool{
+				Name:        prefix + "_get_pr_reviews",
+				Description: fmt.Sprintf("Get all reviews and inline review comments for a specific pull request from %s. Returns review decisions, comments, and code-level feedback.", prefix),
+				InputSchema: ToolSchema{
+					Type: "object",
+					Properties: map[string]SchemaProperty{
+						"pr_number": {Type: "number", Description: "The pull request number"},
+					},
+					Required: []string{"pr_number"},
+				},
+			},
+		)
+	}
+
 	for _, ms := range tr.integrations.MessageSources() {
 		prefix := ms.Name()
 		tools = append(tools,
@@ -228,6 +256,15 @@ func (tr *ToolRegistry) CallTool(ctx context.Context, name string, args json.Raw
 		}
 		method := name[len(prefix):]
 		return tr.callDocumentStore(ctx, ds, method, args)
+	}
+
+	for _, cr := range tr.integrations.CodeReviewSources() {
+		prefix := cr.Name() + "_"
+		if len(name) <= len(prefix) || name[:len(prefix)] != prefix {
+			continue
+		}
+		method := name[len(prefix):]
+		return tr.callCodeReviewSource(ctx, cr, method, args)
 	}
 
 	for _, ms := range tr.integrations.MessageSources() {
@@ -464,6 +501,51 @@ func (tr *ToolRegistry) callDocumentStore(ctx context.Context, ds integration.Do
 
 	default:
 		return ErrorResult(fmt.Sprintf("unknown document store method: %s", method))
+	}
+}
+
+// --------------------------------------------------------------------------
+// Code review source dispatch
+// --------------------------------------------------------------------------
+
+func (tr *ToolRegistry) callCodeReviewSource(ctx context.Context, cr integration.CodeReviewSource, method string, args json.RawMessage) *ToolCallResult {
+	switch method {
+	case "list_recent_prs":
+		var p struct {
+			State string `json:"state"`
+			Limit int    `json:"limit"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil && len(args) > 0 {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		filter := integration.PRFilter{
+			State: p.State,
+			Limit: p.Limit,
+		}
+		results, err := cr.ListRecentPRs(ctx, filter)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("list recent PRs failed: %s", err))
+		}
+		return jsonResult(results)
+
+	case "get_pr_reviews":
+		var p struct {
+			PRNumber int `json:"pr_number"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		if p.PRNumber <= 0 {
+			return ErrorResult("pr_number is required and must be positive")
+		}
+		reviews, err := cr.GetPRReviews(ctx, p.PRNumber)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("get PR reviews failed: %s", err))
+		}
+		return jsonResult(reviews)
+
+	default:
+		return ErrorResult(fmt.Sprintf("unknown code review source method: %s", method))
 	}
 }
 

@@ -225,6 +225,37 @@ function parseHunks(lines: string[]): DiffHunk[] {
   let currentHunk: DiffHunk | null = null;
 
   for (const line of lines) {
+    if (!line.startsWith("@@")) {
+      // Fast path: only @@ lines can be hunk headers, skip regex for all others.
+      if (currentHunk) {
+        if (line.startsWith("+")) {
+          currentHunk.lines.push({
+            type: "add",
+            content: line.slice(1),
+            oldLineNumber: null,
+            newLineNumber: 0,
+          });
+        } else if (line.startsWith("-")) {
+          currentHunk.lines.push({
+            type: "remove",
+            content: line.slice(1),
+            oldLineNumber: 0,
+            newLineNumber: null,
+          });
+        } else if (line.startsWith("\\")) {
+          // "\ No newline at end of file" — skip
+        } else {
+          currentHunk.lines.push({
+            type: "context",
+            content: line.startsWith(" ") ? line.slice(1) : line,
+            oldLineNumber: 0,
+            newLineNumber: 0,
+          });
+        }
+      }
+      continue;
+    }
+
     const hunkMatch = line.match(HUNK_HEADER_RE);
 
     if (hunkMatch) {
@@ -237,36 +268,6 @@ function parseHunks(lines: string[]): DiffHunk[] {
         lines: [],
       };
       hunks.push(currentHunk);
-      continue;
-    }
-
-    if (!currentHunk) continue;
-
-    if (line.startsWith("+")) {
-      currentHunk.lines.push({
-        type: "add",
-        content: line.slice(1),
-        oldLineNumber: null,
-        newLineNumber: 0, // placeholder, computed below
-      });
-    } else if (line.startsWith("-")) {
-      currentHunk.lines.push({
-        type: "remove",
-        content: line.slice(1),
-        oldLineNumber: 0, // placeholder
-        newLineNumber: null,
-      });
-    } else if (line.startsWith("\\")) {
-      // "\ No newline at end of file" — skip
-      continue;
-    } else {
-      // Context line (may or may not start with a space)
-      currentHunk.lines.push({
-        type: "context",
-        content: line.startsWith(" ") ? line.slice(1) : line,
-        oldLineNumber: 0,
-        newLineNumber: 0,
-      });
     }
   }
 

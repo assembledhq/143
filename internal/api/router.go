@@ -105,6 +105,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			integrationOpts = append(integrationOpts, handlers.WithGitHubApp(ghSvc, repoStore))
 		}
 	}
+	integrationOpts = append(integrationOpts, handlers.WithPMContextAutoTrigger(jobStore, pmDocumentStore, logger))
 	integrationHandler := handlers.NewIntegrationHandler(
 		integrationStore,
 		credentialStore,
@@ -162,6 +163,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	credentialHandler.SetAuditEmitter(auditEmitter)
 	projectHandler.SetAuditEmitter(auditEmitter)
 	pmHandler.SetAuditEmitter(auditEmitter)
+	pmHandler.SetPMDocumentStore(pmDocumentStore)
 	projectAttachmentHandler := handlers.NewProjectAttachmentHandler(projectAttachmentStore, projectStore)
 	projectSpecHandler := handlers.NewProjectSpecHandler(projectSpecStore, projectStore)
 	projectAnalysisHandler := handlers.NewProjectAnalysisHandler(projectStore, projectSpecStore, projectAttachmentStore, projectTaskStore)
@@ -355,6 +357,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Delete("/api/v1/repositories/{id}", repoHandler.Delete)
 			r.Post("/api/v1/issues/{id}/reprioritize", priorityHandler.Reprioritize)
 			r.Post("/api/v1/pm/analyze", pmHandler.Analyze)
+			r.Post("/api/v1/pm/bootstrap", pmHandler.Bootstrap)
+			r.Post("/api/v1/pm/refresh", pmHandler.Refresh)
+			r.Get("/api/v1/pm/context/pending", pmHandler.ListPendingRefreshes)
+			r.Post("/api/v1/pm/context/{id}/accept", pmHandler.AcceptRefresh)
+			r.Delete("/api/v1/pm/context/{id}/reject", pmHandler.RejectRefresh)
 			r.Patch("/api/v1/settings", settingsHandler.Update)
 			r.Post("/api/v1/memories", memoryHandler.Create)
 			r.Patch("/api/v1/memories/{id}", memoryHandler.UpdateStatus)
