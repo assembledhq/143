@@ -1090,8 +1090,9 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 		}
 	}
 
-	// Integration credentials — consumed by the 143-mcp binary inside the sandbox.
-	// These are injected for all agent types since the MCP server is agent-agnostic.
+	// Integration credentials — consumed by the 143-tools CLI (preferred) and
+	// 143-mcp binary inside the sandbox. Agents use the CLI via shell commands;
+	// the MCP server is only for IDE integrations. See internal/services/mcp/AGENTS.md.
 	ic := o.fetchIntegrationCredentials(ctx, orgID)
 	if ic.Sentry != nil {
 		if ic.Sentry.AccessToken != "" {
