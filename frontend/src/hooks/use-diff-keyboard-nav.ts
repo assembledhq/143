@@ -30,7 +30,9 @@ interface UseDiffKeyboardNavOptions {
  */
 export function useDiffKeyboardNav(options: UseDiffKeyboardNavOptions) {
   const optionsRef = useRef(options);
-  optionsRef.current = options;
+  useEffect(() => {
+    optionsRef.current = options;
+  });
 
   useEffect(() => {
     if (!options.enabled) return;
