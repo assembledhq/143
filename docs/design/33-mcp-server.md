@@ -87,6 +87,22 @@ Thin entry point that:
 - STDIO transport — no network ports exposed
 - Tool inputs validated before passing to integration layer
 
+## CLI vs MCP: When to Use Which
+
+> **Default to `143-tools` (CLI) for sandbox agents.** The MCP server exists for IDE integrations and external MCP clients — not for agents running in sandboxes.
+
+Both binaries share the same `ToolRegistry` (`internal/services/mcp/tools.go`), so tool coverage is identical. The difference is the transport:
+
+| | `143-tools` (CLI) | `143-mcp` (MCP) |
+|---|---|---|
+| **Token cost** | ~200-800 tokens (skills doc) | Much higher (JSON-RPC framing, schema, handshake) |
+| **Reliability** | LLMs already know CLIs from training data | JSON-RPC is an extra failure mode |
+| **Debugging** | Single line in session log | Multi-message protocol exchange |
+| **Lifecycle** | One-shot invocation | Long-lived subprocess to manage |
+| **Use for** | Sandbox agents (default) | IDE integrations, external MCP clients |
+
+The orchestrator already handles CLI injection: `buildIntegrationSkills()` generates the skills doc, `resolveAgentEnv()` passes credentials as env vars. See `internal/services/mcp/AGENTS.md` for implementation details.
+
 ## Key Design Decisions
 
 1. **STDIO over HTTP**: No network policy changes needed. Each agent gets isolated MCP process.
