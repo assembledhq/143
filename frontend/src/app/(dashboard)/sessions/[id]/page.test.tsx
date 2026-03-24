@@ -214,7 +214,26 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id={runningSession.id} />);
     expect(await screen.findByText('Agent is working...')).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('Agent is working...')).toBeDisabled();
+    expect(screen.getByPlaceholderText('Send a message to the agent...')).toBeEnabled();
+  });
+
+  it('disables input for pending session', async () => {
+    const pendingSession: Session = {
+      ...mockSessions[0],
+      status: 'pending',
+      completed_at: undefined,
+      current_turn: 0,
+      sandbox_state: 'none',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: pendingSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={pendingSession.id} />);
+    expect(await screen.findByPlaceholderText('Session is not active')).toBeDisabled();
   });
 
   it('keeps polling logs and reconnects after an SSE error while the session is active', async () => {
