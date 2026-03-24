@@ -137,14 +137,25 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
               <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Agent Type</span>
               <p className="mt-1 font-medium">{agentTypeLabels[session.agent_type] || session.agent_type}</p>
             </div>
-            {session.triggered_by_user_id && (
-              <div>
-                <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Triggered by</span>
-                <p className="mt-1 font-medium">
-                  {members.find((m) => m.id === session.triggered_by_user_id)?.name || "Unknown user"}
-                </p>
+            <div>
+              <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Triggered by</span>
+              <div className="mt-1">
+                {/* Infer PM-triggered from pm_plan_id + no user — consider adding an explicit triggered_by_type field */}
+                {session.pm_plan_id && !session.triggered_by_user_id ? (
+                  <span className="inline-flex items-center gap-1.5 font-medium">
+                    <span className="inline-flex items-center rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
+                      PM Agent
+                    </span>
+                  </span>
+                ) : session.triggered_by_user_id ? (
+                  <p className="font-medium">
+                    {members.find((m) => m.id === session.triggered_by_user_id)?.name || "Unknown user"}
+                  </p>
+                ) : (
+                  <p className="font-medium text-muted-foreground">System</p>
+                )}
               </div>
-            )}
+            </div>
             {session.confidence_score != null && (
               <div>
                 <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Confidence</span>

@@ -20,9 +20,11 @@ import {
 } from "@/components/ui/select";
 import { api } from "@/lib/api";
 import { AutonomySlider } from "@/components/autopilot/autonomy-slider";
+import { AutonomyReadiness } from "@/components/autopilot/autonomy-readiness";
+import { ContextHealth } from "@/components/autopilot/context-health";
 import { PriorityWeights, areWeightsValid } from "@/components/autopilot/priority-weights";
 import { DocumentsManager } from "@/components/autopilot/documents-manager";
-import type { Organization, OrgSettings, SingleResponse, Repository, ListResponse, RepoSettings } from "@/lib/types";
+import type { Organization, OrgSettings, SingleResponse, Repository, ListResponse, RepoSettings, PMDecisionsResponse, PMDocument, PMPlan } from "@/lib/types";
 import { DEFAULT_PM_MODEL, PM_MODELS_BY_PROVIDER } from "@/lib/model-constants";
 
 const DEFAULT_SETTINGS: Pick<
@@ -64,6 +66,24 @@ export function DirectionSection() {
     queryKey: ["repositories"],
     queryFn: () => api.repositories.list(),
   });
+
+  const { data: documentsResponse } = useQuery({
+    queryKey: ["pm", "documents"],
+    queryFn: () => api.pm.listDocuments(),
+  });
+
+  const { data: decisionsResponse } = useQuery<PMDecisionsResponse>({
+    queryKey: ["pm", "decisions"],
+    queryFn: () => api.pm.decisions({ limit: 50 }),
+  });
+
+  const { data: plansResponse } = useQuery<ListResponse<PMPlan>>({
+    queryKey: ["pm", "plans"],
+    queryFn: () => api.pm.list({ limit: 50 }),
+  });
+
+  const pmDocuments = (documentsResponse?.data ?? []) as PMDocument[];
+  const totalCycles = plansResponse?.data?.length ?? 0;
 
   const reposWithCustomPM = (reposResponse?.data ?? []).filter((repo) => {
     const rs = (repo.settings ?? {}) as RepoSettings;
@@ -185,28 +205,64 @@ export function DirectionSection() {
 
   return (
     <div className="space-y-6">
-      {/* Org defaults notice */}
-      <div className="rounded-md border border-border bg-muted/50 px-4 py-3">
+      {/* Org defaults notice with context inheritance */}
+      <div className="rounded-md border border-border bg-muted/50 px-4 py-3 space-y-2">
         <p className="text-xs text-muted-foreground">
           These are <span className="font-medium text-foreground">organization defaults</span>.
           Individual repositories can override these settings from their repository settings page.
         </p>
         {reposWithCustomPM.length > 0 && (
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            <span className="text-xs text-muted-foreground">Custom PM settings:</span>
-            {reposWithCustomPM.map((repo) => (
-              <Badge key={repo.id} variant="secondary" className="text-[11px]">
-                {repo.full_name}
-              </Badge>
-            ))}
+          <div className="space-y-1.5">
+            <div className="flex flex-wrap gap-1.5 items-center">
+              <span className="text-xs text-muted-foreground">Repos with custom PM context:</span>
+              {reposWithCustomPM.map((repo) => {
+                const rs = (repo.settings ?? {}) as RepoSettings;
+                const overrides: string[] = [];
+                if (rs.pm?.product_context?.philosophy) overrides.push("philosophy");
+                if (rs.pm?.product_context?.direction) overrides.push("direction");
+                if (rs.pm?.product_context?.focus_areas?.length) overrides.push("focus");
+                if (rs.pm?.product_context?.avoid_areas?.length) overrides.push("avoid");
+                if (rs.pm?.pm_model) overrides.push("model");
+                return (
+                  <Badge key={repo.id} variant="secondary" className="text-[11px]">
+                    {repo.full_name}
+                    {overrides.length > 0 && (
+                      <span className="text-muted-foreground/60 ml-1">
+                        ({overrides.join(", ")})
+                      </span>
+                    )}
+                  </Badge>
+                );
+              })}
+            </div>
+            <p className="text-[11px] text-muted-foreground/60">
+              Org defaults apply to all other repos. Per-repo overrides take precedence.
+            </p>
           </div>
         )}
       </div>
+
+      {/* Context Health */}
+      <ContextHealth
+        productContext={{
+          philosophy: productPhilosophy,
+          direction: productDirection,
+          focus_areas: focusAreas,
+          avoid_areas: avoidAreas,
+        }}
+        settingsUpdatedAt={settings?.data?.updated_at}
+        documents={pmDocuments}
+      />
 
       {/* Autonomy level */}
       <section className="space-y-3">
         <h3 className="text-[13px] font-medium text-foreground">Autonomy level</h3>
         <AutonomySlider value={autonomyLevel} onChange={setAutonomyLevel} />
+        <AutonomyReadiness
+          autonomyLevel={autonomyLevel}
+          decisionSummary={decisionsResponse?.summary}
+          totalCycles={totalCycles}
+        />
       </section>
 
       {/* PM Agent */}
