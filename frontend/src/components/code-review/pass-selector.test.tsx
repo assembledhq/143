@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { renderWithProviders, screen, userEvent } from "@/test/test-utils";
-import { PassSelector, type DiffPassEntry, type PassRange } from "./pass-selector";
+import { PassSelector, type DiffPassEntry } from "./pass-selector";
 
 const mockPasses: DiffPassEntry[] = [
   {

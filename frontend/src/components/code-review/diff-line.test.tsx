@@ -86,7 +86,6 @@ describe("DiffLineRow", () => {
       />
     );
     // Click the new line number (second button = R side)
-    const buttons = screen.getAllByRole("button");
     // First button is old line number "7", second is new line number "9"
     await user.click(screen.getByText("7"));
     expect(replaceStateSpy).toHaveBeenCalledWith(null, "", "#src/app.ts-L7");
