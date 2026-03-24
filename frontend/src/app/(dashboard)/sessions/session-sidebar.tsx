@@ -12,6 +12,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { useOptimisticSessions, type OptimisticSession } from "@/contexts/optimistic-sessions";
+import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
 
 // ---------------------------------------------------------------------------
 // Status config
@@ -52,6 +53,16 @@ function filterToStatusParam(filter: string | null): string | undefined {
   if (filter === "working") return workingStatuses.join(",");
   if (filter === "done") return doneStatuses.join(",");
   return filter;
+}
+
+// ---------------------------------------------------------------------------
+// Lightweight diff stats badge for sidebar rows
+// ---------------------------------------------------------------------------
+
+function SessionDiffBadge({ diffStats }: { diffStats?: { added: number; removed: number; files_changed: number } }) {
+  if (!diffStats) return null;
+  if (diffStats.added === 0 && diffStats.removed === 0) return null;
+  return <DiffStatsBadge added={diffStats.added} removed={diffStats.removed} />;
 }
 
 // ---------------------------------------------------------------------------
@@ -266,6 +277,7 @@ export function SessionSidebar() {
                     <span className="text-[11px] text-muted-foreground/50 truncate">
                       {formatTimeAgo(ts)}
                     </span>
+                    <SessionDiffBadge diffStats={session.diff_stats} />
                   </div>
                   {session.status === "failed" && (session.failure_explanation || session.error) && (
                     <p className="text-[11px] text-destructive/70 truncate mt-0.5">

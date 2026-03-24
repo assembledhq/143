@@ -23,13 +23,14 @@ const (
 	ProviderSentry        ProviderName = "sentry"
 	ProviderLinear        ProviderName = "linear"
 	ProviderSlack         ProviderName = "slack"
+	ProviderNotion        ProviderName = "notion"
 )
 
 // AllProviders is the canonical list of credential providers.
 var AllProviders = []ProviderName{
 	ProviderAnthropic, ProviderOpenAI, ProviderGemini, ProviderOpenAIChatGPT, ProviderOpenRouter,
 	ProviderGitHubApp, ProviderGitHubOAuth,
-	ProviderSentry, ProviderLinear, ProviderSlack,
+	ProviderSentry, ProviderLinear, ProviderSlack, ProviderNotion,
 }
 
 // LLMProviders is the subset of providers that serve LLM completions.
@@ -139,6 +140,12 @@ type SlackConfig struct {
 	ChannelIDs  []string `json:"channel_ids"`
 }
 
+type NotionConfig struct {
+	AccessToken   string `json:"access_token"`              // #nosec G117 -- JSON config field
+	WorkspaceID   string `json:"workspace_id,omitempty"`
+	WorkspaceName string `json:"workspace_name,omitempty"`
+}
+
 type OpenAIChatGPTConfig struct {
 	AccessToken  string    `json:"access_token"`  // #nosec G117 -- JSON config field
 	RefreshToken string    `json:"refresh_token"` // #nosec G117 -- JSON config field
@@ -175,6 +182,7 @@ func (c GitHubOAuthConfig) Provider() ProviderName   { return ProviderGitHubOAut
 func (c SentryConfig) Provider() ProviderName        { return ProviderSentry }
 func (c LinearConfig) Provider() ProviderName        { return ProviderLinear }
 func (c SlackConfig) Provider() ProviderName          { return ProviderSlack }
+func (c NotionConfig) Provider() ProviderName         { return ProviderNotion }
 func (c OpenAIChatGPTConfig) Provider() ProviderName { return ProviderOpenAIChatGPT }
 
 // --- Validate() implementations ---
@@ -245,6 +253,13 @@ func (c LinearConfig) Validate() error {
 }
 
 func (c SlackConfig) Validate() error {
+	if c.AccessToken == "" {
+		return errors.New("access_token is required")
+	}
+	return nil
+}
+
+func (c NotionConfig) Validate() error {
 	if c.AccessToken == "" {
 		return errors.New("access_token is required")
 	}
@@ -334,6 +349,13 @@ func (c SlackConfig) MaskedSummary() CredentialSummary {
 	}
 }
 
+func (c NotionConfig) MaskedSummary() CredentialSummary {
+	return CredentialSummary{
+		Provider:   ProviderNotion,
+		Configured: true,
+	}
+}
+
 func (c OpenAIChatGPTConfig) MaskedSummary() CredentialSummary {
 	return CredentialSummary{
 		Provider:    ProviderOpenAIChatGPT,
@@ -410,6 +432,12 @@ func ParseProviderConfig(provider ProviderName, data []byte) (ProviderConfig, er
 		var cfg SlackConfig
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return nil, fmt.Errorf("parse slack config: %w", err)
+		}
+		return cfg, nil
+	case ProviderNotion:
+		var cfg NotionConfig
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("parse notion config: %w", err)
 		}
 		return cfg, nil
 	default:

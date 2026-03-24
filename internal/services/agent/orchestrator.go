@@ -1009,14 +1009,15 @@ func (o *Orchestrator) enqueueJob(ctx context.Context, orgID uuid.UUID, queue, j
 	}
 }
 
-// integrationCredentials holds the resolved Sentry and Linear configs for an org.
+// integrationCredentials holds the resolved Sentry, Linear, and Notion configs for an org.
 type integrationCredentials struct {
 	Sentry *models.SentryConfig
 	Linear *models.LinearConfig
+	Notion *models.NotionConfig
 }
 
-// fetchIntegrationCredentials retrieves the Sentry and Linear configs for
-// an org from the credential provider. Returns nil configs if unavailable.
+// fetchIntegrationCredentials retrieves the Sentry, Linear, and Notion configs
+// for an org from the credential provider. Returns nil configs if unavailable.
 func (o *Orchestrator) fetchIntegrationCredentials(ctx context.Context, orgID uuid.UUID) integrationCredentials {
 	var ic integrationCredentials
 	if o.credentials == nil {
@@ -1031,6 +1032,11 @@ func (o *Orchestrator) fetchIntegrationCredentials(ctx context.Context, orgID uu
 	if cred, err := o.credentials.Get(ctx, orgID, models.ProviderLinear); err == nil && cred != nil {
 		if cfg, ok := cred.Config.(models.LinearConfig); ok {
 			ic.Linear = &cfg
+		}
+	}
+	if cred, err := o.credentials.Get(ctx, orgID, models.ProviderNotion); err == nil && cred != nil {
+		if cfg, ok := cred.Config.(models.NotionConfig); ok {
+			ic.Notion = &cfg
 		}
 	}
 	return ic
@@ -1090,8 +1096,9 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 		}
 	}
 
-	// Integration credentials — consumed by the 143-mcp binary inside the sandbox.
-	// These are injected for all agent types since the MCP server is agent-agnostic.
+	// Integration credentials — consumed by the 143-tools CLI (preferred) and
+	// 143-mcp binary inside the sandbox. Agents use the CLI via shell commands;
+	// the MCP server is only for IDE integrations. See internal/services/mcp/AGENTS.md.
 	ic := o.fetchIntegrationCredentials(ctx, orgID)
 	if ic.Sentry != nil {
 		if ic.Sentry.AccessToken != "" {
@@ -1104,6 +1111,11 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 	if ic.Linear != nil {
 		if ic.Linear.AccessToken != "" {
 			merged["LINEAR_ACCESS_TOKEN"] = ic.Linear.AccessToken
+		}
+	}
+	if ic.Notion != nil {
+		if ic.Notion.AccessToken != "" {
+			merged["NOTION_ACCESS_TOKEN"] = ic.Notion.AccessToken
 		}
 	}
 
@@ -1253,6 +1265,12 @@ func (o *Orchestrator) buildIntegrationSkills(ctx context.Context, orgID uuid.UU
 			AuthToken: ic.Linear.AccessToken,
 		})
 		reg.RegisterTaskManager(manager)
+	}
+	if ic.Notion != nil && ic.Notion.AccessToken != "" {
+		store := integration.NewNotionDocumentStore(integration.NotionDocumentStoreConfig{
+			AuthToken: ic.Notion.AccessToken,
+		})
+		reg.RegisterDocumentStore(store)
 	}
 
 	if !reg.HasAny() {

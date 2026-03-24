@@ -209,6 +209,30 @@ export const api = {
       get<import('./types').ListResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/messages`),
     getThreadLogs: (sessionId: string, threadId: string) =>
       get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/logs`),
+    listReviewComments: (sessionId: string) =>
+      get<import('./types').ListResponse<import('./types').SessionReviewComment>>(`/api/v1/sessions/${sessionId}/review-comments`),
+    createReviewComment: (sessionId: string, body: { file_path: string; line_number: number; side?: string; body: string }) =>
+      post<import('./types').SingleResponse<import('./types').SessionReviewComment>>(`/api/v1/sessions/${sessionId}/review-comments`, body),
+    updateReviewComment: (sessionId: string, commentId: string, body: { body?: string; resolved?: boolean }) =>
+      patch<import('./types').SingleResponse<import('./types').SessionReviewComment>>(`/api/v1/sessions/${sessionId}/review-comments/${commentId}`, body),
+    deleteReviewComment: (sessionId: string, commentId: string) =>
+      del(`/api/v1/sessions/${sessionId}/review-comments/${commentId}`),
+    sendReviewComments: (sessionId: string) =>
+      post<import('./types').SingleResponse<{ message: string; sent: boolean }>>(`/api/v1/sessions/${sessionId}/review-comments/send`),
+    listFiles: (sessionId: string, path?: string) => {
+      const params = new URLSearchParams();
+      if (path) params.set('path', path);
+      const qs = params.toString();
+      return get<import('./types').ListResponse<import('./types').FileEntry>>(`/api/v1/sessions/${sessionId}/files${qs ? `?${qs}` : ''}`);
+    },
+    getFileContent: (sessionId: string, path: string) =>
+      get<import('./types').SingleResponse<import('./types').FileContent>>(`/api/v1/sessions/${sessionId}/files/content?path=${encodeURIComponent(path)}`),
+    getFileContext: (sessionId: string, path: string, line: number, above?: number, below?: number) => {
+      const params = new URLSearchParams({ path, line: String(line) });
+      if (above != null) params.set('above', String(above));
+      if (below != null) params.set('below', String(below));
+      return get<import('./types').SingleResponse<import('./types').FileContextResponse>>(`/api/v1/sessions/${sessionId}/files/context?${params.toString()}`);
+    },
   },
   settings: {
     get: () => get<import('./types').SingleResponse<import('./types').Organization>>('/api/v1/settings'),
@@ -266,6 +290,7 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify({ channel_ids: channelIds }),
     }),
+    connectNotion: (accessToken: string) => post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/notion/connect', { access_token: accessToken }),
     disconnect: (provider: string) => del(`/api/v1/integrations/${provider}/disconnect`),
     syncGitHub: () => post<{ data: { repos_synced: number; errors: number } }>('/api/v1/integrations/github/sync'),
   },

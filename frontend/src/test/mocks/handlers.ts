@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import type { Issue, Session, SessionLog, SessionMessage, User, Validation, PullRequest, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail } from '@/lib/types';
+import type { Issue, Session, SessionLog, SessionMessage, SessionReviewComment, User, Validation, PullRequest, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail } from '@/lib/types';
 
 export const mockIssues: Issue[] = [
   {
@@ -282,6 +282,63 @@ export const handlers = [
     } satisfies SingleResponse<Session>);
   }),
 
+  http.get('/api/v1/sessions/:id/review-comments', () => {
+    return HttpResponse.json({
+      data: [] as SessionReviewComment[],
+      meta: {},
+    } satisfies ListResponse<SessionReviewComment>);
+  }),
+
+  http.post('/api/v1/sessions/:id/review-comments', async ({ request, params }) => {
+    const body = await request.json() as Record<string, unknown>;
+    const comment: SessionReviewComment = {
+      id: 'comment-new-1',
+      session_id: params.id as string,
+      org_id: 'org-1',
+      user_id: 'user-1',
+      file_path: body.file_path as string,
+      line_number: body.line_number as number,
+      diff_side: ((body.side as string) || 'new') as 'old' | 'new',
+      body: body.body as string,
+      resolved: false,
+      pass_number: 1,
+      created_at: '2026-02-17T07:10:00Z',
+      updated_at: '2026-02-17T07:10:00Z',
+    };
+    return HttpResponse.json({ data: comment } satisfies SingleResponse<SessionReviewComment>, { status: 201 });
+  }),
+
+  http.patch('/api/v1/sessions/:id/review-comments/:commentId', async ({ request, params }) => {
+    const body = await request.json() as Record<string, unknown>;
+    const resolved = (body.resolved as boolean) ?? false;
+    const comment: SessionReviewComment = {
+      id: params.commentId as string,
+      session_id: params.id as string,
+      org_id: 'org-1',
+      user_id: 'user-1',
+      file_path: 'file.ts',
+      line_number: 1,
+      diff_side: 'new',
+      body: (body.body as string) ?? 'original body',
+      resolved,
+      ...(resolved ? { resolved_at: '2026-02-17T07:11:00Z' } : {}),
+      pass_number: 1,
+      created_at: '2026-02-17T07:10:00Z',
+      updated_at: '2026-02-17T07:11:00Z',
+    };
+    return HttpResponse.json({ data: comment } satisfies SingleResponse<SessionReviewComment>);
+  }),
+
+  http.delete('/api/v1/sessions/:id/review-comments/:commentId', () => {
+    return new HttpResponse(null, { status: 204 });
+  }),
+
+  http.post('/api/v1/sessions/:id/review-comments/send', () => {
+    return HttpResponse.json({
+      data: { message: 'Please address the following code review comments:\n\n1. src/app.ts:2\n   "Add error handling here"' },
+    } satisfies SingleResponse<{ message: string }>);
+  }),
+
   http.get('/api/v1/sessions/:id/questions', () => {
     return HttpResponse.json({ data: [], meta: {} });
   }),
@@ -390,5 +447,45 @@ export const handlers = [
       summary: { total_delegated: 0, succeeded: 0, failed: 0, still_open: 0 },
       meta: {},
     } satisfies PMDecisionsResponse);
+  }),
+
+  http.get('/api/v1/sessions/:id/files', ({ request }) => {
+    const url = new URL(request.url);
+    const path = url.searchParams.get('path') || '';
+    // Return mock directory listing
+    const entries = path === '' ? [
+      { path: 'src', type: 'dir' as const, size: 4096 },
+      { path: 'internal', type: 'dir' as const, size: 4096 },
+      { path: 'main.go', type: 'file' as const, size: 1234 },
+      { path: 'README.md', type: 'file' as const, size: 567 },
+    ] : [
+      { path: `${path}/index.ts`, type: 'file' as const, size: 890 },
+      { path: `${path}/utils.ts`, type: 'file' as const, size: 445 },
+    ];
+    return HttpResponse.json({ data: entries, meta: {} });
+  }),
+
+  http.get('/api/v1/sessions/:id/files/content', ({ request }) => {
+    const url = new URL(request.url);
+    const filePath = url.searchParams.get('path') || 'unknown';
+    return HttpResponse.json({
+      data: {
+        path: filePath,
+        content: '// Mock file content\nexport function hello() {\n  return "world";\n}\n',
+        language: 'typescript',
+      },
+    });
+  }),
+
+  http.get('/api/v1/sessions/:id/files/context', () => {
+    return HttpResponse.json({
+      data: {
+        lines: [
+          { number: 1, content: '// line 1' },
+          { number: 2, content: '// line 2' },
+          { number: 3, content: '// line 3' },
+        ],
+      },
+    });
   }),
 ];

@@ -261,6 +261,8 @@ Each attempt to fix an issue via a coding agent.
 | error | text | failure reason if applicable |
 | result_summary | text | agent-generated summary of what it did |
 | diff | text | the generated code diff |
+| diff_stats | jsonb | pre-computed `{ added, removed, files_changed }` |
+| diff_history | jsonb | array of `{ pass, diff, diff_stats, created_at }` for multi-pass review |
 | created_at | timestamptz | |
 
 **Indexes:**
@@ -433,6 +435,31 @@ Individual review comments captured from 143-generated GitHub PRs, processed thr
 - `(pull_request_id)` — comments per PR
 - `(org_id, category)` — category analytics
 - `(org_id, filter_status)` — pipeline monitoring
+
+### `session_review_comments`
+
+Inline review comments left by users on session diffs, feeding directives back into the agent's next pass. See [36-code-review-display.md](36-code-review-display.md).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | uuid | PK |
+| session_id | uuid | FK -> sessions (CASCADE) |
+| org_id | uuid | FK -> organizations |
+| user_id | uuid | FK -> users |
+| file_path | text | file the comment targets |
+| line_number | int | line number in that file |
+| diff_side | text | `old` or `new` |
+| body | text | comment markdown |
+| resolved | boolean | default false |
+| resolved_at | timestamptz | |
+| resolved_by_pass | int | agent pass that addressed this comment |
+| pass_number | int | which agent pass this comment targets |
+| created_at | timestamptz | |
+| updated_at | timestamptz | |
+
+**Indexes:**
+- `(org_id, session_id)` — comments per session (org-scoped)
+- `(session_id, file_path)` — comments per file in a session
 
 ### `review_patterns`
 

@@ -260,6 +260,16 @@ it('renders issues in the data table', async () => {
 
 **MSW for API mocking**: Use `msw` (Mock Service Worker) to intercept network requests in tests. Define handlers in `src/test/mocks/handlers.ts`.
 
+## Integration Tools (Sentry, Linear, Notion, Slack)
+
+**Use `143-tools` CLI for sandbox agents, not the MCP server.** Both binaries share the same `ToolRegistry` (`internal/services/mcp/tools.go`), so tool coverage is identical. The CLI is preferred because it costs ~200-800 tokens (vs much heavier MCP protocol framing), LLMs already know how to use CLIs from training data, and there's no subprocess lifecycle to manage.
+
+The orchestrator handles CLI injection automatically: `buildIntegrationSkills()` generates a markdown skills doc, `resolveAgentEnv()` passes credentials as env vars. Adding a new tool to `tools.go` makes it available in both CLI and MCP with no extra work.
+
+**When to use MCP (`143-mcp`)**: IDE integrations that speak MCP protocol, external JSON-RPC clients, interactive development tools. Never for sandbox agents.
+
+See `internal/services/mcp/AGENTS.md` for detailed implementation guidance.
+
 ## Security Patterns
 
 **RBAC**: The `middleware.RequireRole(roles ...string)` middleware enforces role-based access. Apply it in the router after `Auth` middleware. Three roles: `admin` (full access), `member` (read + write), `viewer` (read-only). Webhook and health endpoints are exempt.
