@@ -2338,6 +2338,60 @@ func TestSessionHandler_CreatePR_SessionNotFound(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionHandler_CreatePR_PRLookupDBError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	diff := "--- a/file.go\n+++ b/file.go\n@@ -1 +1 @@\n-old\n+new"
+
+	// Mock session lookup — session has a diff.
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).AddRow(
+				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+				nil, nil, nil, nil,
+				nil, &now, &now, nil,
+				nil, nil, nil, nil,
+				nil, nil, nil, nil, &diff,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,
+				nil, 0, nil, "none", nil,
+				nil, nil, nil, nil, nil,
+				now,
+			),
+		)
+
+	// Mock PR lookup — returns a database error.
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(fmt.Errorf("connection refused"))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CreatePR(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code, "should return 500 on PR lookup DB error")
+	require.Contains(t, w.Body.String(), "INTERNAL_ERROR", "error code should indicate internal error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func stringPtr(s string) *string {
 	return &s
 }

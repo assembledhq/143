@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -17,6 +18,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 )
 
@@ -448,8 +450,13 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check whether a PR already exists for this session.
-	if _, prErr := h.pullRequestStore.GetBySessionID(r.Context(), orgID, sessionID); prErr == nil {
+	_, prErr := h.pullRequestStore.GetBySessionID(r.Context(), orgID, sessionID)
+	if prErr == nil {
 		writeError(w, r, http.StatusConflict, "PR_EXISTS", "a pull request already exists for this session")
+		return
+	}
+	if !errors.Is(prErr, pgx.ErrNoRows) {
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to check for existing PR", prErr)
 		return
 	}
 
@@ -464,7 +471,7 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionIDStr := sessionID.String()
-	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionStatusChanged, models.AuditResourceSession, &sessionIDStr, &session.ID, nil, nil)
+	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionPRRequested, models.AuditResourceSession, &sessionIDStr, &session.ID, nil, nil)
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
 }
 
