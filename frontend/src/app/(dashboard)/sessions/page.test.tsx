@@ -2,9 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { renderWithProviders, screen } from '@/test/test-utils';
 import { server } from '@/test/mocks/server';
-import { mockSessions, mockMembers } from '@/test/mocks/handlers';
 import { SessionSidebar } from './session-sidebar';
-import type { Session, User, ListResponse } from '@/lib/types';
 
 // Mock next/link to render a plain anchor
 vi.mock('next/link', () => ({

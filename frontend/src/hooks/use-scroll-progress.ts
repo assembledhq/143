@@ -38,7 +38,7 @@ export function useScrollProgress<T extends HTMLElement = HTMLDivElement>(
       window.removeEventListener("scroll", handleScroll);
       window.removeEventListener("resize", handleScroll);
     };
-  }, [handleScroll]);
+  }, [handleScroll, reducedMotion]);
 
   return { ref, progress };
 }

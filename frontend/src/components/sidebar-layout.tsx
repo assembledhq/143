@@ -20,7 +20,7 @@ export function SidebarLayout({ sidebar, children }: SidebarLayoutProps) {
   }, []);
 
   return (
-    <div className="flex h-full -mx-8 -my-6 lg:-mx-10">
+    <div className="flex h-full -mx-8 -my-6 lg:-mx-10 overflow-hidden">
       <div style={{ width: sidebarWidth }} className="shrink-0">
         {sidebar}
       </div>

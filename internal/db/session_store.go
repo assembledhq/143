@@ -72,7 +72,7 @@ func diffHistoryAppendSQL(passExpr string) string {
 	if !safePassExprRE.MatchString(passExpr) {
 		panic(fmt.Sprintf("diffHistoryAppendSQL: unsafe passExpr: %q", passExpr))
 	}
-	return fmt.Sprintf(`CASE WHEN @diff IS NOT NULL THEN
+	return fmt.Sprintf(`CASE WHEN @diff::text IS NOT NULL THEN
 	  (SELECT jsonb_agg(elem) FROM (
 	    SELECT elem FROM jsonb_array_elements(
 	      COALESCE(diff_history, '[]'::jsonb) || jsonb_build_array(jsonb_build_object(

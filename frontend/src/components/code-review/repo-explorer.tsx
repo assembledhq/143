@@ -2,8 +2,6 @@
 
 import { useCallback, useMemo, useState } from "react";
 import {
-  ChevronDown,
-  ChevronRight,
   FileText,
   Folder,
   FolderOpen,
@@ -118,7 +116,7 @@ function DirectoryTree({
 }) {
   const { data, isLoading, error } = useSessionFileList(sessionId, currentPath);
 
-  const entries = data?.data ?? [];
+  const entries = useMemo(() => data?.data ?? [], [data?.data]);
 
   // Separate dirs and files, sort alphabetically
   const sortedEntries = useMemo(() => {

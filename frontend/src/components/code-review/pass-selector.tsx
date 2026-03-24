@@ -22,7 +22,7 @@ interface PassSelectorProps {
   onRangeChange: (range: PassRange | null) => void;
 }
 
-function formatPassLabel(range: PassRange | null, passCount: number): string {
+function formatPassLabel(range: PassRange | null): string {
   if (!range) return "All changes";
   if (range.from === 0) return `Base → Pass ${range.to}`;
   return `Pass ${range.from} → Pass ${range.to}`;
@@ -70,7 +70,7 @@ export function PassSelector({
 
   if (passes.length < 2) return null;
 
-  const label = formatPassLabel(selectedRange, passes.length);
+  const label = formatPassLabel(selectedRange);
 
   // Build available ranges:
   // - "All changes" (null) — shows the latest full diff

@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useState, useMemo } from "react";
+import { memo, useState } from "react";
 import { Check, Edit2, Trash2, Undo2, MessageSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
