@@ -1730,7 +1730,29 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 			body: `{"message":"Please add tests"}`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
 				now := time.Now()
-				// ClaimIdle.
+				// GetByID — session is idle.
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionColumns).AddRow(
+							sessionID, uuid.New(), orgID, "claude-code", "idle", "semi", "low",
+							nil, nil, nil, nil,
+							nil, &now, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil, // triggered_by_user_id
+							nil, 1, &now, "snapshotted", stringPtr("snapshots/test"),
+							nil, // target_branch
+							nil, // working_branch
+							nil, // repository_id
+							nil, // diff_stats
+							nil, // diff_history
+							now,
+						),
+					)
+				// ClaimIdle succeeds.
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
@@ -1765,6 +1787,41 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 			expectedBody: "Please add tests",
 		},
 		{
+			name: "sends message to running session without enqueuing job",
+			body: `{"message":"Quick note while you work"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
+				now := time.Now()
+				// GetByID — session is running.
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionColumns).AddRow(
+							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
+							nil, nil, nil, nil,
+							nil, &now, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil, // triggered_by_user_id
+							nil, 2, &now, "running", nil,
+							nil, // target_branch
+							nil, // working_branch
+							nil, // repository_id
+							nil, // diff_stats
+							nil, // diff_history
+							now,
+						),
+					)
+				// Create message — no ClaimIdle, no ClaimForResume, no Enqueue.
+				mock.ExpectQuery("INSERT INTO session_messages").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
+			},
+			expectedCode: http.StatusCreated,
+			expectedBody: "Quick note while you work",
+		},
+		{
 			name: "rejects empty message",
 			body: `{"message":""}`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
@@ -1777,16 +1834,12 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 			body: `{"message":"More work"}`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
 				now := time.Now()
-				// ClaimIdle fails (no row returned).
-				mock.ExpectQuery("UPDATE sessions SET status").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows(sessionColumns))
-				// GetByID lookup (to capture original status for revert).
+				// GetByID — session is pending (not running, not idle, not terminal).
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(sessionColumns).AddRow(
-							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
+							sessionID, uuid.New(), orgID, "claude-code", "pending", "semi", "low",
 							nil, nil, nil, nil,
 							nil, &now, nil, nil,
 							nil, nil, nil, nil,
@@ -1803,6 +1856,10 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							now,
 						),
 					)
+				// ClaimIdle fails (no row returned).
+				mock.ExpectQuery("UPDATE sessions SET status").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionColumns))
 				// ClaimForResume also fails (no row returned).
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -1816,11 +1873,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 			body: `{"message":"Continue working on this"}`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
 				now := time.Now()
-				// ClaimIdle fails (no row returned).
-				mock.ExpectQuery("UPDATE sessions SET status").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows(sessionColumns))
-				// GetByID lookup (to capture original status for revert).
+				// GetByID — session is completed.
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
@@ -1842,6 +1895,10 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							now,
 						),
 					)
+				// ClaimIdle fails (no row returned).
+				mock.ExpectQuery("UPDATE sessions SET status").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionColumns))
 				// ClaimForResume succeeds.
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).

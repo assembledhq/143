@@ -524,26 +524,58 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Look up the session to check its current status.
+	session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+		return
+	}
+
+	// If the session is already running, just save the message — the coding
+	// agent will buffer it and process inline. No status change or job needed.
+	if session.Status == string(models.SessionStatusRunning) {
+		user := middleware.UserFromContext(r.Context())
+		var userID *uuid.UUID
+		if user != nil {
+			userID = &user.ID
+		}
+
+		msg := &models.SessionMessage{
+			SessionID:  sessionID,
+			OrgID:      orgID,
+			UserID:     userID,
+			TurnNumber: session.CurrentTurn + 1,
+			Role:       models.MessageRoleUser,
+			Content:    body.Message,
+		}
+		if len(body.Images) > 0 {
+			msg.Attachments = body.Images
+		}
+
+		if err := h.messageStore.Create(r.Context(), msg); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message", err)
+			return
+		}
+
+		writeJSON(w, http.StatusCreated, models.SingleResponse[models.SessionMessage]{Data: *msg})
+		return
+	}
+
 	// Try claiming an idle session first, then fall back to resuming a
 	// terminal session (completed/pr_created/failed/cancelled).
 	var revertStatus string
-	session, err := h.runStore.ClaimIdle(r.Context(), orgID, sessionID)
-	if err != nil {
-		// Look up the session to capture its current status for revert.
-		existing, lookupErr := h.runStore.GetByID(r.Context(), orgID, sessionID)
-		if lookupErr != nil {
-			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+	claimed, claimErr := h.runStore.ClaimIdle(r.Context(), orgID, sessionID)
+	if claimErr != nil {
+		claimed, claimErr = h.runStore.ClaimForResume(r.Context(), orgID, sessionID)
+		if claimErr != nil {
+			writeError(w, r, http.StatusConflict, "NOT_RESUMABLE", "session must be idle, running, or completed to send a message")
 			return
 		}
-		session, err = h.runStore.ClaimForResume(r.Context(), orgID, sessionID)
-		if err != nil {
-			writeError(w, r, http.StatusConflict, "NOT_RESUMABLE", "session must be idle or completed to send a message")
-			return
-		}
-		revertStatus = existing.Status // preserve original status for revert
+		revertStatus = session.Status // preserve original status for revert
 	} else {
 		revertStatus = string(models.SessionStatusIdle)
 	}
+	session = claimed
 
 	user := middleware.UserFromContext(r.Context())
 	var userID *uuid.UUID
