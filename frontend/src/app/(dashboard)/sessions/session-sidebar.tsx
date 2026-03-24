@@ -274,6 +274,11 @@ export function SessionSidebar() {
                     <span className="text-[11px] text-muted-foreground shrink-0">
                       {cfg.label}
                     </span>
+                    {session.pm_plan_id && !session.triggered_by_user_id && (
+                      <span className="inline-flex items-center rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary shrink-0">
+                        PM
+                      </span>
+                    )}
                     <span className="text-[11px] text-muted-foreground/50 truncate">
                       {formatTimeAgo(ts)}
                     </span>

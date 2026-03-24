@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 )
 
@@ -111,6 +113,54 @@ func (h *PMHandler) Latest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.PMPlan]{Data: plan})
+}
+
+// Current returns the PM's latest recommendation in a presentation-friendly
+// format, combining plan output with context stats and decision summary.
+// This is the primary endpoint for the Autopilot page — it replaces direct
+// plan access from the frontend.
+func (h *PMHandler) Current(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+
+	plan, err := h.planStore.GetLatestByOrg(r.Context(), orgID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "no analysis available yet")
+			return
+		}
+		zerolog.Ctx(r.Context()).Error().Err(err).Msg("failed to get latest PM plan")
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL", "failed to load analysis")
+		return
+	}
+
+	summary, err := h.decisionLogStore.GetDecisionSummary(r.Context(), orgID)
+	if err != nil {
+		// Non-fatal — return recommendation without summary.
+		zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to get PM decision summary")
+		summary = models.PMDecisionSummary{}
+	}
+
+	rec := models.PMCurrentRecommendation{
+		Analysis:      plan.Analysis,
+		Tasks:         plan.Tasks,
+		Clusters:      plan.Clusters,
+		SkippedIssues: plan.SkippedIssues,
+		ContextStats: models.PMContextStats{
+			IssuesReviewed:        plan.IssuesReviewed,
+			InFlightRunsChecked:   plan.InFlightRunsChecked,
+			PastOutcomesReviewed:  plan.PastOutcomesReviewed,
+			RecentPRsChecked:      plan.RecentPRsChecked,
+			PastDecisionsReviewed: plan.PastDecisionsReviewed,
+			CommitsAnalyzed:       plan.CommitsAnalyzed,
+		},
+		DecisionSummary: summary,
+		AnalyzedAt:      plan.CreatedAt,
+		CompletedAt:     plan.CompletedAt,
+		Status:          string(plan.Status),
+		TriggeredBy:     string(plan.TriggeredBy),
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.PMCurrentRecommendation]{Data: rec})
 }
 
 // decisionsResponse is the response for the decisions endpoint.

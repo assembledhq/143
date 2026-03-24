@@ -2,7 +2,7 @@
 
 > Promote the PM agent to a first-class operator workspace alongside Sessions and Projects. Define how it differs from agents.md and design it as the place operators live.
 
-**Status**: Approved — promote PM to top-level nav as an operator workspace
+**Status**: Completed — all phases implemented
 
 ## Decision Summary
 

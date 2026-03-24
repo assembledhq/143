@@ -406,6 +406,29 @@ export interface PMDecisionsResponse {
   meta: { next_cursor?: string };
 }
 
+// Presentation-friendly recommendation from /api/v1/pm/current
+export interface PMCurrentRecommendation {
+  analysis: string;
+  tasks: PMTask[];
+  clusters: PMCluster[];
+  skipped_issues: PMSkipEntry[];
+  context_stats: PMContextStats;
+  decision_summary: PMDecisionSummary;
+  analyzed_at: string;
+  completed_at?: string;
+  status: string;
+  triggered_by: string;
+}
+
+export interface PMContextStats {
+  issues_reviewed: number;
+  in_flight_runs_checked: number;
+  past_outcomes_reviewed: number;
+  recent_prs_checked: number;
+  past_decisions_reviewed: number;
+  commits_analyzed: number;
+}
+
 export interface PMStatus {
   is_running: boolean;
   last_run_at?: string;

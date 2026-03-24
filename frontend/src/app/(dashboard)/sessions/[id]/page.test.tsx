@@ -141,10 +141,11 @@ describe('SessionDetailPage', () => {
     expect(screen.getByText('Alice Smith')).toBeInTheDocument();
   });
 
-  it('does not show triggered by when triggered_by_user_id is not set', async () => {
+  it('shows System when triggered_by_user_id is not set and no pm_plan_id', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
-    expect(screen.queryByText('Triggered by')).not.toBeInTheDocument();
+    expect(screen.getByText('Triggered by')).toBeInTheDocument();
+    expect(screen.getByText('System')).toBeInTheDocument();
   });
 
   it('shows chat messages for idle multi-turn session', async () => {
