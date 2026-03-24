@@ -1065,10 +1065,13 @@ func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
 	err := orch.RunAgent(context.Background(), run)
 	require.NoError(t, err)
 
-	// Sandbox should have no agent-specific env vars since "claude_code" has no credential,
-	// but HOME is always injected as a fallback.
-	require.Equal(t, map[string]string{"HOME": "/workspace"}, capturedCfg.Env,
-		"sandbox config should only have HOME for unconfigured agent type")
+	// Sandbox should have no agent-specific env vars since "claude_code" has no credential.
+	// HOME is always injected as a fallback, and GitHub integration vars are injected
+	// when integration skills are available (independent of agent type).
+	require.NotContains(t, capturedCfg.Env, "ANTHROPIC_API_KEY",
+		"sandbox config should not have agent-specific env for unconfigured agent type")
+	require.Equal(t, "/workspace", capturedCfg.Env["HOME"],
+		"HOME should always be set")
 }
 
 func TestRunAgent_CodexUsesAuthJsonNotEnvVar(t *testing.T) {

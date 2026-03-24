@@ -168,10 +168,10 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 		}
 	}
 
-	// Gather PM documents if store is configured.
+	// Gather PM documents if store is configured, excluding pending refresh docs.
 	var pmDocs []models.PMDocument
 	if s.pmDocuments != nil {
-		docs, err := s.pmDocuments.ListByOrg(ctx, orgID)
+		docs, err := s.pmDocuments.ListByOrgExcludeSourceType(ctx, orgID, models.PMDocSourceRefresh, 100)
 		if err != nil {
 			s.logger.Warn().Err(err).Msg("failed to load PM documents for context")
 		} else {

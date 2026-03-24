@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/db"
@@ -80,6 +81,16 @@ type projectCycleStore interface {
 
 type pmDocumentStore interface {
 	ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.PMDocument, error)
+	ListByOrgExcludeSourceType(ctx context.Context, orgID uuid.UUID, excludeSourceType string, limit int) ([]models.PMDocument, error)
+	GetByOrgAndSourceType(ctx context.Context, orgID uuid.UUID, sourceType string) (models.PMDocument, error)
+	ListByOrgAndSourceType(ctx context.Context, orgID uuid.UUID, sourceType string) ([]models.PMDocument, error)
+	Create(ctx context.Context, doc *models.PMDocument) error
+	Update(ctx context.Context, doc *models.PMDocument) error
+	Delete(ctx context.Context, orgID, docID uuid.UUID) error
+	DeleteByOrgAndSourceType(ctx context.Context, orgID uuid.UUID, sourceType string) error
+	GetByID(ctx context.Context, orgID, docID uuid.UUID) (models.PMDocument, error)
+	Begin(ctx context.Context) (pgx.Tx, error)
+	WithTx(tx pgx.Tx) *db.PMDocumentStore
 }
 
 type integrationStore interface {
@@ -88,6 +99,13 @@ type integrationStore interface {
 
 type credentialStore interface {
 	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
+}
+
+// SkillsBuilder generates integration skills docs for agents running in sandboxes.
+// This is satisfied by the Orchestrator which already builds skills docs from
+// org integration credentials.
+type SkillsBuilder interface {
+	BuildIntegrationSkills(ctx context.Context, orgID uuid.UUID) string
 }
 
 // Service is the AI Product Manager. It runs the PM agent and delegates work.
@@ -106,6 +124,7 @@ type Service struct {
 	pmDocuments   pmDocumentStore   // nil-safe
 	integrations  integrationStore  // nil-safe: Slack context disabled if nil
 	credentials   credentialStore   // nil-safe
+	skills        SkillsBuilder     // nil-safe: bootstrap disabled if nil
 	sandbox       agent.SandboxProvider
 	adapter       agent.AgentAdapter
 	github        agent.GitHubTokenProvider
@@ -160,6 +179,42 @@ func (s *Service) SetSlackStores(integrations integrationStore, credentials cred
 	s.credentials = credentials
 }
 
+// SetSkillsBuilder injects the skills builder for bootstrap/refresh agent prompts.
+func (s *Service) SetSkillsBuilder(sb SkillsBuilder) {
+	s.skills = sb
+}
+
+// selectRepo picks a target repository for an org. If repoID is provided, that
+// specific repo is selected; otherwise it defaults to the first active repo.
+// Note: for multi-repo orgs, this only returns one repo. Bootstrap/refresh will
+// only cover that single repo's codebase.
+func (s *Service) selectRepo(ctx context.Context, orgID uuid.UUID, repoID *uuid.UUID) (models.Repository, error) {
+	repos, err := s.repos.ListByOrg(ctx, orgID)
+	if err != nil {
+		return models.Repository{}, fmt.Errorf("list repositories: %w", err)
+	}
+	if len(repos) == 0 {
+		return models.Repository{}, fmt.Errorf("no repositories configured for org")
+	}
+
+	if repoID != nil {
+		for _, candidate := range repos {
+			if candidate.ID == *repoID {
+				return candidate, nil
+			}
+		}
+		return models.Repository{}, fmt.Errorf("repository %s not found in org", repoID)
+	}
+
+	repo := repos[0]
+	for _, candidate := range repos {
+		if candidate.Status == "active" {
+			repo = candidate
+			break
+		}
+	}
+	return repo, nil
+}
 
 func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID) (*Plan, error) {
 	if s.adapter == nil || s.sandbox == nil {
@@ -169,36 +224,9 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		return nil, fmt.Errorf("invalid trigger: %w", err)
 	}
 
-	repos, err := s.repos.ListByOrg(ctx, orgID)
+	repo, err := s.selectRepo(ctx, orgID, repoID)
 	if err != nil {
-		return nil, fmt.Errorf("list repositories: %w", err)
-	}
-	if len(repos) == 0 {
-		return nil, fmt.Errorf("no repositories configured for org")
-	}
-
-	// Select the target repository.
-	var repo models.Repository
-	if repoID != nil {
-		found := false
-		for _, candidate := range repos {
-			if candidate.ID == *repoID {
-				repo = candidate
-				found = true
-				break
-			}
-		}
-		if !found {
-			return nil, fmt.Errorf("repository %s not found in org", repoID)
-		}
-	} else {
-		repo = repos[0]
-		for _, candidate := range repos {
-			if candidate.Status == "active" {
-				repo = candidate
-				break
-			}
-		}
+		return nil, err
 	}
 
 	ctxBundle, err := s.gatherContext(ctx, orgID, &repo)

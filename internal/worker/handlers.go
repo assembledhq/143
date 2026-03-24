@@ -40,8 +40,10 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("prioritize", newPrioritizeHandler(stores, services, logger))
 	}
 	if services != nil && services.PM != nil {
-		w.Register("pm_analyze", newPMAnalyzeHandler(stores, services, logger))
-		w.Register("project_cycle", newProjectCycleHandler(services, logger))
+		w.Register(models.JobTypePMAnalyze, newPMAnalyzeHandler(stores, services, logger))
+		w.Register(models.JobTypeProjectCycle, newProjectCycleHandler(services, logger))
+		w.Register(models.JobTypePMBootstrap, newOrgIDJobHandler("pm_bootstrap", services.PM.RunBootstrap, logger))
+		w.Register(models.JobTypePMContextRefresh, newOrgIDJobHandler("pm_context_refresh", services.PM.RunRefresh, logger))
 	}
 	if hasServiceHandlersDependencies(services) {
 		w.Register("run_agent", newRunAgentHandler(stores, services, logger))
@@ -114,6 +116,8 @@ type Services struct {
 type pmService interface {
 	Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID) (*pm.Plan, error)
 	AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID) error
+	RunBootstrap(ctx context.Context, orgID uuid.UUID) error
+	RunRefresh(ctx context.Context, orgID uuid.UUID) error
 }
 
 // ingest_webhook handler processes a webhook delivery asynchronously.
@@ -236,6 +240,27 @@ func newProjectCycleHandler(services *Services, logger zerolog.Logger) JobHandle
 
 		logger.Info().Str("org_id", orgID.String()).Str("project_id", projectID.String()).Msg("running project_cycle job")
 		return services.PM.AnalyzeProject(ctx, orgID, projectID)
+	}
+}
+
+// newOrgIDJobHandler creates a handler that unmarshals an org_id payload and
+// calls the given function. Used for simple jobs like pm_bootstrap and pm_context_refresh.
+func newOrgIDJobHandler(jobName string, fn func(ctx context.Context, orgID uuid.UUID) error, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID string `json:"org_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal %s payload: %w", jobName, err)
+		}
+
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+
+		logger.Info().Str("org_id", orgID.String()).Msgf("running %s job", jobName)
+		return fn(ctx, orgID)
 	}
 }
 
