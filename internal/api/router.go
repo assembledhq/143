@@ -88,6 +88,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	healthHandler := handlers.NewHealthHandler(pool)
 	authHandler := handlers.NewAuthHandler(cfg, orgStore, userStore, authSessionStore, invitationStore)
 	repoHandler := handlers.NewRepositoryHandler(repoStore)
+	if prService != nil {
+		repoHandler.SetPRService(prService)
+	}
 	integrationOpts := []handlers.IntegrationHandlerOption{
 		handlers.WithSentryOAuth(cfg.SentryOAuthClientID, cfg.SentryOAuthClientSecret),
 		handlers.WithGitHubIntegrationOAuth(cfg.GitHubOAuthClientID, cfg.GitHubOAuthClientSecret),
@@ -228,6 +231,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/repositories", repoHandler.List)
 			r.Get("/api/v1/repositories/summary", repoHandler.Summary)
 			r.Get("/api/v1/repositories/{id}", repoHandler.Get)
+			r.Get("/api/v1/repositories/{id}/branches", repoHandler.ListBranches)
 			r.Get("/api/v1/integrations", integrationHandler.ListIntegrations)
 			r.Get("/api/v1/issues", issueHandler.List)
 			r.Get("/api/v1/issues/{id}", issueHandler.Get)

@@ -1433,3 +1433,114 @@ func TestPushRevision_WithParentSessionID(t *testing.T) {
 	require.NoError(t, err, "PushRevision should not return an error with parent session ID")
 	require.Contains(t, capturedCommitMsg, parentID.String(), "commit message should reference parent session ID")
 }
+
+func TestListBranches_Success(t *testing.T) {
+	t.Parallel()
+
+	branches := []GitHubBranch{
+		{Name: "main", Protected: true},
+		{Name: "develop", Protected: false},
+		{Name: "feature/foo", Protected: false},
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodGet, r.Method, "ListBranches should use GET")
+		require.Contains(t, r.URL.Path, "/repos/owner/repo/branches", "request path should target branches endpoint")
+		require.Equal(t, "token test-token", r.Header.Get("Authorization"), "should send authorization header")
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(branches)
+	}))
+	defer server.Close()
+
+	svc := &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		logger:     zerolog.Nop(),
+	}
+
+	result, err := svc.ListBranches(context.Background(), "test-token", "owner", "repo")
+	require.NoError(t, err, "ListBranches should not return an error")
+	require.Len(t, result, 3, "should return all branches")
+	require.Equal(t, "main", result[0].Name, "first branch should be main")
+	require.True(t, result[0].Protected, "main branch should be protected")
+	require.Equal(t, "feature/foo", result[2].Name, "third branch should be feature/foo")
+}
+
+func TestListBranches_Pagination(t *testing.T) {
+	t.Parallel()
+
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+
+		if callCount == 1 {
+			// Return exactly 100 branches to trigger pagination.
+			branches := make([]GitHubBranch, 100)
+			for i := range branches {
+				branches[i] = GitHubBranch{Name: fmt.Sprintf("branch-%d", i)}
+			}
+			json.NewEncoder(w).Encode(branches)
+		} else {
+			// Second page returns fewer than 100.
+			branches := []GitHubBranch{{Name: "last-branch"}}
+			json.NewEncoder(w).Encode(branches)
+		}
+	}))
+	defer server.Close()
+
+	svc := &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		logger:     zerolog.Nop(),
+	}
+
+	result, err := svc.ListBranches(context.Background(), "test-token", "owner", "repo")
+	require.NoError(t, err, "ListBranches should not return an error")
+	require.Len(t, result, 101, "should return all branches across pages")
+	require.Equal(t, 2, callCount, "should make exactly 2 API calls")
+	require.Equal(t, "last-branch", result[100].Name, "last branch should be from second page")
+}
+
+func TestListBranches_APIError(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"message":"internal error"}`))
+	}))
+	defer server.Close()
+
+	svc := &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		logger:     zerolog.Nop(),
+	}
+
+	result, err := svc.ListBranches(context.Background(), "test-token", "owner", "repo")
+	require.Error(t, err, "ListBranches should return an error on API failure")
+	require.Nil(t, result, "result should be nil on error")
+	require.Contains(t, err.Error(), "list branches", "error should include context")
+}
+
+func TestGetInstallationToken_DelegatesToTokenProvider(t *testing.T) {
+	t.Parallel()
+
+	tokenSvc := &Service{
+		cache: make(map[int64]*cachedToken),
+	}
+	tokenSvc.cache[42] = &cachedToken{
+		Token:     "cached-install-token",
+		ExpiresAt: time.Now().Add(30 * time.Minute),
+	}
+
+	svc := &PRService{
+		tokenProvider: tokenSvc,
+		logger:        zerolog.Nop(),
+	}
+
+	token, err := svc.GetInstallationToken(context.Background(), 42)
+	require.NoError(t, err, "GetInstallationToken should not return an error")
+	require.Equal(t, "cached-install-token", token, "should return the cached token")
+}
