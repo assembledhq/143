@@ -61,18 +61,25 @@ function setupOnboardedHandlers() {
         },
       });
     }),
-    http.get("/api/v1/pm/plans/latest", () => {
+    http.get("/api/v1/pm/current", () => {
       return HttpResponse.json({
         data: {
-          id: "plan-1",
-          org_id: "org-1",
-          status: "completed",
           analysis: "Found 14 open issues. 3 are high priority.",
           tasks: [],
           clusters: [],
-          skipped: [],
           skipped_issues: [],
-          created_at: "2026-03-20T10:00:00Z",
+          context_stats: {
+            issues_reviewed: 14,
+            in_flight_runs_checked: 3,
+            past_outcomes_reviewed: 5,
+            recent_prs_checked: 2,
+            past_decisions_reviewed: 8,
+            commits_analyzed: 20,
+          },
+          decision_summary: { total_delegated: 4, succeeded: 3, failed: 1, still_open: 0 },
+          analyzed_at: "2026-03-20T10:00:00Z",
+          status: "completed",
+          triggered_by: "cron",
         },
       });
     }),
@@ -133,8 +140,8 @@ function setupPreOnboardingHandlers({ noGitHub = false, noAgent = false } = {}) 
     http.get("/api/v1/pm/status", () => {
       return HttpResponse.json({ data: { is_running: false, issues_reviewed: 0, success_rate: 0, success_count: 0, total_delegated: 0 } });
     }),
-    http.get("/api/v1/pm/plans/latest", () => {
-      return HttpResponse.json({ error: { code: "NOT_FOUND", message: "no plans" } }, { status: 404 });
+    http.get("/api/v1/pm/current", () => {
+      return HttpResponse.json({ error: { code: "NOT_FOUND", message: "no analysis" } }, { status: 404 });
     }),
     http.get("/api/v1/pm/decisions", () => {
       return HttpResponse.json({ data: [], summary: { total_delegated: 0, succeeded: 0, failed: 0, still_open: 0 }, meta: {} });
@@ -176,8 +183,8 @@ function setupPostOnboardingNoAnalysisHandlers() {
     http.get("/api/v1/pm/status", () => {
       return HttpResponse.json({ data: { is_running: false, issues_reviewed: 0, success_rate: 0, success_count: 0, total_delegated: 0 } });
     }),
-    http.get("/api/v1/pm/plans/latest", () => {
-      return HttpResponse.json({ error: { code: "NOT_FOUND", message: "no plans" } }, { status: 404 });
+    http.get("/api/v1/pm/current", () => {
+      return HttpResponse.json({ error: { code: "NOT_FOUND", message: "no analysis" } }, { status: 404 });
     }),
     http.get("/api/v1/pm/decisions", () => {
       return HttpResponse.json({ data: [], summary: { total_delegated: 0, succeeded: 0, failed: 0, still_open: 0 }, meta: {} });

@@ -13,6 +13,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
@@ -566,6 +567,93 @@ func TestPMHandler_RejectRefresh_NotRefreshDoc(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 	require.Contains(t, rr.Body.String(), "NOT_REFRESH")
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPMHandler_Current(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	planStore := db.NewPMPlanStore(mock)
+	decisionLogStore := db.NewPMDecisionLogStore(mock)
+	jobStore := db.NewJobStore(mock)
+	handler := NewPMHandler(planStore, decisionLogStore, jobStore, nil)
+
+	orgID := uuid.New()
+	now := time.Now()
+
+	// Mock GetLatestByOrg query.
+	mock.ExpectQuery("SELECT .+ FROM pm_plans WHERE org_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(pmPlanColumnsWithContext).
+				AddRow(uuid.New(), orgID, "completed", "Payment cluster found",
+					json.RawMessage(`[{"rank":1,"title":"Fix auth"}]`),
+					json.RawMessage(`[]`),
+					json.RawMessage(`[{"issue_id":"abc","reason":"duplicate","detail":"Already fixed"}]`),
+					14, 3, 8, 5, 12, 20,
+					json.RawMessage(`{}`), json.RawMessage(`{}`), "manual",
+					now, &now,
+				),
+		)
+
+	// Mock GetDecisionSummary query.
+	mock.ExpectQuery("SELECT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"total_delegated", "succeeded", "failed", "still_open"}).
+				AddRow(15, 12, 1, 2),
+		)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/pm/current", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.Current(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "should return OK")
+
+	var resp models.SingleResponse[models.PMCurrentRecommendation]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "response should be valid JSON")
+	require.Equal(t, "Payment cluster found", resp.Data.Analysis, "should include analysis")
+	require.Equal(t, 14, resp.Data.ContextStats.IssuesReviewed, "should include context stats")
+	require.Equal(t, 12, resp.Data.ContextStats.PastDecisionsReviewed)
+	require.Equal(t, 15, resp.Data.DecisionSummary.TotalDelegated, "should include decision summary")
+	require.Equal(t, 12, resp.Data.DecisionSummary.Succeeded)
+	require.Equal(t, "completed", resp.Data.Status, "should include plan status")
+	require.Equal(t, "manual", resp.Data.TriggeredBy)
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPMHandler_CurrentNotFound(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	planStore := db.NewPMPlanStore(mock)
+	decisionLogStore := db.NewPMDecisionLogStore(mock)
+	jobStore := db.NewJobStore(mock)
+	handler := NewPMHandler(planStore, decisionLogStore, jobStore, nil)
+
+	orgID := uuid.New()
+
+	// Mock GetLatestByOrg — no rows.
+	mock.ExpectQuery("SELECT .+ FROM pm_plans WHERE org_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnError(pgx.ErrNoRows)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/pm/current", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.Current(rr, req)
+
+	require.Equal(t, http.StatusNotFound, rr.Code, "should return 404 when no plan exists")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func strPtr(s string) *string { return &s }
