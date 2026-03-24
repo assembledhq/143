@@ -17,6 +17,8 @@ vi.mock("lucide-react", () => {
     XCircle: icon("XCircle"),
     Clock: icon("Clock"),
     Minus: icon("Minus"),
+    TrendingUp: icon("TrendingUp"),
+    TrendingDown: icon("TrendingDown"),
   };
 });
 
@@ -121,7 +123,7 @@ describe("DecisionsView", () => {
     expect(screen.getByText("Failed")).toBeInTheDocument();
   });
 
-  it("renders summary bar with success rate", async () => {
+  it("renders summary bar with stat cards", async () => {
     server.use(
       http.get("*/api/v1/pm/decisions", () => {
         return HttpResponse.json({
@@ -151,12 +153,11 @@ describe("DecisionsView", () => {
     renderWithProviders(<DecisionsView />);
 
     await waitFor(() => {
-      expect(screen.getByText("Success rate: 80%")).toBeInTheDocument();
+      expect(screen.getByText("80%")).toBeInTheDocument();
     });
-    expect(
-      screen.getByText("(8/10 delegated tasks succeeded)"),
-    ).toBeInTheDocument();
-    expect(screen.getByText("1 still open")).toBeInTheDocument();
+    expect(screen.getByText("Success rate")).toBeInTheDocument();
+    expect(screen.getByText("8")).toBeInTheDocument();
+    expect(screen.getByText("Succeeded")).toBeInTheDocument();
   });
 
   it("renders Still open outcome for decisions without outcome", async () => {

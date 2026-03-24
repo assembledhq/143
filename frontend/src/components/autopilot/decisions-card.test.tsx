@@ -98,7 +98,7 @@ describe("DecisionsCard", () => {
       <DecisionsCard decisions={decisions} isLoading={false} />,
     );
 
-    expect(screen.getByText("3 more decisions not shown")).toBeInTheDocument();
+    expect(screen.getByText("View all decisions")).toBeInTheDocument();
   });
 
   it("truncates to 5 decisions max", () => {
