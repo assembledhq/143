@@ -531,27 +531,27 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Build the user message from the request context.
+	user := middleware.UserFromContext(r.Context())
+	var userID *uuid.UUID
+	if user != nil {
+		userID = &user.ID
+	}
+	msg := &models.SessionMessage{
+		SessionID:  sessionID,
+		OrgID:      orgID,
+		UserID:     userID,
+		TurnNumber: session.CurrentTurn + 1,
+		Role:       models.MessageRoleUser,
+		Content:    body.Message,
+	}
+	if len(body.Images) > 0 {
+		msg.Attachments = body.Images
+	}
+
 	// If the session is already running, just save the message — the coding
 	// agent will buffer it and process inline. No status change or job needed.
 	if session.Status == string(models.SessionStatusRunning) {
-		user := middleware.UserFromContext(r.Context())
-		var userID *uuid.UUID
-		if user != nil {
-			userID = &user.ID
-		}
-
-		msg := &models.SessionMessage{
-			SessionID:  sessionID,
-			OrgID:      orgID,
-			UserID:     userID,
-			TurnNumber: session.CurrentTurn + 1,
-			Role:       models.MessageRoleUser,
-			Content:    body.Message,
-		}
-		if len(body.Images) > 0 {
-			msg.Attachments = body.Images
-		}
-
 		if err := h.messageStore.Create(r.Context(), msg); err != nil {
 			writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message", err)
 			return
@@ -575,25 +575,9 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	} else {
 		revertStatus = string(models.SessionStatusIdle)
 	}
+	// Update turn number from the claimed session (may differ after status transition).
 	session = claimed
-
-	user := middleware.UserFromContext(r.Context())
-	var userID *uuid.UUID
-	if user != nil {
-		userID = &user.ID
-	}
-
-	msg := &models.SessionMessage{
-		SessionID:  sessionID,
-		OrgID:      orgID,
-		UserID:     userID,
-		TurnNumber: session.CurrentTurn + 1,
-		Role:       models.MessageRoleUser,
-		Content:    body.Message,
-	}
-	if len(body.Images) > 0 {
-		msg.Attachments = body.Images
-	}
+	msg.TurnNumber = session.CurrentTurn + 1
 
 	if err := h.messageStore.Create(r.Context(), msg); err != nil {
 		if revertErr := h.runStore.UpdateStatus(r.Context(), orgID, sessionID, revertStatus); revertErr != nil {
