@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { CheckCircle2, AlertTriangle, Circle } from "lucide-react";
 import type { ProductContext, PMDocument } from "@/lib/types";
 
@@ -32,10 +33,11 @@ export function ContextHealth({ productContext, settingsUpdatedAt, documents }: 
 
   // Compute direction age — note: settingsUpdatedAt tracks any settings change,
   // not just direction updates, so this is an approximation.
+  const [now] = useState(() => Date.now());
   let directionAge: string | undefined;
   if (settingsUpdatedAt) {
     const days = Math.floor(
-      (Date.now() - new Date(settingsUpdatedAt).getTime()) / (1000 * 60 * 60 * 24)
+      (now - new Date(settingsUpdatedAt).getTime()) / (1000 * 60 * 60 * 24)
     );
     if (days > 30) {
       directionAge = `${days}d ago`;

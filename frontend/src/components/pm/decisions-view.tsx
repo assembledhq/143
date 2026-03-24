@@ -4,7 +4,6 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { CheckCircle2, XCircle, Clock, Minus, TrendingUp, TrendingDown } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { api } from "@/lib/api";
 import type { PMDecisionView, PMDecisionSummary } from "@/lib/types";
 
