@@ -382,6 +382,65 @@ export const handlers = [
     });
   }),
 
+  http.get('/api/v1/repositories', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {},
+    });
+  }),
+
+  http.get('/api/v1/settings', () => {
+    return HttpResponse.json({
+      data: {
+        id: 'org-1',
+        name: 'Test Org',
+        settings: {
+          default_agent_type: 'claude_code',
+          agent_config: {},
+          autonomy_level: 'auto_simple',
+          pm_schedule_hours: 4,
+          pm_model: 'claude-sonnet-4-5-20250929',
+        },
+      },
+    });
+  }),
+
+  http.patch('/api/v1/settings', () => {
+    return HttpResponse.json({
+      data: {
+        id: 'org-1',
+        name: 'Test Org',
+        settings: {},
+      },
+    });
+  }),
+
+  http.get('/api/v1/settings/agent-defaults', () => {
+    return HttpResponse.json({
+      data: {},
+    });
+  }),
+
+  http.get('/api/v1/settings/codex-auth/status', () => {
+    return HttpResponse.json({
+      data: { status: 'none' },
+    });
+  }),
+
+  http.get('/api/v1/integrations', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {},
+    });
+  }),
+
+  http.get('/api/v1/pm/documents', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {},
+    });
+  }),
+
   http.get('/api/v1/pm/decisions', () => {
     return HttpResponse.json({
       data: [],

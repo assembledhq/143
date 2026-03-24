@@ -52,7 +52,7 @@ export function ProjectSidebar() {
     refetchInterval: 10000,
   });
 
-  const allProjects = data?.data ?? [];
+  const allProjects = useMemo(() => data?.data ?? [], [data?.data]);
   const currentFilter = activeFilter ?? "all";
 
   const activeCount = allProjects.filter(isActive).length;
