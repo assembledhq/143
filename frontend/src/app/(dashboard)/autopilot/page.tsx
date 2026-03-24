@@ -53,6 +53,9 @@ function PreOnboardingState({ agentConnected, selectedAgentType, integrations, r
   const slackIntegration = integrations.find(
     (integration) => integration.provider === "slack" && integration.status === "active"
   );
+  const notionIntegration = integrations.find(
+    (integration) => integration.provider === "notion" && integration.status === "active"
+  );
 
   return (
     <div className="space-y-6">
@@ -105,10 +108,12 @@ function PreOnboardingState({ agentConnected, selectedAgentType, integrations, r
               sentryConnected={Boolean(sentryIntegration)}
               linearConnected={Boolean(linearIntegration)}
               slackConnected={Boolean(slackIntegration)}
+              notionConnected={Boolean(notionIntegration)}
               linearLoading={false}
               onConnectSentry={() => api.auth.loginSentry()}
               onConnectLinear={() => api.integrations.loginLinear()}
               onConnectSlack={() => api.integrations.loginSlack()}
+              onConnectNotion={() => window.location.assign("/integrations")}
               onDisconnect={(provider) => disconnectMutation.mutate(provider)}
               disconnectingProvider={disconnectMutation.isPending ? disconnectMutation.variables : null}
               disconnectErrorProvider={disconnectMutation.isError ? disconnectMutation.variables ?? null : null}
