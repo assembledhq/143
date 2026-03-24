@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -17,6 +18,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 )
 
@@ -423,6 +425,54 @@ func (h *SessionHandler) GetPullRequest(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.PullRequest]{Data: pr})
+}
+
+// CreatePR handles POST /sessions/{id}/pr — enqueues a job to create a GitHub
+// PR from the session's diff. The session must have a non-empty diff and must
+// not already have an associated PR.
+func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+
+	session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+		return
+	}
+
+	if session.Diff == nil || *session.Diff == "" {
+		writeError(w, r, http.StatusBadRequest, "NO_DIFF", "session has no diff to create a PR from")
+		return
+	}
+
+	// Check whether a PR already exists for this session.
+	_, prErr := h.pullRequestStore.GetBySessionID(r.Context(), orgID, sessionID)
+	if prErr == nil {
+		writeError(w, r, http.StatusConflict, "PR_EXISTS", "a pull request already exists for this session")
+		return
+	}
+	if !errors.Is(prErr, pgx.ErrNoRows) {
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to check for existing PR", prErr)
+		return
+	}
+
+	payload := map[string]string{
+		"session_id": sessionID.String(),
+		"org_id":     orgID.String(),
+	}
+	dedupeKey := fmt.Sprintf("open_pr:%s", sessionID)
+	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "open_pr", payload, 5, &dedupeKey); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue PR creation job", err)
+		return
+	}
+
+	sessionIDStr := sessionID.String()
+	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionPRRequested, models.AuditResourceSession, &sessionIDStr, &session.ID, nil, nil)
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
 }
 
 // ListQuestions returns the questions for an agent run.
