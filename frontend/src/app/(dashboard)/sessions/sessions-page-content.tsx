@@ -240,8 +240,8 @@ export function SessionsPageContent() {
     queryFn: () => api.team.listMembers(),
   });
 
-  const allSessions = allData?.data ?? [];
-  const members = membersData?.data ?? [];
+  const allSessions = useMemo(() => allData?.data ?? [], [allData?.data]);
+  const members = useMemo(() => membersData?.data ?? [], [membersData?.data]);
 
   const needsAttentionSessions = allSessions.filter((s) => needsAttentionSet.has(s.status));
   const workingSessions = allSessions.filter((s) => workingSet.has(s.status));

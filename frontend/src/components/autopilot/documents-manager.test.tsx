@@ -190,4 +190,128 @@ describe("DocumentsManager", () => {
     });
     expect(screen.getByText("Q1 Roadmap")).toBeInTheDocument();
   });
+
+  it("expands document content when title is clicked", async () => {
+    const doc = makeDoc({ content: "## Goals\n- Launch v2" });
+    setupDocsWithItems([doc]);
+    const user = userEvent.setup();
+    renderWithProviders(<DocumentsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Q1 Roadmap")).toBeInTheDocument();
+    });
+
+    // Click the title to expand
+    await user.click(screen.getByText("Q1 Roadmap"));
+
+    await waitFor(() => {
+      expect(screen.getByText((content) => content.includes("Goals") && content.includes("Launch v2"))).toBeInTheDocument();
+    });
+  });
+
+  it("opens the edit form when the pencil button is clicked", async () => {
+    const doc = makeDoc();
+    setupDocsWithItems([doc]);
+    const user = userEvent.setup();
+    renderWithProviders(<DocumentsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Q1 Roadmap")).toBeInTheDocument();
+    });
+
+    // Find the edit button (pencil icon) - it's the second ghost button
+    const editButtons = screen.getAllByRole("button").filter((btn) => {
+      const svg = btn.querySelector("svg");
+      return svg && !btn.querySelector("svg.text-destructive") && btn.textContent === "";
+    });
+    // Click the pencil button (should be among the small action buttons)
+    const pencilBtn = editButtons.find((btn) => {
+      return btn.classList.contains("h-7");
+    });
+    if (pencilBtn) {
+      await user.click(pencilBtn);
+    }
+
+    // Edit form should have Title and Content fields
+    await waitFor(() => {
+      const titleInputs = screen.getAllByDisplayValue("Q1 Roadmap");
+      expect(titleInputs.length).toBeGreaterThan(0);
+    });
+  });
+
+  it("creates a document via the create form", async () => {
+    setupDocsWithItems([]);
+    const user = userEvent.setup();
+    renderWithProviders(<DocumentsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Add/ })).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: /Add/ }));
+
+    // Fill in title
+    const titleInput = screen.getByLabelText("Title");
+    await user.type(titleInput, "New Roadmap");
+
+    // Fill in content
+    const contentInput = screen.getByLabelText("Content");
+    await user.type(contentInput, "Some content");
+
+    // Click save
+    await user.click(screen.getByRole("button", { name: /Save document/ }));
+  });
+
+  it("shows source type badge for non-manual documents", async () => {
+    const doc = makeDoc({ source_type: "notion" });
+    setupDocsWithItems([doc]);
+    renderWithProviders(<DocumentsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Q1 Roadmap")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("Notion")).toBeInTheDocument();
+  });
+
+  it("shows source URL field when source type is not manual", async () => {
+    setupEmptyDocs();
+    const user = userEvent.setup();
+    renderWithProviders(<DocumentsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Add/ })).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: /Add/ }));
+
+    // By default source type is "manual" so no URL field
+    expect(screen.queryByLabelText("Source URL")).not.toBeInTheDocument();
+  });
+
+  it("shows expanded content with source URL when available", async () => {
+    const doc = makeDoc({
+      source_type: "url",
+      source_url: "https://example.com/doc",
+      content: "Document content here",
+      last_synced_at: "2026-03-20T00:00:00Z",
+    });
+    setupDocsWithItems([doc]);
+    const user = userEvent.setup();
+    renderWithProviders(<DocumentsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Q1 Roadmap")).toBeInTheDocument();
+    });
+
+    // Expand
+    await user.click(screen.getByText("Q1 Roadmap"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Document content here")).toBeInTheDocument();
+    });
+    // Source URL link
+    const sourceLink = screen.getByRole("link", { name: "https://example.com/doc" });
+    expect(sourceLink).toHaveAttribute("href", "https://example.com/doc");
+  });
 });

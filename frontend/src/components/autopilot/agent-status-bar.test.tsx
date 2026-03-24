@@ -2,9 +2,6 @@ import { describe, it, expect, vi } from "vitest";
 import { renderWithProviders, screen } from "@/test/test-utils";
 import {
   AgentStatusBar,
-  deriveAgentStatus,
-  agentStatusLabel,
-  agentStatusDotColors,
 } from "./agent-status-bar";
 import type { PMStatus } from "@/lib/types";
 

@@ -104,12 +104,15 @@ export function DirectionSection() {
   const [saveStatus, setSaveStatus] = useState<"idle" | "success" | "error">("idle");
 
   // Sync server data into form state when it arrives or changes.
+  // setState calls here are intentional: this effect synchronises external
+  // (server) data into local form state, which is a recommended use of useEffect.
   const prevSettingsRef = useRef<unknown>(undefined);
   useEffect(() => {
     const settingsData = settings?.data?.settings;
     if (!settingsData || settingsData === prevSettingsRef.current) return;
     prevSettingsRef.current = settingsData;
     const s = orgSettings;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- syncing server data to form state
     setAutonomyLevel(s.autonomy_level ?? DEFAULT_SETTINGS.autonomy_level);
     setPmScheduleHours(String(s.pm_schedule_hours ?? DEFAULT_SETTINGS.pm_schedule_hours));
     setPmModel(s.pm_model ?? DEFAULT_SETTINGS.pm_model);

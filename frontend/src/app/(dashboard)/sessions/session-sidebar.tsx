@@ -12,7 +12,6 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { useOptimisticSessions, type OptimisticSession } from "@/contexts/optimistic-sessions";
-import type { Session } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
 // Status config
@@ -118,7 +117,7 @@ export function SessionSidebar() {
     enabled: !!statusParam,
   });
 
-  const allSessions = allData?.data ?? [];
+  const allSessions = useMemo(() => allData?.data ?? [], [allData?.data]);
 
   const needsAttentionSessions = allSessions.filter((s) => needsAttentionSet.has(s.status));
   const workingSessions = allSessions.filter((s) => workingSet.has(s.status));
