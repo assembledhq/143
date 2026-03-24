@@ -282,6 +282,10 @@ export const handlers = [
     } satisfies SingleResponse<Session>);
   }),
 
+  http.post('/api/v1/sessions/:id/pr', () => {
+    return HttpResponse.json({ status: 'queued' }, { status: 202 });
+  }),
+
   http.get('/api/v1/sessions/:id/review-comments', () => {
     return HttpResponse.json({
       data: [] as SessionReviewComment[],

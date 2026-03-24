@@ -7,6 +7,7 @@ import {
   AlertTriangle,
   ArrowUp,
   ExternalLink,
+  GitPullRequest,
   RefreshCw,
   CheckCircle2,
   XCircle,
@@ -847,6 +848,22 @@ function ChatPanel({ session, sessionId, isActive }: { session: Session; session
     },
   });
 
+  const { data: prData } = useQuery({
+    queryKey: ["session", sessionId, "pr"],
+    queryFn: () => api.sessions.getPR(sessionId),
+  });
+  const hasPR = !!prData?.data;
+  const hasDiff = !!session.diff_stats;
+  const canCreatePR = hasDiff && !hasPR && !isRunning;
+
+  const createPRMutation = useMutation({
+    mutationFn: () => api.sessions.createPR(sessionId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+      queryClient.invalidateQueries({ queryKey: ["session", sessionId, "pr"] });
+    },
+  });
+
   // Auto-resize textarea
   useEffect(() => {
     const el = textareaRef.current;
@@ -884,10 +901,10 @@ function ChatPanel({ session, sessionId, isActive }: { session: Session; session
       </div>
 
       {/* Error display */}
-      {(sendMutation.error || endMutation.error) && (
+      {(sendMutation.error || endMutation.error || createPRMutation.error) && (
         <div className="flex items-center gap-2 px-4 py-2 text-xs text-destructive border-t bg-destructive/5">
           <AlertTriangle className="h-3 w-3 shrink-0" />
-          {sendMutation.error instanceof Error ? sendMutation.error.message : endMutation.error instanceof Error ? endMutation.error.message : "An error occurred"}
+          {sendMutation.error instanceof Error ? sendMutation.error.message : endMutation.error instanceof Error ? endMutation.error.message : createPRMutation.error instanceof Error ? createPRMutation.error.message : "An error occurred"}
         </div>
       )}
 
@@ -923,6 +940,18 @@ function ChatPanel({ session, sessionId, isActive }: { session: Session; session
                 onClick={() => endMutation.mutate()}
               >
                 <Square className="h-3 w-3" />
+              </Button>
+            )}
+            {canCreatePR && (
+              <Button
+                size="icon"
+                variant="outline"
+                className="h-8 w-8 shrink-0"
+                title="Create PR"
+                disabled={createPRMutation.isPending}
+                onClick={() => createPRMutation.mutate()}
+              >
+                <GitPullRequest className="h-3.5 w-3.5" />
               </Button>
             )}
           </div>
