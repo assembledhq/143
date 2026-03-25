@@ -10,6 +10,8 @@ import { cn, formatTimeAgo, sessionTitle } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
+import { useSessionUserFilter } from "@/hooks/use-session-user-filter";
+import { SessionUserFilterDropdown } from "./session-user-filter-dropdown";
 import { queryKeys } from "@/lib/query-keys";
 import { useOptimisticSessions, type OptimisticSession } from "@/contexts/optimistic-sessions";
 import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
@@ -101,6 +103,7 @@ function OptimisticSessionRow({ session }: { session: OptimisticSession }) {
 export function SessionSidebar() {
   const params = useParams();
   const pathname = usePathname();
+  const { currentUserFilter, triggeredByUserId, user, setUserFilter } = useSessionUserFilter();
   const selectedId = params?.id as string | undefined;
   const [search, setSearch] = useState("");
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
@@ -115,20 +118,26 @@ export function SessionSidebar() {
   // Also fetches a filtered query when a tab is active — see sessions-page-content
   // for the rationale on the double-fetch tradeoff.
   const { data: allData, isLoading } = useQuery({
-    queryKey: queryKeys.sessions.list(repo),
-    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined }),
+    queryKey: [...queryKeys.sessions.list(repo), triggeredByUserId],
+    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, triggered_by_user_id: triggeredByUserId }),
     refetchInterval: 10000,
   });
 
   // Fetch filtered sessions from the backend when a specific tab is selected.
   const { data: filteredData } = useQuery({
-    queryKey: [...queryKeys.sessions.list(repo), statusParam],
-    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, status: statusParam }),
+    queryKey: [...queryKeys.sessions.list(repo), statusParam, triggeredByUserId],
+    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, status: statusParam, triggered_by_user_id: triggeredByUserId }),
     refetchInterval: 10000,
     enabled: !!statusParam,
   });
 
+  const { data: membersData } = useQuery({
+    queryKey: ["team", "members"],
+    queryFn: () => api.team.listMembers(),
+  });
+
   const allSessions = useMemo(() => allData?.data ?? [], [allData?.data]);
+  const members = useMemo(() => membersData?.data ?? [], [membersData?.data]);
 
   const needsAttentionSessions = allSessions.filter((s) => needsAttentionSet.has(s.status));
   const workingSessions = allSessions.filter((s) => workingSet.has(s.status));
@@ -174,6 +183,16 @@ export function SessionSidebar() {
           <Plus className="h-4 w-4" />
           New session
         </Link>
+
+        {/* User filter dropdown */}
+        <SessionUserFilterDropdown
+          currentUserFilter={currentUserFilter}
+          members={members}
+          currentUser={user}
+          onFilterChange={setUserFilter}
+          align="start"
+          className="w-full justify-between"
+        />
 
         {/* Filter tabs */}
         <Tabs
