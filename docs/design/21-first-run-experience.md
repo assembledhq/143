@@ -1,6 +1,8 @@
 # Design: First-Run Experience & Time-to-Value
 
-> **Status:** Implemented | **Last reviewed:** 2026-03-19
+> **Status:** Partially Implemented | **Last reviewed:** 2026-03-24
+>
+> **Implementation notes:** Sessions/repo infrastructure and agent orchestrator exist. Missing: `onboarding_progress` table, quick-start scan service, quick-win candidate scoring, onboarding checklist UI, first-run failure handling.
 
 This document describes how 143.dev gets new users from sign-up to their first shipped fix as fast as possible. The goal: value in under 10 minutes, "aha moment" in under 5.
 

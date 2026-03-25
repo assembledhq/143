@@ -1,6 +1,6 @@
 # Design: Security Architecture
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-03-19
+> **Status:** Partially Implemented | **Last reviewed:** 2026-03-25
 
 This document defines the security architecture for 143.dev. Because 143.dev runs arbitrary coding agents with full repo access inside sandboxes, security is a first-class concern — not an afterthought. This doc covers the threat model, defense layers, and implementation requirements.
 

@@ -1,6 +1,6 @@
 # Design: Repository Onboarding & GitHub Authentication
 
-> **Status:** Implemented | **Last reviewed:** 2026-03-19
+> **Status:** Implemented | **Last reviewed:** 2026-03-25
 
 This document describes how 143.dev connects to GitHub repositories, authenticates users, and manages repo access so that coding agents can clone, read, and push code.
 

@@ -2,7 +2,9 @@
 
 > A coding agent session that explores all connected integrations (GitHub, Linear, Notion, Slack, Sentry) via `143-tools` CLI calls, reads the codebase, and writes a structured, human-readable PM context file. Runs once at setup and refreshes every 1-2 weeks with suggested updates.
 
-**Status:** Not Started | **Last reviewed:** 2026-03-23
+> **Status:** Partially Implemented | **Last reviewed:** 2026-03-25
+>
+> **Implementation notes:** PMDocument model, store, handler, and migration exist. Missing: automated bootstrap agent session, context file writing automation, refresh scheduling, markdown CONTEXT.md processing.
 
 ---
 

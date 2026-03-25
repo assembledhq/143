@@ -1,8 +1,10 @@
 # 35 - PM Agent: Operator Workspace
 
-> Promote the PM agent to a first-class operator workspace alongside Sessions and Projects. Define how it differs from agents.md and design it as the place operators live.
+> **Status:** Partially Implemented | **Last reviewed:** 2026-03-25
+>
+> **Implementation notes:** Decision log model/API and PM handler exist. Missing: split-view workspace, autonomy model, PM as first-class nav item. Plans still exposed as concept.
 
-**Status**: Completed — all phases implemented
+> Promote the PM agent to a first-class operator workspace alongside Sessions and Projects. Define how it differs from agents.md and design it as the place operators live.
 
 ## Decision Summary
 
