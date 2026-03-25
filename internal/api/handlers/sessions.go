@@ -109,6 +109,15 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 		filters.RepositoryID = repoID
 	}
 
+	if userIDStr := r.URL.Query().Get("triggered_by_user_id"); userIDStr != "" {
+		userID, err := uuid.Parse(userIDStr)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_USER_ID", "invalid triggered_by_user_id")
+			return
+		}
+		filters.TriggeredByUserID = userID
+	}
+
 	runs, err := h.runStore.ListByOrg(r.Context(), orgID, filters)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list runs", err)
