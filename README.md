@@ -42,9 +42,9 @@ issues in → PM agent plans → coding agents execute → validate → ship PRs
 
 ## Built for production
 
-Agents run in gVisor-isolated containers with read-only filesystems and no network access beyond LLM APIs. PRs go through security scanning (gitleaks, semgrep), correctness checks, and your CI before a human sees them. After deploy, 143 measures actual impact on error rates and support volume — so you know if the fix worked, not just if it merged.
+Every agent runs in a gVisor-isolated container with a read-only filesystem and network access limited to LLM APIs and package registries. PRs go through security scanning (gitleaks, semgrep), correctness checks, and your CI before a human ever sees them. Your code never leaves infrastructure you control.
 
-No primary node. Postgres-backed job queue and leader election. Add capacity by running more copies of the same binary.
+The architecture is symmetric — there's no primary node. A Postgres-backed job queue handles scheduling and leader election, so scaling out means running more copies of the same binary behind a load balancer.
 
 ## Getting Started
 
