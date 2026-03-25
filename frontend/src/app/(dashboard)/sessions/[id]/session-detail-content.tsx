@@ -977,6 +977,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
                 size="icon"
                 variant="default"
                 className="h-8 w-8 shrink-0 rounded-lg"
+                title="Send message"
                 disabled={!message.trim() || !canSendMessage || sendMutation.isPending}
                 onClick={() => sendMutation.mutate()}
               >
