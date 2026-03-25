@@ -17,6 +17,7 @@ import {
   PanelRightClose,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { MarkdownContent } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
@@ -186,7 +187,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
             <CardTitle className="text-sm">Result</CardTitle>
           </CardHeader>
           <CardContent>
-            <p className="text-sm">{session.result_summary}</p>
+            <MarkdownContent content={session.result_summary} className="text-sm" />
           </CardContent>
         </Card>
       )}
