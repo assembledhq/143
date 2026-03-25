@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronRight, AlertTriangle, Wrench } from "lucide-react";
+import { ChevronRight, AlertTriangle, Wrench, FileCode2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { MarkdownContent } from "@/components/markdown";
 import type { TimelineEntry } from "@/lib/timeline";
@@ -190,12 +190,46 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
   );
 }
 
+function CodeDiffSummary({
+  added,
+  removed,
+  filesChanged,
+  onClick,
+}: {
+  added: number;
+  removed: number;
+  filesChanged: number;
+  onClick?: () => void;
+}) {
+  return (
+    <div className="flex justify-start">
+      <button
+        onClick={onClick}
+        className="flex items-center gap-3 rounded-lg border border-border bg-muted/50 px-4 py-2.5 text-sm hover:bg-muted transition-colors group text-left"
+      >
+        <FileCode2 className="h-4 w-4 text-muted-foreground shrink-0" />
+        <span className="font-mono text-xs flex items-center gap-1.5">
+          <span className="text-green-600 dark:text-green-400 font-semibold">+{added}</span>
+          <span className="text-muted-foreground/40">/</span>
+          <span className="text-red-600 dark:text-red-400 font-semibold">-{removed}</span>
+        </span>
+        <span className="text-muted-foreground text-xs">
+          {filesChanged} {filesChanged === 1 ? "file" : "files"} changed
+        </span>
+        <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/50 group-hover:text-muted-foreground transition-colors ml-1" />
+      </button>
+    </div>
+  );
+}
+
 interface ChatTimelineProps {
   entries: TimelineEntry[];
   isRunning: boolean;
+  diffStats?: { added: number; removed: number; files_changed: number } | null;
+  onDiffClick?: () => void;
 }
 
-export function ChatTimeline({ entries, isRunning }: ChatTimelineProps) {
+export function ChatTimeline({ entries, isRunning, diffStats, onDiffClick }: ChatTimelineProps) {
   // Separate visible entries (messages, tool groups, errors) from hidden logs.
   // Group consecutive hidden logs together so they share a single "Show more" toggle.
   const rendered: React.ReactNode[] = [];
@@ -245,6 +279,19 @@ export function ChatTimeline({ entries, isRunning }: ChatTimelineProps) {
   }
 
   flushHidden();
+
+  // Show diff summary after all timeline entries when changes exist
+  if (diffStats && (diffStats.added > 0 || diffStats.removed > 0)) {
+    rendered.push(
+      <CodeDiffSummary
+        key="diff-summary"
+        added={diffStats.added}
+        removed={diffStats.removed}
+        filesChanged={diffStats.files_changed}
+        onClick={onDiffClick}
+      />
+    );
+  }
 
   if (isRunning) {
     rendered.push(
