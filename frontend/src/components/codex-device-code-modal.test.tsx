@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor, act } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { server } from "@/test/mocks/server";
@@ -74,7 +74,6 @@ describe("CodexDeviceCodeModal", () => {
   });
 
   it("shows success state when auth completes", async () => {
-    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     server.use(
       http.post(INITIATE_URL, () => {
         return HttpResponse.json({ data: mockDeviceAuth });
@@ -86,23 +85,17 @@ describe("CodexDeviceCodeModal", () => {
 
     render(<CodexDeviceCodeModal onClose={vi.fn()} />);
 
-    // Wait for initiation to complete
     await waitFor(() => {
       expect(screen.getByText("ABCD-1234")).toBeInTheDocument();
     });
 
-    // Advance past the 3s polling interval
-    await act(async () => { vi.advanceTimersByTime(3100); });
-
+    // Wait for the real 3s polling interval to fire and resolve
     await waitFor(() => {
       expect(screen.getByText(/connected successfully/i)).toBeInTheDocument();
-    });
-
-    vi.useRealTimers();
+    }, { timeout: 5000 });
   });
 
   it("shows expired state and Try again button", async () => {
-    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     server.use(
       http.post(INITIATE_URL, () => {
         return HttpResponse.json({ data: mockDeviceAuth });
@@ -114,21 +107,16 @@ describe("CodexDeviceCodeModal", () => {
 
     render(<CodexDeviceCodeModal onClose={vi.fn()} />);
 
-    // Wait for initiation to complete
     await waitFor(() => {
       expect(screen.getByText("ABCD-1234")).toBeInTheDocument();
     });
 
-    // Advance past the 3s polling interval
-    await act(async () => { vi.advanceTimersByTime(3100); });
-
+    // Wait for the real 3s polling interval to fire and resolve
     await waitFor(() => {
       expect(screen.getByText(/code expired/i)).toBeInTheDocument();
-    });
+    }, { timeout: 5000 });
 
     expect(screen.getByRole("button", { name: /try again/i })).toBeInTheDocument();
-
-    vi.useRealTimers();
   });
 
   it("shows 'Copied' feedback after clicking Copy", async () => {
