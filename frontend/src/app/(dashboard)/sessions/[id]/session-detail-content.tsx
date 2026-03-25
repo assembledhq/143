@@ -7,6 +7,7 @@ import {
   AlertTriangle,
   ArrowUp,
   ExternalLink,
+  FileCode2,
   GitPullRequest,
   RefreshCw,
   CheckCircle2,
@@ -15,14 +16,24 @@ import {
   Square,
   PanelRightOpen,
   PanelRightClose,
+  ChevronDown,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { MarkdownContent } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatTimeline } from "@/components/chat-timeline";
 import { api } from "@/lib/api";
+import { AGENT_TYPE_OPTIONS } from "@/lib/model-constants";
 import { SSE_EVENT, addSSEListener } from "@/lib/sse";
 import { buildTimeline } from "@/lib/timeline";
 import { parseDiffStats } from "@/lib/diff-parser";
@@ -71,12 +82,6 @@ function formatDuration(startedAt?: string, completedAt?: string): string {
 function formatTimestamp(dateStr?: string): string {
   if (!dateStr) return "-";
   return new Date(dateStr).toLocaleString();
-}
-
-function confidenceColor(score: number): string {
-  if (score > 0.8) return "text-emerald-600 dark:text-emerald-400";
-  if (score >= 0.5) return "text-amber-600 dark:text-amber-400";
-  return "text-destructive";
 }
 
 const validationChecks: { key: string; label: string }[] = [
@@ -156,14 +161,6 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
                 )}
               </div>
             </div>
-            {session.confidence_score != null && (
-              <div>
-                <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Confidence</span>
-                <p className={`mt-1 font-medium ${confidenceColor(session.confidence_score)}`}>
-                  {(session.confidence_score * 100).toFixed(0)}%
-                </p>
-              </div>
-            )}
             <div>
               <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Duration</span>
               <p className="mt-1 font-medium">{formatDuration(session.started_at, session.completed_at)}</p>
@@ -186,7 +183,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
             <CardTitle className="text-sm">Result</CardTitle>
           </CardHeader>
           <CardContent>
-            <p className="text-sm">{session.result_summary}</p>
+            <MarkdownContent content={session.result_summary} className="text-sm" />
           </CardContent>
         </Card>
       )}
@@ -672,9 +669,17 @@ function ChangesTab({
         </div>
       ) : (
         <div className="flex-1 flex items-center justify-center py-12">
-          <p className="text-sm text-muted-foreground">
-            No diff available for this session.
-          </p>
+          <div className="text-center space-y-2 max-w-[280px]">
+            <FileCode2 className="h-8 w-8 text-muted-foreground/40 mx-auto" />
+            <p className="text-sm font-medium text-muted-foreground">
+              No changes yet
+            </p>
+            <p className="text-xs text-muted-foreground/60">
+              {session.status === "running" || session.status === "pending"
+                ? "Changes will appear here as the agent modifies files."
+                : "This session did not produce any file changes."}
+            </p>
+          </div>
         </div>
       )}
 
@@ -694,6 +699,7 @@ const BASE_SSE_RECONNECT_DELAY_MS = 1000;
 function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Session; sessionId: string; isActive: boolean; onDiffClick?: () => void }) {
   const queryClient = useQueryClient();
   const [message, setMessage] = useState("");
+  const [selectedModel, setSelectedModel] = useState("");
   const [streamedLogs, setStreamedLogs] = useState<SessionLog[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -708,6 +714,11 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
   // and "pending" (agent not started yet). The backend will reject statuses
   // it cannot handle, so this is safe to be permissive.
   const canSendMessage = session.status !== "skipped" && session.status !== "pending";
+
+  const availableModels = useMemo(() => {
+    const agentType = AGENT_TYPE_OPTIONS.find((a) => a.key === session.agent_type);
+    return agentType?.models ?? [];
+  }, [session.agent_type]);
 
   const { data: messagesData } = useQuery({
     queryKey: ["session", sessionId, "messages"],
@@ -838,7 +849,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
   }, [sessionId, apiBase, isActive, mergeLogs, queryClient]);
 
   const sendMutation = useMutation({
-    mutationFn: () => api.sessions.sendMessage(sessionId, message),
+    mutationFn: () => api.sessions.sendMessage(sessionId, message, undefined, selectedModel || undefined),
     onSuccess: () => {
       setMessage("");
       if (textareaRef.current) {
@@ -938,7 +949,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
 
       {/* Input bar */}
       <div className="border-t border-border p-3 bg-background">
-        <div className="relative flex items-end rounded-xl border border-border bg-muted/30 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring">
+        <div className="rounded-xl border border-border bg-muted/30 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring">
           <Textarea
             ref={textareaRef}
             value={message}
@@ -946,44 +957,61 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
             onKeyDown={handleKeyDown}
             placeholder={canSendMessage ? (isRunning ? "Send a message to the agent..." : "Send a follow-up message...") : "Session is not active"}
             disabled={!canSendMessage || sendMutation.isPending}
-            className="min-h-[44px] max-h-[200px] resize-none border-none bg-transparent shadow-none focus-visible:ring-0 pr-20"
+            className="min-h-[44px] max-h-[200px] resize-none border-none bg-transparent shadow-none focus-visible:ring-0"
           />
-          <div className="absolute right-2 bottom-2 flex items-center gap-1">
-            {canCreatePR && (
-              <Button
-                size="icon"
-                variant="ghost"
-                className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
-                title="Create PR"
-                disabled={createPRMutation.isPending}
-                onClick={() => createPRMutation.mutate()}
-              >
-                <GitPullRequest className="h-3.5 w-3.5" />
-              </Button>
+          <div className="flex items-center gap-1 px-2 pb-2">
+            {availableModels.length > 0 && (
+              <Select value={selectedModel} onValueChange={setSelectedModel}>
+                <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-[13px] text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
+                  <SelectValue placeholder="Default model" />
+                </SelectTrigger>
+                <SelectContent>
+                  {availableModels.map((model) => (
+                    <SelectItem key={model} value={model}>
+                      {model}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             )}
-            {isRunning ? (
-              <Button
-                size="icon"
-                variant="outline"
-                className="h-8 w-8 shrink-0 rounded-lg"
-                title="Stop session"
-                disabled={endMutation.isPending}
-                onClick={() => endMutation.mutate()}
-              >
-                <Square className="h-3 w-3" />
-              </Button>
-            ) : (
-              <Button
-                size="icon"
-                variant="default"
-                className="h-8 w-8 shrink-0 rounded-lg"
-                title="Send message"
-                disabled={!message.trim() || !canSendMessage || sendMutation.isPending}
-                onClick={() => sendMutation.mutate()}
-              >
-                <ArrowUp className="h-4 w-4" />
-              </Button>
-            )}
+
+            <div className="ml-auto flex items-center gap-1">
+              {canCreatePR && (
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
+                  title="Create PR"
+                  disabled={createPRMutation.isPending}
+                  onClick={() => createPRMutation.mutate()}
+                >
+                  <GitPullRequest className="h-3.5 w-3.5" />
+                </Button>
+              )}
+              {isRunning ? (
+                <Button
+                  size="icon"
+                  variant="outline"
+                  className="h-8 w-8 shrink-0 rounded-lg"
+                  title="Stop session"
+                  disabled={endMutation.isPending}
+                  onClick={() => endMutation.mutate()}
+                >
+                  <Square className="h-3 w-3" />
+                </Button>
+              ) : (
+                <Button
+                  size="icon"
+                  variant="default"
+                  className="h-8 w-8 shrink-0 rounded-lg"
+                  title="Send message"
+                  disabled={!message.trim() || !canSendMessage || sendMutation.isPending}
+                  onClick={() => sendMutation.mutate()}
+                >
+                  <ArrowUp className="h-4 w-4" />
+                </Button>
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -1069,9 +1097,9 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const status = statusConfig[session.status] || statusConfig.pending;
 
-  const detailTabs: { value: DetailTab; label: string }[] = [
+  const detailTabs: { value: DetailTab; label: string; count?: number }[] = [
     { value: "overview", label: "Overview" },
-    { value: "changes", label: "Changes" },
+    { value: "changes", label: "Changes", count: diffStats?.filesChanged },
     { value: "validation", label: "Validation" },
   ];
 
@@ -1093,6 +1121,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 <DiffStatsBadge
                   added={diffStats.added}
                   removed={diffStats.removed}
+                  filesChanged={diffStats.filesChanged}
                   onClick={openChangesTab}
                 />
               )}
@@ -1160,7 +1189,19 @@ export function SessionDetailContent({ id }: { id: string }) {
                 )}
                 onClick={() => setDetailTab(tab.value)}
               >
-                {tab.label}
+                <span className="inline-flex items-center gap-1.5">
+                  {tab.label}
+                  {tab.count != null && tab.count > 0 && (
+                    <span className={cn(
+                      "inline-flex items-center justify-center min-w-[18px] h-[18px] rounded-full px-1 text-[10px] font-semibold leading-none",
+                      detailTab === tab.value
+                        ? "bg-primary/15 text-primary"
+                        : "bg-muted text-muted-foreground"
+                    )}>
+                      {tab.count}
+                    </span>
+                  )}
+                </span>
                 {detailTab === tab.value && (
                   <span className="absolute bottom-0 left-3 right-3 h-0.5 bg-[image:var(--gradient-primary)] rounded-full" />
                 )}

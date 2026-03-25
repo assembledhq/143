@@ -63,11 +63,10 @@ describe('SessionDetailPage', () => {
     expect(screen.getAllByText(/Claude Code/).length).toBeGreaterThanOrEqual(1);
   });
 
-  it('shows overview tab with status and confidence in detail panel', async () => {
+  it('shows overview tab with status in detail panel', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
     expect(screen.getAllByText('Completed').length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText('92%')).toBeInTheDocument();
   });
 
   it('shows detail panel tabs for Overview, Changes, Validation', async () => {
@@ -379,7 +378,7 @@ describe('SessionDetailPage', () => {
     await screen.findAllByText('Fixed TypeError by adding null check');
 
     const user = userEvent.setup();
-    const changesTab = screen.getByRole('button', { name: 'Changes' });
+    const changesTab = screen.getByRole('button', { name: /^Changes/ });
     await user.click(changesTab);
 
     // Pass selector should be visible with "All changes" label
@@ -505,6 +504,115 @@ describe('SessionDetailPage', () => {
     await waitFor(() => {
       expect(createPRCalled).toBe(true);
     });
+  });
+
+  it('shows file count badge on Changes tab when session has diff', async () => {
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);\ndiff --git a/src/new.ts b/src/new.ts\n--- /dev/null\n+++ b/src/new.ts\n@@ -0,0 +1 @@\n+export const x = 1;',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    // Changes tab should show file count badge
+    const changesTab = screen.getByRole('button', { name: /^Changes/ });
+    expect(changesTab).toHaveTextContent('Changes2');
+  });
+
+  it('does not show file count badge on Changes tab when session has no diff', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const changesTab = screen.getByRole('button', { name: 'Changes' });
+    expect(changesTab).toHaveTextContent('Changes');
+    expect(changesTab).not.toHaveTextContent(/\d/);
+  });
+
+  it('shows diff stats badge with file count in header when session has diff', async () => {
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    // Header and footer should show clickable diff stats badges with file count
+    const viewChangesButtons = screen.getAllByTitle('View changes');
+    expect(viewChangesButtons.length).toBeGreaterThanOrEqual(1);
+    expect(viewChangesButtons[0]).toHaveTextContent('1 file');
+    expect(viewChangesButtons[0]).toHaveTextContent('+1');
+  });
+
+  it('clicking diff stats badge in header opens Changes tab', async () => {
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const user = userEvent.setup();
+    const viewChangesButtons = screen.getAllByTitle('View changes');
+    await user.click(viewChangesButtons[0]);
+
+    // Should show the diff content in the Changes tab
+    expect(await screen.findByText('src/app.ts')).toBeInTheDocument();
+  });
+
+  it('shows contextual empty state for completed session with no changes', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const user = userEvent.setup();
+    const changesTab = screen.getByRole('button', { name: 'Changes' });
+    await user.click(changesTab);
+
+    expect(await screen.findByText('No changes yet')).toBeInTheDocument();
+    expect(screen.getByText('This session did not produce any file changes.')).toBeInTheDocument();
+  });
+
+  it('shows contextual empty state for running session with no changes', async () => {
+    const runningSession: Session = {
+      ...mockSessions[0],
+      status: 'running',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: runningSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const user = userEvent.setup();
+    const changesTab = screen.getByRole('button', { name: 'Changes' });
+    await user.click(changesTab);
+
+    expect(await screen.findByText('No changes yet')).toBeInTheDocument();
+    expect(screen.getByText('Changes will appear here as the agent modifies files.')).toBeInTheDocument();
   });
 
   it('shows stop button instead of send button when session is running', async () => {
