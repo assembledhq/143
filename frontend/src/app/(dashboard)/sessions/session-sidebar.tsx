@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { Plus, Search } from "lucide-react";
+import { ChevronDown, Plus, Search, Users } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
 import { useMemo, useState } from "react";
@@ -9,6 +9,14 @@ import { useQueryState, parseAsString } from "nuqs";
 import { cn, formatTimeAgo, sessionTitle } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { api } from "@/lib/api";
 import { useAuth } from "@/hooks/use-auth";
 import { queryKeys } from "@/lib/query-keys";
@@ -114,9 +122,13 @@ export function SessionSidebar() {
   const currentFilter = activeFilter ?? "all";
   const statusParam = filterToStatusParam(currentFilter);
 
-  // User filter: default to "mine" when not set, "all" shows everyone
+  // User filter: "mine" (default), "all" (everyone), or a specific user ID
   const currentUserFilter = userFilter ?? "mine";
-  const triggeredByUserId = currentUserFilter === "mine" && user ? user.id : undefined;
+  const triggeredByUserId = currentUserFilter === "all"
+    ? undefined
+    : currentUserFilter === "mine" && user
+      ? user.id
+      : currentUserFilter !== "mine" ? currentUserFilter : undefined;
 
   // Fetch all sessions (for tab badge counts and the "all" view).
   // Also fetches a filtered query when a tab is active — see sessions-page-content
@@ -135,7 +147,13 @@ export function SessionSidebar() {
     enabled: !!statusParam,
   });
 
+  const { data: membersData } = useQuery({
+    queryKey: ["team", "members"],
+    queryFn: () => api.team.listMembers(),
+  });
+
   const allSessions = useMemo(() => allData?.data ?? [], [allData?.data]);
+  const members = useMemo(() => membersData?.data ?? [], [membersData?.data]);
 
   const needsAttentionSessions = allSessions.filter((s) => needsAttentionSet.has(s.status));
   const workingSessions = allSessions.filter((s) => workingSet.has(s.status));
@@ -182,31 +200,52 @@ export function SessionSidebar() {
           New session
         </Link>
 
-        {/* User filter toggle */}
-        <div className="flex items-center gap-0.5 rounded-md border border-border bg-muted/50 p-0.5">
-          <button
-            className={cn(
-              "flex-1 px-2.5 py-1 text-[12px] font-medium rounded transition-colors text-center",
-              currentUserFilter === "mine"
-                ? "bg-background text-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground/80"
+        {/* User filter dropdown */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button className="flex items-center justify-between w-full px-2.5 py-1.5 text-[12px] font-medium rounded-md border border-border bg-muted/50 hover:bg-muted transition-colors text-foreground">
+              <span className="flex items-center gap-1.5">
+                <Users className="h-3.5 w-3.5 text-muted-foreground" />
+                {currentUserFilter === "mine" ? "Mine" : currentUserFilter === "all" ? "Everyone" : members.find(m => m.id === currentUserFilter)?.name.split(" ")[0] ?? "User"}
+              </span>
+              <ChevronDown className="h-3 w-3 text-muted-foreground" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-48">
+            <DropdownMenuItem
+              className={cn("text-[12px]", currentUserFilter === "mine" && "font-semibold")}
+              onClick={() => setUserFilter(null)}
+            >
+              Mine
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className={cn("text-[12px]", currentUserFilter === "all" && "font-semibold")}
+              onClick={() => setUserFilter("all")}
+            >
+              Everyone
+            </DropdownMenuItem>
+            {members.length > 0 && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuLabel className="text-[11px] text-muted-foreground font-normal">
+                  Team members
+                </DropdownMenuLabel>
+                {members.map((member) => (
+                  <DropdownMenuItem
+                    key={member.id}
+                    className={cn("text-[12px]", currentUserFilter === member.id && "font-semibold")}
+                    onClick={() => setUserFilter(member.id === user?.id ? null : member.id)}
+                  >
+                    {member.name}
+                    {member.id === user?.id && (
+                      <span className="text-[10px] text-muted-foreground ml-1">(you)</span>
+                    )}
+                  </DropdownMenuItem>
+                ))}
+              </>
             )}
-            onClick={() => setUserFilter(null)}
-          >
-            Mine
-          </button>
-          <button
-            className={cn(
-              "flex-1 px-2.5 py-1 text-[12px] font-medium rounded transition-colors text-center",
-              currentUserFilter === "all"
-                ? "bg-background text-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground/80"
-            )}
-            onClick={() => setUserFilter("all")}
-          >
-            Everyone
-          </button>
-        </div>
+          </DropdownMenuContent>
+        </DropdownMenu>
 
         {/* Filter tabs */}
         <Tabs

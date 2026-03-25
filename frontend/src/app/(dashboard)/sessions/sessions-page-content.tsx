@@ -9,7 +9,7 @@ import {
   type ColumnDef,
   type SortingState,
 } from "@tanstack/react-table";
-import { ArrowUpDown, CalendarClock, Plus } from "lucide-react";
+import { ArrowUpDown, CalendarClock, ChevronDown, Plus, Users } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
@@ -19,6 +19,14 @@ import { PMStatusBanner } from "@/components/pm/pm-status-banner";
 import { DecisionsView } from "@/components/pm/decisions-view";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Table,
   TableBody,
@@ -217,9 +225,13 @@ export function SessionsPageContent() {
   const showDecisions = currentFilter === "decisions";
   const statusParam = filterToStatusParam(currentFilter);
 
-  // User filter: default to "mine" when not set, "all" shows everyone
+  // User filter: "mine" (default), "all" (everyone), or a specific user ID
   const currentUserFilter = userFilter ?? "mine";
-  const triggeredByUserId = currentUserFilter === "mine" && user ? user.id : undefined;
+  const triggeredByUserId = currentUserFilter === "all"
+    ? undefined
+    : currentUserFilter === "mine" && user
+      ? user.id
+      : currentUserFilter !== "mine" ? currentUserFilter : undefined;
 
   // Fetch all sessions (for tab badge counts and the "all" view).
   // We also fetch a filtered query below when a tab is active. The two queries
@@ -318,29 +330,50 @@ export function SessionsPageContent() {
           })}
         </div>
 
-        {/* User filter toggle */}
-        <div className="flex items-center gap-0.5 mr-2 rounded-md border border-border bg-muted/50 p-0.5">
-          <button
-            className={`px-2.5 py-1 text-[12px] font-medium rounded transition-colors ${
-              currentUserFilter === "mine"
-                ? "bg-background text-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground/80"
-            }`}
-            onClick={() => setUserFilter(null)}
-          >
-            Mine
-          </button>
-          <button
-            className={`px-2.5 py-1 text-[12px] font-medium rounded transition-colors ${
-              currentUserFilter === "all"
-                ? "bg-background text-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground/80"
-            }`}
-            onClick={() => setUserFilter("all")}
-          >
-            Everyone
-          </button>
-        </div>
+        {/* User filter dropdown */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button className="flex items-center gap-1.5 mr-2 px-2.5 py-1.5 text-[12px] font-medium rounded-md border border-border bg-muted/50 hover:bg-muted transition-colors text-foreground">
+              <Users className="h-3.5 w-3.5 text-muted-foreground" />
+              {currentUserFilter === "mine" ? "Mine" : currentUserFilter === "all" ? "Everyone" : members.find(m => m.id === currentUserFilter)?.name.split(" ")[0] ?? "User"}
+              <ChevronDown className="h-3 w-3 text-muted-foreground" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-48">
+            <DropdownMenuItem
+              className={`text-[12px] ${currentUserFilter === "mine" ? "font-semibold" : ""}`}
+              onClick={() => setUserFilter(null)}
+            >
+              Mine
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className={`text-[12px] ${currentUserFilter === "all" ? "font-semibold" : ""}`}
+              onClick={() => setUserFilter("all")}
+            >
+              Everyone
+            </DropdownMenuItem>
+            {members.length > 0 && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuLabel className="text-[11px] text-muted-foreground font-normal">
+                  Team members
+                </DropdownMenuLabel>
+                {members.map((member) => (
+                  <DropdownMenuItem
+                    key={member.id}
+                    className={`text-[12px] ${currentUserFilter === member.id ? "font-semibold" : ""}`}
+                    onClick={() => setUserFilter(member.id === user?.id ? null : member.id)}
+                  >
+                    {member.name}
+                    {member.id === user?.id && (
+                      <span className="text-[10px] text-muted-foreground ml-1">(you)</span>
+                    )}
+                  </DropdownMenuItem>
+                ))}
+              </>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
 
       {/* ── Decisions tab ──────────────────────────────────────────── */}
