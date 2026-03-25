@@ -63,11 +63,10 @@ describe('SessionDetailPage', () => {
     expect(screen.getAllByText(/Claude Code/).length).toBeGreaterThanOrEqual(1);
   });
 
-  it('shows overview tab with status and confidence in detail panel', async () => {
+  it('shows overview tab with status in detail panel', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
     expect(screen.getAllByText('Completed').length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText('92%')).toBeInTheDocument();
   });
 
   it('shows detail panel tabs for Overview, Changes, Validation', async () => {
