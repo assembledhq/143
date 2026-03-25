@@ -6,6 +6,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   ArrowUp,
+  ClipboardList,
   ExternalLink,
   FileCode2,
   GitPullRequest,
@@ -690,6 +691,7 @@ const BASE_SSE_RECONNECT_DELAY_MS = 1000;
 function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Session; sessionId: string; isActive: boolean; onDiffClick?: () => void }) {
   const queryClient = useQueryClient();
   const [message, setMessage] = useState("");
+  const [planMode, setPlanMode] = useState(false);
   const [streamedLogs, setStreamedLogs] = useState<SessionLog[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -697,6 +699,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
   const reconnectAttempts = useRef(0);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
+  const isClaudeCode = session.agent_type === "claude_code";
 
   const isIdle = session.status === "idle";
   const isRunning = session.status === "running";
@@ -834,9 +837,14 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
   }, [sessionId, apiBase, isActive, mergeLogs, queryClient]);
 
   const sendMutation = useMutation({
-    mutationFn: () => api.sessions.sendMessage(sessionId, message),
+    mutationFn: (opts?: { planMode?: boolean; overrideMessage?: string }) => {
+      const msg = opts?.overrideMessage ?? message;
+      const isPlan = opts?.planMode ?? planMode;
+      return api.sessions.sendMessage(sessionId, msg, undefined, isPlan);
+    },
     onSuccess: () => {
       setMessage("");
+      setPlanMode(false);
       if (textareaRef.current) {
         textareaRef.current.style.height = "auto";
       }
@@ -891,12 +899,29 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
     }
   }, [timelineEntries.length]);
 
+  // Plan mode callbacks for the timeline approve/adjust buttons.
+  const handleApprovePlan = useCallback((_turnNumber: number) => {
+    if (!canSendMessage || sendMutation.isPending) return;
+    sendMutation.mutate({ planMode: false, overrideMessage: "The plan looks good. Please proceed with executing the implementation plan above. Make all the changes as described." });
+  }, [canSendMessage, sendMutation]);
+
+  const handleAdjustPlan = useCallback((_turnNumber: number) => {
+    setMessage("Please adjust the plan: ");
+    setPlanMode(false);
+    textareaRef.current?.focus();
+  }, []);
+
   function handleKeyDown(e: React.KeyboardEvent) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       if (message.trim() && canSendMessage && !sendMutation.isPending) {
         sendMutation.mutate();
       }
+    }
+    // Shift+Tab toggles plan mode for Claude Code sessions.
+    if (e.key === "Tab" && e.shiftKey && isClaudeCode && canSendMessage) {
+      e.preventDefault();
+      setPlanMode((prev) => !prev);
     }
   }
 
@@ -909,7 +934,14 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
             No activity yet. The session is processing its initial turn.
           </div>
         )}
-        <ChatTimeline entries={timelineEntries} isRunning={isRunning} diffStats={session.diff_stats} onDiffClick={onDiffClick} />
+        <ChatTimeline
+          entries={timelineEntries}
+          isRunning={isRunning}
+          diffStats={session.diff_stats}
+          onDiffClick={onDiffClick}
+          onApprovePlan={canSendMessage ? handleApprovePlan : undefined}
+          onAdjustPlan={canSendMessage ? handleAdjustPlan : undefined}
+        />
       </div>
 
       {/* PR queued indicator */}
@@ -934,25 +966,65 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
 
       {/* Input bar */}
       <div className="border-t border-border p-3 bg-background">
+        {/* Plan mode indicator */}
+        {planMode && (
+          <div className="flex items-center gap-2 mb-2 px-1">
+            <div className="flex items-center gap-1.5 rounded-full bg-amber-500/10 border border-amber-200 dark:border-amber-800/50 px-2.5 py-1">
+              <ClipboardList className="h-3 w-3 text-amber-600 dark:text-amber-400" />
+              <span className="text-[11px] font-medium text-amber-700 dark:text-amber-400">Plan Mode</span>
+              <button
+                onClick={() => setPlanMode(false)}
+                className="ml-1 text-amber-600/60 hover:text-amber-600 dark:text-amber-400/60 dark:hover:text-amber-400 text-xs"
+                title="Exit plan mode"
+              >
+                &times;
+              </button>
+            </div>
+            <span className="text-[11px] text-muted-foreground">Agent will create a plan for review before making changes</span>
+          </div>
+        )}
         <div className="flex items-end gap-2">
-          <Textarea
-            ref={textareaRef}
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder={canSendMessage ? (isRunning ? "Send a message to the agent..." : "Send a follow-up message...") : "Session is not active"}
-            disabled={!canSendMessage || sendMutation.isPending}
-            className="min-h-[44px] max-h-[200px] resize-none"
-          />
+          <div className="flex-1 flex flex-col gap-1">
+            <Textarea
+              ref={textareaRef}
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder={
+                !canSendMessage
+                  ? "Session is not active"
+                  : planMode
+                  ? "Describe what you want to plan..."
+                  : isRunning
+                  ? "Send a message to the agent..."
+                  : "Send a follow-up message..."
+              }
+              disabled={!canSendMessage || sendMutation.isPending}
+              className="min-h-[44px] max-h-[200px] resize-none"
+            />
+            {isClaudeCode && canSendMessage && !planMode && (
+              <div className="flex items-center gap-1 px-1">
+                <button
+                  onClick={() => setPlanMode(true)}
+                  className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors py-0.5"
+                  title="Switch to plan mode (Shift+Tab)"
+                >
+                  <ClipboardList className="h-3 w-3" />
+                  <span>Plan mode</span>
+                </button>
+              </div>
+            )}
+          </div>
           <div className="flex flex-col gap-1">
             <Button
               size="icon"
-              variant="default"
-              className="h-8 w-8 shrink-0"
+              variant={planMode ? "outline" : "default"}
+              className={cn("h-8 w-8 shrink-0", planMode && "border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/30")}
               disabled={!message.trim() || !canSendMessage || sendMutation.isPending}
               onClick={() => sendMutation.mutate()}
+              title={planMode ? "Send plan request" : "Send message"}
             >
-              <ArrowUp className="h-4 w-4" />
+              {planMode ? <ClipboardList className="h-4 w-4" /> : <ArrowUp className="h-4 w-4" />}
             </Button>
             {isIdle && (
               <Button
