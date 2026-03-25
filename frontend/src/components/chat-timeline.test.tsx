@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ChatTimeline, formatMessageTime } from "./chat-timeline";
 import type { TimelineEntry } from "@/lib/timeline";
 import type { SessionMessage, SessionLog } from "@/lib/types";
@@ -116,5 +116,62 @@ describe("ChatTimeline", () => {
   it("does not show working indicator when not running", () => {
     render(<ChatTimeline entries={[]} isRunning={false} />);
     expect(screen.queryByText("Agent is working...")).not.toBeInTheDocument();
+  });
+
+  it("shows diff summary when diffStats has changes", () => {
+    render(
+      <ChatTimeline
+        entries={[]}
+        isRunning={false}
+        diffStats={{ added: 42, removed: 7, files_changed: 3 }}
+      />
+    );
+    expect(screen.getByText("+42")).toBeInTheDocument();
+    expect(screen.getByText("-7")).toBeInTheDocument();
+    expect(screen.getByText("3 files changed")).toBeInTheDocument();
+  });
+
+  it("does not show diff summary when diffStats is null", () => {
+    render(
+      <ChatTimeline entries={[]} isRunning={false} diffStats={null} />
+    );
+    expect(screen.queryByText(/files? changed/)).not.toBeInTheDocument();
+  });
+
+  it("does not show diff summary when added and removed are both zero", () => {
+    render(
+      <ChatTimeline
+        entries={[]}
+        isRunning={false}
+        diffStats={{ added: 0, removed: 0, files_changed: 0 }}
+      />
+    );
+    expect(screen.queryByText(/files? changed/)).not.toBeInTheDocument();
+  });
+
+  it("calls onDiffClick when diff summary is clicked", async () => {
+    const onClick = vi.fn();
+    render(
+      <ChatTimeline
+        entries={[]}
+        isRunning={false}
+        diffStats={{ added: 10, removed: 5, files_changed: 2 }}
+        onDiffClick={onClick}
+      />
+    );
+
+    await userEvent.click(screen.getByText("2 files changed"));
+    expect(onClick).toHaveBeenCalledOnce();
+  });
+
+  it("uses singular 'file' when only one file changed", () => {
+    render(
+      <ChatTimeline
+        entries={[]}
+        isRunning={false}
+        diffStats={{ added: 1, removed: 0, files_changed: 1 }}
+      />
+    );
+    expect(screen.getByText("1 file changed")).toBeInTheDocument();
   });
 });
