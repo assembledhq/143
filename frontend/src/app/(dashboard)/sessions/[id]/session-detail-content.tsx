@@ -74,12 +74,6 @@ function formatTimestamp(dateStr?: string): string {
   return new Date(dateStr).toLocaleString();
 }
 
-function confidenceColor(score: number): string {
-  if (score > 0.8) return "text-emerald-600 dark:text-emerald-400";
-  if (score >= 0.5) return "text-amber-600 dark:text-amber-400";
-  return "text-destructive";
-}
-
 const validationChecks: { key: string; label: string }[] = [
   { key: "direction_check", label: "Direction check" },
   { key: "correctness_check", label: "Correctness check" },
@@ -157,14 +151,6 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
                 )}
               </div>
             </div>
-            {session.confidence_score != null && (
-              <div>
-                <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Confidence</span>
-                <p className={`mt-1 font-medium ${confidenceColor(session.confidence_score)}`}>
-                  {(session.confidence_score * 100).toFixed(0)}%
-                </p>
-              </div>
-            )}
             <div>
               <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Duration</span>
               <p className="mt-1 font-medium">{formatDuration(session.started_at, session.completed_at)}</p>
