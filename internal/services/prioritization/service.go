@@ -78,7 +78,7 @@ const (
 	defaultWeightSeverity       = 0.25
 	defaultWeightRecency        = 0.20
 	defaultWeightRevenueRisk    = 0.20
-	defaultMaxConcurrentRuns    = 3
+	defaultMaxConcurrentRuns    = 10
 	defaultMinPriorityThreshold = 30.0
 
 	// recencyHalfLifeHours is the half-life in hours for recency decay (1 week).
