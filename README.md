@@ -40,25 +40,15 @@ issues in → PM agent plans → coding agents execute → validate → ship PRs
 6. **Observe** — measure post-deploy impact on error rates and support volume
 7. **Learn** — extract review feedback into conventions, feed back into future runs
 
-## Key Features
+## Built for production
 
-**Sandboxed execution with gVisor** — every agent run happens in an isolated container with gVisor syscall-level enforcement, read-only root filesystem, dropped capabilities, and network restricted to LLM APIs and package registries. Graceful fallback to standard Docker in local dev.
+**Sandboxed execution** — every agent runs in a gVisor-isolated container with a read-only root filesystem, dropped capabilities, and network restricted to LLM APIs and package registries. Your code never leaves an environment you control.
 
-**6-stage validation pipeline** — direction check, correctness check, quality check, security scanning (gitleaks + semgrep), regression tests, and CI integration. Fail-fast ordering minimizes wasted tokens.
+**Validated before it ships** — PRs go through direction, correctness, quality, and security checks (gitleaks + semgrep) before a human ever sees them. Fail-fast ordering so bad fixes get caught early and cheaply.
 
-**Smart routing & complexity estimation** — before spinning up an agent, 143 estimates issue complexity (trivial → very complex) and routes accordingly. An admin-configurable aggressiveness slider controls which tiers the system attempts autonomously.
+**Measures what matters** — after a fix deploys, 143 tracks the actual impact on error rates and support volume. You see whether the fix worked, not just whether it merged.
 
-**Interactive sessions** — create free-form sessions without waiting for a PM cycle. Each agent turn auto-snapshots sandbox state so you can review, send follow-ups, or resume locally via CLI.
-
-**Multi-agent sessions** — run multiple agents in parallel on the same codebase: compare Claude vs Codex output, or split backend and frontend work across independent threads.
-
-**Post-deploy impact measurement** — after a fix ships, 143 measures the actual impact on Sentry error rates, support ticket volume, and custom metrics. Closes the loop from issue to outcome.
-
-**Distributed, no primary node** — symmetric architecture where every node runs the same binary. Leader election via Postgres advisory locks, job distribution via `SELECT ... FOR UPDATE SKIP LOCKED`. No external coordination service needed.
-
-**Dashboard credential management** — all API keys (LLM providers, GitHub, Sentry, Linear) are configured through the UI with per-org isolation and AES-256-GCM encryption at rest. No env vars for secrets in production.
-
-**Prompt overrides & tuning** — customize agent system prompts per repo, issue type, or execution phase. Insert-only versioned config preserves full change history with point-in-time rollback.
+**Scales without coordination** — symmetric architecture with no primary node. Postgres-backed job queue and leader election. Add capacity by running more instances of the same binary.
 
 ## Getting Started
 
