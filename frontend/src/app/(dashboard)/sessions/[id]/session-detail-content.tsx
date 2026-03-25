@@ -938,7 +938,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
 
       {/* Input bar */}
       <div className="border-t border-border p-3 bg-background">
-        <div className="flex items-end gap-2">
+        <div className="relative flex items-end rounded-xl border border-border bg-muted/30 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring">
           <Textarea
             ref={textareaRef}
             value={message}
@@ -946,40 +946,41 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
             onKeyDown={handleKeyDown}
             placeholder={canSendMessage ? (isRunning ? "Send a message to the agent..." : "Send a follow-up message...") : "Session is not active"}
             disabled={!canSendMessage || sendMutation.isPending}
-            className="min-h-[44px] max-h-[200px] resize-none"
+            className="min-h-[44px] max-h-[200px] resize-none border-none bg-transparent shadow-none focus-visible:ring-0 pr-20"
           />
-          <div className="flex flex-col gap-1">
-            <Button
-              size="icon"
-              variant="default"
-              className="h-8 w-8 shrink-0"
-              disabled={!message.trim() || !canSendMessage || sendMutation.isPending}
-              onClick={() => sendMutation.mutate()}
-            >
-              <ArrowUp className="h-4 w-4" />
-            </Button>
-            {isIdle && (
-              <Button
-                size="icon"
-                variant="outline"
-                className="h-8 w-8 shrink-0"
-                title="End session"
-                disabled={endMutation.isPending}
-                onClick={() => endMutation.mutate()}
-              >
-                <Square className="h-3 w-3" />
-              </Button>
-            )}
+          <div className="absolute right-2 bottom-2 flex items-center gap-1">
             {canCreatePR && (
               <Button
                 size="icon"
-                variant="outline"
-                className="h-8 w-8 shrink-0"
+                variant="ghost"
+                className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
                 title="Create PR"
                 disabled={createPRMutation.isPending}
                 onClick={() => createPRMutation.mutate()}
               >
                 <GitPullRequest className="h-3.5 w-3.5" />
+              </Button>
+            )}
+            {isRunning ? (
+              <Button
+                size="icon"
+                variant="outline"
+                className="h-8 w-8 shrink-0 rounded-lg"
+                title="Stop session"
+                disabled={endMutation.isPending}
+                onClick={() => endMutation.mutate()}
+              >
+                <Square className="h-3 w-3" />
+              </Button>
+            ) : (
+              <Button
+                size="icon"
+                variant="default"
+                className="h-8 w-8 shrink-0 rounded-lg"
+                disabled={!message.trim() || !canSendMessage || sendMutation.isPending}
+                onClick={() => sendMutation.mutate()}
+              >
+                <ArrowUp className="h-4 w-4" />
               </Button>
             )}
           </div>
