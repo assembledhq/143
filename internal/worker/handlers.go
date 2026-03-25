@@ -562,7 +562,13 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			Str("org_id", orgID.String()).
 			Msg("starting run_agent job")
 
-		return services.Orchestrator.RunAgent(ctx, &run)
+		if err := services.Orchestrator.RunAgent(ctx, &run); err != nil {
+			if errors.Is(err, agent.ErrConcurrencyLimit) {
+				return &RetryableError{Err: err}
+			}
+			return err
+		}
+		return nil
 	}
 }
 

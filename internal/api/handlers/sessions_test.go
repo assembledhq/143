@@ -1261,6 +1261,12 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 				runID := uuid.New()
 				jobID := uuid.New()
 
+				// Mock org settings lookup
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+						AddRow(orgID, "test-org", nil, now, now))
+
 				// Mock issue upsert (16 named args)
 				mock.ExpectQuery("INSERT INTO issues").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -1277,6 +1283,11 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
+
+				// Mock concurrency check
+				mock.ExpectQuery("SELECT count").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
 				// Mock job enqueue (6 named args)
 				mock.ExpectQuery("INSERT INTO jobs").
@@ -1321,6 +1332,11 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 						pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
 
+				// Mock concurrency check
+				mock.ExpectQuery("SELECT count").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+
 				// Mock job enqueue
 				mock.ExpectQuery("INSERT INTO jobs").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -1345,23 +1361,41 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 			expectedBody: "INVALID_BODY",
 		},
 		{
-			name:         "returns bad request for invalid agent type",
-			body:         `{"message":"Fix bug","agent_type":"invalid"}`,
-			setupMock:    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {},
+			name: "returns bad request for invalid agent type",
+			body: `{"message":"Fix bug","agent_type":"invalid"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+						AddRow(orgID, "test-org", nil, now, now))
+			},
 			expectedCode: http.StatusBadRequest,
 			expectedBody: "INVALID_AGENT_TYPE",
 		},
 		{
-			name:         "returns bad request for invalid autonomy level",
-			body:         `{"message":"Fix bug","agent_type":"claude_code","autonomy_level":"chaos"}`,
-			setupMock:    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {},
+			name: "returns bad request for invalid autonomy level",
+			body: `{"message":"Fix bug","agent_type":"claude_code","autonomy_level":"chaos"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+						AddRow(orgID, "test-org", nil, now, now))
+			},
 			expectedCode: http.StatusBadRequest,
 			expectedBody: "INVALID_AUTONOMY_LEVEL",
 		},
 		{
-			name:         "returns bad request for invalid token mode",
-			body:         `{"message":"Fix bug","agent_type":"claude_code","token_mode":"extreme"}`,
-			setupMock:    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {},
+			name: "returns bad request for invalid token mode",
+			body: `{"message":"Fix bug","agent_type":"claude_code","token_mode":"extreme"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+						AddRow(orgID, "test-org", nil, now, now))
+			},
 			expectedCode: http.StatusBadRequest,
 			expectedBody: "INVALID_TOKEN_MODE",
 		},
@@ -2064,6 +2098,12 @@ func TestSessionHandler_CreateManual_WithLLMTitle(t *testing.T) {
 	runID := uuid.New()
 	jobID := uuid.New()
 
+	// Mock org settings lookup
+	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+			AddRow(orgID, "test-org", nil, now, now))
+
 	// Mock issue upsert
 	mock.ExpectQuery("INSERT INTO issues").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -2080,6 +2120,11 @@ func TestSessionHandler_CreateManual_WithLLMTitle(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
+
+	// Mock concurrency check
+	mock.ExpectQuery("SELECT count").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
 	// Mock job enqueue
 	mock.ExpectQuery("INSERT INTO jobs").
@@ -2145,6 +2190,12 @@ func TestSessionHandler_CreateManual_LLMError_Returns500(t *testing.T) {
 	runID := uuid.New()
 	jobID := uuid.New()
 
+	// Mock org settings lookup
+	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+			AddRow(orgID, "test-org", nil, now, now))
+
 	// Mock issue upsert
 	mock.ExpectQuery("INSERT INTO issues").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -2161,6 +2212,11 @@ func TestSessionHandler_CreateManual_LLMError_Returns500(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
+
+	// Mock concurrency check
+	mock.ExpectQuery("SELECT count").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
 	// Mock job enqueue
 	mock.ExpectQuery("INSERT INTO jobs").

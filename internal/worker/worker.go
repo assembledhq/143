@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -13,6 +14,16 @@ import (
 )
 
 type JobHandler func(ctx context.Context, jobType string, payload json.RawMessage) error
+
+// RetryableError wraps an error to indicate that the job should be retried
+// without consuming an attempt. This is useful for transient conditions like
+// concurrency limits where the job will succeed once capacity is available.
+type RetryableError struct {
+	Err error
+}
+
+func (e *RetryableError) Error() string { return e.Err.Error() }
+func (e *RetryableError) Unwrap() error { return e.Err }
 
 type jobContextKey string
 
@@ -136,6 +147,14 @@ func (w *Worker) poll(ctx context.Context) {
 	handlerCtx := withJobOrgID(ctx, orgID)
 	w.logger.Info().Str("job_id", jobID.String()).Str("job_type", jobType).Msg("processing job")
 	if err := handler(handlerCtx, jobType, payload); err != nil {
+		// RetryableError means we should retry without consuming an attempt
+		// (e.g. concurrency limit reached — the job will succeed once a slot opens).
+		var retryable *RetryableError
+		if errors.As(err, &retryable) {
+			w.logger.Info().Err(err).Str("job_id", jobID.String()).Msg("job deferred (retryable)")
+			w.retryJob(ctx, jobID, err.Error(), attempts) // don't increment attempt count
+			return
+		}
 		w.logger.Error().Err(err).Str("job_id", jobID.String()).Msg("job failed")
 		if attempts+1 >= maxAttempts {
 			w.deadLetterJob(ctx, jobID, err.Error())
