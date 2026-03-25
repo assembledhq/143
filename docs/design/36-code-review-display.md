@@ -1,6 +1,8 @@
 # 36 - Code Review Display
 
-> **Status:** Proposed | **Last reviewed:** 2026-03-19
+> **Status:** Partially Implemented | **Last reviewed:** 2026-03-25
+>
+> **Implementation notes:** Backend infrastructure complete: `diff_stats`, `diff_history` columns, `session_review_comments` table, review comments API/handler. Missing: syntax highlighting, file tree panel, inline comments UI, rich diff viewer components.
 
 > A rich, GitHub-quality code review experience embedded in each session, with inline commenting that feeds directly into the next agent pass.
 

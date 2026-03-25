@@ -1,6 +1,6 @@
 # 27 — CSRF Protection
 
-> **Status:** Implemented | **Last reviewed:** 2026-03-19
+> **Status:** Implemented | **Last reviewed:** 2026-03-25
 
 ## Background
 
