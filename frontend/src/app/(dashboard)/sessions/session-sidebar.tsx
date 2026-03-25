@@ -10,6 +10,7 @@ import { cn, formatTimeAgo, sessionTitle } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
+import { useAuth } from "@/hooks/use-auth";
 import { queryKeys } from "@/lib/query-keys";
 import { useOptimisticSessions, type OptimisticSession } from "@/contexts/optimistic-sessions";
 import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
@@ -101,9 +102,11 @@ function OptimisticSessionRow({ session }: { session: OptimisticSession }) {
 export function SessionSidebar() {
   const params = useParams();
   const pathname = usePathname();
+  const { user } = useAuth();
   const selectedId = params?.id as string | undefined;
   const [search, setSearch] = useState("");
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
+  const [userFilter, setUserFilter] = useQueryState("user", parseAsString);
   const [repo] = useQueryState("repo");
 
   const { optimisticSessions } = useOptimisticSessions();
@@ -111,19 +114,23 @@ export function SessionSidebar() {
   const currentFilter = activeFilter ?? "all";
   const statusParam = filterToStatusParam(currentFilter);
 
+  // User filter: default to "mine" when not set, "all" shows everyone
+  const currentUserFilter = userFilter ?? "mine";
+  const triggeredByUserId = currentUserFilter === "mine" && user ? user.id : undefined;
+
   // Fetch all sessions (for tab badge counts and the "all" view).
   // Also fetches a filtered query when a tab is active — see sessions-page-content
   // for the rationale on the double-fetch tradeoff.
   const { data: allData, isLoading } = useQuery({
-    queryKey: queryKeys.sessions.list(repo),
-    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined }),
+    queryKey: [...queryKeys.sessions.list(repo), triggeredByUserId],
+    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, triggered_by_user_id: triggeredByUserId }),
     refetchInterval: 10000,
   });
 
   // Fetch filtered sessions from the backend when a specific tab is selected.
   const { data: filteredData } = useQuery({
-    queryKey: [...queryKeys.sessions.list(repo), statusParam],
-    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, status: statusParam }),
+    queryKey: [...queryKeys.sessions.list(repo), statusParam, triggeredByUserId],
+    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, status: statusParam, triggered_by_user_id: triggeredByUserId }),
     refetchInterval: 10000,
     enabled: !!statusParam,
   });
@@ -174,6 +181,32 @@ export function SessionSidebar() {
           <Plus className="h-4 w-4" />
           New session
         </Link>
+
+        {/* User filter toggle */}
+        <div className="flex items-center gap-0.5 rounded-md border border-border bg-muted/50 p-0.5">
+          <button
+            className={cn(
+              "flex-1 px-2.5 py-1 text-[12px] font-medium rounded transition-colors text-center",
+              currentUserFilter === "mine"
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground/80"
+            )}
+            onClick={() => setUserFilter(null)}
+          >
+            Mine
+          </button>
+          <button
+            className={cn(
+              "flex-1 px-2.5 py-1 text-[12px] font-medium rounded transition-colors text-center",
+              currentUserFilter === "all"
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground/80"
+            )}
+            onClick={() => setUserFilter("all")}
+          >
+            Everyone
+          </button>
+        </div>
 
         {/* Filter tabs */}
         <Tabs

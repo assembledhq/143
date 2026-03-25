@@ -30,6 +30,7 @@ import {
 import { api } from "@/lib/api";
 import { formatTimeAgo, sessionTitle } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
+import { useAuth } from "@/hooks/use-auth";
 import type { Session, User } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
@@ -206,13 +207,19 @@ function buildColumns(members: User[]): ColumnDef<Session>[] {
 
 export function SessionsPageContent() {
   const router = useRouter();
+  const { user } = useAuth();
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
+  const [userFilter, setUserFilter] = useQueryState("user", parseAsString);
   const [repo] = useQueryState("repo");
   const [sorting, setSorting] = useState<SortingState>([]);
 
   const currentFilter = activeFilter ?? "all";
   const showDecisions = currentFilter === "decisions";
   const statusParam = filterToStatusParam(currentFilter);
+
+  // User filter: default to "mine" when not set, "all" shows everyone
+  const currentUserFilter = userFilter ?? "mine";
+  const triggeredByUserId = currentUserFilter === "mine" && user ? user.id : undefined;
 
   // Fetch all sessions (for tab badge counts and the "all" view).
   // We also fetch a filtered query below when a tab is active. The two queries
@@ -222,15 +229,15 @@ export function SessionsPageContent() {
   // the limit. If polling cost becomes a concern, consider a dedicated
   // /sessions/counts endpoint.
   const { data: allData, isLoading, error } = useQuery({
-    queryKey: ["sessions", repo],
-    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined }),
+    queryKey: ["sessions", repo, triggeredByUserId],
+    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, triggered_by_user_id: triggeredByUserId }),
     refetchInterval: 10000,
   });
 
   // Fetch filtered sessions from the backend when a specific tab is selected.
   const { data: filteredData } = useQuery({
-    queryKey: ["sessions", repo, statusParam],
-    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, status: statusParam }),
+    queryKey: ["sessions", repo, statusParam, triggeredByUserId],
+    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, status: statusParam, triggered_by_user_id: triggeredByUserId }),
     refetchInterval: 10000,
     enabled: !!statusParam,
   });
@@ -276,38 +283,64 @@ export function SessionsPageContent() {
       <PMStatusBanner hasActivePlanSession={workingSessions.length > 0} />
 
       {/* ── Tab filters ────────────────────────────────────────────── */}
-      <div className="flex items-center gap-0 border-b border-border">
-        {filterTabs.map((tab) => {
-          const isSelected = currentFilter === tab.value;
-          const count =
-            tab.value === "needs_attention" ? needsAttentionSessions.length
-            : tab.value === "working" ? workingSessions.length
-            : 0;
-          return (
-            <button
-              key={tab.value}
-              className={`relative px-3 py-2.5 text-[13px] font-medium transition-colors duration-150 ${
-                isSelected
-                  ? "text-foreground"
-                  : "text-muted-foreground hover:text-foreground/80"
-              }`}
-              onClick={() => setActiveFilter(tab.value === "all" ? null : tab.value)}
-            >
-              <span className="flex items-center gap-1.5">
-                {tab.label}
-                {count > 0 && (
-                  <span className={`rounded-full text-white text-[10px] leading-none px-1.5 py-0.5 font-normal ${
-                    tab.value === "needs_attention" ? "bg-orange-500"
-                    : "bg-primary"
-                  }`}>{count}</span>
+      <div className="flex items-center justify-between border-b border-border">
+        <div className="flex items-center gap-0">
+          {filterTabs.map((tab) => {
+            const isSelected = currentFilter === tab.value;
+            const count =
+              tab.value === "needs_attention" ? needsAttentionSessions.length
+              : tab.value === "working" ? workingSessions.length
+              : 0;
+            return (
+              <button
+                key={tab.value}
+                className={`relative px-3 py-2.5 text-[13px] font-medium transition-colors duration-150 ${
+                  isSelected
+                    ? "text-foreground"
+                    : "text-muted-foreground hover:text-foreground/80"
+                }`}
+                onClick={() => setActiveFilter(tab.value === "all" ? null : tab.value)}
+              >
+                <span className="flex items-center gap-1.5">
+                  {tab.label}
+                  {count > 0 && (
+                    <span className={`rounded-full text-white text-[10px] leading-none px-1.5 py-0.5 font-normal ${
+                      tab.value === "needs_attention" ? "bg-orange-500"
+                      : "bg-primary"
+                    }`}>{count}</span>
+                  )}
+                </span>
+                {isSelected && (
+                  <span className="absolute bottom-0 left-3 right-3 h-0.5 bg-[image:var(--gradient-primary)] rounded-full" />
                 )}
-              </span>
-              {isSelected && (
-                <span className="absolute bottom-0 left-3 right-3 h-0.5 bg-[image:var(--gradient-primary)] rounded-full" />
-              )}
-            </button>
-          );
-        })}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* User filter toggle */}
+        <div className="flex items-center gap-0.5 mr-2 rounded-md border border-border bg-muted/50 p-0.5">
+          <button
+            className={`px-2.5 py-1 text-[12px] font-medium rounded transition-colors ${
+              currentUserFilter === "mine"
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground/80"
+            }`}
+            onClick={() => setUserFilter(null)}
+          >
+            Mine
+          </button>
+          <button
+            className={`px-2.5 py-1 text-[12px] font-medium rounded transition-colors ${
+              currentUserFilter === "all"
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground/80"
+            }`}
+            onClick={() => setUserFilter("all")}
+          >
+            Everyone
+          </button>
+        </div>
       </div>
 
       {/* ── Decisions tab ──────────────────────────────────────────── */}

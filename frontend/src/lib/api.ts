@@ -172,12 +172,13 @@ export const api = {
       del(`/api/v1/pm/documents/${docId}`),
   },
   sessions: {
-    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string }) => {
+    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; triggered_by_user_id?: string }) => {
       const searchParams = new URLSearchParams();
       if (params?.status) searchParams.set('status', params.status);
       if (params?.cursor) searchParams.set('cursor', params.cursor);
       if (params?.limit) searchParams.set('limit', String(params.limit));
       if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
+      if (params?.triggered_by_user_id) searchParams.set('triggered_by_user_id', params.triggered_by_user_id);
       const qs = searchParams.toString();
       return get<import('./types').ListResponse<import('./types').Session>>(`/api/v1/sessions${qs ? `?${qs}` : ''}`);
     },
