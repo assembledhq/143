@@ -1,6 +1,8 @@
 # 30 - PM Agent UX Elevation
 
-> **Status:** Implemented | **Last reviewed:** 2026-03-19
+> **Status:** Partially Implemented | **Last reviewed:** 2026-03-25
+>
+> **Implementation notes:** Core project infrastructure exists. Missing: PM agent status banner, context stats API, file identification from path:line patterns, sidebar status dot.
 
 > Surface the PM agent's intelligence through the existing Sessions page. Add projects as a grouping concept.
 

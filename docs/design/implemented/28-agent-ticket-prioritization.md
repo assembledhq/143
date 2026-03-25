@@ -1,6 +1,6 @@
 # Design: AI Product Manager Agent
 
-> **Status:** Implemented | **Last reviewed:** 2026-03-19
+> **Status:** Implemented | **Last reviewed:** 2026-03-25
 
 This document describes how to restructure 143.dev so that the **main loop** is an LLM-powered Product Manager (PM) agent that runs on a batch schedule, analyzes all accumulated Sentry errors and Linear tickets, reasons about what matters most, and delegates work to coding agents.
 

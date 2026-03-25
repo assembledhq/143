@@ -1,6 +1,8 @@
 # Design: Auto-Closing Feedback Loops
 
-> **Status:** Implemented | **Last reviewed:** 2026-03-19
+> **Status:** Not Implemented | **Last reviewed:** 2026-03-25
+>
+> **Implementation notes:** No `tuning_config_versions` or `tuning_decisions` tables, no tuning service, no API endpoints for tuning configuration, no `tuning_autonomy` fields in org settings.
 
 This document describes how 143.dev automatically closes its own feedback loops — turning high-signal data (PR review comments, failure classifications, complexity predictions, post-deploy impact) into configuration improvements without requiring human action. Every automated decision is logged, versioned with insert-only snapshots, and rollback-able to any point in time.
 
