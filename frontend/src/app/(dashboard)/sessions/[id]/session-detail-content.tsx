@@ -7,6 +7,7 @@ import {
   AlertTriangle,
   ArrowUp,
   ExternalLink,
+  FileCode2,
   GitPullRequest,
   RefreshCw,
   CheckCircle2,
@@ -672,9 +673,17 @@ function ChangesTab({
         </div>
       ) : (
         <div className="flex-1 flex items-center justify-center py-12">
-          <p className="text-sm text-muted-foreground">
-            No diff available for this session.
-          </p>
+          <div className="text-center space-y-2 max-w-[280px]">
+            <FileCode2 className="h-8 w-8 text-muted-foreground/40 mx-auto" />
+            <p className="text-sm font-medium text-muted-foreground">
+              No changes yet
+            </p>
+            <p className="text-xs text-muted-foreground/60">
+              {session.status === "running" || session.status === "pending"
+                ? "Changes will appear here as the agent modifies files."
+                : "This session did not produce any file changes."}
+            </p>
+          </div>
         </div>
       )}
 
@@ -1067,9 +1076,9 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const status = statusConfig[session.status] || statusConfig.pending;
 
-  const detailTabs: { value: DetailTab; label: string }[] = [
+  const detailTabs: { value: DetailTab; label: string; count?: number }[] = [
     { value: "overview", label: "Overview" },
-    { value: "changes", label: "Changes" },
+    { value: "changes", label: "Changes", count: diffStats?.filesChanged },
     { value: "validation", label: "Validation" },
   ];
 
@@ -1091,6 +1100,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 <DiffStatsBadge
                   added={diffStats.added}
                   removed={diffStats.removed}
+                  filesChanged={diffStats.filesChanged}
                   onClick={openChangesTab}
                 />
               )}
@@ -1158,7 +1168,19 @@ export function SessionDetailContent({ id }: { id: string }) {
                 )}
                 onClick={() => setDetailTab(tab.value)}
               >
-                {tab.label}
+                <span className="inline-flex items-center gap-1.5">
+                  {tab.label}
+                  {tab.count != null && tab.count > 0 && (
+                    <span className={cn(
+                      "inline-flex items-center justify-center min-w-[18px] h-[18px] rounded-full px-1 text-[10px] font-semibold leading-none",
+                      detailTab === tab.value
+                        ? "bg-primary/15 text-primary"
+                        : "bg-muted text-muted-foreground"
+                    )}>
+                      {tab.count}
+                    </span>
+                  )}
+                </span>
                 {detailTab === tab.value && (
                   <span className="absolute bottom-0 left-3 right-3 h-0.5 bg-[image:var(--gradient-primary)] rounded-full" />
                 )}
