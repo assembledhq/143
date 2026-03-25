@@ -277,10 +277,10 @@ func TestOrgSize_PMScheduleHours(t *testing.T) {
 func TestOrgSize_MaxConcurrentRuns(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, 3, OrgSizeSmall.MaxConcurrentRuns())
-	require.Equal(t, 5, OrgSizeMedium.MaxConcurrentRuns())
-	require.Equal(t, 10, OrgSizeLarge.MaxConcurrentRuns())
-	require.Equal(t, 20, OrgSizeEnterprise.MaxConcurrentRuns())
+	require.Equal(t, 5, OrgSizeSmall.MaxConcurrentRuns())
+	require.Equal(t, 10, OrgSizeMedium.MaxConcurrentRuns())
+	require.Equal(t, 15, OrgSizeLarge.MaxConcurrentRuns())
+	require.Equal(t, 25, OrgSizeEnterprise.MaxConcurrentRuns())
 }
 
 func TestContextLimits_WithDefaults(t *testing.T) {
@@ -325,7 +325,7 @@ func TestParseOrgSettings_OrgSizeDefaults(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, OrgSizeLarge, s.OrgSize)
-	require.Equal(t, 10, s.MaxConcurrentRuns, "large org should default to 10 concurrent runs")
+	require.Equal(t, 15, s.MaxConcurrentRuns, "large org should default to 15 concurrent runs")
 	require.Equal(t, 2, s.PMScheduleHours, "large org should default to 2-hour PM schedule")
 	require.Equal(t, 300, s.ContextLimits.MaxOpenIssues, "large org should see 300 open issues")
 	require.Equal(t, 100_000, s.ContextLimits.PMMaxTokens, "large org should get 100k PM tokens")
@@ -362,7 +362,7 @@ func TestParseOrgSettings_DefaultOrgSizeIsMedium(t *testing.T) {
 	require.NoError(t, err)
 
 	// With no org_size set, defaults should match medium profile (backward compatible)
-	require.Equal(t, 5, s.MaxConcurrentRuns, "default should match medium concurrent runs")
+	require.Equal(t, 10, s.MaxConcurrentRuns, "default should match medium concurrent runs")
 	require.Equal(t, 4, s.PMScheduleHours, "default should match medium PM schedule")
 	require.Equal(t, 100, s.ContextLimits.MaxOpenIssues, "default should match medium open issues")
 	require.Equal(t, 50_000, s.ContextLimits.PMMaxTokens, "default should match medium PM tokens")

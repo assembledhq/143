@@ -22,8 +22,13 @@ import (
 )
 
 const (
-	defaultMaxConcurrent = 3
+	defaultMaxConcurrent = 10
 )
+
+// ErrConcurrencyLimit is returned when an org has reached its maximum
+// number of concurrent agent runs. Callers can check for this with
+// errors.Is to handle it as a transient/retryable condition.
+var ErrConcurrencyLimit = fmt.Errorf("concurrency limit reached")
 
 // GitHubTokenProvider abstracts retrieving a GitHub App installation token.
 type GitHubTokenProvider interface {
@@ -905,7 +910,7 @@ func (o *Orchestrator) checkConcurrency(ctx context.Context, orgID uuid.UUID) er
 		return fmt.Errorf("count running runs: %w", err)
 	}
 	if count >= o.maxConcurrent {
-		return fmt.Errorf("concurrency limit reached: %d/%d runs active", count, o.maxConcurrent)
+		return fmt.Errorf("%w: %d/%d runs active", ErrConcurrencyLimit, count, o.maxConcurrent)
 	}
 	return nil
 }

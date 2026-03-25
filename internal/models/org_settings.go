@@ -209,7 +209,7 @@ type PriorityWeights struct {
 const (
 	DefaultAutonomyLevel        AutonomyLevel = AutonomyLevelAutoSimple
 	DefaultAggressiveness                     = 5
-	DefaultMaxConcurrentRuns                  = 5
+	DefaultMaxConcurrentRuns                  = 10
 	DefaultAgentAutonomy                      = AgentAutonomyAggressive
 	DefaultMinPriorityThreshold               = 30.0
 	DefaultDefaultAgentType     AgentType     = AgentTypeCodex
@@ -310,13 +310,13 @@ func (s OrgSize) PMScheduleHours() int {
 func (s OrgSize) MaxConcurrentRuns() int {
 	switch s {
 	case OrgSizeSmall:
-		return 3
-	case OrgSizeLarge:
-		return 10
-	case OrgSizeEnterprise:
-		return 20
-	default: // medium
 		return 5
+	case OrgSizeLarge:
+		return 15
+	case OrgSizeEnterprise:
+		return 25
+	default: // medium
+		return 10
 	}
 }
 

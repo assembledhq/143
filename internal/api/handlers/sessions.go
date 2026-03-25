@@ -796,17 +796,18 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		targetBranch = &b
 	}
 
+	org, err := h.orgStore.GetByID(r.Context(), orgID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "DEFAULT_AGENT_LOOKUP_FAILED", "failed to load organization settings", err)
+		return
+	}
+	orgSettings, parseErr := models.ParseOrgSettings(org.Settings)
+	if parseErr != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(parseErr).Msg("failed to parse org settings, using defaults")
+	}
+
 	agentType := models.AgentType(body.AgentType)
 	if agentType == "" {
-		org, err := h.orgStore.GetByID(r.Context(), orgID)
-		if err != nil {
-			writeError(w, r, http.StatusInternalServerError, "DEFAULT_AGENT_LOOKUP_FAILED", "failed to load organization settings", err)
-			return
-		}
-		orgSettings, parseErr := models.ParseOrgSettings(org.Settings)
-		if parseErr != nil {
-			zerolog.Ctx(r.Context()).Warn().Err(parseErr).Msg("failed to parse org settings, using defaults")
-		}
 		agentType = orgSettings.DefaultAgentType
 		if agentType == "" {
 			agentType = models.DefaultDefaultAgentType
@@ -898,6 +899,22 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.runStore.Create(r.Context(), session); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create manual session", err)
+		return
+	}
+
+	// Check concurrency before enqueuing so the user gets immediate feedback.
+	runningCount, err := h.runStore.CountRunningByOrg(r.Context(), orgID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CONCURRENCY_CHECK_FAILED", "failed to check running sessions", err)
+		return
+	}
+	maxConcurrent := orgSettings.MaxConcurrentRuns
+	if maxConcurrent <= 0 {
+		maxConcurrent = models.DefaultMaxConcurrentRuns
+	}
+	if runningCount >= maxConcurrent {
+		writeError(w, r, http.StatusTooManyRequests, "CONCURRENCY_LIMIT",
+			fmt.Sprintf("Too many sessions running (%d/%d). Please wait for a session to finish before starting a new one.", runningCount, maxConcurrent))
 		return
 	}
 
