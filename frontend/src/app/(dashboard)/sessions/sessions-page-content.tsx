@@ -30,6 +30,8 @@ import {
 import { api } from "@/lib/api";
 import { formatTimeAgo, sessionTitle } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
+import { useSessionUserFilter } from "@/hooks/use-session-user-filter";
+import { SessionUserFilterDropdown } from "./session-user-filter-dropdown";
 import type { Session, User } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
@@ -206,6 +208,7 @@ function buildColumns(members: User[]): ColumnDef<Session>[] {
 
 export function SessionsPageContent() {
   const router = useRouter();
+  const { currentUserFilter, triggeredByUserId, user, setUserFilter } = useSessionUserFilter();
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
   const [repo] = useQueryState("repo");
   const [sorting, setSorting] = useState<SortingState>([]);
@@ -222,15 +225,15 @@ export function SessionsPageContent() {
   // the limit. If polling cost becomes a concern, consider a dedicated
   // /sessions/counts endpoint.
   const { data: allData, isLoading, error } = useQuery({
-    queryKey: ["sessions", repo],
-    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined }),
+    queryKey: ["sessions", repo, triggeredByUserId],
+    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, triggered_by_user_id: triggeredByUserId }),
     refetchInterval: 10000,
   });
 
   // Fetch filtered sessions from the backend when a specific tab is selected.
   const { data: filteredData } = useQuery({
-    queryKey: ["sessions", repo, statusParam],
-    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, status: statusParam }),
+    queryKey: ["sessions", repo, statusParam, triggeredByUserId],
+    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, status: statusParam, triggered_by_user_id: triggeredByUserId }),
     refetchInterval: 10000,
     enabled: !!statusParam,
   });
@@ -276,38 +279,50 @@ export function SessionsPageContent() {
       <PMStatusBanner hasActivePlanSession={workingSessions.length > 0} />
 
       {/* ── Tab filters ────────────────────────────────────────────── */}
-      <div className="flex items-center gap-0 border-b border-border">
-        {filterTabs.map((tab) => {
-          const isSelected = currentFilter === tab.value;
-          const count =
-            tab.value === "needs_attention" ? needsAttentionSessions.length
-            : tab.value === "working" ? workingSessions.length
-            : 0;
-          return (
-            <button
-              key={tab.value}
-              className={`relative px-3 py-2.5 text-[13px] font-medium transition-colors duration-150 ${
-                isSelected
-                  ? "text-foreground"
-                  : "text-muted-foreground hover:text-foreground/80"
-              }`}
-              onClick={() => setActiveFilter(tab.value === "all" ? null : tab.value)}
-            >
-              <span className="flex items-center gap-1.5">
-                {tab.label}
-                {count > 0 && (
-                  <span className={`rounded-full text-white text-[10px] leading-none px-1.5 py-0.5 font-normal ${
-                    tab.value === "needs_attention" ? "bg-orange-500"
-                    : "bg-primary"
-                  }`}>{count}</span>
+      <div className="flex items-center justify-between border-b border-border">
+        <div className="flex items-center gap-0">
+          {filterTabs.map((tab) => {
+            const isSelected = currentFilter === tab.value;
+            const count =
+              tab.value === "needs_attention" ? needsAttentionSessions.length
+              : tab.value === "working" ? workingSessions.length
+              : 0;
+            return (
+              <button
+                key={tab.value}
+                className={`relative px-3 py-2.5 text-[13px] font-medium transition-colors duration-150 ${
+                  isSelected
+                    ? "text-foreground"
+                    : "text-muted-foreground hover:text-foreground/80"
+                }`}
+                onClick={() => setActiveFilter(tab.value === "all" ? null : tab.value)}
+              >
+                <span className="flex items-center gap-1.5">
+                  {tab.label}
+                  {count > 0 && (
+                    <span className={`rounded-full text-white text-[10px] leading-none px-1.5 py-0.5 font-normal ${
+                      tab.value === "needs_attention" ? "bg-orange-500"
+                      : "bg-primary"
+                    }`}>{count}</span>
+                  )}
+                </span>
+                {isSelected && (
+                  <span className="absolute bottom-0 left-3 right-3 h-0.5 bg-[image:var(--gradient-primary)] rounded-full" />
                 )}
-              </span>
-              {isSelected && (
-                <span className="absolute bottom-0 left-3 right-3 h-0.5 bg-[image:var(--gradient-primary)] rounded-full" />
-              )}
-            </button>
-          );
-        })}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* User filter dropdown */}
+        <SessionUserFilterDropdown
+          currentUserFilter={currentUserFilter}
+          members={members}
+          currentUser={user}
+          onFilterChange={setUserFilter}
+          align="end"
+          className="mr-2"
+        />
       </div>
 
       {/* ── Decisions tab ──────────────────────────────────────────── */}

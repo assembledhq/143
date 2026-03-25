@@ -27,11 +27,12 @@ func NewSessionStore(db DBTX) *SessionStore {
 }
 
 type SessionFilters struct {
-	Statuses     []models.SessionStatus // When non-empty, filter to sessions matching any of these statuses.
-	Limit        int
-	Cursor       string
-	AdHocOnly    bool      // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
-	RepositoryID uuid.UUID // When non-zero, filter sessions by repository via issues table.
+	Statuses           []models.SessionStatus // When non-empty, filter to sessions matching any of these statuses.
+	Limit              int
+	Cursor             string
+	AdHocOnly          bool      // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
+	RepositoryID       uuid.UUID // When non-zero, filter sessions by repository via issues table.
+	TriggeredByUserID  uuid.UUID // When non-zero, filter sessions to those triggered by this user.
 }
 
 // sessionSelectColumns is used for single-session queries where we want all fields.
@@ -119,6 +120,10 @@ func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters S
 		}
 		query += ` AND status = ANY(@statuses)`
 		args["statuses"] = statusStrings
+	}
+	if filters.TriggeredByUserID != uuid.Nil {
+		query += ` AND triggered_by_user_id = @triggered_by_user_id`
+		args["triggered_by_user_id"] = filters.TriggeredByUserID
 	}
 	if filters.AdHocOnly {
 		query += ` AND pm_plan_id IS NULL`
