@@ -691,7 +691,7 @@ function ChangesTab({
 const MAX_SSE_RECONNECT_ATTEMPTS = 5;
 const BASE_SSE_RECONNECT_DELAY_MS = 1000;
 
-function ChatPanel({ session, sessionId, isActive }: { session: Session; sessionId: string; isActive: boolean }) {
+function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Session; sessionId: string; isActive: boolean; onDiffClick?: () => void }) {
   const queryClient = useQueryClient();
   const [message, setMessage] = useState("");
   const [streamedLogs, setStreamedLogs] = useState<SessionLog[]>([]);
@@ -913,7 +913,7 @@ function ChatPanel({ session, sessionId, isActive }: { session: Session; session
             No activity yet. The session is processing its initial turn.
           </div>
         )}
-        <ChatTimeline entries={timelineEntries} isRunning={isRunning} />
+        <ChatTimeline entries={timelineEntries} isRunning={isRunning} diffStats={session.diff_stats} onDiffClick={onDiffClick} />
       </div>
 
       {/* PR queued indicator */}
@@ -1120,7 +1120,7 @@ export function SessionDetailContent({ id }: { id: string }) {
 
         {/* Chat panel */}
         <div className="flex-1 min-h-0">
-          <ChatPanel session={session} sessionId={id} isActive={isActive} />
+          <ChatPanel session={session} sessionId={id} isActive={isActive} onDiffClick={openChangesTab} />
         </div>
 
         {/* Session footer bar */}
