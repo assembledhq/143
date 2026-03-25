@@ -42,13 +42,9 @@ issues in → PM agent plans → coding agents execute → validate → ship PRs
 
 ## Built for production
 
-**Sandboxed execution** — every agent runs in a gVisor-isolated container with a read-only root filesystem, dropped capabilities, and network restricted to LLM APIs and package registries. Your code never leaves an environment you control.
+Agents run in gVisor-isolated containers with read-only filesystems and no network access beyond LLM APIs. PRs go through security scanning (gitleaks, semgrep), correctness checks, and your CI before a human sees them. After deploy, 143 measures actual impact on error rates and support volume — so you know if the fix worked, not just if it merged.
 
-**Validated before it ships** — PRs go through direction, correctness, quality, and security checks (gitleaks + semgrep) before a human ever sees them. Fail-fast ordering so bad fixes get caught early and cheaply.
-
-**Measures what matters** — after a fix deploys, 143 tracks the actual impact on error rates and support volume. You see whether the fix worked, not just whether it merged.
-
-**Scales without coordination** — symmetric architecture with no primary node. Postgres-backed job queue and leader election. Add capacity by running more instances of the same binary.
+No primary node. Postgres-backed job queue and leader election. Add capacity by running more copies of the same binary.
 
 ## Getting Started
 
