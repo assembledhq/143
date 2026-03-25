@@ -16,15 +16,24 @@ import {
   Square,
   PanelRightOpen,
   PanelRightClose,
+  ChevronDown,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { MarkdownContent } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatTimeline } from "@/components/chat-timeline";
 import { api } from "@/lib/api";
+import { AGENT_TYPE_OPTIONS } from "@/lib/model-constants";
 import { SSE_EVENT, addSSEListener } from "@/lib/sse";
 import { buildTimeline } from "@/lib/timeline";
 import { parseDiffStats } from "@/lib/diff-parser";
@@ -690,6 +699,7 @@ const BASE_SSE_RECONNECT_DELAY_MS = 1000;
 function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Session; sessionId: string; isActive: boolean; onDiffClick?: () => void }) {
   const queryClient = useQueryClient();
   const [message, setMessage] = useState("");
+  const [selectedModel, setSelectedModel] = useState("");
   const [streamedLogs, setStreamedLogs] = useState<SessionLog[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -704,6 +714,11 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
   // and "pending" (agent not started yet). The backend will reject statuses
   // it cannot handle, so this is safe to be permissive.
   const canSendMessage = session.status !== "skipped" && session.status !== "pending";
+
+  const availableModels = useMemo(() => {
+    const agentType = AGENT_TYPE_OPTIONS.find((a) => a.key === session.agent_type);
+    return agentType?.models ?? [];
+  }, [session.agent_type]);
 
   const { data: messagesData } = useQuery({
     queryKey: ["session", sessionId, "messages"],
@@ -834,7 +849,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
   }, [sessionId, apiBase, isActive, mergeLogs, queryClient]);
 
   const sendMutation = useMutation({
-    mutationFn: () => api.sessions.sendMessage(sessionId, message),
+    mutationFn: () => api.sessions.sendMessage(sessionId, message, undefined, selectedModel || undefined),
     onSuccess: () => {
       setMessage("");
       if (textareaRef.current) {
@@ -934,7 +949,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
 
       {/* Input bar */}
       <div className="border-t border-border p-3 bg-background">
-        <div className="flex items-end gap-2">
+        <div className="rounded-xl border border-border bg-muted/30 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring">
           <Textarea
             ref={textareaRef}
             value={message}
@@ -942,42 +957,61 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
             onKeyDown={handleKeyDown}
             placeholder={canSendMessage ? (isRunning ? "Send a message to the agent..." : "Send a follow-up message...") : "Session is not active"}
             disabled={!canSendMessage || sendMutation.isPending}
-            className="min-h-[44px] max-h-[200px] resize-none"
+            className="min-h-[44px] max-h-[200px] resize-none border-none bg-transparent shadow-none focus-visible:ring-0"
           />
-          <div className="flex flex-col gap-1">
-            <Button
-              size="icon"
-              variant="default"
-              className="h-8 w-8 shrink-0"
-              disabled={!message.trim() || !canSendMessage || sendMutation.isPending}
-              onClick={() => sendMutation.mutate()}
-            >
-              <ArrowUp className="h-4 w-4" />
-            </Button>
-            {isIdle && (
-              <Button
-                size="icon"
-                variant="outline"
-                className="h-8 w-8 shrink-0"
-                title="End session"
-                disabled={endMutation.isPending}
-                onClick={() => endMutation.mutate()}
-              >
-                <Square className="h-3 w-3" />
-              </Button>
+          <div className="flex items-center gap-1 px-2 pb-2">
+            {availableModels.length > 0 && (
+              <Select value={selectedModel} onValueChange={setSelectedModel}>
+                <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-[13px] text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
+                  <SelectValue placeholder="Default model" />
+                </SelectTrigger>
+                <SelectContent>
+                  {availableModels.map((model) => (
+                    <SelectItem key={model} value={model}>
+                      {model}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             )}
-            {canCreatePR && (
-              <Button
-                size="icon"
-                variant="outline"
-                className="h-8 w-8 shrink-0"
-                title="Create PR"
-                disabled={createPRMutation.isPending}
-                onClick={() => createPRMutation.mutate()}
-              >
-                <GitPullRequest className="h-3.5 w-3.5" />
-              </Button>
-            )}
+
+            <div className="ml-auto flex items-center gap-1">
+              {canCreatePR && (
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
+                  title="Create PR"
+                  disabled={createPRMutation.isPending}
+                  onClick={() => createPRMutation.mutate()}
+                >
+                  <GitPullRequest className="h-3.5 w-3.5" />
+                </Button>
+              )}
+              {isRunning ? (
+                <Button
+                  size="icon"
+                  variant="outline"
+                  className="h-8 w-8 shrink-0 rounded-lg"
+                  title="Stop session"
+                  disabled={endMutation.isPending}
+                  onClick={() => endMutation.mutate()}
+                >
+                  <Square className="h-3 w-3" />
+                </Button>
+              ) : (
+                <Button
+                  size="icon"
+                  variant="default"
+                  className="h-8 w-8 shrink-0 rounded-lg"
+                  title="Send message"
+                  disabled={!message.trim() || !canSendMessage || sendMutation.isPending}
+                  onClick={() => sendMutation.mutate()}
+                >
+                  <ArrowUp className="h-4 w-4" />
+                </Button>
+              )}
+            </div>
           </div>
         </div>
       </div>
