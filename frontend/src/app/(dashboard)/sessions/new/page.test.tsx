@@ -132,11 +132,11 @@ describe('ManualSessionCreatePage', () => {
     await user.type(screen.getByPlaceholderText('https://example.com/screenshot.png'), 'https://example.com/test.png');
     await user.click(screen.getByRole('button', { name: 'Add' }));
 
-    expect(screen.getByText('https://example.com/test.png')).toBeInTheDocument();
+    expect(screen.getByAltText('test.png')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'Remove https://example.com/test.png' }));
+    await user.click(screen.getByRole('button', { name: 'Remove test.png' }));
 
-    expect(screen.queryByText('https://example.com/test.png')).not.toBeInTheDocument();
+    expect(screen.queryByAltText('test.png')).not.toBeInTheDocument();
   });
 
   it('does not add empty URL', async () => {
