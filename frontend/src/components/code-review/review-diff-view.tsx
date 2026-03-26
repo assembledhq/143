@@ -63,10 +63,12 @@ export function ReviewDiffView({
     return "unified";
   });
 
-  // Escape key exits review mode (when not in an input, comment, or explorer)
+  // Escape key exits review mode (when not in an input, comment, or explorer).
+  // Check e.defaultPrevented to avoid conflicts with KeyboardHelpOverlay's own
+  // Escape handler, which calls e.preventDefault() when closing the overlay.
   useEffect(() => {
     function handleEscape(e: KeyboardEvent) {
-      if (e.key !== "Escape") return;
+      if (e.key !== "Escape" || e.defaultPrevented) return;
       const target = e.target as HTMLElement;
       if (
         target.tagName === "INPUT" ||

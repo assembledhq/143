@@ -1090,6 +1090,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   // --- Shared review state (lifted from old ChangesTab) ---
   const queryClient = useQueryClient();
 
+  // Hooks can't be called conditionally, so provide a stub when session hasn't loaded yet.
+  // useDiffViewState only reads `diff` and `diff_history` — the stub satisfies that contract.
   const diffViewState = useDiffViewState(session ?? { diff: null, diff_history: [] } as unknown as Session);
   const { files: allDiffFiles, filteredFiles, passes, passRange, setPassRange, diffSearchQuery, setDiffSearchQuery } = diffViewState;
 
@@ -1229,27 +1231,32 @@ export function SessionDetailContent({ id }: { id: string }) {
         </div>
 
         {/* Center content — either chat or diff review */}
-        <div key={centerMode} className="flex-1 min-h-0 animate-in fade-in duration-150">
-          {centerMode === "review" ? (
-            <ReviewDiffView
-              sessionId={id}
-              files={filteredFiles}
-              allFiles={allDiffFiles}
-              activeFileIndex={activeFileIndex}
-              onFileChange={setActiveFileIndex}
-              onBack={exitReview}
-              commentsByLine={commentsByLine}
-              activeCommentLine={activeCommentLine}
-              onAddComment={handleAddComment}
-              onSubmitComment={handleSubmitComment}
-              onCancelComment={handleCancelComment}
-              onUpdateComment={updateComment}
-              onDeleteComment={deleteComment}
-              diffSearchQuery={diffSearchQuery}
-              onDiffSearchChange={setDiffSearchQuery}
-            />
-          ) : (
+        <div className="flex-1 min-h-0 relative">
+          {/* Chat panel — always mounted to preserve scroll, SSE connections, etc. */}
+          <div className={cn("h-full", centerMode !== "chat" && "hidden")}>
             <ChatPanel session={session} sessionId={id} isActive={isActive} onDiffClick={() => openReview()} />
+          </div>
+          {/* Review diff view — mounted only when active */}
+          {centerMode === "review" && (
+            <div className="h-full animate-in fade-in duration-150">
+              <ReviewDiffView
+                sessionId={id}
+                files={filteredFiles}
+                allFiles={allDiffFiles}
+                activeFileIndex={activeFileIndex}
+                onFileChange={setActiveFileIndex}
+                onBack={exitReview}
+                commentsByLine={commentsByLine}
+                activeCommentLine={activeCommentLine}
+                onAddComment={handleAddComment}
+                onSubmitComment={handleSubmitComment}
+                onCancelComment={handleCancelComment}
+                onUpdateComment={updateComment}
+                onDeleteComment={deleteComment}
+                diffSearchQuery={diffSearchQuery}
+                onDiffSearchChange={setDiffSearchQuery}
+              />
+            </div>
           )}
         </div>
 

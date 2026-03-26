@@ -29,7 +29,7 @@ describe("KeyboardHelpOverlay", () => {
     render(<KeyboardHelpOverlay open={true} onClose={vi.fn()} />);
     expect(screen.getByText("Next / previous file")).toBeInTheDocument();
     expect(screen.getByText("Toggle file tree panel")).toBeInTheDocument();
-    expect(screen.getByText("Back to conversation")).toBeInTheDocument();
+    expect(screen.getAllByText("Back to conversation")).toHaveLength(2); // m and Esc
   });
 
   it("calls onClose when close button is clicked", async () => {
