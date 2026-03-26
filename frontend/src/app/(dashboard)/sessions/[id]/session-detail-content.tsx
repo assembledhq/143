@@ -17,6 +17,10 @@ import {
   PanelRightOpen,
   PanelRightClose,
   ChevronDown,
+  Paperclip,
+  X,
+  ImagePlus,
+  Loader2,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { MarkdownContent } from "@/components/markdown";
@@ -701,7 +705,10 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
   const [message, setMessage] = useState("");
   const [selectedModel, setSelectedModel] = useState("");
   const [streamedLogs, setStreamedLogs] = useState<SessionLog[]>([]);
+  const [attachments, setAttachments] = useState<string[]>([]);
+  const [isUploading, setIsUploading] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const seenLogIds = useRef<Set<number>>(new Set());
   const reconnectAttempts = useRef(0);
@@ -848,10 +855,34 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
     };
   }, [sessionId, apiBase, isActive, mergeLogs, queryClient]);
 
+  async function handleFileUpload(event: React.ChangeEvent<HTMLInputElement>) {
+    const fileList = event.target.files;
+    if (!fileList || fileList.length === 0) return;
+
+    setIsUploading(true);
+    try {
+      const files = Array.from(fileList);
+      const results = await Promise.all(
+        files.map((file) => api.uploads.upload(file))
+      );
+      setAttachments((prev) => [...prev, ...results.map((r) => r.url)]);
+    } catch {
+      // Upload failed — silently ignore (user can retry).
+    } finally {
+      setIsUploading(false);
+      event.target.value = "";
+    }
+  }
+
+  function removeAttachment(url: string) {
+    setAttachments((prev) => prev.filter((a) => a !== url));
+  }
+
   const sendMutation = useMutation({
-    mutationFn: () => api.sessions.sendMessage(sessionId, message, undefined, selectedModel || undefined),
+    mutationFn: () => api.sessions.sendMessage(sessionId, message, attachments.length > 0 ? attachments : undefined, selectedModel || undefined),
     onSuccess: () => {
       setMessage("");
+      setAttachments([]);
       if (textareaRef.current) {
         textareaRef.current.style.height = "auto";
       }
@@ -906,10 +937,12 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
     }
   }, [timelineEntries.length]);
 
+  const hasContent = message.trim() || attachments.length > 0;
+
   function handleKeyDown(e: React.KeyboardEvent) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      if (message.trim() && canSendMessage && !sendMutation.isPending) {
+      if (hasContent && canSendMessage && !sendMutation.isPending) {
         sendMutation.mutate();
       }
     }
@@ -959,7 +992,67 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
             disabled={!canSendMessage || sendMutation.isPending}
             className="min-h-[44px] max-h-[200px] resize-none border-none bg-transparent shadow-none focus-visible:ring-0"
           />
+
+          {/* Attachment previews */}
+          {attachments.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2 px-3 pb-2">
+              {attachments.map((url) => {
+                const isImage = /\.(png|jpe?g|gif|webp|svg)$/i.test(url);
+                const fileName = url.split("/").pop() || "file";
+                return (
+                  <div key={url} className="relative group">
+                    {isImage ? (
+                      <img
+                        src={url}
+                        alt={fileName}
+                        className="h-16 w-16 rounded-md object-cover border border-border"
+                      />
+                    ) : (
+                      <div className="h-16 px-3 flex items-center rounded-md border border-border bg-muted text-xs text-muted-foreground">
+                        {fileName}
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => removeAttachment(url)}
+                      className="absolute -top-1.5 -right-1.5 h-5 w-5 rounded-full bg-background border border-border flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                      aria-label={`Remove ${fileName}`}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                );
+              })}
+              {isUploading && (
+                <div className="h-16 w-16 rounded-md border border-border bg-muted flex items-center justify-center">
+                  <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="flex items-center gap-1 px-2 pb-2">
+            {/* File upload button */}
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
+              title="Attach files or images"
+              disabled={!canSendMessage || isUploading}
+              onClick={() => uploadInputRef.current?.click()}
+            >
+              {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
+            </Button>
+            <input
+              ref={uploadInputRef}
+              type="file"
+              accept="image/*,.pdf,.txt,.md,.json,.csv"
+              multiple
+              className="hidden"
+              onChange={handleFileUpload}
+            />
+
             {availableModels.length > 0 && (
               <Select value={selectedModel} onValueChange={setSelectedModel}>
                 <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-[13px] text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
@@ -1005,7 +1098,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
                   variant="default"
                   className="h-8 w-8 shrink-0 rounded-lg"
                   title="Send message"
-                  disabled={!message.trim() || !canSendMessage || sendMutation.isPending}
+                  disabled={!hasContent || !canSendMessage || sendMutation.isPending}
                   onClick={() => sendMutation.mutate()}
                 >
                   <ArrowUp className="h-4 w-4" />
