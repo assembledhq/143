@@ -106,7 +106,7 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id="nonexistent" />);
     expect(
-      await screen.findByText('Failed to load session details.'),
+      await screen.findByText('Failed to load session'),
     ).toBeInTheDocument();
   });
 
@@ -136,14 +136,12 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
-    expect(await screen.findByText('Triggered by')).toBeInTheDocument();
-    expect(screen.getByText('Alice Smith')).toBeInTheDocument();
+    expect(await screen.findByText('Alice Smith')).toBeInTheDocument();
   });
 
   it('shows System when triggered_by_user_id is not set and no pm_plan_id', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
-    expect(screen.getByText('Triggered by')).toBeInTheDocument();
     expect(screen.getByText('System')).toBeInTheDocument();
   });
 
@@ -193,7 +191,8 @@ describe('SessionDetailPage', () => {
     );
 
     renderWithProviders(<SessionDetailContent id={idleSession.id} />);
-    expect(await screen.findByText('No activity yet. The session is processing its initial turn.')).toBeInTheDocument();
+    expect(await screen.findByText('No activity yet')).toBeInTheDocument();
+    expect(screen.getByText('The session is processing its initial turn.')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('Send a follow-up message...')).toBeInTheDocument();
   });
 
@@ -349,8 +348,7 @@ describe('SessionDetailPage', () => {
   it('shows duration for completed session', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
-    expect(screen.getByText('Duration')).toBeInTheDocument();
-    // 5m 30s duration between started_at and completed_at
+    // 5m 30s duration between started_at and completed_at (shown in timestamp row)
     expect(screen.getByText('5m 30s')).toBeInTheDocument();
   });
 
