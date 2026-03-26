@@ -26,6 +26,18 @@ export const queryKeys = {
   },
   settings: {
     all: ["settings"] as const,
+    agentDefaults: ["agent-defaults"] as const,
+  },
+  codexAuth: {
+    status: ["codex-auth-status"] as const,
+  },
+  integrations: {
+    all: ["integrations"] as const,
+  },
+  pm: {
+    status: ["pm", "status"] as const,
+    latest: ["pm", "latest"] as const,
+    documents: ["pm", "documents"] as const,
   },
   team: {
     members: ["team", "members"] as const,
