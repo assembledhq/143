@@ -142,7 +142,7 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
     }), [file.newPath, commentsByLine, activeCommentLine, onAddComment, handleAddComment, onSubmitComment, onCancelComment, onUpdateComment, onDeleteComment]);
 
     return (
-      <div ref={ref} className="border border-border rounded-lg overflow-hidden">
+      <div ref={ref} className="border border-border rounded-lg overflow-x-auto">
         <FileDiffHeader
           filePath={file.newPath}
           added={file.stats.added}
