@@ -110,7 +110,7 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [settingsAgentType, setSettingsAgentType] = useState<OrgSettings["default_agent_type"]>("codex");
-  const [selectedAgentType, setSelectedAgentType] = useState<AgentType>("codex");
+  const [selectedAgentTypeOverride, setSelectedAgentType] = useState<AgentType | null>(null);
 
   const { data: codexAuthResponse } = useQuery({
     queryKey: queryKeys.codexAuth.status,
@@ -129,11 +129,7 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
   const agentConfig = settings?.agent_config ?? {};
   const agentDefaults = agentDefaultsResponse?.data ?? {};
 
-  useEffect(() => {
-    if (settings?.default_agent_type) {
-      setSelectedAgentType(settings.default_agent_type);
-    }
-  }, [settings?.default_agent_type]);
+  const selectedAgentType: AgentType = selectedAgentTypeOverride ?? settings?.default_agent_type ?? "codex";
 
   const isSelectedAgentConnected = isAgentConnected(selectedAgentType, agentConfig, agentDefaults, codexAuthResponse?.data);
 
