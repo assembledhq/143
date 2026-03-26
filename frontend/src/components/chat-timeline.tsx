@@ -1,9 +1,11 @@
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
-import { ChevronRight, AlertTriangle, Wrench, FileCode2, X, FileText } from "lucide-react";
+import { ChevronRight, AlertTriangle, Wrench, FileCode2, X, FileText, ClipboardList, Check, PenLine } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { MarkdownContent } from "@/components/markdown";
+import { PLAN_MODE_PREFIX } from "@/lib/timeline";
 import type { TimelineEntry } from "@/lib/timeline";
 import type { SessionMessage, SessionLog } from "@/lib/types";
 import { isImageURL, fileNameFromURL } from "@/lib/utils";
@@ -270,11 +272,23 @@ function AssistantBubble({ children }: { children: React.ReactNode }) {
 }
 
 function MessageBubble({ msg }: { msg: SessionMessage }) {
+  // Strip plan mode prefix from user messages for display.
+  const isPlanModeUser = msg.role === "user" && msg.content.startsWith(PLAN_MODE_PREFIX);
+  const displayContent = isPlanModeUser
+    ? msg.content.slice(PLAN_MODE_PREFIX.length)
+    : msg.content;
+
   if (msg.role === "user") {
     return (
       <div className="flex justify-end">
         <div className="max-w-[80%] rounded-lg px-3 py-2 text-sm bg-primary bg-[image:var(--gradient-primary)] text-white shadow-sm">
-          {msg.content && <p className="whitespace-pre-wrap">{msg.content}</p>}
+          {isPlanModeUser && (
+            <div className="flex items-center gap-1.5 mb-1.5">
+              <ClipboardList className="h-3 w-3 text-white/80" />
+              <span className="text-[10px] font-medium text-white/80 uppercase tracking-wide">Plan Mode</span>
+            </div>
+          )}
+          {displayContent && <p className="whitespace-pre-wrap">{displayContent}</p>}
           {msg.attachments && msg.attachments.length > 0 && (
             <AttachmentGrid attachments={msg.attachments} />
           )}
@@ -296,6 +310,56 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
         {formatMessageTime(msg.created_at)}
       </p>
     </AssistantBubble>
+  );
+}
+
+function PlanOutputBubble({
+  children,
+  onApprove,
+  onAdjust,
+  isRunning,
+}: {
+  children: React.ReactNode;
+  onApprove?: () => void;
+  onAdjust?: () => void;
+  isRunning: boolean;
+}) {
+  return (
+    <div className="flex justify-start">
+      <div className="max-w-[80%] rounded-lg text-sm bg-muted border border-amber-200 dark:border-amber-800/50">
+        <div className="flex items-center gap-1.5 px-3 pt-2 pb-1">
+          <ClipboardList className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
+          <span className="text-xs font-medium text-amber-700 dark:text-amber-400">Implementation Plan</span>
+        </div>
+        <div className="px-3 py-2">{children}</div>
+        {(onApprove || onAdjust) && !isRunning && (
+          <div className="flex items-center gap-2 px-3 pb-2.5 pt-1 border-t border-amber-200/50 dark:border-amber-800/30">
+            {onApprove && (
+              <Button
+                size="sm"
+                variant="default"
+                className="h-7 text-xs gap-1.5"
+                onClick={onApprove}
+              >
+                <Check className="h-3 w-3" />
+                Approve Plan
+              </Button>
+            )}
+            {onAdjust && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 text-xs gap-1.5"
+                onClick={onAdjust}
+              >
+                <PenLine className="h-3 w-3" />
+                Adjust Plan
+              </Button>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -336,9 +400,11 @@ interface ChatTimelineProps {
   isRunning: boolean;
   diffStats?: { added: number; removed: number; files_changed: number } | null;
   onDiffClick?: () => void;
+  onApprovePlan?: (turnNumber: number) => void;
+  onAdjustPlan?: (turnNumber: number) => void;
 }
 
-export function ChatTimeline({ entries, isRunning, diffStats, onDiffClick }: ChatTimelineProps) {
+export function ChatTimeline({ entries, isRunning, diffStats, onDiffClick, onApprovePlan, onAdjustPlan }: ChatTimelineProps) {
   // Separate visible entries (messages, tool groups, errors) from hidden logs.
   // Group consecutive hidden logs together so they share a single "Show more" toggle.
   const rendered: React.ReactNode[] = [];
@@ -370,6 +436,33 @@ export function ChatTimeline({ entries, isRunning, diffStats, onDiffClick }: Cha
           <AssistantBubble key={`aout-${entry.data.id}`}>
             <MarkdownContent content={entry.data.message} />
           </AssistantBubble>
+        );
+        break;
+      case "plan_output":
+        rendered.push(
+          <PlanOutputBubble
+            key={`plan-${entry.data.id}`}
+            onApprove={onApprovePlan ? () => onApprovePlan(entry.turnNumber) : undefined}
+            onAdjust={onAdjustPlan ? () => onAdjustPlan(entry.turnNumber) : undefined}
+            isRunning={isRunning}
+          >
+            <MarkdownContent content={entry.data.message} />
+          </PlanOutputBubble>
+        );
+        break;
+      case "plan_message":
+        rendered.push(
+          <PlanOutputBubble
+            key={`planmsg-${entry.data.id}`}
+            onApprove={onApprovePlan ? () => onApprovePlan(entry.turnNumber) : undefined}
+            onAdjust={onAdjustPlan ? () => onAdjustPlan(entry.turnNumber) : undefined}
+            isRunning={isRunning}
+          >
+            <MarkdownContent content={entry.data.content} />
+            <p className="text-[10px] mt-1 text-muted-foreground">
+              {formatMessageTime(entry.data.created_at)}
+            </p>
+          </PlanOutputBubble>
         );
         break;
       case "tool_group":
