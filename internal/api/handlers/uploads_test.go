@@ -3,9 +3,11 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"testing"
 
 	"github.com/google/uuid"
@@ -20,7 +22,12 @@ func newUploadRequest(t *testing.T, fieldName, fileName, contentType string, bod
 
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
-	part, err := writer.CreateFormFile(fieldName, fileName)
+
+	// Create a part with the correct Content-Type (CreateFormFile always uses application/octet-stream).
+	h := make(textproto.MIMEHeader)
+	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="%s"; filename="%s"`, fieldName, fileName))
+	h.Set("Content-Type", contentType)
+	part, err := writer.CreatePart(h)
 	require.NoError(t, err)
 	_, err = part.Write(body)
 	require.NoError(t, err)

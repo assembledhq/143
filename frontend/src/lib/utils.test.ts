@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { formatTimeAgo } from "./utils";
+import { formatTimeAgo, isImageURL, fileNameFromURL } from "./utils";
 
 describe("formatTimeAgo", () => {
   it("returns 'just now' for dates less than a minute ago", () => {
@@ -43,5 +43,58 @@ describe("formatTimeAgo", () => {
   it("returns '23h ago' just under a day", () => {
     const twentyThreeHoursAgo = new Date(Date.now() - 23 * 3_600_000).toISOString();
     expect(formatTimeAgo(twentyThreeHoursAgo)).toBe("23h ago");
+  });
+});
+
+describe("isImageURL", () => {
+  it("matches common image extensions", () => {
+    expect(isImageURL("/uploads/photo.png")).toBe(true);
+    expect(isImageURL("/uploads/photo.jpg")).toBe(true);
+    expect(isImageURL("/uploads/photo.jpeg")).toBe(true);
+    expect(isImageURL("/uploads/photo.gif")).toBe(true);
+    expect(isImageURL("/uploads/photo.webp")).toBe(true);
+    expect(isImageURL("/uploads/photo.svg")).toBe(true);
+  });
+
+  it("matches data: image URLs", () => {
+    expect(isImageURL("data:image/png;base64,abc")).toBe(true);
+  });
+
+  it("rejects non-image URLs", () => {
+    expect(isImageURL("/uploads/doc.pdf")).toBe(false);
+    expect(isImageURL("/uploads/file.txt")).toBe(false);
+    expect(isImageURL("/uploads/data.json")).toBe(false);
+  });
+
+  it("strips query params from S3 presigned URLs", () => {
+    expect(isImageURL("https://bucket.s3.amazonaws.com/uploads/photo.png?X-Amz-Algorithm=AWS4")).toBe(true);
+    expect(isImageURL("https://bucket.s3.amazonaws.com/uploads/doc.pdf?X-Amz-Algorithm=AWS4")).toBe(false);
+  });
+
+  it("strips fragments", () => {
+    expect(isImageURL("/uploads/photo.jpg#section")).toBe(true);
+  });
+
+  it("is case-insensitive", () => {
+    expect(isImageURL("/uploads/PHOTO.PNG")).toBe(true);
+    expect(isImageURL("/uploads/photo.JPG")).toBe(true);
+  });
+});
+
+describe("fileNameFromURL", () => {
+  it("extracts filename from simple path", () => {
+    expect(fileNameFromURL("/uploads/org-1/photo.png")).toBe("photo.png");
+  });
+
+  it("strips query params", () => {
+    expect(fileNameFromURL("https://s3.amazonaws.com/uploads/photo.png?token=abc")).toBe("photo.png");
+  });
+
+  it("strips fragments", () => {
+    expect(fileNameFromURL("/uploads/photo.png#section")).toBe("photo.png");
+  });
+
+  it("returns 'file' for empty paths", () => {
+    expect(fileNameFromURL("")).toBe("file");
   });
 });
