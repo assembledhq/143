@@ -1100,7 +1100,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const detailTabs: { value: DetailTab; label: string; count?: number }[] = [
     { value: "overview", label: "Overview" },
     { value: "changes", label: "Changes", count: diffStats?.filesChanged },
-    { value: "validation", label: "Validation" },
+    ...(!session.triggered_by_user_id ? [{ value: "validation" as DetailTab, label: "Validation" }] : []),
   ];
 
   return (

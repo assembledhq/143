@@ -290,7 +290,7 @@ describe('SessionDetailPage', () => {
     });
   });
 
-  it('shows validation tab with check results', async () => {
+  it('shows validation tab with check results for non-manual sessions', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
     // Click the Validation tab button
@@ -300,6 +300,25 @@ describe('SessionDetailPage', () => {
     expect(await screen.findByText('Direction check')).toBeInTheDocument();
     expect(screen.getByText('Correctness check')).toBeInTheDocument();
     expect(screen.getByText('Changes align with issue description')).toBeInTheDocument();
+  });
+
+  it('hides validation tab for manual sessions', async () => {
+    const manualSession: Session = {
+      ...mockSessions[0],
+      triggered_by_user_id: 'user-1',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: manualSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    expect(screen.getByRole('button', { name: 'Overview' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Changes' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Validation' })).not.toBeInTheDocument();
   });
 
   it('shows changes tab with PR info and diff', async () => {

@@ -720,14 +720,29 @@ func (h *SessionHandler) EndSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	issue, err := h.issueStore.GetByID(r.Context(), orgID, session.IssueID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "ISSUE_FETCH_FAILED", "failed to fetch issue", err)
+		return
+	}
+
 	payload := map[string]string{
 		"session_id": sessionID.String(),
 		"org_id":     orgID.String(),
 	}
-	dedupeKey := fmt.Sprintf("validate:%s", sessionID)
-	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "validate", payload, 5, &dedupeKey); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue validation", err)
-		return
+	if issue.Source == models.IssueSourceManual {
+		// Manual sessions skip validation — go straight to PR creation.
+		dedupeKey := fmt.Sprintf("open_pr:%s", sessionID)
+		if _, err := h.jobStore.Enqueue(r.Context(), orgID, "default", "open_pr", payload, 5, &dedupeKey); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue PR creation", err)
+			return
+		}
+	} else {
+		dedupeKey := fmt.Sprintf("validate:%s", sessionID)
+		if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "validate", payload, 5, &dedupeKey); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue validation", err)
+			return
+		}
 	}
 
 	// Snapshot cleanup is handled by the reaper, which will find this session
