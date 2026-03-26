@@ -1,13 +1,14 @@
 "use client";
 
-import { useState } from "react";
-import { ChevronRight, AlertTriangle, Wrench, FileCode2, ClipboardList, Check, PenLine } from "lucide-react";
+import { useState, useCallback, useEffect } from "react";
+import { ChevronRight, AlertTriangle, Wrench, FileCode2, X, FileText, ClipboardList, Check, PenLine } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { MarkdownContent } from "@/components/markdown";
 import { PLAN_MODE_PREFIX } from "@/lib/timeline";
 import type { TimelineEntry } from "@/lib/timeline";
 import type { SessionMessage, SessionLog } from "@/lib/types";
+import { isImageURL, fileNameFromURL } from "@/lib/utils";
 
 function safeDate(dateStr: string): Date | null {
   const d = new Date(dateStr);
@@ -158,6 +159,108 @@ export function formatMessageTime(dateStr: string): string {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Image lightbox overlay
+// ---------------------------------------------------------------------------
+
+function ImageLightbox({ src, alt, onClose }: { src: string; alt: string; onClose: () => void }) {
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <button
+        onClick={onClose}
+        className="absolute top-4 right-4 h-8 w-8 rounded-full bg-background/80 flex items-center justify-center hover:bg-background transition-colors"
+        aria-label="Close"
+      >
+        <X className="h-4 w-4" />
+      </button>
+      <img
+        src={src}
+        alt={alt}
+        className="max-w-[90vw] max-h-[90vh] rounded-lg shadow-2xl object-contain"
+        onClick={(e) => e.stopPropagation()}
+      />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Attachment thumbnails for messages
+// ---------------------------------------------------------------------------
+
+function AttachmentGrid({ attachments }: { attachments: string[] }) {
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+
+  const closeLightbox = useCallback(() => setLightboxSrc(null), []);
+
+  if (!attachments || attachments.length === 0) return null;
+
+  const images = attachments.filter(isImageURL);
+  const files = attachments.filter((a) => !isImageURL(a));
+
+  return (
+    <>
+      {lightboxSrc && (
+        <ImageLightbox
+          src={lightboxSrc}
+          alt="Attachment"
+          onClose={closeLightbox}
+        />
+      )}
+
+      {images.length > 0 && (
+        <div className="flex flex-wrap gap-2 mt-2">
+          {images.map((url) => (
+            <button
+              key={url}
+              type="button"
+              onClick={() => setLightboxSrc(url)}
+              className="relative group rounded-md overflow-hidden border border-border/50 hover:border-border transition-colors"
+            >
+              <img
+                src={url}
+                alt="Attached image"
+                className="h-24 w-24 object-cover"
+              />
+              <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors" />
+            </button>
+          ))}
+        </div>
+      )}
+
+      {files.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mt-2">
+          {files.map((url) => {
+            const fileName = fileNameFromURL(url);
+            return (
+              <a
+                key={url}
+                href={url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 rounded-md border border-border/50 bg-background/50 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:border-border transition-colors"
+              >
+                <FileText className="h-3 w-3 shrink-0" />
+                {fileName}
+              </a>
+            );
+          })}
+        </div>
+      )}
+    </>
+  );
+}
+
 function AssistantBubble({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex justify-start">
@@ -185,7 +288,10 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
               <span className="text-[10px] font-medium text-white/80 uppercase tracking-wide">Plan Mode</span>
             </div>
           )}
-          <p className="whitespace-pre-wrap">{displayContent}</p>
+          {displayContent && <p className="whitespace-pre-wrap">{displayContent}</p>}
+          {msg.attachments && msg.attachments.length > 0 && (
+            <AttachmentGrid attachments={msg.attachments} />
+          )}
           <p className="text-[10px] mt-1 text-white/70">
             {formatMessageTime(msg.created_at)}
           </p>
@@ -197,6 +303,9 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
   return (
     <AssistantBubble>
       <MarkdownContent content={msg.content} />
+      {msg.attachments && msg.attachments.length > 0 && (
+        <AttachmentGrid attachments={msg.attachments} />
+      )}
       <p className="text-[10px] mt-1 text-muted-foreground">
         {formatMessageTime(msg.created_at)}
       </p>

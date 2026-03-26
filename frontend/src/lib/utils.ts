@@ -13,6 +13,23 @@ export function sessionTitle(session: Session): string {
   return `Session ${session.id.slice(0, 8)}`;
 }
 
+/**
+ * Check whether a URL points to an image, handling query params/fragments
+ * from S3 presigned URLs.
+ */
+export function isImageURL(url: string): boolean {
+  if (url.startsWith("data:image/")) return true;
+  const pathname = url.split("?")[0].split("#")[0];
+  return /\.(png|jpe?g|gif|webp|svg)$/i.test(pathname);
+}
+
+/**
+ * Extract a clean file name from a URL, stripping query params.
+ */
+export function fileNameFromURL(url: string): string {
+  return url.split("?")[0].split("#")[0].split("/").pop() || "file";
+}
+
 export function formatTimeAgo(dateStr: string): string {
   const date = new Date(dateStr);
   const now = new Date();
