@@ -132,11 +132,11 @@ describe('ManualSessionCreatePage', () => {
     await user.type(screen.getByPlaceholderText('https://example.com/screenshot.png'), 'https://example.com/test.png');
     await user.click(screen.getByRole('button', { name: 'Add' }));
 
-    expect(screen.getByText('https://example.com/test.png')).toBeInTheDocument();
+    expect(screen.getByAltText('test.png')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'Remove https://example.com/test.png' }));
+    await user.click(screen.getByRole('button', { name: 'Remove test.png' }));
 
-    expect(screen.queryByText('https://example.com/test.png')).not.toBeInTheDocument();
+    expect(screen.queryByAltText('test.png')).not.toBeInTheDocument();
   });
 
   it('does not add empty URL', async () => {
@@ -150,6 +150,54 @@ describe('ManualSessionCreatePage', () => {
     // The image URL input area should still be visible (not dismissed)
     // and no attachment badges should appear
     expect(screen.getByPlaceholderText('https://example.com/screenshot.png')).toBeInTheDocument();
+  });
+
+  it('uploads a file via the upload endpoint and shows thumbnail', async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.post('/api/v1/uploads', () => {
+        return HttpResponse.json({
+          url: '/api/v1/uploads/files/org-1/2026-03/test-uuid.png',
+          file_name: 'photo.png',
+          content_type: 'image/png',
+        });
+      }),
+    );
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    // Trigger upload via hidden file input.
+    const file = new File(['fake-png'], 'photo.png', { type: 'image/png' });
+    await user.click(screen.getByRole('button', { name: 'Add files or photos' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Upload files or photos' }));
+
+    // The hidden file input should exist; simulate a file selection.
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(fileInput).toBeTruthy();
+    await user.upload(fileInput, file);
+
+    // Should show the uploaded image thumbnail.
+    await waitFor(() => {
+      expect(screen.getByAltText('test-uuid.png')).toBeInTheDocument();
+    });
+  });
+
+  it('shows error for oversized files', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    // Create a file larger than 10 MB.
+    const bigContent = new Uint8Array(11 * 1024 * 1024);
+    const bigFile = new File([bigContent], 'huge.png', { type: 'image/png' });
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(fileInput).toBeTruthy();
+    await user.upload(fileInput, bigFile);
+
+    await waitFor(() => {
+      expect(screen.getByText(/too large/i)).toBeInTheDocument();
+    });
   });
 
   it('shows error when session creation fails', async () => {

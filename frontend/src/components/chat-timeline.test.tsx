@@ -174,4 +174,91 @@ describe("ChatTimeline", () => {
     );
     expect(screen.getByText("1 file changed")).toBeInTheDocument();
   });
+
+  it("renders image attachments as thumbnails on user messages", () => {
+    const entries: TimelineEntry[] = [
+      {
+        kind: "message",
+        data: makeMessage({
+          id: 10,
+          role: "user",
+          content: "See this screenshot",
+          attachments: ["/uploads/org-1/screenshot.png"],
+        }),
+      },
+    ];
+    render(<ChatTimeline entries={entries} isRunning={false} />);
+    expect(screen.getByText("See this screenshot")).toBeInTheDocument();
+    expect(screen.getByAltText("Attached image")).toBeInTheDocument();
+  });
+
+  it("renders non-image attachments as file links", () => {
+    const entries: TimelineEntry[] = [
+      {
+        kind: "message",
+        data: makeMessage({
+          id: 11,
+          role: "user",
+          content: "Here is a log",
+          attachments: ["/uploads/org-1/debug.txt"],
+        }),
+      },
+    ];
+    render(<ChatTimeline entries={entries} isRunning={false} />);
+    expect(screen.getByText("debug.txt")).toBeInTheDocument();
+    const link = screen.getByText("debug.txt").closest("a");
+    expect(link).toHaveAttribute("href", "/uploads/org-1/debug.txt");
+  });
+
+  it("opens and closes lightbox when clicking an image attachment", async () => {
+    const entries: TimelineEntry[] = [
+      {
+        kind: "message",
+        data: makeMessage({
+          id: 12,
+          role: "user",
+          content: "",
+          attachments: ["/uploads/org-1/photo.jpg"],
+        }),
+      },
+    ];
+    render(<ChatTimeline entries={entries} isRunning={false} />);
+
+    // Click thumbnail to open lightbox.
+    await userEvent.click(screen.getByAltText("Attached image"));
+    // Lightbox shows a larger image with close button.
+    expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
+
+    // Close via button.
+    await userEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
+  });
+
+  it("renders attachments on assistant messages", () => {
+    const entries: TimelineEntry[] = [
+      {
+        kind: "message",
+        data: makeMessage({
+          id: 13,
+          role: "assistant",
+          content: "Generated this image",
+          attachments: ["/uploads/org-1/output.png"],
+        }),
+      },
+    ];
+    render(<ChatTimeline entries={entries} isRunning={false} />);
+    expect(screen.getByAltText("Attached image")).toBeInTheDocument();
+  });
+
+  it("does not render attachment grid when attachments is empty", () => {
+    const entries: TimelineEntry[] = [
+      {
+        kind: "message",
+        data: makeMessage({ id: 14, role: "user", content: "No attachments", attachments: [] }),
+      },
+    ];
+    render(<ChatTimeline entries={entries} isRunning={false} />);
+    expect(screen.getByText("No attachments")).toBeInTheDocument();
+    expect(screen.queryByAltText("Attached image")).not.toBeInTheDocument();
+  });
 });

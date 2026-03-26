@@ -6,6 +6,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   ArrowUp,
+  ClipboardList,
   ExternalLink,
   FileCode2,
   GitPullRequest,
@@ -24,6 +25,9 @@ import {
   Bot,
   Cpu,
   MessageSquare,
+  Paperclip,
+  X,
+  Loader2,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { MarkdownContent } from "@/components/markdown";
@@ -48,7 +52,7 @@ import { parseDiffStats } from "@/lib/diff-parser";
 import type { Session, SessionLog, SessionMessage, User, Validation } from "@/lib/types";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
-import { cn, sessionTitle } from "@/lib/utils";
+import { cn, sessionTitle, isImageURL, fileNameFromURL } from "@/lib/utils";
 import { DiffStatsBadge, FileTree, ReviewToolbar, DiffPane, SessionFooter, KeyboardHelpOverlay, CommentsSummary, RepoExplorer, type ViewMode, type DiffPaneHandle } from "@/components/code-review";
 import { useDiffKeyboardNav } from "@/hooks/use-diff-keyboard-nav";
 import { useReviewComments } from "@/hooks/use-review-comments";
@@ -721,18 +725,25 @@ function ChangesTab({
 
 const MAX_SSE_RECONNECT_ATTEMPTS = 5;
 const BASE_SSE_RECONNECT_DELAY_MS = 1000;
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
 function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Session; sessionId: string; isActive: boolean; onDiffClick?: () => void }) {
   const queryClient = useQueryClient();
   const [message, setMessage] = useState("");
+  const [planMode, setPlanMode] = useState(false);
   const [selectedModel, setSelectedModel] = useState("");
   const [streamedLogs, setStreamedLogs] = useState<SessionLog[]>([]);
+  const [attachments, setAttachments] = useState<string[]>([]);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const seenLogIds = useRef<Set<number>>(new Set());
   const reconnectAttempts = useRef(0);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
+  const isClaudeCode = session.agent_type === "claude_code";
 
   const isIdle = session.status === "idle";
   const isRunning = session.status === "running";
@@ -874,10 +885,48 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
     };
   }, [sessionId, apiBase, isActive, mergeLogs, queryClient]);
 
+  async function handleFileUpload(event: React.ChangeEvent<HTMLInputElement>) {
+    const fileList = event.target.files;
+    if (!fileList || fileList.length === 0) return;
+
+    const files = Array.from(fileList);
+    const oversized = files.filter((f) => f.size > MAX_FILE_SIZE);
+    if (oversized.length > 0) {
+      setUploadError(`File${oversized.length > 1 ? "s" : ""} too large (max 10 MB): ${oversized.map((f) => f.name).join(", ")}`);
+      event.target.value = "";
+      return;
+    }
+
+    setIsUploading(true);
+    setUploadError(null);
+    try {
+      const results = await Promise.all(
+        files.map((file) => api.uploads.upload(file))
+      );
+      setAttachments((prev) => [...prev, ...results.map((r) => r.url)]);
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : "Upload failed");
+    } finally {
+      setIsUploading(false);
+      event.target.value = "";
+    }
+  }
+
+  function removeAttachment(url: string) {
+    setAttachments((prev) => prev.filter((a) => a !== url));
+  }
+
   const sendMutation = useMutation({
-    mutationFn: () => api.sessions.sendMessage(sessionId, message, undefined, selectedModel || undefined),
+    mutationFn: (opts: { planMode?: boolean; overrideMessage?: string } = {}) => {
+      setUploadError(null);
+      const msg = opts.overrideMessage ?? message;
+      const isPlan = opts.planMode ?? planMode;
+      return api.sessions.sendMessage(sessionId, msg, attachments.length > 0 ? attachments : undefined, isPlan, selectedModel || undefined);
+    },
     onSuccess: () => {
       setMessage("");
+      setAttachments([]);
+      setPlanMode(false);
       if (textareaRef.current) {
         textareaRef.current.style.height = "auto";
       }
@@ -932,12 +981,31 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
     }
   }, [timelineEntries.length]);
 
+  const hasContent = message.trim() || attachments.length > 0;
+
+  // Plan mode callbacks for the timeline approve/adjust buttons.
+  const handleApprovePlan = useCallback((_turnNumber: number) => {
+    if (!canSendMessage || sendMutation.isPending) return;
+    sendMutation.mutate({ planMode: false, overrideMessage: "The plan looks good. Please proceed with executing the implementation plan above. Make all the changes as described." });
+  }, [canSendMessage, sendMutation]);
+
+  const handleAdjustPlan = useCallback((_turnNumber: number) => {
+    setMessage("Please adjust the plan: ");
+    setPlanMode(false);
+    textareaRef.current?.focus();
+  }, []);
+
   function handleKeyDown(e: React.KeyboardEvent) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      if (message.trim() && canSendMessage && !sendMutation.isPending) {
-        sendMutation.mutate();
+      if (hasContent && canSendMessage && !sendMutation.isPending) {
+        sendMutation.mutate({});
       }
+    }
+    // Shift+Tab toggles plan mode for Claude Code sessions.
+    if (e.key === "Tab" && e.shiftKey && isClaudeCode && canSendMessage) {
+      e.preventDefault();
+      setPlanMode((prev) => !prev);
     }
   }
 
@@ -954,7 +1022,14 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
             </div>
           </div>
         )}
-        <ChatTimeline entries={timelineEntries} isRunning={isRunning} diffStats={session.diff_stats} onDiffClick={onDiffClick} />
+        <ChatTimeline
+          entries={timelineEntries}
+          isRunning={isRunning}
+          diffStats={session.diff_stats}
+          onDiffClick={onDiffClick}
+          onApprovePlan={canSendMessage ? handleApprovePlan : undefined}
+          onAdjustPlan={canSendMessage ? handleAdjustPlan : undefined}
+        />
       </div>
 
       {/* PR queued indicator */}
@@ -967,29 +1042,115 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
 
       {/* Error display */}
       {(() => {
-        const firstError = [sendMutation, endMutation, createPRMutation].find(m => m.error)?.error;
+        const firstError = uploadError || [sendMutation, endMutation, createPRMutation].find(m => m.error)?.error;
         if (!firstError) return null;
+        const msg = typeof firstError === "string" ? firstError : (firstError instanceof Error ? firstError.message : "An error occurred");
         return (
           <div className="flex items-center gap-2 px-4 py-2 text-xs text-destructive border-t bg-destructive/5">
             <AlertTriangle className="h-3 w-3 shrink-0" />
-            {firstError instanceof Error ? firstError.message : "An error occurred"}
+            {msg}
           </div>
         );
       })()}
 
       {/* Input bar */}
       <div className="border-t border-border p-3 bg-background">
-        <div className="rounded-xl border border-border bg-muted/30 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring">
+        {/* Plan mode indicator */}
+        {planMode && (
+          <div className="flex items-center gap-2 mb-2 px-1">
+            <div className="flex items-center gap-1.5 rounded-full bg-amber-500/10 border border-amber-200 dark:border-amber-800/50 px-2.5 py-1">
+              <ClipboardList className="h-3 w-3 text-amber-600 dark:text-amber-400" />
+              <span className="text-[11px] font-medium text-amber-700 dark:text-amber-400">Plan Mode</span>
+              <button
+                onClick={() => setPlanMode(false)}
+                className="ml-1 text-amber-600/60 hover:text-amber-600 dark:text-amber-400/60 dark:hover:text-amber-400 text-xs"
+                title="Exit plan mode"
+              >
+                &times;
+              </button>
+            </div>
+            <span className="text-[11px] text-muted-foreground">Agent will create a plan for review before making changes</span>
+          </div>
+        )}
+        <div className={cn("rounded-xl border bg-muted/30 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring", planMode ? "border-amber-200 dark:border-amber-800/50" : "border-border")}>
           <Textarea
             ref={textareaRef}
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder={canSendMessage ? (isRunning ? "Send a message to the agent..." : "Send a follow-up message...") : "Session is not active"}
+            placeholder={
+              !canSendMessage
+                ? "Session is not active"
+                : planMode
+                ? "Describe what you want to plan..."
+                : isRunning
+                ? "Send a message to the agent..."
+                : "Send a follow-up message..."
+            }
             disabled={!canSendMessage || sendMutation.isPending}
             className="min-h-[44px] max-h-[200px] resize-none border-none bg-transparent shadow-none focus-visible:ring-0"
           />
+
+          {/* Attachment previews */}
+          {(attachments.length > 0 || isUploading) && (
+            <div className="flex flex-wrap items-center gap-2 px-3 pb-2">
+              {attachments.map((url) => {
+                const isImage = isImageURL(url);
+                const fileName = fileNameFromURL(url);
+                return (
+                  <div key={url} className="relative group">
+                    {isImage ? (
+                      <img
+                        src={url}
+                        alt={fileName}
+                        className="h-16 w-16 rounded-md object-cover border border-border"
+                      />
+                    ) : (
+                      <div className="h-16 px-3 flex items-center rounded-md border border-border bg-muted text-xs text-muted-foreground">
+                        {fileName}
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => removeAttachment(url)}
+                      className="absolute -top-1.5 -right-1.5 h-5 w-5 rounded-full bg-background border border-border flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                      aria-label={`Remove ${fileName}`}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                );
+              })}
+              {isUploading && (
+                <div className="h-16 w-16 rounded-md border border-border bg-muted flex items-center justify-center">
+                  <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="flex items-center gap-1 px-2 pb-2">
+            {/* File upload button */}
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
+              title="Attach files or images"
+              disabled={!canSendMessage || isUploading}
+              onClick={() => uploadInputRef.current?.click()}
+            >
+              {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
+            </Button>
+            <input
+              ref={uploadInputRef}
+              type="file"
+              accept="image/*,.pdf,.txt,.md,.json,.csv"
+              multiple
+              className="hidden"
+              onChange={handleFileUpload}
+            />
+
             {availableModels.length > 0 && (
               <Select value={selectedModel} onValueChange={setSelectedModel}>
                 <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-[13px] text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
@@ -1003,6 +1164,16 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
                   ))}
                 </SelectContent>
               </Select>
+            )}
+            {isClaudeCode && canSendMessage && !planMode && (
+              <button
+                onClick={() => setPlanMode(true)}
+                className="flex items-center gap-1 h-8 px-2 text-[13px] text-muted-foreground hover:text-foreground transition-colors rounded-md"
+                title="Switch to plan mode (Shift+Tab)"
+              >
+                <ClipboardList className="h-3.5 w-3.5" />
+                <span>Plan</span>
+              </button>
             )}
 
             <div className="ml-auto flex items-center gap-1">
@@ -1032,13 +1203,13 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
               ) : (
                 <Button
                   size="icon"
-                  variant="default"
-                  className="h-8 w-8 shrink-0 rounded-lg"
-                  title="Send message"
-                  disabled={!message.trim() || !canSendMessage || sendMutation.isPending}
-                  onClick={() => sendMutation.mutate()}
+                  variant={planMode ? "outline" : "default"}
+                  className={cn("h-8 w-8 shrink-0 rounded-lg", planMode && "border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/30")}
+                  title={planMode ? "Send plan request" : "Send message"}
+                  disabled={!hasContent || !canSendMessage || sendMutation.isPending}
+                  onClick={() => sendMutation.mutate({})}
                 >
-                  <ArrowUp className="h-4 w-4" />
+                  {planMode ? <ClipboardList className="h-4 w-4" /> : <ArrowUp className="h-4 w-4" />}
                 </Button>
               )}
             </div>
@@ -1135,6 +1306,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const status = statusConfig[session.status] || statusConfig.pending;
 
   const changesCount = diffStats?.filesChanged;
+  const showValidationTab = !session.triggered_by_user_id;
 
   return (
     <div className="flex h-full">
@@ -1225,7 +1397,9 @@ export function SessionDetailContent({ id }: { id: string }) {
                   </Badge>
                 )}
               </TabsTrigger>
-              <TabsTrigger value="validation">Validation</TabsTrigger>
+              {showValidationTab && (
+                <TabsTrigger value="validation">Validation</TabsTrigger>
+              )}
             </TabsList>
 
             <TabsContent value="changes" className="flex-1 min-h-0">
@@ -1239,9 +1413,11 @@ export function SessionDetailContent({ id }: { id: string }) {
             <TabsContent value="overview" className="flex-1 overflow-y-auto p-4">
               <OverviewTab session={session} members={members} />
             </TabsContent>
-            <TabsContent value="validation" className="flex-1 overflow-y-auto p-4">
-              <ValidationTab sessionId={id} />
-            </TabsContent>
+            {showValidationTab && (
+              <TabsContent value="validation" className="flex-1 overflow-y-auto p-4">
+                <ValidationTab sessionId={id} />
+              </TabsContent>
+            )}
           </Tabs>
         </div>
         </>

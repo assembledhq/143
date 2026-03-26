@@ -1507,7 +1507,66 @@ func TestSessionHandler_EndSession_EnqueuesValidation(t *testing.T) {
 
 	handler.EndSession(w, req)
 
-	require.Equal(t, http.StatusOK, w.Code, "ending an idle interactive session should succeed")
+	require.Equal(t, http.StatusOK, w.Code, "ending an idle non-manual session should enqueue validation")
+	require.Contains(t, w.Body.String(), `"status":"completed"`, "response should return the completed session")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_EndSession_ManualSkipsValidation(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	userID := uuid.New()
+	jobID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).AddRow(
+				sessionID, issueID, orgID, "claude_code", "idle", "semi", "low",
+				nil, nil, nil, nil,
+				nil, &now, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				&userID, // triggered_by_user_id
+				nil, 1, &now, "snapshotted", stringPtr("snapshots/test.tar"),
+				nil, // target_branch
+				nil, // working_branch
+				nil, // repository_id
+				nil, // diff_stats
+				nil, // diff_history
+				now,
+			),
+		)
+	mock.ExpectExec("UPDATE sessions SET status = @status, completed_at = now\\(\\) WHERE id = @id AND org_id = @org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	// Expect open_pr job instead of validate.
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/end", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.EndSession(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "ending a manual session should skip validation and enqueue open_pr")
 	require.Contains(t, w.Body.String(), `"status":"completed"`, "response should return the completed session")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

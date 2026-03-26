@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowUp, Mic, Plus, X, ImagePlus, Paperclip, GitBranch, ChevronDown } from "lucide-react";
+import { ArrowUp, Mic, Plus, X, ImagePlus, Paperclip, GitBranch, ChevronDown, Loader2 } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -17,18 +17,23 @@ import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
+import { isImageURL, fileNameFromURL } from "@/lib/utils";
 import { captureError } from "@/lib/errors";
 import { queryKeys } from "@/lib/query-keys";
-import { AGENT_TYPE_OPTIONS } from "@/lib/model-constants";
+import { AGENT_TYPE_OPTIONS, agentTypeForModel } from "@/lib/model-constants";
 import { NoReposWarning } from "@/components/no-repos-warning";
 import { useOptimisticSessions } from "@/contexts/optimistic-sessions";
 import type { OrgSettings, Organization, Repository, SingleResponse, ListResponse } from "@/lib/types";
+
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
 type BranchInfo = { name: string; protected: boolean };
 
@@ -53,15 +58,6 @@ type BrowserSpeechRecognition = {
 
 type SpeechRecognitionCtor = new () => BrowserSpeechRecognition;
 
-function readFileAsDataURL(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result ?? ""));
-    reader.onerror = () => reject(new Error("file read failed"));
-    reader.readAsDataURL(file);
-  });
-}
-
 export function ManualSessionCreatePageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -76,6 +72,7 @@ export function ManualSessionCreatePageContent() {
 
   const [message, setMessage] = useState("");
   const [attachments, setAttachments] = useState<string[]>([]);
+  const [isUploading, setIsUploading] = useState(false);
   const [showImageInput, setShowImageInput] = useState(false);
   const [imageURL, setImageURL] = useState("");
   const [isDictating, setIsDictating] = useState(false);
@@ -134,9 +131,13 @@ export function ManualSessionCreatePageContent() {
     setBranchByRepoId((prev) => ({ ...prev, [selectedRepoId]: branch }));
   };
 
-  const availableModels = useMemo(() => {
-    const agentType = AGENT_TYPE_OPTIONS.find((a) => a.key === defaultAgentType);
-    return agentType?.models ?? [];
+  const modelGroups = useMemo(() => {
+    // Sort so the default agent type appears first, preserve original order otherwise.
+    return [...AGENT_TYPE_OPTIONS].sort((a, b) => {
+      if (a.key === defaultAgentType) return -1;
+      if (b.key === defaultAgentType) return 1;
+      return AGENT_TYPE_OPTIONS.indexOf(a) - AGENT_TYPE_OPTIONS.indexOf(b);
+    });
   }, [defaultAgentType]);
 
   const createManualSessionMutation = useMutation({
@@ -144,7 +145,7 @@ export function ManualSessionCreatePageContent() {
       api.sessions.createManual({
         message: message.trim(),
         images: attachments,
-        ...(selectedModel ? { model: selectedModel } : {}),
+        ...(selectedModel ? { model: selectedModel, agent_type: agentTypeForModel(selectedModel) } : {}),
         ...(selectedRepoId ? { repository_id: selectedRepoId } : {}),
         ...(selectedBranch ? { branch: selectedBranch } : {}),
       }),
@@ -195,15 +196,26 @@ export function ManualSessionCreatePageContent() {
     }
 
     const files = Array.from(fileList);
-    const uploadedAttachments = await Promise.all(files.map(async (file) => {
-      if (file.type.startsWith("image/")) {
-        return readFileAsDataURL(file);
-      }
-      return `attachment:${file.name}`;
-    }));
+    const oversized = files.filter((f) => f.size > MAX_FILE_SIZE);
+    if (oversized.length > 0) {
+      setCreationError(`File${oversized.length > 1 ? "s" : ""} too large (max 10 MB): ${oversized.map((f) => f.name).join(", ")}`);
+      event.target.value = "";
+      return;
+    }
 
-    setAttachments((previous) => [...previous, ...uploadedAttachments]);
-    event.target.value = "";
+    setIsUploading(true);
+    setCreationError(null);
+    try {
+      const results = await Promise.all(
+        files.map((file) => api.uploads.upload(file))
+      );
+      setAttachments((previous) => [...previous, ...results.map((r) => r.url)]);
+    } catch (err) {
+      setCreationError(err instanceof Error ? err.message : "Upload failed");
+    } finally {
+      setIsUploading(false);
+      event.target.value = "";
+    }
   }
 
   function addImageURL() {
@@ -310,23 +322,40 @@ export function ManualSessionCreatePageContent() {
               aria-label="Manual session prompt"
             />
 
-            {attachments.length > 0 && (
+            {(attachments.length > 0 || isUploading) && (
               <div className="flex flex-wrap items-center gap-2 pb-3">
-                {attachments.map((attachment) => (
-                  <Badge key={attachment} variant="secondary" className="gap-1 text-xs">
-                    {attachment.startsWith("data:") ? "photo" : attachment}
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="h-4 w-4 p-0"
-                      onClick={() => removeAttachment(attachment)}
-                      aria-label={`Remove ${attachment}`}
-                    >
-                      <X className="h-3 w-3" />
-                    </Button>
-                  </Badge>
-                ))}
+                {attachments.map((url) => {
+                  const isImage = isImageURL(url);
+                  const fileName = url.startsWith("data:") ? "photo" : fileNameFromURL(url);
+                  return (
+                    <div key={url} className="relative group">
+                      {isImage ? (
+                        <img
+                          src={url}
+                          alt={fileName}
+                          className="h-16 w-16 rounded-md object-cover border border-border"
+                        />
+                      ) : (
+                        <Badge variant="secondary" className="gap-1 text-xs h-8">
+                          {fileName}
+                        </Badge>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => removeAttachment(url)}
+                        className="absolute -top-1.5 -right-1.5 h-5 w-5 rounded-full bg-background border border-border flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                        aria-label={`Remove ${fileName}`}
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  );
+                })}
+                {isUploading && (
+                  <div className="h-16 w-16 rounded-md border border-border bg-muted flex items-center justify-center">
+                    <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                  </div>
+                )}
               </div>
             )}
 
@@ -453,15 +482,21 @@ export function ManualSessionCreatePageContent() {
                 )
               )}
 
-              <Select value={selectedModel} onValueChange={setSelectedModel}>
+              <Select value={selectedModel} onValueChange={(v) => setSelectedModel(v === "__default__" ? "" : v)}>
                 <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-[13px] text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
                   <SelectValue placeholder="Default model" />
                 </SelectTrigger>
                 <SelectContent>
-                  {availableModels.map((model) => (
-                    <SelectItem key={model} value={model}>
-                      {model}
-                    </SelectItem>
+                  <SelectItem value="__default__">Default model</SelectItem>
+                  {modelGroups.map((group) => (
+                    <SelectGroup key={group.key}>
+                      <SelectLabel>{group.label}</SelectLabel>
+                      {group.models.map((model) => (
+                        <SelectItem key={model} value={model}>
+                          {model}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
                   ))}
                 </SelectContent>
               </Select>

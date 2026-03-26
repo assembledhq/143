@@ -1,11 +1,16 @@
 import type { SessionMessage, SessionLog } from "./types";
 
+/** Prefix added by the backend when a message is sent in plan mode. */
+export const PLAN_MODE_PREFIX = "[PLAN_MODE]\n";
+
 export type TimelineEntry =
   | { kind: "message"; data: SessionMessage }
   | { kind: "assistant_output"; data: SessionLog }
   | { kind: "tool_group"; toolUse: SessionLog; toolResult?: SessionLog }
   | { kind: "error"; data: SessionLog }
-  | { kind: "log"; data: SessionLog };
+  | { kind: "log"; data: SessionLog }
+  | { kind: "plan_output"; data: SessionLog; turnNumber: number }
+  | { kind: "plan_message"; data: SessionMessage; turnNumber: number };
 
 /**
  * Merges SessionMessage and SessionLog arrays into a unified timeline
@@ -36,6 +41,15 @@ export function buildTimeline(
     return true;
   });
 
+  // Detect which turn numbers are plan mode turns by checking user messages
+  // for the plan mode prefix.
+  const planModeTurns = new Set<number>();
+  for (const msg of messages) {
+    if (msg.role === "user" && msg.content.startsWith(PLAN_MODE_PREFIX)) {
+      planModeTurns.add(msg.turn_number);
+    }
+  }
+
   // Tag and merge into a single sortable list.
   type Tagged =
     | { source: "message"; ts: string; data: SessionMessage }
@@ -59,7 +73,14 @@ export function buildTimeline(
     const item = items[i];
 
     if (item.source === "message") {
-      entries.push({ kind: "message", data: item.data });
+      const msg = item.data;
+      // If this is an assistant message responding to a plan mode turn,
+      // mark it as a plan_message so the UI can show approve/adjust buttons.
+      if (msg.role === "assistant" && planModeTurns.has(msg.turn_number)) {
+        entries.push({ kind: "plan_message", data: msg, turnNumber: msg.turn_number });
+      } else {
+        entries.push({ kind: "message", data: msg });
+      }
       i++;
       continue;
     }
@@ -96,7 +117,12 @@ export function buildTimeline(
     // output-level logs without metadata type are assistant text responses
     // (e.g. agent_message from Codex CLI). Show them as visible output.
     if (log.level === "output" && (!log.metadata || !log.metadata.type)) {
-      entries.push({ kind: "assistant_output", data: log });
+      // If this output belongs to a plan mode turn, mark it as plan output.
+      if (planModeTurns.has(log.turn_number)) {
+        entries.push({ kind: "plan_output", data: log, turnNumber: log.turn_number });
+      } else {
+        entries.push({ kind: "assistant_output", data: log });
+      }
       i++;
       continue;
     }

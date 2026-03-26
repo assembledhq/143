@@ -570,17 +570,24 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Message string   `json:"message"`
-		Images  []string `json:"images"`
+		Message  string   `json:"message"`
+		Images   []string `json:"images"`
+		PlanMode bool     `json:"plan_mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
 		return
 	}
 	body.Message = strings.TrimSpace(body.Message)
-	if body.Message == "" {
-		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message is required")
+	if body.Message == "" && len(body.Images) == 0 {
+		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message or images are required")
 		return
+	}
+
+	// When plan mode is requested, prefix the message so the orchestrator
+	// can detect it and instruct the coding agent to plan instead of execute.
+	if body.PlanMode {
+		body.Message = "[PLAN_MODE]\n" + body.Message
 	}
 
 	// Look up the session to check its current status.
@@ -724,10 +731,19 @@ func (h *SessionHandler) EndSession(w http.ResponseWriter, r *http.Request) {
 		"session_id": sessionID.String(),
 		"org_id":     orgID.String(),
 	}
-	dedupeKey := fmt.Sprintf("validate:%s", sessionID)
-	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "validate", payload, 5, &dedupeKey); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue validation", err)
-		return
+	if session.TriggeredByUserID != nil {
+		// Manual sessions skip validation — go straight to PR creation.
+		dedupeKey := fmt.Sprintf("open_pr:%s", sessionID)
+		if _, err := h.jobStore.Enqueue(r.Context(), orgID, "default", "open_pr", payload, 5, &dedupeKey); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue PR creation", err)
+			return
+		}
+	} else {
+		dedupeKey := fmt.Sprintf("validate:%s", sessionID)
+		if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "validate", payload, 5, &dedupeKey); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue validation", err)
+			return
+		}
 	}
 
 	// Snapshot cleanup is handled by the reaper, which will find this session
@@ -900,6 +916,27 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	if err := h.runStore.Create(r.Context(), session); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create manual session", err)
 		return
+	}
+
+	// Persist the initial user message as a turn-0 record so that attachments
+	// (uploaded images) are displayed alongside the prompt in the chat timeline.
+	if h.messageStore != nil {
+		initMsg := &models.SessionMessage{
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 0,
+			Role:       models.MessageRoleUser,
+			Content:    body.Message,
+		}
+		if user := middleware.UserFromContext(r.Context()); user != nil {
+			initMsg.UserID = &user.ID
+		}
+		if len(body.Images) > 0 {
+			initMsg.Attachments = body.Images
+		}
+		if err := h.messageStore.Create(r.Context(), initMsg); err != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to create initial session message — continuing without it")
+		}
 	}
 
 	// Check concurrency before enqueuing so the user gets immediate feedback.

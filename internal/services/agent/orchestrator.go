@@ -600,6 +600,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 
 	var userMessage string
+	var planMode bool
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role == models.MessageRoleUser {
 			userMessage = messages[i].Content
@@ -610,6 +611,22 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		o.failRun(ctx, session, "no user message found for continue_session")
 		return fmt.Errorf("no user message found")
 	}
+
+	// Detect plan mode prefix and strip it, wrapping with plan instructions.
+	const planModePrefix = "[PLAN_MODE]\n"
+	if strings.HasPrefix(userMessage, planModePrefix) {
+		planMode = true
+		originalMessage := strings.TrimPrefix(userMessage, planModePrefix)
+		userMessage = "You are in PLAN MODE. Instead of making changes directly, create a detailed implementation plan for the following request. Describe:\n" +
+			"1. What files need to be changed and why\n" +
+			"2. What specific changes are needed in each file\n" +
+			"3. The order of operations\n" +
+			"4. Any potential risks or considerations\n\n" +
+			"Do NOT make any file changes or use any tools that modify files. Only output the plan as a structured markdown response. " +
+			"The user will review the plan and either approve it or request adjustments before you proceed.\n\n" +
+			"User's request:\n" + originalMessage
+	}
+	_ = planMode // used by adapters that support explicit plan mode
 
 	// 4. Create sandbox.
 	sandboxCfg := DefaultSandboxConfig()

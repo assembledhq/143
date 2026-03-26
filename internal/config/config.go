@@ -86,6 +86,14 @@ type Config struct {
 	DataRetentionLogsDays    int `env:"DATA_RETENTION_LOGS_DAYS"    envDefault:"90"`
 	DataRetentionJobsDays    int `env:"DATA_RETENTION_JOBS_DAYS"    envDefault:"30"`
 
+	// Upload storage (images/files attached to session messages)
+	UploadStorageDir      string `env:"UPLOAD_STORAGE_DIR"      envDefault:".data/uploads"`
+	UploadS3Bucket        string `env:"UPLOAD_S3_BUCKET"`
+	UploadS3Prefix        string `env:"UPLOAD_S3_PREFIX"        envDefault:"uploads"`
+	UploadS3Endpoint      string `env:"UPLOAD_S3_ENDPOINT"`      // e.g. https://mybucket.s3.amazonaws.com
+	UploadS3Region        string `env:"UPLOAD_S3_REGION"        envDefault:"us-east-1"`
+	UploadMaxAge          time.Duration `env:"UPLOAD_MAX_AGE"    envDefault:"2160h"` // 90 days
+
 	// Interactive session snapshots
 	SnapshotStorageDir    string        `env:"SNAPSHOT_STORAGE_DIR"    envDefault:".data/snapshots"`
 	SessionMaxIdleAge     time.Duration `env:"SESSION_MAX_IDLE_AGE"    envDefault:"2h"`
