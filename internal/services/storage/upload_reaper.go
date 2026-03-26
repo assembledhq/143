@@ -2,7 +2,6 @@ package storage
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -119,18 +118,4 @@ func (r *UploadReaper) cleanEmptyDirs(baseDir string) {
 			}
 		}
 	}
-}
-
-// S3LifecycleHint returns a suggested S3 lifecycle configuration XML
-// for the given prefix and max age.
-func S3LifecycleHint(prefix string, maxAge time.Duration) string {
-	days := int(maxAge.Hours() / 24)
-	if days < 1 {
-		days = 1
-	}
-	return fmt.Sprintf(`Suggested S3 lifecycle rule for upload cleanup:
-  Prefix: %s/
-  Expiration: %d days
-Configure this via the S3 console or aws cli:
-  aws s3api put-bucket-lifecycle-configuration --bucket YOUR_BUCKET --lifecycle-configuration ...`, prefix, days)
 }

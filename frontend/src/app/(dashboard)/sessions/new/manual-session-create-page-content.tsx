@@ -23,12 +23,15 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
+import { isImageURL, fileNameFromURL } from "@/lib/utils";
 import { captureError } from "@/lib/errors";
 import { queryKeys } from "@/lib/query-keys";
 import { AGENT_TYPE_OPTIONS } from "@/lib/model-constants";
 import { NoReposWarning } from "@/components/no-repos-warning";
 import { useOptimisticSessions } from "@/contexts/optimistic-sessions";
 import type { OrgSettings, Organization, Repository, SingleResponse, ListResponse } from "@/lib/types";
+
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
 type BranchInfo = { name: string; protected: boolean };
 
@@ -180,8 +183,6 @@ export function ManualSessionCreatePageContent() {
     resizeMessageInput();
   }, [message]);
 
-  const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
-
   async function onUploadChange(event: React.ChangeEvent<HTMLInputElement>) {
     const fileList = event.target.files;
     if (!fileList || fileList.length === 0) {
@@ -318,9 +319,8 @@ export function ManualSessionCreatePageContent() {
             {(attachments.length > 0 || isUploading) && (
               <div className="flex flex-wrap items-center gap-2 pb-3">
                 {attachments.map((url) => {
-                  const pathname = url.split("?")[0].split("#")[0];
-                  const isImage = /\.(png|jpe?g|gif|webp|svg)$/i.test(pathname) || url.startsWith("data:image/");
-                  const fileName = url.startsWith("data:") ? "photo" : (pathname.split("/").pop() || "file");
+                  const isImage = isImageURL(url);
+                  const fileName = url.startsWith("data:") ? "photo" : fileNameFromURL(url);
                   return (
                     <div key={url} className="relative group">
                       {isImage ? (

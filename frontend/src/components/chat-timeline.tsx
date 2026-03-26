@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { MarkdownContent } from "@/components/markdown";
 import type { TimelineEntry } from "@/lib/timeline";
 import type { SessionMessage, SessionLog } from "@/lib/types";
+import { isImageURL, fileNameFromURL } from "@/lib/utils";
 
 function safeDate(dateStr: string): Date | null {
   const d = new Date(dateStr);
@@ -195,13 +196,6 @@ function ImageLightbox({ src, alt, onClose }: { src: string; alt: string; onClos
 // Attachment thumbnails for messages
 // ---------------------------------------------------------------------------
 
-function isImageURL(url: string): boolean {
-  if (url.startsWith("data:image/")) return true;
-  // Strip query params and fragment so S3 presigned URLs still match.
-  const pathname = url.split("?")[0].split("#")[0];
-  return /\.(png|jpe?g|gif|webp|svg)$/i.test(pathname);
-}
-
 function AttachmentGrid({ attachments }: { attachments: string[] }) {
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
 
@@ -245,7 +239,7 @@ function AttachmentGrid({ attachments }: { attachments: string[] }) {
       {files.length > 0 && (
         <div className="flex flex-wrap gap-1.5 mt-2">
           {files.map((url) => {
-            const fileName = url.split("?")[0].split("/").pop() || "file";
+            const fileName = fileNameFromURL(url);
             return (
               <a
                 key={url}

@@ -43,7 +43,7 @@ import { parseDiffStats } from "@/lib/diff-parser";
 import type { Session, SessionLog, SessionMessage, User, Validation } from "@/lib/types";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
-import { cn, sessionTitle } from "@/lib/utils";
+import { cn, sessionTitle, isImageURL, fileNameFromURL } from "@/lib/utils";
 import { DiffStatsBadge, FileTree, ReviewToolbar, DiffPane, SessionFooter, KeyboardHelpOverlay, CommentsSummary, RepoExplorer, type ViewMode, type DiffPaneHandle } from "@/components/code-review";
 import { useDiffKeyboardNav } from "@/hooks/use-diff-keyboard-nav";
 import { useReviewComments } from "@/hooks/use-review-comments";
@@ -698,6 +698,7 @@ function ChangesTab({
 
 const MAX_SSE_RECONNECT_ATTEMPTS = 5;
 const BASE_SSE_RECONNECT_DELAY_MS = 1000;
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
 function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Session; sessionId: string; isActive: boolean; onDiffClick?: () => void }) {
   const queryClient = useQueryClient();
@@ -855,8 +856,6 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
     };
   }, [sessionId, apiBase, isActive, mergeLogs, queryClient]);
 
-  const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
-
   async function handleFileUpload(event: React.ChangeEvent<HTMLInputElement>) {
     const fileList = event.target.files;
     if (!fileList || fileList.length === 0) return;
@@ -889,7 +888,10 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
   }
 
   const sendMutation = useMutation({
-    mutationFn: () => api.sessions.sendMessage(sessionId, message, attachments.length > 0 ? attachments : undefined, selectedModel || undefined),
+    mutationFn: () => {
+      setUploadError(null);
+      return api.sessions.sendMessage(sessionId, message, attachments.length > 0 ? attachments : undefined, selectedModel || undefined);
+    },
     onSuccess: () => {
       setMessage("");
       setAttachments([]);
@@ -1008,9 +1010,8 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
           {(attachments.length > 0 || isUploading) && (
             <div className="flex flex-wrap items-center gap-2 px-3 pb-2">
               {attachments.map((url) => {
-                const pathname = url.split("?")[0].split("#")[0];
-                const isImage = /\.(png|jpe?g|gif|webp|svg)$/i.test(pathname);
-                const fileName = pathname.split("/").pop() || "file";
+                const isImage = isImageURL(url);
+                const fileName = fileNameFromURL(url);
                 return (
                   <div key={url} className="relative group">
                     {isImage ? (
