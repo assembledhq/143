@@ -1,6 +1,10 @@
 package api
 
 import (
+	"context"
+
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -14,6 +18,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/services/codexauth"
+	"github.com/assembledhq/143/internal/services/storage"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/sandbox"
@@ -176,6 +181,25 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	sessionReviewCommentHandler.SetMessageAndJobStores(sessionMessageStore, jobStore)
 	sessionFileHandler := handlers.NewSessionFileHandler(sessionStore, fileReader, logger)
 
+	// Upload store: use S3 if configured, otherwise fall back to local filesystem.
+	var uploadStore storage.UploadStore
+	if cfg.UploadS3Bucket != "" {
+		awsCfg, awsErr := awsconfig.LoadDefaultConfig(context.Background(),
+			awsconfig.WithRegion(cfg.UploadS3Region),
+		)
+		if awsErr != nil {
+			logger.Warn().Err(awsErr).Msg("failed to load AWS config for upload S3 — falling back to file uploads")
+			uploadStore = storage.NewFileUploadStore(cfg.UploadStorageDir, "/api/v1/uploads/files")
+		} else {
+			s3Client := s3.NewFromConfig(awsCfg)
+			uploadStore = storage.NewS3UploadStore(s3Client, cfg.UploadS3Bucket, cfg.UploadS3Prefix, cfg.UploadS3Endpoint)
+			logger.Info().Str("bucket", cfg.UploadS3Bucket).Str("prefix", cfg.UploadS3Prefix).Msg("upload S3 store configured")
+		}
+	} else {
+		uploadStore = storage.NewFileUploadStore(cfg.UploadStorageDir, "/api/v1/uploads/files")
+	}
+	uploadHandler := handlers.NewUploadHandler(uploadStore)
+
 	r := chi.NewRouter()
 
 	// Global middleware
@@ -255,6 +279,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.GetThreadMessages)
 			r.Get("/api/v1/sessions/{id}/threads/{tid}/logs", sessionThreadHandler.GetThreadLogs)
 			r.Get("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.List)
+			r.Get("/api/v1/uploads/files/*", uploadHandler.ServeUpload)
 			r.Get("/api/v1/sessions/{id}/files", sessionFileHandler.ListFiles)
 			r.Get("/api/v1/sessions/{id}/files/content", sessionFileHandler.GetFileContent)
 			r.Get("/api/v1/sessions/{id}/files/context", sessionFileHandler.GetFileContext)
@@ -311,6 +336,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Delete("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.DeletePersonal)
 
 			r.Post("/api/v1/issues/{id}/fix", sessionHandler.TriggerFix)
+			// File upload (higher body-size limit for multipart uploads).
+			r.With(middleware.MaxBodySize(11<<20)).Post("/api/v1/uploads", uploadHandler.Upload)
+
 			r.Post("/api/v1/sessions/manual", sessionHandler.CreateManual)
 			r.Post("/api/v1/sessions/{id}/questions/{qid}/answer", sessionHandler.AnswerQuestion)
 			r.Post("/api/v1/sessions/{id}/messages", sessionHandler.SendMessage)
