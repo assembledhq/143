@@ -145,7 +145,7 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
 
   return (
     <>
-      <Card className={`py-0 ${selectedAgentType === "codex" && !codexConnected ? "border-primary" : ""}`}>
+      <Card className={`py-0 ${selectedAgentType === "codex" && !isSelectedAgentConnected ? "border-primary" : ""}`}>
         <CardContent className="flex items-center justify-between gap-4 py-4">
           <div className="flex min-w-0 flex-1 items-center gap-3">
             <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-muted/50 text-muted-foreground ring-1 ring-border/50 dark:bg-white/5">
@@ -216,7 +216,7 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
 export function AutopilotSetupChecklist() {
   const [agentConnected, setAgentConnected] = useState(false);
   const { data: integrationsResponse } = useQuery({
-    queryKey: ["integrations"],
+    queryKey: queryKeys.integrations.all,
     queryFn: () => api.integrations.list(),
   });
   const { data: repositoriesResponse } = useQuery({
@@ -233,6 +233,7 @@ export function AutopilotSetupChecklist() {
   const sentryIntegration = integrations.find((integration) => integration.provider === "sentry" && integration.status === "active");
   const linearIntegration = integrations.find((integration) => integration.provider === "linear" && integration.status === "active");
   const slackIntegration = integrations.find((integration) => integration.provider === "slack" && integration.status === "active");
+  const notionIntegration = integrations.find((integration) => integration.provider === "notion" && integration.status === "active");
 
   const githubReady = Boolean(githubIntegration) && repositories.length > 0;
 
@@ -260,10 +261,12 @@ export function AutopilotSetupChecklist() {
             sentryConnected={Boolean(sentryIntegration)}
             linearConnected={Boolean(linearIntegration)}
             slackConnected={Boolean(slackIntegration)}
+            notionConnected={Boolean(notionIntegration)}
             linearLoading={false}
             onConnectSentry={() => api.auth.loginSentry()}
             onConnectLinear={() => api.integrations.loginLinear()}
             onConnectSlack={() => api.integrations.loginSlack()}
+            onConnectNotion={() => { /* Notion requires token input — use the Integrations page */ }}
             onDisconnect={(provider) => disconnectMutation.mutate(provider)}
             disconnectingProvider={disconnectMutation.isPending ? disconnectMutation.variables : null}
             disconnectErrorProvider={disconnectMutation.isError ? disconnectMutation.variables ?? null : null}

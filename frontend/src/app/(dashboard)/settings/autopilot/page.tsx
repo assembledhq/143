@@ -19,20 +19,21 @@ import {
 } from "@/components/ui/select";
 import { SettingsPageFrame } from "@/components/settings-page-frame";
 import { DEFAULT_PM_MODEL, PM_MODELS_BY_PROVIDER } from "@/lib/model-constants";
+import { queryKeys } from "@/lib/query-keys";
 import type { ListResponse, Organization, OrgSettings, RepoSettings, Repository, SingleResponse } from "@/lib/types";
 
 export default function AutopilotSettingsPage() {
   const queryClient = useQueryClient();
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
-    queryKey: ["settings"],
+    queryKey: queryKeys.settings.all,
     queryFn: () => api.settings.get(),
   });
   const { data: agentDefaultsResponse } = useQuery({
-    queryKey: ["agent-defaults"],
+    queryKey: queryKeys.settings.agentDefaults,
     queryFn: () => api.settings.getAgentDefaults(),
   });
   const { data: repositoriesResponse } = useQuery<ListResponse<Repository>>({
-    queryKey: ["repositories"],
+    queryKey: queryKeys.repositories.all,
     queryFn: () => api.repositories.list(),
   });
 
@@ -65,7 +66,7 @@ export default function AutopilotSettingsPage() {
   const mutation = useMutation({
     mutationFn: (payload: Record<string, unknown>) => api.settings.update(payload),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["settings"] });
+      queryClient.invalidateQueries({ queryKey: queryKeys.settings.all });
     },
     onError: (error) => {
       console.error("failed to save autopilot settings", error);

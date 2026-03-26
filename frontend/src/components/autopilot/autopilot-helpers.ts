@@ -1,6 +1,6 @@
 import type { OrgSettings, PMDocument, PMPlan, PMStatus, CodexAuthStatus } from "@/lib/types";
 
-export const DEFAULT_PRIORITY_WEIGHTS: NonNullable<OrgSettings["priority_weights"]> = {
+export const DEFAULT_PRIORITY_WEIGHTS: Required<NonNullable<OrgSettings["priority_weights"]>> = {
   customer_impact: 0.35,
   severity: 0.25,
   recency: 0.2,
