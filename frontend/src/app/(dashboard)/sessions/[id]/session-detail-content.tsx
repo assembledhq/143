@@ -19,7 +19,6 @@ import {
   ChevronDown,
   Paperclip,
   X,
-  ImagePlus,
   Loader2,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -707,6 +706,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
   const [streamedLogs, setStreamedLogs] = useState<SessionLog[]>([]);
   const [attachments, setAttachments] = useState<string[]>([]);
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -860,14 +860,15 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
     if (!fileList || fileList.length === 0) return;
 
     setIsUploading(true);
+    setUploadError(null);
     try {
       const files = Array.from(fileList);
       const results = await Promise.all(
         files.map((file) => api.uploads.upload(file))
       );
       setAttachments((prev) => [...prev, ...results.map((r) => r.url)]);
-    } catch {
-      // Upload failed — silently ignore (user can retry).
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : "Upload failed");
     } finally {
       setIsUploading(false);
       event.target.value = "";
@@ -970,12 +971,13 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
 
       {/* Error display */}
       {(() => {
-        const firstError = [sendMutation, endMutation, createPRMutation].find(m => m.error)?.error;
+        const firstError = uploadError || [sendMutation, endMutation, createPRMutation].find(m => m.error)?.error;
         if (!firstError) return null;
+        const msg = typeof firstError === "string" ? firstError : (firstError instanceof Error ? firstError.message : "An error occurred");
         return (
           <div className="flex items-center gap-2 px-4 py-2 text-xs text-destructive border-t bg-destructive/5">
             <AlertTriangle className="h-3 w-3 shrink-0" />
-            {firstError instanceof Error ? firstError.message : "An error occurred"}
+            {msg}
           </div>
         );
       })()}
@@ -994,7 +996,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
           />
 
           {/* Attachment previews */}
-          {attachments.length > 0 && (
+          {(attachments.length > 0 || isUploading) && (
             <div className="flex flex-wrap items-center gap-2 px-3 pb-2">
               {attachments.map((url) => {
                 const isImage = /\.(png|jpe?g|gif|webp|svg)$/i.test(url);

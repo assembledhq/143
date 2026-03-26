@@ -578,8 +578,8 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body.Message = strings.TrimSpace(body.Message)
-	if body.Message == "" {
-		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message is required")
+	if body.Message == "" && len(body.Images) == 0 {
+		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message or images are required")
 		return
 	}
 

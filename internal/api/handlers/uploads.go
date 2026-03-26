@@ -118,8 +118,8 @@ func (h *UploadHandler) ServeUpload(w http.ResponseWriter, r *http.Request) {
 
 	// Extract the file key from the URL path after /api/v1/uploads/files/
 	key := strings.TrimPrefix(r.URL.Path, "/api/v1/uploads/files/")
-	if key == "" {
-		writeError(w, r, http.StatusBadRequest, "MISSING_KEY", "file key is required")
+	if key == "" || strings.Contains(key, "..") {
+		writeError(w, r, http.StatusBadRequest, "INVALID_KEY", "invalid file key")
 		return
 	}
 
