@@ -61,6 +61,11 @@ export const AGENT_TYPE_OPTIONS: { key: string; label: string; models: readonly 
   { key: "gemini_cli", label: "Gemini CLI", models: AVAILABLE_GEMINI_CLI_MODELS },
 ];
 
+// Resolve the agent type key for a given model string.
+export function agentTypeForModel(model: string): string | undefined {
+  return AGENT_TYPE_OPTIONS.find((a) => (a.models as readonly string[]).includes(model))?.key;
+}
+
 // All PM models across every provider (for validation / backward compat).
 export const AVAILABLE_PM_MODELS = [
   ...LEGACY_PM_ALIASES,
