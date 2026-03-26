@@ -1493,22 +1493,6 @@ func TestSessionHandler_EndSession_EnqueuesValidation(t *testing.T) {
 	mock.ExpectExec("UPDATE sessions SET status = @status, completed_at = now\\(\\) WHERE id = @id AND org_id = @org_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	// Issue fetch to determine whether to validate or skip.
-	mock.ExpectQuery("SELECT .+ FROM issues WHERE").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows([]string{
-				"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
-				"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
-				"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
-				"created_at", "updated_at",
-			}).AddRow(
-				issueID, orgID, "ext-1", "sentry", nil, nil,
-				"Test Issue", nil, json.RawMessage(`{}`), "open", now, now,
-				5, 2, "high", []string{"bug"}, "fp123",
-				now, now,
-			),
-		)
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
@@ -1567,22 +1551,6 @@ func TestSessionHandler_EndSession_ManualSkipsValidation(t *testing.T) {
 	mock.ExpectExec("UPDATE sessions SET status = @status, completed_at = now\\(\\) WHERE id = @id AND org_id = @org_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	// Issue fetch — manual source means validation is skipped.
-	mock.ExpectQuery("SELECT .+ FROM issues WHERE").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows([]string{
-				"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
-				"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
-				"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
-				"created_at", "updated_at",
-			}).AddRow(
-				issueID, orgID, "", "manual", nil, nil,
-				"Manual session", nil, json.RawMessage(`{}`), "open", now, now,
-				0, 0, "", nil, "",
-				now, now,
-			),
-		)
 	// Expect open_pr job instead of validate.
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).

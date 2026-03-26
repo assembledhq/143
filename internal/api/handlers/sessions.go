@@ -720,17 +720,11 @@ func (h *SessionHandler) EndSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	issue, err := h.issueStore.GetByID(r.Context(), orgID, session.IssueID)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "ISSUE_FETCH_FAILED", "failed to fetch issue", err)
-		return
-	}
-
 	payload := map[string]string{
 		"session_id": sessionID.String(),
 		"org_id":     orgID.String(),
 	}
-	if issue.Source == models.IssueSourceManual {
+	if session.TriggeredByUserID != nil {
 		// Manual sessions skip validation — go straight to PR creation.
 		dedupeKey := fmt.Sprintf("open_pr:%s", sessionID)
 		if _, err := h.jobStore.Enqueue(r.Context(), orgID, "default", "open_pr", payload, 5, &dedupeKey); err != nil {
