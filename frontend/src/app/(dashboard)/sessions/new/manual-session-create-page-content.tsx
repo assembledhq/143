@@ -27,7 +27,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
 import { queryKeys } from "@/lib/query-keys";
-import { AGENT_TYPE_OPTIONS } from "@/lib/model-constants";
+import { AGENT_TYPE_OPTIONS, agentTypeForModel } from "@/lib/model-constants";
 import { NoReposWarning } from "@/components/no-repos-warning";
 import { useOptimisticSessions } from "@/contexts/optimistic-sessions";
 import type { OrgSettings, Organization, Repository, SingleResponse, ListResponse } from "@/lib/types";
@@ -137,11 +137,11 @@ export function ManualSessionCreatePageContent() {
   };
 
   const modelGroups = useMemo(() => {
-    // Sort so the default agent type appears first.
+    // Sort so the default agent type appears first, preserve original order otherwise.
     return [...AGENT_TYPE_OPTIONS].sort((a, b) => {
       if (a.key === defaultAgentType) return -1;
       if (b.key === defaultAgentType) return 1;
-      return 0;
+      return AGENT_TYPE_OPTIONS.indexOf(a) - AGENT_TYPE_OPTIONS.indexOf(b);
     });
   }, [defaultAgentType]);
 
@@ -150,7 +150,7 @@ export function ManualSessionCreatePageContent() {
       api.sessions.createManual({
         message: message.trim(),
         images: attachments,
-        ...(selectedModel ? { model: selectedModel } : {}),
+        ...(selectedModel ? { model: selectedModel, agent_type: agentTypeForModel(selectedModel) } : {}),
         ...(selectedRepoId ? { repository_id: selectedRepoId } : {}),
         ...(selectedBranch ? { branch: selectedBranch } : {}),
       }),
@@ -459,11 +459,12 @@ export function ManualSessionCreatePageContent() {
                 )
               )}
 
-              <Select value={selectedModel} onValueChange={setSelectedModel}>
+              <Select value={selectedModel} onValueChange={(v) => setSelectedModel(v === "__default__" ? "" : v)}>
                 <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-[13px] text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
                   <SelectValue placeholder="Default model" />
                 </SelectTrigger>
                 <SelectContent>
+                  <SelectItem value="__default__">Default model</SelectItem>
                   {modelGroups.map((group) => (
                     <SelectGroup key={group.key}>
                       <SelectLabel>{group.label}</SelectLabel>
