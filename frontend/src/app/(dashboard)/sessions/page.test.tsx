@@ -85,12 +85,7 @@ describe('SessionSidebar', () => {
     await screen.findByText('Fixed TypeError by adding null check');
 
     // Search is collapsed behind an icon button — click to expand
-    const buttons = screen.getAllByRole('button');
-    const searchToggle = buttons.find(
-      (btn) => btn.querySelector('svg.lucide-search'),
-    );
-    expect(searchToggle).toBeTruthy();
-    searchToggle!.click();
+    screen.getByRole('button', { name: 'Search sessions' }).click();
 
     expect(screen.getByPlaceholderText('Search sessions...')).toBeInTheDocument();
   });

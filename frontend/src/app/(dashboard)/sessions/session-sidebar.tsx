@@ -195,6 +195,7 @@ export function SessionSidebar() {
           ) : (
             <>
               <button
+                aria-label="Search sessions"
                 onClick={() => {
                   setSearchOpen(true);
                   requestAnimationFrame(() => searchInputRef.current?.focus());
