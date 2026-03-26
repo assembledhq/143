@@ -27,7 +27,6 @@ import {
   MessageSquare,
   Paperclip,
   X,
-  Loader2,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { MarkdownContent } from "@/components/markdown";
@@ -53,7 +52,7 @@ import type { Session, SessionLog, SessionMessage, User, Validation } from "@/li
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
 import { cn, sessionTitle, isImageURL, fileNameFromURL } from "@/lib/utils";
-import { DiffStatsBadge, FileTree, ReviewToolbar, DiffPane, SessionFooter, KeyboardHelpOverlay, CommentsSummary, RepoExplorer, type ViewMode, type DiffPaneHandle } from "@/components/code-review";
+import { FileTree, ReviewToolbar, DiffPane, SessionFooter, KeyboardHelpOverlay, CommentsSummary, RepoExplorer, type ViewMode, type DiffPaneHandle } from "@/components/code-review";
 import { useDiffKeyboardNav } from "@/hooks/use-diff-keyboard-nav";
 import { useReviewComments } from "@/hooks/use-review-comments";
 import { useDiffViewState } from "@/hooks/use-diff-view-state";
@@ -268,6 +267,12 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
           </CardContent>
         </Card>
       )}
+
+      <AuditLogTrigger
+        filters={{ session_id: session.id }}
+        members={members}
+        title="Session activity"
+      />
     </div>
   );
 }
@@ -1269,8 +1274,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   const session = data?.data;
   const members = membersData?.data ?? [];
   const isActive = session ? !terminalStatuses.has(session.status) : false;
-  const isMultiTurn = session && session.current_turn > 0;
-
   const sessionDiff = session?.diff;
   const diffStats = useMemo(() => {
     if (!sessionDiff) return null;
@@ -1314,44 +1317,23 @@ export function SessionDetailContent({ id }: { id: string }) {
       <div className={cn("flex-1 min-w-0 flex flex-col", maximized && "hidden")}>
         {/* Session header bar */}
         <div className="border-b border-border px-4 py-3 bg-background flex items-center justify-between shrink-0">
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <h1 className="text-sm font-semibold text-foreground truncate">
-                {sessionTitle(session)}
-              </h1>
-              <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium shrink-0 ${status.color}`}>
-                {status.label}
-              </span>
-              {diffStats && (
-                <DiffStatsBadge
-                  added={diffStats.added}
-                  removed={diffStats.removed}
-                  filesChanged={diffStats.filesChanged}
-                  onClick={openChangesTab}
-                />
-              )}
-            </div>
-            <p className="text-[12px] text-muted-foreground mt-0.5">
-              {agentTypeLabels[session.agent_type] || session.agent_type}
-              {isMultiTurn && ` \u00B7 Turn ${session.current_turn}`}
-            </p>
+          <div className="min-w-0 flex-1 flex items-center gap-2">
+            <h1 className="text-sm font-semibold text-foreground truncate">
+              {sessionTitle(session)}
+            </h1>
+            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium shrink-0 ${status.color}`}>
+              {status.label}
+            </span>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
-            <AuditLogTrigger
-              filters={{ session_id: session.id }}
-              members={members}
-              title="Session activity"
-            />
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8"
-              onClick={() => setShowDetailPanel(!showDetailPanel)}
-              title={showDetailPanel ? "Hide details" : "Show details"}
-            >
-              {showDetailPanel ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
-            </Button>
-          </div>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 shrink-0"
+            onClick={() => setShowDetailPanel(!showDetailPanel)}
+            title={showDetailPanel ? "Hide details" : "Show details"}
+          >
+            {showDetailPanel ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
+          </Button>
         </div>
 
         {/* Chat panel */}
