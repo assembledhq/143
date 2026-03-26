@@ -17,7 +17,9 @@ import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
@@ -134,9 +136,13 @@ export function ManualSessionCreatePageContent() {
     setBranchByRepoId((prev) => ({ ...prev, [selectedRepoId]: branch }));
   };
 
-  const availableModels = useMemo(() => {
-    const agentType = AGENT_TYPE_OPTIONS.find((a) => a.key === defaultAgentType);
-    return agentType?.models ?? [];
+  const modelGroups = useMemo(() => {
+    // Sort so the default agent type appears first.
+    return [...AGENT_TYPE_OPTIONS].sort((a, b) => {
+      if (a.key === defaultAgentType) return -1;
+      if (b.key === defaultAgentType) return 1;
+      return 0;
+    });
   }, [defaultAgentType]);
 
   const createManualSessionMutation = useMutation({
@@ -458,10 +464,15 @@ export function ManualSessionCreatePageContent() {
                   <SelectValue placeholder="Default model" />
                 </SelectTrigger>
                 <SelectContent>
-                  {availableModels.map((model) => (
-                    <SelectItem key={model} value={model}>
-                      {model}
-                    </SelectItem>
+                  {modelGroups.map((group) => (
+                    <SelectGroup key={group.key}>
+                      <SelectLabel>{group.label}</SelectLabel>
+                      {group.models.map((model) => (
+                        <SelectItem key={model} value={model}>
+                          {model}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
                   ))}
                 </SelectContent>
               </Select>
