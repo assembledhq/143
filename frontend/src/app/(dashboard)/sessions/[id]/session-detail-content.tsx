@@ -23,6 +23,7 @@ import {
   User as UserIcon,
   Bot,
   Cpu,
+  MessageSquare,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { MarkdownContent } from "@/components/markdown";
@@ -195,7 +196,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
       {/* Session vitals — primary info row */}
       <Card>
         <CardContent className="p-4">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
             <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${status.color}`}>
               {isActive && (
                 <span className="relative mr-1.5 flex h-2 w-2">
@@ -205,12 +206,12 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
               )}
               {status.label}
             </span>
-            <span className="text-border">|</span>
+            <span className="h-4 w-px bg-border" />
             <span className="inline-flex items-center gap-1.5 text-sm">
               <Cpu className="h-3.5 w-3.5 text-muted-foreground" />
               <span className="font-medium">{agentTypeLabels[session.agent_type] || session.agent_type}</span>
             </span>
-            <span className="text-border">|</span>
+            <span className="h-4 w-px bg-border" />
             <span className="inline-flex items-center gap-1.5 text-sm">
               {session.pm_plan_id && !session.triggered_by_user_id ? (
                 <Bot className="h-3.5 w-3.5 text-primary" />
@@ -224,7 +225,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
       </Card>
 
       {/* Timestamps — secondary reference data */}
-      <div className="flex items-center gap-4 text-xs text-muted-foreground px-1">
+      <div className="flex items-center gap-x-4 gap-y-1 flex-wrap text-xs text-muted-foreground px-1">
         <span className="inline-flex items-center gap-1.5">
           <Timer className="h-3 w-3" />
           {formatDuration(session.started_at, session.completed_at)}
@@ -947,7 +948,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
         {timelineEntries.length === 0 && !isRunning && (
           <div className="flex items-center justify-center py-12">
             <div className="text-center space-y-2 max-w-[280px]">
-              <Loader2 className="h-6 w-6 text-muted-foreground/40 mx-auto" />
+              <MessageSquare className="h-8 w-8 text-muted-foreground/40 mx-auto" />
               <p className="text-sm font-medium text-muted-foreground">No activity yet</p>
               <p className="text-xs text-muted-foreground/60">The session is processing its initial turn.</p>
             </div>
