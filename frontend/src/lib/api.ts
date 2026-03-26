@@ -81,7 +81,38 @@ function del<T>(path: string): Promise<T> {
   return request<T>(path, { method: 'DELETE' });
 }
 
+async function uploadFile(file: File): Promise<{ url: string; file_name: string; content_type: string }> {
+  const formData = new FormData();
+  formData.append('file', file);
+
+  const headers: Record<string, string> = {
+    'X-CSRF-Token': getCSRFToken(),
+  };
+  // Do NOT set Content-Type — the browser sets it with the multipart boundary.
+
+  const res = await fetch(`${API_BASE}/api/v1/uploads`, {
+    method: 'POST',
+    credentials: 'include',
+    headers,
+    body: formData,
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new ApiError(
+      body?.error?.code || 'UNKNOWN',
+      body?.error?.message || res.statusText,
+      body?.error?.details
+    );
+  }
+
+  return res.json();
+}
+
 export const api = {
+  uploads: {
+    upload: uploadFile,
+  },
   auth: {
     providers: () => get<import('./types').SingleResponse<import('./types').AuthProviders>>('/api/v1/auth/providers'),
     me: () => get<import('./types').SingleResponse<import('./types').User>>('/api/v1/auth/me'),

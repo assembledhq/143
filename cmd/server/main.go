@@ -152,6 +152,11 @@ func main() {
 		reaper := agent.NewSessionReaper(sessionStore, snapshotStore, cfg.SessionMaxIdleAge, cfg.SessionMaxSnapshotAge, cfg.SessionReaperInterval, logger)
 		go reaper.Run(ctx)
 
+		// Upload reaper: clean up old uploaded files (local mode only; use S3 lifecycle rules for S3).
+		uploadStore := storage.NewFileUploadStore(cfg.UploadStorageDir, "")
+		uploadReaper := storage.NewUploadReaper(uploadStore, cfg.UploadMaxAge, cfg.SessionReaperInterval, logger)
+		go uploadReaper.Run(ctx)
+
 		scheduler := cluster.NewScheduler(
 			cluster.NewSchedulerLock(pool),
 			jobStore,
