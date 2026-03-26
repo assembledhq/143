@@ -570,8 +570,9 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Message string   `json:"message"`
-		Images  []string `json:"images"`
+		Message  string   `json:"message"`
+		Images   []string `json:"images"`
+		PlanMode bool     `json:"plan_mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
@@ -581,6 +582,12 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	if body.Message == "" {
 		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message is required")
 		return
+	}
+
+	// When plan mode is requested, prefix the message so the orchestrator
+	// can detect it and instruct the coding agent to plan instead of execute.
+	if body.PlanMode {
+		body.Message = "[PLAN_MODE]\n" + body.Message
 	}
 
 	// Look up the session to check its current status.
