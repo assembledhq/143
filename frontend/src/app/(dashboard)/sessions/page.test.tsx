@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { renderWithProviders, screen } from '@/test/test-utils';
+import { fireEvent } from '@testing-library/react';
 import { server } from '@/test/mocks/server';
 import { SessionSidebar } from './session-sidebar';
 
@@ -85,9 +86,9 @@ describe('SessionSidebar', () => {
     await screen.findByText('Fixed TypeError by adding null check');
 
     // Search is collapsed behind an icon button — click to expand
-    screen.getByRole('button', { name: 'Search sessions' }).click();
+    fireEvent.click(screen.getByRole('button', { name: 'Search sessions' }));
 
-    expect(screen.getByPlaceholderText('Search sessions...')).toBeInTheDocument();
+    expect(await screen.findByPlaceholderText('Search sessions...')).toBeInTheDocument();
   });
 
   it('shows ghost New session entry when on /sessions/new', async () => {
