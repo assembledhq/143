@@ -31,7 +31,7 @@ import { api } from "@/lib/api";
 import { formatTimeAgo, sessionTitle } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
 import { useSessionUserFilter } from "@/hooks/use-session-user-filter";
-import { SessionUserFilterDropdown } from "./session-user-filter-dropdown";
+import { SessionOwnerToggle } from "./session-owner-toggle";
 import type { Session, User } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
@@ -314,13 +314,10 @@ export function SessionsPageContent() {
           })}
         </div>
 
-        {/* User filter dropdown */}
-        <SessionUserFilterDropdown
+        {/* User filter toggle */}
+        <SessionOwnerToggle
           currentUserFilter={currentUserFilter}
-          members={members}
-          currentUser={user}
           onFilterChange={setUserFilter}
-          align="end"
           className="mr-2"
         />
       </div>

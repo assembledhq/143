@@ -1,17 +1,17 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { Plus, Search } from "lucide-react";
+import { Plus, Search, X } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { cn, formatTimeAgo, sessionTitle } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
 import { useSessionUserFilter } from "@/hooks/use-session-user-filter";
-import { SessionUserFilterDropdown } from "./session-user-filter-dropdown";
+import { SessionOwnerToggle } from "./session-owner-toggle";
 import { queryKeys } from "@/lib/query-keys";
 import { useOptimisticSessions, type OptimisticSession } from "@/contexts/optimistic-sessions";
 import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
@@ -110,6 +110,8 @@ export function SessionSidebar() {
   const { currentUserFilter, triggeredByUserId, user, setUserFilter } = useSessionUserFilter();
   const selectedId = params?.id as string | undefined;
   const [search, setSearch] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
   const [repo] = useQueryState("repo");
 
@@ -135,13 +137,7 @@ export function SessionSidebar() {
     enabled: !!statusParam,
   });
 
-  const { data: membersData } = useQuery({
-    queryKey: ["team", "members"],
-    queryFn: () => api.team.listMembers(),
-  });
-
   const allSessions = useMemo(() => allData?.data ?? [], [allData?.data]);
-  const members = useMemo(() => membersData?.data ?? [], [membersData?.data]);
 
   const needsAttentionSessions = allSessions.filter((s) => needsAttentionSet.has(s.status));
   const workingSessions = allSessions.filter((s) => workingSet.has(s.status));
@@ -165,38 +161,66 @@ export function SessionSidebar() {
   return (
     <div className="w-full h-full border-r border-border bg-muted/30 flex flex-col">
       {/* Header */}
-      <div className="px-4 pt-3 pb-2 space-y-3">
+      <div className="px-4 pt-3 pb-2 space-y-2.5">
 
-        {/* Search */}
-        <div className="relative">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground/50" />
-          <input
-            type="text"
-            placeholder="Search sessions..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-full h-8 pl-8 pr-3 rounded-md border border-border bg-background text-[13px] placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
-          />
+        {/* Row 1: Search icon + Owner toggle (or expanded search input) */}
+        <div className="flex items-center gap-2">
+          {searchOpen ? (
+            <div className="relative flex-1">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground/50" />
+              <input
+                ref={searchInputRef}
+                type="text"
+                placeholder="Search sessions..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                onBlur={() => {
+                  if (!search.trim()) setSearchOpen(false);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    setSearch("");
+                    setSearchOpen(false);
+                  }
+                }}
+                className="w-full h-8 pl-8 pr-8 rounded-md border border-border bg-background text-[13px] placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
+              />
+              <button
+                onClick={() => { setSearch(""); setSearchOpen(false); }}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground/50 hover:text-muted-foreground"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ) : (
+            <>
+              <button
+                aria-label="Search sessions"
+                onClick={() => {
+                  setSearchOpen(true);
+                  requestAnimationFrame(() => searchInputRef.current?.focus());
+                }}
+                className="flex items-center justify-center h-8 w-8 rounded-md border border-border bg-background hover:bg-accent transition-colors shrink-0"
+              >
+                <Search className="h-3.5 w-3.5 text-muted-foreground" />
+              </button>
+              <SessionOwnerToggle
+                currentUserFilter={currentUserFilter}
+                onFilterChange={setUserFilter}
+                className="flex-1"
+              />
+            </>
+          )}
         </div>
 
         {/* New session button */}
         <Link
           href="/sessions/new"
-          className="flex items-center justify-center gap-2 w-full h-9 rounded-md border border-border bg-background text-[13px] font-medium text-foreground hover:bg-accent transition-colors shadow-sm"
+          className="flex items-center justify-center gap-2 w-full h-8 rounded-md border border-border bg-background text-[13px] font-medium text-foreground hover:bg-accent transition-colors shadow-sm"
         >
-          <Plus className="h-4 w-4" />
+          <Plus className="h-3.5 w-3.5" />
           New session
         </Link>
-
-        {/* User filter dropdown */}
-        <SessionUserFilterDropdown
-          currentUserFilter={currentUserFilter}
-          members={members}
-          currentUser={user}
-          onFilterChange={setUserFilter}
-          align="start"
-          className="w-full justify-between"
-        />
 
         {/* Filter tabs */}
         <Tabs
