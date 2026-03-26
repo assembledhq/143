@@ -64,7 +64,11 @@ function filterToStatusParam(filter: string | null): string | undefined {
 function SessionDiffBadge({ diffStats }: { diffStats?: { added: number; removed: number; files_changed: number } }) {
   if (!diffStats) return null;
   if (diffStats.added === 0 && diffStats.removed === 0) return null;
-  return <DiffStatsBadge added={diffStats.added} removed={diffStats.removed} />;
+  return (
+    <span className="inline-flex shrink-0 rounded-md border border-border/60 bg-muted/50 px-1.5 py-0.5">
+      <DiffStatsBadge added={diffStats.added} removed={diffStats.removed} className="text-[10px]" />
+    </span>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -286,21 +290,25 @@ export function SessionSidebar() {
 
                 {/* Content */}
                 <div className="min-w-0 flex-1">
-                  <p className="text-[13px] font-medium text-foreground truncate leading-snug">
-                    {sessionTitle(session)}
-                  </p>
-                  <div className="flex items-center gap-3 mt-0.5">
-                    <span className="text-[11px] text-muted-foreground shrink-0">
-                      {cfg.label}
-                    </span>
-                    {session.pm_plan_id && !session.triggered_by_user_id && (
-                      <span className="inline-flex items-center rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary shrink-0">
-                        PM
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="text-[13px] font-medium text-foreground truncate leading-snug">
+                      {sessionTitle(session)}
+                    </p>
+                  </div>
+                  <div className="flex items-center justify-between mt-0.5">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <span className="text-[11px] text-muted-foreground shrink-0">
+                        {cfg.label}
                       </span>
-                    )}
-                    <span className="text-[11px] text-muted-foreground/50 truncate">
-                      {formatTimeAgo(ts)}
-                    </span>
+                      {session.pm_plan_id && !session.triggered_by_user_id && (
+                        <span className="inline-flex items-center rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary shrink-0">
+                          PM
+                        </span>
+                      )}
+                      <span className="text-[11px] text-muted-foreground/50 truncate">
+                        {formatTimeAgo(ts)}
+                      </span>
+                    </div>
                     <SessionDiffBadge diffStats={session.diff_stats} />
                   </div>
                   {session.status === "failed" && (session.failure_explanation || session.error) && (
