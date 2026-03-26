@@ -9,6 +9,7 @@ import {
   ExternalLink,
   FileCode2,
   GitPullRequest,
+  Loader2,
   RefreshCw,
   CheckCircle2,
   XCircle,
@@ -17,12 +18,18 @@ import {
   PanelRightOpen,
   PanelRightClose,
   ChevronDown,
+  Clock,
+  Timer,
+  User as UserIcon,
+  Bot,
+  Cpu,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { MarkdownContent } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Select,
   SelectContent,
@@ -119,68 +126,22 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
   const terminalStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
   const isActive = !terminalStatuses.has(session.status);
 
+  const triggeredByLabel = session.pm_plan_id && !session.triggered_by_user_id
+    ? "PM Agent"
+    : session.triggered_by_user_id
+      ? members.find((m) => m.id === session.triggered_by_user_id)?.name || "Unknown user"
+      : "System";
+
   return (
     <div className="space-y-4">
-      <Card>
-        <CardContent className="pt-6">
-          <div className="grid grid-cols-2 gap-5 text-sm">
-            <div>
-              <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Status</span>
-              <div className="mt-1">
-                <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${status.color}`}>
-                  {isActive && (
-                    <span className="relative mr-1.5 flex h-2 w-2">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                      <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
-                    </span>
-                  )}
-                  {status.label}
-                </span>
-              </div>
-            </div>
-            <div>
-              <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Agent Type</span>
-              <p className="mt-1 font-medium">{agentTypeLabels[session.agent_type] || session.agent_type}</p>
-            </div>
-            <div>
-              <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Triggered by</span>
-              <div className="mt-1">
-                {/* Infer PM-triggered from pm_plan_id + no user — consider adding an explicit triggered_by_type field */}
-                {session.pm_plan_id && !session.triggered_by_user_id ? (
-                  <span className="inline-flex items-center gap-1.5 font-medium">
-                    <span className="inline-flex items-center rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
-                      PM Agent
-                    </span>
-                  </span>
-                ) : session.triggered_by_user_id ? (
-                  <p className="font-medium">
-                    {members.find((m) => m.id === session.triggered_by_user_id)?.name || "Unknown user"}
-                  </p>
-                ) : (
-                  <p className="font-medium text-muted-foreground">System</p>
-                )}
-              </div>
-            </div>
-            <div>
-              <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Duration</span>
-              <p className="mt-1 font-medium">{formatDuration(session.started_at, session.completed_at)}</p>
-            </div>
-            <div>
-              <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Started</span>
-              <p className="mt-1">{formatTimestamp(session.started_at)}</p>
-            </div>
-            <div>
-              <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Completed</span>
-              <p className="mt-1">{formatTimestamp(session.completed_at)}</p>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
+      {/* Result card — most important for completed sessions, shown first */}
       {session.result_summary && (
-        <Card>
+        <Card className="border-l-2 border-l-emerald-500 bg-emerald-50/30 dark:bg-emerald-950/10">
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm">Result</CardTitle>
+            <CardTitle className="text-sm flex items-center gap-2">
+              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+              Result
+            </CardTitle>
           </CardHeader>
           <CardContent>
             <MarkdownContent content={session.result_summary} className="text-sm" />
@@ -188,6 +149,99 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
         </Card>
       )}
 
+      {/* Failure card — shown prominently at top for failed sessions */}
+      {session.status === "failed" && (session.failure_explanation || session.error) && (
+        <Card className="border-l-2 border-l-destructive border-destructive/20 dark:border-destructive/30">
+          <CardHeader className="pb-2">
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-sm text-destructive flex items-center gap-2">
+                <XCircle className="h-3.5 w-3.5" />
+                Failure details
+                {session.failure_category && (
+                  <Badge variant="secondary" className="bg-destructive/10 text-destructive border-destructive/20 text-[11px]">
+                    {session.failure_category}
+                  </Badge>
+                )}
+              </CardTitle>
+              {session.failure_retry_advised && (
+                <Button
+                  size="xs"
+                  variant="outline"
+                  onClick={() => retryMutation.mutate()}
+                  disabled={retryMutation.isPending}
+                >
+                  <RefreshCw className={`mr-1.5 h-3 w-3 ${retryMutation.isPending ? "animate-spin" : ""}`} />
+                  {retryMutation.isPending ? "Retrying..." : "Retry"}
+                </Button>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-sm">{session.failure_explanation || session.error}</p>
+            {session.failure_next_steps && session.failure_next_steps.length > 0 && (
+              <div>
+                <p className="text-xs font-medium text-muted-foreground mb-1">Next steps</p>
+                <ul className="list-disc list-inside text-sm space-y-1">
+                  {session.failure_next_steps.map((step, i) => (
+                    <li key={i}>{step}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Session vitals — primary info row */}
+      <Card>
+        <CardContent className="p-4">
+          <div className="flex items-center gap-3">
+            <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${status.color}`}>
+              {isActive && (
+                <span className="relative mr-1.5 flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+                </span>
+              )}
+              {status.label}
+            </span>
+            <span className="text-border">|</span>
+            <span className="inline-flex items-center gap-1.5 text-sm">
+              <Cpu className="h-3.5 w-3.5 text-muted-foreground" />
+              <span className="font-medium">{agentTypeLabels[session.agent_type] || session.agent_type}</span>
+            </span>
+            <span className="text-border">|</span>
+            <span className="inline-flex items-center gap-1.5 text-sm">
+              {session.pm_plan_id && !session.triggered_by_user_id ? (
+                <Bot className="h-3.5 w-3.5 text-primary" />
+              ) : (
+                <UserIcon className="h-3.5 w-3.5 text-muted-foreground" />
+              )}
+              <span className="font-medium">{triggeredByLabel}</span>
+            </span>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Timestamps — secondary reference data */}
+      <div className="flex items-center gap-4 text-xs text-muted-foreground px-1">
+        <span className="inline-flex items-center gap-1.5">
+          <Timer className="h-3 w-3" />
+          {formatDuration(session.started_at, session.completed_at)}
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <Clock className="h-3 w-3" />
+          Started {formatTimestamp(session.started_at)}
+        </span>
+        {session.completed_at && (
+          <span className="inline-flex items-center gap-1.5">
+            <CheckCircle2 className="h-3 w-3" />
+            {formatTimestamp(session.completed_at)}
+          </span>
+        )}
+      </div>
+
+      {/* PM context */}
       {session.pm_plan_id && (session.pm_reasoning || session.pm_approach) && (
         <Card>
           <CardHeader className="pb-2">
@@ -209,46 +263,6 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
           </CardContent>
         </Card>
       )}
-
-      {session.status === "failed" && (session.failure_explanation || session.error) && (
-        <Card className="border-destructive/20 dark:border-destructive/30">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm text-destructive flex items-center gap-2">
-              <XCircle className="h-4 w-4" />
-              Failure details
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {session.failure_category && (
-              <Badge variant="secondary" className="bg-destructive/10 text-destructive border-destructive/20 text-[11px]">
-                {session.failure_category}
-              </Badge>
-            )}
-            <p className="text-sm">{session.failure_explanation || session.error}</p>
-            {session.failure_next_steps && session.failure_next_steps.length > 0 && (
-              <div>
-                <p className="text-xs font-medium text-muted-foreground mb-1">Next steps</p>
-                <ul className="list-disc list-inside text-sm space-y-1">
-                  {session.failure_next_steps.map((step, i) => (
-                    <li key={i}>{step}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-            {session.failure_retry_advised && (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => retryMutation.mutate()}
-                disabled={retryMutation.isPending}
-              >
-                <RefreshCw className={`mr-1.5 h-3 w-3 ${retryMutation.isPending ? "animate-spin" : ""}`} />
-                {retryMutation.isPending ? "Retrying..." : "Retry"}
-              </Button>
-            )}
-          </CardContent>
-        </Card>
-      )}
     </div>
   );
 }
@@ -260,16 +274,27 @@ function ValidationTab({ sessionId }: { sessionId: string }) {
   });
 
   if (isLoading) {
-    return <div className="py-8 text-center text-sm text-muted-foreground">Loading validation...</div>;
-  }
-
-  if (error) {
-    return <div className="py-8 text-center text-sm text-muted-foreground">No validation data available.</div>;
+    return (
+      <div className="flex items-center justify-center py-12">
+        <div className="text-center space-y-2">
+          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/40 mx-auto" />
+          <p className="text-sm text-muted-foreground">Loading validation...</p>
+        </div>
+      </div>
+    );
   }
 
   const validation = data?.data;
-  if (!validation) {
-    return <div className="py-8 text-center text-sm text-muted-foreground">No validation data available.</div>;
+  if (error || !validation) {
+    return (
+      <div className="flex items-center justify-center py-12">
+        <div className="text-center space-y-2 max-w-[280px]">
+          <CheckCircle2 className="h-8 w-8 text-muted-foreground/40 mx-auto" />
+          <p className="text-sm font-medium text-muted-foreground">No validation data</p>
+          <p className="text-xs text-muted-foreground/60">Validation checks will appear here once the session produces results.</p>
+        </div>
+      </div>
+    );
   }
 
   const overallStatus = validation.status;
@@ -338,7 +363,7 @@ function PRCard({ sessionId }: { sessionId: string }) {
   });
 
   const pr = prData?.data;
-  if (prLoading) return <div className="py-2 text-center text-sm text-muted-foreground">Loading PR...</div>;
+  if (prLoading) return <div className="flex items-center justify-center gap-2 py-2 text-sm text-muted-foreground"><Loader2 className="h-3.5 w-3.5 animate-spin" />Loading PR...</div>;
   if (!pr) return null;
 
   return (
@@ -920,8 +945,12 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
       {/* Unified timeline */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto space-y-2 p-4">
         {timelineEntries.length === 0 && !isRunning && (
-          <div className="text-center py-8 text-sm text-muted-foreground">
-            No activity yet. The session is processing its initial turn.
+          <div className="flex items-center justify-center py-12">
+            <div className="text-center space-y-2 max-w-[280px]">
+              <Loader2 className="h-6 w-6 text-muted-foreground/40 mx-auto" />
+              <p className="text-sm font-medium text-muted-foreground">No activity yet</p>
+              <p className="text-xs text-muted-foreground/60">The session is processing its initial turn.</p>
+            </div>
           </div>
         )}
         <ChatTimeline entries={timelineEntries} isRunning={isRunning} diffStats={session.diff_stats} onDiffClick={onDiffClick} />
@@ -1082,7 +1111,10 @@ export function SessionDetailContent({ id }: { id: string }) {
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <div className="text-sm text-muted-foreground">Loading session...</div>
+        <div className="text-center space-y-2">
+          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/40 mx-auto" />
+          <p className="text-sm text-muted-foreground">Loading session...</p>
+        </div>
       </div>
     );
   }
@@ -1090,18 +1122,18 @@ export function SessionDetailContent({ id }: { id: string }) {
   if (error || !session) {
     return (
       <div className="flex items-center justify-center h-full">
-        <div className="text-sm text-muted-foreground">Failed to load session details.</div>
+        <div className="text-center space-y-2 max-w-[280px]">
+          <AlertTriangle className="h-5 w-5 text-muted-foreground/40 mx-auto" />
+          <p className="text-sm font-medium text-muted-foreground">Failed to load session</p>
+          <p className="text-xs text-muted-foreground/60">The session could not be found or an error occurred.</p>
+        </div>
       </div>
     );
   }
 
   const status = statusConfig[session.status] || statusConfig.pending;
 
-  const detailTabs: { value: DetailTab; label: string; count?: number }[] = [
-    { value: "overview", label: "Overview" },
-    { value: "changes", label: "Changes", count: diffStats?.filesChanged },
-    { value: "validation", label: "Validation" },
-  ];
+  const changesCount = diffStats?.filesChanged;
 
   return (
     <div className="flex h-full">
@@ -1177,52 +1209,39 @@ export function SessionDetailContent({ id }: { id: string }) {
           )}
         >
           {/* Detail tabs */}
-          <div className="flex items-center gap-0 border-b border-border px-2 shrink-0">
-            {detailTabs.map((tab) => (
-              <button
-                key={tab.value}
-                className={cn(
-                  "relative px-3 py-2.5 text-[12px] font-medium transition-colors",
-                  detailTab === tab.value
-                    ? "text-foreground"
-                    : "text-muted-foreground hover:text-foreground/80"
+          <Tabs
+            value={detailTab}
+            onValueChange={(v) => setDetailTab(v as DetailTab)}
+            className="flex flex-col flex-1 min-h-0 gap-0"
+          >
+            <TabsList variant="line" size="sm" className="border-b border-border px-2 shrink-0 w-full">
+              <TabsTrigger value="overview">Overview</TabsTrigger>
+              <TabsTrigger value="changes">
+                Changes
+                {changesCount != null && changesCount > 0 && (
+                  <Badge variant="secondary" className="ml-1 min-w-[18px] h-[18px] rounded-full px-1 text-[10px] font-semibold leading-none">
+                    {changesCount}
+                  </Badge>
                 )}
-                onClick={() => setDetailTab(tab.value)}
-              >
-                <span className="inline-flex items-center gap-1.5">
-                  {tab.label}
-                  {tab.count != null && tab.count > 0 && (
-                    <span className={cn(
-                      "inline-flex items-center justify-center min-w-[18px] h-[18px] rounded-full px-1 text-[10px] font-semibold leading-none",
-                      detailTab === tab.value
-                        ? "bg-primary/15 text-primary"
-                        : "bg-muted text-muted-foreground"
-                    )}>
-                      {tab.count}
-                    </span>
-                  )}
-                </span>
-                {detailTab === tab.value && (
-                  <span className="absolute bottom-0 left-3 right-3 h-0.5 bg-[image:var(--gradient-primary)] rounded-full" />
-                )}
-              </button>
-            ))}
-          </div>
+              </TabsTrigger>
+              <TabsTrigger value="validation">Validation</TabsTrigger>
+            </TabsList>
 
-          {/* Detail content */}
-          {detailTab === "changes" ? (
-            <ChangesTab
-              session={session}
-              sessionId={id}
-              maximized={maximized}
-              onToggleMaximize={toggleMaximize}
-            />
-          ) : (
-            <div className="flex-1 overflow-y-auto p-4">
-              {detailTab === "overview" && <OverviewTab session={session} members={members} />}
-              {detailTab === "validation" && <ValidationTab sessionId={id} />}
-            </div>
-          )}
+            <TabsContent value="changes" className="flex-1 min-h-0">
+              <ChangesTab
+                session={session}
+                sessionId={id}
+                maximized={maximized}
+                onToggleMaximize={toggleMaximize}
+              />
+            </TabsContent>
+            <TabsContent value="overview" className="flex-1 overflow-y-auto p-4">
+              <OverviewTab session={session} members={members} />
+            </TabsContent>
+            <TabsContent value="validation" className="flex-1 overflow-y-auto p-4">
+              <ValidationTab sessionId={id} />
+            </TabsContent>
+          </Tabs>
         </div>
         </>
       )}
