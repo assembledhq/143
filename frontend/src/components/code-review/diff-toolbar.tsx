@@ -4,8 +4,7 @@ import { useState, useRef, useEffect } from "react";
 import { ArrowLeft, Columns2, Rows3, FolderSearch, Search, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-
-export type ViewMode = "unified" | "split";
+import type { ViewMode } from "./review-toolbar";
 
 interface DiffToolbarProps {
   onBack: () => void;

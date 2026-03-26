@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { FileCode2 } from "lucide-react";
 import type { DiffFile } from "@/lib/diff-parser";
 import type { SessionReviewComment } from "@/lib/types";
@@ -10,8 +10,7 @@ import { DiffPane, type DiffPaneHandle } from "./diff-pane";
 import { RepoExplorer } from "./repo-explorer";
 import { KeyboardHelpOverlay } from "./keyboard-help-overlay";
 import { useDiffKeyboardNav } from "@/hooks/use-diff-keyboard-nav";
-
-export type ViewMode = "unified" | "split";
+import type { ViewMode } from "./review-toolbar";
 
 interface ReviewDiffViewProps {
   sessionId: string;
@@ -34,8 +33,6 @@ interface ReviewDiffViewProps {
   /** Search query for filtering diff content */
   diffSearchQuery: string;
   onDiffSearchChange: (q: string) => void;
-  /** Callback when file tree visibility should toggle (in sidebar) */
-  onToggleFileTree?: () => void;
 }
 
 export function ReviewDiffView({
@@ -54,7 +51,6 @@ export function ReviewDiffView({
   onDeleteComment,
   diffSearchQuery,
   onDiffSearchChange,
-  onToggleFileTree,
 }: ReviewDiffViewProps) {
   const diffPaneRef = useRef<DiffPaneHandle>(null);
   const [showKeyboardHelp, setShowKeyboardHelp] = useState(false);
@@ -66,6 +62,27 @@ export function ReviewDiffView({
     }
     return "unified";
   });
+
+  // Escape key exits review mode (when not in an input, comment, or explorer)
+  useEffect(() => {
+    function handleEscape(e: KeyboardEvent) {
+      if (e.key !== "Escape") return;
+      const target = e.target as HTMLElement;
+      if (
+        target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.isContentEditable
+      ) {
+        return;
+      }
+      if (!explorerMode && !activeCommentLine && !showKeyboardHelp) {
+        e.preventDefault();
+        onBack();
+      }
+    }
+    document.addEventListener("keydown", handleEscape);
+    return () => document.removeEventListener("keydown", handleEscape);
+  }, [explorerMode, activeCommentLine, showKeyboardHelp, onBack]);
 
   const handleViewModeChange = useCallback((mode: ViewMode) => {
     setViewMode(mode);
@@ -144,7 +161,7 @@ export function ReviewDiffView({
     fileCount: files.length,
     activeFileIndex,
     onFileChange: handleFileSelect,
-    onToggleFileTree: onToggleFileTree ?? (() => {}),
+    onToggleFileTree: () => {}, // File tree lives in sidebar, no-op in center
     onToggleViewMode: toggleViewMode,
     onSetViewMode: handleViewModeChange,
     onToggleMaximize: onBack, // "m" key exits review mode

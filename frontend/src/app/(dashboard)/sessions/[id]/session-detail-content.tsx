@@ -414,7 +414,6 @@ function PRCard({ sessionId }: { sessionId: string }) {
 }
 
 function ChangesTab({
-  session,
   sessionId,
   filteredFiles,
   activeFileIndex,
@@ -429,10 +428,10 @@ function ChangesTab({
   passes,
   passRange,
   onPassRangeChange,
+  emptyStatusText,
 }: {
-  session: Session;
   sessionId: string;
-  filteredFiles: import("@/lib/diff-parser").DiffFile[];
+  filteredFiles: DiffFile[];
   activeFileIndex: number;
   onFileSelect: (index: number) => void;
   onOpenReview: (fileIndex?: number) => void;
@@ -445,6 +444,7 @@ function ChangesTab({
   passes: DiffPassEntry[];
   passRange: PassRange | null;
   onPassRangeChange: (range: PassRange | null) => void;
+  emptyStatusText: string;
 }) {
   const hasDiff = filteredFiles.length > 0;
 
@@ -492,7 +492,7 @@ function ChangesTab({
               className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-md border border-border bg-background text-[12px] font-medium text-foreground hover:bg-muted/50 transition-colors"
             >
               <FileCode2 className="h-3.5 w-3.5" />
-              Review all changes
+              Review {filteredFiles.length} {filteredFiles.length === 1 ? "file" : "files"}
             </button>
           </div>
 
@@ -515,9 +515,7 @@ function ChangesTab({
               No changes yet
             </p>
             <p className="text-xs text-muted-foreground/60">
-              {session.status === "running" || session.status === "pending"
-                ? "Changes will appear here as the agent modifies files."
-                : "This session did not produce any file changes."}
+              {emptyStatusText}
             </p>
           </div>
         </div>
@@ -1231,7 +1229,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         </div>
 
         {/* Center content — either chat or diff review */}
-        <div className="flex-1 min-h-0">
+        <div key={centerMode} className="flex-1 min-h-0 animate-in fade-in duration-150">
           {centerMode === "review" ? (
             <ReviewDiffView
               sessionId={id}
