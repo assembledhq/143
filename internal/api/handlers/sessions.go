@@ -579,8 +579,8 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body.Message = strings.TrimSpace(body.Message)
-	if body.Message == "" {
-		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message is required")
+	if body.Message == "" && len(body.Images) == 0 {
+		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message or images are required")
 		return
 	}
 
@@ -916,6 +916,27 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	if err := h.runStore.Create(r.Context(), session); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create manual session", err)
 		return
+	}
+
+	// Persist the initial user message as a turn-0 record so that attachments
+	// (uploaded images) are displayed alongside the prompt in the chat timeline.
+	if h.messageStore != nil {
+		initMsg := &models.SessionMessage{
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 0,
+			Role:       models.MessageRoleUser,
+			Content:    body.Message,
+		}
+		if user := middleware.UserFromContext(r.Context()); user != nil {
+			initMsg.UserID = &user.ID
+		}
+		if len(body.Images) > 0 {
+			initMsg.Attachments = body.Images
+		}
+		if err := h.messageStore.Create(r.Context(), initMsg); err != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to create initial session message — continuing without it")
+		}
 	}
 
 	// Check concurrency before enqueuing so the user gets immediate feedback.
