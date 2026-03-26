@@ -196,7 +196,10 @@ function ImageLightbox({ src, alt, onClose }: { src: string; alt: string; onClos
 // ---------------------------------------------------------------------------
 
 function isImageURL(url: string): boolean {
-  return /\.(png|jpe?g|gif|webp|svg)$/i.test(url) || url.startsWith("data:image/");
+  if (url.startsWith("data:image/")) return true;
+  // Strip query params and fragment so S3 presigned URLs still match.
+  const pathname = url.split("?")[0].split("#")[0];
+  return /\.(png|jpe?g|gif|webp|svg)$/i.test(pathname);
 }
 
 function AttachmentGrid({ attachments }: { attachments: string[] }) {
@@ -242,7 +245,7 @@ function AttachmentGrid({ attachments }: { attachments: string[] }) {
       {files.length > 0 && (
         <div className="flex flex-wrap gap-1.5 mt-2">
           {files.map((url) => {
-            const fileName = url.split("/").pop() || "file";
+            const fileName = url.split("?")[0].split("/").pop() || "file";
             return (
               <a
                 key={url}

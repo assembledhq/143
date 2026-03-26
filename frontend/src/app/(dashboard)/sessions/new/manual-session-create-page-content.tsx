@@ -180,21 +180,31 @@ export function ManualSessionCreatePageContent() {
     resizeMessageInput();
   }, [message]);
 
+  const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
+
   async function onUploadChange(event: React.ChangeEvent<HTMLInputElement>) {
     const fileList = event.target.files;
     if (!fileList || fileList.length === 0) {
       return;
     }
 
+    const files = Array.from(fileList);
+    const oversized = files.filter((f) => f.size > MAX_FILE_SIZE);
+    if (oversized.length > 0) {
+      setCreationError(`File${oversized.length > 1 ? "s" : ""} too large (max 10 MB): ${oversized.map((f) => f.name).join(", ")}`);
+      event.target.value = "";
+      return;
+    }
+
     setIsUploading(true);
+    setCreationError(null);
     try {
-      const files = Array.from(fileList);
       const results = await Promise.all(
         files.map((file) => api.uploads.upload(file))
       );
       setAttachments((previous) => [...previous, ...results.map((r) => r.url)]);
-    } catch {
-      // Upload failed silently — user can retry.
+    } catch (err) {
+      setCreationError(err instanceof Error ? err.message : "Upload failed");
     } finally {
       setIsUploading(false);
       event.target.value = "";
@@ -308,8 +318,9 @@ export function ManualSessionCreatePageContent() {
             {(attachments.length > 0 || isUploading) && (
               <div className="flex flex-wrap items-center gap-2 pb-3">
                 {attachments.map((url) => {
-                  const isImage = /\.(png|jpe?g|gif|webp|svg)$/i.test(url) || url.startsWith("data:image/");
-                  const fileName = url.startsWith("data:") ? "photo" : (url.split("/").pop() || "file");
+                  const pathname = url.split("?")[0].split("#")[0];
+                  const isImage = /\.(png|jpe?g|gif|webp|svg)$/i.test(pathname) || url.startsWith("data:image/");
+                  const fileName = url.startsWith("data:") ? "photo" : (pathname.split("/").pop() || "file");
                   return (
                     <div key={url} className="relative group">
                       {isImage ? (

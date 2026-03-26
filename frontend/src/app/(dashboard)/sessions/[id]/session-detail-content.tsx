@@ -855,14 +855,23 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
     };
   }, [sessionId, apiBase, isActive, mergeLogs, queryClient]);
 
+  const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
+
   async function handleFileUpload(event: React.ChangeEvent<HTMLInputElement>) {
     const fileList = event.target.files;
     if (!fileList || fileList.length === 0) return;
 
+    const files = Array.from(fileList);
+    const oversized = files.filter((f) => f.size > MAX_FILE_SIZE);
+    if (oversized.length > 0) {
+      setUploadError(`File${oversized.length > 1 ? "s" : ""} too large (max 10 MB): ${oversized.map((f) => f.name).join(", ")}`);
+      event.target.value = "";
+      return;
+    }
+
     setIsUploading(true);
     setUploadError(null);
     try {
-      const files = Array.from(fileList);
       const results = await Promise.all(
         files.map((file) => api.uploads.upload(file))
       );
@@ -999,8 +1008,9 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
           {(attachments.length > 0 || isUploading) && (
             <div className="flex flex-wrap items-center gap-2 px-3 pb-2">
               {attachments.map((url) => {
-                const isImage = /\.(png|jpe?g|gif|webp|svg)$/i.test(url);
-                const fileName = url.split("/").pop() || "file";
+                const pathname = url.split("?")[0].split("#")[0];
+                const isImage = /\.(png|jpe?g|gif|webp|svg)$/i.test(pathname);
+                const fileName = pathname.split("/").pop() || "file";
                 return (
                   <div key={url} className="relative group">
                     {isImage ? (

@@ -1,6 +1,10 @@
 package api
 
 import (
+	"context"
+
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -180,10 +184,17 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	// Upload store: use S3 if configured, otherwise fall back to local filesystem.
 	var uploadStore storage.UploadStore
 	if cfg.UploadS3Bucket != "" {
-		// S3 upload store requires the S3 client to be configured externally.
-		// For now, use file-based uploads until an S3 client is provided.
-		logger.Warn().Msg("UPLOAD_S3_BUCKET is set but S3 client not yet injected into router — falling back to file uploads")
-		uploadStore = storage.NewFileUploadStore(cfg.UploadStorageDir, "/api/v1/uploads/files")
+		awsCfg, awsErr := awsconfig.LoadDefaultConfig(context.Background(),
+			awsconfig.WithRegion(cfg.UploadS3Region),
+		)
+		if awsErr != nil {
+			logger.Warn().Err(awsErr).Msg("failed to load AWS config for upload S3 — falling back to file uploads")
+			uploadStore = storage.NewFileUploadStore(cfg.UploadStorageDir, "/api/v1/uploads/files")
+		} else {
+			s3Client := s3.NewFromConfig(awsCfg)
+			uploadStore = storage.NewS3UploadStore(s3Client, cfg.UploadS3Bucket, cfg.UploadS3Prefix, cfg.UploadS3Endpoint)
+			logger.Info().Str("bucket", cfg.UploadS3Bucket).Str("prefix", cfg.UploadS3Prefix).Msg("upload S3 store configured")
+		}
 	} else {
 		uploadStore = storage.NewFileUploadStore(cfg.UploadStorageDir, "/api/v1/uploads/files")
 	}
