@@ -47,13 +47,12 @@ import { api } from "@/lib/api";
 import { AGENT_TYPE_OPTIONS } from "@/lib/model-constants";
 import { SSE_EVENT, addSSEListener } from "@/lib/sse";
 import { buildTimeline } from "@/lib/timeline";
-import { parseDiffStats } from "@/lib/diff-parser";
-import type { Session, SessionLog, SessionMessage, User, Validation } from "@/lib/types";
+import { parseDiffStats, type DiffFile } from "@/lib/diff-parser";
+import type { Session, SessionLog, SessionMessage, SessionReviewComment, User, Validation } from "@/lib/types";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
 import { cn, sessionTitle, isImageURL, fileNameFromURL } from "@/lib/utils";
-import { FileTree, ReviewToolbar, DiffPane, SessionFooter, KeyboardHelpOverlay, CommentsSummary, RepoExplorer, type ViewMode, type DiffPaneHandle } from "@/components/code-review";
-import { useDiffKeyboardNav } from "@/hooks/use-diff-keyboard-nav";
+import { DiffStatsBadge, FileTree, SessionFooter, CommentsSummary, ReviewDiffView, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
 import { useReviewComments } from "@/hooks/use-review-comments";
 import { useDiffViewState } from "@/hooks/use-diff-view-state";
 import { useReviewedFiles } from "@/hooks/use-reviewed-files";
@@ -415,292 +414,98 @@ function PRCard({ sessionId }: { sessionId: string }) {
 }
 
 function ChangesTab({
-  session,
   sessionId,
-  maximized,
-  onToggleMaximize,
+  filteredFiles,
+  activeFileIndex,
+  onFileSelect,
+  onOpenReview,
+  reviewedFiles,
+  onToggleReviewed,
+  comments,
+  onCommentClick,
+  onSendToAgent,
+  isSendingComments,
+  passes,
+  passRange,
+  onPassRangeChange,
+  emptyStatusText,
 }: {
-  session: Session;
   sessionId: string;
-  maximized: boolean;
-  onToggleMaximize: () => void;
+  filteredFiles: DiffFile[];
+  activeFileIndex: number;
+  onFileSelect: (index: number) => void;
+  onOpenReview: (fileIndex?: number) => void;
+  reviewedFiles: Set<string>;
+  onToggleReviewed: (filePath: string) => void;
+  comments: SessionReviewComment[];
+  onCommentClick: (filePath: string) => void;
+  onSendToAgent: () => void;
+  isSendingComments: boolean;
+  passes: DiffPassEntry[];
+  passRange: PassRange | null;
+  onPassRangeChange: (range: PassRange | null) => void;
+  emptyStatusText: string;
 }) {
-  const queryClient = useQueryClient();
-  const [activeFileIndex, setActiveFileIndex] = useState(0);
-  const [showFileTree, setShowFileTree] = useState(true);
-  const [showKeyboardHelp, setShowKeyboardHelp] = useState(false);
-  const [explorerMode, setExplorerMode] = useState(false);
-  const [explorerInitialPath, setExplorerInitialPath] = useState<string | undefined>(undefined);
-  const [activeCommentLine, setActiveCommentLine] = useState<{
-    filePath: string;
-    lineNumber: number;
-    side: "old" | "new";
-  } | null>(null);
-  const [viewMode, setViewMode] = useState<ViewMode>(() => {
-    if (typeof window !== "undefined") {
-      return (localStorage.getItem("diff-view-mode") as ViewMode) || "unified";
-    }
-    return "unified";
-  });
-  const diffPaneRef = useRef<DiffPaneHandle>(null);
+  const hasDiff = filteredFiles.length > 0;
 
-  // --- Pass selection & diff parsing (extracted to hook) ---
-  const {
-    files,
-    filteredFiles,
-    passes,
-    passRange,
-    setPassRange,
-    diffSearchQuery,
-    setDiffSearchQuery,
-  } = useDiffViewState(session);
-
-  // --- Reviewed files (extracted to hook) ---
-  const { reviewedFiles, toggleReviewed: handleToggleReviewed } = useReviewedFiles(sessionId);
-
-  // --- Review comments ---
-  const {
-    comments,
-    commentsByLine,
-    createComment,
-    updateComment,
-    deleteComment,
-  } = useReviewComments(sessionId);
-
-  // Use backend endpoint to compile and send review comments in one call.
-  // The backend formats the comments and sends the message directly.
-  // If the backend cannot send (e.g., session not idle), it returns sent=false
-  // and the frontend falls back to sending manually.
-  const sendToAgentMutation = useMutation({
-    mutationFn: async () => {
-      const resp = await api.sessions.sendReviewComments(sessionId);
-      if (!resp.data.sent) {
-        // Fallback: backend could not send directly, send manually
-        const message = resp.data.message;
-        return api.sessions.sendMessage(sessionId, message);
-      }
-      return resp;
+  const handleFileClick = useCallback(
+    (index: number) => {
+      onFileSelect(index);
+      onOpenReview(index);
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
-      queryClient.invalidateQueries({ queryKey: ["session", sessionId, "messages"] });
-    },
-    onError: (err: Error) => {
-      console.error("Failed to send review comments to agent:", err.message);
-    },
-  });
-
-  const handleAddComment = useCallback(
-    (filePath: string, lineNumber: number, side: "old" | "new") => {
-      setActiveCommentLine({ filePath, lineNumber, side });
-    },
-    []
+    [onFileSelect, onOpenReview]
   );
-
-  const handleSubmitComment = useCallback(
-    (body: string) => {
-      if (!activeCommentLine) return;
-      createComment({
-        file_path: activeCommentLine.filePath,
-        line_number: activeCommentLine.lineNumber,
-        side: activeCommentLine.side,
-        body,
-      });
-      setActiveCommentLine(null);
-    },
-    [activeCommentLine, createComment]
-  );
-
-  const handleCancelComment = useCallback(() => {
-    setActiveCommentLine(null);
-  }, []);
-
-  const handleCommentClick = useCallback(
-    (filePath: string) => {
-      // Scroll to the file containing the comment
-      // Search filteredFiles since DiffPane receives filteredFiles
-      const fileIndex = filteredFiles.findIndex((f) => f.newPath === filePath);
-      if (fileIndex >= 0) {
-        setActiveFileIndex(fileIndex);
-        diffPaneRef.current?.scrollToFile(fileIndex);
-      }
-    },
-    [filteredFiles]
-  );
-
-  // --- View & nav ---
-  const handleViewModeChange = useCallback((mode: ViewMode) => {
-    setViewMode(mode);
-    if (typeof window !== "undefined") {
-      localStorage.setItem("diff-view-mode", mode);
-    }
-  }, []);
-
-  const handleFileSelect = useCallback((index: number) => {
-    setActiveFileIndex(index);
-    diffPaneRef.current?.scrollToFile(index);
-  }, []);
-
-  const toggleViewMode = useCallback(() => {
-    handleViewModeChange(viewMode === "unified" ? "split" : "unified");
-  }, [viewMode, handleViewModeChange]);
-
-  const toggleFileTree = useCallback(() => {
-    setShowFileTree((v) => !v);
-  }, []);
-
-  const handleNextHunk = useCallback(() => {
-    diffPaneRef.current?.scrollToNextHunk();
-  }, []);
-
-  const handlePrevHunk = useCallback(() => {
-    diffPaneRef.current?.scrollToPrevHunk();
-  }, []);
-
-  const handleJumpToFile = useCallback(() => {
-    diffPaneRef.current?.scrollToFile(activeFileIndex);
-  }, [activeFileIndex]);
-
-  const toggleShowHelp = useCallback(() => {
-    setShowKeyboardHelp((v) => !v);
-  }, []);
-
-  const handleBrowseRepo = useCallback(() => {
-    setExplorerMode(true);
-    setExplorerInitialPath(undefined);
-  }, []);
-
-  const handleBackToDiff = useCallback(() => {
-    setExplorerMode(false);
-    setExplorerInitialPath(undefined);
-  }, []);
-
-  const handleBrowseFile = useCallback((filePath: string) => {
-    setExplorerInitialPath(filePath);
-    setExplorerMode(true);
-  }, []);
-
-  const toggleExplorer = useCallback(() => {
-    setExplorerMode((v) => !v);
-    setExplorerInitialPath(undefined);
-  }, []);
-
-  // `c` key: open comment input on the first changed line of the active file
-  const handleAddCommentOnSelectedLine = useCallback(() => {
-    const activeFile = filteredFiles[activeFileIndex];
-    if (!activeFile) return;
-    // Find the first add or remove line to comment on
-    for (const hunk of activeFile.hunks) {
-      for (const line of hunk.lines) {
-        if (line.type === "add" && line.newLineNumber != null) {
-          handleAddComment(activeFile.newPath, line.newLineNumber, "new");
-          return;
-        }
-        if (line.type === "remove" && line.oldLineNumber != null) {
-          handleAddComment(activeFile.newPath, line.oldLineNumber, "old");
-          return;
-        }
-      }
-    }
-  }, [filteredFiles, activeFileIndex, handleAddComment]);
-
-  useDiffKeyboardNav({
-    fileCount: files.length,
-    activeFileIndex,
-    onFileChange: handleFileSelect,
-    onToggleFileTree: toggleFileTree,
-    onToggleViewMode: toggleViewMode,
-    onSetViewMode: handleViewModeChange,
-    onToggleMaximize,
-    onNextHunk: handleNextHunk,
-    onPrevHunk: handlePrevHunk,
-    onJumpToFile: handleJumpToFile,
-    onShowHelp: toggleShowHelp,
-    onToggleExplorer: toggleExplorer,
-    onAddCommentOnSelectedLine: handleAddCommentOnSelectedLine,
-    enabled: activeCommentLine === null && !explorerMode,
-  });
-
-  const hasDiff = files.length > 0;
-
-  // If explorer mode, render the repo explorer instead of the diff view
-  if (explorerMode) {
-    return (
-      <div className="flex flex-col h-full">
-        <RepoExplorer
-          sessionId={sessionId}
-          diffFiles={files}
-          onBack={handleBackToDiff}
-          initialPath={explorerInitialPath}
-        />
-      </div>
-    );
-  }
 
   return (
     <div className="flex flex-col h-full">
-      {/* Toolbar */}
-      {hasDiff && (
-        <ReviewToolbar
-          viewMode={viewMode}
-          onViewModeChange={handleViewModeChange}
-          maximized={maximized}
-          onToggleMaximize={onToggleMaximize}
-          showFileTree={showFileTree}
-          onToggleFileTree={toggleFileTree}
-          onBrowseRepo={handleBrowseRepo}
-          passes={passes}
-          selectedPassRange={passRange}
-          onPassRangeChange={setPassRange}
-          searchQuery={diffSearchQuery}
-          onSearchChange={setDiffSearchQuery}
-        />
+      {/* Pass selector */}
+      {passes.length >= 2 && (
+        <div className="px-3 py-2 border-b border-border">
+          <PassSelector
+            passes={passes}
+            selectedRange={passRange}
+            onRangeChange={onPassRangeChange}
+          />
+        </div>
       )}
 
       {/* Comments summary */}
       {comments.length > 0 && (
         <CommentsSummary
           comments={comments}
-          onCommentClick={handleCommentClick}
-          onSendToAgent={() => sendToAgentMutation.mutate()}
-          isSending={sendToAgentMutation.isPending}
+          onCommentClick={onCommentClick}
+          onSendToAgent={onSendToAgent}
+          isSending={isSendingComments}
         />
       )}
 
       {/* PR Card */}
       <PRCard sessionId={sessionId} />
 
-      {/* Main content area */}
+      {/* Main content: file tree or empty state */}
       {hasDiff ? (
-        <div className="flex flex-1 min-h-0">
-          {/* File tree */}
-          {showFileTree && (
-            <div className="w-[220px] shrink-0 border-r border-border overflow-hidden">
-              <FileTree
-                files={filteredFiles}
-                activeFileIndex={activeFileIndex}
-                onFileSelect={handleFileSelect}
-                reviewedFiles={reviewedFiles}
-                onToggleReviewed={handleToggleReviewed}
-              />
-            </div>
-          )}
-          {/* Diff pane */}
-          <DiffPane
-            ref={diffPaneRef}
-            files={filteredFiles}
-            viewMode={viewMode}
-            sessionId={sessionId}
-            activeFileIndex={activeFileIndex}
-            commentsByLine={commentsByLine}
-            activeCommentLine={activeCommentLine}
-            onAddComment={handleAddComment}
-            onSubmitComment={handleSubmitComment}
-            onCancelComment={handleCancelComment}
-            onUpdateComment={updateComment}
-            onDeleteComment={deleteComment}
-            onBrowseFile={handleBrowseFile}
-          />
+        <div className="flex flex-col flex-1 min-h-0">
+          {/* Review all button */}
+          <div className="px-3 pt-3 pb-1">
+            <button
+              onClick={() => onOpenReview()}
+              className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-md border border-border bg-background text-[12px] font-medium text-foreground hover:bg-muted/50 transition-colors"
+            >
+              <FileCode2 className="h-3.5 w-3.5" />
+              Review {filteredFiles.length} {filteredFiles.length === 1 ? "file" : "files"}
+            </button>
+          </div>
+
+          {/* File tree — always visible, it's the sidebar's purpose */}
+          <div className="flex-1 overflow-hidden">
+            <FileTree
+              files={filteredFiles}
+              activeFileIndex={activeFileIndex}
+              onFileSelect={handleFileClick}
+              reviewedFiles={reviewedFiles}
+              onToggleReviewed={onToggleReviewed}
+            />
+          </div>
         </div>
       ) : (
         <div className="flex-1 flex items-center justify-center py-12">
@@ -710,16 +515,11 @@ function ChangesTab({
               No changes yet
             </p>
             <p className="text-xs text-muted-foreground/60">
-              {session.status === "running" || session.status === "pending"
-                ? "Changes will appear here as the agent modifies files."
-                : "This session did not produce any file changes."}
+              {emptyStatusText}
             </p>
           </div>
         </div>
       )}
-
-      {/* Keyboard help overlay */}
-      <KeyboardHelpOverlay open={showKeyboardHelp} onClose={toggleShowHelp} />
     </div>
   );
 }
@@ -1236,30 +1036,37 @@ const DEFAULT_DETAIL = 384;
 export function SessionDetailContent({ id }: { id: string }) {
   const terminalStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
   const [reviewParam, setReviewParam] = useQueryState("review");
-  const maximized = reviewParam === "maximized";
-  const [detailTab, setDetailTab] = useState<DetailTab>(maximized ? "changes" : "overview");
+  const centerMode = reviewParam === "active" ? "review" : "chat";
+  const [detailTab, setDetailTab] = useState<DetailTab>("overview");
   const [showDetailPanel, setShowDetailPanel] = useState(true);
   const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL);
+  const [activeFileIndex, setActiveFileIndex] = useState(0);
 
   const handleDetailResize = useCallback((delta: number) => {
-    // Negative delta = dragging left = panel gets wider
     setDetailWidth((w) => Math.min(MAX_DETAIL, Math.max(MIN_DETAIL, w - delta)));
   }, []);
 
-  const openChangesTab = useCallback(() => {
+  // --- Enter review mode ---
+  const openReview = useCallback((fileIndex?: number) => {
+    if (fileIndex !== undefined) setActiveFileIndex(fileIndex);
+    setReviewParam("active");
     setDetailTab("changes");
     setShowDetailPanel(true);
-  }, []);
+  }, [setReviewParam]);
 
-  const toggleMaximize = useCallback(() => {
-    if (maximized) {
-      setReviewParam(null);
-    } else {
-      setReviewParam("maximized");
-      setDetailTab("changes");
-      setShowDetailPanel(true);
+  // --- Exit review mode ---
+  const exitReview = useCallback(() => {
+    setReviewParam(null);
+  }, [setReviewParam]);
+
+  // --- Handle detail tab click ---
+  const handleDetailTabClick = useCallback((tab: DetailTab) => {
+    setDetailTab(tab);
+    // Clicking a non-changes tab exits review mode
+    if (tab !== "changes" && centerMode === "review") {
+      exitReview();
     }
-  }, [maximized, setReviewParam]);
+  }, [centerMode, exitReview]);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["session", id],
@@ -1280,8 +1087,82 @@ export function SessionDetailContent({ id }: { id: string }) {
     return parseDiffStats(sessionDiff);
   }, [sessionDiff]);
 
-  // Comment count for the footer — React Query deduplicates with ChangesTab's query
-  const { openCount: footerOpenCommentCount } = useReviewComments(id);
+  // --- Shared review state (lifted from old ChangesTab) ---
+  const queryClient = useQueryClient();
+
+  // Hooks can't be called conditionally, so provide a stub when session hasn't loaded yet.
+  // useDiffViewState only reads `diff` and `diff_history` — the stub satisfies that contract.
+  const diffViewState = useDiffViewState(session ?? { diff: null, diff_history: [] } as unknown as Session);
+  const { files: allDiffFiles, filteredFiles, passes, passRange, setPassRange, diffSearchQuery, setDiffSearchQuery } = diffViewState;
+
+  const { reviewedFiles, toggleReviewed } = useReviewedFiles(id);
+  const {
+    comments,
+    commentsByLine,
+    openCount: footerOpenCommentCount,
+    createComment,
+    updateComment,
+    deleteComment,
+  } = useReviewComments(id);
+
+  const [activeCommentLine, setActiveCommentLine] = useState<{
+    filePath: string;
+    lineNumber: number;
+    side: "old" | "new";
+  } | null>(null);
+
+  const handleAddComment = useCallback(
+    (filePath: string, lineNumber: number, side: "old" | "new") => {
+      setActiveCommentLine({ filePath, lineNumber, side });
+    },
+    []
+  );
+
+  const handleSubmitComment = useCallback(
+    (body: string) => {
+      if (!activeCommentLine) return;
+      createComment({
+        file_path: activeCommentLine.filePath,
+        line_number: activeCommentLine.lineNumber,
+        side: activeCommentLine.side,
+        body,
+      });
+      setActiveCommentLine(null);
+    },
+    [activeCommentLine, createComment]
+  );
+
+  const handleCancelComment = useCallback(() => {
+    setActiveCommentLine(null);
+  }, []);
+
+  const sendToAgentMutation = useMutation({
+    mutationFn: async () => {
+      const resp = await api.sessions.sendReviewComments(id);
+      if (!resp.data.sent) {
+        const message = resp.data.message;
+        return api.sessions.sendMessage(id, message);
+      }
+      return resp;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["session", id] });
+      queryClient.invalidateQueries({ queryKey: ["session", id, "messages"] });
+    },
+    onError: (err: Error) => {
+      console.error("Failed to send review comments to agent:", err.message);
+    },
+  });
+
+  const handleCommentClick = useCallback(
+    (filePath: string) => {
+      const fileIndex = filteredFiles.findIndex((f) => f.newPath === filePath);
+      if (fileIndex >= 0) {
+        openReview(fileIndex);
+      }
+    },
+    [filteredFiles, openReview]
+  );
 
   if (isLoading) {
     return (
@@ -1313,8 +1194,8 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   return (
     <div className="flex h-full">
-      {/* Main chat area */}
-      <div className={cn("flex-1 min-w-0 flex flex-col", maximized && "hidden")}>
+      {/* Center area: chat or review diff view */}
+      <div className="flex-1 min-w-0 flex flex-col">
         {/* Session header bar */}
         <div className="border-b border-border px-4 py-3 bg-background flex items-center justify-between shrink-0">
           <div className="min-w-0 flex-1 flex items-center gap-2">
@@ -1324,21 +1205,59 @@ export function SessionDetailContent({ id }: { id: string }) {
             <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium shrink-0 ${status.color}`}>
               {status.label}
             </span>
+            {diffStats && (
+              <DiffStatsBadge
+                added={diffStats.added}
+                removed={diffStats.removed}
+                filesChanged={diffStats.filesChanged}
+                onClick={() => openReview()}
+              />
+            )}
           </div>
           <Button
             variant="ghost"
             size="icon"
-            className="h-8 w-8 shrink-0"
+            className={cn("h-8 w-8 shrink-0", centerMode === "review" && showDetailPanel && "opacity-30 cursor-not-allowed")}
+            disabled={centerMode === "review" && showDetailPanel}
             onClick={() => setShowDetailPanel(!showDetailPanel)}
-            title={showDetailPanel ? "Hide details" : "Show details"}
+            title={
+              centerMode === "review" && showDetailPanel
+                ? "File tree required during review"
+                : showDetailPanel ? "Hide details" : "Show details"
+            }
           >
             {showDetailPanel ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
           </Button>
         </div>
 
-        {/* Chat panel */}
-        <div className="flex-1 min-h-0">
-          <ChatPanel session={session} sessionId={id} isActive={isActive} onDiffClick={openChangesTab} />
+        {/* Center content — either chat or diff review */}
+        <div className="flex-1 min-h-0 relative">
+          {/* Chat panel — always mounted to preserve scroll, SSE connections, etc. */}
+          <div className={cn("h-full", centerMode !== "chat" && "hidden")}>
+            <ChatPanel session={session} sessionId={id} isActive={isActive} onDiffClick={() => openReview()} />
+          </div>
+          {/* Review diff view — mounted only when active */}
+          {centerMode === "review" && (
+            <div className="h-full animate-in fade-in duration-150">
+              <ReviewDiffView
+                sessionId={id}
+                files={filteredFiles}
+                allFiles={allDiffFiles}
+                activeFileIndex={activeFileIndex}
+                onFileChange={setActiveFileIndex}
+                onBack={exitReview}
+                commentsByLine={commentsByLine}
+                activeCommentLine={activeCommentLine}
+                onAddComment={handleAddComment}
+                onSubmitComment={handleSubmitComment}
+                onCancelComment={handleCancelComment}
+                onUpdateComment={updateComment}
+                onDeleteComment={deleteComment}
+                diffSearchQuery={diffSearchQuery}
+                onDiffSearchChange={setDiffSearchQuery}
+              />
+            </div>
+          )}
         </div>
 
         {/* Session footer bar */}
@@ -1346,27 +1265,24 @@ export function SessionDetailContent({ id }: { id: string }) {
           status={session.status}
           currentTurn={session.current_turn}
           diffStats={diffStats}
-          onDiffClick={openChangesTab}
+          onDiffClick={centerMode === "review" ? undefined : () => openReview()}
           openCommentCount={footerOpenCommentCount}
-          onCommentsClick={openChangesTab}
+          onCommentsClick={centerMode === "review" ? undefined : () => openReview()}
         />
       </div>
 
       {/* Detail panel (collapsible right sidebar) */}
-      {(showDetailPanel || maximized) && (
+      {showDetailPanel && (
         <>
-        {!maximized && <ResizeHandle onResize={handleDetailResize} />}
+        <ResizeHandle onResize={handleDetailResize} />
         <div
-          style={maximized ? undefined : { width: detailWidth }}
-          className={cn(
-            "border-l border-border bg-muted/20 flex flex-col shrink-0 overflow-hidden",
-            maximized && "flex-1 border-l-0"
-          )}
+          style={{ width: detailWidth }}
+          className="border-l border-border bg-muted/20 flex flex-col shrink-0 overflow-hidden"
         >
           {/* Detail tabs */}
           <Tabs
             value={detailTab}
-            onValueChange={(v) => setDetailTab(v as DetailTab)}
+            onValueChange={(v) => handleDetailTabClick(v as DetailTab)}
             className="flex flex-col flex-1 min-h-0 gap-0"
           >
             <TabsList variant="line" size="sm" className="border-b border-border px-2 shrink-0 w-full">
@@ -1386,10 +1302,25 @@ export function SessionDetailContent({ id }: { id: string }) {
 
             <TabsContent value="changes" className="flex-1 min-h-0">
               <ChangesTab
-                session={session}
                 sessionId={id}
-                maximized={maximized}
-                onToggleMaximize={toggleMaximize}
+                filteredFiles={filteredFiles}
+                activeFileIndex={activeFileIndex}
+                onFileSelect={setActiveFileIndex}
+                onOpenReview={openReview}
+                reviewedFiles={reviewedFiles}
+                onToggleReviewed={toggleReviewed}
+                comments={comments}
+                onCommentClick={handleCommentClick}
+                onSendToAgent={() => sendToAgentMutation.mutate()}
+                isSendingComments={sendToAgentMutation.isPending}
+                passes={passes}
+                passRange={passRange}
+                onPassRangeChange={setPassRange}
+                emptyStatusText={
+                  session.status === "running" || session.status === "pending"
+                    ? "Changes will appear here as the agent modifies files."
+                    : "This session did not produce any file changes."
+                }
               />
             </TabsContent>
             <TabsContent value="overview" className="flex-1 overflow-y-auto p-4">
