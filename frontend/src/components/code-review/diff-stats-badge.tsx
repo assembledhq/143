@@ -1,4 +1,3 @@
-import { FileCode2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface DiffStatsBadgeProps {
@@ -13,13 +12,11 @@ export function DiffStatsBadge({ added, removed, filesChanged, onClick, classNam
   if (added === 0 && removed === 0) return null;
 
   const content = (
-    <span className={cn("inline-flex items-center gap-1.5 text-[11px] font-mono", className)}>
-      <FileCode2 className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+    <span className={cn("inline-flex items-center gap-1 text-[11px] font-mono", className)}>
       {filesChanged != null && filesChanged > 0 && (
         <span className="text-muted-foreground">{filesChanged} file{filesChanged !== 1 ? "s" : ""}</span>
       )}
       <span className="text-green-600 dark:text-green-400">+{added}</span>
-      <span className="text-muted-foreground/40">/</span>
       <span className="text-red-600 dark:text-red-400">-{removed}</span>
     </span>
   );
