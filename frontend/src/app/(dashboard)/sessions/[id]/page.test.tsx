@@ -72,9 +72,9 @@ describe('SessionDetailPage', () => {
   it('shows detail panel tabs for Overview, Changes, Validation', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
-    expect(screen.getByRole('button', { name: 'Overview' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Changes' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Validation' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Overview' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Changes' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Validation' })).toBeInTheDocument();
   });
 
   it('renders failed session with failure details', async () => {
@@ -295,7 +295,7 @@ describe('SessionDetailPage', () => {
     await screen.findAllByText('Fixed TypeError by adding null check');
     // Click the Validation tab button
     const user = userEvent.setup();
-    const validationTab = screen.getByRole('button', { name: 'Validation' });
+    const validationTab = screen.getByRole('tab', { name: 'Validation' });
     await user.click(validationTab);
     expect(await screen.findByText('Direction check')).toBeInTheDocument();
     expect(screen.getByText('Correctness check')).toBeInTheDocument();
@@ -317,7 +317,7 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
     const user = userEvent.setup();
-    const changesTab = screen.getByRole('button', { name: 'Changes' });
+    const changesTab = screen.getByRole('tab', { name: 'Changes' });
     await user.click(changesTab);
     expect(await screen.findByText('GitHub')).toBeInTheDocument();
     expect(screen.getByText('example/repo #42')).toBeInTheDocument();
@@ -378,7 +378,7 @@ describe('SessionDetailPage', () => {
     await screen.findAllByText('Fixed TypeError by adding null check');
 
     const user = userEvent.setup();
-    const changesTab = screen.getByRole('button', { name: /^Changes/ });
+    const changesTab = screen.getByRole('tab', { name: /^Changes/ });
     await user.click(changesTab);
 
     // Pass selector should be visible with "All changes" label
@@ -522,7 +522,7 @@ describe('SessionDetailPage', () => {
     await screen.findAllByText('Fixed TypeError by adding null check');
 
     // Changes tab should show file count badge
-    const changesTab = screen.getByRole('button', { name: /^Changes/ });
+    const changesTab = screen.getByRole('tab', { name: /^Changes/ });
     expect(changesTab).toHaveTextContent('Changes2');
   });
 
@@ -530,7 +530,7 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
 
-    const changesTab = screen.getByRole('button', { name: 'Changes' });
+    const changesTab = screen.getByRole('tab', { name: 'Changes' });
     expect(changesTab).toHaveTextContent('Changes');
     expect(changesTab).not.toHaveTextContent(/\d/);
   });
@@ -585,7 +585,7 @@ describe('SessionDetailPage', () => {
     await screen.findAllByText('Fixed TypeError by adding null check');
 
     const user = userEvent.setup();
-    const changesTab = screen.getByRole('button', { name: 'Changes' });
+    const changesTab = screen.getByRole('tab', { name: 'Changes' });
     await user.click(changesTab);
 
     expect(await screen.findByText('No changes yet')).toBeInTheDocument();
@@ -608,7 +608,7 @@ describe('SessionDetailPage', () => {
     await screen.findAllByText('Fixed TypeError by adding null check');
 
     const user = userEvent.setup();
-    const changesTab = screen.getByRole('button', { name: 'Changes' });
+    const changesTab = screen.getByRole('tab', { name: 'Changes' });
     await user.click(changesTab);
 
     expect(await screen.findByText('No changes yet')).toBeInTheDocument();
