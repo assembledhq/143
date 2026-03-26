@@ -11,7 +11,7 @@ import type { User } from "@/lib/types";
 /** Well-known user filter presets. Any other string value is a specific user ID. */
 export type UserFilterPreset = "mine" | "all";
 
-/** The resolved value stored in the URL query param. `null` means "mine" (default). */
+/** The resolved value stored in the URL query param. `null` means "all" (default). */
 export type UserFilterParam = string | null;
 
 // ---------------------------------------------------------------------------
@@ -20,10 +20,10 @@ export type UserFilterParam = string | null;
 
 /**
  * Resolve the URL-level filter value to the effective filter key.
- * `null` (no param) → "mine".
+ * `null` (no param) → "all".
  */
 export function resolveUserFilter(param: string | null): UserFilterPreset | string {
-  return param ?? "mine";
+  return param ?? "all";
 }
 
 /**
@@ -85,7 +85,7 @@ export function useSessionUserFilter() {
     triggeredByUserId,
     /** The current authenticated user. */
     user,
-    /** Set the user filter. Pass `null` for "mine", `"all"` for everyone, or a user ID. */
+    /** Set the user filter. Pass `null` for "all" (default), `"mine"` for own sessions, or a user ID. */
     setUserFilter,
   };
 }
