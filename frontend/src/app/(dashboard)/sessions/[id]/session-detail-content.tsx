@@ -1209,7 +1209,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               <DiffStatsBadge
                 added={diffStats.added}
                 removed={diffStats.removed}
-                filesChanged={diffStats.filesChanged}
+                className="shrink-0"
                 onClick={() => openReview()}
               />
             )}
