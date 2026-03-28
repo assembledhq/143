@@ -27,7 +27,7 @@ export function CommentsSummary({
   const openCount = comments.length - resolvedCount;
 
   return (
-    <div className="mx-4 mt-3 border border-border rounded-lg overflow-hidden bg-background">
+    <div className="mx-4 mt-3 mb-0 border border-border rounded-lg overflow-hidden bg-background">
       <button
         onClick={() => setExpanded(!expanded)}
         className="flex items-center justify-between w-full px-3 py-2 text-[12px] hover:bg-muted/30 transition-colors"
