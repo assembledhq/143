@@ -4,7 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Plus, Search } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { cn, formatTimeAgo, sessionTitle } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
@@ -110,7 +110,7 @@ export function SessionSidebar() {
   const { currentUserFilter, triggeredByUserId, user, setUserFilter } = useSessionUserFilter();
   const selectedId = params?.id as string | undefined;
   const [search, setSearch] = useState("");
-  const searchInputRef = useRef<HTMLInputElement>(null);
+
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
   const [repo] = useQueryState("repo");
 
@@ -167,7 +167,6 @@ export function SessionSidebar() {
           <div className="relative flex-1 min-w-0">
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground/50" />
             <input
-              ref={searchInputRef}
               type="text"
               placeholder="Search sessions..."
               value={search}
@@ -175,7 +174,7 @@ export function SessionSidebar() {
               onKeyDown={(e) => {
                 if (e.key === "Escape") {
                   setSearch("");
-                  searchInputRef.current?.blur();
+                  e.currentTarget.blur();
                 }
               }}
               className="w-full h-7 pl-8 pr-2 rounded-md border border-border bg-background text-[13px] placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"

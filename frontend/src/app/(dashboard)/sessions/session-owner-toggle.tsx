@@ -1,6 +1,5 @@
 "use client";
 
-import { cn } from "@/lib/utils";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import type { UserFilterParam } from "@/hooks/use-session-user-filter";
 
@@ -24,7 +23,7 @@ export function SessionOwnerToggle({
         if (!value) return; // prevent deselecting
         onFilterChange(value === "all" ? null : "mine");
       }}
-      className={cn(className)}
+      className={className}
     >
       <ToggleGroupItem value="all">Everyone</ToggleGroupItem>
       <ToggleGroupItem value="mine">Mine</ToggleGroupItem>
