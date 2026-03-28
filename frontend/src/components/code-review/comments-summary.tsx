@@ -28,9 +28,17 @@ export function CommentsSummary({
 
   return (
     <div className="mx-4 mt-3 border border-border rounded-lg overflow-hidden bg-background">
-      <button
+      <div
+        role="button"
+        tabIndex={0}
         onClick={() => setExpanded(!expanded)}
-        className="flex items-center justify-between w-full px-3 py-2 text-[12px] hover:bg-muted/30 transition-colors"
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setExpanded(!expanded);
+          }
+        }}
+        className="flex items-center justify-between w-full px-3 py-2 text-[12px] hover:bg-muted/30 transition-colors cursor-pointer"
       >
         <div className="flex items-center gap-2">
           {expanded ? (
@@ -61,7 +69,7 @@ export function CommentsSummary({
             {isSending ? "Sending..." : "Send to agent"}
           </Button>
         )}
-      </button>
+      </div>
 
       {expanded && (
         <div className="border-t border-border/50 px-3 py-1.5 space-y-0.5 max-h-[200px] overflow-y-auto">
