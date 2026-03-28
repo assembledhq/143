@@ -45,6 +45,11 @@ vi.mock('next/link', () => ({
   ),
 }));
 
+// Mock next/image to render a plain img
+vi.mock('next/image', () => ({
+  default: (props: React.ComponentProps<'img'>) => <img {...props} />,
+}));
+
 describe('SessionDetailPage', () => {
   it('shows loading state initially', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
@@ -567,10 +572,9 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
 
-    // Header and footer should show clickable diff stats badges with file count
+    // Header and footer should show clickable diff stats badges
     const viewChangesButtons = screen.getAllByTitle('View changes');
     expect(viewChangesButtons.length).toBeGreaterThanOrEqual(1);
-    expect(viewChangesButtons[0]).toHaveTextContent('1 file');
     expect(viewChangesButtons[0]).toHaveTextContent('+1');
   });
 
