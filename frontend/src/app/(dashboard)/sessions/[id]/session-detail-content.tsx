@@ -51,7 +51,7 @@ import { parseDiffStats, type DiffFile } from "@/lib/diff-parser";
 import type { Session, SessionLog, SessionMessage, SessionReviewComment, User, Validation } from "@/lib/types";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
-import { cn, sessionTitle, isImageURL, fileNameFromURL } from "@/lib/utils";
+import { cn, sessionTitle, isImageURL, fileNameFromURL, formatTimeAgo } from "@/lib/utils";
 import { DiffStatsBadge, FileTree, SessionFooter, CommentsSummary, ReviewDiffView, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
 import { useReviewComments } from "@/hooks/use-review-comments";
 import { useDiffViewState } from "@/hooks/use-diff-view-state";
@@ -89,10 +89,6 @@ function formatDuration(startedAt?: string, completedAt?: string): string {
   return `${mins}m ${secs}s`;
 }
 
-function formatTimestamp(dateStr?: string): string {
-  if (!dateStr) return "-";
-  return new Date(dateStr).toLocaleString();
-}
 
 const validationChecks: { key: string; label: string }[] = [
   { key: "direction_check", label: "Direction check" },
@@ -233,15 +229,18 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
           {formatDuration(session.started_at, session.completed_at)}
         </span>
         <span className="inline-flex items-center gap-1.5">
-          <Clock className="h-3 w-3" />
-          Started {formatTimestamp(session.started_at)}
+          {session.completed_at ? (
+            <>
+              <CheckCircle2 className="h-3 w-3" />
+              Completed {formatTimeAgo(session.completed_at)}
+            </>
+          ) : session.started_at ? (
+            <>
+              <Clock className="h-3 w-3" />
+              Started {formatTimeAgo(session.started_at)}
+            </>
+          ) : null}
         </span>
-        {session.completed_at && (
-          <span className="inline-flex items-center gap-1.5">
-            <CheckCircle2 className="h-3 w-3" />
-            {formatTimestamp(session.completed_at)}
-          </span>
-        )}
       </div>
 
       {/* PM context */}
