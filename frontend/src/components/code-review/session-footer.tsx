@@ -73,7 +73,6 @@ export function SessionFooter({
         <DiffStatsBadge
           added={diffStats.added}
           removed={diffStats.removed}
-          filesChanged={diffStats.filesChanged}
           onClick={onDiffClick}
         />
       )}
