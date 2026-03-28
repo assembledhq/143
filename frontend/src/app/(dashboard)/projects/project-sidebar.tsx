@@ -79,7 +79,7 @@ export function ProjectSidebar() {
   return (
     <div className="w-full h-full border-r border-border bg-muted/30 flex flex-col">
       {/* Header */}
-      <div className="px-4 pt-3 pb-2 space-y-3">
+      <div className="px-4 pt-3 pb-3 space-y-3">
 
         {/* Search */}
         <div className="relative">
