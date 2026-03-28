@@ -1,23 +1,18 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronDown, ChevronRight, Check, Send, MessageSquare } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { ChevronDown, ChevronRight, Check, MessageSquare } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { SessionReviewComment } from "@/lib/types";
 
 interface CommentsSummaryProps {
   comments: SessionReviewComment[];
   onCommentClick: (filePath: string) => void;
-  onSendToAgent: () => void;
-  isSending: boolean;
 }
 
 export function CommentsSummary({
   comments,
   onCommentClick,
-  onSendToAgent,
-  isSending,
 }: CommentsSummaryProps) {
   const [expanded, setExpanded] = useState(true);
 
@@ -46,21 +41,6 @@ export function CommentsSummary({
             ({openCount} open{resolvedCount > 0 ? `, ${resolvedCount} resolved` : ""})
           </span>
         </div>
-        {openCount > 0 && (
-          <Button
-            size="sm"
-            variant="default"
-            className="h-6 text-[11px] px-2 gap-1"
-            onClick={(e) => {
-              e.stopPropagation();
-              onSendToAgent();
-            }}
-            disabled={isSending}
-          >
-            <Send className="h-3 w-3" />
-            {isSending ? "Sending..." : "Send to agent"}
-          </Button>
-        )}
       </button>
 
       {expanded && (
