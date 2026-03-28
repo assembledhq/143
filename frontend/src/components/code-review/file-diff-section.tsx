@@ -142,13 +142,14 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
     }), [file.newPath, commentsByLine, activeCommentLine, onAddComment, handleAddComment, onSubmitComment, onCancelComment, onUpdateComment, onDeleteComment]);
 
     return (
-      <div ref={ref} className="border border-border rounded-lg overflow-x-auto">
+      <div ref={ref} className="border border-border rounded-lg">
         <FileDiffHeader
           filePath={file.newPath}
           added={file.stats.added}
           removed={file.stats.removed}
           onBrowseFile={onBrowseFile}
         />
+        <div className="overflow-x-auto">
         {file.hunks.map((hunk, i) => {
           const hunkEl =
             viewMode === "split" ? (
@@ -207,6 +208,7 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
             </div>
           );
         })}
+        </div>
       </div>
     );
   }
