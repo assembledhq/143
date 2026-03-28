@@ -400,8 +400,8 @@ interface ChatTimelineProps {
   isRunning: boolean;
   diffStats?: { added: number; removed: number; files_changed: number } | null;
   onDiffClick?: () => void;
-  onApprovePlan?: (turnNumber: number) => void;
-  onAdjustPlan?: (turnNumber: number) => void;
+  onApprovePlan?: () => void;
+  onAdjustPlan?: () => void;
 }
 
 export function ChatTimeline({ entries, isRunning, diffStats, onDiffClick, onApprovePlan, onAdjustPlan }: ChatTimelineProps) {
@@ -442,8 +442,8 @@ export function ChatTimeline({ entries, isRunning, diffStats, onDiffClick, onApp
         rendered.push(
           <PlanOutputBubble
             key={`plan-${entry.data.id}`}
-            onApprove={onApprovePlan ? () => onApprovePlan(entry.turnNumber) : undefined}
-            onAdjust={onAdjustPlan ? () => onAdjustPlan(entry.turnNumber) : undefined}
+            onApprove={onApprovePlan}
+            onAdjust={onAdjustPlan}
             isRunning={isRunning}
           >
             <MarkdownContent content={entry.data.message} />
@@ -454,8 +454,8 @@ export function ChatTimeline({ entries, isRunning, diffStats, onDiffClick, onApp
         rendered.push(
           <PlanOutputBubble
             key={`planmsg-${entry.data.id}`}
-            onApprove={onApprovePlan ? () => onApprovePlan(entry.turnNumber) : undefined}
-            onAdjust={onAdjustPlan ? () => onAdjustPlan(entry.turnNumber) : undefined}
+            onApprove={onApprovePlan}
+            onAdjust={onAdjustPlan}
             isRunning={isRunning}
           >
             <MarkdownContent content={entry.data.content} />

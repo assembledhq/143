@@ -18,7 +18,6 @@ import {
   Square,
   PanelRightOpen,
   PanelRightClose,
-  ChevronDown,
   Clock,
   Timer,
   User as UserIcon,
@@ -28,6 +27,7 @@ import {
   Paperclip,
   X,
 } from "lucide-react";
+import Image from "next/image";
 import { Badge } from "@/components/ui/badge";
 import { MarkdownContent } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
@@ -549,7 +549,6 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
   const isClaudeCode = session.agent_type === "claude_code";
 
-  const isIdle = session.status === "idle";
   const isRunning = session.status === "running";
   // Allow messaging in any state except "skipped" (never ran, no workspace)
   // and "pending" (agent not started yet). The backend will reject statuses
@@ -788,12 +787,12 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
   const hasContent = message.trim() || attachments.length > 0;
 
   // Plan mode callbacks for the timeline approve/adjust buttons.
-  const handleApprovePlan = useCallback((_turnNumber: number) => {
+  const handleApprovePlan = useCallback(() => {
     if (!canSendMessage || sendMutation.isPending) return;
     sendMutation.mutate({ planMode: false, overrideMessage: "The plan looks good. Please proceed with executing the implementation plan above. Make all the changes as described." });
   }, [canSendMessage, sendMutation]);
 
-  const handleAdjustPlan = useCallback((_turnNumber: number) => {
+  const handleAdjustPlan = useCallback(() => {
     setMessage("Please adjust the plan: ");
     setPlanMode(false);
     textareaRef.current?.focus();
@@ -904,9 +903,12 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
                 return (
                   <div key={url} className="relative group">
                     {isImage ? (
-                      <img
+                      <Image
                         src={url}
                         alt={fileName}
+                        width={64}
+                        height={64}
+                        unoptimized
                         className="h-16 w-16 rounded-md object-cover border border-border"
                       />
                     ) : (
@@ -1208,7 +1210,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               <DiffStatsBadge
                 added={diffStats.added}
                 removed={diffStats.removed}
-                filesChanged={diffStats.filesChanged}
+                className="shrink-0"
                 onClick={() => openReview()}
               />
             )}
