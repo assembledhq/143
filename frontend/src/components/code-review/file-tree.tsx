@@ -242,8 +242,8 @@ export function FileTree({
 
   return (
     <div className="flex flex-col h-full">
-      <div className="px-2 pt-2 pb-1">
-        <p className="text-[11px] font-medium text-muted-foreground/70 uppercase tracking-wider px-2 mb-2">
+      <div className="px-4 pb-3">
+        <p className="text-[11px] font-medium text-muted-foreground/70 uppercase tracking-wider mb-2">
           {files.length} files changed
         </p>
         <div className="relative">
@@ -257,7 +257,7 @@ export function FileTree({
           />
         </div>
       </div>
-      <div className="flex-1 overflow-y-auto px-1 pb-2">
+      <div className="flex-1 overflow-y-auto px-3 pb-2">
         <TreeDirectory
           node={tree}
           activeFileIndex={sortedActiveIndex}

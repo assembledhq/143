@@ -51,7 +51,7 @@ import { parseDiffStats, type DiffFile } from "@/lib/diff-parser";
 import type { Session, SessionLog, SessionMessage, SessionReviewComment, User, Validation } from "@/lib/types";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
-import { cn, sessionTitle, isImageURL, fileNameFromURL } from "@/lib/utils";
+import { cn, sessionTitle, isImageURL, fileNameFromURL, formatTimeAgo } from "@/lib/utils";
 import { DiffStatsBadge, FileTree, SessionFooter, CommentsSummary, ReviewDiffView, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
 import { useReviewComments } from "@/hooks/use-review-comments";
 import { useDiffViewState } from "@/hooks/use-diff-view-state";
@@ -89,10 +89,6 @@ function formatDuration(startedAt?: string, completedAt?: string): string {
   return `${mins}m ${secs}s`;
 }
 
-function formatTimestamp(dateStr?: string): string {
-  if (!dateStr) return "-";
-  return new Date(dateStr).toLocaleString();
-}
 
 const validationChecks: { key: string; label: string }[] = [
   { key: "direction_check", label: "Direction check" },
@@ -233,15 +229,18 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
           {formatDuration(session.started_at, session.completed_at)}
         </span>
         <span className="inline-flex items-center gap-1.5">
-          <Clock className="h-3 w-3" />
-          Started {formatTimestamp(session.started_at)}
+          {session.completed_at ? (
+            <>
+              <CheckCircle2 className="h-3 w-3" />
+              Completed {formatTimeAgo(session.completed_at)}
+            </>
+          ) : session.started_at ? (
+            <>
+              <Clock className="h-3 w-3" />
+              Started {formatTimeAgo(session.started_at)}
+            </>
+          ) : null}
         </span>
-        {session.completed_at && (
-          <span className="inline-flex items-center gap-1.5">
-            <CheckCircle2 className="h-3 w-3" />
-            {formatTimestamp(session.completed_at)}
-          </span>
-        )}
       </div>
 
       {/* PM context */}
@@ -377,7 +376,7 @@ function PRCard({ sessionId }: { sessionId: string }) {
 
   return (
     <Card className="mx-4 mt-3">
-      <CardContent className="pt-4 pb-3 space-y-3">
+      <CardContent className="py-3 space-y-3">
         <div className="flex items-start justify-between">
           <div className="min-w-0">
             <h3 className="text-sm font-medium truncate">{pr.title}</h3>
@@ -460,7 +459,7 @@ function ChangesTab({
     <div className="flex flex-col h-full">
       {/* Pass selector */}
       {passes.length >= 2 && (
-        <div className="px-3 py-2 border-b border-border">
+        <div className="px-4 py-3 border-b border-border">
           <PassSelector
             passes={passes}
             selectedRange={passRange}
@@ -486,7 +485,7 @@ function ChangesTab({
       {hasDiff ? (
         <div className="flex flex-col flex-1 min-h-0">
           {/* Review all button */}
-          <div className="px-3 pt-3 pb-1">
+          <div className="px-4 py-3">
             <button
               onClick={() => onOpenReview()}
               className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-md border border-border bg-background text-[12px] font-medium text-foreground hover:bg-muted/50 transition-colors"
