@@ -161,7 +161,7 @@ export function SessionSidebar() {
   return (
     <div className="w-full h-full border-r border-border bg-muted/30 flex flex-col">
       {/* Header */}
-      <div className="px-4 pt-3 pb-2 space-y-2.5">
+      <div className="px-4 pt-3 pb-3 space-y-2.5">
 
         {/* Row 1: Search icon + Owner toggle (or expanded search input) */}
         <div className="flex items-center gap-2">
