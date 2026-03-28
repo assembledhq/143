@@ -377,7 +377,7 @@ function PRCard({ sessionId }: { sessionId: string }) {
 
   return (
     <Card className="mx-4 mt-3">
-      <CardContent className="pt-4 pb-3 space-y-3">
+      <CardContent className="py-3 space-y-3">
         <div className="flex items-start justify-between">
           <div className="min-w-0">
             <h3 className="text-sm font-medium truncate">{pr.title}</h3>
@@ -460,7 +460,7 @@ function ChangesTab({
     <div className="flex flex-col h-full">
       {/* Pass selector */}
       {passes.length >= 2 && (
-        <div className="px-3 py-2 border-b border-border">
+        <div className="px-4 py-3 border-b border-border">
           <PassSelector
             passes={passes}
             selectedRange={passRange}
@@ -486,7 +486,7 @@ function ChangesTab({
       {hasDiff ? (
         <div className="flex flex-col flex-1 min-h-0">
           {/* Review all button */}
-          <div className="px-3 pt-3 pb-1">
+          <div className="px-4 py-3">
             <button
               onClick={() => onOpenReview()}
               className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-md border border-border bg-background text-[12px] font-medium text-foreground hover:bg-muted/50 transition-colors"
