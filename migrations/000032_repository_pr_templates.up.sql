@@ -3,7 +3,7 @@
 CREATE TABLE repository_pr_templates (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     repository_id UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
-    org_id UUID NOT NULL REFERENCES organizations(id),
+    org_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     template_content TEXT NOT NULL DEFAULT '',
     template_path TEXT NOT NULL DEFAULT '',
     fetched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -12,4 +12,3 @@ CREATE TABLE repository_pr_templates (
     UNIQUE (repository_id)
 );
 
-CREATE INDEX idx_repository_pr_templates_repo ON repository_pr_templates(repository_id);

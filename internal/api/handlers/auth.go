@@ -681,9 +681,15 @@ type githubUser struct {
 }
 
 func (h *AuthHandler) exchangeGitHubCode(code string) (*githubTokenResponse, error) {
+	return exchangeGitHubOAuthCode(h.cfg.GitHubOAuthClientID, h.cfg.GitHubOAuthClientSecret, code)
+}
+
+// exchangeGitHubOAuthCode is the shared implementation for exchanging a GitHub
+// OAuth authorization code for an access token.
+func exchangeGitHubOAuthCode(clientID, clientSecret, code string) (*githubTokenResponse, error) {
 	data := url.Values{
-		"client_id":     {h.cfg.GitHubOAuthClientID},
-		"client_secret": {h.cfg.GitHubOAuthClientSecret},
+		"client_id":     {clientID},
+		"client_secret": {clientSecret},
 		"code":          {code},
 	}
 

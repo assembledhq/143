@@ -3,8 +3,6 @@ package handlers
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -141,8 +139,8 @@ func (h *GitHubStatusHandler) HandleConnectCallback(w http.ResponseWriter, r *ht
 		return
 	}
 
-	// Exchange code for token.
-	tokenResp, err := h.exchangeGitHubCode(code)
+	// Exchange code for token using the shared helper.
+	tokenResp, err := exchangeGitHubOAuthCode(h.githubClientID, h.githubSecret, code)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "TOKEN_EXCHANGE_FAILED", "failed to exchange code", err)
 		return
@@ -150,9 +148,9 @@ func (h *GitHubStatusHandler) HandleConnectCallback(w http.ResponseWriter, r *ht
 
 	// Store user credential with repo scope.
 	cfg := models.GitHubOAuthConfig{
-		AccessToken: tokenResp.accessToken,
-		TokenType:   tokenResp.tokenType,
-		Scope:       tokenResp.scope,
+		AccessToken: tokenResp.AccessToken,
+		TokenType:   tokenResp.TokenType,
+		Scope:       tokenResp.Scope,
 	}
 	if err := h.credentials.Upsert(r.Context(), user.ID, user.OrgID, cfg, false); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to store credential", err)
@@ -160,56 +158,6 @@ func (h *GitHubStatusHandler) HandleConnectCallback(w http.ResponseWriter, r *ht
 	}
 
 	http.Redirect(w, r, h.frontendURL+"/settings?github_pr=connected", http.StatusTemporaryRedirect)
-}
-
-type ghTokenResponse struct {
-	accessToken string
-	tokenType   string
-	scope       string
-}
-
-func (h *GitHubStatusHandler) exchangeGitHubCode(code string) (*ghTokenResponse, error) {
-	data := url.Values{
-		"client_id":     {h.githubClientID},
-		"client_secret": {h.githubSecret},
-		"code":          {code},
-	}
-
-	req, err := http.NewRequest("POST", "https://github.com/login/oauth/access_token", nil)
-	if err != nil {
-		return nil, err
-	}
-	req.URL.RawQuery = data.Encode()
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("token exchange request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read token response: %w", err)
-	}
-
-	var parsed struct {
-		AccessToken string `json:"access_token"`
-		TokenType   string `json:"token_type"`
-		Scope       string `json:"scope"`
-	}
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, fmt.Errorf("decode token response: %w", err)
-	}
-	if parsed.AccessToken == "" {
-		return nil, fmt.Errorf("empty access token")
-	}
-
-	return &ghTokenResponse{
-		accessToken: parsed.AccessToken,
-		tokenType:   parsed.TokenType,
-		scope:       parsed.Scope,
-	}, nil
 }
 
 // hasRepoScope returns true if the comma/space-separated scope string includes "repo".

@@ -127,7 +127,7 @@ func (s *PRService) resolveToken(ctx context.Context, run *models.Session, repo 
 	// Try user token if user triggered the session and we have credential stores.
 	if run.TriggeredByUserID != nil && s.userCredentials != nil && s.users != nil {
 		cred, err := s.userCredentials.GetForUser(ctx, run.OrgID, *run.TriggeredByUserID, models.ProviderGitHubOAuth)
-		if err == nil && cred.Config != nil {
+		if err == nil && cred != nil && cred.Config != nil {
 			cfg, ok := cred.Config.(models.GitHubOAuthConfig)
 			// The token must have "repo" scope to push code and create PRs.
 			// Login-only tokens (read:user,user:email) lack this — skip them.
