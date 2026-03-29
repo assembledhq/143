@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   Sparkles,
@@ -130,10 +130,13 @@ export default function NewProjectPage() {
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   // Platform detection for keyboard shortcut hint
-  const [isMac, setIsMac] = useState(true);
-  useEffect(() => {
-    setIsMac(/Mac|iPhone|iPad/.test(navigator.userAgent));
-  }, []);
+  const isMac = useMemo(
+    () =>
+      typeof navigator !== "undefined"
+        ? /Mac|iPhone|iPad/.test(navigator.userAgent)
+        : true,
+    [],
+  );
 
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
     queryKey: ["settings"],
