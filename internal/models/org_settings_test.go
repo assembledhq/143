@@ -369,3 +369,31 @@ func TestParseOrgSettings_DefaultOrgSizeIsMedium(t *testing.T) {
 	require.Equal(t, 50_000, s.ContextLimits.AgentLowTokenMax, "default should match medium low tokens")
 	require.Equal(t, 200_000, s.ContextLimits.AgentHighTokenMax, "default should match medium high tokens")
 }
+
+func TestParseOrgSettings_PRAuthorship_Default(t *testing.T) {
+	t.Parallel()
+
+	s, err := ParseOrgSettings(json.RawMessage(`{}`))
+	require.NoError(t, err)
+	require.Equal(t, PRAuthorshipUserPreferred, s.PRAuthorship, "should default to user_preferred")
+	require.False(t, s.PRDraftDefault, "should default to non-draft PRs")
+}
+
+func TestParseOrgSettings_PRAuthorship_Explicit(t *testing.T) {
+	t.Parallel()
+
+	s, err := ParseOrgSettings(json.RawMessage(`{"pr_authorship":"app_only","pr_draft_default":true}`))
+	require.NoError(t, err)
+	require.Equal(t, PRAuthorshipAppOnly, s.PRAuthorship, "should parse app_only authorship")
+	require.True(t, s.PRDraftDefault, "should parse draft default")
+}
+
+func TestPRAuthorship_Validate(t *testing.T) {
+	t.Parallel()
+
+	require.NoError(t, PRAuthorshipUserPreferred.Validate())
+	require.NoError(t, PRAuthorshipAppOnly.Validate())
+	require.NoError(t, PRAuthorshipUserRequired.Validate())
+	require.NoError(t, PRAuthorship("").Validate(), "empty should be valid")
+	require.Error(t, PRAuthorship("invalid").Validate(), "unknown value should be invalid")
+}
