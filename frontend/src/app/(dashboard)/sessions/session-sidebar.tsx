@@ -1,10 +1,10 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { Plus, Search, X } from "lucide-react";
+import { Plus, Search } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { cn, formatTimeAgo, sessionTitle } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
@@ -110,8 +110,7 @@ export function SessionSidebar() {
   const { currentUserFilter, triggeredByUserId, user, setUserFilter } = useSessionUserFilter();
   const selectedId = params?.id as string | undefined;
   const [search, setSearch] = useState("");
-  const [searchOpen, setSearchOpen] = useState(false);
-  const searchInputRef = useRef<HTMLInputElement>(null);
+
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
   const [repo] = useQueryState("repo");
 
@@ -163,54 +162,29 @@ export function SessionSidebar() {
       {/* Header */}
       <div className="px-4 pt-3 pb-3 space-y-2.5">
 
-        {/* Row 1: Search icon + Owner toggle (or expanded search input) */}
+        {/* Row 1: Search + Owner toggle */}
         <div className="flex items-center gap-2">
-          {searchOpen ? (
-            <div className="relative flex-1">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground/50" />
-              <input
-                ref={searchInputRef}
-                type="text"
-                placeholder="Search sessions..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                onBlur={() => {
-                  if (!search.trim()) setSearchOpen(false);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Escape") {
-                    setSearch("");
-                    setSearchOpen(false);
-                  }
-                }}
-                className="w-full h-8 pl-8 pr-8 rounded-md border border-border bg-background text-[13px] placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
-              />
-              <button
-                onClick={() => { setSearch(""); setSearchOpen(false); }}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground/50 hover:text-muted-foreground"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          ) : (
-            <>
-              <button
-                aria-label="Search sessions"
-                onClick={() => {
-                  setSearchOpen(true);
-                  requestAnimationFrame(() => searchInputRef.current?.focus());
-                }}
-                className="flex items-center justify-center h-8 w-8 rounded-md border border-border bg-background hover:bg-accent transition-colors shrink-0"
-              >
-                <Search className="h-3.5 w-3.5 text-muted-foreground" />
-              </button>
-              <SessionOwnerToggle
-                currentUserFilter={currentUserFilter}
-                onFilterChange={setUserFilter}
-                className="flex-1"
-              />
-            </>
-          )}
+          <div className="relative flex-1 min-w-0">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground/50" />
+            <input
+              type="text"
+              placeholder="Search sessions..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  setSearch("");
+                  e.currentTarget.blur();
+                }
+              }}
+              className="w-full h-7 pl-8 pr-2 rounded-md border border-border bg-background text-[13px] placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
+            />
+          </div>
+          <SessionOwnerToggle
+            currentUserFilter={currentUserFilter}
+            onFilterChange={setUserFilter}
+            className="shrink-0"
+          />
         </div>
 
         {/* New session button */}
