@@ -519,10 +519,11 @@ function ChangesTab({
 }
 
 // ---------------------------------------------------------------------------
-// Helper: extract code context from diff for a given comment
+// Helper: extract diff hunk context around a commented line
+// Returns ~3 lines before and after, formatted as a mini diff snippet.
 // ---------------------------------------------------------------------------
 
-function getLineContext(
+function getDiffHunkContext(
   files: DiffFile[],
   filePath: string,
   lineNumber: number,
@@ -530,13 +531,26 @@ function getLineContext(
 ): string | null {
   const file = files.find((f) => f.newPath === filePath || f.oldPath === filePath);
   if (!file) return null;
+
   for (const hunk of file.hunks) {
-    for (const line of hunk.lines) {
+    // Find the target line's index within this hunk
+    const targetIdx = hunk.lines.findIndex((line) => {
       const ln = side === "new" ? line.newLineNumber : line.oldLineNumber;
-      if (ln === lineNumber) {
-        return line.content;
-      }
-    }
+      return ln === lineNumber;
+    });
+    if (targetIdx === -1) continue;
+
+    // Extract surrounding lines (up to 3 before, 3 after)
+    const start = Math.max(0, targetIdx - 3);
+    const end = Math.min(hunk.lines.length, targetIdx + 4);
+    const contextLines = hunk.lines.slice(start, end);
+
+    const formatted = contextLines.map((line) => {
+      const prefix = line.type === "add" ? "+" : line.type === "remove" ? "-" : " ";
+      return `${prefix} ${line.content}`;
+    });
+
+    return formatted.join("\n");
   }
   return null;
 }
@@ -564,27 +578,36 @@ function ReviewCommentInput({
 
   const sendMutation = useMutation({
     mutationFn: () => {
-      let fullMessage = "";
+      const parts: string[] = [];
+
+      // Section 1: Inline comments (anchored to specific file:line with diff context)
       if (openComments.length > 0) {
-        fullMessage += "Please address the following code review comments:\n\n";
+        parts.push("Please address the following code review comments:\n");
         openComments.forEach((c, i) => {
-          fullMessage += `${i + 1}. ${c.file_path}:${c.line_number}\n`;
-          const ctx = getLineContext(diffFiles, c.file_path, c.line_number, c.diff_side as "old" | "new");
-          if (ctx) {
-            fullMessage += `   Code: \`${ctx.trim()}\`\n`;
+          parts.push(`${i + 1}. **${c.file_path}:${c.line_number}** (${c.diff_side} side)`);
+          const hunk = getDiffHunkContext(diffFiles, c.file_path, c.line_number, c.diff_side as "old" | "new");
+          if (hunk) {
+            parts.push("   ```");
+            hunk.split("\n").forEach((line) => parts.push(`   ${line}`));
+            parts.push("   ```");
           }
           const indented = c.body.replace(/\n/g, "\n   ");
-          fullMessage += `   "${indented}"\n\n`;
+          parts.push(`   Comment: "${indented}"\n`);
         });
       }
+
+      // Section 2: General instructions (not tied to a specific line)
       if (message.trim()) {
         if (openComments.length > 0) {
-          fullMessage += `Additional instructions: ${message.trim()}`;
+          parts.push("---\n");
+          parts.push("Additional instructions:\n");
+          parts.push(message.trim());
         } else {
-          fullMessage = message.trim();
+          parts.push(message.trim());
         }
       }
-      return api.sessions.sendMessage(sessionId, fullMessage.trim());
+
+      return api.sessions.sendMessage(sessionId, parts.join("\n").trim());
     },
     onSuccess: () => {
       setMessage("");
