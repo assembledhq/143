@@ -129,12 +129,13 @@ func (h *InternalIssueHandler) Create(w http.ResponseWriter, r *http.Request) {
 	fpHash := sha256.Sum256([]byte(req.Title + "\x00" + req.Description))
 	fingerprint := "pm-agent:" + hex.EncodeToString(fpHash[:12])
 
+	description := req.Description
 	issue := &models.Issue{
 		OrgID:           claims.OrgID,
 		ExternalID:      uuid.New().String(),
 		Source:          models.IssueSourcePMAgent,
 		Title:           req.Title,
-		Description:     req.Description,
+		Description:     &description,
 		Status:          "triaged",
 		Severity:        severity,
 		Tags:            req.Tags,
@@ -198,7 +199,6 @@ func (h *InternalIssueHandler) dispatchSession(r *http.Request, orgID uuid.UUID,
 	}
 
 	title := issue.Title
-	approach := issue.Description
 
 	session := &models.Session{
 		IssueID:       issue.ID,
@@ -208,7 +208,7 @@ func (h *InternalIssueHandler) dispatchSession(r *http.Request, orgID uuid.UUID,
 		AutonomyLevel: autonomyLevel,
 		TokenMode:     "low",
 		Title:         &title,
-		PMApproach:    &approach,
+		PMApproach:    issue.Description,
 		RepositoryID:  issue.RepositoryID,
 	}
 	if err := h.sessionStore.Create(r.Context(), session); err != nil {
