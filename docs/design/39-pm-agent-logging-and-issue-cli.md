@@ -185,12 +185,75 @@ accepts `"pm-agent"` as a value.
 No schema changes. Reuses `session_logs` and `sessions` tables. The PM
 session is distinguished by `agent_type = 'pm-agent'`.
 
-#### UI Impact
+#### Frontend: Reuse Existing Session Detail Components
 
-PM session logs will appear in existing log viewers. The frontend may want
-to filter or group PM sessions separately (e.g., under the Autopilot
-activity view rather than the session list), but this is a frontend concern
-and not blocking for the backend work.
+**Principle:** PM agent sessions must use the same UI components as coding
+agent sessions. There should be one viewing experience, not two. The PM
+session is a session — it just happens to have `agent_type = "pm-agent"`.
+
+**Existing component chain (reuse as-is):**
+
+| Component | File | Role |
+|-----------|------|------|
+| `ChatTimeline` | `frontend/src/components/chat-timeline.tsx` | Renders the unified timeline of tool calls, assistant output, errors, and messages. Accepts `TimelineEntry[]` — fully generic, no agent-type assumptions. |
+| `buildTimeline()` | `frontend/src/lib/timeline.ts` | Merges `SessionMessage[]` + `SessionLog[]` into `TimelineEntry[]` with tool-use/tool-result pairing and dedup. Entirely data-driven, works for any session. |
+| `ToolGroupEntry` | `frontend/src/components/chat-timeline.tsx` | Collapsible tool call display (tool name badge, expandable result). Will show PM agent's `143-tools` calls naturally. |
+| `ErrorEntry` | `frontend/src/components/chat-timeline.tsx` | Error log display. Works for PM errors identically. |
+| Session detail page | `frontend/src/app/(dashboard)/sessions/[id]/session-detail-content.tsx` | Full session detail view with tabs (overview, changes, validation), status badges, duration, log streaming. |
+| Log streaming (SSE) | `GET /api/v1/sessions/{id}/logs/stream` | Real-time log updates via EventSource. PM sessions stream identically since they use the same `session_logs` table. |
+| `api.sessions.getLogs()` | `frontend/src/lib/api.ts` | Fetches logs by session ID. No agent-type filter — works for PM sessions out of the box. |
+
+**What needs minor adjustment:**
+
+1. **Sessions list page** (`sessions-page-content.tsx`): Currently shows
+   all sessions in one table. PM agent sessions will appear here with
+   `agent_type = "pm-agent"`. The existing `agent_type` column already
+   renders this field (`row.original.agent_type.replace(/_/g, " ")`), so
+   PM sessions will show as "pm agent". No code change needed — this works
+   by default.
+
+2. **Session detail: overview tab** (`OverviewTab` in
+   `session-detail-content.tsx`): Shows "PM context" card when
+   `session.pm_plan_id` is set. For PM sessions this may need a variant —
+   the PM session *is* the PM plan, not a child of it. Two options:
+   - (a) Skip the "PM context" card when `agent_type === "pm-agent"` and
+     show a "PM Analysis" card with the plan's `analysis` text instead.
+   - (b) Do nothing — the PM session won't have `pm_reasoning`/
+     `pm_approach` set, so the card simply won't render. The plan analysis
+     is visible in the timeline logs.
+   **Recommendation:** Option (b) for launch. The timeline itself is the
+   primary value. A dedicated PM summary card can be added later.
+
+3. **Session detail: changes/validation tabs**: PM sessions produce no
+   diffs or validation checks. These tabs will show empty states naturally
+   (the existing "No validation data" and empty diff views handle this).
+   No changes needed.
+
+4. **Session detail: input bar**: The input bar at the bottom allows
+   sending messages to active sessions. For PM sessions this is not
+   meaningful (PM agent doesn't accept interactive input). Hide the input
+   bar when `agent_type === "pm-agent"` — a one-line conditional.
+
+5. **SSE streaming**: The session detail page already connects to
+   `/api/v1/sessions/{id}/logs/stream` for active sessions. Since PM
+   sessions write to the same `session_logs` table and use the same
+   `ListByRunIDSince` query, SSE streaming works without changes. Users
+   can watch the PM agent think in real time.
+
+**What does NOT need a new component:**
+
+- No `PMSessionDetail` component — use `SessionDetailContent` directly.
+- No `PMLogViewer` — `ChatTimeline` + `buildTimeline` handle all log types.
+- No `PMSessionList` — PM sessions appear in the existing sessions table.
+- No separate API endpoints — all existing session/log endpoints work by
+  session ID, agnostic of agent type.
+
+**Filtering PM sessions (optional, post-launch):**
+
+The sessions list could add a filter chip for `agent_type` to let users
+isolate PM sessions. The backend `SessionFilters` struct would need an
+`AgentType` field (not yet present), and the API handler would accept an
+`agent_type` query parameter. This is a nice-to-have, not a blocker.
 
 ---
 
@@ -341,6 +404,8 @@ Do NOT use this to duplicate issues that already exist in .pm-context.json.
 
 ## File Change Summary
 
+### Backend
+
 | File | Change |
 |------|--------|
 | `internal/services/pm/service.go` | Add session log persistence; add sessionLogs dependency; generate sandbox auth token; pass new env vars |
@@ -353,6 +418,13 @@ Do NOT use this to duplicate issues that already exist in .pm-context.json.
 | `internal/services/mcp/registry_builder.go` | Wire IssueCreator from env vars |
 | `internal/prompts/templates/pm_system_prompt.template` | Add issue creation instructions |
 | `cmd/server/main.go` | Wire sessionLogs into PM service |
+
+### Frontend (minimal — reuse existing components)
+
+| File | Change |
+|------|--------|
+| `frontend/src/app/(dashboard)/sessions/[id]/session-detail-content.tsx` | Hide input bar when `agent_type === "pm-agent"` (one conditional) |
+| No new components | `ChatTimeline`, `buildTimeline`, `ToolGroupEntry`, `ErrorEntry`, SSE streaming, session list, session detail — all reused as-is |
 
 ## Migration
 
