@@ -982,3 +982,138 @@ func TestValidateUserToken_RevokedToken(t *testing.T) {
 
 	require.False(t, svc.validateUserToken(context.Background(), "revoked-token"))
 }
+
+func TestFillRepoTemplate_NoLLMClient(t *testing.T) {
+	t.Parallel()
+
+	svc := &PRService{logger: zerolog.Nop()}
+	run := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+
+	_, err := svc.fillRepoTemplate(context.Background(), "## Template", run, nil)
+	require.Error(t, err, "should fail without LLM client")
+	require.Contains(t, err.Error(), "no LLM client")
+}
+
+func TestFormatPRBody_SessionLink(t *testing.T) {
+	t.Parallel()
+
+	svc := &PRService{logger: zerolog.Nop()}
+	summary := "Fixed a bug"
+	run := &models.Session{
+		ID:            uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789"),
+		OrgID:         uuid.New(),
+		ResultSummary: &summary,
+	}
+
+	body := svc.formatPRBody(context.Background(), run, nil)
+	require.Contains(t, body, "session abcdef01", "should contain short session ID in footer")
+	require.Contains(t, body, "app.143.dev/sessions/", "should contain session link")
+}
+
+func TestFormatPRBody_WithIssueContext(t *testing.T) {
+	t.Parallel()
+
+	svc := &PRService{logger: zerolog.Nop()}
+	summary := "Fixed null ptr"
+	run := &models.Session{
+		ID:            uuid.New(),
+		OrgID:         uuid.New(),
+		ResultSummary: &summary,
+	}
+	issue := &models.Issue{
+		Source:   models.IssueSourceSentry,
+		Title:    "NullPointerException in handler",
+		Severity: "critical",
+	}
+
+	body := svc.formatPRBody(context.Background(), run, issue)
+	require.Contains(t, body, "**Issue**: sentry", "should contain issue source")
+	require.Contains(t, body, "NullPointerException in handler", "should contain issue title")
+	require.Contains(t, body, "(critical)", "should contain severity")
+}
+
+func TestCreateCommitWithAuthor(t *testing.T) {
+	t.Parallel()
+
+	var capturedPayload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		err := json.NewDecoder(r.Body).Decode(&capturedPayload)
+		require.NoError(t, err)
+		w.WriteHeader(http.StatusCreated)
+		err = json.NewEncoder(w).Encode(map[string]string{"sha": "commit123"})
+		require.NoError(t, err)
+	}))
+	defer server.Close()
+
+	svc := &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		logger:     zerolog.Nop(),
+	}
+
+	author := &commitAuthor{Name: "Test User", Email: "test@example.com", Date: "2024-01-01T00:00:00Z"}
+	sha, err := svc.createCommitWithAuthor(context.Background(), "token", "owner", "repo", "msg", "tree", "parent", author)
+	require.NoError(t, err)
+	require.Equal(t, "commit123", sha)
+	require.Contains(t, capturedPayload, "author", "should include author in commit payload")
+}
+
+func TestCreatePullRequest_WithDraft(t *testing.T) {
+	t.Parallel()
+
+	var capturedPayload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		err := json.NewDecoder(r.Body).Decode(&capturedPayload)
+		require.NoError(t, err)
+		w.WriteHeader(http.StatusCreated)
+		err = json.NewEncoder(w).Encode(map[string]any{
+			"number":   99,
+			"html_url": "https://github.com/owner/repo/pull/99",
+		})
+		require.NoError(t, err)
+	}))
+	defer server.Close()
+
+	svc := &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		logger:     zerolog.Nop(),
+	}
+
+	num, url, err := svc.createPullRequest(context.Background(), "token", "owner", "repo", "title", "body", "head", "main", withDraft(true))
+	require.NoError(t, err)
+	require.Equal(t, 99, num)
+	require.Equal(t, "https://github.com/owner/repo/pull/99", url)
+	require.Equal(t, true, capturedPayload["draft"], "should set draft=true in payload")
+}
+
+func TestPRTemplatePaths(t *testing.T) {
+	t.Parallel()
+
+	// Verify the template paths list contains the most common locations.
+	require.Contains(t, prTemplatePaths, ".github/pull_request_template.md")
+	require.Contains(t, prTemplatePaths, ".github/PULL_REQUEST_TEMPLATE.md")
+	require.GreaterOrEqual(t, len(prTemplatePaths), 5, "should check at least 5 conventional paths")
+}
+
+func TestFirstLine_LongLine(t *testing.T) {
+	t.Parallel()
+
+	long := strings.Repeat("a", 100)
+	result := firstLine(long)
+	require.Len(t, result, 72, "firstLine should truncate to 72 chars")
+}
+
+func TestFormatBranchName_ResultSummaryFallback(t *testing.T) {
+	t.Parallel()
+
+	summary := "Fixed the auth middleware"
+	session := &models.Session{
+		ID:            uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789"),
+		ResultSummary: &summary,
+	}
+	// When issue is nil and title is nil, branch name uses "changes" fallback
+	// because ResultSummary is not used for branch names.
+	result := formatBranchName(session, nil)
+	require.Equal(t, "143/abcdef01/changes", result)
+}
