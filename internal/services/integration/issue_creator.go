@@ -38,8 +38,8 @@ func (c *InternalIssueCreator) CreateIssue(ctx context.Context, params CreateIss
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	url := c.baseURL + "/issues"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	reqURL := c.baseURL + "/issues"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(body)) // #nosec G107 -- URL from trusted server config
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -52,7 +52,7 @@ func (c *InternalIssueCreator) CreateIssue(ctx context.Context, params CreateIss
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1MB max response
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}

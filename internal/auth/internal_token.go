@@ -31,7 +31,9 @@ func GenerateInternalToken(secret string, orgID uuid.UUID, ttl time.Duration) (s
 	}
 
 	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(payload)
+	if _, err := mac.Write(payload); err != nil {
+		return "", fmt.Errorf("compute HMAC: %w", err)
+	}
 	sig := mac.Sum(nil)
 
 	// Token format: base64(payload).base64(signature)
@@ -67,7 +69,9 @@ func ValidateInternalToken(secret, token string) (*InternalTokenClaims, error) {
 
 	// Verify HMAC.
 	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(payload)
+	if _, err := mac.Write(payload); err != nil {
+		return nil, fmt.Errorf("compute HMAC: %w", err)
+	}
 	expectedSig := mac.Sum(nil)
 	if !hmac.Equal(sig, expectedSig) {
 		return nil, fmt.Errorf("invalid signature")
