@@ -1,9 +1,13 @@
 package handlers
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,9 +18,13 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
+// maxIssuesPerPMRun caps how many issues a single PM agent run can create.
+// This prevents a misbehaving agent from flooding the system.
+const maxIssuesPerPMRun = 10
+
 // InternalIssueHandler handles issue creation from sandbox agents via internal API tokens.
 // When an issue is created, it also creates a coding agent session and enqueues
-// a run_agent job so the issue is automatically worked on.
+// a run_agent job so the issue is picked up when concurrency slots are available.
 type InternalIssueHandler struct {
 	issueStore    *db.IssueStore
 	sessionStore  *db.SessionStore
@@ -24,6 +32,11 @@ type InternalIssueHandler struct {
 	orgStore      *db.OrganizationStore
 	signingSecret string
 	logger        zerolog.Logger
+
+	// perTokenCount tracks how many issues each token has created.
+	// Keyed by a hash of the token string.
+	perTokenMu    sync.Mutex
+	perTokenCount map[string]int
 }
 
 // NewInternalIssueHandler creates a handler for internal issue creation.
@@ -42,6 +55,7 @@ func NewInternalIssueHandler(
 		orgStore:      orgStore,
 		signingSecret: signingSecret,
 		logger:        logger,
+		perTokenCount: make(map[string]int),
 	}
 }
 
@@ -60,7 +74,7 @@ type createIssueResponse struct {
 
 // Create handles POST /api/v1/internal/issues.
 // It creates the issue, then automatically creates a coding agent session
-// and enqueues a run_agent job to solve it.
+// and enqueues a run_agent job so it is picked up when slots are available.
 func (h *InternalIssueHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// Authenticate via internal token.
 	tokenStr := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -72,6 +86,14 @@ func (h *InternalIssueHandler) Create(w http.ResponseWriter, r *http.Request) {
 	claims, err := auth.ValidateInternalToken(h.signingSecret, tokenStr)
 	if err != nil {
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "invalid token", err)
+		return
+	}
+
+	// Rate limit: max issues per PM run (keyed by token hash).
+	tokenHash := hashToken(tokenStr)
+	if !h.incrementAndCheck(tokenHash) {
+		writeError(w, r, http.StatusTooManyRequests, "RATE_LIMITED",
+			fmt.Sprintf("issue creation limit reached (%d per PM run)", maxIssuesPerPMRun))
 		return
 	}
 
@@ -102,14 +124,18 @@ func (h *InternalIssueHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now()
-	fingerprint := "pm-agent:" + req.Title
+	// Use a hash of title+description for fingerprint to avoid collisions
+	// on title reuse while still deduplicating truly identical issues.
+	fpHash := sha256.Sum256([]byte(req.Title + "\x00" + req.Description))
+	fingerprint := "pm-agent:" + hex.EncodeToString(fpHash[:12])
+
 	issue := &models.Issue{
 		OrgID:           claims.OrgID,
 		ExternalID:      uuid.New().String(),
 		Source:          models.IssueSourcePMAgent,
 		Title:           req.Title,
 		Description:     req.Description,
-		Status:          "open",
+		Status:          "triaged",
 		Severity:        severity,
 		Tags:            req.Tags,
 		Fingerprint:     fingerprint,
@@ -123,12 +149,9 @@ func (h *InternalIssueHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Mark issue as triaged since we're immediately dispatching work.
-	if err := h.issueStore.UpdateStatus(r.Context(), claims.OrgID, issue.ID, "triaged"); err != nil {
-		h.logger.Warn().Err(err).Str("issue_id", issue.ID.String()).Msg("failed to mark PM-created issue as triaged")
-	}
-
 	// Create a coding agent session and enqueue a run_agent job.
+	// The session is created as "pending" — the worker picks it up when
+	// concurrency slots are available, so we don't need to check capacity here.
 	resp := createIssueResponse{
 		ID:    issue.ID.String(),
 		Title: issue.Title,
@@ -149,7 +172,9 @@ func (h *InternalIssueHandler) Create(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, resp)
 }
 
-// dispatchSession creates a coding agent session for the issue and enqueues a run_agent job.
+// dispatchSession creates a coding agent session for the issue and enqueues a
+// run_agent job. The session starts as "pending" and will be picked up by the
+// worker when concurrency slots are available.
 func (h *InternalIssueHandler) dispatchSession(r *http.Request, orgID uuid.UUID, issue *models.Issue) (*uuid.UUID, error) {
 	// Resolve org settings for default agent type and autonomy level.
 	org, err := h.orgStore.GetByID(r.Context(), orgID)
@@ -169,7 +194,7 @@ func (h *InternalIssueHandler) dispatchSession(r *http.Request, orgID uuid.UUID,
 
 	autonomyLevel := string(orgSettings.AutonomyLevel)
 	if autonomyLevel == "" {
-		autonomyLevel = "full"
+		autonomyLevel = "semi"
 	}
 
 	title := issue.Title
@@ -199,4 +224,23 @@ func (h *InternalIssueHandler) dispatchSession(r *http.Request, orgID uuid.UUID,
 	}
 
 	return &session.ID, nil
+}
+
+// incrementAndCheck atomically increments the per-token issue count and returns
+// true if the count is within the allowed limit.
+func (h *InternalIssueHandler) incrementAndCheck(tokenHash string) bool {
+	h.perTokenMu.Lock()
+	defer h.perTokenMu.Unlock()
+	count := h.perTokenCount[tokenHash]
+	if count >= maxIssuesPerPMRun {
+		return false
+	}
+	h.perTokenCount[tokenHash] = count + 1
+	return true
+}
+
+// hashToken returns a short hash of a token string for use as a map key.
+func hashToken(token string) string {
+	h := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(h[:8])
 }

@@ -257,7 +257,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		OrgID:         orgID,
 		AgentType:     models.AgentTypePMAgent,
 		Status:        "running",
-		Title:         ptrStr("PM Analysis"),
+		Title:         strPtr("PM Analysis"),
 		RepositoryID:  &repo.ID,
 		AutonomyLevel: "full",
 		TokenMode:     "high",
@@ -286,7 +286,9 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 
 	// Inject internal API credentials so the PM agent can create issues.
 	if s.internalAPIURL != "" && s.internalAPISecret != "" {
-		internalToken, tokenErr := auth.GenerateInternalToken(s.internalAPISecret, orgID, 15*time.Minute)
+		// Token TTL extends past sandbox timeout to avoid mid-execution expiry.
+		tokenTTL := sbCfg.Timeout + 5*time.Minute
+		internalToken, tokenErr := auth.GenerateInternalToken(s.internalAPISecret, orgID, tokenTTL)
 		if tokenErr != nil {
 			s.logger.Warn().Err(tokenErr).Msg("failed to generate internal API token — issue creation will be unavailable")
 		} else {
@@ -553,4 +555,4 @@ func tokenModeFromComplexity(complexity models.PMTaskComplexity) string {
 	}
 }
 
-func ptrStr(s string) *string { return &s }
+func strPtr(s string) *string { return &s }
