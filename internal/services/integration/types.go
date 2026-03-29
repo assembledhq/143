@@ -409,6 +409,7 @@ type CreateIssueParams struct {
 
 // CreateIssueResult is returned after successfully creating an issue.
 type CreateIssueResult struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
+	ID        string  `json:"id"`
+	Title     string  `json:"title"`
+	SessionID *string `json:"session_id,omitempty"`
 }

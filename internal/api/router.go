@@ -224,7 +224,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	})
 
 	// Internal API routes (token-based auth — called by sandbox agents)
-	internalIssueHandler := handlers.NewInternalIssueHandler(issueStore, cfg.SessionSecret)
+	internalIssueHandler := handlers.NewInternalIssueHandler(issueStore, sessionStore, jobStore, orgStore, cfg.SessionSecret, logger)
 	r.Route("/api/v1/internal", func(r chi.Router) {
 		r.Post("/issues", internalIssueHandler.Create)
 	})

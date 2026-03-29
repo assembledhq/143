@@ -226,8 +226,20 @@ can create a new issue using the 143-tools CLI:
 
     143-tools issue_create --title "..." --description "..." --severity warning
 
-The tool returns the created issue's UUID. You can then reference this UUID
-in your plan's tasks or clusters, just like any other issue.
+The tool returns the created issue's UUID and a session ID. Each issue you
+create is **automatically dispatched** to a coding agent — a session is
+created and a run_agent job is enqueued immediately. You do NOT need to
+include these issues in your plan's tasks array; they are already being
+worked on.
+
+You can still reference the returned UUID in your plan's clusters to group
+related issues, or in skip entries if you want to note that you created
+and dispatched them.
+
+IMPORTANT: Because every issue you create triggers a coding agent run, write
+a thorough description — it becomes the agent's approach briefing. Include
+specific file paths, function names, and code-grounded guidance just as you
+would for a task in the plan.
 
 Use this when:
 - A Slack thread surfaces a real bug or feature gap with no existing issue
