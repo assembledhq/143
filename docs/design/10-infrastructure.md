@@ -795,6 +795,521 @@ DATABASE_URL=postgres://onefortythree:pass@managed-db.provider.com:5432/oneforty
 
 No application code changes. The app only sees `DATABASE_URL`.
 
+##### Stage 6: Automated Fleet Provisioning
+
+Manual SSH + docker compose works for 3-5 nodes. Beyond that, you need provisioning automation — a script that spins up a new worker in minutes without you logging in.
+
+**cloud-init (Hetzner native, no dependencies):**
+
+Every Hetzner VPS accepts a cloud-init user-data script at creation time. This runs once on first boot and fully provisions the node.
+
+```yaml
+# deploy/cloud-init/worker.yml
+#cloud-config
+
+packages:
+  - docker.io
+  - docker-compose-plugin
+
+runcmd:
+  # Install gVisor
+  - curl -fsSL https://gvisor.dev/archive.key | gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+  - echo "deb [arch=amd64 signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" > /etc/apt/sources.list.d/gvisor.list
+  - apt-get update && apt-get install -y runsc
+  - runsc install
+  - systemctl restart docker
+
+  # Pull images from your registry
+  - docker login ghcr.io -u deploy -p ${REGISTRY_TOKEN}
+  - docker pull ghcr.io/assembledhq/143-server:latest
+  - docker pull ghcr.io/assembledhq/143-sandbox:latest
+
+  # Write the compose file
+  - mkdir -p /opt/143
+  - |
+    cat > /opt/143/docker-compose.yml << 'COMPOSE'
+    services:
+      worker:
+        image: ghcr.io/assembledhq/143-server:latest
+        environment:
+          DATABASE_URL: ${DATABASE_URL}
+          MODE: worker
+          NODE_ID: ${HOSTNAME}
+          MAX_CONCURRENT_RUNS: ${MAX_CONCURRENT_RUNS}
+          SANDBOX_IMAGE: ghcr.io/assembledhq/143-sandbox:latest
+          SANDBOX_RUNTIME: runsc
+          MEZMO_INGESTION_KEY: ${MEZMO_INGESTION_KEY}
+          DD_API_KEY: ${DD_API_KEY}
+        volumes:
+          - /var/run/docker.sock:/var/run/docker.sock
+        restart: unless-stopped
+    COMPOSE
+
+  # Start
+  - cd /opt/143 && docker compose up -d
+
+write_files:
+  - path: /opt/143/.env
+    content: |
+      DATABASE_URL=${DATABASE_URL}
+      MEZMO_INGESTION_KEY=${MEZMO_INGESTION_KEY}
+      DD_API_KEY=${DD_API_KEY}
+    permissions: '0600'
+```
+
+**Provisioning script** (`deploy/scripts/provision-worker.sh`):
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Provision a new worker node via Hetzner Cloud API
+# Usage: ./provision-worker.sh [server-type] [location]
+# Example: ./provision-worker.sh cx42 fsn1
+
+SERVER_TYPE="${1:-cx42}"
+LOCATION="${2:-fsn1}"
+WORKER_NAME="143-worker-$(date +%s)"
+
+# Load secrets
+source /opt/143/.env.provisioning
+
+# Render cloud-init template with secrets
+USERDATA=$(envsubst < deploy/cloud-init/worker.yml)
+
+# Create the server
+RESPONSE=$(hcloud server create \
+  --name "$WORKER_NAME" \
+  --type "$SERVER_TYPE" \
+  --image ubuntu-24.04 \
+  --location "$LOCATION" \
+  --network 143-private \
+  --ssh-key deploy-key \
+  --user-data "$USERDATA" \
+  --label env=production \
+  --label role=worker \
+  --output json)
+
+SERVER_ID=$(echo "$RESPONSE" | jq -r '.server.id')
+SERVER_IP=$(echo "$RESPONSE" | jq -r '.server.public_net.ipv4.ip')
+PRIVATE_IP=$(echo "$RESPONSE" | jq -r '.server.private_net[0].ip')
+
+echo "Created $WORKER_NAME (ID: $SERVER_ID)"
+echo "  Public IP:  $SERVER_IP"
+echo "  Private IP: $PRIVATE_IP"
+echo "  Type:       $SERVER_TYPE"
+echo "  Location:   $LOCATION"
+echo ""
+echo "Node will register itself in ~90 seconds (cloud-init + image pull)."
+echo "Monitor: SELECT * FROM nodes WHERE id = '$WORKER_NAME';"
+```
+
+**Decommission script** (`deploy/scripts/decommission-worker.sh`):
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Gracefully decommission a worker node
+# Usage: ./decommission-worker.sh <server-name-or-id>
+
+SERVER="$1"
+
+# 1. Drain the node (let it finish current work)
+SERVER_IP=$(hcloud server ip "$SERVER" --output noheader)
+ssh deploy@"$SERVER_IP" "docker compose -f /opt/143/docker-compose.yml exec worker kill -SIGTERM 1"
+
+echo "Draining $SERVER... waiting for in-progress jobs to complete."
+
+# 2. Wait for the node to show as 'dead' in the nodes table (up to SHUTDOWN_TIMEOUT)
+for i in $(seq 1 60); do
+  STATUS=$(psql "$DATABASE_URL" -t -c "SELECT status FROM nodes WHERE host LIKE '%${SERVER}%'" | xargs)
+  if [ "$STATUS" = "dead" ]; then
+    echo "Node drained and marked dead."
+    break
+  fi
+  sleep 5
+done
+
+# 3. Delete the VPS
+hcloud server delete "$SERVER"
+echo "Server $SERVER deleted."
+```
+
+This takes node provisioning from "SSH in and set stuff up" to a single command. Hetzner servers boot in ~20 seconds, cloud-init completes in ~60 seconds, and the worker is accepting jobs within 90 seconds.
+
+**Move to Stage 7 when:** you're provisioning/decommissioning workers frequently enough that doing it manually is a chore (more than a few times a week), or you want capacity to automatically respond to demand.
+
+##### Stage 7: Auto-Scaling Workers
+
+When queue depth exceeds capacity, automatically spin up more workers. When demand drops, drain and destroy them. The Go server does this — no external orchestrator needed.
+
+**How it works:**
+
+```go
+// internal/autoscaler/autoscaler.go
+//
+// Runs as part of the scheduler (on whichever node holds the advisory lock).
+// Checks queue depth every 60 seconds and adjusts the fleet.
+
+type AutoScaler struct {
+    db          *pgxpool.Pool
+    hetzner     *hcloud.Client
+    config      AutoScaleConfig
+    logger      zerolog.Logger
+}
+
+type AutoScaleConfig struct {
+    Enabled          bool          `env:"AUTOSCALE_ENABLED" envDefault:"false"`
+    MinWorkers       int           `env:"AUTOSCALE_MIN_WORKERS" envDefault:"1"`
+    MaxWorkers       int           `env:"AUTOSCALE_MAX_WORKERS" envDefault:"10"`
+    ServerType       string        `env:"AUTOSCALE_SERVER_TYPE" envDefault:"cx42"`
+    Location         string        `env:"AUTOSCALE_LOCATION" envDefault:"fsn1"`
+    ScaleUpThreshold int           `env:"AUTOSCALE_SCALE_UP_THRESHOLD" envDefault:"5"`   // pending jobs
+    ScaleDownAfter   time.Duration `env:"AUTOSCALE_SCALE_DOWN_AFTER" envDefault:"15m"`   // idle time before removal
+    CooldownPeriod   time.Duration `env:"AUTOSCALE_COOLDOWN" envDefault:"5m"`            // min time between scale events
+    NetworkID        string        `env:"AUTOSCALE_NETWORK_ID"`                          // Hetzner private network ID
+    RunsPerWorker    int           `env:"AUTOSCALE_RUNS_PER_WORKER" envDefault:"5"`      // MAX_CONCURRENT_RUNS per worker
+}
+
+func (a *AutoScaler) Tick(ctx context.Context) {
+    // 1. Count pending sandbox jobs
+    var pendingJobs int
+    a.db.QueryRow(ctx,
+        "SELECT count(*) FROM jobs WHERE status = 'pending' AND job_type = 'agent_run'",
+    ).Scan(&pendingJobs)
+
+    // 2. Count active workers
+    var activeWorkers int
+    a.db.QueryRow(ctx,
+        "SELECT count(*) FROM nodes WHERE mode = 'worker' AND status = 'active'",
+    ).Scan(&activeWorkers)
+
+    totalCapacity := activeWorkers * a.config.RunsPerWorker
+
+    // 3. Scale up: more pending jobs than capacity can absorb
+    if pendingJobs > a.config.ScaleUpThreshold && activeWorkers < a.config.MaxWorkers {
+        needed := (pendingJobs / a.config.RunsPerWorker) + 1 - activeWorkers
+        needed = min(needed, a.config.MaxWorkers-activeWorkers)
+        for i := 0; i < needed; i++ {
+            a.provisionWorker(ctx)
+        }
+        return
+    }
+
+    // 4. Scale down: workers with no active runs for > ScaleDownAfter
+    if activeWorkers > a.config.MinWorkers {
+        a.drainIdleWorkers(ctx)
+    }
+}
+```
+
+**Scale-up policy:** When pending `agent_run` jobs exceed `AUTOSCALE_SCALE_UP_THRESHOLD` (default 5) and current worker count is below `AUTOSCALE_MAX_WORKERS`, provision enough workers to absorb the backlog. Each worker handles `AUTOSCALE_RUNS_PER_WORKER` concurrent runs.
+
+**Scale-down policy:** When a worker has had zero active sandbox runs for longer than `AUTOSCALE_SCALE_DOWN_AFTER` (default 15 minutes), drain it (SIGTERM → wait for completion → delete VPS). Never scale below `AUTOSCALE_MIN_WORKERS`.
+
+**Cooldown:** At least `AUTOSCALE_COOLDOWN` (default 5 minutes) between scale events to avoid thrashing.
+
+**Cost control:** `AUTOSCALE_MAX_WORKERS` is your hard cap. At €14/mo per CX42 (billed hourly at ~€0.02/hr), a worker that runs for 2 hours to handle a spike costs €0.04. Auto-scaling is effectively free compared to the LLM API costs of the agent runs themselves.
+
+**Environment variables:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTOSCALE_ENABLED` | `false` | Enable auto-scaling |
+| `AUTOSCALE_MIN_WORKERS` | `1` | Minimum worker count (never scale below) |
+| `AUTOSCALE_MAX_WORKERS` | `10` | Maximum worker count (hard cap) |
+| `AUTOSCALE_SERVER_TYPE` | `cx42` | Hetzner server type for new workers |
+| `AUTOSCALE_LOCATION` | `fsn1` | Hetzner datacenter location |
+| `AUTOSCALE_SCALE_UP_THRESHOLD` | `5` | Pending jobs that trigger scale-up |
+| `AUTOSCALE_SCALE_DOWN_AFTER` | `15m` | Idle time before a worker is drained |
+| `AUTOSCALE_COOLDOWN` | `5m` | Minimum time between scale events |
+| `AUTOSCALE_NETWORK_ID` | - | Hetzner private network ID |
+| `AUTOSCALE_RUNS_PER_WORKER` | `5` | `MAX_CONCURRENT_RUNS` for provisioned workers |
+| `HCLOUD_TOKEN` | - | Hetzner Cloud API token |
+
+**Move to Stage 8 when:** you need high-availability Postgres (zero-downtime failover), or your database is large enough that single-node Postgres is a SPOF you can't tolerate.
+
+##### Stage 8: Postgres High Availability
+
+At this scale, Postgres is the only single point of failure. If the DB VPS dies, everything stops. Two options:
+
+**Option A: Streaming Replication (self-managed)**
+
+```
+┌──────────────────┐     ┌──────────────────┐
+│  VPS-DB-1        │     │  VPS-DB-2        │
+│  (Primary)       │────▶│  (Replica)       │
+│                  │ WAL │                  │
+│  Postgres        │     │  Postgres        │
+│  PgBouncer       │     │  (read-only)     │
+└──────────────────┘     └──────────────────┘
+         ▲                        ▲
+         │ writes                 │ reads (dashboard, experiments)
+         │                        │
+    ┌────┴────────────────────────┴────┐
+    │          App / Worker nodes       │
+    └──────────────────────────────────┘
+```
+
+- Primary handles all writes (job queue, agent run logs, webhooks)
+- Replica handles read-heavy queries (dashboard, experiment evaluation, audit log queries)
+- If Primary dies, promote Replica to Primary (manual or via Patroni for automatic failover)
+- App uses two `DATABASE_URL`s: one for writes, one for reads
+
+**Splitting reads and writes in the app:**
+
+```go
+type DBPool struct {
+    Primary *pgxpool.Pool  // DATABASE_URL — all writes
+    Replica *pgxpool.Pool  // DATABASE_REPLICA_URL — read-heavy queries (optional, falls back to Primary)
+}
+
+// Use Replica for read-heavy, latency-tolerant queries
+func (db *DBPool) ReadPool() *pgxpool.Pool {
+    if db.Replica != nil {
+        return db.Replica
+    }
+    return db.Primary
+}
+```
+
+Dashboard queries, experiment metric reads, and audit log queries use `ReadPool()`. Job queue operations, writes, and anything requiring strong consistency use `Primary` directly.
+
+**Option B: Managed Postgres with HA (simplest)**
+
+Hetzner doesn't offer managed Postgres, but several providers do:
+
+| Provider | HA Setup | Cost (4GB RAM) | Notes |
+|----------|----------|----------------|-------|
+| Supabase | Auto-failover | ~$25/mo | Managed Postgres, easy setup |
+| Neon | Serverless, auto-scale | Pay-per-query | Good for variable workloads |
+| Ubicloud | Open-source managed | ~$40/mo | Runs on Hetzner hardware |
+| AWS RDS | Multi-AZ | ~$70/mo | More expensive but battle-tested |
+| Crunchy Bridge | Managed HA | ~$50/mo | Postgres-focused, excellent support |
+
+For this project, **self-managed streaming replication** (Option A) is the right fit until operational burden outweighs cost savings. The app code change (read/write splitting) is worth doing regardless — it's a one-time investment that works with any Postgres setup.
+
+#### Capacity Planning Reference
+
+**Concrete numbers at different scales:**
+
+| Scale | VPSes | Monthly Cost (Hetzner) | Concurrent Agents | Repos Supported | Setup |
+|-------|-------|----------------------|-------------------|-----------------|-------|
+| **Solo** | 1x CX32 (4CPU/8GB) | ~€8 | 2-3 | 1-5 | Stage 1 |
+| **Small team** | 2 VPSes (DB + App) | ~€20 | 3-5 | 5-15 | Stage 2 |
+| **Growing** | 4 VPSes (DB + App + 2 Workers) | ~€50 | 10-15 | 15-40 | Stage 3 |
+| **Busy** | 7 VPSes (DB + 2 API + 4 Workers) | ~€110 | 20-30 | 40-100 | Stage 3-4 |
+| **Large** | 12 VPSes (DB HA + 2 API + LB + 8 Workers) | ~€200 | 40-60 | 100-300 | Stage 4+ |
+| **Auto-scaled** | 2-20 VPSes (dynamic) | ~€30-400 | 5-100 (elastic) | 100+ | Stage 7 |
+
+**The dominant cost is LLM API, not infrastructure.** A single agent run costs $0.50-5.00 in Claude API tokens. The VPS to run it costs ~$0.02/hr. Infrastructure is rounding error compared to LLM spend — so don't under-provision to save $10/month.
+
+**Where the money actually goes at scale:**
+
+| Category | % of Total Cost | Example (100 repos) |
+|----------|----------------|---------------------|
+| LLM API (Claude/GPT) | 80-90% | $2,000-10,000/mo |
+| Infrastructure (Hetzner) | 5-10% | $100-200/mo |
+| Observability (Datadog/Mezmo) | 3-5% | $50-100/mo |
+| Backups (S3 storage) | < 1% | $5-10/mo |
+
+#### Container Registry & CI/CD for Multi-Node
+
+When you have more than one node, you need a container registry (so workers can pull the latest images) and a deployment pipeline that updates the fleet.
+
+**Registry: GitHub Container Registry (ghcr.io) — free for public repos, included with GitHub Pro**
+
+```yaml
+# .github/workflows/build-and-push.yml
+name: Build & Push Images
+on:
+  push:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  SERVER_IMAGE: ghcr.io/assembledhq/143-server
+  SANDBOX_IMAGE: ghcr.io/assembledhq/143-sandbox
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push server image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.SERVER_IMAGE }}:latest
+            ${{ env.SERVER_IMAGE }}:${{ github.sha }}
+
+      - name: Build & push sandbox image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.sandbox
+          push: true
+          tags: |
+            ${{ env.SANDBOX_IMAGE }}:latest
+            ${{ env.SANDBOX_IMAGE }}:${{ github.sha }}
+```
+
+**Fleet deployment** (`deploy/scripts/deploy-fleet.sh`):
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Deploy to all nodes in the fleet.
+# Usage: ./deploy-fleet.sh [image-tag]
+# Example: ./deploy-fleet.sh abc123f
+
+TAG="${1:-latest}"
+SERVER_IMAGE="ghcr.io/assembledhq/143-server:$TAG"
+SANDBOX_IMAGE="ghcr.io/assembledhq/143-sandbox:$TAG"
+
+echo "Deploying $TAG to fleet..."
+
+# Get all active nodes from Hetzner
+NODES=$(hcloud server list --selector env=production -o columns=name,ipv4 -o noheader)
+
+# Deploy to each node (rolling — one at a time)
+while IFS=$'\t' read -r NAME IP; do
+  echo "--- Deploying to $NAME ($IP) ---"
+
+  ssh -o StrictHostKeyChecking=no deploy@"$IP" << REMOTE
+    # Pull new images
+    docker pull $SERVER_IMAGE
+    docker pull $SANDBOX_IMAGE
+
+    # Tag as latest locally so compose file picks them up
+    docker tag $SERVER_IMAGE ghcr.io/assembledhq/143-server:latest
+    docker tag $SANDBOX_IMAGE ghcr.io/assembledhq/143-sandbox:latest
+
+    # Rolling restart
+    cd /opt/143
+    docker compose up -d --remove-orphans
+
+    # Wait for health check
+    for i in \$(seq 1 30); do
+      if docker compose exec -T worker wget -q -O /dev/null http://localhost:8080/healthz 2>/dev/null || \
+         docker compose exec -T api wget -q -O /dev/null http://localhost:8080/healthz 2>/dev/null; then
+        echo "Health check passed."
+        break
+      fi
+      sleep 2
+    done
+REMOTE
+
+  echo "$NAME deployed."
+done <<< "$NODES"
+
+echo "Fleet deployment complete."
+```
+
+**GitHub Actions deployment workflow:**
+
+```yaml
+# .github/workflows/deploy.yml
+name: Deploy to Fleet
+on:
+  workflow_run:
+    workflows: ["Build & Push Images"]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install hcloud CLI
+        run: |
+          curl -sL https://github.com/hetznercloud/cli/releases/latest/download/hcloud-linux-amd64.tar.gz | tar xz
+          sudo mv hcloud /usr/local/bin/
+
+      - name: Deploy fleet
+        env:
+          HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
+        run: |
+          chmod +x deploy/scripts/deploy-fleet.sh
+          ./deploy/scripts/deploy-fleet.sh ${{ github.event.workflow_run.head_sha }}
+
+      - name: Run migrations (on one API node)
+        run: |
+          API_IP=$(hcloud server list --selector role=api -o columns=ipv4 -o noheader | head -1)
+          ssh deploy@"$API_IP" "cd /opt/143 && docker compose exec -T api ./server migrate up"
+```
+
+**Deployment strategy:**
+- **Rolling deploy** — update one node at a time. Each node drains, pulls the new image, restarts, and passes health checks before moving to the next.
+- **Migrations run once** — on a single API node after all nodes are updated. The server binary includes the migrate command.
+- **Rollback** — re-deploy the previous git SHA: `./deploy-fleet.sh <previous-sha>`. Images are tagged by SHA so every version is available.
+
+#### Full Architecture at Scale
+
+```
+                    ┌─────────────────────────────────────┐
+                    │       GitHub (source of truth)       │
+                    │                                     │
+                    │  push to main → build images →      │
+                    │  push to GHCR → deploy to fleet     │
+                    └──────────────┬──────────────────────┘
+                                   │
+                    ┌──────────────▼──────────────────────┐
+                    │       Hetzner Load Balancer          │
+                    │       (€6/mo, health-checked)        │
+                    └──┬───────────┬───────────┬──────────┘
+                       │           │           │
+              ┌────────▼──┐ ┌─────▼─────┐ ┌───▼───────┐
+              │  API-1    │ │  API-2    │ │  API-3    │
+              │  mode=all │ │  mode=api │ │  mode=api │
+              │           │ │           │ │           │
+              └─────┬─────┘ └─────┬─────┘ └─────┬────┘
+                    │             │             │
+       ┌────────────▼─────────────▼─────────────▼──────────┐
+       │                   PgBouncer                        │
+       │              (on DB VPS, port 6432)                │
+       └────────────────────────┬───────────────────────────┘
+                                │
+                ┌───────────────▼───────────────┐
+                │     Postgres Primary          │───── WAL ─────▶ Replica (reads)
+                │     (dedicated VPS, 8GB+)     │───── WAL ─────▶ S3 (WAL-G)
+                └───────────────────────────────┘
+                                ▲
+                                │
+       ┌────────────────────────┼────────────────────────┐
+       │                        │                        │
+  ┌────▼────┐  ┌────────┐  ┌───▼────┐  ┌────────┐  ┌───▼────┐
+  │Worker-1 │  │Worker-2│  │Worker-3│  │Worker-4│  │Worker-N│
+  │ 5 runs  │  │ 5 runs │  │ 5 runs │  │ 5 runs │  │ auto   │
+  │ (fixed) │  │ (fixed)│  │ (fixed)│  │ (fixed)│  │ scaled │
+  └─────────┘  └────────┘  └────────┘  └────────┘  └────────┘
+
+  ┌──────────────────────────────────────────────────────────┐
+  │  Observability                                           │
+  │  Datadog: metrics, APM traces, dashboards, alerts        │
+  │  Mezmo: structured logs, log-based alerts                │
+  │  S3: WAL archives, pg_dump backups, audit logs           │
+  └──────────────────────────────────────────────────────────┘
+```
+
 #### When to Split What
 
 | Signal | Action |
