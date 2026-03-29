@@ -17,6 +17,7 @@ import (
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/rs/zerolog"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/assembledhq/143/internal/api/middleware"
@@ -290,7 +291,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusInternalServerError, "USER_UPSERT_FAILED", "failed to upsert user", upsertErr)
 			return
 		}
-		h.storeGitHubToken(r.Context(), &existingUser, tokenResp)
+		h.storeGitHubToken(r, &existingUser, tokenResp)
 		h.emitAuthEvent(r, &existingUser, models.AuditActionAuthLogin)
 		h.createSessionAndRedirect(w, r, &existingUser)
 		return
@@ -302,7 +303,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusInternalServerError, "LINK_FAILED", "failed to link GitHub account", linkErr)
 			return
 		}
-		h.storeGitHubToken(r.Context(), &emailUser, tokenResp)
+		h.storeGitHubToken(r, &emailUser, tokenResp)
 		h.emitAuthEvent(r, &emailUser, models.AuditActionAuthLogin)
 		h.createSessionAndRedirect(w, r, &emailUser)
 		return
@@ -364,7 +365,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusInternalServerError, "USER_UPSERT_FAILED", "failed to upsert user", createErr)
 			return
 		}
-		h.storeGitHubToken(r.Context(), createdUser, tokenResp)
+		h.storeGitHubToken(r, createdUser, tokenResp)
 		h.emitAuthEvent(r, createdUser, models.AuditActionAuthRegister)
 		h.createSessionAndRedirect(w, r, createdUser)
 		return
@@ -375,7 +376,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.storeGitHubToken(r.Context(), user, tokenResp)
+	h.storeGitHubToken(r, user, tokenResp)
 	h.emitAuthEvent(r, user, models.AuditActionAuthRegister)
 	h.createSessionAndRedirect(w, r, user)
 }
@@ -648,7 +649,7 @@ func (h *AuthHandler) createSessionAndRespond(w http.ResponseWriter, r *http.Req
 
 // storeGitHubToken persists the user's GitHub OAuth token for PR creation.
 // Non-fatal: user can still sign in even if token storage fails.
-func (h *AuthHandler) storeGitHubToken(ctx context.Context, user *models.User, tokenResp *githubTokenResponse) {
+func (h *AuthHandler) storeGitHubToken(r *http.Request, user *models.User, tokenResp *githubTokenResponse) {
 	if h.userCredentials == nil || tokenResp == nil || tokenResp.AccessToken == "" {
 		return
 	}
@@ -657,10 +658,9 @@ func (h *AuthHandler) storeGitHubToken(ctx context.Context, user *models.User, t
 		TokenType:   tokenResp.TokenType,
 		Scope:       tokenResp.Scope,
 	}
-	if err := h.userCredentials.Upsert(ctx, user.ID, user.OrgID, cfg, false); err != nil {
+	if err := h.userCredentials.Upsert(r.Context(), user.ID, user.OrgID, cfg, false); err != nil {
 		// Non-fatal — user can still sign in, just can't create PRs as themselves.
-		// Log at warn level so ops can notice if this consistently fails.
-		_ = err // logged by caller if needed
+		zerolog.Ctx(r.Context()).Warn().Err(err).Str("user_id", user.ID.String()).Msg("failed to store GitHub OAuth token for PR authorship")
 	}
 }
 

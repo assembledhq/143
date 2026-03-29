@@ -649,6 +649,30 @@ func TestFirstLine(t *testing.T) {
 	require.Equal(t, "trimmed", firstLine("  trimmed  \nsecond"), "firstLine should trim whitespace")
 }
 
+func TestHasRepoScope(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		scope  string
+		expect bool
+	}{
+		{"repo", true},
+		{"repo read:org", true},
+		{"read:user,repo,user:email", true},
+		{"repo,read:org", true},
+		{"read:user,user:email", false},
+		{"", false},
+		{"public_repo", false}, // public_repo is not the same as repo
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.scope, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expect, hasRepoScope(tt.scope), "hasRepoScope(%q)", tt.scope)
+		})
+	}
+}
+
 func TestDoGitHubRequest_ErrorResponse(t *testing.T) {
 	t.Parallel()
 

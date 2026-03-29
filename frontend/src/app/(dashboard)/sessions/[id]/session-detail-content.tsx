@@ -1123,11 +1123,13 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
                   variant="ghost"
                   className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
                   title={
-                    ghStatus?.connected
+                    ghStatus?.connected && ghStatus?.has_repo_scope
                       ? `Create PR as @${ghStatus.github_login}`
-                      : ghStatus?.pr_authorship_mode === "user_required"
-                        ? "Connect GitHub to create PRs"
-                        : "Create PR"
+                      : ghStatus?.connected && !ghStatus?.has_repo_scope
+                        ? "Create PR (app token — reconnect GitHub with repo access for user-authored PRs)"
+                        : ghStatus?.pr_authorship_mode === "user_required"
+                          ? "Connect GitHub to create PRs"
+                          : "Create PR"
                   }
                   disabled={
                     createPRMutation.isPending ||

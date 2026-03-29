@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -36,6 +37,7 @@ func NewGitHubStatusHandler(credentials githubStatusCredentialStore, orgs github
 // GitHubStatusResponse is the response for GET /api/v1/users/me/github-status.
 type GitHubStatusResponse struct {
 	Connected        bool   `json:"connected"`
+	HasRepoScope     bool   `json:"has_repo_scope"`
 	GitHubLogin      string `json:"github_login,omitempty"`
 	PRAuthorshipMode string `json:"pr_authorship_mode"`
 }
@@ -68,6 +70,7 @@ func (h *GitHubStatusHandler) GetStatus(w http.ResponseWriter, r *http.Request) 
 		cfg, ok := cred.Config.(models.GitHubOAuthConfig)
 		if ok && cfg.AccessToken != "" {
 			resp.Connected = true
+			resp.HasRepoScope = hasRepoScope(cfg.Scope)
 			if user.GitHubLogin != nil {
 				resp.GitHubLogin = *user.GitHubLogin
 			}
@@ -76,6 +79,16 @@ func (h *GitHubStatusHandler) GetStatus(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// hasRepoScope returns true if the comma/space-separated scope string includes "repo".
+func hasRepoScope(scope string) bool {
+	for _, s := range strings.FieldsFunc(scope, func(r rune) bool { return r == ',' || r == ' ' }) {
+		if s == "repo" {
+			return true
+		}
+	}
+	return false
 }
 
 // Disconnect removes the user's stored GitHub OAuth credential.

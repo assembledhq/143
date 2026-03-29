@@ -335,7 +335,7 @@ export const api = {
     disconnect: () => post('/api/v1/settings/codex-auth/disconnect'),
   },
   githubStatus: {
-    get: () => get<{ connected: boolean; github_login?: string; pr_authorship_mode: string }>('/api/v1/users/me/github-status'),
+    get: () => get<{ connected: boolean; has_repo_scope: boolean; github_login?: string; pr_authorship_mode: string }>('/api/v1/users/me/github-status'),
     disconnect: () => post('/api/v1/users/me/github/disconnect'),
   },
   priority: {

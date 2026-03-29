@@ -122,7 +122,9 @@ func (s *PRService) resolveToken(ctx context.Context, run *models.Session, repo 
 		cred, err := s.userCredentials.GetForUser(ctx, run.OrgID, *run.TriggeredByUserID, models.ProviderGitHubOAuth)
 		if err == nil && cred.Config != nil {
 			cfg, ok := cred.Config.(models.GitHubOAuthConfig)
-			if ok && cfg.AccessToken != "" {
+			// The token must have "repo" scope to push code and create PRs.
+			// Login-only tokens (read:user,user:email) lack this — skip them.
+			if ok && cfg.AccessToken != "" && hasRepoScope(cfg.Scope) {
 				user, userErr := s.users.GetByID(ctx, run.OrgID, *run.TriggeredByUserID)
 				if userErr == nil {
 					return &tokenResolution{
@@ -935,6 +937,16 @@ func (s *PRService) addLabels(ctx context.Context, token, owner, repo string, pr
 }
 
 // --- Formatting helpers ---
+
+// hasRepoScope returns true if the comma/space-separated scope string includes "repo".
+func hasRepoScope(scope string) bool {
+	for _, s := range strings.FieldsFunc(scope, func(r rune) bool { return r == ',' || r == ' ' }) {
+		if s == "repo" {
+			return true
+		}
+	}
+	return false
+}
 
 func splitRepo(fullName string) (owner, repo string) {
 	parts := strings.SplitN(fullName, "/", 2)
