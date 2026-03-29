@@ -25,7 +25,7 @@ function makeComment(overrides: Partial<SessionReviewComment> = {}): SessionRevi
 describe("CommentsSummary", () => {
   it("returns null when no comments", () => {
     const { container } = render(
-      <CommentsSummary comments={[]} onCommentClick={vi.fn()} onSendToAgent={vi.fn()} isSending={false} />
+      <CommentsSummary comments={[]} onCommentClick={vi.fn()} />
     );
     expect(container.firstChild).toBeNull();
   });
@@ -35,8 +35,6 @@ describe("CommentsSummary", () => {
       <CommentsSummary
         comments={[makeComment()]}
         onCommentClick={vi.fn()}
-        onSendToAgent={vi.fn()}
-        isSending={false}
       />
     );
     expect(screen.getByText("1 comment")).toBeInTheDocument();
@@ -48,8 +46,6 @@ describe("CommentsSummary", () => {
       <CommentsSummary
         comments={[makeComment({ id: "c1" }), makeComment({ id: "c2" })]}
         onCommentClick={vi.fn()}
-        onSendToAgent={vi.fn()}
-        isSending={false}
       />
     );
     expect(screen.getByText("2 comments")).toBeInTheDocument();
@@ -63,62 +59,9 @@ describe("CommentsSummary", () => {
           makeComment({ id: "c2", resolved: true }),
         ]}
         onCommentClick={vi.fn()}
-        onSendToAgent={vi.fn()}
-        isSending={false}
       />
     );
     expect(screen.getByText("(1 open, 1 resolved)")).toBeInTheDocument();
-  });
-
-  it("shows Send to agent button when there are open comments", () => {
-    render(
-      <CommentsSummary
-        comments={[makeComment()]}
-        onCommentClick={vi.fn()}
-        onSendToAgent={vi.fn()}
-        isSending={false}
-      />
-    );
-    expect(screen.getByText("Send to agent")).toBeInTheDocument();
-  });
-
-  it("shows Sending... when isSending is true", () => {
-    render(
-      <CommentsSummary
-        comments={[makeComment()]}
-        onCommentClick={vi.fn()}
-        onSendToAgent={vi.fn()}
-        isSending={true}
-      />
-    );
-    expect(screen.getByText("Sending...")).toBeInTheDocument();
-  });
-
-  it("does not show Send to agent button when all resolved", () => {
-    render(
-      <CommentsSummary
-        comments={[makeComment({ resolved: true })]}
-        onCommentClick={vi.fn()}
-        onSendToAgent={vi.fn()}
-        isSending={false}
-      />
-    );
-    expect(screen.queryByText("Send to agent")).not.toBeInTheDocument();
-  });
-
-  it("calls onSendToAgent when button clicked", async () => {
-    const onSendToAgent = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <CommentsSummary
-        comments={[makeComment()]}
-        onCommentClick={vi.fn()}
-        onSendToAgent={onSendToAgent}
-        isSending={false}
-      />
-    );
-    await user.click(screen.getByText("Send to agent"));
-    expect(onSendToAgent).toHaveBeenCalled();
   });
 
   it("renders comment body text truncated to 80 chars", () => {
@@ -127,8 +70,6 @@ describe("CommentsSummary", () => {
       <CommentsSummary
         comments={[makeComment({ body: longBody })]}
         onCommentClick={vi.fn()}
-        onSendToAgent={vi.fn()}
-        isSending={false}
       />
     );
     expect(screen.getByText("A".repeat(80) + "...")).toBeInTheDocument();
@@ -139,8 +80,6 @@ describe("CommentsSummary", () => {
       <CommentsSummary
         comments={[makeComment({ file_path: "src/components/app.tsx", line_number: 42 })]}
         onCommentClick={vi.fn()}
-        onSendToAgent={vi.fn()}
-        isSending={false}
       />
     );
     expect(screen.getByText("app.tsx:42")).toBeInTheDocument();
@@ -153,8 +92,6 @@ describe("CommentsSummary", () => {
       <CommentsSummary
         comments={[makeComment({ file_path: "src/app.ts" })]}
         onCommentClick={onCommentClick}
-        onSendToAgent={vi.fn()}
-        isSending={false}
       />
     );
     await user.click(screen.getByText("app.ts:10"));
@@ -167,8 +104,6 @@ describe("CommentsSummary", () => {
       <CommentsSummary
         comments={[makeComment({ body: "visible body" })]}
         onCommentClick={vi.fn()}
-        onSendToAgent={vi.fn()}
-        isSending={false}
       />
     );
     expect(screen.getByText("visible body")).toBeInTheDocument();
@@ -183,8 +118,6 @@ describe("CommentsSummary", () => {
       <CommentsSummary
         comments={[makeComment({ body: "keyboard body" })]}
         onCommentClick={vi.fn()}
-        onSendToAgent={vi.fn()}
-        isSending={false}
       />
     );
     expect(screen.getByText("keyboard body")).toBeInTheDocument();
@@ -199,8 +132,6 @@ describe("CommentsSummary", () => {
       <CommentsSummary
         comments={[makeComment({ pass_number: 3 })]}
         onCommentClick={vi.fn()}
-        onSendToAgent={vi.fn()}
-        isSending={false}
       />
     );
     expect(screen.getByText("P3")).toBeInTheDocument();
@@ -211,8 +142,6 @@ describe("CommentsSummary", () => {
       <CommentsSummary
         comments={[makeComment({ pass_number: 1 })]}
         onCommentClick={vi.fn()}
-        onSendToAgent={vi.fn()}
-        isSending={false}
       />
     );
     expect(screen.queryByText("P1")).not.toBeInTheDocument();

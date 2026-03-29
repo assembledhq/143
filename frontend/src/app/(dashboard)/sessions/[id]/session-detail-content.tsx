@@ -48,6 +48,7 @@ import { AGENT_TYPE_OPTIONS } from "@/lib/model-constants";
 import { SSE_EVENT, addSSEListener } from "@/lib/sse";
 import { buildTimeline } from "@/lib/timeline";
 import { parseDiffStats, type DiffFile } from "@/lib/diff-parser";
+import { formatReviewMessage } from "@/lib/format-review-message";
 import type { Session, SessionLog, SessionMessage, SessionReviewComment, User, Validation } from "@/lib/types";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
@@ -422,8 +423,6 @@ function ChangesTab({
   onToggleReviewed,
   comments,
   onCommentClick,
-  onSendToAgent,
-  isSendingComments,
   passes,
   passRange,
   onPassRangeChange,
@@ -438,8 +437,6 @@ function ChangesTab({
   onToggleReviewed: (filePath: string) => void;
   comments: SessionReviewComment[];
   onCommentClick: (filePath: string) => void;
-  onSendToAgent: () => void;
-  isSendingComments: boolean;
   passes: DiffPassEntry[];
   passRange: PassRange | null;
   onPassRangeChange: (range: PassRange | null) => void;
@@ -473,8 +470,6 @@ function ChangesTab({
         <CommentsSummary
           comments={comments}
           onCommentClick={onCommentClick}
-          onSendToAgent={onSendToAgent}
-          isSending={isSendingComments}
         />
       )}
 
@@ -517,6 +512,137 @@ function ChangesTab({
               {emptyStatusText}
             </p>
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Review comment input bar (shown at bottom during review mode)
+// ---------------------------------------------------------------------------
+
+function ReviewCommentInput({
+  sessionId,
+  comments,
+  diffFiles,
+  canSendMessage,
+}: {
+  sessionId: string;
+  comments: SessionReviewComment[];
+  diffFiles: DiffFile[];
+  canSendMessage: boolean;
+}) {
+  const [message, setMessage] = useState("");
+  const queryClient = useQueryClient();
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const openComments = useMemo(() => comments.filter((c) => !c.resolved), [comments]);
+
+  const sendMutation = useMutation({
+    mutationFn: () => {
+      const formatted = formatReviewMessage(openComments, diffFiles, message);
+      return api.sessions.sendMessage(sessionId, formatted);
+    },
+    onSuccess: () => {
+      setMessage("");
+      if (textareaRef.current) {
+        textareaRef.current.style.height = "auto";
+      }
+      queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+      queryClient.invalidateQueries({ queryKey: ["session", sessionId, "messages"] });
+    },
+  });
+
+  // Auto-resize textarea
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+  }, [message]);
+
+  const hasContent = message.trim() || openComments.length > 0;
+
+  function handleKeyDown(e: React.KeyboardEvent) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      if (hasContent && canSendMessage && !sendMutation.isPending) {
+        sendMutation.mutate();
+      }
+    }
+  }
+
+  return (
+    <div className="border-t border-border p-3 bg-background shrink-0">
+      <div className={cn("rounded-xl border border-border bg-muted/30 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring")}>
+        {/* Open comments as chips */}
+        {openComments.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 px-3 pt-2.5 pb-1">
+            {openComments.map((c) => {
+              const fileName = c.file_path.split("/").pop() ?? c.file_path;
+              return (
+                <div
+                  key={c.id}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-[11px]"
+                >
+                  <MessageSquare className="h-3 w-3 text-muted-foreground shrink-0" />
+                  <span className="font-mono text-muted-foreground">
+                    {fileName}:{c.line_number}
+                  </span>
+                  <span className="text-muted-foreground/40">&mdash;</span>
+                  <span className="truncate max-w-[200px]">
+                    {c.body.length > 60 ? `${c.body.slice(0, 60)}...` : c.body}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <Textarea
+          ref={textareaRef}
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder={
+            openComments.length > 0
+              ? "Add instructions or send comments to agent..."
+              : "Ask to make changes, @mention files..."
+          }
+          disabled={!canSendMessage || sendMutation.isPending}
+          className="min-h-[44px] max-h-[200px] resize-none border-none bg-transparent shadow-none focus-visible:ring-0"
+        />
+
+        <div className="flex items-center gap-1 px-2 pb-2">
+          {openComments.length > 0 && (
+            <span className="text-[11px] text-muted-foreground">
+              {openComments.length} comment{openComments.length > 1 ? "s" : ""} attached
+            </span>
+          )}
+          <div className="ml-auto">
+            <Button
+              size="icon"
+              variant="default"
+              className="h-8 w-8 shrink-0 rounded-lg"
+              title="Send to agent"
+              disabled={!hasContent || !canSendMessage || sendMutation.isPending}
+              onClick={() => sendMutation.mutate()}
+            >
+              {sendMutation.isPending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <ArrowUp className="h-4 w-4" />
+              )}
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      {sendMutation.error && (
+        <div className="flex items-center gap-2 mt-2 text-xs text-destructive">
+          <AlertTriangle className="h-3 w-3 shrink-0" />
+          {sendMutation.error instanceof Error ? sendMutation.error.message : "Failed to send"}
         </div>
       )}
     </div>
@@ -1137,24 +1263,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     setActiveCommentLine(null);
   }, []);
 
-  const sendToAgentMutation = useMutation({
-    mutationFn: async () => {
-      const resp = await api.sessions.sendReviewComments(id);
-      if (!resp.data.sent) {
-        const message = resp.data.message;
-        return api.sessions.sendMessage(id, message);
-      }
-      return resp;
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["session", id] });
-      queryClient.invalidateQueries({ queryKey: ["session", id, "messages"] });
-    },
-    onError: (err: Error) => {
-      console.error("Failed to send review comments to agent:", err.message);
-    },
-  });
-
   const handleCommentClick = useCallback(
     (filePath: string) => {
       const fileIndex = filteredFiles.findIndex((f) => f.newPath === filePath);
@@ -1239,23 +1347,31 @@ export function SessionDetailContent({ id }: { id: string }) {
           </div>
           {/* Review diff view — mounted only when active */}
           {centerMode === "review" && (
-            <div className="h-full animate-in fade-in duration-150">
-              <ReviewDiffView
+            <div className="h-full animate-in fade-in duration-150 flex flex-col">
+              <div className="flex-1 min-h-0">
+                <ReviewDiffView
+                  sessionId={id}
+                  files={filteredFiles}
+                  allFiles={allDiffFiles}
+                  activeFileIndex={activeFileIndex}
+                  onFileChange={setActiveFileIndex}
+                  onBack={exitReview}
+                  commentsByLine={commentsByLine}
+                  activeCommentLine={activeCommentLine}
+                  onAddComment={handleAddComment}
+                  onSubmitComment={handleSubmitComment}
+                  onCancelComment={handleCancelComment}
+                  onUpdateComment={updateComment}
+                  onDeleteComment={deleteComment}
+                  diffSearchQuery={diffSearchQuery}
+                  onDiffSearchChange={setDiffSearchQuery}
+                />
+              </div>
+              <ReviewCommentInput
                 sessionId={id}
-                files={filteredFiles}
-                allFiles={allDiffFiles}
-                activeFileIndex={activeFileIndex}
-                onFileChange={setActiveFileIndex}
-                onBack={exitReview}
-                commentsByLine={commentsByLine}
-                activeCommentLine={activeCommentLine}
-                onAddComment={handleAddComment}
-                onSubmitComment={handleSubmitComment}
-                onCancelComment={handleCancelComment}
-                onUpdateComment={updateComment}
-                onDeleteComment={deleteComment}
-                diffSearchQuery={diffSearchQuery}
-                onDiffSearchChange={setDiffSearchQuery}
+                comments={comments}
+                diffFiles={filteredFiles}
+                canSendMessage={session.status !== "skipped" && session.status !== "pending"}
               />
             </div>
           )}
@@ -1312,8 +1428,6 @@ export function SessionDetailContent({ id }: { id: string }) {
                 onToggleReviewed={toggleReviewed}
                 comments={comments}
                 onCommentClick={handleCommentClick}
-                onSendToAgent={() => sendToAgentMutation.mutate()}
-                isSendingComments={sendToAgentMutation.isPending}
                 passes={passes}
                 passRange={passRange}
                 onPassRangeChange={setPassRange}

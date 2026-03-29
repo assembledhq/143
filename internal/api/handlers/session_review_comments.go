@@ -317,13 +317,14 @@ func (h *SessionReviewCommentHandler) SendToAgent(w http.ResponseWriter, r *http
 	}
 
 	// Format into a structured directive for the agent.
+	// Each comment includes file path, line number, and diff side for precise location.
 	// Indent multi-line comment bodies so each line stays within the numbered block.
 	var sb strings.Builder
 	sb.WriteString("Please address the following code review comments:\n\n")
 	for i, c := range open {
-		sb.WriteString(fmt.Sprintf("%d. %s:%d\n", i+1, c.FilePath, c.LineNumber))
+		sb.WriteString(fmt.Sprintf("%d. **%s:%d** (%s side)\n", i+1, c.FilePath, c.LineNumber, c.DiffSide))
 		indented := strings.ReplaceAll(c.Body, "\n", "\n   ")
-		sb.WriteString(fmt.Sprintf("   \"%s\"\n\n", indented))
+		sb.WriteString(fmt.Sprintf("   Comment: \"%s\"\n\n", indented))
 	}
 	message := strings.TrimSpace(sb.String())
 
