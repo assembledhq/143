@@ -22,9 +22,10 @@ import (
 )
 
 const (
-	defaultGitHubAPI  = "https://api.github.com"
-	maxBranchSlugLen  = 60
-	maxLabelsToCreate = 5
+	defaultGitHubAPI       = "https://api.github.com"
+	maxBranchSlugLen       = 60
+	maxLabelsToCreate      = 5
+	prTemplateCacheTTL     = 24 * time.Hour // re-fetch repo PR template after this duration
 )
 
 // PRService handles GitHub PR creation and webhook-based tracking.
@@ -41,6 +42,7 @@ type PRService struct {
 	userCredentials  *db.UserCredentialStore
 	users            *db.UserStore
 	orgs             *db.OrganizationStore
+	prTemplates      *db.PRTemplateStore
 	llmClient        llm.Client
 	logger           zerolog.Logger
 	baseURL          string
@@ -98,6 +100,11 @@ func (s *PRService) SetOrgStore(store *db.OrganizationStore) {
 	s.orgs = store
 }
 
+// SetPRTemplateStore sets the PR template cache store.
+func (s *PRService) SetPRTemplateStore(store *db.PRTemplateStore) {
+	s.prTemplates = store
+}
+
 // tokenResolution holds the resolved token and metadata about how it was resolved.
 type tokenResolution struct {
 	Token       string
@@ -125,13 +132,20 @@ func (s *PRService) resolveToken(ctx context.Context, run *models.Session, repo 
 			// The token must have "repo" scope to push code and create PRs.
 			// Login-only tokens (read:user,user:email) lack this — skip them.
 			if ok && cfg.AccessToken != "" && hasRepoScope(cfg.Scope) {
-				user, userErr := s.users.GetByID(ctx, run.OrgID, *run.TriggeredByUserID)
-				if userErr == nil {
-					return &tokenResolution{
-						Token:       cfg.AccessToken,
-						IsUserToken: true,
-						User:        &user,
-					}, nil
+				// Validate token is still active before using it.
+				if s.validateUserToken(ctx, cfg.AccessToken) {
+					user, userErr := s.users.GetByID(ctx, run.OrgID, *run.TriggeredByUserID)
+					if userErr == nil {
+						return &tokenResolution{
+							Token:       cfg.AccessToken,
+							IsUserToken: true,
+							User:        &user,
+						}, nil
+					}
+				} else {
+					// Token was revoked — disable the stored credential and fall through.
+					s.logger.Warn().Str("user_id", run.TriggeredByUserID.String()).Msg("user GitHub token revoked, disabling credential and falling back to app token")
+					_ = s.userCredentials.Disable(ctx, run.OrgID, *run.TriggeredByUserID, models.ProviderGitHubOAuth)
 				}
 			}
 		}
@@ -148,6 +162,13 @@ func (s *PRService) resolveToken(ctx context.Context, run *models.Session, repo 
 		return nil, fmt.Errorf("get installation token: %w", err)
 	}
 	return &tokenResolution{Token: token, IsUserToken: false}, nil
+}
+
+// validateUserToken checks if a user's GitHub token is still valid by calling GET /user.
+// Returns false if the token is revoked or expired.
+func (s *PRService) validateUserToken(ctx context.Context, token string) bool {
+	_, err := s.doGitHubRequest(ctx, token, http.MethodGet, "/user", nil)
+	return err == nil
 }
 
 // SetBaseURL overrides the GitHub API base URL (for testing).
@@ -290,7 +311,7 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session) (*models.
 
 	// 5. Create PR.
 	title := formatPRTitle(run, issue)
-	body := s.generatePRBody(ctx, token, owner, repoName, defaultBranch, run, issue)
+	body := s.generatePRBody(ctx, token, owner, repoName, defaultBranch, *repoID, run.OrgID, run, issue)
 
 	var prOpts []prCreateOption
 	if orgSettings.PRDraftDefault {
@@ -1055,8 +1076,8 @@ var prTemplatePaths = []string{
 }
 
 // fetchPRTemplate retrieves the repo's PR template via the GitHub Contents API.
-// Returns empty string if no template is found.
-func (s *PRService) fetchPRTemplate(ctx context.Context, token, owner, repo, ref string) string {
+// Returns (content, path) — both empty if no template is found.
+func (s *PRService) fetchPRTemplate(ctx context.Context, token, owner, repo, ref string) (string, string) {
 	for _, path := range prTemplatePaths {
 		url := fmt.Sprintf("/repos/%s/%s/contents/%s?ref=%s", owner, repo, path, ref)
 		body, err := s.doGitHubRequest(ctx, token, http.MethodGet, url, nil)
@@ -1073,11 +1094,11 @@ func (s *PRService) fetchPRTemplate(ctx context.Context, token, owner, repo, ref
 		if content.Encoding == "base64" && content.Content != "" {
 			decoded, err := decodeBase64Content(content.Content)
 			if err == nil && decoded != "" {
-				return decoded
+				return decoded, path
 			}
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // decodeBase64Content decodes GitHub's base64-encoded file content.
@@ -1128,9 +1149,13 @@ func (s *PRService) fillRepoTemplate(ctx context.Context, template string, run *
 
 // generatePRBody produces the PR description. It tries the repo's PR template first
 // (filled via LLM), falling back to the minimal default template.
-func (s *PRService) generatePRBody(ctx context.Context, token, owner, repoName, defaultBranch string, run *models.Session, issue *models.Issue) string {
-	// 1. Try repo template.
-	template := s.fetchPRTemplate(ctx, token, owner, repoName, defaultBranch)
+//
+// Template lookup uses a DB cache (repository_pr_templates) to avoid hitting
+// the GitHub Contents API on every PR creation. Templates are re-fetched after
+// prTemplateCacheTTL (24h).
+func (s *PRService) generatePRBody(ctx context.Context, token, owner, repoName, defaultBranch string, repoID, orgID uuid.UUID, run *models.Session, issue *models.Issue) string {
+	// 1. Try cached template first.
+	template := s.getOrFetchPRTemplate(ctx, token, owner, repoName, defaultBranch, repoID, orgID)
 	if template != "" {
 		filled, err := s.fillRepoTemplate(ctx, template, run, issue)
 		if err == nil && filled != "" {
@@ -1141,6 +1166,30 @@ func (s *PRService) generatePRBody(ctx context.Context, token, owner, repoName, 
 
 	// 2. Fall back to minimal default.
 	return s.formatPRBody(ctx, run, issue)
+}
+
+// getOrFetchPRTemplate returns the cached PR template if fresh, otherwise
+// fetches from GitHub and caches the result.
+func (s *PRService) getOrFetchPRTemplate(ctx context.Context, token, owner, repoName, defaultBranch string, repoID, orgID uuid.UUID) string {
+	// Check DB cache.
+	if s.prTemplates != nil {
+		cached, err := s.prTemplates.GetByRepositoryID(ctx, repoID)
+		if err == nil && time.Since(cached.FetchedAt) < prTemplateCacheTTL {
+			return cached.TemplateContent
+		}
+	}
+
+	// Cache miss or stale — fetch from GitHub.
+	template, path := s.fetchPRTemplate(ctx, token, owner, repoName, defaultBranch)
+
+	// Persist to cache (even if empty — avoids re-fetching repos with no template).
+	if s.prTemplates != nil {
+		if err := s.prTemplates.Upsert(ctx, repoID, orgID, template, path); err != nil {
+			s.logger.Warn().Err(err).Msg("failed to cache PR template")
+		}
+	}
+
+	return template
 }
 
 // formatPRBody builds the default PR body when no repo template is found.

@@ -160,7 +160,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	projectHandler := handlers.NewProjectHandler(projectStore, projectTaskStore, projectCycleStore, projectAttachmentStore, projectSpecStore)
 	projectHandler.SetJobStore(jobStore)
 
-	githubStatusHandler := handlers.NewGitHubStatusHandler(userCredentialStore, orgStore)
+	prTemplateStore := db.NewPRTemplateStore(pool)
+	githubStatusHandler := handlers.NewGitHubStatusHandler(
+		userCredentialStore, orgStore,
+		cfg.GitHubOAuthClientID, cfg.GitHubOAuthClientSecret,
+		cfg.BaseURL, cfg.FrontendURL,
+	)
 
 	// Wire user credential store and LLM client into PR service.
 	if prService != nil {
@@ -168,6 +173,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		prService.SetUserStore(userStore)
 		prService.SetOrgStore(orgStore)
 		prService.SetLLMClient(llmClient)
+		prService.SetPRTemplateStore(prTemplateStore)
 	}
 
 	// Wire user credential store into auth handler for token storage on login.
@@ -352,6 +358,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Delete("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.DeletePersonal)
 
 			// GitHub connection for user-authored PRs
+			r.Get("/api/v1/users/me/github/connect", githubStatusHandler.StartConnect)
+			r.Get("/api/v1/users/me/github/callback", githubStatusHandler.HandleConnectCallback)
 			r.Post("/api/v1/users/me/github/disconnect", githubStatusHandler.Disconnect)
 
 			r.Post("/api/v1/issues/{id}/fix", sessionHandler.TriggerFix)
