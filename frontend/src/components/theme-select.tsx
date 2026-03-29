@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { useTheme } from "next-themes";
 import { Monitor, Moon, Sun } from "lucide-react";
 import {
@@ -18,6 +19,15 @@ const themes = [
 
 export function ThemeSelect() {
   const { theme, setTheme } = useTheme();
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => setMounted(true), []);
+
+  if (!mounted) {
+    return (
+      <div className="h-8 w-[140px] rounded-md border border-input bg-transparent" />
+    );
+  }
 
   return (
     <Select value={theme} onValueChange={setTheme}>
