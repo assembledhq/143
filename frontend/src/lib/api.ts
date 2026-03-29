@@ -334,6 +334,10 @@ export const api = {
     status: () => get<import('./types').SingleResponse<import('./types').CodexAuthStatus>>('/api/v1/settings/codex-auth/status'),
     disconnect: () => post('/api/v1/settings/codex-auth/disconnect'),
   },
+  githubStatus: {
+    get: () => get<{ connected: boolean; github_login?: string; pr_authorship_mode: string }>('/api/v1/users/me/github-status'),
+    disconnect: () => post('/api/v1/users/me/github/disconnect'),
+  },
   priority: {
     getForIssue: (issueId: string) => get<import('./types').SingleResponse<import('./types').PriorityScore>>(`/api/v1/issues/${issueId}/priority`),
     getComplexity: (issueId: string) => get<import('./types').SingleResponse<import('./types').ComplexityEstimate>>(`/api/v1/issues/${issueId}/complexity`),

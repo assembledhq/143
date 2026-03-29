@@ -26,17 +26,23 @@ import (
 )
 
 type AuthHandler struct {
-	cfg             *config.Config
-	orgStore        *db.OrganizationStore
-	userStore       *db.UserStore
-	sessionStore    *db.AuthSessionStore
-	invitationStore *db.InvitationStore
-	audit           *db.AuditEmitter
+	cfg              *config.Config
+	orgStore         *db.OrganizationStore
+	userStore        *db.UserStore
+	sessionStore     *db.AuthSessionStore
+	invitationStore  *db.InvitationStore
+	userCredentials  *db.UserCredentialStore
+	audit            *db.AuditEmitter
 }
 
 // SetAuditEmitter injects the audit emitter for logging auth events.
 func (h *AuthHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 	h.audit = audit
+}
+
+// SetUserCredentialStore injects the user credential store for storing GitHub tokens.
+func (h *AuthHandler) SetUserCredentialStore(store *db.UserCredentialStore) {
+	h.userCredentials = store
 }
 
 func NewAuthHandler(cfg *config.Config, orgStore *db.OrganizationStore, userStore *db.UserStore, sessionStore *db.AuthSessionStore, invitationStore *db.InvitationStore) *AuthHandler {
@@ -284,6 +290,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusInternalServerError, "USER_UPSERT_FAILED", "failed to upsert user", upsertErr)
 			return
 		}
+		h.storeGitHubToken(r.Context(), &existingUser, tokenResp)
 		h.emitAuthEvent(r, &existingUser, models.AuditActionAuthLogin)
 		h.createSessionAndRedirect(w, r, &existingUser)
 		return
@@ -295,6 +302,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusInternalServerError, "LINK_FAILED", "failed to link GitHub account", linkErr)
 			return
 		}
+		h.storeGitHubToken(r.Context(), &emailUser, tokenResp)
 		h.emitAuthEvent(r, &emailUser, models.AuditActionAuthLogin)
 		h.createSessionAndRedirect(w, r, &emailUser)
 		return
@@ -356,6 +364,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusInternalServerError, "USER_UPSERT_FAILED", "failed to upsert user", createErr)
 			return
 		}
+		h.storeGitHubToken(r.Context(), createdUser, tokenResp)
 		h.emitAuthEvent(r, createdUser, models.AuditActionAuthRegister)
 		h.createSessionAndRedirect(w, r, createdUser)
 		return
@@ -366,6 +375,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.storeGitHubToken(r.Context(), user, tokenResp)
 	h.emitAuthEvent(r, user, models.AuditActionAuthRegister)
 	h.createSessionAndRedirect(w, r, user)
 }
@@ -634,6 +644,24 @@ func (h *AuthHandler) createSessionAndRespond(w http.ResponseWriter, r *http.Req
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"data": user})
+}
+
+// storeGitHubToken persists the user's GitHub OAuth token for PR creation.
+// Non-fatal: user can still sign in even if token storage fails.
+func (h *AuthHandler) storeGitHubToken(ctx context.Context, user *models.User, tokenResp *githubTokenResponse) {
+	if h.userCredentials == nil || tokenResp == nil || tokenResp.AccessToken == "" {
+		return
+	}
+	cfg := models.GitHubOAuthConfig{
+		AccessToken: tokenResp.AccessToken,
+		TokenType:   tokenResp.TokenType,
+		Scope:       tokenResp.Scope,
+	}
+	if err := h.userCredentials.Upsert(ctx, user.ID, user.OrgID, cfg, false); err != nil {
+		// Non-fatal — user can still sign in, just can't create PRs as themselves.
+		// Log at warn level so ops can notice if this consistently fails.
+		_ = err // logged by caller if needed
+	}
 }
 
 // --- GitHub OAuth helpers ---

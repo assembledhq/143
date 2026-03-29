@@ -160,6 +160,19 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	projectHandler := handlers.NewProjectHandler(projectStore, projectTaskStore, projectCycleStore, projectAttachmentStore, projectSpecStore)
 	projectHandler.SetJobStore(jobStore)
 
+	githubStatusHandler := handlers.NewGitHubStatusHandler(userCredentialStore, orgStore)
+
+	// Wire user credential store and LLM client into PR service.
+	if prService != nil {
+		prService.SetUserCredentialStore(userCredentialStore)
+		prService.SetUserStore(userStore)
+		prService.SetOrgStore(orgStore)
+		prService.SetLLMClient(llmClient)
+	}
+
+	// Wire user credential store into auth handler for token storage on login.
+	authHandler.SetUserCredentialStore(userCredentialStore)
+
 	// Wire audit emitter into all handlers that perform state changes.
 	authHandler.SetAuditEmitter(auditEmitter)
 	sessionHandler.SetAuditEmitter(auditEmitter)
@@ -249,6 +262,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.RequireRole("admin", "member", "viewer"))
 
+			// GitHub connection status for PR authorship
+			r.Get("/api/v1/users/me/github-status", githubStatusHandler.GetStatus)
+
 			// Personal and resolved credential views
 			r.Get("/api/v1/settings/credentials/personal", userCredentialHandler.ListPersonal)
 			r.Get("/api/v1/settings/credentials/resolved", userCredentialHandler.ListResolved)
@@ -334,6 +350,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			// Personal credential management
 			r.Put("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.UpsertPersonal)
 			r.Delete("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.DeletePersonal)
+
+			// GitHub connection for user-authored PRs
+			r.Post("/api/v1/users/me/github/disconnect", githubStatusHandler.Disconnect)
 
 			r.Post("/api/v1/issues/{id}/fix", sessionHandler.TriggerFix)
 			// File upload (higher body-size limit for multipart uploads).

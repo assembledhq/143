@@ -3,6 +3,7 @@ package github
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -27,18 +29,22 @@ const (
 
 // PRService handles GitHub PR creation and webhook-based tracking.
 type PRService struct {
-	tokenProvider  *Service
-	pullRequests   *db.PullRequestStore
-	sessions      *db.SessionStore
-	issues         *db.IssueStore
-	deploys        *db.DeployStore
-	validations    *db.ValidationStore
-	repos          *db.RepositoryStore
-	jobs           *db.JobStore
-	reviewComments *db.ReviewCommentStore
-	logger         zerolog.Logger
-	baseURL        string
-	httpClient     *http.Client
+	tokenProvider    *Service
+	pullRequests     *db.PullRequestStore
+	sessions         *db.SessionStore
+	issues           *db.IssueStore
+	deploys          *db.DeployStore
+	validations      *db.ValidationStore
+	repos            *db.RepositoryStore
+	jobs             *db.JobStore
+	reviewComments   *db.ReviewCommentStore
+	userCredentials  *db.UserCredentialStore
+	users            *db.UserStore
+	orgs             *db.OrganizationStore
+	llmClient        llm.Client
+	logger           zerolog.Logger
+	baseURL          string
+	httpClient       *http.Client
 }
 
 func NewPRService(
@@ -72,28 +78,105 @@ func (s *PRService) SetReviewCommentStore(store *db.ReviewCommentStore) {
 	s.reviewComments = store
 }
 
+// SetUserCredentialStore sets the user credential store for user-authored PRs.
+func (s *PRService) SetUserCredentialStore(store *db.UserCredentialStore) {
+	s.userCredentials = store
+}
+
+// SetLLMClient sets the LLM client for repo PR template filling.
+func (s *PRService) SetLLMClient(client llm.Client) {
+	s.llmClient = client
+}
+
+// SetUserStore sets the user store for fetching user info during PR creation.
+func (s *PRService) SetUserStore(store *db.UserStore) {
+	s.users = store
+}
+
+// SetOrgStore sets the organization store for fetching org settings.
+func (s *PRService) SetOrgStore(store *db.OrganizationStore) {
+	s.orgs = store
+}
+
+// tokenResolution holds the resolved token and metadata about how it was resolved.
+type tokenResolution struct {
+	Token       string
+	IsUserToken bool
+	User        *models.User // set when IsUserToken is true
+}
+
+// resolveToken determines which GitHub token to use for PR creation.
+// Order: user's personal GitHub token → GitHub App installation token.
+func (s *PRService) resolveToken(ctx context.Context, run *models.Session, repo *models.Repository, orgSettings models.OrgSettings) (*tokenResolution, error) {
+	// If org is set to app_only, skip user token lookup.
+	if orgSettings.PRAuthorship == models.PRAuthorshipAppOnly {
+		token, err := s.tokenProvider.GetInstallationToken(ctx, repo.InstallationID)
+		if err != nil {
+			return nil, fmt.Errorf("get installation token: %w", err)
+		}
+		return &tokenResolution{Token: token, IsUserToken: false}, nil
+	}
+
+	// Try user token if user triggered the session and we have credential stores.
+	if run.TriggeredByUserID != nil && s.userCredentials != nil && s.users != nil {
+		cred, err := s.userCredentials.GetForUser(ctx, run.OrgID, *run.TriggeredByUserID, models.ProviderGitHubOAuth)
+		if err == nil && cred.Config != nil {
+			cfg, ok := cred.Config.(models.GitHubOAuthConfig)
+			if ok && cfg.AccessToken != "" {
+				user, userErr := s.users.GetByID(ctx, run.OrgID, *run.TriggeredByUserID)
+				if userErr == nil {
+					return &tokenResolution{
+						Token:       cfg.AccessToken,
+						IsUserToken: true,
+						User:        &user,
+					}, nil
+				}
+			}
+		}
+	}
+
+	// If org requires user auth and we couldn't get a user token, block.
+	if orgSettings.PRAuthorship == models.PRAuthorshipUserRequired {
+		return nil, fmt.Errorf("org requires user GitHub auth for PR creation, but no valid user token found")
+	}
+
+	// Fall back to app installation token.
+	token, err := s.tokenProvider.GetInstallationToken(ctx, repo.InstallationID)
+	if err != nil {
+		return nil, fmt.Errorf("get installation token: %w", err)
+	}
+	return &tokenResolution{Token: token, IsUserToken: false}, nil
+}
+
 // SetBaseURL overrides the GitHub API base URL (for testing).
 func (s *PRService) SetBaseURL(url string) {
 	s.baseURL = url
 }
 
 // CreatePR creates a GitHub PR from a completed agent run.
+// The session may or may not have an associated issue — issueless sessions
+// (e.g. manually created) derive PR metadata from the session itself.
 func (s *PRService) CreatePR(ctx context.Context, run *models.Session) (*models.PullRequest, error) {
 	if run.Diff == nil || *run.Diff == "" {
 		return nil, fmt.Errorf("agent run %s has no diff", run.ID)
 	}
 
-	// Look up the issue to get title/source info.
-	issue, err := s.issues.GetByID(ctx, run.OrgID, run.IssueID)
-	if err != nil {
-		return nil, fmt.Errorf("get issue: %w", err)
+	// Issue lookup is now optional — sessions may not have an associated issue.
+	var issue *models.Issue
+	if run.IssueID != uuid.Nil {
+		i, err := s.issues.GetByID(ctx, run.OrgID, run.IssueID)
+		if err == nil {
+			issue = &i
+		} else {
+			s.logger.Warn().Err(err).Str("issue_id", run.IssueID.String()).Msg("failed to look up issue, proceeding without it")
+		}
 	}
 
 	// Resolve repository: session.RepositoryID first, then issue.RepositoryID.
 	var repoID *uuid.UUID
 	if run.RepositoryID != nil {
 		repoID = run.RepositoryID
-	} else if issue.RepositoryID != nil {
+	} else if issue != nil && issue.RepositoryID != nil {
 		repoID = issue.RepositoryID
 	}
 	if repoID == nil {
@@ -104,10 +187,24 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session) (*models.
 		return nil, fmt.Errorf("get repository: %w", err)
 	}
 
-	token, err := s.tokenProvider.GetInstallationToken(ctx, repo.InstallationID)
-	if err != nil {
-		return nil, fmt.Errorf("get installation token: %w", err)
+	// Resolve org settings for PR authorship and draft defaults.
+	orgSettings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
+	if s.orgs != nil {
+		org, orgErr := s.orgs.GetByID(ctx, run.OrgID)
+		if orgErr == nil {
+			parsed, parseErr := models.ParseOrgSettings(org.Settings)
+			if parseErr == nil {
+				orgSettings = parsed
+			}
+		}
 	}
+
+	// Resolve GitHub token: user token (preferred) → app installation token.
+	resolution, err := s.resolveToken(ctx, run, &repo, orgSettings)
+	if err != nil {
+		return nil, fmt.Errorf("resolve token: %w", err)
+	}
+	token := resolution.Token
 
 	owner, repoName := splitRepo(repo.FullName)
 	defaultBranch := repo.DefaultBranch
@@ -122,7 +219,7 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session) (*models.
 	}
 
 	// 2. Create branch.
-	branchName := formatBranchName(run.ID, issue.Title)
+	branchName := formatBranchName(run, issue)
 	if err := s.createRef(ctx, token, owner, repoName, "refs/heads/"+branchName, baseSHA); err != nil {
 		return nil, fmt.Errorf("create branch: %w", err)
 	}
@@ -161,8 +258,25 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session) (*models.
 		return nil, fmt.Errorf("create tree: %w", err)
 	}
 
-	commitMsg := formatCommitMessage(&issue)
-	commitSHA, err := s.createCommit(ctx, token, owner, repoName, commitMsg, treeSHA, baseSHA)
+	commitMsg := formatCommitMessage(run, issue)
+
+	// Set commit author when using a user token; add Co-authored-by trailer for app token.
+	var author *commitAuthor
+	if resolution.IsUserToken && resolution.User != nil {
+		author = &commitAuthor{
+			Name:  resolution.User.Name,
+			Email: resolution.User.Email,
+			Date:  time.Now().UTC().Format(time.RFC3339),
+		}
+	} else if !resolution.IsUserToken && run.TriggeredByUserID != nil && s.users != nil {
+		// App token: add Co-authored-by trailer for attribution.
+		user, userErr := s.users.GetByID(ctx, run.OrgID, *run.TriggeredByUserID)
+		if userErr == nil {
+			commitMsg += fmt.Sprintf("\n\nCo-authored-by: %s <%s>", user.Name, user.Email)
+		}
+	}
+
+	commitSHA, err := s.createCommitWithAuthor(ctx, token, owner, repoName, commitMsg, treeSHA, baseSHA, author)
 	if err != nil {
 		return nil, fmt.Errorf("create commit: %w", err)
 	}
@@ -173,16 +287,21 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session) (*models.
 	}
 
 	// 5. Create PR.
-	title := formatPRTitle(&issue)
-	body := s.formatPRBody(ctx, run, &issue)
+	title := formatPRTitle(run, issue)
+	body := s.generatePRBody(ctx, token, owner, repoName, defaultBranch, run, issue)
 
-	prNumber, prURL, err := s.createPullRequest(ctx, token, owner, repoName, title, body, branchName, defaultBranch)
+	var prOpts []prCreateOption
+	if orgSettings.PRDraftDefault {
+		prOpts = append(prOpts, withDraft(true))
+	}
+
+	prNumber, prURL, err := s.createPullRequest(ctx, token, owner, repoName, title, body, branchName, defaultBranch, prOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("create pull request: %w", err)
 	}
 
 	// 6. Add labels (best-effort).
-	labels := buildLabels(&issue)
+	labels := buildLabels(issue)
 	if len(labels) > 0 {
 		if err := s.addLabels(ctx, token, owner, repoName, prNumber, labels); err != nil {
 			s.logger.Warn().Err(err).Int("pr_number", prNumber).Msg("failed to add labels to PR")
@@ -191,7 +310,7 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session) (*models.
 
 	// 7. Store PR in DB.
 	pr := &models.PullRequest{
-		SessionID:     run.ID,
+		SessionID:      run.ID,
 		OrgID:          run.OrgID,
 		GitHubPRNumber: prNumber,
 		GitHubPRURL:    prURL,
@@ -210,9 +329,11 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session) (*models.
 		s.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update agent run status")
 	}
 
-	// 9. Update issue status.
-	if err := s.issues.UpdateStatus(ctx, run.OrgID, run.IssueID, "in_progress"); err != nil {
-		s.logger.Warn().Err(err).Str("issue_id", run.IssueID.String()).Msg("failed to update issue status")
+	// 9. Update issue status (only when an issue is attached).
+	if issue != nil {
+		if err := s.issues.UpdateStatus(ctx, run.OrgID, run.IssueID, "in_progress"); err != nil {
+			s.logger.Warn().Err(err).Str("issue_id", run.IssueID.String()).Msg("failed to update issue status")
+		}
 	}
 
 	return pr, nil
@@ -729,13 +850,41 @@ func (s *PRService) createTree(ctx context.Context, token, owner, repo, baseTree
 	return result.SHA, nil
 }
 
+// prCreateConfig holds optional configuration for createPullRequest.
+type prCreateConfig struct {
+	draft bool
+}
+
+type prCreateOption func(*prCreateConfig)
+
+func withDraft(draft bool) prCreateOption {
+	return func(c *prCreateConfig) {
+		c.draft = draft
+	}
+}
+
+// commitAuthor represents the author/committer for a Git commit.
+type commitAuthor struct {
+	Name  string `json:"name"`
+	Email string `json:"email"`
+	Date  string `json:"date"`
+}
+
 func (s *PRService) createCommit(ctx context.Context, token, owner, repo, message, treeSHA, parentSHA string) (string, error) {
+	return s.createCommitWithAuthor(ctx, token, owner, repo, message, treeSHA, parentSHA, nil)
+}
+
+func (s *PRService) createCommitWithAuthor(ctx context.Context, token, owner, repo, message, treeSHA, parentSHA string, author *commitAuthor) (string, error) {
 	path := fmt.Sprintf("/repos/%s/%s/git/commits", owner, repo)
-	body, err := s.doGitHubRequest(ctx, token, http.MethodPost, path, map[string]any{
+	payload := map[string]any{
 		"message": message,
 		"tree":    treeSHA,
 		"parents": []string{parentSHA},
-	})
+	}
+	if author != nil {
+		payload["author"] = author
+	}
+	body, err := s.doGitHubRequest(ctx, token, http.MethodPost, path, payload)
 	if err != nil {
 		return "", err
 	}
@@ -748,14 +897,22 @@ func (s *PRService) createCommit(ctx context.Context, token, owner, repo, messag
 	return result.SHA, nil
 }
 
-func (s *PRService) createPullRequest(ctx context.Context, token, owner, repo, title, body, head, base string) (int, string, error) {
+func (s *PRService) createPullRequest(ctx context.Context, token, owner, repo, title, body, head, base string, opts ...prCreateOption) (int, string, error) {
+	cfg := prCreateConfig{}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 	path := fmt.Sprintf("/repos/%s/%s/pulls", owner, repo)
-	respBody, err := s.doGitHubRequest(ctx, token, http.MethodPost, path, map[string]string{
+	payload := map[string]any{
 		"title": title,
 		"body":  body,
 		"head":  head,
 		"base":  base,
-	})
+	}
+	if cfg.draft {
+		payload["draft"] = true
+	}
+	respBody, err := s.doGitHubRequest(ctx, token, http.MethodPost, path, payload)
 	if err != nil {
 		return 0, "", err
 	}
@@ -803,97 +960,242 @@ func slugify(s string) string {
 	return s
 }
 
-func formatBranchName(runID uuid.UUID, issueTitle string) string {
-	short := runID.String()[:8]
-	slug := slugify(issueTitle)
+// firstLine returns the first non-empty line of s, truncated to 72 chars.
+func firstLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			if len(line) > 72 {
+				return line[:72]
+			}
+			return line
+		}
+	}
+	return ""
+}
+
+func formatBranchName(session *models.Session, issue *models.Issue) string {
+	short := session.ID.String()[:8]
+	var title string
+	if issue != nil {
+		title = issue.Title
+	} else if session.Title != nil {
+		title = *session.Title
+	}
+	slug := slugify(title)
 	if slug == "" {
-		slug = "fix"
+		slug = "changes"
 	}
-	return fmt.Sprintf("143/fix/%s/%s", short, slug)
+	return fmt.Sprintf("143/%s/%s", short, slug)
 }
 
-func formatPRTitle(issue *models.Issue) string {
-	switch issue.Source {
-	case models.IssueSourceLinear:
-		return fmt.Sprintf("%s: %s", issue.ExternalID, issue.Title)
-	default:
-		return fmt.Sprintf("fix: %s", issue.Title)
+func formatPRTitle(session *models.Session, issue *models.Issue) string {
+	// Issue-based sessions: keep current behavior.
+	if issue != nil {
+		switch issue.Source {
+		case models.IssueSourceLinear:
+			return fmt.Sprintf("%s: %s", issue.ExternalID, issue.Title)
+		default:
+			return fmt.Sprintf("fix: %s", issue.Title)
+		}
 	}
+
+	// Issueless sessions: use session title or result summary.
+	if session.Title != nil && *session.Title != "" {
+		return *session.Title
+	}
+	if session.ResultSummary != nil && *session.ResultSummary != "" {
+		return firstLine(*session.ResultSummary)
+	}
+	return fmt.Sprintf("Session %s", session.ID.String()[:8])
 }
 
-func formatCommitMessage(issue *models.Issue) string {
-	msg := fmt.Sprintf("fix: %s", issue.Title)
-	switch issue.Source {
-	case models.IssueSourceLinear:
-		msg += fmt.Sprintf("\n\nFixes #%s", issue.ExternalID)
-	case models.IssueSourceSentry:
-		msg += fmt.Sprintf("\n\nResolves %s", issue.ExternalID)
+func formatCommitMessage(session *models.Session, issue *models.Issue) string {
+	if issue != nil {
+		msg := fmt.Sprintf("fix: %s", issue.Title)
+		switch issue.Source {
+		case models.IssueSourceLinear:
+			msg += fmt.Sprintf("\n\nFixes #%s", issue.ExternalID)
+		case models.IssueSourceSentry:
+			msg += fmt.Sprintf("\n\nResolves %s", issue.ExternalID)
+		}
+		return msg
 	}
-	return msg
+
+	// Issueless sessions: derive from session title or summary.
+	if session.Title != nil && *session.Title != "" {
+		return *session.Title
+	}
+	if session.ResultSummary != nil && *session.ResultSummary != "" {
+		return firstLine(*session.ResultSummary)
+	}
+	return fmt.Sprintf("Session %s", session.ID.String()[:8])
 }
 
+// prTemplatePaths lists the conventional locations for GitHub PR templates.
+var prTemplatePaths = []string{
+	".github/pull_request_template.md",
+	".github/PULL_REQUEST_TEMPLATE.md",
+	"docs/pull_request_template.md",
+	"pull_request_template.md",
+	"PULL_REQUEST_TEMPLATE.md",
+	".github/PULL_REQUEST_TEMPLATE/default.md",
+}
+
+// fetchPRTemplate retrieves the repo's PR template via the GitHub Contents API.
+// Returns empty string if no template is found.
+func (s *PRService) fetchPRTemplate(ctx context.Context, token, owner, repo, ref string) string {
+	for _, path := range prTemplatePaths {
+		url := fmt.Sprintf("/repos/%s/%s/contents/%s?ref=%s", owner, repo, path, ref)
+		body, err := s.doGitHubRequest(ctx, token, http.MethodGet, url, nil)
+		if err != nil {
+			continue
+		}
+		var content struct {
+			Content  string `json:"content"`
+			Encoding string `json:"encoding"`
+		}
+		if err := json.Unmarshal(body, &content); err != nil {
+			continue
+		}
+		if content.Encoding == "base64" && content.Content != "" {
+			decoded, err := decodeBase64Content(content.Content)
+			if err == nil && decoded != "" {
+				return decoded
+			}
+		}
+	}
+	return ""
+}
+
+// decodeBase64Content decodes GitHub's base64-encoded file content.
+func decodeBase64Content(encoded string) (string, error) {
+	// GitHub base64 content may contain newlines.
+	clean := strings.ReplaceAll(encoded, "\n", "")
+	decoded, err := base64.StdEncoding.DecodeString(clean)
+	if err != nil {
+		return "", err
+	}
+	return string(decoded), nil
+}
+
+// fillRepoTemplate uses the LLM to fill a repo's PR template with session context.
+func (s *PRService) fillRepoTemplate(ctx context.Context, template string, run *models.Session, issue *models.Issue) (string, error) {
+	if s.llmClient == nil {
+		return "", fmt.Errorf("no LLM client configured")
+	}
+
+	systemPrompt := `You are a PR description writer. Fill in the sections of the given PR template using the provided context. Be concise. If a section is not applicable, write "N/A" or remove it. Do not add sections that aren't in the template. Return only the filled-in template, nothing else.`
+
+	var contextBuilder strings.Builder
+	contextBuilder.WriteString("## PR Template to fill:\n\n")
+	contextBuilder.WriteString(template)
+	contextBuilder.WriteString("\n\n## Context:\n\n")
+
+	if run.ResultSummary != nil && *run.ResultSummary != "" {
+		fmt.Fprintf(&contextBuilder, "### What the agent did:\n%s\n\n", *run.ResultSummary)
+	}
+	if run.Diff != nil && *run.Diff != "" {
+		// Include a truncated diff stat for context.
+		diffLines := strings.Split(*run.Diff, "\n")
+		if len(diffLines) > 100 {
+			diffLines = diffLines[:100]
+		}
+		fmt.Fprintf(&contextBuilder, "### Diff (truncated):\n```\n%s\n```\n\n", strings.Join(diffLines, "\n"))
+	}
+	if issue != nil {
+		fmt.Fprintf(&contextBuilder, "### Issue:\n- Title: %s\n- Source: %s\n- Severity: %s\n\n", issue.Title, issue.Source, issue.Severity)
+	}
+
+	filled, err := s.llmClient.Complete(ctx, systemPrompt, contextBuilder.String())
+	if err != nil {
+		return "", fmt.Errorf("LLM template fill: %w", err)
+	}
+	return filled, nil
+}
+
+// generatePRBody produces the PR description. It tries the repo's PR template first
+// (filled via LLM), falling back to the minimal default template.
+func (s *PRService) generatePRBody(ctx context.Context, token, owner, repoName, defaultBranch string, run *models.Session, issue *models.Issue) string {
+	// 1. Try repo template.
+	template := s.fetchPRTemplate(ctx, token, owner, repoName, defaultBranch)
+	if template != "" {
+		filled, err := s.fillRepoTemplate(ctx, template, run, issue)
+		if err == nil && filled != "" {
+			return filled + "\n\n---\n*Generated by [143.dev](https://143.dev)*\n"
+		}
+		s.logger.Warn().Err(err).Msg("failed to fill repo PR template, falling back to default")
+	}
+
+	// 2. Fall back to minimal default.
+	return s.formatPRBody(ctx, run, issue)
+}
+
+// formatPRBody builds the default PR body when no repo template is found.
+// It produces a minimal, scannable body: Summary, optional Issue info, and Test plan.
 func (s *PRService) formatPRBody(ctx context.Context, run *models.Session, issue *models.Issue) string {
 	var b strings.Builder
 
 	b.WriteString("## Summary\n\n")
-	if run.ResultSummary != nil {
+	if run.ResultSummary != nil && *run.ResultSummary != "" {
 		b.WriteString(*run.ResultSummary)
 	} else {
-		b.WriteString("Automated fix generated by 143.dev")
+		b.WriteString("Automated changes generated by 143.dev")
 	}
 	b.WriteString("\n\n")
 
-	b.WriteString("## Issue\n\n")
-	fmt.Fprintf(&b, "- **Source**: %s\n", issue.Source)
-	fmt.Fprintf(&b, "- **Severity**: %s\n", issue.Severity)
-	fmt.Fprintf(&b, "- **Affected customers**: %d\n", issue.AffectedCustomerCount)
-	fmt.Fprintf(&b, "- **Occurrences**: %d\n", issue.OccurrenceCount)
-	b.WriteString("\n")
+	// Issue context — only when an issue is attached.
+	if issue != nil {
+		fmt.Fprintf(&b, "**Issue**: %s — %s", issue.Source, issue.Title)
+		if issue.Severity != "" {
+			fmt.Fprintf(&b, " (%s)", issue.Severity)
+		}
+		b.WriteString("\n\n")
+	}
 
-	// Validation results (best-effort).
+	// Test plan: summarize validation results if available, otherwise use a placeholder.
+	b.WriteString("## Test plan\n\n")
+	validationWritten := false
 	if s.validations != nil {
 		validation, err := s.validations.GetBySessionID(ctx, run.OrgID, run.ID)
 		if err == nil {
-			b.WriteString("## Validation\n\n")
-			b.WriteString("| Check | Result |\n")
-			b.WriteString("|-------|--------|\n")
-			fmt.Fprintf(&b, "| Direction alignment | %s |\n", checkEmoji(validation.DirectionCheck))
-			fmt.Fprintf(&b, "| Correctness | %s |\n", checkEmoji(validation.CorrectnessCheck))
-			fmt.Fprintf(&b, "| Code quality | %s |\n", checkEmoji(validation.QualityCheck))
-			fmt.Fprintf(&b, "| Security scan | %s |\n", checkEmoji(validation.SecurityScan))
-			fmt.Fprintf(&b, "| Regression tests | %s |\n", checkEmoji(validation.RegressionTestCheck))
-			fmt.Fprintf(&b, "| CI/CD | %s |\n", checkEmoji(validation.CICheck))
-			b.WriteString("\n")
+			var checks []string
+			if validation.RegressionTestCheck == "pass" || validation.RegressionTestCheck == "passed" {
+				checks = append(checks, "Regression tests passed")
+			}
+			if validation.CorrectnessCheck == "pass" || validation.CorrectnessCheck == "passed" {
+				checks = append(checks, "Correctness check passed")
+			}
+			if validation.SecurityScan == "pass" || validation.SecurityScan == "passed" {
+				checks = append(checks, "Security scan passed")
+			}
+			if validation.CICheck == "pass" || validation.CICheck == "passed" {
+				checks = append(checks, "CI/CD passed")
+			}
+			if len(checks) > 0 {
+				for _, c := range checks {
+					fmt.Fprintf(&b, "- %s\n", c)
+				}
+				validationWritten = true
+			}
 		}
 	}
-
-	b.WriteString("## Agent Details\n\n")
-	fmt.Fprintf(&b, "- **Agent**: %s\n", run.AgentType)
-	if run.StartedAt != nil && run.CompletedAt != nil {
-		duration := run.CompletedAt.Sub(*run.StartedAt).Round(time.Second)
-		fmt.Fprintf(&b, "- **Run time**: %s\n", duration)
+	if !validationWritten {
+		b.WriteString("Validated by automated agent run.\n")
 	}
+
 	b.WriteString("\n---\n")
-	fmt.Fprintf(&b, "*Generated by [143.dev](https://143.dev) — agent run %s*\n", run.ID)
+	fmt.Fprintf(&b, "*Generated by [143.dev](https://143.dev) — [session %s](https://app.143.dev/sessions/%s)*\n", run.ID.String()[:8], run.ID)
 
 	return b.String()
 }
 
-func checkEmoji(status string) string {
-	switch status {
-	case "pass", "passed":
-		return "pass"
-	case "fail", "failed":
-		return "fail"
-	case "skip", "skipped":
-		return "skip"
-	default:
-		return status
-	}
-}
 
 func buildLabels(issue *models.Issue) []string {
 	labels := []string{"143-generated"}
+	if issue == nil {
+		return labels
+	}
 	if issue.Severity != "" {
 		labels = append(labels, "severity:"+issue.Severity)
 	}

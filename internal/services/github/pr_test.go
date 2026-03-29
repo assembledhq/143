@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -19,14 +18,19 @@ import (
 func TestFormatPRTitle(t *testing.T) {
 	t.Parallel()
 
+	sessionTitle := "Refactor auth middleware"
+	summaryText := "Updated the login flow\nwith multiple lines"
+
 	tests := []struct {
-		name   string
-		issue  models.Issue
-		expect string
+		name    string
+		session models.Session
+		issue   *models.Issue
+		expect  string
 	}{
 		{
-			name: "linear source uses external ID prefix",
-			issue: models.Issue{
+			name:    "linear source uses external ID prefix",
+			session: models.Session{ID: uuid.New()},
+			issue: &models.Issue{
 				Source:     models.IssueSourceLinear,
 				ExternalID: "ENG-1234",
 				Title:      "Fix null pointer in user API",
@@ -34,35 +38,56 @@ func TestFormatPRTitle(t *testing.T) {
 			expect: "ENG-1234: Fix null pointer in user API",
 		},
 		{
-			name: "sentry source uses fix prefix",
-			issue: models.Issue{
+			name:    "sentry source uses fix prefix",
+			session: models.Session{ID: uuid.New()},
+			issue: &models.Issue{
 				Source: models.IssueSourceSentry,
 				Title:  "TypeError in payment handler",
 			},
 			expect: "fix: TypeError in payment handler",
 		},
 		{
-			name: "support source uses fix prefix",
-			issue: models.Issue{
+			name:    "support source uses fix prefix",
+			session: models.Session{ID: uuid.New()},
+			issue: &models.Issue{
 				Source: models.IssueSource("support"),
 				Title:  "Login button not working",
 			},
 			expect: "fix: Login button not working",
 		},
 		{
-			name: "unknown source uses fix prefix",
-			issue: models.Issue{
+			name:    "unknown source uses fix prefix",
+			session: models.Session{ID: uuid.New()},
+			issue: &models.Issue{
 				Source: models.IssueSource("other"),
 				Title:  "Some issue",
 			},
 			expect: "fix: Some issue",
+		},
+		{
+			name:    "nil issue uses session title",
+			session: models.Session{ID: uuid.New(), Title: &sessionTitle},
+			issue:   nil,
+			expect:  "Refactor auth middleware",
+		},
+		{
+			name:    "nil issue falls back to result summary first line",
+			session: models.Session{ID: uuid.New(), ResultSummary: &summaryText},
+			issue:   nil,
+			expect:  "Updated the login flow",
+		},
+		{
+			name:    "nil issue with no title or summary uses session ID",
+			session: models.Session{ID: uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789")},
+			issue:   nil,
+			expect:  "Session abcdef01",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			result := formatPRTitle(&tt.issue)
+			result := formatPRTitle(&tt.session, tt.issue)
 			require.Equal(t, tt.expect, result, "PR title should match expected format")
 		})
 	}
@@ -71,48 +96,64 @@ func TestFormatPRTitle(t *testing.T) {
 func TestFormatBranchName(t *testing.T) {
 	t.Parallel()
 
+	issueTitle := "Fix null pointer"
+	sessionTitle := "Refactor auth"
+	longTitle := "This is a very long issue title that should be truncated at some reasonable point to avoid creating overly long branch names"
+
 	tests := []struct {
-		name   string
-		runID  uuid.UUID
-		title  string
-		expect string
-		maxLen bool // if true, verify length constraints
+		name    string
+		session models.Session
+		issue   *models.Issue
+		expect  string
+		maxLen  bool // if true, verify length constraints
 	}{
 		{
-			name:   "basic branch name",
-			runID:  uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789"),
-			title:  "Fix null pointer",
-			expect: "143/fix/abcdef01/fix-null-pointer",
+			name:    "issue-based branch name",
+			session: models.Session{ID: uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789")},
+			issue:   &models.Issue{Title: "Fix null pointer"},
+			expect:  "143/abcdef01/fix-null-pointer",
 		},
 		{
-			name:   "special characters are slugified",
-			runID:  uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789"),
-			title:  "Fix: TypeError in payment_handler (v2)",
-			expect: "143/fix/abcdef01/fix-typeerror-in-payment-handler-v2",
+			name:    "special characters are slugified",
+			session: models.Session{ID: uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789")},
+			issue:   &models.Issue{Title: "Fix: TypeError in payment_handler (v2)"},
+			expect:  "143/abcdef01/fix-typeerror-in-payment-handler-v2",
 		},
 		{
-			name:   "long title is truncated",
-			runID:  uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789"),
-			title:  "This is a very long issue title that should be truncated at some reasonable point to avoid creating overly long branch names",
-			maxLen: true,
+			name:    "long title is truncated",
+			session: models.Session{ID: uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789")},
+			issue:   &models.Issue{Title: longTitle},
+			maxLen:  true,
 		},
 		{
-			name:   "empty title falls back to fix",
-			runID:  uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789"),
-			title:  "",
-			expect: "143/fix/abcdef01/fix",
+			name:    "nil issue uses session title",
+			session: models.Session{ID: uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789"), Title: &sessionTitle},
+			issue:   nil,
+			expect:  "143/abcdef01/refactor-auth",
+		},
+		{
+			name:    "nil issue with nil title uses session title from issue",
+			session: models.Session{ID: uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789"), Title: &issueTitle},
+			issue:   nil,
+			expect:  "143/abcdef01/fix-null-pointer",
+		},
+		{
+			name:    "nil issue with no title falls back to changes",
+			session: models.Session{ID: uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789")},
+			issue:   nil,
+			expect:  "143/abcdef01/changes",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			result := formatBranchName(tt.runID, tt.title)
+			result := formatBranchName(&tt.session, tt.issue)
 			if tt.maxLen {
-				// The slug portion (after "143/fix/{8chars}/") shouldn't exceed maxBranchSlugLen
-				parts := strings.SplitN(result, "/", 4)
-				require.Len(t, parts, 4, "branch name should have 4 path segments")
-				require.LessOrEqual(t, len(parts[3]), maxBranchSlugLen, "slug portion should not exceed max branch slug length")
+				// The slug portion (after "143/{8chars}/") shouldn't exceed maxBranchSlugLen
+				parts := strings.SplitN(result, "/", 3)
+				require.Len(t, parts, 3, "branch name should have 3 path segments")
+				require.LessOrEqual(t, len(parts[2]), maxBranchSlugLen, "slug portion should not exceed max branch slug length")
 			} else {
 				require.Equal(t, tt.expect, result, "branch name should match expected format")
 			}
@@ -125,14 +166,18 @@ func TestFormatBranchName(t *testing.T) {
 func TestFormatCommitMessage(t *testing.T) {
 	t.Parallel()
 
+	sessionTitle := "Refactor auth middleware"
+
 	tests := []struct {
-		name   string
-		issue  models.Issue
-		expect string
+		name    string
+		session models.Session
+		issue   *models.Issue
+		expect  string
 	}{
 		{
-			name: "linear issue includes Fixes reference",
-			issue: models.Issue{
+			name:    "linear issue includes Fixes reference",
+			session: models.Session{ID: uuid.New()},
+			issue: &models.Issue{
 				Source:     models.IssueSourceLinear,
 				ExternalID: "ENG-1234",
 				Title:      "Fix null pointer",
@@ -140,8 +185,9 @@ func TestFormatCommitMessage(t *testing.T) {
 			expect: "fix: Fix null pointer\n\nFixes #ENG-1234",
 		},
 		{
-			name: "sentry issue includes Resolves reference",
-			issue: models.Issue{
+			name:    "sentry issue includes Resolves reference",
+			session: models.Session{ID: uuid.New()},
+			issue: &models.Issue{
 				Source:     models.IssueSourceSentry,
 				ExternalID: "SENTRY-5678",
 				Title:      "TypeError in handler",
@@ -149,19 +195,32 @@ func TestFormatCommitMessage(t *testing.T) {
 			expect: "fix: TypeError in handler\n\nResolves SENTRY-5678",
 		},
 		{
-			name: "support issue has no reference",
-			issue: models.Issue{
+			name:    "support issue has no reference",
+			session: models.Session{ID: uuid.New()},
+			issue: &models.Issue{
 				Source: models.IssueSource("support"),
 				Title:  "Login broken",
 			},
 			expect: "fix: Login broken",
+		},
+		{
+			name:    "nil issue uses session title",
+			session: models.Session{ID: uuid.New(), Title: &sessionTitle},
+			issue:   nil,
+			expect:  "Refactor auth middleware",
+		},
+		{
+			name:    "nil issue with no title uses session ID",
+			session: models.Session{ID: uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789")},
+			issue:   nil,
+			expect:  "Session abcdef01",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			result := formatCommitMessage(&tt.issue)
+			result := formatCommitMessage(&tt.session, tt.issue)
 			require.Equal(t, tt.expect, result, "commit message should match expected format")
 		})
 	}
@@ -172,12 +231,12 @@ func TestBuildLabels(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		issue  models.Issue
+		issue  *models.Issue
 		expect []string
 	}{
 		{
 			name: "all labels",
-			issue: models.Issue{
+			issue: &models.Issue{
 				Severity: "high",
 				Source:   models.IssueSourceSentry,
 			},
@@ -185,14 +244,19 @@ func TestBuildLabels(t *testing.T) {
 		},
 		{
 			name: "no severity",
-			issue: models.Issue{
+			issue: &models.Issue{
 				Source: models.IssueSourceLinear,
 			},
 			expect: []string{"143-generated", "source:linear"},
 		},
 		{
-			name:   "minimal",
-			issue:  models.Issue{},
+			name:   "minimal issue",
+			issue:  &models.Issue{},
+			expect: []string{"143-generated"},
+		},
+		{
+			name:   "nil issue returns only base label",
+			issue:  nil,
 			expect: []string{"143-generated"},
 		},
 	}
@@ -200,7 +264,7 @@ func TestBuildLabels(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			result := buildLabels(&tt.issue)
+			result := buildLabels(tt.issue)
 			require.Equal(t, tt.expect, result, "labels should match expected set")
 		})
 	}
@@ -224,6 +288,7 @@ func TestFormatPRBody(t *testing.T) {
 		Severity:              "high",
 		AffectedCustomerCount: 42,
 		OccurrenceCount:       100,
+		Title:                 "Null pointer in user API",
 	}
 
 	body := svc.formatPRBody(context.Background(), run, issue)
@@ -232,9 +297,30 @@ func TestFormatPRBody(t *testing.T) {
 	require.Contains(t, body, summary, "PR body should contain the result summary text")
 	require.Contains(t, body, "sentry", "PR body should contain the issue source")
 	require.Contains(t, body, "high", "PR body should contain the severity level")
-	require.Contains(t, body, "42", "PR body should contain the affected customer count")
-	require.Contains(t, body, "100", "PR body should contain the occurrence count")
-	require.Contains(t, body, "claude-code", "PR body should contain the agent type")
+	require.Contains(t, body, "## Test plan", "PR body should contain Test plan heading")
+	require.Contains(t, body, "143.dev", "PR body should contain the 143.dev branding")
+}
+
+func TestFormatPRBody_NilIssue(t *testing.T) {
+	t.Parallel()
+
+	logger := zerolog.Nop()
+	svc := &PRService{logger: logger}
+
+	summary := "Refactored the auth middleware for clarity"
+	run := &models.Session{
+		ID:            uuid.New(),
+		OrgID:         uuid.New(),
+		AgentType:     "claude-code",
+		ResultSummary: &summary,
+	}
+
+	body := svc.formatPRBody(context.Background(), run, nil)
+
+	require.Contains(t, body, "## Summary", "PR body should contain Summary heading")
+	require.Contains(t, body, summary, "PR body should contain the result summary text")
+	require.NotContains(t, body, "**Issue**", "PR body should not contain Issue section when issue is nil")
+	require.Contains(t, body, "## Test plan", "PR body should contain Test plan heading")
 	require.Contains(t, body, "143.dev", "PR body should contain the 143.dev branding")
 }
 
@@ -554,16 +640,13 @@ func TestHandlePullRequestReviewEvent_ChangesRequested(t *testing.T) {
 	require.Equal(t, "changes_requested", decoded.Review.State, "decoded review state should be changes_requested")
 }
 
-func TestCheckEmoji(t *testing.T) {
+func TestFirstLine(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, "pass", checkEmoji("pass"), "checkEmoji should return pass for pass input")
-	require.Equal(t, "pass", checkEmoji("passed"), "checkEmoji should return pass for passed input")
-	require.Equal(t, "fail", checkEmoji("fail"), "checkEmoji should return fail for fail input")
-	require.Equal(t, "fail", checkEmoji("failed"), "checkEmoji should return fail for failed input")
-	require.Equal(t, "skip", checkEmoji("skip"), "checkEmoji should return skip for skip input")
-	require.Equal(t, "skip", checkEmoji("skipped"), "checkEmoji should return skip for skipped input")
-	require.Equal(t, "pending", checkEmoji("pending"), "checkEmoji should return pending for pending input")
+	require.Equal(t, "hello", firstLine("hello\nworld"), "firstLine should return first line")
+	require.Equal(t, "single", firstLine("single"), "firstLine should handle single line")
+	require.Equal(t, "", firstLine(""), "firstLine should handle empty string")
+	require.Equal(t, "trimmed", firstLine("  trimmed  \nsecond"), "firstLine should trim whitespace")
 }
 
 func TestDoGitHubRequest_ErrorResponse(t *testing.T) {
@@ -613,38 +696,32 @@ func TestDoGitHubRequest_SetsHeaders(t *testing.T) {
 	require.Equal(t, "application/vnd.github+json", capturedAccept, "Accept header should be set to GitHub JSON media type")
 }
 
-func TestFormatPRBody_WithValidation(t *testing.T) {
+func TestFormatPRBody_WithIssue(t *testing.T) {
 	t.Parallel()
 
 	logger := zerolog.Nop()
 	svc := &PRService{logger: logger}
 
-	now := time.Now()
-	started := now.Add(-5 * time.Minute)
 	summary := "Fixed the bug"
 	run := &models.Session{
 		ID:            uuid.New(),
 		OrgID:         uuid.New(),
 		AgentType:     "claude-code",
 		ResultSummary: &summary,
-		StartedAt:     &started,
-		CompletedAt:   &now,
 	}
 	issue := &models.Issue{
-		Source:                models.IssueSourceLinear,
-		Severity:              "critical",
-		AffectedCustomerCount: 10,
-		OccurrenceCount:       50,
+		Source:   models.IssueSourceLinear,
+		Severity: "critical",
+		Title:    "Null pointer in user handler",
 	}
 
 	body := svc.formatPRBody(context.Background(), run, issue)
 
 	require.Contains(t, body, "## Summary", "PR body should contain Summary heading")
 	require.Contains(t, body, "Fixed the bug", "PR body should contain the result summary")
-	require.Contains(t, body, "linear", "PR body should contain the issue source")
+	require.Contains(t, body, "**Issue**: linear", "PR body should contain issue source")
 	require.Contains(t, body, "critical", "PR body should contain the severity")
-	require.Contains(t, body, "## Agent Details", "PR body should contain Agent Details section")
-	require.Contains(t, body, "5m0s", "PR body should contain the elapsed duration")
+	require.Contains(t, body, "## Test plan", "PR body should contain Test plan heading")
 }
 
 func TestFormatPRBody_NilSummary(t *testing.T) {
@@ -658,11 +735,7 @@ func TestFormatPRBody_NilSummary(t *testing.T) {
 		OrgID:     uuid.New(),
 		AgentType: "claude-code",
 	}
-	issue := &models.Issue{
-		Source:   models.IssueSourceSentry,
-		Severity: "low",
-	}
 
-	body := svc.formatPRBody(context.Background(), run, issue)
-	require.Contains(t, body, "Automated fix generated by 143.dev", "PR body with nil summary should contain default branding text")
+	body := svc.formatPRBody(context.Background(), run, nil)
+	require.Contains(t, body, "Automated changes generated by 143.dev", "PR body with nil summary should contain default text")
 }
