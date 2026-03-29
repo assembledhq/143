@@ -58,6 +58,8 @@ The base font size is `text-[13px]` (set globally). Use these specific sizes:
 | Form field groups (label → input → hint) | `space-y-2` |
 | Filter tabs gap | `gap-1` |
 | Button groups | `gap-3` |
+| Sidebar/panel header padding | `px-4 pt-3 pb-3` — minimum `pb-3` (12px) bottom padding to prevent scrollable content from overlapping with the last header element (e.g., filter tabs, buttons) |
+| Gap between fixed header and scrollable list | Always ensure at least 12px (`pb-3`) of bottom padding on the fixed header container so interactive elements (tabs, buttons) are fully visible and not clipped by the scroll area |
 
 ### Border Radius
 
@@ -426,3 +428,4 @@ Use the `tags` parameter to add searchable context (feature name, endpoint, comp
 8. **Missing dark mode** — Banners/alerts using hardcoded Tailwind colors (e.g., `bg-blue-50`, `border-green-200`) need `dark:` variant classes. Semantic tokens (`bg-destructive/10`, `bg-primary/10`) adapt automatically.
 9. **Flat cards** — Cards should always have `shadow-sm` (provided by the Card component). Don't override with `shadow-none`.
 10. **Missing transitions** — Interactive elements (radio cards, buttons, rows) need `transition-all duration-150`.
+11. **Insufficient header-to-scroll-area spacing** — Fixed header sections above scrollable content must have at least `pb-3` (12px) bottom padding. Using `pb-2` or less causes the scroll area to overlap with the last header element (e.g., filter tabs, buttons), clipping their bottom border or active indicator.

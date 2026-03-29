@@ -112,6 +112,21 @@ describe("CommentsSummary", () => {
     expect(screen.queryByText("visible body")).not.toBeInTheDocument();
   });
 
+  it("collapses the list when Enter is pressed on the header", async () => {
+    const user = userEvent.setup();
+    render(
+      <CommentsSummary
+        comments={[makeComment({ body: "keyboard body" })]}
+        onCommentClick={vi.fn()}
+      />
+    );
+    expect(screen.getByText("keyboard body")).toBeInTheDocument();
+    const header = screen.getByRole("button", { name: /1 comment/i });
+    header.focus();
+    await user.keyboard("{Enter}");
+    expect(screen.queryByText("keyboard body")).not.toBeInTheDocument();
+  });
+
   it("shows pass number badge when pass_number > 1", () => {
     render(
       <CommentsSummary
