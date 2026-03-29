@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
+import { ThemeSelect } from "@/components/theme-select";
 import type { Organization, SingleResponse } from "@/lib/types";
 
 export default function SettingsPage() {
@@ -27,6 +28,23 @@ export default function SettingsPage() {
           filters={{ resource_type: "settings" }}
           title="Settings activity"
         />
+        <section className="space-y-3">
+          <h2 className="text-[13px] font-medium text-foreground">Appearance</h2>
+          <Card>
+            <CardContent>
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <Label>Theme</Label>
+                  <p className="text-[13px] text-muted-foreground">
+                    Select your preferred color scheme
+                  </p>
+                </div>
+                <ThemeSelect />
+              </div>
+            </CardContent>
+          </Card>
+        </section>
+
         <section className="space-y-3">
           <h2 className="text-[13px] font-medium text-foreground">General</h2>
           <Card>
