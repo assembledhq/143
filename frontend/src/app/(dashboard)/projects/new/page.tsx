@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   Sparkles,
@@ -30,6 +30,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api";
 import { AGENT_TYPE_OPTIONS } from "@/lib/model-constants";
 import { NoReposWarning } from "@/components/no-repos-warning";
@@ -128,6 +129,12 @@ export default function NewProjectPage() {
   // Advanced section
   const [showAdvanced, setShowAdvanced] = useState(false);
 
+  // Platform detection for keyboard shortcut hint
+  const [isMac, setIsMac] = useState(true);
+  useEffect(() => {
+    setIsMac(/Mac|iPhone|iPad/.test(navigator.userAgent));
+  }, []);
+
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
     queryKey: ["settings"],
     queryFn: () => api.settings.get(),
@@ -197,6 +204,10 @@ export default function NewProjectPage() {
     setScheduleUnit(template.scheduleUnit);
   }
 
+  function clearGenerated() {
+    if (hasGenerated) setHasGenerated(false);
+  }
+
   function handleDescriptionKeyDown(e: React.KeyboardEvent) {
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
@@ -225,6 +236,7 @@ export default function NewProjectPage() {
         <div className="space-y-2">
           <div className="relative">
             <Textarea
+              id="description"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               onKeyDown={handleDescriptionKeyDown}
@@ -252,7 +264,7 @@ export default function NewProjectPage() {
           <p className="text-[11px] text-muted-foreground/60">
             {generateMutation.isPending
               ? "Generating project details..."
-              : "Press ⌘ Enter to generate, or fill in the form directly below."}
+              : `Press ${isMac ? "⌘" : "Ctrl+"} Enter to generate, or fill in the form directly below.`}
           </p>
           {generateMutation.isError && (
             <p className="text-xs text-destructive">
@@ -274,7 +286,7 @@ export default function NewProjectPage() {
         </div>
 
         {/* ── Main Form ────────────────────────────────────────── */}
-        <div className="space-y-4">
+        <div className="space-y-4 rounded-lg border border-border bg-card p-5">
           {hasGenerated && (
             <div className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2.5 text-[13px] text-primary flex items-center gap-2">
               <Sparkles className="h-3.5 w-3.5 shrink-0" />
@@ -287,7 +299,10 @@ export default function NewProjectPage() {
             <Input
               id="title"
               value={title}
-              onChange={(e) => setTitle(e.target.value)}
+              onChange={(e) => {
+                setTitle(e.target.value);
+                clearGenerated();
+              }}
               placeholder="Project title"
             />
           </div>
@@ -297,7 +312,10 @@ export default function NewProjectPage() {
             <Textarea
               id="goal"
               value={goal}
-              onChange={(e) => setGoal(e.target.value)}
+              onChange={(e) => {
+                setGoal(e.target.value);
+                clearGenerated();
+              }}
               placeholder={
                 scheduleEnabled
                   ? "What should this project do on each scheduled run?"
@@ -361,31 +379,20 @@ export default function NewProjectPage() {
 
           {/* ── Schedule toggle ───────────────────────────────── */}
           <div className="rounded-lg border border-border p-3 space-y-3">
-            <label className="flex items-center justify-between cursor-pointer">
-              <div className="flex items-center gap-2">
-                <Timer className="h-4 w-4 text-muted-foreground" />
-                <span className="text-[13px] font-medium">
-                  Run on a schedule
-                </span>
-              </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={scheduleEnabled}
-                onClick={() => setScheduleEnabled(!scheduleEnabled)}
-                className={cn(
-                  "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors",
-                  scheduleEnabled ? "bg-primary" : "bg-muted-foreground/25",
-                )}
+            <div className="flex items-center justify-between">
+              <Label
+                htmlFor="schedule-toggle"
+                className="flex items-center gap-2 cursor-pointer font-medium"
               >
-                <span
-                  className={cn(
-                    "pointer-events-none block h-4 w-4 rounded-full bg-white shadow-sm ring-0 transition-transform",
-                    scheduleEnabled ? "translate-x-4" : "translate-x-0",
-                  )}
-                />
-              </button>
-            </label>
+                <Timer className="h-4 w-4 text-muted-foreground" />
+                Run on a schedule
+              </Label>
+              <Switch
+                id="schedule-toggle"
+                checked={scheduleEnabled}
+                onCheckedChange={setScheduleEnabled}
+              />
+            </div>
 
             {scheduleEnabled && (
               <div className="space-y-3">
