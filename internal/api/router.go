@@ -223,6 +223,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		r.Post("/linear", ingestionWebhookHandler.HandleLinear)
 	})
 
+	// Internal API routes (token-based auth — called by sandbox agents)
+	internalIssueHandler := handlers.NewInternalIssueHandler(issueStore, cfg.SessionSecret)
+	r.Route("/api/v1/internal", func(r chi.Router) {
+		r.Post("/issues", internalIssueHandler.Create)
+	})
+
 	// Public team routes (token-based, no auth)
 	r.Post("/api/v1/team/invitations/accept", teamHandler.AcceptInvitation)
 

@@ -222,6 +222,25 @@ When creating tasks from Slack conversations, include relevant quotes and contex
 in the task's `approach` and `reasoning` fields so the coding agent has full
 context without needing Slack access.
 
+## Creating New Issues
+
+When your analysis reveals work that should be tracked but no existing issue
+covers it — for example, a pattern you noticed in the codebase, a concern
+raised in a Slack thread, or a gap you identified during exploration — you
+can create a new issue using the 143-tools CLI:
+
+    143-tools issue_create --title "..." --description "..." --severity warning
+
+The tool returns the created issue's UUID. You can then reference this UUID
+in your plan's tasks or clusters, just like any other issue.
+
+Use this when:
+- A Slack thread surfaces a real bug or feature gap with no existing issue
+- Your codebase exploration reveals a problem not tracked anywhere
+- You want to break a cluster into trackable individual items
+
+Do NOT use this to duplicate issues that already exist in .pm-context.json.
+
 ## IMPORTANT: Do NOT modify any code
 
 You are analyzing and planning only. Do not write code, create branches, or

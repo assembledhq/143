@@ -384,3 +384,31 @@ type Thread struct {
 	Messages []MessageSummary `json:"messages"`
 	Channel  string           `json:"channel"`
 }
+
+// --------------------------------------------------------------------------
+// IssueCreator — internal 143 issue creation
+// --------------------------------------------------------------------------
+
+// IssueCreator allows agents to create first-class issues in the 143 database.
+// This is used by the PM agent when it identifies new work that should be tracked.
+type IssueCreator interface {
+	// Name returns the provider identifier (e.g. "143").
+	Name() string
+
+	// CreateIssue creates a new issue and returns the created issue's ID and title.
+	CreateIssue(ctx context.Context, params CreateIssueParams) (*CreateIssueResult, error)
+}
+
+// CreateIssueParams describes a new issue to create.
+type CreateIssueParams struct {
+	Title       string   `json:"title"`
+	Description string   `json:"description"`
+	Severity    string   `json:"severity,omitempty"` // info, warning, error, critical
+	Tags        []string `json:"tags,omitempty"`
+}
+
+// CreateIssueResult is returned after successfully creating an issue.
+type CreateIssueResult struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}

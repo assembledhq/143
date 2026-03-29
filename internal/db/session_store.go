@@ -226,6 +226,16 @@ func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID,
 	return err
 }
 
+func (s *SessionStore) UpdatePMPlanID(ctx context.Context, orgID, runID, planID uuid.UUID) error {
+	query := `UPDATE sessions SET pm_plan_id = @pm_plan_id WHERE id = @id AND org_id = @org_id`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":         runID,
+		"org_id":     orgID,
+		"pm_plan_id": planID,
+	})
+	return err
+}
+
 func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.SessionResult) error {
 	diffStats := computeDiffStatsForResult(result)
 
