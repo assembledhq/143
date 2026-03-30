@@ -892,10 +892,10 @@ func TestFormatPRBody_WithValidationStore(t *testing.T) {
 		)
 
 	body := svc.formatPRBody(context.Background(), run, issue)
-	require.Contains(t, body, "## Validation", "PR body should contain Validation section when validation exists")
-	require.Contains(t, body, "Direction alignment", "PR body should contain direction check row")
-	require.Contains(t, body, "Correctness", "PR body should contain correctness check row")
-	require.Contains(t, body, "Security scan", "PR body should contain security scan row")
+	require.Contains(t, body, "## Test plan", "PR body should contain Test plan section")
+	require.Contains(t, body, "Regression tests passed", "PR body should contain regression test status")
+	require.Contains(t, body, "Correctness check passed", "PR body should contain correctness check status")
+	require.Contains(t, body, "Security scan passed", "PR body should contain security scan status")
 }
 
 func TestHandlePullRequestEvent_MergedWithUpdateStatusError(t *testing.T) {

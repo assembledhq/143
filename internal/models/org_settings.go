@@ -148,6 +148,28 @@ func (c ContextLimits) WithDefaults(defaults ContextLimits) ContextLimits {
 	return out
 }
 
+// PRAuthorship controls who creates the PR on GitHub.
+type PRAuthorship string
+
+const (
+	// PRAuthorshipUserPreferred uses the user's GitHub token if available, falls back to the app.
+	PRAuthorshipUserPreferred PRAuthorship = "user_preferred"
+	// PRAuthorshipAppOnly always uses the GitHub App (current/legacy behavior).
+	PRAuthorshipAppOnly PRAuthorship = "app_only"
+	// PRAuthorshipUserRequired requires user GitHub auth; blocks PR creation if not connected.
+	PRAuthorshipUserRequired PRAuthorship = "user_required"
+)
+
+// Validate returns an error if the PR authorship mode is not a recognized value.
+func (p PRAuthorship) Validate() error {
+	switch p {
+	case "", PRAuthorshipUserPreferred, PRAuthorshipAppOnly, PRAuthorshipUserRequired:
+		return nil
+	default:
+		return fmt.Errorf("invalid pr_authorship mode: %q", p)
+	}
+}
+
 // OrgSettings is the strongly-typed representation of organizations.settings JSONB.
 type OrgSettings struct {
 	AutonomyLevel        AutonomyLevel        `json:"autonomy_level"`
@@ -169,6 +191,8 @@ type OrgSettings struct {
 	ContextRefreshIntervalDays int             `json:"context_refresh_interval_days,omitempty"`
 	OrgSize                    OrgSize         `json:"org_size,omitempty"`
 	ContextLimits              ContextLimits   `json:"context_limits,omitempty"`
+	PRAuthorship               PRAuthorship    `json:"pr_authorship,omitempty"`
+	PRDraftDefault             bool            `json:"pr_draft_default,omitempty"`
 }
 
 // Agent autonomy mode constants.
@@ -392,6 +416,11 @@ func ParseOrgSettings(raw json.RawMessage) (OrgSettings, error) {
 
 	// Apply org-size-aware defaults for context limits.
 	s.ContextLimits = s.ContextLimits.WithDefaults(effectiveSize.ContextLimits())
+
+	// PR authorship: default to user_preferred (zero-value treated as user_preferred).
+	if s.PRAuthorship == "" {
+		s.PRAuthorship = PRAuthorshipUserPreferred
+	}
 
 	return s, nil
 }
