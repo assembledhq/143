@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -211,7 +212,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			uploadStore = storage.NewFileUploadStore(cfg.UploadStorageDir, "/api/v1/uploads/files")
 		} else {
 			s3Client := s3.NewFromConfig(awsCfg)
-			uploadStore = storage.NewS3UploadStore(s3Client, cfg.UploadS3Bucket, cfg.UploadS3Prefix, cfg.UploadS3Endpoint)
+			endpoint := cfg.UploadS3Endpoint
+			if endpoint == "" {
+				endpoint = fmt.Sprintf("https://%s.s3.%s.amazonaws.com", cfg.UploadS3Bucket, cfg.UploadS3Region)
+			}
+			uploadStore = storage.NewS3UploadStore(s3Client, cfg.UploadS3Bucket, cfg.UploadS3Prefix, endpoint)
 			logger.Info().Str("bucket", cfg.UploadS3Bucket).Str("prefix", cfg.UploadS3Prefix).Msg("upload S3 store configured")
 		}
 	} else {
