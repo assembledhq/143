@@ -82,6 +82,25 @@ func (m *mockMessageSource) GetThread(_ context.Context, messageID string) (*int
 }
 
 // --------------------------------------------------------------------------
+// Mock: IssueCreator
+// --------------------------------------------------------------------------
+
+type mockIssueCreator struct {
+	name string
+}
+
+func (m *mockIssueCreator) Name() string { return m.name }
+
+func (m *mockIssueCreator) CreateIssue(_ context.Context, params integration.CreateIssueParams) (*integration.CreateIssueResult, error) {
+	sid := "session-mock-123"
+	return &integration.CreateIssueResult{
+		ID:        "issue-mock-456",
+		Title:     params.Title,
+		SessionID: &sid,
+	}, nil
+}
+
+// --------------------------------------------------------------------------
 // Helper: build a registry with all integration types
 // --------------------------------------------------------------------------
 
@@ -92,6 +111,7 @@ func buildFullTestRegistry() *integration.Registry {
 	reg.RegisterCodeReviewSource(&mockCodeReviewSource{name: "github"})
 	reg.RegisterDocumentStore(&mockDocumentStore{name: "notion"})
 	reg.RegisterMessageSource(&mockMessageSource{name: "slack"})
+	reg.RegisterIssueCreator(&mockIssueCreator{name: "issue"})
 	return reg
 }
 
@@ -381,22 +401,23 @@ func TestListToolsAllIntegrations(t *testing.T) {
 	tr := NewToolRegistry(buildFullTestRegistry())
 	tools := tr.ListTools()
 
-	// 4 error tracker + 5 task manager + 2 document store + 2 code review + 2 message source = 15
-	if len(tools) != 15 {
+	// 4 error tracker + 5 task manager + 2 document store + 2 code review + 2 message source + 1 issue creator = 16
+	if len(tools) != 16 {
 		names := make([]string, len(tools))
 		for i, tool := range tools {
 			names[i] = tool.Name
 		}
-		t.Fatalf("expected 15 tools, got %d: %v", len(tools), names)
+		t.Fatalf("expected 16 tools, got %d: %v", len(tools), names)
 	}
 
 	expected := map[string]bool{
-		"github_list_recent_prs": false,
-		"github_get_pr_reviews":  false,
+		"github_list_recent_prs":  false,
+		"github_get_pr_reviews":   false,
 		"notion_search_documents": false,
 		"notion_get_document":     false,
 		"slack_search_messages":   false,
 		"slack_get_thread":        false,
+		"issue_create":            false,
 	}
 	for _, tool := range tools {
 		if _, ok := expected[tool.Name]; ok {
@@ -407,5 +428,82 @@ func TestListToolsAllIntegrations(t *testing.T) {
 		if !found {
 			t.Errorf("missing expected tool: %s", name)
 		}
+	}
+}
+
+// --------------------------------------------------------------------------
+// Tests: IssueCreator dispatch (callIssueCreator)
+// --------------------------------------------------------------------------
+
+func TestCallToolIssueCreatorCreate(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildFullTestRegistry())
+	args := `{"title":"New bug","description":"Something is broken","severity":"warning","tags":["backend"]}`
+	result := tr.CallTool(context.Background(), "issue_create", json.RawMessage(args))
+
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+
+	var resp integration.CreateIssueResult
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &resp); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if resp.ID != "issue-mock-456" {
+		t.Errorf("expected issue ID issue-mock-456, got %s", resp.ID)
+	}
+	if resp.Title != "New bug" {
+		t.Errorf("expected title 'New bug', got %s", resp.Title)
+	}
+	if resp.SessionID == nil || *resp.SessionID != "session-mock-123" {
+		t.Error("expected session ID session-mock-123")
+	}
+}
+
+func TestCallToolIssueCreatorCreate_MissingTitle(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildFullTestRegistry())
+	args := `{"title":"","description":"desc"}`
+	result := tr.CallTool(context.Background(), "issue_create", json.RawMessage(args))
+
+	if !result.IsError {
+		t.Fatal("expected error for missing title")
+	}
+	if !strings.Contains(result.Content[0].Text, "title is required") {
+		t.Errorf("expected 'title is required', got: %s", result.Content[0].Text)
+	}
+}
+
+func TestCallToolIssueCreatorCreate_MissingDescription(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildFullTestRegistry())
+	args := `{"title":"bug","description":""}`
+	result := tr.CallTool(context.Background(), "issue_create", json.RawMessage(args))
+
+	if !result.IsError {
+		t.Fatal("expected error for missing description")
+	}
+	if !strings.Contains(result.Content[0].Text, "description is required") {
+		t.Errorf("expected 'description is required', got: %s", result.Content[0].Text)
+	}
+}
+
+func TestCallToolIssueCreatorCreate_BadJSON(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildFullTestRegistry())
+	result := tr.CallTool(context.Background(), "issue_create", json.RawMessage(`{invalid`))
+
+	if !result.IsError {
+		t.Fatal("expected error for bad JSON")
+	}
+}
+
+func TestCallToolIssueCreatorUnknownMethod(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildFullTestRegistry())
+	result := tr.CallTool(context.Background(), "issue_delete", json.RawMessage(`{}`))
+
+	if !result.IsError {
+		t.Fatal("expected error for unknown method")
 	}
 }

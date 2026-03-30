@@ -24,7 +24,6 @@ func parsePlan(output string) (*Plan, error) {
 		Clusters       []Cluster        `json:"clusters"`
 		Skip           []SkipEntry      `json:"skip"`
 		ProjectPlans   []ProjectPlan    `json:"project_plans,omitempty"`
-		NewProjects    []NewProjectSpec `json:"new_projects,omitempty"`
 		LinearActions  []LinearAction   `json:"linear_actions,omitempty"`
 		SlotAllocation *SlotAllocation  `json:"slot_allocation,omitempty"`
 	}
@@ -53,7 +52,6 @@ func parsePlan(output string) (*Plan, error) {
 		Clusters:       payload.Clusters,
 		SkippedIssues:  payload.Skip,
 		ProjectPlans:   payload.ProjectPlans,
-		NewProjects:    payload.NewProjects,
 		LinearActions:  payload.LinearActions,
 		SlotAllocation: payload.SlotAllocation,
 	}, nil

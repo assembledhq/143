@@ -6,14 +6,15 @@ import "fmt"
 type IssueSource string
 
 const (
-	IssueSourceSentry IssueSource = "sentry"
-	IssueSourceLinear IssueSource = "linear"
-	IssueSourceManual IssueSource = "manual"
+	IssueSourceSentry  IssueSource = "sentry"
+	IssueSourceLinear  IssueSource = "linear"
+	IssueSourceManual  IssueSource = "manual"
+	IssueSourcePMAgent IssueSource = "pm_agent"
 )
 
 func (s IssueSource) Validate() error {
 	switch s {
-	case IssueSourceSentry, IssueSourceLinear, IssueSourceManual:
+	case IssueSourceSentry, IssueSourceLinear, IssueSourceManual, IssueSourcePMAgent:
 		return nil
 	default:
 		return fmt.Errorf("invalid IssueSource: %q", s)
