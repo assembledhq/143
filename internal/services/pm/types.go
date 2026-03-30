@@ -19,7 +19,6 @@ type Plan struct {
 	Clusters       []Cluster       `json:"clusters"`
 	SkippedIssues  []SkipEntry     `json:"skipped_issues"`
 	ProjectPlans   []ProjectPlan   `json:"project_plans,omitempty"`
-	NewProjects    []NewProjectSpec `json:"new_projects,omitempty"`
 	LinearActions  []LinearAction  `json:"linear_actions,omitempty"`
 	SlotAllocation *SlotAllocation `json:"slot_allocation,omitempty"`
 	IssuesReviewed int             `json:"issues_reviewed"`
@@ -240,18 +239,6 @@ type SlotAllocation struct {
 	Reactive  int            `json:"reactive"`
 	Projects  map[string]int `json:"projects"`
 	Reasoning string         `json:"reasoning"`
-}
-
-// NewProjectSpec is a project the PM agent recommends creating from a cluster
-// of related issues or a strategic initiative it identifies.
-type NewProjectSpec struct {
-	Title              string      `json:"title"`
-	Goal               string      `json:"goal"`
-	Scope              string      `json:"scope,omitempty"`
-	CompletionCriteria string      `json:"completion_criteria,omitempty"`
-	IssueIDs           []uuid.UUID `json:"issue_ids"`
-	Priority           int         `json:"priority"`
-	Reasoning          string      `json:"reasoning"`
 }
 
 // LinearAction is an action the PM recommends taking on a Linear issue.

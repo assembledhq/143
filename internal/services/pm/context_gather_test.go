@@ -76,6 +76,14 @@ func (m *gatherSessionStoreMock) ListRecentByOrg(ctx context.Context, orgID uuid
 	return m.recent, nil
 }
 
+func (m *gatherSessionStoreMock) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string) error {
+	return nil
+}
+
+func (m *gatherSessionStoreMock) UpdatePMPlanID(ctx context.Context, orgID, runID, planID uuid.UUID) error {
+	return nil
+}
+
 type gatherOrgStoreMock struct {
 	org models.Organization
 	err error

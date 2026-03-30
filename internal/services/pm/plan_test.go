@@ -96,30 +96,17 @@ func TestPlanToDecisionLog(t *testing.T) {
 	require.Equal(t, models.PMDecisionTypeCluster, entries[2].Decision, "should mark cluster")
 }
 
-func TestParsePlan_WithNewProjectsAndLinearActions(t *testing.T) {
+func TestParsePlan_WithLinearActions(t *testing.T) {
 	t.Parallel()
 
-	issueID := uuid.New()
-	issueID2 := uuid.New()
 	issueID3 := uuid.New()
 
 	output := `<pm-plan>
 {
-  "analysis": "Found a cluster of auth issues that warrant a project.",
+  "analysis": "Found auth issues that need Linear updates.",
   "tasks": [],
   "clusters": [],
   "skip": [],
-  "new_projects": [
-    {
-      "title": "Auth Hardening",
-      "goal": "Fix all authentication edge cases",
-      "scope": "internal/auth/ and internal/api/middleware/",
-      "completion_criteria": "All auth tests pass with 90% coverage",
-      "issue_ids": ["` + issueID.String() + `", "` + issueID2.String() + `"],
-      "priority": 1,
-      "reasoning": "3 related auth failures in the last week"
-    }
-  ],
   "linear_actions": [
     {
       "issue_id": "` + issueID3.String() + `",
@@ -133,11 +120,7 @@ func TestParsePlan_WithNewProjectsAndLinearActions(t *testing.T) {
 </pm-plan>`
 
 	plan, err := parsePlan(output)
-	require.NoError(t, err, "parsePlan should succeed with new_projects and linear_actions")
-	require.Len(t, plan.NewProjects, 1, "should parse new_projects")
-	require.Equal(t, "Auth Hardening", plan.NewProjects[0].Title, "should parse project title")
-	require.Equal(t, 2, len(plan.NewProjects[0].IssueIDs), "should parse project issue IDs")
-	require.Equal(t, 1, plan.NewProjects[0].Priority, "should parse project priority")
+	require.NoError(t, err, "parsePlan should succeed with linear_actions")
 	require.Len(t, plan.LinearActions, 1, "should parse linear_actions")
 	require.Equal(t, issueID3, plan.LinearActions[0].IssueID, "should parse linear action issue ID")
 	require.Equal(t, "ENG-456", plan.LinearActions[0].ExternalID, "should parse linear action external ID")

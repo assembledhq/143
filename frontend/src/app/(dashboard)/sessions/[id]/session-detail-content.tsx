@@ -982,8 +982,8 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
         );
       })()}
 
-      {/* Input bar */}
-      <div className="border-t border-border p-3 bg-background">
+      {/* Input bar — hidden for PM agent sessions (PM agent doesn't accept interactive input) */}
+      {session.agent_type !== "pm_agent" && <div className="border-t border-border p-3 bg-background">
         {/* Plan mode indicator */}
         {planMode && (
           <div className="flex items-center gap-2 mb-2 px-1">
@@ -1147,7 +1147,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
             </div>
           </div>
         </div>
-      </div>
+      </div>}
     </div>
   );
 }

@@ -51,6 +51,14 @@ func (m *mockSessionStore) ListRecentByOrg(ctx context.Context, orgID uuid.UUID,
 	return nil, nil
 }
 
+func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string) error {
+	return nil
+}
+
+func (m *mockSessionStore) UpdatePMPlanID(ctx context.Context, orgID, runID, planID uuid.UUID) error {
+	return nil
+}
+
 type mockOrgStore struct {
 	org models.Organization
 }

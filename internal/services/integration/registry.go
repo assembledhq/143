@@ -20,16 +20,18 @@ type Registry struct {
 	documentStores    map[string]DocumentStore
 	messageSources    map[string]MessageSource
 	codeReviewSources map[string]CodeReviewSource
+	issueCreators     map[string]IssueCreator
 }
 
 // NewRegistry creates an empty integration registry.
 func NewRegistry() *Registry {
 	return &Registry{
-		errorTrackers:  make(map[string]ErrorTracker),
-		taskManagers:   make(map[string]TaskManager),
-		documentStores: make(map[string]DocumentStore),
-		messageSources: make(map[string]MessageSource),
+		errorTrackers:     make(map[string]ErrorTracker),
+		taskManagers:      make(map[string]TaskManager),
+		documentStores:    make(map[string]DocumentStore),
+		messageSources:    make(map[string]MessageSource),
 		codeReviewSources: make(map[string]CodeReviewSource),
+		issueCreators:     make(map[string]IssueCreator),
 	}
 }
 
@@ -178,6 +180,35 @@ func (r *Registry) CodeReviewSource(name string) (CodeReviewSource, error) {
 	return cr, nil
 }
 
+// RegisterIssueCreator adds an issue creator (e.g. internal 143 API).
+func (r *Registry) RegisterIssueCreator(provider IssueCreator) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.issueCreators[provider.Name()] = provider
+}
+
+// IssueCreators returns all registered issue creators.
+func (r *Registry) IssueCreators() []IssueCreator {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result := make([]IssueCreator, 0, len(r.issueCreators))
+	for _, ic := range r.issueCreators {
+		result = append(result, ic)
+	}
+	return result
+}
+
+// IssueCreator returns a specific issue creator by name, or an error if not found.
+func (r *Registry) IssueCreator(name string) (IssueCreator, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	ic, ok := r.issueCreators[name]
+	if !ok {
+		return nil, fmt.Errorf("issue creator %q not registered", name)
+	}
+	return ic, nil
+}
+
 // HasAny returns true if at least one provider is registered.
 func (r *Registry) HasAny() bool {
 	r.mu.RLock()
@@ -186,7 +217,8 @@ func (r *Registry) HasAny() bool {
 		len(r.taskManagers) > 0 ||
 		len(r.documentStores) > 0 ||
 		len(r.messageSources) > 0 ||
-		len(r.codeReviewSources) > 0
+		len(r.codeReviewSources) > 0 ||
+		len(r.issueCreators) > 0
 }
 
 // Summary returns a human-readable summary of registered providers.
@@ -208,6 +240,9 @@ func (r *Registry) Summary() map[string][]string {
 	}
 	for name := range r.codeReviewSources {
 		m["code_review_sources"] = append(m["code_review_sources"], name)
+	}
+	for name := range r.issueCreators {
+		m["issue_creators"] = append(m["issue_creators"], name)
 	}
 	return m
 }

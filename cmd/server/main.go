@@ -343,6 +343,8 @@ func buildServices(
 	pmSvc.SetProjectStores(projectStore, projectTaskStore, projectCycleStore)
 	pmSvc.SetPMDocumentStore(pmDocumentStore)
 	pmSvc.SetSlackStores(integrationStore, credentialStore)
+	pmSvc.SetSessionLogStore(sessionLogStore)
+	pmSvc.SetInternalAPI(cfg.BaseURL+"/api/v1/internal", cfg.SessionSecret)
 	pmSvc.SetSkillsBuilder(orchestrator)
 
 	logger.Info().
