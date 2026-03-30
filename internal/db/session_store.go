@@ -273,11 +273,13 @@ func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 // ClaimIdle atomically transitions an idle session to running and returns the
 // claimed session row. Used when a user sends a follow-up message so only one
 // continuation can be queued at a time.
+// Sessions whose sandbox snapshot has been destroyed cannot be claimed.
 func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
 	query := `
 		UPDATE sessions
 		SET status = 'running'
 		WHERE id = @id AND org_id = @org_id AND status = 'idle'
+		  AND sandbox_state != 'destroyed'
 		RETURNING ` + sessionSelectColumns
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
@@ -293,11 +295,13 @@ func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID
 // ClaimForResume atomically transitions a terminal session to running so it
 // can be resumed with a follow-up message. Used when a user sends a message
 // to a completed/failed/cancelled/pr_created session.
+// Sessions whose sandbox snapshot has been destroyed cannot be resumed.
 func (s *SessionStore) ClaimForResume(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
 	query := `
 		UPDATE sessions
 		SET status = 'running', completed_at = NULL
 		WHERE id = @id AND org_id = @org_id AND status IN ('completed', 'pr_created', 'failed', 'cancelled')
+		  AND sandbox_state != 'destroyed'
 		RETURNING ` + sessionSelectColumns
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{

@@ -597,6 +597,13 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reject early if the session's sandbox snapshot has been destroyed
+	// (expired after 30 days). The session can no longer be resumed.
+	if session.SandboxState == string(models.SandboxStateDestroyed) {
+		writeError(w, r, http.StatusGone, "SNAPSHOT_EXPIRED", "this session's environment has expired and can no longer be continued")
+		return
+	}
+
 	// Build the user message from the request context.
 	user := middleware.UserFromContext(r.Context())
 	var userID *uuid.UUID
