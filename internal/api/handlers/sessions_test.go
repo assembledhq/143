@@ -1962,6 +1962,58 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 			expectedBody: "NOT_RESUMABLE",
 		},
 		{
+			name: "rejects message to completed session with destroyed sandbox snapshot",
+			body: `{"message":"Continue please"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionColumns).AddRow(
+							sessionID, uuid.New(), orgID, "claude-code", "completed", "semi", "low",
+							nil, nil, nil, nil,
+							nil, &now, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil, // triggered_by_user_id
+							nil, 3, &now, "destroyed", nil,
+							nil, nil, nil, nil, nil,
+							now,
+						),
+					)
+			},
+			expectedCode: http.StatusGone,
+			expectedBody: "SNAPSHOT_EXPIRED",
+		},
+		{
+			name: "rejects message to idle session with destroyed sandbox snapshot",
+			body: `{"message":"Continue please"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionColumns).AddRow(
+							sessionID, uuid.New(), orgID, "claude-code", "idle", "semi", "low",
+							nil, nil, nil, nil,
+							nil, &now, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil, // triggered_by_user_id
+							nil, 2, &now, "destroyed", nil,
+							nil, nil, nil, nil, nil,
+							now,
+						),
+					)
+			},
+			expectedCode: http.StatusGone,
+			expectedBody: "SNAPSHOT_EXPIRED",
+		},
+		{
 			name: "sends message to completed session via ClaimForResume",
 			body: `{"message":"Continue working on this"}`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {

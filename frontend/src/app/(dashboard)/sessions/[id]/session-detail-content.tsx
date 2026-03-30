@@ -676,10 +676,11 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
   const isClaudeCode = session.agent_type === "claude_code";
 
   const isRunning = session.status === "running";
-  // Allow messaging in any state except "skipped" (never ran, no workspace)
-  // and "pending" (agent not started yet). The backend will reject statuses
-  // it cannot handle, so this is safe to be permissive.
-  const canSendMessage = session.status !== "skipped" && session.status !== "pending";
+  const isSnapshotExpired = session.sandbox_state === "destroyed";
+  // Allow messaging in any state except "skipped" (never ran, no workspace),
+  // "pending" (agent not started yet), and sessions whose sandbox snapshot has
+  // expired (sandbox_state === "destroyed") — the environment no longer exists.
+  const canSendMessage = session.status !== "skipped" && session.status !== "pending" && !isSnapshotExpired;
 
   const availableModels = useMemo(() => {
     const agentType = AGENT_TYPE_OPTIONS.find((a) => a.key === session.agent_type);
@@ -990,6 +991,16 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
         );
       })()}
 
+      {/* Snapshot expired banner */}
+      {isSnapshotExpired && (
+        <div className="flex items-center gap-2 px-4 py-2.5 text-xs border-t bg-amber-50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800/40 text-amber-800 dark:text-amber-300">
+          <Clock className="h-3.5 w-3.5 shrink-0" />
+          <span>
+            This session&apos;s environment has expired. Sessions can be continued for up to 30 days after their last activity. To make further changes, please start a new session.
+          </span>
+        </div>
+      )}
+
       {/* Input bar — hidden for PM agent sessions (PM agent doesn't accept interactive input) */}
       {session.agent_type !== "pm_agent" && <div className="border-t border-border p-3 bg-background">
         {/* Plan mode indicator */}
@@ -1016,7 +1027,9 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
             onChange={(e) => setMessage(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder={
-              !canSendMessage
+              isSnapshotExpired
+                ? "Session environment has expired and can no longer be continued"
+                : !canSendMessage
                 ? "Session is not active"
                 : planMode
                 ? "Describe what you want to plan..."
@@ -1390,7 +1403,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 sessionId={id}
                 comments={comments}
                 diffFiles={filteredFiles}
-                canSendMessage={session.status !== "skipped" && session.status !== "pending"}
+                canSendMessage={session.status !== "skipped" && session.status !== "pending" && session.sandbox_state !== "destroyed"}
               />
             </div>
           )}
