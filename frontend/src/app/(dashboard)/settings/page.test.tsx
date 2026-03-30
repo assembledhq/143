@@ -4,6 +4,7 @@ import SettingsPage from './page';
 
 const {
   settingsGetMock,
+  githubStatusGetMock,
 } = vi.hoisted(() => ({
   settingsGetMock: vi.fn().mockResolvedValue({
     data: {
@@ -11,12 +12,22 @@ const {
       settings: {},
     },
   }),
+  githubStatusGetMock: vi.fn().mockResolvedValue({
+    connected: false,
+    has_repo_scope: false,
+    pr_authorship_mode: 'user_preferred',
+  }),
 }));
 
 vi.mock('@/lib/api', () => ({
   api: {
     settings: {
       get: settingsGetMock,
+    },
+    githubStatus: {
+      get: githubStatusGetMock,
+      connect: vi.fn(),
+      disconnect: vi.fn(),
     },
   },
 }));
