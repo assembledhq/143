@@ -210,4 +210,130 @@ func TestSessionStore_UpdateResult(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestSessionStore_ClaimIdle(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface)
+		wantErr   bool
+	}{
+		{
+			name: "claims idle session successfully",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				now := time.Now()
+				mock.ExpectQuery("UPDATE sessions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionTestColumns).AddRow(
+							newAgentSessionRow(uuid.New(), uuid.New(), uuid.New(), now)...,
+						),
+					)
+			},
+			wantErr: false,
+		},
+		{
+			name: "returns error when no matching row",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("UPDATE sessions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionTestColumns))
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err)
+			defer mock.Close()
+
+			store := NewSessionStore(mock)
+			tt.setupMock(mock)
+
+			_, err = store.ClaimIdle(context.Background(), uuid.New(), uuid.New())
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestSessionStore_ClaimForResume(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface)
+		wantErr   bool
+	}{
+		{
+			name: "resumes completed session successfully",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				now := time.Now()
+				mock.ExpectQuery("UPDATE sessions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionTestColumns).AddRow(
+							newAgentSessionRow(uuid.New(), uuid.New(), uuid.New(), now)...,
+						),
+					)
+			},
+			wantErr: false,
+		},
+		{
+			name: "returns error when no matching row",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("UPDATE sessions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionTestColumns))
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err)
+			defer mock.Close()
+
+			store := NewSessionStore(mock)
+			tt.setupMock(mock)
+
+			_, err = store.ClaimForResume(context.Background(), uuid.New(), uuid.New())
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestSessionStore_UpdatePMPlanID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+
+	mock.ExpectExec("UPDATE sessions SET pm_plan_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdatePMPlanID(context.Background(), uuid.New(), uuid.New(), uuid.New())
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func stringPtr(s string) *string { return &s }
