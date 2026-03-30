@@ -895,6 +895,14 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
     },
   });
 
+  // Fetch GitHub connection status for PR authorship indicator.
+  const { data: ghStatus } = useQuery({
+    queryKey: ["github-status"],
+    queryFn: () => api.githubStatus.get(),
+    enabled: canCreatePR,
+    staleTime: 5 * 60 * 1000, // 5 min
+  });
+
   // Auto-resize textarea
   useEffect(() => {
     const el = textareaRef.current;
@@ -1114,8 +1122,19 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
                   size="icon"
                   variant="ghost"
                   className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
-                  title="Create PR"
-                  disabled={createPRMutation.isPending}
+                  title={
+                    ghStatus?.connected && ghStatus?.has_repo_scope
+                      ? `Create PR as @${ghStatus.github_login}`
+                      : ghStatus?.connected && !ghStatus?.has_repo_scope
+                        ? "Create PR (app token — reconnect GitHub with repo access for user-authored PRs)"
+                        : ghStatus?.pr_authorship_mode === "user_required"
+                          ? "Connect GitHub to create PRs"
+                          : "Create PR"
+                  }
+                  disabled={
+                    createPRMutation.isPending ||
+                    (ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected)
+                  }
                   onClick={() => createPRMutation.mutate()}
                 >
                   <GitPullRequest className="h-3.5 w-3.5" />
