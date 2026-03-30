@@ -219,8 +219,6 @@ func TestTokenModeFromTaskComplexity(t *testing.T) {
 	}
 }
 
-func strPtr(s string) *string { return &s }
-
 func TestCanDispatchForProject_Sequential(t *testing.T) {
 	t.Parallel()
 

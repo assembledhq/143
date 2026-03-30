@@ -17,6 +17,7 @@ func TestIssueSourceValidate(t *testing.T) {
 		{name: "valid sentry", value: IssueSourceSentry},
 		{name: "valid linear", value: IssueSourceLinear},
 		{name: "valid manual", value: IssueSourceManual},
+		{name: "valid pm_agent", value: IssueSourcePMAgent},
 		{name: "invalid empty", value: IssueSource(""), wantErr: true},
 		{name: "invalid unknown", value: IssueSource("jira"), wantErr: true},
 	}

@@ -46,6 +46,15 @@ func BuildRegistryFromEnv(logger io.Writer) *integration.Registry {
 		fmt.Fprintln(logger, "143-tools: registered notion")
 	}
 
+	if token := os.Getenv("INTERNAL_API_TOKEN"); token != "" {
+		apiURL := os.Getenv("INTERNAL_API_URL")
+		if apiURL != "" {
+			creator := integration.NewInternalIssueCreator(token, apiURL)
+			reg.RegisterIssueCreator(creator)
+			fmt.Fprintln(logger, "143-tools: registered issue creator")
+		}
+	}
+
 	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
 		owner := os.Getenv("GITHUB_REPO_OWNER")
 		repo := os.Getenv("GITHUB_REPO_NAME")

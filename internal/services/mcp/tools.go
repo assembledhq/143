@@ -196,6 +196,26 @@ func (tr *ToolRegistry) ListTools() []Tool {
 		)
 	}
 
+	for _, ic := range tr.integrations.IssueCreators() {
+		prefix := ic.Name()
+		tools = append(tools,
+			Tool{
+				Name:        prefix + "_create",
+				Description: "Create a new issue for the engineering team to work on. Returns the created issue's UUID.",
+				InputSchema: ToolSchema{
+					Type: "object",
+					Properties: map[string]SchemaProperty{
+						"title":       {Type: "string", Description: "Issue title (concise, descriptive)"},
+						"description": {Type: "string", Description: "Detailed description of the issue, including context and evidence"},
+						"severity":    {Type: "string", Description: "Issue severity level", Enum: []string{"info", "warning", "error", "critical"}, Default: "info"},
+						"tags":        {Type: "array", Description: "Tags to categorize the issue", Items: &SchemaProperty{Type: "string"}},
+					},
+					Required: []string{"title", "description"},
+				},
+			},
+		)
+	}
+
 	for _, ms := range tr.integrations.MessageSources() {
 		prefix := ms.Name()
 		tools = append(tools,
@@ -274,6 +294,15 @@ func (tr *ToolRegistry) CallTool(ctx context.Context, name string, args json.Raw
 		}
 		method := name[len(prefix):]
 		return tr.callMessageSource(ctx, ms, method, args)
+	}
+
+	for _, ic := range tr.integrations.IssueCreators() {
+		prefix := ic.Name() + "_"
+		if len(name) <= len(prefix) || name[:len(prefix)] != prefix {
+			continue
+		}
+		method := name[len(prefix):]
+		return tr.callIssueCreator(ctx, ic, method, args)
 	}
 
 	return ErrorResult(fmt.Sprintf("unknown tool: %s", name))
@@ -589,6 +618,45 @@ func (tr *ToolRegistry) callMessageSource(ctx context.Context, ms integration.Me
 
 	default:
 		return ErrorResult(fmt.Sprintf("unknown message source method: %s", method))
+	}
+}
+
+// --------------------------------------------------------------------------
+// Issue creator dispatch
+// --------------------------------------------------------------------------
+
+func (tr *ToolRegistry) callIssueCreator(ctx context.Context, ic integration.IssueCreator, method string, args json.RawMessage) *ToolCallResult {
+	switch method {
+	case "create":
+		var p struct {
+			Title       string   `json:"title"`
+			Description string   `json:"description"`
+			Severity    string   `json:"severity"`
+			Tags        []string `json:"tags"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		if p.Title == "" {
+			return ErrorResult("title is required")
+		}
+		if p.Description == "" {
+			return ErrorResult("description is required")
+		}
+		params := integration.CreateIssueParams{
+			Title:       p.Title,
+			Description: p.Description,
+			Severity:    p.Severity,
+			Tags:        p.Tags,
+		}
+		result, err := ic.CreateIssue(ctx, params)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("create issue failed: %s", err))
+		}
+		return jsonResult(result)
+
+	default:
+		return ErrorResult(fmt.Sprintf("unknown issue creator method: %s", method))
 	}
 }
 

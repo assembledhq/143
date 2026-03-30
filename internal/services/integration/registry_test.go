@@ -78,6 +78,16 @@ func (m *mockMsgSource) SearchMessages(_ context.Context, _ string, _ MessageFil
 }
 func (m *mockMsgSource) GetThread(_ context.Context, _ string) (*Thread, error) { return nil, nil }
 
+type mockIssueCreator struct {
+	name   string
+	result *CreateIssueResult
+}
+
+func (m *mockIssueCreator) Name() string { return m.name }
+func (m *mockIssueCreator) CreateIssue(_ context.Context, _ CreateIssueParams) (*CreateIssueResult, error) {
+	return m.result, nil
+}
+
 // --- registry tests ---
 
 func TestRegistry_RegisterAndRetrieve(t *testing.T) {
@@ -89,6 +99,7 @@ func TestRegistry_RegisterAndRetrieve(t *testing.T) {
 	r.RegisterTaskManager(&mockTaskManager{name: "linear"})
 	r.RegisterDocumentStore(&mockDocStore{name: "notion"})
 	r.RegisterMessageSource(&mockMsgSource{name: "slack"})
+	r.RegisterIssueCreator(&mockIssueCreator{name: "issue"})
 
 	if !r.HasAny() {
 		t.Fatal("expected HasAny to be true")
@@ -126,6 +137,14 @@ func TestRegistry_RegisterAndRetrieve(t *testing.T) {
 	if ms.Name() != "slack" {
 		t.Errorf("expected slack, got %s", ms.Name())
 	}
+
+	ic, err := r.IssueCreator("issue")
+	if err != nil {
+		t.Fatalf("IssueCreator: %v", err)
+	}
+	if ic.Name() != "issue" {
+		t.Errorf("expected issue, got %s", ic.Name())
+	}
 }
 
 func TestRegistry_NotFound(t *testing.T) {
@@ -150,6 +169,11 @@ func TestRegistry_NotFound(t *testing.T) {
 	_, err = r.MessageSource("slack")
 	if err == nil {
 		t.Fatal("expected error for missing msg source")
+	}
+
+	_, err = r.IssueCreator("issue")
+	if err == nil {
+		t.Fatal("expected error for missing issue creator")
 	}
 }
 
@@ -181,6 +205,11 @@ func TestRegistry_ListAll(t *testing.T) {
 	ds := r.DocumentStores()
 	if len(ds) != 0 {
 		t.Fatalf("expected 0 doc stores, got %d", len(ds))
+	}
+
+	ics := r.IssueCreators()
+	if len(ics) != 0 {
+		t.Fatalf("expected 0 issue creators, got %d", len(ics))
 	}
 }
 
