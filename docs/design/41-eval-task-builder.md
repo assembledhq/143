@@ -153,6 +153,75 @@ We do NOT store full repo snapshots. Git is the snapshot mechanism:
 - Store the repo's remote URL at creation time to detect repo renames/deletions
 - If a repo is force-pushed and the commit becomes unreachable, mark the eval task as `snapshot_broken` and surface it in the UI
 
+### Config overlay: testing repo configuration changes
+
+A key use case: you've updated AGENTS.md, changed your coding conventions, added new skills to your repo, or modified `.claude/` configuration — and you want to run your eval suite with those changes applied to see if agent performance improves.
+
+The problem: `base_commit_sha` pins the entire repo, including config files. If you want to test a new AGENTS.md against historical eval tasks, you need the codebase at the old state but with the new config overlaid.
+
+**Solution: `config_ref` on EvalRun**
+
+Each eval run can optionally specify a `config_ref` — a branch, commit SHA, or PR head — from which repo-level configuration files are pulled and overlaid on top of `base_commit_sha`.
+
+```
+EvalRun {
+  ...
+  config_ref          *string         -- branch/SHA to pull config overlay from
+  ...
+}
+```
+
+When `config_ref` is set, the sandbox setup becomes:
+
+```
+1. git clone <repo> && git checkout <base_commit_sha>     # source code at historical state
+2. git show <config_ref>:AGENTS.md > AGENTS.md             # overlay config from config_ref
+   git show <config_ref>:CLAUDE.md > CLAUDE.md
+   git show <config_ref>:.claude/ > .claude/               # (if directory exists)
+   git show <config_ref>:.143/ > .143/                     # (if directory exists)
+```
+
+The overlay replaces a fixed set of **repo config paths**:
+
+| Path | What it controls |
+|------|-----------------|
+| `AGENTS.md` | Agent behavioral conventions, code patterns, testing instructions |
+| `CLAUDE.md` | Claude-specific context and instructions |
+| `.claude/` | Claude Code configuration directory |
+| `.143/` | 143-specific configuration (eval scripts, learned-conventions.md, etc.) |
+| `*.skills.*` or skill config files | Available skills and tool definitions |
+
+This is a file-level overlay, not a merge — the config_ref version completely replaces the base_commit version for each config file. Source code files outside the config paths are untouched.
+
+**What this enables:**
+
+- **Test AGENTS.md changes**: "I rewrote our AGENTS.md to be more specific about error handling. Do auth-related evals improve?"
+- **Test skill additions**: "I added a new debugging skill to .claude/. Does the agent use it and do complex evals score higher?"
+- **Test convention changes**: "I changed our learned-conventions.md to prefer table-driven tests. Do test-related eval criteria improve?"
+- **A/B test config across the eval suite**: Run the full suite once with the current config, once with the config branch, and compare scores in the batch results matrix.
+
+**What this does NOT cover:**
+
+Platform-level changes (model, agent type, org settings, PM documents) are already handled by the eval run configuration — you select those directly when starting a run. The config overlay is specifically for **files that live in the repo**.
+
+**UX in the run panel:**
+
+```
+┌──────────────────────────────────────────┐
+│  Run Eval                                │
+│                                          │
+│  Model:  [claude-opus-4-6      ▼]        │
+│  PM Docs: [Current             ▼]        │
+│                                          │
+│  Config overlay (optional):              │
+│  [branch or SHA_________________]        │
+│  Overlays: AGENTS.md, CLAUDE.md,         │
+│            .claude/, .143/               │
+│                                          │
+│  [Run]  [Run Batch]                      │
+└──────────────────────────────────────────┘
+```
+
 ---
 
 ## Input Freezing
@@ -176,7 +245,8 @@ These are covered in detail in [42-prompt-and-input-versioning.md](42-prompt-and
 
 | Input | Why it's already covered |
 |-------|------------------------|
-| **Codebase** (source code, CLAUDE.md, AGENTS.md, learned-conventions.md) | Git — checking out `base_commit_sha` gives exact state |
+| **Source code** | Git — checking out `base_commit_sha` gives exact state |
+| **Repo config** (AGENTS.md, CLAUDE.md, .claude/, .143/) | Also pinned by `base_commit_sha` by default. But can be **overlaid** from a different branch/commit via `config_ref` on the eval run — see "Config overlay" above. This is how you test repo configuration changes against your eval suite. |
 | **Product context** (org settings philosophy/direction/focus) | Already captured as `product_context_snapshot` on PMPlan |
 
 ### Inputs that are per-task (not versioned, captured directly)
@@ -303,6 +373,7 @@ EvalRun {
   model               string
   server_deploy_sha   string          -- pins prompt templates
   pm_document_set_pin_id UUID
+  config_ref          *string         -- optional: branch/SHA for repo config overlay
   context_overrides   jsonb
 
   -- Output
@@ -330,14 +401,26 @@ EvalRun {
 
 The most powerful feature: automatically discover good eval candidates from your repo's merged PRs.
 
+### Why a coding agent session
+
+The bootstrapper runs as a **coding agent session** — the same sandbox + agent infrastructure used for regular coding tasks. This is intentional: analyzing PR history, reading diffs, understanding linked issues, and generating good scoring criteria is judgment-heavy work that benefits from the agent having full repo context and tool access. A deterministic script can't judge whether a PR body constitutes a clear problem description or whether a diff represents a "single logical change."
+
+The bootstrapper session gets:
+- The repo cloned at HEAD (it needs access to full git history)
+- `143-tools github` CLI access (to read PR metadata, linked issues, review comments)
+- A system prompt explaining the bootstrap task and fitness criteria
+- The output schema for eval task candidates
+
 ### How it works
 
 1. User clicks **Bootstrap from PR History** in the evals settings.
-2. System scans recent merged PRs (configurable window, default: last 90 days).
-3. For each PR, it evaluates **bootstrap fitness**:
+2. System launches a coding agent session with the bootstrap prompt. The agent:
+   - Uses `git log` and `143-tools github` to scan recent merged PRs (configurable window, default: last 90 days)
+   - Reads each PR's diff, body, linked issues, and review history
+   - Evaluates **bootstrap fitness** using its judgment:
 
 ```
-Bootstrap Fitness Criteria:
+Bootstrap Fitness Criteria (agent evaluates these):
   - Human-authored (not from a bot or 143 itself)
   - Reasonably scoped (10-500 lines changed, 1-15 files touched)
   - Has a clear problem description (PR body or linked issue)
@@ -346,28 +429,28 @@ Bootstrap Fitness Criteria:
   - Single logical change (not a mega-PR with unrelated changes)
 ```
 
-4. The bootstrapper ranks candidates by fitness and presents the top N (default: 20) to the user.
-5. For each candidate, it auto-generates:
+3. The agent ranks candidates by fitness and outputs structured JSON with the top N (default: 20).
+4. For each candidate, the agent generates:
    - `base_commit_sha` from the PR's merge base
    - `solution_commit_sha` and `solution_diff` from the merge
-   - `issue_description` from the PR body + linked issue
-   - Proposed scoring criteria based on what the PR touched:
+   - `issue_description` synthesized from the PR body + linked issue (the agent rewrites this as a clear task description, since PR bodies are often written for reviewers, not for agents)
+   - Proposed scoring criteria based on what the PR touched and the agent's understanding of the change:
      - Always → `code_check` with `make test` or equivalent CI command
      - Always → `llm_judge` with notes comparing agent diff against solution diff for approach similarity
      - If tests were added → `code_check` running the specific test suite
      - If the change is stylistically interesting → `llm_judge` with notes about code quality expectations
 
-6. User reviews, adjusts criteria/weights, and saves as eval tasks.
+5. Candidates are presented to the user in the evals settings UI. User reviews, adjusts criteria/weights, and accepts to create eval tasks.
 
 ### Bootstrap quality signals
 
-The system prefers PRs that:
+The agent prefers PRs that:
 - Fix a bug with a clear reproduction (Sentry link, failing test)
 - Add a focused feature with clear acceptance criteria
 - Have reviewer approval with minimal back-and-forth (indicates clear scope)
 - Touch well-tested areas of the codebase (more deterministic grading possible)
 
-The system avoids PRs that:
+The agent avoids PRs that:
 - Are dependency bumps or auto-generated
 - Touch only config/docs
 - Have extensive merge conflicts
@@ -375,13 +458,19 @@ The system avoids PRs that:
 
 ### Continuous bootstrap
 
-Optionally, the system can run the bootstrapper on a schedule (e.g., weekly) and surface new candidates as suggestions in the evals settings. This keeps the eval suite growing organically as the team ships features.
+Optionally, the system can run a bootstrap session on a schedule (e.g., weekly via PM cadence) and surface new candidates as suggestions in the evals settings. This keeps the eval suite growing organically as the team ships features. The scheduled session runs the same agent prompt but filters to PRs merged since the last bootstrap run.
 
 ---
 
-## Running Evals with New Prompts and Documents
+## Running Evals with Changes
 
-A key use case: you've edited a prompt or added a new PM document and want to see the impact before deploying.
+Three categories of changes can be tested against the eval suite:
+
+| Change type | How to test it |
+|------------|---------------|
+| **Repo config** (AGENTS.md, CLAUDE.md, skills, .claude/) | Set `config_ref` to the branch/commit with your changes |
+| **Platform config** (model, agent type, PM documents) | Select different model or PM doc set in the run panel |
+| **Org settings** (token limits, reasoning effort, context limits) | Change the setting, then run — the current active settings version is captured in the manifest |
 
 ### Workflow
 
@@ -389,18 +478,22 @@ A key use case: you've edited a prompt or added a new PM document and want to se
 2. Select one or more eval tasks
 3. Click **Run with overrides**
 4. In the override panel:
-   - **PM Documents**: add/remove/edit documents for this run
-   - **Model**: optionally change the model
+   - **Model**: change the coding agent model
+   - **PM Documents**: swap in a different document set
+   - **Config overlay**: point to a branch with AGENTS.md / skills changes
 5. Run executes with overrides, results show alongside baseline runs for comparison
 
 ### Diff view
 
 The results page shows a side-by-side:
-- Left: baseline run (current production prompts/docs)
+- Left: baseline run (previous config)
 - Right: override run (your changes)
 - Delta: per-criterion score changes, highlighted green/red
 
-This lets you answer: "If I change the PM context to emphasize security, do the auth-related evals improve without regressing the feature evals?"
+This lets you answer:
+- "If I change the PM context to emphasize security, do the auth-related evals improve without regressing the feature evals?"
+- "I rewrote AGENTS.md to include more explicit testing instructions — do eval tasks with test criteria score higher?"
+- "Does switching from claude-sonnet to claude-opus improve pass rates enough to justify the cost?"
 
 ---
 
@@ -434,16 +527,16 @@ POST   /api/v1/evals/bootstrap/accept       -- accept candidates as eval tasks
 │  EvalTask    │────▶│  EvalRun         │────▶│  CriterionResult │
 │              │     │                  │     │  (per criterion)  │
 │  base_commit │     │  model           │     └──────────────┘
-│  scoring_    │     │  prompt_version  │
+│  scoring_    │     │  config_ref      │
 │    criteria  │     │  final_score     │
-│  prompt_     │     │  agent_diff      │
-│    version   │     │  agent_trace     │
+│  deploy_sha  │     │  agent_diff      │
+│              │     │  input_manifest  │
 └──────┬───────┘     └──────────────────┘
        │
-       │ source_pr_number
+       │ source_pr_number (bootstrapped from)
        ▼
 ┌──────────────┐
-│  PR History  │  (GitHub API / local git)
+│  PR History  │  (coding agent session scans via git + 143-tools)
 └──────────────┘
 ```
 
