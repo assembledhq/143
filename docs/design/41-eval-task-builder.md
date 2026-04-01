@@ -40,10 +40,13 @@ EvalTask {
   issue_description   string          -- what the agent is told to fix/build
   issue_context       jsonb           -- additional context (Sentry trace, Linear ticket, etc.)
 
-  -- Input configuration (frozen references)
-  prompt_version_id   *UUID           -- pinned prompt version (see doc 42)
-  pm_document_set_id  *UUID           -- pinned PM document snapshot (see doc 42)
-  context_overrides   jsonb           -- any additional context injections
+  -- Input configuration (frozen references, see doc 42)
+  prompt_version_id   *UUID           -- pinned prompt version
+  pm_document_set_pin_id *UUID        -- pinned PM document set
+  org_settings_version_id *UUID       -- pinned org settings version
+  memory_snapshot     jsonb           -- pinned learned conventions (memory IDs + content)
+  sandbox_image_digest *string        -- pinned sandbox container image
+  context_overrides   jsonb           -- any additional context injections (PM guidance, etc.)
 
   -- Scoring
   scoring_criteria    jsonb           -- array of ScoringCriterion (see below)
@@ -65,28 +68,64 @@ EvalTask {
 
 Each eval task has one or more scoring criteria. Criteria are evaluated independently and combined into a weighted final score.
 
+Every platform in the eval ecosystem (Braintrust, Langfuse, LangSmith, DeepEval, Arize Phoenix) converges on the same insight: **there are only two kinds of checks** — things a script can verify deterministically, and things that require judgment. We follow the same pattern.
+
 ```
 ScoringCriterion {
   name            string    -- e.g. "tests_pass", "minimal_diff", "correct_files_touched"
-  description     string    -- human-readable explanation of what this measures
-  grader_type     string    -- "deterministic" | "llm_judge" | "diff_similarity" | "custom_script"
-  grader_config   jsonb     -- grader-specific configuration (see Grader Types below)
+  notes           string    -- describe what good looks like and what would fail
+  grader_type     string    -- "code_check" | "llm_judge"
+  grader_config   jsonb     -- type-specific configuration (see below)
   weight          float     -- relative weight in final score (weights are normalized)
   required        bool      -- if true, failing this criterion fails the entire eval
-  fail_reasons    text[]    -- example failure modes to watch for
 }
 ```
 
-### Grader Types
+### Two Grader Primitives
 
-| Type | Config | What it checks |
-|------|--------|----------------|
-| `deterministic` | `{ "command": "make test", "timeout_seconds": 300 }` | Exit code 0 = pass. Runs in sandbox against agent output. |
-| `llm_judge` | `{ "rubric": "...", "model": "claude-sonnet-4-6", "dimensions": [...] }` | LLM scores output against rubric. Returns per-dimension scores. |
-| `diff_similarity` | `{ "max_files_changed": 5, "max_lines_added": 200, "similarity_threshold": 0.6 }` | Compares agent diff against known-good solution diff. Penalizes unnecessary changes. |
-| `custom_script` | `{ "script_path": ".143/eval-scripts/check_auth.sh", "args": [...] }` | User-provided script. Receives agent diff on stdin, exits 0/1, optional JSON score on stdout. |
-| `file_scope` | `{ "expected_files": ["src/auth.go", "src/auth_test.go"], "forbidden_files": ["go.mod"] }` | Checks that the right files were touched and wrong ones weren't. |
-| `regression_test` | `{ "test_pattern": "TestAuth.*", "must_add_test": true }` | Verifies specific tests pass and optionally that new tests were added. |
+Industry best practice (per Braintrust, LangSmith, Arize): use code-based checks where you can, LLM judges where you must, human review to calibrate both. Start binary (pass/fail) — numeric scales (1-10) produce inconsistent results from LLM judges.
+
+#### `code_check` — Deterministic, fast, cheap
+
+Runs a command in the sandbox against the agent's output. Exit code 0 = pass, non-zero = fail. Optional JSON on stdout for a numeric score.
+
+```json
+{ "command": "make test", "timeout_seconds": 300 }
+```
+
+This single primitive covers everything that was previously split across multiple grader types:
+- **CI/tests**: `{ "command": "make test" }`
+- **File scope**: `{ "command": "git diff --name-only | grep -q 'src/auth.go' && ! git diff --name-only | grep -q 'go.mod'" }`
+- **Regression tests**: `{ "command": "go test -run TestAuth ./..." }`
+- **Custom scripts**: `{ "command": ".143/eval-scripts/check_auth.sh" }`
+- **Lint/format**: `{ "command": "golangci-lint run ./..." }`
+
+The `notes` field on the criterion documents what the check verifies, for human understanding.
+
+#### `llm_judge` — For anything requiring judgment
+
+The user's `notes` field IS the rubric. The system wraps it in a judge prompt, passes the agent's diff + context, and gets back pass/fail + reasoning.
+
+```json
+{ "model": "claude-sonnet-4-6" }
+```
+
+The `notes` describe what to evaluate:
+> "The fix should be minimal — only touch files directly related to the auth token refresh bug. No unrelated refactoring. The diff should be under 100 lines. A new test should be added that would have caught the original bug."
+
+Best practices baked in (from Braintrust/DeepEval research):
+- **One dimension per criterion.** Don't ask a single judge to evaluate "correctness AND code quality AND test coverage." Create separate criteria.
+- **Binary by default.** The judge returns pass/fail + reasoning. If you need a numeric score, set `"output": "score"` in config to get 0.0-1.0.
+- **Reasoning is always returned.** Every LLM judge call includes chain-of-thought explaining the judgment. This is non-negotiable for debuggability.
+- **Solution diff comparison.** If the eval task has a `solution_diff`, it's automatically included in the judge context so it can compare approaches. No separate "diff_similarity" grader needed — just mention it in the notes.
+
+### Why only two types?
+
+The eval framework research across Braintrust, LangSmith, Langfuse, DeepEval, Arize Phoenix, and Patronus AI shows clear convergence:
+
+1. **Every platform offers code + LLM + human.** No platform has dropped either code or LLM graders.
+2. **The trend is toward simpler authoring, not fewer grader types.** Braintrust's "Loop" lets users describe failures in plain language and auto-generates scorers. DeepEval's G-Eval takes criteria in everyday language. The platforms are making it easier to create criteria, not adding more grader type taxonomies.
+3. **Six grader types is authoring friction, not capability.** `file_scope`, `regression_test`, `diff_similarity` are all just specific instances of either a shell command or an LLM rubric instruction. Having them as separate types means more dropdowns, more type-specific config forms, and more docs to maintain — with no additional capability.
 
 ---
 
@@ -118,27 +157,44 @@ We do NOT store full repo snapshots. Git is the snapshot mechanism:
 
 ## Input Freezing
 
-An eval is only reproducible if the inputs are frozen. Three categories of inputs need versioning:
+An eval is only reproducible if the inputs are frozen. A thorough audit of `orchestrator.RunAgent()` and the agent adapter layer identified **every input** that flows into an agent run. Here's what needs freezing and how:
 
-### 1. Prompts (system prompts, task preambles, validation prompts)
+### Inputs versioned by doc 42
 
-**Current state:** Prompts are embedded Go templates (`internal/prompts/templates/`). They change with code deploys. There is no versioning.
+These are covered in detail in [42-prompt-and-input-versioning.md](42-prompt-and-input-versioning.md):
 
-**Required:** Full prompt versioning with immutable snapshots. **This is not implemented and is spun out into [42-prompt-and-input-versioning.md](42-prompt-and-input-versioning.md).**
+| Input | Current state | Doc 42 solution |
+|-------|--------------|-----------------|
+| **Prompt templates** (19 templates in `internal/prompts/templates/`) | Embedded in Go binary, change with deploys, no history | `prompt_versions` table with auto-versioning on deploy |
+| **PM documents** (roadmap, philosophy, context) | Overwritten in place, no history | Insert-only versioning on `pm_documents` with `active` flag |
+| **Server deploy SHA** | Not recorded | Build ldflags + recorded in input manifest |
+| **Org settings** (token limits, confidence thresholds, context limits, autonomy) | Not explicitly versioned | Already follows insert-only pattern — record active version ID in manifest |
+| **Memory context** (learned conventions from review feedback) | Changes over time, not snapshotted | Snapshot selected memory IDs + content in manifest |
+| **Sandbox image version** | Uses mutable `"143-sandbox:latest"` | Pin to image digest, record in manifest |
+| **Integration skills doc** (auto-generated CLI tool docs) | Changes when integrations change | Content hash in manifest |
 
-Each eval task pins a `prompt_version_id`. When the eval runs, it uses that exact prompt text regardless of what the current production prompt is.
+### Inputs already versioned
 
-### 2. PM Documents (product context, roadmap, philosophy)
+| Input | Why it's already covered |
+|-------|------------------------|
+| **Codebase** (source code, CLAUDE.md, AGENTS.md, learned-conventions.md) | Git — checking out `base_commit_sha` gives exact state |
+| **Product context** (org settings philosophy/direction/focus) | Already captured as `product_context_snapshot` on PMPlan |
 
-**Current state:** `PMDocument` records store current content. Updates overwrite in place. No history.
+### Inputs that are per-task (not versioned, captured directly)
 
-**Required:** Immutable document snapshots. **Also covered in [42-prompt-and-input-versioning.md](42-prompt-and-input-versioning.md).**
+| Input | Where it lives |
+|-------|---------------|
+| **Issue description + context** | Stored directly on the EvalTask (`issue_description`, `issue_context`) |
+| **PM task guidance** (approach, risk, reasoning) | Stored on session as `PMApproach`/`PMReasoning` — captured in eval task's `context_overrides` |
+| **Model + model config** | Selected per eval run, stored on EvalRun |
+| **Complexity tier** | Stored on eval task as `complexity` |
 
-Each eval task pins a `pm_document_set_id` — a snapshot of all PM documents as they existed at a point in time.
+### Inputs intentionally NOT versioned
 
-### 3. Codebase context (CLAUDE.md, AGENTS.md, learned-conventions.md)
-
-These are already versioned by git — they're files in the repo. Checking out `base_commit_sha` automatically gives you the correct versions. No additional work needed.
+| Input | Why |
+|-------|-----|
+| **Credentials** (API keys, tokens) | Secrets — never stored in version history. Manifest records credential *source type* (user/team/org) since resolution order affects which endpoint is hit |
+| **Revision context** (previous diff + reviewer feedback) | Only applies to retry runs, not relevant for evals which always start fresh |
 
 ---
 
@@ -192,11 +248,13 @@ The eval task builder lives in **Settings > Evals** (new section alongside the e
 **Step 3: Configure scoring criteria**
 
 Repeatable form section. Each criterion:
-- Name, description
-- Grader type (dropdown) → type-specific config fields
+- Name
+- Notes — describe what good looks like and what would fail (free-text, natural language)
+- Type toggle: **Code check** (can a script verify this?) or **LLM judge** (needs judgment?)
+  - Code check → command field + optional timeout
+  - LLM judge → model selector (defaults to org's configured model)
 - Weight slider
 - Required checkbox
-- Example failure reasons (optional, helps LLM judges)
 
 **Step 4: Pin inputs**
 
@@ -242,10 +300,11 @@ EvalRun {
   task_id             UUID
   org_id              UUID
 
-  -- Configuration used
+  -- Configuration used (full input manifest per doc 42)
+  input_manifest      jsonb           -- complete frozen inputs (see doc 42 §4)
   model               string
   prompt_version_id   UUID
-  pm_document_set_id  UUID
+  pm_document_set_pin_id UUID
   context_overrides   jsonb
 
   -- Output
@@ -295,10 +354,10 @@ Bootstrap Fitness Criteria:
    - `solution_commit_sha` and `solution_diff` from the merge
    - `issue_description` from the PR body + linked issue
    - Proposed scoring criteria based on what the PR touched:
-     - If tests were added → `regression_test` criterion
-     - If few files changed → `file_scope` criterion
-     - Always → `deterministic` (CI must pass) + `diff_similarity` (solution comparison)
-     - If the change is stylistically interesting → `llm_judge` for code quality
+     - Always → `code_check` with `make test` or equivalent CI command
+     - Always → `llm_judge` with notes comparing agent diff against solution diff for approach similarity
+     - If tests were added → `code_check` running the specific test suite
+     - If the change is stylistically interesting → `llm_judge` with notes about code quality expectations
 
 6. User reviews, adjusts criteria/weights, and saves as eval tasks.
 
@@ -414,9 +473,9 @@ Eval tasks created here feed into doc 16's dataset buckets. PR-bootstrapped task
 
 1. **EvalTask and EvalRun schema** — migrations, models, store layer
 2. **Codebase snapshot mechanism** — sandbox checkout at arbitrary commits
-3. **Scoring criteria engine** — deterministic + diff_similarity graders first
-4. **Settings UI** — task list, create flow, run trigger, results display
-5. **LLM judge grader** — rubric-based scoring with calibration
+3. **Code check grader** — run commands in sandbox, capture exit code + output
+4. **LLM judge grader** — wrap user notes as rubric, call judge model, return pass/fail + reasoning
+5. **Settings UI** — task list, create flow, run trigger, results display
 6. **PR history bootstrapper** — scan, rank, propose candidates
 7. **Batch runs and comparison view** — multi-model/prompt matrices
 8. **Input freezing integration** — depends on doc 42 shipping first
