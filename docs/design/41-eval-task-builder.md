@@ -41,7 +41,7 @@ EvalTask {
   issue_context       jsonb           -- additional context (Sentry trace, Linear ticket, etc.)
 
   -- Input configuration (frozen references, see doc 42)
-  prompt_version_id   *UUID           -- pinned prompt version
+  server_deploy_sha   string          -- pins all prompt templates (they're in the binary)
   pm_document_set_pin_id *UUID        -- pinned PM document set
   org_settings_version_id *UUID       -- pinned org settings version
   memory_snapshot     jsonb           -- pinned learned conventions (memory IDs + content)
@@ -165,10 +165,9 @@ These are covered in detail in [42-prompt-and-input-versioning.md](42-prompt-and
 
 | Input | Current state | Doc 42 solution |
 |-------|--------------|-----------------|
-| **Prompt templates** (19 templates in `internal/prompts/templates/`) | Embedded in Go binary, change with deploys, no history | `prompt_versions` table with auto-versioning on deploy |
+| **Prompt templates** (19 templates in `internal/prompts/templates/`) | Embedded in Go binary, identical across all orgs, change only on deploy | `server_deploy_sha` — prompts are code, not config. The deploy SHA pins them all. |
 | **PM documents** (roadmap, philosophy, context) | Overwritten in place, no history | Insert-only versioning on `pm_documents` with `active` flag |
-| **Server deploy SHA** | Not recorded | Build ldflags + recorded in input manifest |
-| **Org settings** (token limits, confidence thresholds, context limits, autonomy) | Not explicitly versioned | Already follows insert-only pattern — record active version ID in manifest |
+| **Org settings** (token limits, confidence thresholds, context limits, autonomy) | Already insert-only versioned | Record active version ID in manifest |
 | **Memory context** (learned conventions from review feedback) | Changes over time, not snapshotted | Snapshot selected memory IDs + content in manifest |
 | **Sandbox image version** | Uses mutable `"143-sandbox:latest"` | Pin to image digest, record in manifest |
 | **Integration skills doc** (auto-generated CLI tool docs) | Changes when integrations change | Content hash in manifest |
@@ -258,9 +257,9 @@ Repeatable form section. Each criterion:
 
 **Step 4: Pin inputs**
 
-- Prompt version: "Current" or pick from version history (requires doc 42)
+- Server deploy SHA: defaults to current deploy (pins all prompt templates)
 - PM documents: "Current" or pick from snapshot history (requires doc 42)
-- Additional context overrides (JSON editor)
+- Additional context overrides (JSON editor, for PM guidance, memory, etc.)
 
 **Step 5: Review and save**
 
@@ -272,7 +271,6 @@ Repeatable form section. Each criterion:
 
 From the eval task detail page, click **Run** and choose:
 - **Model**: dropdown of available models (claude-opus-4-6, claude-sonnet-4-6, codex, gemini-cli, etc.)
-- **Prompt version**: override the pinned version for this run
 - **PM documents**: override the pinned document set for this run
 
 The run:
@@ -301,9 +299,9 @@ EvalRun {
   org_id              UUID
 
   -- Configuration used (full input manifest per doc 42)
-  input_manifest      jsonb           -- complete frozen inputs (see doc 42 §4)
+  input_manifest      jsonb           -- complete frozen inputs (see doc 42 §7)
   model               string
-  prompt_version_id   UUID
+  server_deploy_sha   string          -- pins prompt templates
   pm_document_set_pin_id UUID
   context_overrides   jsonb
 
@@ -391,7 +389,6 @@ A key use case: you've edited a prompt or added a new PM document and want to se
 2. Select one or more eval tasks
 3. Click **Run with overrides**
 4. In the override panel:
-   - **Prompt**: paste modified prompt text or select a draft version (doc 42)
    - **PM Documents**: add/remove/edit documents for this run
    - **Model**: optionally change the model
 5. Run executes with overrides, results show alongside baseline runs for comparison
