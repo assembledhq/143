@@ -60,52 +60,46 @@ This value is:
 
 #### Approach: Insert-only versioning on `pm_documents` itself
 
-Rather than adding a separate snapshot table, we apply the **insert-only versioned settings pattern** already established in the codebase (see AGENTS.md). This is the same pattern used for org settings: deactivate the old row, insert a new active row, all in a transaction.
+We apply the **insert-only versioned pattern** already used for `memories` and `review_patterns` in the codebase. The pattern is: `active` boolean flag, deactivate old row + insert new row in a transaction. No `parent_id` pointer — the existing codebase identifies logical entities by their natural key (e.g., memories use `(org_id, repo, rule)`), not by a chain of parent references.
+
+For PM documents, the natural key for version history is `(org_id, title, doc_type)` — but since titles can change, we add a stable `logical_id` that's set once on first creation and carried forward through all versions.
 
 **Schema changes to `pm_documents`:**
 
 ```sql
 ALTER TABLE pm_documents
     ADD COLUMN active       BOOLEAN NOT NULL DEFAULT true,
-    ADD COLUMN version      INT NOT NULL DEFAULT 1,
-    ADD COLUMN content_hash TEXT NOT NULL DEFAULT '',
-    ADD COLUMN parent_id    UUID REFERENCES pm_documents(id);
+    ADD COLUMN logical_id   UUID NOT NULL DEFAULT gen_random_uuid(),
+    ADD COLUMN content_hash TEXT NOT NULL DEFAULT '';
 
 -- Ensure only one active version per logical document
-CREATE UNIQUE INDEX idx_pm_documents_active_parent
-    ON pm_documents (org_id, parent_id) WHERE active = true AND parent_id IS NOT NULL;
-
--- For the first version (no parent), ensure uniqueness differently
--- The first version of a document has parent_id = NULL; subsequent versions point to the first version
+CREATE UNIQUE INDEX idx_pm_documents_active_logical
+    ON pm_documents (org_id, logical_id) WHERE active = true;
 ```
 
 **How it works:**
 
-1. The first version of a document is inserted with `active = true`, `version = 1`, `parent_id = NULL`.
-2. On update, within a transaction:
-   - Set `active = false` on the current active row (returns the row for value merging).
-   - Insert a new row with `active = true`, `version = previous + 1`, `parent_id = first version's ID`, and the new content.
-3. All existing queries add `WHERE active = true` (enforced by tenancy-style test).
-4. Version history = `SELECT * FROM pm_documents WHERE parent_id = :first_version_id ORDER BY version DESC`.
+1. On create, a document gets `active = true` and a fresh `logical_id`. This `logical_id` is the stable identity of the document across versions.
+2. On update, within a transaction (same pattern as `MemoryStore.UpdateMemoryAndGet`):
+   - `UPDATE pm_documents SET active = false WHERE id = @id AND org_id = @org_id AND active = true RETURNING ...`
+   - Insert a new row with `active = true`, the same `logical_id`, and the new content.
+3. All existing queries add `WHERE active = true` (enforced by tenancy-style test, same as `memories`).
+4. Version history = `SELECT * FROM pm_documents WHERE org_id = @org_id AND logical_id = @logical_id ORDER BY created_at DESC`.
 
-**Why this over a separate table:**
+**Why this matches the codebase:**
 
-- Follows the established codebase pattern — developers already understand it.
-- No new tables or join complexity for the common case.
-- Version history is a simple query on the same table.
-- The `active` filter is already a tested pattern (tenancy test can enforce it).
-- Content dedup isn't necessary — PM documents change infrequently and are not large enough to warrant content-addressed storage.
+- `memories` and `review_patterns` use exactly this pattern: `active` flag, deactivate + insert in a transaction, fresh UUID per version, no parent pointer.
+- No `version INT` counter — the codebase doesn't use one for insert-only tables (it's only on `project_specs` which uses in-place UPDATE, a different pattern).
+- No `parent_id` FK chain — the codebase doesn't use parent pointers for versioning. Lineage is tracked by the shared `logical_id` (equivalent to how memories share `(org_id, repo, rule)`).
 
 #### Document set pinning for evals
 
-For eval tasks that need to freeze the full set of PM documents at a point in time, we store a lightweight reference:
+For eval tasks that need to freeze the full set of PM documents at a point in time, we store a lightweight reference. The `pm_plan` already has a FK slot for this (`document_set_pin_id`), so the pin is the **source of truth** — the `pm_plan` row that references it tells you which PM cycle created it.
 
 ```sql
 CREATE TABLE pm_document_set_pins (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     org_id          UUID NOT NULL REFERENCES organizations(id),
-    name            TEXT,                   -- optional label
-    source          TEXT NOT NULL,          -- "pm_cycle", "eval_pin", "manual"
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -116,9 +110,10 @@ CREATE TABLE pm_document_set_pin_members (
 );
 ```
 
-- Before every PM planning cycle, the system creates a pin capturing the current active document IDs. The `pm_plan` stores `document_set_pin_id`.
+- Before every PM planning cycle, the system creates a pin capturing the current active document row IDs. The `pm_plan` stores `document_set_pin_id`.
 - Eval tasks store `document_set_pin_id` to freeze their input documents.
 - Since `pm_documents` rows are never deleted (insert-only), the pin references are stable forever.
+- No `source` or `name` columns — the relationship is the provenance. If a `pm_plan` points to a pin, it was created by a PM cycle. If an `eval_task` points to it, it was created for an eval. If you need to find "all pins for PM cycles," join through `pm_plans`. This avoids duplicating relationship information as an enum.
 
 #### Audit log integration
 
@@ -126,10 +121,9 @@ PM document version changes emit audit entries:
 
 | Event | Action | Details |
 |-------|--------|---------|
-| Document created | `pm_document.created` (existing) | `{ "document_id": "...", "version": 1 }` |
-| Document updated | `pm_document.updated` | `{ "document_id": "...", "version": 5, "previous_version_id": "..." }` |
-| Document restored to old version | `pm_document.restored` | `{ "document_id": "...", "restored_from_version": 3, "new_version": 6 }` |
-| Document set pinned | `pm_document_set.pinned` | `{ "pin_id": "...", "document_count": 4, "source": "pm_cycle" }` |
+| Document created | `pm_document.created` (existing) | `{ "document_id": "...", "logical_id": "..." }` |
+| Document updated | `pm_document.updated` | `{ "document_id": "...", "logical_id": "...", "previous_id": "..." }` |
+| Document restored to old version | `pm_document.restored` | `{ "document_id": "...", "logical_id": "...", "restored_from_id": "..." }` |
 
 New audit enums:
 ```go
@@ -255,9 +249,9 @@ For the eval system, this manifest enables:
 
 The existing PM documents UI gains:
 
-- **Version indicator** on each document card ("v3 · edited 2d ago")
-- **History drawer** showing all versions with diffs (query: `WHERE parent_id = :first_id ORDER BY version DESC`)
-- **Restore** button to revert to any previous version (creates a new version with the old content)
+- **Version indicator** on each document card ("edited 2d ago · 3 versions")
+- **History drawer** showing all versions with diffs (query: `WHERE logical_id = :logical_id ORDER BY created_at DESC`)
+- **Restore** button to revert to any previous version (deactivate current + insert new row with old content, same transaction pattern as `MemoryStore`)
 - **Document set timeline** showing auto-pins aligned with PM planning cycles
 
 ---
@@ -284,10 +278,10 @@ GET    /api/v1/version                          -- current deploy SHA and build 
 
 This is additive — no existing behavior changes until the new columns/tables are populated.
 
-1. **Alter `pm_documents`** — Add `active`, `version`, `content_hash`, `parent_id` columns. Backfill: set all existing rows to `active = true`, `version = 1`, `parent_id = NULL`, compute `content_hash`.
+1. **Alter `pm_documents`** — Add `active`, `logical_id`, `content_hash` columns. Backfill: set all existing rows to `active = true`, `logical_id = id` (each existing doc becomes its own first version), compute `content_hash`.
 2. **Add `pm_document_set_pins` and `pm_document_set_pin_members`** tables.
 3. **Add `server_deploy_sha` via build ldflags** — Set `-X main.buildSHA=$(git rev-parse HEAD)` in Makefile/CI. Expose via `/api/v1/version`.
-4. **Update `PMDocumentStore.Update`** — Replace in-place UPDATE with insert-only transaction pattern (deactivate + insert).
+4. **Update `PMDocumentStore.Update`** — Replace in-place UPDATE with insert-only transaction pattern (deactivate + insert), following the same structure as `MemoryStore.UpdateMemoryAndGet`.
 5. **Pin sandbox image digests** — Update `DefaultSandboxConfig()` to use content-addressed digests instead of `"143-sandbox:latest"`. Update CI/CD to tag images with digest.
 6. **Add `input_manifest` to agent runs** — Start recording all inputs (deploy SHA, PM doc pin, org settings version, memory snapshot, sandbox digest, integration skills hash, credential sources). Old runs will have NULL (acceptable).
 7. **Add audit log emissions** — For PM document version changes.
@@ -299,7 +293,11 @@ This is additive — no existing behavior changes until the new columns/tables a
 
 ## Connection to Existing Patterns
 
-**Insert-only versioning** (from AGENTS.md): PM documents now follow the exact same pattern as org settings — deactivate old row, insert new active row in a transaction. Developers already understand this pattern. The `active` boolean, transactional update, and `WHERE active = true` discipline are all established.
+**Insert-only versioning** (from AGENTS.md and `MemoryStore`): PM documents now follow the exact same pattern as `memories` and `review_patterns` — `active` boolean flag, deactivate old row + insert new active row in a transaction. No parent pointers or version counters (those are a different pattern used by `project_specs`). The `active` filter and transactional deactivate+insert are established codebase conventions.
+
+**Lineage tracking**: `memories` identifies versions by `(org_id, repo, rule)`. PM documents use `logical_id` — a stable UUID set on first creation and carried forward. This is semantically equivalent but handles the case where a document's title changes between versions.
+
+**Pin provenance via relationships, not enums**: Document set pins don't carry a `source` column. The relationship to the entity that created them (a `pm_plan` or an `eval_task`) is the provenance. This avoids duplicating information.
 
 **Audit logs**: The existing `AuditEmitter` and `AuditResourcePMDocument` resource type are extended with new actions for version tracking. Audit logs reference version IDs in their `details` JSONB but do not store content — that lives in the version rows, which have no retention expiry.
 
