@@ -155,31 +155,81 @@ We do NOT store full repo snapshots. Git is the snapshot mechanism:
 
 ### Config overlay: testing repo configuration changes
 
-A key use case: you've updated AGENTS.md, changed your coding conventions, added new skills to your repo, or modified `.claude/` configuration — and you want to run your eval suite with those changes applied to see if agent performance improves.
+Eval tasks pin the codebase at `base_commit_sha`, which includes the config files (AGENTS.md, CLAUDE.md, .claude/, .143/) that existed at that point. But a common need is: "I've been iterating on my AGENTS.md on a branch — does it actually make the agent better?" You want the source code at the historical state but with your new config overlaid.
 
-The problem: `base_commit_sha` pins the entire repo, including config files. If you want to test a new AGENTS.md against historical eval tasks, you need the codebase at the old state but with the new config overlaid.
+#### End-to-end user experience
 
-**Solution: `config_ref` on EvalRun**
+**Scenario: You've rewritten AGENTS.md on a branch called `better-agents-md`.**
 
-Each eval run can optionally specify a `config_ref` — a branch, commit SHA, or PR head — from which repo-level configuration files are pulled and overlaid on top of `base_commit_sha`.
+1. Go to **Settings > Evals**. You see your eval tasks with their baseline scores.
 
-```
-EvalRun {
-  ...
-  config_ref          *string         -- branch/SHA to pull config overlay from
-  ...
-}
-```
+2. Select the tasks you want to test (or "Select all"), click **Run Batch**.
 
-When `config_ref` is set, the sandbox setup becomes:
+3. The batch run panel appears:
 
 ```
-1. git clone <repo> && git checkout <base_commit_sha>     # source code at historical state
-2. git show <config_ref>:AGENTS.md > AGENTS.md             # overlay config from config_ref
-   git show <config_ref>:CLAUDE.md > CLAUDE.md
-   git show <config_ref>:.claude/ > .claude/               # (if directory exists)
-   git show <config_ref>:.143/ > .143/                     # (if directory exists)
+┌──────────────────────────────────────────────────────────────┐
+│  Run Batch                                                   │
+│                                                              │
+│  Selected: 8 eval tasks                                      │
+│                                                              │
+│  Configurations to compare:                                  │
+│                                                              │
+│  ┌─ Config A (baseline) ──────────────────────────────────┐  │
+│  │  Model:   [claude-sonnet-4-6    ▼]                     │  │
+│  │  Config:  [base_commit (default) ▼]  ← no overlay     │  │
+│  └────────────────────────────────────────────────────────┘  │
+│                                                              │
+│  ┌─ Config B ─────────────────────────────────────────────┐  │
+│  │  Model:   [claude-sonnet-4-6    ▼]                     │  │
+│  │  Config:  [better-agents-md     ▼]  ← branch picker   │  │
+│  │                                                        │  │
+│  │  Preview:                                              │  │
+│  │   AGENTS.md           changed (±47 lines)              │  │
+│  │   CLAUDE.md           unchanged                        │  │
+│  │   .claude/            unchanged                        │  │
+│  └────────────────────────────────────────────────────────┘  │
+│                                                              │
+│  [+ Add another configuration]                               │
+│                                                              │
+│  [Run 16 evals]  (8 tasks × 2 configs)                       │
+└──────────────────────────────────────────────────────────────┘
 ```
+
+4. The **Config** dropdown is a branch/tag picker (same component used elsewhere for branch selection in the app). It lists repo branches and shows a search field. Selecting a branch means: "use the config files from this branch instead of the ones at `base_commit_sha`."
+
+5. When you select a branch, the panel shows a **preview** of which config files differ between the branch and the eval task's `base_commit_sha`. This gives you immediate feedback — you can see that AGENTS.md changed but CLAUDE.md didn't.
+
+6. After runs complete, the results page shows a **comparison matrix**:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Batch Results                                               │
+│                                                              │
+│  Task                      │ Baseline │ better-agents-md     │
+│  ─────────────────────────-┼──────────┼─────────────────     │
+│  Auth token refresh        │ 0.72     │ 0.89  ▲ +0.17       │
+│  Pagination fix            │ 0.91     │ 0.88  ▼ -0.03       │
+│  Rate limiter bug          │ 0.65     │ 0.81  ▲ +0.16       │
+│  Webhook retry logic       │ 0.78     │ 0.85  ▲ +0.07       │
+│  ...                       │          │                      │
+│  ─────────────────────────-┼──────────┼─────────────────     │
+│  Average                   │ 0.77     │ 0.86  ▲ +0.09       │
+│  Pass rate (≥0.7)          │ 6/8      │ 8/8                  │
+└──────────────────────────────────────────────────────────────┘
+```
+
+7. You see that the new AGENTS.md improved average scores by +0.09 and brought all tasks above the pass threshold. You merge the branch.
+
+**Scenario: Comparing two different AGENTS.md approaches.**
+
+Same flow, but you add a third configuration pointing to a different branch. The matrix gets a third column. You can compare as many configs as you want.
+
+**Scenario: Testing a model change alongside a config change.**
+
+Config A: sonnet + current AGENTS.md. Config B: opus + current AGENTS.md. Config C: sonnet + new AGENTS.md. This tells you whether the AGENTS.md improvement is worth more or less than upgrading the model.
+
+#### What gets overlaid
 
 The overlay replaces a fixed set of **repo config paths**:
 
@@ -187,40 +237,25 @@ The overlay replaces a fixed set of **repo config paths**:
 |------|-----------------|
 | `AGENTS.md` | Agent behavioral conventions, code patterns, testing instructions |
 | `CLAUDE.md` | Claude-specific context and instructions |
-| `.claude/` | Claude Code configuration directory |
+| `.claude/` | Claude Code configuration directory (settings, commands, skills) |
 | `.143/` | 143-specific configuration (eval scripts, learned-conventions.md, etc.) |
-| `*.skills.*` or skill config files | Available skills and tool definitions |
 
-This is a file-level overlay, not a merge — the config_ref version completely replaces the base_commit version for each config file. Source code files outside the config paths are untouched.
+This is a file-level replacement, not a merge — the branch version completely replaces the `base_commit_sha` version for each file that exists on the branch. Source code files outside these paths are untouched.
 
-**What this enables:**
+#### How it works under the hood
 
-- **Test AGENTS.md changes**: "I rewrote our AGENTS.md to be more specific about error handling. Do auth-related evals improve?"
-- **Test skill additions**: "I added a new debugging skill to .claude/. Does the agent use it and do complex evals score higher?"
-- **Test convention changes**: "I changed our learned-conventions.md to prefer table-driven tests. Do test-related eval criteria improve?"
-- **A/B test config across the eval suite**: Run the full suite once with the current config, once with the config branch, and compare scores in the batch results matrix.
-
-**What this does NOT cover:**
-
-Platform-level changes (model, agent type, org settings, PM documents) are already handled by the eval run configuration — you select those directly when starting a run. The config overlay is specifically for **files that live in the repo**.
-
-**UX in the run panel:**
+When `config_ref` is set on an EvalRun, the sandbox setup becomes:
 
 ```
-┌──────────────────────────────────────────┐
-│  Run Eval                                │
-│                                          │
-│  Model:  [claude-opus-4-6      ▼]        │
-│  PM Docs: [Current             ▼]        │
-│                                          │
-│  Config overlay (optional):              │
-│  [branch or SHA_________________]        │
-│  Overlays: AGENTS.md, CLAUDE.md,         │
-│            .claude/, .143/               │
-│                                          │
-│  [Run]  [Run Batch]                      │
-└──────────────────────────────────────────┘
+1. git clone <repo> && git checkout <base_commit_sha>     # source code at historical state
+2. git show <config_ref>:AGENTS.md > AGENTS.md             # overlay config from branch
+   git show <config_ref>:CLAUDE.md > CLAUDE.md             # (skipped if file doesn't exist on branch)
+   # same for .claude/ and .143/ directories
 ```
+
+#### What this does NOT cover
+
+Platform-level changes (model, agent type, org settings, PM documents) are not repo files — they're selected directly in the run configuration. The config overlay is specifically for **files that live in the git repo**.
 
 ---
 
@@ -464,36 +499,15 @@ Optionally, the system can run a bootstrap session on a schedule (e.g., weekly v
 
 ## Running Evals with Changes
 
-Three categories of changes can be tested against the eval suite:
+Three categories of changes can be tested against the eval suite, all through the same batch run panel (see "Config overlay" above for the full UX):
 
 | Change type | How to test it |
 |------------|---------------|
-| **Repo config** (AGENTS.md, CLAUDE.md, skills, .claude/) | Set `config_ref` to the branch/commit with your changes |
-| **Platform config** (model, agent type, PM documents) | Select different model or PM doc set in the run panel |
+| **Repo config** (AGENTS.md, CLAUDE.md, skills, .claude/) | Select the branch with your changes in the Config picker |
+| **Platform config** (model, agent type, PM documents) | Select different model or PM doc set in the configuration row |
 | **Org settings** (token limits, reasoning effort, context limits) | Change the setting, then run — the current active settings version is captured in the manifest |
 
-### Workflow
-
-1. Go to **Settings > Evals**
-2. Select one or more eval tasks
-3. Click **Run with overrides**
-4. In the override panel:
-   - **Model**: change the coding agent model
-   - **PM Documents**: swap in a different document set
-   - **Config overlay**: point to a branch with AGENTS.md / skills changes
-5. Run executes with overrides, results show alongside baseline runs for comparison
-
-### Diff view
-
-The results page shows a side-by-side:
-- Left: baseline run (previous config)
-- Right: override run (your changes)
-- Delta: per-criterion score changes, highlighted green/red
-
-This lets you answer:
-- "If I change the PM context to emphasize security, do the auth-related evals improve without regressing the feature evals?"
-- "I rewrote AGENTS.md to include more explicit testing instructions — do eval tasks with test criteria score higher?"
-- "Does switching from claude-sonnet to claude-opus improve pass rates enough to justify the cost?"
+You can mix these: one configuration row might be "sonnet + current config" and another might be "opus + new AGENTS.md branch." The batch results matrix shows scores for every combination, making it easy to isolate which change actually moved the needle.
 
 ---
 
