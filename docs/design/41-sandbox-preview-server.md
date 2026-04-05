@@ -10,6 +10,7 @@ Today, 143.dev runs coding agents in isolated sandboxes and surfaces the result 
 
 The key constraint: preview content is **untrusted**. It may be agent-generated, repository-defined, or both. The design must treat the browser rendering boundary as seriously as the sandbox boundary.
 
+Preview is intended to replace local setup for **reviewing and iterating on supported repos**, not to be a general-purpose browser IDE. Users can inspect the running result and give follow-up guidance without cloning the repo locally, but complex multi-service debugging may still require a traditional development environment.
 ## Design Goals
 
 1. Show a live HTTP preview for a sandboxed session inside the web app.
@@ -32,39 +33,6 @@ The key constraint: preview content is **untrusted**. It may be agent-generated,
 3. Previewing apps that require production secrets or external private infrastructure.
 4. Direct browser access to sandbox container ports.
 5. Visual regression diffing as a CI/review gate (automated pass/fail checks with thresholds). Note: semantic diffs are available as agent tools for self-verification, but not as automated gating checks in MVP.
-
-## What Preview Replaces
-
-Sandbox preview is intended to replace local setup for **reviewing and iterating on supported repos**, especially frontend-heavy changes where a human needs to inspect behavior before approving it.
-
-It is **not** a general-purpose browser IDE or a complete replacement for local development. Users can ask 143.dev to make changes, inspect the running result, and give follow-up guidance without cloning the repo locally, but complex multi-service debugging may still require a traditional development environment.
-
-For MVP, the target repos are:
-
-- single frontend apps (React, Vue, Svelte with Vite/Next.js/Nuxt/etc.)
-- framework-integrated full-stack apps where one process serves both frontend and API (Next.js API routes, Remix loaders, Nuxt server routes, Rails with Hotwire)
-- monorepos with a frontend and backend that can run as separate processes inside a single sandbox, communicating over `localhost` (e.g., React SPA + Express/Flask/Django/Rails API)
-- SPAs / SSR apps that can boot from repo-local dependencies and mocked or managed non-production data
-- apps that connect to external staging databases or APIs via managed destinations (e.g., a staging RDS instance)
-- apps that need a local database or cache, using platform-provided infrastructure services (PostgreSQL, Redis, MySQL)
-- repos where the app can start without production-only secrets
-
-For MVP, the non-target repos are:
-
-- apps that require custom Docker Compose or Kubernetes orchestration
-- apps that need infrastructure services not in the platform-provided set (e.g., Elasticsearch, Kafka, custom containers)
-- apps that depend on private infrastructure that is not represented as a managed preview destination or a platform infrastructure template
-- separate-repo architectures where frontend and backend live in different repositories
-
-## Preview Readiness
-
-To make the feature understandable to non-engineers, preview support should be presented as a repo readiness state rather than a binary success/failure:
-
-- `ready` - the repo can preview with the default `bootstrap` config (including any platform infrastructure declared in the config)
-- `admin_setup_required` - the repo can preview after an admin attaches managed credentials or managed destinations
-- `not_supported` - the repo is not a fit for preview MVP (e.g., requires unsupported infrastructure templates or custom containers)
-
-The UI should surface this readiness state before a user clicks `Start Preview` so people know whether preview is expected to work without extra setup.
 
 ## Core Decision
 
@@ -132,6 +100,332 @@ Instead:
 The bootstrap token is one-time and short-lived. It never appears in a URL, browser history, or server access logs. The preview domain does not receive the main app's session cookie.
 
 Per-preview hostnames require wildcard DNS and TLS for the preview zone, but they remove a large class of cross-preview browser-isolation problems that a shared preview origin would create.
+
+## Backend Components
+
+### 1. Preview Manager
+
+A new service owns preview lifecycle:
+
+- start preview (including multi-service startup orchestration)
+- stop preview (all services in the config)
+- report status (aggregate and per-service)
+- mint bootstrap tokens
+- enforce TTLs and concurrency caps
+
+This is separate from HTTP handlers so the lifecycle logic does not leak into routers.
+
+It is also responsible for:
+
+- resolving the selected preview config and normalizing single-service configs to the multi-service format
+- provisioning and tearing down platform infrastructure containers (PostgreSQL, Redis, etc.)
+- generating ephemeral credentials for infrastructure services and constructing connection strings
+- running init scripts against infrastructure containers
+- managing the process group for all services in a config (start, stop, health check, restart)
+- routing credentials (both managed and infrastructure-generated) to the correct services based on `inject_into`
+- enforcing repo/org preview quotas
+- recording node ownership even in single-node mode
+
+For multi-service configs, the preview manager acts as a lightweight process supervisor. It holds references to all child processes, monitors their exit status, and coordinates ordered startup and shutdown. If a support service crashes, the preview manager should:
+
+1. Transition the preview to `unhealthy` status
+2. Surface which service failed in the UI
+3. Allow the user to restart the entire preview (not individual services in MVP)
+
+### 2. Provider-Agnostic Preview Transport
+
+The API server should **not** resolve container IPs directly. That only works for same-host Docker.
+
+Instead, add a preview-capable interface on the sandbox side:
+
+```go
+type PreviewCapableProvider interface {
+    StartPreview(ctx context.Context, sb *Sandbox, cfg PreviewConfig) (*PreviewInstance, error)
+    StopPreview(ctx context.Context, previewID string) error
+    DialPreview(ctx context.Context, previewID string) (PreviewStream, error)
+}
+```
+
+`StartPreview` handles the full lifecycle: provision infrastructure containers (if any), wait for infrastructure health, run init scripts, then start application services in dependency order. The `PreviewConfig` includes the full resolved service map and infrastructure declarations. The provider exposes a stream to the primary service's port.
+
+`DialPreview` always connects to the **primary service's port**. Support services are never directly exposed to the gateway — they are only reachable from other processes inside the sandbox via `localhost`. This keeps the transport interface simple: one preview = one stream, regardless of how many services run inside.
+
+`DialPreview` is intentionally abstract. In Docker it may attach to a worker-local port forward. In E2B it may use the provider's tunnel API. In a multi-node deployment it may proxy through the worker that owns the sandbox.
+
+The API/gateway layer cares only that it can stream bytes for HTTP and WebSocket traffic. It should not know whether the preview is backed by a container IP, a VM tunnel, or another transport.
+
+### 3. Preview Gateway
+
+The preview gateway runs on the preview origin and does exactly three things:
+
+1. Validate preview access
+2. Proxy HTTP and WebSocket traffic
+3. Inject / strip security-sensitive headers
+
+It does **not** use the main app's session middleware. Access is established by the bootstrap token exchange.
+
+### 4. Worker Routing
+
+In `MODE=all`, the API server and preview-owning worker may be the same process.
+
+In multi-node mode:
+
+- the `preview_instances` record stores `worker_node_id`
+- the gateway routes preview traffic to that worker over an authenticated internal hop
+- the worker opens the provider-specific preview stream locally
+
+This mirrors the general cluster model more closely than a direct container IP lookup.
+
+### 5. Headless Browser (Preview Inspector)
+
+A headless Chromium instance runs on the worker node (not inside the sandbox) and is used for two purposes:
+
+1. **Agent-facing screenshot and DOM inspection** — the agent captures visual state and console errors from the preview to self-verify its work
+2. **Human-facing Design Mode** — the reviewer clicks on elements in the preview and gives visual feedback that is translated into agent context
+
+The headless browser connects to the preview through the same internal transport as the preview gateway (via `DialPreview`), so it sees exactly what a real browser would see. It runs outside the sandbox to keep the sandbox footprint small and to avoid giving untrusted preview code access to browser automation APIs.
+
+```go
+type PreviewInspector interface {
+    // CaptureScreenshot takes a viewport screenshot of the preview at the given URL path.
+    // Returns PNG bytes and page metadata (title, console errors, URL).
+    CaptureScreenshot(ctx context.Context, previewID string, opts ScreenshotOpts) (*ScreenshotResult, error)
+
+    // CaptureDOM returns a serialized snapshot of the DOM at the given URL path,
+    // including computed styles for selected elements and the component tree if
+    // source maps are available.
+    CaptureDOM(ctx context.Context, previewID string, opts DOMCaptureOpts) (*DOMSnapshot, error)
+
+    // ReadConsole returns buffered console messages (errors, warnings, logs)
+    // captured since the last read or since the page was loaded.
+    ReadConsole(ctx context.Context, previewID string) ([]ConsoleMessage, error)
+
+    // InspectElement returns metadata about the DOM element at the given
+    // coordinates: computed styles, component name (if React/Vue devtools
+    // protocol is available), bounding box, and surrounding DOM context.
+    InspectElement(ctx context.Context, previewID string, x, y int) (*ElementInfo, error)
+
+    // StartScreencast begins recording frames from the preview at the given FPS.
+    // Uses Chromium's Page.startScreencast CDP method.
+    StartScreencast(ctx context.Context, previewID string, fps int) (screencastID string, err error)
+
+    // StopScreencast ends recording and returns the assembled video/GIF.
+    StopScreencast(ctx context.Context, screencastID string) (*ScreencastResult, error)
+
+    // ExecuteInteraction runs a sequence of browser interactions (click, type,
+    // navigate, wait) against the preview and returns the result of each step,
+    // including screenshots captured at specified checkpoints.
+    ExecuteInteraction(ctx context.Context, previewID string, steps []InteractionStep) (*InteractionResult, error)
+
+    // CaptureMultiViewport takes simultaneous screenshots at multiple viewport
+    // sizes (e.g., mobile, tablet, desktop) in a single call.
+    CaptureMultiViewport(ctx context.Context, previewID string, opts MultiViewportOpts) (*MultiViewportResult, error)
+
+    // ComputeVisualDiff compares two snapshots (before/after a code change) and
+    // returns structured information about what changed visually and in the DOM.
+    ComputeVisualDiff(ctx context.Context, previewID string, beforeSnapshotID, afterSnapshotID string) (*VisualDiff, error)
+}
+
+// Supporting types: ScreenshotOpts, ScreenshotResult, ScreencastResult,
+// InteractionStep/Result, MultiViewportOpts/Result, VisualDiff, ElementInfo
+// See "Type Reference" appendix at the end of this document for full definitions.
+```
+
+#### Headless Browser Lifecycle
+
+- The headless browser is **not** started when the preview starts. It is started **on demand** when the first screenshot or DOM inspection is requested.
+- One headless browser instance is shared across all active previews on the same worker node. Each preview gets its own browser context (isolated cookies, storage) within the shared instance.
+- The browser is shut down after 5 minutes of inactivity to free resources.
+- The headless browser has no access to the main app session, managed credentials, or any state beyond what the preview gateway exposes.
+
+#### Resource Overhead
+
+| Resource | Per-Worker Overhead |
+|----------|-------------------|
+| Memory | ~150-250 MB for the shared Chromium instance |
+| CPU | Minimal when idle; spikes during screenshot capture |
+| Startup | ~2-3 seconds for first browser launch; <500ms for new browser context |
+
+This overhead is per-worker, not per-preview. A worker running 3 previews uses one shared headless browser instance.
+
+#### Component Resolver
+
+DOM-level inspection (`elementFromPoint` returning a `<div>`) is not sufficient for meaningful Design Mode feedback. The agent needs to know that the `<div>` is a `<Header>` component defined in `src/components/Header.tsx:14` with props `{ title: "Dashboard", showNav: true }`.
+
+The Preview Inspector achieves this by injecting a lightweight **component resolver script** (~2KB) into each preview page via the preview gateway. The script detects the framework in use and extracts component metadata:
+
+| Framework | Detection | Hook Used | Data Extracted |
+|-----------|-----------|-----------|---------------|
+| React 16+ | `window.__REACT_DEVTOOLS_GLOBAL_HOOK__` | React fiber tree walker | Component name, props, source file (if available), parent component chain |
+| Vue 3 | `window.__VUE_DEVTOOLS_GLOBAL_HOOK__` | Component instance tree | Component name, props, source file, parent chain |
+| Vue 2 | `window.__VUE_DEVTOOLS_GLOBAL_HOOK__` | Legacy instance API | Component name, props (limited source info) |
+| Svelte | `__svelte_meta` on elements | Element metadata | Component name, source file |
+| Angular | `ng.getComponent()` | Debug API | Component class name, template file |
+| None detected | — | Source map fallback | CSS selector path, computed styles only |
+
+The resolver script registers a global function `__143_resolveElement(element)` that the headless browser calls after `elementFromPoint`. It returns:
+
+```json
+{
+  "componentName": "Header",
+  "componentFile": "src/components/Header.tsx",
+  "componentLine": 14,
+  "props": { "title": "Dashboard", "showNav": true },
+  "componentTree": ["App", "DashboardLayout", "Header"],
+  "framework": "react"
+}
+```
+
+**Trust model**: The resolver script runs in the preview origin (untrusted). Its output is treated as **untrusted hints** — the headless browser validates that the reported component file exists in the repo and that the component name is reasonable (alphanumeric, < 100 chars). If validation fails, the field is omitted from `ElementInfo` and the system falls back to DOM-only information. The agent receives whatever metadata is available, and can use source maps as a secondary resolution path.
+
+The resolver script is injected by the preview gateway as a `<script>` tag in every HTML response, similar to how the bootstrap script handles `postMessage` for activity heartbeats. It is framework-detection code only — it does not modify the page, intercept events, or send data anywhere. It only runs when called by the headless browser via `evaluateHandle`.
+
+#### Design Token Awareness
+
+When a reviewer adjusts a color or spacing value in Visual Editing, the agent should generate code using the project's design system tokens (e.g., `bg-blue-500` in Tailwind) rather than raw values (e.g., `background-color: #3b82f6`). This requires the preview system to understand what tokens exist in the project.
+
+**Token extraction** happens during the **Build** phase and is cached per preview instance:
+
+| Source | How Tokens Are Extracted | Token Format |
+|--------|------------------------|-------------|
+| Tailwind CSS | Parse `tailwind.config.js` / `tailwind.config.ts` to extract the theme (colors, spacing, typography, etc.) | `{ "bg-blue-500": "#3b82f6", "p-4": "1rem", ... }` |
+| CSS custom properties | Scan CSS files for `--variable-name: value` declarations | `{ "--color-primary": "#3b82f6", "--spacing-lg": "2rem", ... }` |
+| Theme files | Detect common patterns: `theme.js`, `tokens.json`, `design-tokens.yaml` | Parsed into `{ name: value }` map |
+
+The extracted token map is stored in memory on the worker (not in the database) and provided to the Preview Inspector. When `InspectElement` resolves an element's computed styles, it reverse-maps values to tokens:
+
+- The element has `background-color: rgb(59, 130, 246)` → matches Tailwind token `bg-blue-500`
+- The element has `padding: 16px` → matches Tailwind token `p-4`
+
+These mappings appear in `ElementInfo.DesignTokens` so the agent knows to write `className="bg-blue-500"` instead of `style={{ backgroundColor: '#3b82f6' }}`.
+
+**Visual Editing controls** use the token map to present a **token picker** alongside raw value inputs:
+
+- Color picker shows the project's color palette (extracted from Tailwind/CSS vars) as swatches
+- Spacing controls show the project's spacing scale as preset options
+- Typography controls show the project's font sizes / weights as named options
+
+When the reviewer picks a token, the `visual_edit` message sent to the agent includes `{ property: "background-color", token: "bg-primary-500", rawValue: "#3b82f6" }` so the agent can use whichever representation the codebase prefers.
+
+If no design tokens are detected, the controls fall back to raw value inputs only.
+
+#### Screencast Recording
+
+For agent verification flows that involve navigation (checking multiple pages, testing a form submission flow), a static screenshot timeline is insufficient. The Preview Inspector supports recording a lightweight screencast using Chromium's built-in `Page.startScreencast` CDP method.
+
+**How it works:**
+1. The agent calls `preview_screencast_start` with a desired FPS (default: 4)
+2. The Preview Inspector begins capturing frames from the headless browser
+3. The agent performs its verification (navigating pages, waiting for transitions)
+4. The agent calls `preview_screencast_stop`
+5. The Preview Inspector assembles frames into a GIF (for short recordings <10s) or WebM (for longer recordings)
+6. The result is stored in blob storage and attached to the session as a `preview_screencast` event
+
+**Constraints:**
+- Maximum recording duration: 30 seconds
+- Maximum FPS: 4 (sufficient for navigation verification, not video-quality)
+- Maximum file size: 10 MB
+- One active screencast per preview at a time
+- Screencasts are stored with the same retention policy as screenshots (session lifetime + 24h)
+
+**Use cases:**
+- Agent navigates from login → dashboard → settings to verify a change doesn't break other pages
+- Agent fills out a form and verifies the success state
+- Agent tests a responsive layout by resizing the viewport mid-recording
+
+The reviewer sees screencasts in the session timeline alongside static screenshots. They play inline (no external player needed) and provide significantly richer context than a series of static images.
+
+
+## Preview Lifecycle
+
+### Startup Phases
+
+Even in MVP, preview startup should be modeled as three phases:
+1. **Build**: prepare or reuse the runnable filesystem/image state (shared across all services — one repo checkout)
+2. **Init**: provision infrastructure containers (if any), wait for infrastructure health, run init scripts, generate and inject credentials (both managed and infrastructure-generated) into the appropriate services per `inject_into`
+3. **Start**: launch application services in dependency order (support services first, then primary) and wait for all readiness probes to pass
+
+The Init phase is where infrastructure and credential setup happens. This ensures that by the time application services start, all databases are populated and all connection strings are injected.
+
+For multi-service configs, the Start phase emits per-service status events so the frontend can show which services are ready and which are still starting. The preview transitions to `ready` only when all services and infrastructure pass their readiness/health checks. If any service or infrastructure container fails, the preview transitions to `failed` with a diagnostic identifying the failing component.
+
+Phase 1 does not need the full immutable image cache pipeline yet, but the lifecycle should already distinguish these phases so later caching and diagnostics do not require redesigning the contract.
+
+### Fast Startup
+
+Preview startup time is the single biggest UX bottleneck. A typical first-time preview for a React + Express app takes 30-90 seconds (npm install + build + start). For the PR review workflow, where a reviewer clicks "Launch Preview" and expects to see something quickly, this delay is unacceptable. The system uses three strategies to minimize startup time.
+
+#### Filesystem Snapshot Caching
+
+After a successful preview startup (all three phases complete), the system takes a **filesystem snapshot** of the sandbox state — node_modules installed, build artifacts ready, infrastructure initialized. The snapshot is keyed by:
+
+```
+snapshot_key = hash(lockfile_contents + base_commit + preview_config_hash)
+```
+
+On subsequent preview starts for the same repo with the same dependencies:
+
+1. The preview manager checks for a matching snapshot
+2. If found, restores the filesystem from snapshot (skipping the Build phase entirely)
+3. Runs only Init (if infrastructure is needed) and Start phases
+4. **Result**: startup drops from 30-90 seconds to 5-15 seconds
+
+Snapshots are stored on the worker's local disk (SSD) with an LRU eviction policy. Default cache size: 20 GB per worker, with each snapshot typically 200 MB - 1 GB depending on node_modules size.
+
+**Invalidation**: snapshots are invalidated when:
+- The lockfile changes (new dependencies)
+- The base commit changes (new code) — but see "partial invalidation" below
+- The preview config changes (different services or settings)
+
+**Partial invalidation**: when only the base commit changes but the lockfile is the same, the system can restore the snapshot and apply only the new file changes (git diff) on top. This handles the common case where a PR is rebased or new commits are pushed without changing dependencies.
+
+#### Progressive Preview
+
+For multi-service configs, the frontend service often starts faster than the backend. Rather than waiting for all services to be ready, the system supports **progressive preview**:
+
+1. As soon as the primary service (frontend) passes its readiness probe, the preview transitions to `partially_ready` and the frontend displays the preview iframe
+2. The UI shows a toast overlay: "Backend starting... (API calls may fail until ready)"
+3. When all services pass readiness, the preview transitions to `ready` and the toast disappears
+4. If the frontend depends on backend data, it will show its own loading/error states naturally — this is actually useful for the agent to see, as it reveals how the app handles backend unavailability
+
+Progressive preview is opt-in per config via a `progressive: true` flag. It is most useful for SPAs with client-side routing that can render a shell before API data is available.
+
+#### Startup Time Targets
+
+| Scenario | Target | Strategy |
+|----------|--------|----------|
+| First preview for repo (cold) | < 90 seconds | Warm sandbox pool (skip container start) |
+| Repeat preview, same dependencies | < 15 seconds | Filesystem snapshot restore + Start only |
+| Re-launch after idle timeout (same session) | < 10 seconds | Snapshot restore + Start only (Init skipped if infra containers still running) |
+| Progressive preview (frontend ready) | < 30 seconds (cold), < 10 seconds (cached) | Show frontend as soon as primary service ready |
+
+### Process Health Checks
+
+The preview manager should poll **each service's** health endpoint after the initial readiness check succeeds:
+
+- Poll each service's `ready.http_path` on its respective port every **10 seconds**
+- If **3 consecutive checks** fail for any service, transition that service to `unhealthy` in `preview_services` and the preview instance to `unhealthy`
+- The UI should show which service failed: "Backend stopped responding — Restart preview?" with a one-click restart button
+- If the service recovers on its own (next health check passes), transition back to `ready`
+
+For multi-service previews, a single unhealthy support service makes the entire preview unhealthy because the primary service likely depends on it. The UI should clearly indicate which service is the source of the problem.
+
+This catches the common case where a dev server crashes mid-session due to a syntax error, bad import, or memory pressure, and gives the user a clear recovery path.
+
+### Process Recycling
+
+Long-running dev servers with HMR enabled are prone to memory leaks. After a configurable `max_uptime` (default: 60 minutes), the preview manager should:
+
+1. Gracefully stop all application service processes (SIGTERM, then SIGKILL after 10 seconds)
+2. Tear down and re-provision infrastructure containers (to ensure clean database state and avoid stale connections)
+3. Re-run init scripts against fresh infrastructure
+4. Restart all application services in dependency order using the same resolved config
+5. Wait for all readiness probes to pass
+6. Resume proxying
+
+In MVP, recycling restarts **everything** — infrastructure and all application services — to avoid inconsistencies (e.g., a backend restart that tries to reconnect to an infrastructure container with stale credentials or corrupted state).
+
+This happens transparently. The UI should show a brief "Preview restarting..." indicator. The `last_path` on the preview instance (see Edge Cases section) should be preserved so the user returns to where they were.
 
 ## Preview Configuration
 
@@ -425,29 +719,6 @@ A diff cannot add or remove infrastructure services, change templates, or modify
 
 For configs with `credentials.mode != none` (connected previews), `init_script` is also pinned to the base branch — the same "pin everything for connected previews" rule applies.
 
-### Design Constraints
-
-- `command` is an argv array, not a shell string
-- readiness is HTTP-based, not stdout-regex-based
-- secrets are not committed in the repo config
-- `credentials` and `network` are config-level, not per-service, to keep the trust model simple
-- `inject_into` is the only per-service credential scoping mechanism
-
-The config model gives us a controlled way to support:
-
-- `bootstrap` previews with no third-party credentials (single or multi-service)
-- `staging_like` previews with managed non-production credentials scoped to specific services
-- optional faster `lightweight` configs later
-
-### Managed Credentials And Managed Destinations
-
-Managed mode is the default.
-
-- Repo config references a credential set name; it does not contain secrets
-- Repo config references named destinations such as `preview_db` or `stripe_test`; it does not define raw egress rules in the common path
-- Repo-scoped credentials are attached in the 143 UI by org admins
-- Raw host allowlists or custom secret-fetch flows are an advanced fallback, not the default setup path
-
 ### Trust Split For Preview Config
 
 Preview config is untrusted repo content. Not all fields should be read from the same revision.
@@ -474,312 +745,597 @@ This prevents a malicious or buggy diff from weakening egress or swapping in a m
 
 ### Preventing Diff-Controlled Launch In Connected Previews
 
-The remaining risk is that a diff can still change the process that receives preview credentials if the preview config allows connected access.
-
 **Hard requirement for MVP**: for any config with `credentials.mode != none` or non-empty managed destinations, all launch fields for **all services** (`command`, `cwd`, `port`, `env`, and `ready`) MUST be read from the **base branch** instead of the session diff. Only `restricted` / `bootstrap` previews may use diff-defined launch behavior. This is enforced in code with no admin override.
 
 - `bootstrap` / `restricted`: allow diff-defined per-service `command`, `cwd`, `port`, `env`, and `ready`
 - `staging_like` / any connected config: pin all launch fields for all services to base branch or an admin-approved template
 
-This applies to **all services in the config**, not just the ones receiving credentials. Even though `inject_into` may scope credentials to the backend, a malicious diff could change the frontend's `command` to a process that reads the backend's environment from `/proc`. Since all services share a sandbox, the trust boundary is the config, not the individual service.
+This applies to **all services in the config**, not just the ones receiving credentials. Since all services share a sandbox, a malicious diff could change any process to read another's environment from `/proc`. The trust boundary is the config, not the individual service.
 
-This is a hard rule, not a recommendation, because the alternative — allowing a diff to control any process in a sandbox that receives credentials — is a class of vulnerability, not a configuration choice. The preview manager must reject any attempt to start a connected preview where launch fields differ between the diff and base branch versions of the config.
+### Preview Readiness
 
-## Backend Components
+To make the feature understandable to non-engineers, preview support should be presented as a repo readiness state:
 
-### 1. Preview Manager
+- `ready` - the repo can preview with the default `bootstrap` config (including any platform infrastructure declared in the config)
+- `admin_setup_required` - the repo can preview after an admin attaches managed credentials or managed destinations
+- `not_supported` - the repo is not a fit for preview MVP (e.g., requires unsupported infrastructure templates or custom containers)
 
-A new service owns preview lifecycle:
+The UI should surface this readiness state before a user clicks `Start Preview` so people know whether preview is expected to work without extra setup.
 
-- start preview (including multi-service startup orchestration)
-- stop preview (all services in the config)
-- report status (aggregate and per-service)
-- mint bootstrap tokens
-- enforce TTLs and concurrency caps
+### Target Repos
 
-This is separate from HTTP handlers so the lifecycle logic does not leak into routers.
+For MVP, the target repos are:
 
-It is also responsible for:
+- single frontend apps (React, Vue, Svelte with Vite/Next.js/Nuxt/etc.)
+- framework-integrated full-stack apps where one process serves both frontend and API (Next.js API routes, Remix loaders, Nuxt server routes, Rails with Hotwire)
+- monorepos with a frontend and backend that can run as separate processes inside a single sandbox, communicating over `localhost` (e.g., React SPA + Express/Flask/Django/Rails API)
+- SPAs / SSR apps that can boot from repo-local dependencies and mocked or managed non-production data
+- apps that connect to external staging databases or APIs via managed destinations (e.g., a staging RDS instance)
+- apps that need a local database or cache, using platform-provided infrastructure services (PostgreSQL, Redis, MySQL)
+- repos where the app can start without production-only secrets
 
-- resolving the selected preview config and normalizing single-service configs to the multi-service format
-- provisioning and tearing down platform infrastructure containers (PostgreSQL, Redis, etc.)
-- generating ephemeral credentials for infrastructure services and constructing connection strings
-- running init scripts against infrastructure containers
-- managing the process group for all services in a config (start, stop, health check, restart)
-- routing credentials (both managed and infrastructure-generated) to the correct services based on `inject_into`
-- enforcing repo/org preview quotas
-- recording node ownership even in single-node mode
+For MVP, the non-target repos are:
 
-For multi-service configs, the preview manager acts as a lightweight process supervisor. It holds references to all child processes, monitors their exit status, and coordinates ordered startup and shutdown. If a support service crashes, the preview manager should:
+- apps that require custom Docker Compose or Kubernetes orchestration
+- apps that need infrastructure services not in the platform-provided set (e.g., Elasticsearch, Kafka, custom containers)
+- apps that depend on private infrastructure that is not represented as a managed preview destination or a platform infrastructure template
+- separate-repo architectures where frontend and backend live in different repositories
 
-1. Transition the preview to `unhealthy` status
-2. Surface which service failed in the UI
-3. Allow the user to restart the entire preview (not individual services in MVP)
+## Agent Capabilities
 
-### 2. Provider-Agnostic Preview Transport
+### Agent Visual Feedback Loop
 
-The API server should **not** resolve container IPs directly. That only works for same-host Docker.
+The agent should be able to see and react to the running preview. Without this, the agent writes code and hopes it looks right — the human reviewer is the only one who catches visual bugs. With visual feedback, the agent can self-verify its work before the reviewer sees it.
 
-Instead, add a preview-capable interface on the sandbox side:
+#### Agent Preview Tools
 
-```go
-type PreviewCapableProvider interface {
-    StartPreview(ctx context.Context, sb *Sandbox, cfg PreviewConfig) (*PreviewInstance, error)
-    StopPreview(ctx context.Context, previewID string) error
-    DialPreview(ctx context.Context, previewID string) (PreviewStream, error)
-}
+The preview system exposes tools to the agent via the standard agent tool interface. These tools use the headless browser (Preview Inspector) running on the worker node.
+
+| Tool | Description | When Used |
+|------|-------------|-----------|
+| `preview_screenshot` | Capture a viewport screenshot at a given URL path | After making changes, to verify the visual result |
+| `preview_screenshot_full` | Capture a full-page screenshot | For pages with below-fold content |
+| `preview_console` | Read console errors and warnings | After changes, to catch runtime errors the agent introduced |
+| `preview_element` | Inspect a specific element by CSS selector | When the agent needs to verify a specific component's styles or content |
+| `preview_accessibility` | Run basic accessibility checks (color contrast, missing alt text, ARIA) | After UI changes, to catch a11y regressions |
+| `preview_screencast_start` | Begin recording a screencast at 2-4 FPS | Before multi-page verification flows |
+| `preview_screencast_stop` | Stop recording and return the assembled GIF/WebM | After completing the verification flow |
+| `preview_interact` | Execute a sequence of browser interactions (click, type, navigate, wait) with optional checkpoint screenshots | To verify multi-step flows like form submission, navigation, or login |
+| `preview_multi_viewport` | Capture simultaneous screenshots at mobile (375px), tablet (768px), and desktop (1440px) viewports | After layout changes, to catch responsive design regressions |
+| `preview_visual_diff` | Compare two snapshots and return structured information about pixel changes, DOM changes, and style changes | After making a change, to understand exactly what the code change affected visually |
+| `preview_assert` | Run a set of visual assertions against the current preview state and return pass/fail results | After changes, to self-verify that the result matches expectations |
+
+The agent gets **read-only observation tools** (screenshots, console, DOM inspection) plus **limited interaction tools** (`preview_interact`) for verification purposes. Interaction tools can click, type, and navigate, but only to verify that the app works correctly — the agent's primary mode of operation is writing code, not manipulating the UI directly. The interaction tools exist so the agent can test flows that require user input (form submission, login, navigation) without requiring a human to manually verify them.
+
+#### Self-Verification Flow
+
+When the preview is running and the agent makes a code change, the recommended agent flow is:
+
+1. Agent writes code changes to the sandbox filesystem
+2. HMR or file watcher picks up the changes and the dev server updates
+3. Agent waits a brief stabilization period (1-2 seconds after the last HMR WebSocket message)
+4. Agent calls `preview_screenshot` to capture the current state
+5. Agent calls `preview_visual_diff` to compare the new state against the previous snapshot — this tells the agent exactly what changed (pixel regions, DOM mutations, style shifts) so it can verify that the change matches intent and catch unintended side effects
+6. Agent calls `preview_assert` to run structured assertions (see below)
+7. Agent evaluates the screenshot, diff, and assertion results against the user's request
+8. If the result doesn't match expectations, the agent iterates (back to step 1)
+9. Once satisfied, the agent presents the final screenshot to the user alongside the diff
+
+The screenshot is included in the agent's context as an image, so the agent can reason about layout, colors, typography, spacing, and visual hierarchy. The visual diff and assertion results provide structured data that complements the visual reasoning.
+
+#### Self-Verification Assertions
+
+The agent can define and run **structured assertions** against the preview state using `preview_assert`. Assertions are ephemeral — they are not persisted as test files, but rather used by the agent within the current session to verify its own work.
+
+Assertion types:
+
+| Type | What It Checks | Example |
+|------|---------------|---------|
+| `element_exists` | A CSS selector matches at least one element | `{ "selector": ".checkout-button", "visible": true }` |
+| `element_text` | An element's text content matches (exact or contains) | `{ "selector": "h1", "contains": "Dashboard" }` |
+| `element_style` | An element's computed style matches | `{ "selector": ".header", "property": "background-color", "value": "#3b82f6" }` |
+| `element_count` | The number of elements matching a selector | `{ "selector": ".card", "min": 3, "max": 10 }` |
+| `no_console_errors` | No new console errors since last check | `{}` |
+| `page_title` | The page title matches | `{ "contains": "Settings" }` |
+| `viewport_screenshot_match` | A region of the screenshot matches expectations (described in natural language — the agent evaluates this) | `{ "region": { "x": 0, "y": 0, "w": 1280, "h": 80 }, "description": "blue header with white text and logo on the left" }` |
+
+The agent composes assertions based on what the user requested. For example, if the user says "add a red delete button to the card footer," the agent would assert:
+
+```json
+[
+  { "type": "element_exists", "selector": ".card-footer .delete-button", "visible": true },
+  { "type": "element_style", "selector": ".card-footer .delete-button", "property": "background-color", "value": "rgb(239, 68, 68)" },
+  { "type": "element_text", "selector": ".card-footer .delete-button", "contains": "Delete" },
+  { "type": "no_console_errors" }
+]
 ```
 
-`StartPreview` handles the full lifecycle: provision infrastructure containers (if any), wait for infrastructure health, run init scripts, then start application services in dependency order. The `PreviewConfig` includes the full resolved service map and infrastructure declarations. The provider exposes a stream to the primary service's port.
+The assertion results are structured pass/fail (count + per-assertion detail), so the agent can programmatically decide whether to iterate or present the result. This transforms the agent from "make a change and hope it looks right" to "make a change, define what success looks like, and verify it."
 
-`DialPreview` always connects to the **primary service's port**. Support services are never directly exposed to the gateway — they are only reachable from other processes inside the sandbox via `localhost`. This keeps the transport interface simple: one preview = one stream, regardless of how many services run inside.
+#### Console Error Detection
 
-`DialPreview` is intentionally abstract. In Docker it may attach to a worker-local port forward. In E2B it may use the provider's tunnel API. In a multi-node deployment it may proxy through the worker that owns the sandbox.
+After each code change, the agent should call `preview_console` to check for new errors. If the change introduced console errors (especially `TypeError`, `ReferenceError`, or React/Vue rendering errors), the agent should attempt to fix them before presenting the result. This catches a common class of bugs where the page appears to render but has runtime errors.
 
-The API/gateway layer cares only that it can stream bytes for HTTP and WebSocket traffic. It should not know whether the preview is backed by a container IP, a VM tunnel, or another transport.
+#### Automatic Post-Change Screenshot
 
-### 3. Preview Gateway
+The preview manager can optionally capture a screenshot automatically after detecting an HMR update or file change. This is enabled per-session and works as follows:
 
-The preview gateway runs on the preview origin and does exactly three things:
+1. The preview gateway detects an HMR WebSocket message indicating a module update
+2. After a 2-second stabilization delay, the preview manager calls `CaptureScreenshot` via the Preview Inspector
+3. The screenshot and any new console errors are attached to the session as a `preview_snapshot` event
+4. The agent receives the snapshot in its context if it is currently active
+5. The reviewer can see a timeline of snapshots in the session UI, showing how the preview evolved as the agent made changes
 
-1. Validate preview access
-2. Proxy HTTP and WebSocket traffic
-3. Inject / strip security-sensitive headers
+This creates an automatic visual audit trail without requiring the agent to explicitly request screenshots.
 
-It does **not** use the main app's session middleware. Access is established by the bootstrap token exchange.
+### Semantic Diff Awareness
 
-### 4. Worker Routing
+Static screenshots tell the agent what the preview looks like, but not what *changed*. After every code edit, the agent needs to understand the delta — both visually and structurally — to verify that the change matches intent and to catch unintended side effects.
 
-In `MODE=all`, the API server and preview-owning worker may be the same process.
+#### How Semantic Diffs Work
 
-In multi-node mode:
+The `preview_visual_diff` tool compares two preview snapshots (typically the before and after of a code change) and returns a structured `VisualDiff`:
 
-- the `preview_instances` record stores `worker_node_id`
-- the gateway routes preview traffic to that worker over an authenticated internal hop
-- the worker opens the provider-specific preview stream locally
+1. **Pixel diff**: The headless browser captures both states at the same viewport size. A pixel-level comparison identifies regions that changed, expressed as bounding boxes with severity ("minor" for small shifts, "major" for large repaints, "new" for added elements, "removed" for missing elements). An overlay image highlights changed regions in red.
+2. **DOM diff**: The system serializes the DOM tree of both snapshots and computes structural differences — elements added, removed, moved, or changed (text content, attributes). Each change is tagged with a CSS selector so the agent can map it back to code.
+3. **Style diff**: For elements that exist in both snapshots, the system compares computed styles and reports changes. If design tokens are available, the diff includes token names (e.g., "background-color changed from `bg-blue-500` to `bg-red-500`").
+4. **Summary**: A human-readable summary string that describes the visual impact in plain language: "Header height increased by 24px, causing nav items to wrap to a second line. Card grid shifted down by 24px."
 
-This mirrors the general cluster model more closely than a direct container IP lookup.
+#### What The Agent Sees
 
-### 5. Headless Browser (Preview Inspector)
+After making a change, the agent receives a structured `VisualDiff` containing: pixel diff percentage, bounding boxes of changed regions with severity, DOM change list (selectors + change types), style change list (with design token names), and a human-readable summary like "Header background changed from blue to red. No other layout or content changes detected."
 
-A headless Chromium instance runs on the worker node (not inside the sandbox) and is used for two purposes:
+This tells the agent: "Your change did exactly what was intended and nothing else." Or, critically: "Your change to the header also shifted the card grid layout — investigate."
 
-1. **Agent-facing screenshot and DOM inspection** — the agent captures visual state and console errors from the preview to self-verify its work
-2. **Human-facing Design Mode** — the reviewer clicks on elements in the preview and gives visual feedback that is translated into agent context
+#### When Semantic Diffs Run
 
-The headless browser connects to the preview through the same internal transport as the preview gateway (via `DialPreview`), so it sees exactly what a real browser would see. It runs outside the sandbox to keep the sandbox footprint small and to avoid giving untrusted preview code access to browser automation APIs.
+- **Automatically** after every HMR-triggered auto-screenshot (diffed against the previous snapshot)
+- **On demand** when the agent calls `preview_visual_diff` with two specific snapshot IDs
+- **In assertion flows** when the agent wants to verify that a change had no unintended side effects beyond the target elements
 
-```go
-type PreviewInspector interface {
-    // CaptureScreenshot takes a viewport screenshot of the preview at the given URL path.
-    // Returns PNG bytes and page metadata (title, console errors, URL).
-    CaptureScreenshot(ctx context.Context, previewID string, opts ScreenshotOpts) (*ScreenshotResult, error)
+The diff computation runs in the headless browser on the worker node. For a typical 1280x720 viewport, the pixel diff takes ~200ms and the DOM/style diff takes ~100ms.
 
-    // CaptureDOM returns a serialized snapshot of the DOM at the given URL path,
-    // including computed styles for selected elements and the component tree if
-    // source maps are available.
-    CaptureDOM(ctx context.Context, previewID string, opts DOMCaptureOpts) (*DOMSnapshot, error)
+### Interaction Replay
 
-    // ReadConsole returns buffered console messages (errors, warnings, logs)
-    // captured since the last read or since the page was loaded.
-    ReadConsole(ctx context.Context, previewID string) ([]ConsoleMessage, error)
+The agent needs to verify flows that require user input — form submission, login, navigation sequences, dropdown menus, modal dialogs. Without interaction capabilities, the agent can only verify static page loads. With `preview_interact`, the agent can script multi-step browser interactions and capture the result at each checkpoint.
 
-    // InspectElement returns metadata about the DOM element at the given
-    // coordinates: computed styles, component name (if React/Vue devtools
-    // protocol is available), bounding box, and surrounding DOM context.
-    InspectElement(ctx context.Context, previewID string, x, y int) (*ElementInfo, error)
+#### Interaction Model
 
-    // StartScreencast begins recording frames from the preview at the given FPS.
-    // Uses Chromium's Page.startScreencast CDP method.
-    StartScreencast(ctx context.Context, previewID string, fps int) (screencastID string, err error)
+The agent composes a sequence of `InteractionStep` objects and executes them in a single `preview_interact` call. Each step performs one browser action and optionally waits for a condition and captures a screenshot:
 
-    // StopScreencast ends recording and returns the assembled video/GIF.
-    StopScreencast(ctx context.Context, screencastID string) (*ScreencastResult, error)
-
-    // ExecuteInteraction runs a sequence of browser interactions (click, type,
-    // navigate, wait) against the preview and returns the result of each step,
-    // including screenshots captured at specified checkpoints.
-    ExecuteInteraction(ctx context.Context, previewID string, steps []InteractionStep) (*InteractionResult, error)
-
-    // CaptureMultiViewport takes simultaneous screenshots at multiple viewport
-    // sizes (e.g., mobile, tablet, desktop) in a single call.
-    CaptureMultiViewport(ctx context.Context, previewID string, opts MultiViewportOpts) (*MultiViewportResult, error)
-
-    // ComputeVisualDiff compares two snapshots (before/after a code change) and
-    // returns structured information about what changed visually and in the DOM.
-    ComputeVisualDiff(ctx context.Context, previewID string, beforeSnapshotID, afterSnapshotID string) (*VisualDiff, error)
-}
-
-// Supporting types: ScreenshotOpts, ScreenshotResult, ScreencastResult,
-// InteractionStep/Result, MultiViewportOpts/Result, VisualDiff, ElementInfo
-// See "Type Reference" appendix at the end of this document for full definitions.
+```json
+[
+  { "action": "navigate", "value": "/login" },
+  { "action": "type", "selector": "#email", "value": "test@example.com" },
+  { "action": "type", "selector": "#password", "value": "password123" },
+  { "action": "click", "selector": "#login-button", "wait_for": "networkidle", "screenshot": true },
+  { "action": "wait", "wait_for": ".dashboard-content", "timeout": "5s", "screenshot": true }
+]
 ```
 
-#### Headless Browser Lifecycle
+The result includes per-step success/failure, screenshots at each checkpoint, the final URL, and any console errors introduced during the interaction.
 
-- The headless browser is **not** started when the preview starts. It is started **on demand** when the first screenshot or DOM inspection is requested.
-- One headless browser instance is shared across all active previews on the same worker node. Each preview gets its own browser context (isolated cookies, storage) within the shared instance.
-- The browser is shut down after 5 minutes of inactivity to free resources.
-- The headless browser has no access to the main app session, managed credentials, or any state beyond what the preview gateway exposes.
+#### Use Cases
 
-#### Resource Overhead
+| Scenario | Interaction Sequence | What The Agent Verifies |
+|----------|---------------------|------------------------|
+| Login flow | Navigate → type email → type password → click submit → wait for dashboard | Successful redirect, dashboard renders, no errors |
+| Form validation | Navigate → click submit (empty form) → check error messages → fill fields → submit → check success | Validation messages appear, successful submission after fix |
+| Navigation | Click nav link → wait for page → click another link → wait | All routes render without errors |
+| Modal dialog | Click trigger → wait for modal → interact with modal content → close | Modal opens/closes correctly, content renders |
+| Pagination | Navigate to list → click "next" → verify page 2 content → click "previous" → verify page 1 | Pagination works, content changes correctly |
 
-| Resource | Per-Worker Overhead |
-|----------|-------------------|
-| Memory | ~150-250 MB for the shared Chromium instance |
-| CPU | Minimal when idle; spikes during screenshot capture |
-| Startup | ~2-3 seconds for first browser launch; <500ms for new browser context |
+#### Safety Constraints
 
-This overhead is per-worker, not per-preview. A worker running 3 previews uses one shared headless browser instance.
+- **Max steps per interaction**: 20 (prevents runaway interaction scripts)
+- **Max total duration**: 60 seconds
+- **No external navigation**: interactions cannot navigate outside the preview origin
+- **No file uploads**: the `type` action works only on text inputs, not file inputs
+- **Rate limited**: max 10 `preview_interact` calls per minute per preview
+- **Idempotent intent**: interactions are for verification, not for mutating application state in ways the agent depends on. The agent should not use interactions to "set up" state that its code changes depend on — instead, it should write the code correctly and use interactions to verify the result.
 
-#### Component Resolver
+#### Interaction Recording From Design Mode
 
-DOM-level inspection (`elementFromPoint` returning a `<div>`) is not sufficient for meaningful Design Mode feedback. The agent needs to know that the `<div>` is a `<Header>` component defined in `src/components/Header.tsx:14` with props `{ title: "Dashboard", showNav: true }`.
+When the reviewer interacts with the preview in "interact" mode, the frontend optionally records the interaction sequence as a replayable script. After the agent makes changes, it replays the recorded interaction to verify the reviewer's workflow still works — a lightweight, ephemeral regression check. Recorded interactions are stored in memory for the session lifetime only.
 
-The Preview Inspector achieves this by injecting a lightweight **component resolver script** (~2KB) into each preview page via the preview gateway. The script detects the framework in use and extracts component metadata:
+### Multi-Viewport Preview
 
-| Framework | Detection | Hook Used | Data Extracted |
-|-----------|-----------|-----------|---------------|
-| React 16+ | `window.__REACT_DEVTOOLS_GLOBAL_HOOK__` | React fiber tree walker | Component name, props, source file (if available), parent component chain |
-| Vue 3 | `window.__VUE_DEVTOOLS_GLOBAL_HOOK__` | Component instance tree | Component name, props, source file, parent chain |
-| Vue 2 | `window.__VUE_DEVTOOLS_GLOBAL_HOOK__` | Legacy instance API | Component name, props (limited source info) |
-| Svelte | `__svelte_meta` on elements | Element metadata | Component name, source file |
-| Angular | `ng.getComponent()` | Debug API | Component class name, template file |
-| None detected | — | Source map fallback | CSS selector path, computed styles only |
+Frontend changes frequently break on viewports the developer didn't check. A responsive design change that looks perfect on desktop may wrap incorrectly on mobile or overflow on tablet. The `preview_multi_viewport` tool captures the preview at multiple viewport sizes in a single call, giving the agent a comprehensive view of how the change renders across screen sizes.
 
-The resolver script registers a global function `__143_resolveElement(element)` that the headless browser calls after `elementFromPoint`. It returns:
+#### Default Viewports
+
+When the agent calls `preview_multi_viewport` without specifying custom viewports, it captures three standard breakpoints:
+
+| Name | Width | Height | Represents |
+|------|-------|--------|------------|
+| `mobile` | 375 | 812 | iPhone SE / typical mobile |
+| `tablet` | 768 | 1024 | iPad / typical tablet |
+| `desktop` | 1280 | 720 | Standard desktop (same as default single screenshot) |
+
+The agent can override these or add custom viewports (e.g., `ultrawide` at 2560x1080) via the `viewports` parameter.
+
+The headless browser captures each viewport sequentially (~3-5 seconds total), collecting per-viewport console errors. The agent calls `preview_multi_viewport` after layout/styling changes, evaluates each viewport, and iterates if any viewport has issues. Particularly valuable for grid/flexbox, typography, navigation, and card layout changes.
+
+#### State Injection
+
+Beyond viewport sizes, the agent can capture the preview in different **application states** to verify edge cases:
+
+| State | How It's Set | What It Catches |
+|-------|-------------|----------------|
+| Empty state | Agent navigates to a route with no data (or uses `preview_interact` to clear data) | Missing empty state UI, broken layouts with no content |
+| Error state | Agent uses `preview_interact` to trigger an error (e.g., disconnect network, submit invalid data) | Error boundary rendering, error message display |
+| Loading state | Agent captures immediately after navigation (before data loads) | Loading spinner/skeleton display, layout shift during load |
+| Dark mode | Agent uses `preview_interact` to toggle theme (if the app supports it) | Color contrast issues, missing dark mode styles |
+
+State injection is not a separate tool — it's a pattern that combines `preview_interact` (to set up the state) with `preview_screenshot` or `preview_multi_viewport` (to capture it). The agent is responsible for knowing how to trigger different states in the specific app being previewed.
+
+#### Multi-Viewport Resource Constraints
+
+- Maximum viewports per call: 5
+- All viewports share the same headless browser instance on the worker
+- Multi-viewport captures count toward the same snapshot storage limits (each viewport is one snapshot)
+- The headless browser restores its default viewport (1280x720) after multi-viewport capture
+
+## Reviewer Experience
+
+The session page on `app.143.dev` renders:
+
+- `Start Preview` / `Stop Preview`
+- Preview status (with per-service breakdown for multi-service configs)
+- Responsive width presets
+- `Open in new tab`
+- **Design Mode toggle** — switches between interact mode (normal iframe) and design mode (overlay captures clicks)
+- **Screenshot timeline** — scrollable strip of snapshots below the preview, showing visual evolution
+- **Console errors badge** — count of unread console errors, click to expand
+
+The iframe `src` points at the preview origin, not the app origin.
+
+`Open in new tab` is allowed only because the preview uses an isolated origin. The earlier same-origin version of this feature was not safe.
+
+### Startup Progress
+
+Preview startup takes 10-90 seconds. A spinner with no context will feel broken. The UI should stream phase-level progress during startup:
+
+1. Show the current phase: **Building** → **Initializing** → **Starting**
+2. Stream the last few lines of build/init output in a collapsible terminal view below the progress indicator
+3. Show estimated time remaining based on historical startup times for the same repo and config. Format as "Usually ready in ~25s" rather than a countdown, since estimates are approximate.
+4. If no historical data exists yet, show an indeterminate progress bar with the phase label only
+
+The preview manager should emit structured phase-transition events that the frontend consumes via the existing session WebSocket channel. These events are separate from `preview_logs` rows — they are ephemeral UI signals, not persisted records.
+
+### Failure Diagnostics
+
+When preview enters `failed` status, the UI should show:
+
+1. **Which phase failed** — Build, Init, or Start — as a prominent label
+2. **The last 20 lines of process output** from the failed phase, redacted per the log policy in the Secret Handling For Logs section
+3. **A suggested fix** when the failure matches a known pattern
+
+Known failure patterns the preview manager should detect and surface:
+
+| Pattern | Suggested Fix |
+|---------|--------------|
+| Port not reachable after timeout | "The dev server did not respond on port {port}. Check that your dev server binds to `0.0.0.0`, not `localhost`. You can set `HOST=0.0.0.0` in the preview config env." |
+| `EADDRINUSE` in process output | "Port {port} is already in use inside the sandbox. Check for conflicting processes or change the port in `.143/preview.json`." |
+| `MODULE_NOT_FOUND` or `Cannot find module` | "A required dependency is missing. Ensure `npm install` or equivalent runs during the Build phase." |
+| OOM kill (exit code 137) | "The preview process exceeded its memory limit ({limit}MB). Try a lighter dev server configuration or request a higher limit." |
+| Non-zero exit within 5 seconds of start | "The dev server exited immediately. Check the process output below for configuration errors." |
+| `ECONNREFUSED` on a support service port | "The {service} service is not responding on port {port}. It may have crashed or failed to start. Check the {service} process output." |
+| Support service ready but primary fails to connect | "The frontend cannot reach the backend at localhost:{port}. Ensure the backend service is configured to bind to `0.0.0.0`." |
+| Infrastructure container fails to start | "PostgreSQL failed to start. This is likely a platform issue — try restarting the preview." |
+| Init script fails (`psql` exit code non-zero) | "Database seed script `{init_script}` failed. Check the script for syntax errors or missing tables." |
+| `ECONNREFUSED` on infrastructure port during app startup | "The {service} service cannot connect to {infra_name} at {host}:{port}. The database may still be initializing — try restarting." |
+
+This pattern list should be maintained as a registry in the preview manager, not hardcoded in the frontend, so new patterns can be added without frontend deploys.
+
+### Activity-Aware Timeouts
+
+Static idle timeouts cause the most common UX complaint: a reviewer reads code for a few minutes, switches back to the preview, and it is gone.
+
+Replace the static 5-minute idle timeout with an **activity-aware timer**:
+
+1. The preview gateway tracks the timestamp of the last meaningful traffic, defined as any HTTP request or WebSocket data frame (excluding ping/pong keepalives)
+2. The frontend injects a lightweight visibility observer via `postMessage` from an injected bootstrap script on the preview origin. When the iframe becomes visible (Page Visibility API), the frontend sends a heartbeat to the app origin, which forwards an activity ping to the preview manager
+3. The idle timeout resets on either gateway traffic or visibility heartbeats
+4. Default idle timeout: **15 minutes** of no activity (up from 5 minutes)
+
+For the hard TTL:
+
+- Default: 30 minutes
+- If the gateway has seen activity in the last 5 minutes when TTL would expire, auto-extend by 30 minutes
+- Maximum extended TTL: **2 hours**
+- The UI should show a subtle "Preview expires in 5 min" warning at the 25-minute mark, with a one-click "Extend" button
+
+This ensures active reviews are never interrupted while still reclaiming resources from truly abandoned previews.
+
+### Hot Reload After Agent Changes
+
+When the agent writes files inside the sandbox, those writes land on the same filesystem the dev server watches. Most modern dev servers (Vite, Next.js, webpack) use `inotify` / `fsevents` and will detect changes automatically.
+
+However, two cases need explicit handling:
+
+1. **Provider-specific file delivery**: if the sandbox provider delivers agent changes via a mechanism that does not trigger filesystem watch events (e.g., direct block-level snapshot restore), the preview manager must emit a synthetic `touch` on changed files after delivery to wake the file watcher
+2. **Full rebuild required**: some changes (new dependencies in `package.json`, config file changes) require a restart rather than HMR. The preview manager should detect changes to known restart-trigger files and prompt the user: "Dependencies changed — Restart preview to apply?"
+
+The design does not support auto-restarting on file changes in MVP. The user must explicitly restart if HMR is insufficient.
+
+### Design Mode (Visual Feedback From Reviewer)
+
+Design Mode lets the reviewer interact with the preview visually and pass precise, element-level feedback to the agent. Instead of typing "make the header bigger," the reviewer clicks on the header element and types "make this bigger" — the agent receives the element context (component name, CSS selector, computed styles, bounding box) alongside the instruction.
+
+This is the reviewer-facing counterpart to the agent's visual feedback tools. Together they form a complete visual loop: the agent sees what it built, the reviewer points at what needs to change, and the agent receives both visual and structural context for the fix.
+
+#### How Design Mode Works
+
+Design Mode runs entirely in the **app origin** (`app.143.dev`), not in the preview iframe. It uses a transparent overlay on top of the preview iframe to capture click and annotation events, then uses the Preview Inspector's server-side headless browser to resolve what the user clicked on.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ app.143.dev (Session Page)                                       │
+│                                                                   │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │ Design Mode Overlay (transparent, captures clicks)          │ │
+│  │                                                              │ │
+│  │  ┌───────────────────────────────────────────────────────┐  │ │
+│  │  │ Preview iframe (<preview-id>.preview.143.dev)         │  │ │
+│  │  │                                                        │  │ │
+│  │  │  [rendered preview content]                            │  │ │
+│  │  │                                                        │  │ │
+│  │  └───────────────────────────────────────────────────────┘  │ │
+│  │                                                              │ │
+│  │  ┌─────────────┐  ┌──────────────────────────────────────┐  │ │
+│  │  │ [x] Element │  │ Describe your change...         [Send]│  │ │
+│  │  │  .header    │  │                                       │  │ │
+│  │  └─────────────┘  └──────────────────────────────────────┘  │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│                                                                   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+Step by step:
+
+1. The reviewer toggles Design Mode via a button in the session UI
+2. A transparent overlay appears on top of the preview iframe, intercepting pointer events
+3. When the reviewer clicks on a point in the overlay, the frontend sends the `(x, y)` coordinates to the API server
+4. The API server calls `InspectElement(previewID, x, y)` on the Preview Inspector, which uses the headless browser to resolve the click coordinates to a DOM element
+5. The Preview Inspector returns `ElementInfo`: component name, CSS selector path, computed styles, bounding box, inner text, and surrounding DOM context
+6. The overlay highlights the selected element (draws a border based on the bounding box) and shows a floating panel with the element name and a text input
+7. The reviewer types their instruction (e.g., "make this bigger", "change the color to blue", "add padding")
+8. The instruction is sent to the agent as a structured `design_mode_feedback` message containing:
+   - The screenshot at the moment of selection (with the element highlighted)
+   - The `ElementInfo` (component name, CSS selector, computed styles)
+   - The user's natural language instruction
+   - The file path and line number of the component (if source maps are available)
+9. The agent receives this as rich context and can make targeted code changes
+
+#### Why The Overlay Instead of In-Iframe Interaction
+
+The preview iframe is sandboxed without `allow-same-origin`, so the app origin cannot inject JS or read its DOM — a hard security constraint. The overlay captures click coordinates client-side (no cross-origin access needed), and the server-side headless browser resolves those coordinates to DOM elements via `elementFromPoint`. Security boundary stays intact.
+
+#### Annotations
+
+Beyond clicking single elements, the reviewer can draw annotations on the overlay:
+
+- **Rectangles**: to indicate a region ("rearrange items in this area")
+- **Arrows**: to indicate relationships ("move this next to that")
+- **Freehand**: to circle or underline ("this text is wrong")
+
+Annotations are captured as SVG paths relative to the iframe viewport. They are rendered onto the screenshot image before being sent to the agent, so the agent sees a single annotated screenshot.
+
+#### Multi-Element Selection
+
+The reviewer can select multiple elements before sending feedback:
+
+1. Click element A → highlighted
+2. Shift-click element B → both highlighted
+3. Type instruction: "swap the positions of these two"
+4. The agent receives both `ElementInfo` objects and the instruction
+
+#### Element Reordering
+
+When the reviewer selects an element in Design Mode that is a child of a flex or grid container, the overlay shows **directional move controls** (up/down/left/right arrows) alongside the element highlight. Clicking an arrow sends a structured `reorder` message to the agent:
 
 ```json
 {
-  "componentName": "Header",
-  "componentFile": "src/components/Header.tsx",
-  "componentLine": 14,
-  "props": { "title": "Dashboard", "showNav": true },
-  "componentTree": ["App", "DashboardLayout", "Header"],
-  "framework": "react"
+  "type": "reorder",
+  "element": { /* ElementInfo */ },
+  "parent": { /* ElementInfo of the container */ },
+  "direction": "up",
+  "siblings": ["NavLink:Home", "NavLink:Dashboard", "NavLink:Settings"]
 }
 ```
 
-**Trust model**: The resolver script runs in the preview origin (untrusted). Its output is treated as **untrusted hints** — the headless browser validates that the reported component file exists in the repo and that the component name is reasonable (alphanumeric, < 100 chars). If validation fails, the field is omitted from `ElementInfo` and the system falls back to DOM-only information. The agent receives whatever metadata is available, and can use source maps as a secondary resolution path.
+The agent receives enough context to find the component in source and reorder the JSX/HTML children. The sibling list (with component names) helps the agent understand the current order without needing to read the full file first.
 
-The resolver script is injected by the preview gateway as a `<script>` tag in every HTML response, similar to how the bootstrap script handles `postMessage` for activity heartbeats. It is framework-detection code only — it does not modify the page, intercept events, or send data anywhere. It only runs when called by the headless browser via `evaluateHandle`.
+This covers the 80% case of layout reordering (list items, nav links, grid children, card order) without the complexity of full freeform drag-and-drop, which requires solving coordinate mapping between the overlay and the actual DOM layout engine. Full drag-and-drop is deferred to a later phase.
 
-#### Design Token Awareness
+#### Design Mode Constraints
 
-When a reviewer adjusts a color or spacing value in Visual Editing, the agent should generate code using the project's design system tokens (e.g., `bg-blue-500` in Tailwind) rather than raw values (e.g., `background-color: #3b82f6`). This requires the preview system to understand what tokens exist in the project.
+- Design Mode requires the preview to be in `ready` status
+- Design Mode is available to `member` role (same as starting a preview)
+- The overlay intercepts pointer events, so the reviewer cannot interact with the preview while Design Mode is active. There is a toggle to switch between "interact" mode (normal iframe interaction) and "design" mode (overlay captures clicks)
+- Design Mode uses the same headless browser instance as the agent's screenshot tools — no additional resource overhead
 
-**Token extraction** happens during the **Build** phase and is cached per preview instance:
+### Visual Editing (Style Tweaks)
 
-| Source | How Tokens Are Extracted | Token Format |
-|--------|------------------------|-------------|
-| Tailwind CSS | Parse `tailwind.config.js` / `tailwind.config.ts` to extract the theme (colors, spacing, typography, etc.) | `{ "bg-blue-500": "#3b82f6", "p-4": "1rem", ... }` |
-| CSS custom properties | Scan CSS files for `--variable-name: value` declarations | `{ "--color-primary": "#3b82f6", "--spacing-lg": "2rem", ... }` |
-| Theme files | Detect common patterns: `theme.js`, `tokens.json`, `design-tokens.yaml` | Parsed into `{ name: value }` map |
+For simple visual changes (colors, spacing, typography, layout), the reviewer can make edits directly in the Design Mode overlay without writing a natural language instruction. This creates a fast feedback loop for visual polish.
 
-The extracted token map is stored in memory on the worker (not in the database) and provided to the Preview Inspector. When `InspectElement` resolves an element's computed styles, it reverse-maps values to tokens:
+#### How Visual Editing Works
 
-- The element has `background-color: rgb(59, 130, 246)` → matches Tailwind token `bg-blue-500`
-- The element has `padding: 16px` → matches Tailwind token `p-4`
+When the reviewer selects an element in Design Mode, the floating panel shows the element's key computed styles alongside interactive controls:
 
-These mappings appear in `ElementInfo.DesignTokens` so the agent knows to write `className="bg-blue-500"` instead of `style={{ backgroundColor: '#3b82f6' }}`.
+| Control | What It Edits | UI |
+|---------|--------------|-----|
+| Color picker | `color`, `background-color`, `border-color` | Native color input + project token swatches (from Tailwind/CSS vars if detected) |
+| Spacing sliders | `margin`, `padding` (per-side) | Four-directional slider + project spacing scale presets |
+| Typography | `font-size`, `font-weight`, `line-height`, `letter-spacing` | Numeric inputs + project typography presets |
+| Layout | `display`, `flex-direction`, `justify-content`, `align-items`, `gap` | Segmented controls (e.g., row/column toggle) |
+| Size | `width`, `height`, `max-width` | Numeric input with unit selector (px, rem, %) |
+| Border radius | `border-radius` | Slider |
 
-**Visual Editing controls** use the token map to present a **token picker** alongside raw value inputs:
+#### Two-Phase Editing Model
 
-- Color picker shows the project's color palette (extracted from Tailwind/CSS vars) as swatches
-- Spacing controls show the project's spacing scale as preset options
-- Typography controls show the project's font sizes / weights as named options
+Visual edits happen in two phases, inspired by Cursor's approach:
 
-When the reviewer picks a token, the `visual_edit` message sent to the agent includes `{ property: "background-color", token: "bg-primary-500", rawValue: "#3b82f6" }` so the agent can use whichever representation the codebase prefers.
+**Phase 1 — Visual Loop (instant, no code changes):**
+The reviewer adjusts a style control. The frontend sends the new CSS value to the preview iframe via a `postMessage` bridge that applies it as an inline style override. The reviewer sees the change instantly in the iframe. No code has been modified yet.
 
-If no design tokens are detected, the controls fall back to raw value inputs only.
+The `postMessage` bridge works despite the origin isolation because the preview's bootstrap script registers a listener that accepts style-override messages from the app origin. The bridge only accepts a whitelisted set of CSS properties — it cannot execute arbitrary JavaScript or modify the DOM beyond inline styles.
 
-#### Screencast Recording
+**Phase 2 — Code Loop (agent writes the actual change):**
+When the reviewer clicks "Apply", the accumulated style changes are sent to the agent as a structured `visual_edit` message containing:
+- The element's `ElementInfo` (component name, file path, CSS selector)
+- A list of `{property, oldValue, newValue}` tuples
+- A before/after screenshot pair
 
-For agent verification flows that involve navigation (checking multiple pages, testing a form submission flow), a static screenshot timeline is insufficient. The Preview Inspector supports recording a lightweight screencast using Chromium's built-in `Page.startScreencast` CDP method.
+The `visual_edit` message includes design token information when available:
 
-**How it works:**
-1. The agent calls `preview_screencast_start` with a desired FPS (default: 4)
-2. The Preview Inspector begins capturing frames from the headless browser
-3. The agent performs its verification (navigating pages, waiting for transitions)
-4. The agent calls `preview_screencast_stop`
-5. The Preview Inspector assembles frames into a GIF (for short recordings <10s) or WebM (for longer recordings)
-6. The result is stored in blob storage and attached to the session as a `preview_screencast` event
-
-**Constraints:**
-- Maximum recording duration: 30 seconds
-- Maximum FPS: 4 (sufficient for navigation verification, not video-quality)
-- Maximum file size: 10 MB
-- One active screencast per preview at a time
-- Screencasts are stored with the same retention policy as screenshots (session lifetime + 24h)
-
-**Use cases:**
-- Agent navigates from login → dashboard → settings to verify a change doesn't break other pages
-- Agent fills out a form and verifies the success state
-- Agent tests a responsive layout by resizing the viewport mid-recording
-
-The reviewer sees screencasts in the session timeline alongside static screenshots. They play inline (no external player needed) and provide significantly richer context than a series of static images.
-
-### 6. Startup Phases
-
-Even in MVP, preview startup should be modeled as three phases:
-
-1. **Build**: prepare or reuse the runnable filesystem/image state (shared across all services — one repo checkout)
-2. **Init**: provision infrastructure containers (if any), wait for infrastructure health, run init scripts, generate and inject credentials (both managed and infrastructure-generated) into the appropriate services per `inject_into`
-3. **Start**: launch application services in dependency order (support services first, then primary) and wait for all readiness probes to pass
-
-The Init phase is where infrastructure and credential setup happens. This ensures that by the time application services start, all databases are populated and all connection strings are injected.
-
-For multi-service configs, the Start phase emits per-service status events so the frontend can show which services are ready and which are still starting. The preview transitions to `ready` only when all services and infrastructure pass their readiness/health checks. If any service or infrastructure container fails, the preview transitions to `failed` with a diagnostic identifying the failing component.
-
-Phase 1 does not need the full immutable image cache pipeline yet, but the lifecycle should already distinguish these phases so later caching and diagnostics do not require redesigning the contract.
-
-### 7. Fast Startup
-
-Preview startup time is the single biggest UX bottleneck. A typical first-time preview for a React + Express app takes 30-90 seconds (npm install + build + start). For the PR review workflow, where a reviewer clicks "Launch Preview" and expects to see something quickly, this delay is unacceptable. The system uses three strategies to minimize startup time.
-
-#### Filesystem Snapshot Caching
-
-After a successful preview startup (all three phases complete), the system takes a **filesystem snapshot** of the sandbox state — node_modules installed, build artifacts ready, infrastructure initialized. The snapshot is keyed by:
-
-```
-snapshot_key = hash(lockfile_contents + base_commit + preview_config_hash)
+```json
+{
+  "element": { /* ElementInfo with ComponentFile, DesignTokens */ },
+  "changes": [
+    {
+      "property": "background-color",
+      "oldValue": "#3b82f6",
+      "newValue": "#ef4444",
+      "oldToken": "bg-blue-500",
+      "newToken": "bg-red-500"
+    }
+  ],
+  "beforeScreenshot": "blob://...",
+  "afterScreenshot": "blob://..."
+}
 ```
 
-On subsequent preview starts for the same repo with the same dependencies:
+The agent uses the token names to generate idiomatic code changes — `bg-blue-500` → `bg-red-500` in Tailwind, `var(--color-primary)` → `var(--color-danger)` in CSS custom properties, etc. When no token matches the new value, the agent falls back to raw values. The dev server's HMR picks up the changes, and the agent captures a verification screenshot to confirm the code change matches the visual intent.
 
-1. The preview manager checks for a matching snapshot
-2. If found, restores the filesystem from snapshot (skipping the Build phase entirely)
-3. Runs only Init (if infrastructure is needed) and Start phases
-4. **Result**: startup drops from 30-90 seconds to 5-15 seconds
+#### Why Not Direct Code Generation From Visual Edits
 
-Snapshots are stored on the worker's local disk (SSD) with an LRU eviction policy. Default cache size: 20 GB per worker, with each snapshot typically 200 MB - 1 GB depending on node_modules size.
+Visual edits produce CSS property changes, but translating those into code depends on the codebase (Tailwind classes, CSS Modules, styled-components, inline styles). The agent already understands the codebase's conventions, so it handles the translation. The UI captures intent; the agent generates code.
 
-**Invalidation**: snapshots are invalidated when:
-- The lockfile changes (new dependencies)
-- The base commit changes (new code) — but see "partial invalidation" below
-- The preview config changes (different services or settings)
+#### Visual Editing Constraints
 
-**Partial invalidation**: when only the base commit changes but the lockfile is the same, the system can restore the snapshot and apply only the new file changes (git diff) on top. This handles the common case where a PR is rebased or new commits are pushed without changing dependencies.
+- Visual edits in Phase 1 are ephemeral — if the page reloads (HMR, navigation), they are lost. This is by design: the reviewer is previewing the change, not committing it.
+- The `postMessage` bridge for style overrides is limited to CSS properties only. It cannot add/remove DOM elements, change text content, or execute scripts.
+- Visual editing is not available for non-CSS changes (adding a new button, changing text, restructuring layout). Those require natural language instructions via the Design Mode text input.
 
-#### Progressive Preview
+### Agent-Driven Screenshot Timeline
 
-For multi-service configs, the frontend service often starts faster than the backend. Rather than waiting for all services to be ready, the system supports **progressive preview**:
+As the agent iterates on changes, the system builds a visual timeline that both the agent and reviewer can reference.
 
-1. As soon as the primary service (frontend) passes its readiness probe, the preview transitions to `partially_ready` and the frontend displays the preview iframe
-2. The UI shows a toast overlay: "Backend starting... (API calls may fail until ready)"
-3. When all services pass readiness, the preview transitions to `ready` and the toast disappears
-4. If the frontend depends on backend data, it will show its own loading/error states naturally — this is actually useful for the agent to see, as it reveals how the app handles backend unavailability
+#### How It Works
 
-Progressive preview is opt-in per config via a `progressive: true` flag. It is most useful for SPAs with client-side routing that can render a shell before API data is available.
+1. When the preview becomes `ready`, the preview manager captures an **initial baseline screenshot** automatically
+2. After each agent code change that triggers an HMR update, a new screenshot is captured (with a 2-second stabilization delay)
+3. Each screenshot is stored as a `preview_snapshot` with metadata:
+   - `preview_instance_id`
+   - `trigger` (`baseline`, `agent_change`, `agent_explicit`, `user_request`, `design_mode`)
+   - `url_path` (the page that was captured)
+   - `png_data` (stored in blob storage, not the database)
+   - `console_errors` (any errors present at capture time)
+   - `file_changes` (list of files the agent modified since the previous snapshot)
+   - `created_at`
+4. The session UI shows a scrollable timeline of snapshots below the preview iframe. The reviewer can click any snapshot to see the state at that point, the associated file changes, and any console errors.
+5. The agent can reference previous snapshots in its context when reasoning about changes ("the header was correct in snapshot 3 but broke in snapshot 4").
 
-#### Startup Time Targets
+#### Storage And Retention
 
-| Scenario | Target | Strategy |
-|----------|--------|----------|
-| First preview for repo (cold) | < 90 seconds | Warm sandbox pool (skip container start) |
-| Repeat preview, same dependencies | < 15 seconds | Filesystem snapshot restore + Start only |
-| Re-launch after idle timeout (same session) | < 10 seconds | Snapshot restore + Start only (Init skipped if infra containers still running) |
-| Progressive preview (frontend ready) | < 30 seconds (cold), < 10 seconds (cached) | Show frontend as soon as primary service ready |
+- Screenshots are stored in blob storage (S3 or equivalent), not in PostgreSQL
+- The `preview_snapshots` table stores metadata and a blob reference
+- Snapshots are retained for the lifetime of the session plus 24 hours (for post-review reference)
+- Maximum 50 snapshots per preview instance (oldest are evicted if exceeded)
+- Each screenshot is ~100-500 KB (PNG, 1280x720 viewport)
+
+## PR Preview Integration
+
+Preview environments are most valuable when they're connected to the code review workflow. Rather than treating previews as a standalone feature accessed through the session UI, the system should integrate directly into the GitHub PR lifecycle — while being careful not to waste resources on idle previews.
+
+### On-Demand PR Previews
+
+Previews are **not** auto-started when a PR is created. Instead, the system posts a PR comment with a **"Launch Preview"** button (a deep link to the 143 session page with `?preview=1`). Clicking the link navigates to the 143 session, which starts the preview on demand.
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ 🔍 Preview available for this PR                          │
+│                                                            │
+│ [Launch Preview] — starts a live preview of this change    │
+│                                                            │
+│ Last preview: 2 hours ago (stopped — idle timeout)         │
+│ Preview snapshots: 12 screenshots from last session        │
+│ [View Screenshot Timeline]                                 │
+└──────────────────────────────────────────────────────────┘
+```
+
+This avoids burning resources on every PR. The preview starts when someone actually wants to look at it, and stops automatically via the existing idle timeout (15 min) and hard TTL (30 min, extendable to 2h).
+
+### PR Comment Lifecycle
+
+The system maintains a **single, updating PR comment** (not one per preview session) that reflects the current state:
+
+| PR State | Comment Content |
+|----------|----------------|
+| PR opened, no preview yet | "Launch Preview" button + link to 143 session |
+| Preview running | Live preview link + "View in 143" deep link + current screenshot thumbnail |
+| Preview stopped (idle timeout) | "Re-launch Preview" button + screenshot timeline from last session + "Last active: 5 min ago" |
+| Agent made changes after review feedback | Updated screenshot thumbnail + "Agent updated preview — 3 files changed" |
+| PR merged/closed | Final screenshot timeline preserved as static artifacts |
+
+The comment is posted via the GitHub API using the org's GitHub integration. It is scoped to the PR — one comment per PR, updated in place.
+
+### Agent-Driven PR Review Loop
+
+When a reviewer leaves a comment on the PR (e.g., "the button color is wrong"), the agent can:
+
+1. Read the PR review comment via the existing GitHub integration
+2. Start or resume the preview (if stopped)
+3. Make the code fix in the sandbox
+4. Wait for HMR to update the preview
+5. Capture a screenshot and run self-verification assertions
+6. Post a reply to the PR comment with the screenshot: "Fixed — here's the updated preview"
+7. Push the code change to the PR branch
+
+This creates a **visual review loop embedded in the PR**: reviewer comments → agent fixes → preview updates → agent posts screenshot proof → reviewer verifies. The preview only runs while the agent is actively working or the reviewer is actively looking at it.
+
+### Visual Diff Summary On PR
+
+When a preview is running for a PR, the system can optionally capture a **base branch vs. feature branch visual diff** and post it as a PR comment section:
+
+```
+### Visual Changes Detected
+
+3 regions changed across 1 page:
+
+| Region | Change | Severity |
+|--------|--------|----------|
+| Header (0,0 → 1280,80) | Background color: blue → red | Major |
+| Button (.card-footer .btn) | Padding increased by 8px | Minor |
+| Footer (0,640 → 1280,720) | New "Terms" link added | New element |
+
+[View full visual diff overlay →]
+```
+
+This runs by starting the preview for both the base branch and the feature branch (sequentially, not simultaneously — the base branch preview is captured as a snapshot, then the sandbox switches to the feature branch). The diff is computed using the existing `ComputeVisualDiff` infrastructure.
+
+**Resource note**: the base branch capture is a one-time cost per PR (cached as a snapshot keyed by `base_commit + preview_config_hash`). It does not require keeping two previews running simultaneously.
+
+### GitHub Deployment Status
+
+When a preview starts, 143 should:
+
+1. Update the session UI with preview status and logs
+2. Create or update a GitHub deployment pointing at a protected 143 URL (the session page, not the raw preview gateway)
+3. Update the PR comment with the current preview state
+4. Set a GitHub commit status (`preview/143`) to `pending` while starting, `success` when ready, `inactive` when stopped
+
+The deployment URL always points to `app.143.dev/sessions/{id}?preview=1`, which handles authentication and preview bootstrapping. Raw preview gateway URLs are never exposed in PR comments.
+
+### Preview Artifacts After Sandbox Teardown
+
+When a preview stops (idle timeout, hard TTL, or manual stop), the screenshot timeline, assertion results, and visual diff summaries are **preserved as static artifacts** on the PR comment. Reviewers can browse the visual history even after the sandbox is torn down.
+
+These artifacts are stored in blob storage with the same retention policy as screenshots (session lifetime + 24h). For PRs that remain open, artifacts are retained until the PR is merged or closed, up to a maximum of 7 days after the last preview session.
+
+When a reviewer clicks "Re-launch Preview" on a stopped preview, the system uses fast startup (filesystem snapshot caching, see below) to minimize wait time.
 
 ## Data Model
 
@@ -971,483 +1527,7 @@ The verification endpoints:
 
 ### RBAC
 
-| Action | Role |
-|------|------|
-| View preview status, logs, and screenshot timeline | `viewer` |
-| Start or resume a `bootstrap` / `restricted` preview | `member` |
-| Start or resume a connected preview (`staging_like` or similar) | `member` |
-| Stop or restart a preview | `member` |
-| View raw process output for connected previews | `member` |
-| Capture screenshots and read console output | `member` |
-| Use Design Mode (click elements, annotate, send feedback) | `member` |
-| Use Visual Editing controls | `member` |
-| Run interaction replay, multi-viewport capture, visual diff, and assertions | `member` |
-| Configure preview configs, credentials, quotas, and defaults | `admin` |
-
-In the current role model, `member` is the editor-equivalent role. Starting a preview is treated as an editor action because it causes sandbox execution and may initiate connected preview flows.
-
-## Frontend UX
-
-The session page on `app.143.dev` renders:
-
-- `Start Preview` / `Stop Preview`
-- Preview status (with per-service breakdown for multi-service configs)
-- Responsive width presets
-- `Open in new tab`
-- **Design Mode toggle** — switches between interact mode (normal iframe) and design mode (overlay captures clicks)
-- **Screenshot timeline** — scrollable strip of snapshots below the preview, showing visual evolution
-- **Console errors badge** — count of unread console errors, click to expand
-
-The iframe `src` points at the preview origin, not the app origin.
-
-`Open in new tab` is allowed only because the preview uses an isolated origin. The earlier same-origin version of this feature was not safe.
-
-### Startup Progress
-
-Preview startup takes 10-90 seconds. A spinner with no context will feel broken. The UI should stream phase-level progress during startup:
-
-1. Show the current phase: **Building** → **Initializing** → **Starting**
-2. Stream the last few lines of build/init output in a collapsible terminal view below the progress indicator
-3. Show estimated time remaining based on historical startup times for the same repo and config. Format as "Usually ready in ~25s" rather than a countdown, since estimates are approximate.
-4. If no historical data exists yet, show an indeterminate progress bar with the phase label only
-
-The preview manager should emit structured phase-transition events that the frontend consumes via the existing session WebSocket channel. These events are separate from `preview_logs` rows — they are ephemeral UI signals, not persisted records.
-
-### Failure Diagnostics
-
-When preview enters `failed` status, the UI should show:
-
-1. **Which phase failed** — Build, Init, or Start — as a prominent label
-2. **The last 20 lines of process output** from the failed phase, redacted per the log policy in the Secret Handling For Logs section
-3. **A suggested fix** when the failure matches a known pattern
-
-Known failure patterns the preview manager should detect and surface:
-
-| Pattern | Suggested Fix |
-|---------|--------------|
-| Port not reachable after timeout | "The dev server did not respond on port {port}. Check that your dev server binds to `0.0.0.0`, not `localhost`. You can set `HOST=0.0.0.0` in the preview config env." |
-| `EADDRINUSE` in process output | "Port {port} is already in use inside the sandbox. Check for conflicting processes or change the port in `.143/preview.json`." |
-| `MODULE_NOT_FOUND` or `Cannot find module` | "A required dependency is missing. Ensure `npm install` or equivalent runs during the Build phase." |
-| OOM kill (exit code 137) | "The preview process exceeded its memory limit ({limit}MB). Try a lighter dev server configuration or request a higher limit." |
-| Non-zero exit within 5 seconds of start | "The dev server exited immediately. Check the process output below for configuration errors." |
-| `ECONNREFUSED` on a support service port | "The {service} service is not responding on port {port}. It may have crashed or failed to start. Check the {service} process output." |
-| Support service ready but primary fails to connect | "The frontend cannot reach the backend at localhost:{port}. Ensure the backend service is configured to bind to `0.0.0.0`." |
-| Infrastructure container fails to start | "PostgreSQL failed to start. This is likely a platform issue — try restarting the preview." |
-| Init script fails (`psql` exit code non-zero) | "Database seed script `{init_script}` failed. Check the script for syntax errors or missing tables." |
-| `ECONNREFUSED` on infrastructure port during app startup | "The {service} service cannot connect to {infra_name} at {host}:{port}. The database may still be initializing — try restarting." |
-
-This pattern list should be maintained as a registry in the preview manager, not hardcoded in the frontend, so new patterns can be added without frontend deploys.
-
-### Activity-Aware Timeouts
-
-Static idle timeouts cause the most common UX complaint: a reviewer reads code for a few minutes, switches back to the preview, and it is gone.
-
-Replace the static 5-minute idle timeout with an **activity-aware timer**:
-
-1. The preview gateway tracks the timestamp of the last meaningful traffic, defined as any HTTP request or WebSocket data frame (excluding ping/pong keepalives)
-2. The frontend injects a lightweight visibility observer via `postMessage` from an injected bootstrap script on the preview origin. When the iframe becomes visible (Page Visibility API), the frontend sends a heartbeat to the app origin, which forwards an activity ping to the preview manager
-3. The idle timeout resets on either gateway traffic or visibility heartbeats
-4. Default idle timeout: **15 minutes** of no activity (up from 5 minutes)
-
-For the hard TTL:
-
-- Default: 30 minutes
-- If the gateway has seen activity in the last 5 minutes when TTL would expire, auto-extend by 30 minutes
-- Maximum extended TTL: **2 hours**
-- The UI should show a subtle "Preview expires in 5 min" warning at the 25-minute mark, with a one-click "Extend" button
-
-This ensures active reviews are never interrupted while still reclaiming resources from truly abandoned previews.
-
-### Hot Reload After Agent Changes
-
-When the agent writes files inside the sandbox, those writes land on the same filesystem the dev server watches. Most modern dev servers (Vite, Next.js, webpack) use `inotify` / `fsevents` and will detect changes automatically.
-
-However, two cases need explicit handling:
-
-1. **Provider-specific file delivery**: if the sandbox provider delivers agent changes via a mechanism that does not trigger filesystem watch events (e.g., direct block-level snapshot restore), the preview manager must emit a synthetic `touch` on changed files after delivery to wake the file watcher
-2. **Full rebuild required**: some changes (new dependencies in `package.json`, config file changes) require a restart rather than HMR. The preview manager should detect changes to known restart-trigger files and prompt the user: "Dependencies changed — Restart preview to apply?"
-
-The design does not support auto-restarting on file changes in MVP. The user must explicitly restart if HMR is insufficient.
-
-### Agent Visual Feedback Loop
-
-The agent should be able to see and react to the running preview. Without this, the agent writes code and hopes it looks right — the human reviewer is the only one who catches visual bugs. With visual feedback, the agent can self-verify its work before the reviewer sees it.
-
-#### Agent Preview Tools
-
-The preview system exposes tools to the agent via the standard agent tool interface. These tools use the headless browser (Preview Inspector) running on the worker node.
-
-| Tool | Description | When Used |
-|------|-------------|-----------|
-| `preview_screenshot` | Capture a viewport screenshot at a given URL path | After making changes, to verify the visual result |
-| `preview_screenshot_full` | Capture a full-page screenshot | For pages with below-fold content |
-| `preview_console` | Read console errors and warnings | After changes, to catch runtime errors the agent introduced |
-| `preview_element` | Inspect a specific element by CSS selector | When the agent needs to verify a specific component's styles or content |
-| `preview_accessibility` | Run basic accessibility checks (color contrast, missing alt text, ARIA) | After UI changes, to catch a11y regressions |
-| `preview_screencast_start` | Begin recording a screencast at 2-4 FPS | Before multi-page verification flows |
-| `preview_screencast_stop` | Stop recording and return the assembled GIF/WebM | After completing the verification flow |
-| `preview_interact` | Execute a sequence of browser interactions (click, type, navigate, wait) with optional checkpoint screenshots | To verify multi-step flows like form submission, navigation, or login |
-| `preview_multi_viewport` | Capture simultaneous screenshots at mobile (375px), tablet (768px), and desktop (1440px) viewports | After layout changes, to catch responsive design regressions |
-| `preview_visual_diff` | Compare two snapshots and return structured information about pixel changes, DOM changes, and style changes | After making a change, to understand exactly what the code change affected visually |
-| `preview_assert` | Run a set of visual assertions against the current preview state and return pass/fail results | After changes, to self-verify that the result matches expectations |
-
-The agent gets **read-only observation tools** (screenshots, console, DOM inspection) plus **limited interaction tools** (`preview_interact`) for verification purposes. Interaction tools can click, type, and navigate, but only to verify that the app works correctly — the agent's primary mode of operation is writing code, not manipulating the UI directly. The interaction tools exist so the agent can test flows that require user input (form submission, login, navigation) without requiring a human to manually verify them.
-
-#### Self-Verification Flow
-
-When the preview is running and the agent makes a code change, the recommended agent flow is:
-
-1. Agent writes code changes to the sandbox filesystem
-2. HMR or file watcher picks up the changes and the dev server updates
-3. Agent waits a brief stabilization period (1-2 seconds after the last HMR WebSocket message)
-4. Agent calls `preview_screenshot` to capture the current state
-5. Agent calls `preview_visual_diff` to compare the new state against the previous snapshot — this tells the agent exactly what changed (pixel regions, DOM mutations, style shifts) so it can verify that the change matches intent and catch unintended side effects
-6. Agent calls `preview_assert` to run structured assertions (see below)
-7. Agent evaluates the screenshot, diff, and assertion results against the user's request
-8. If the result doesn't match expectations, the agent iterates (back to step 1)
-9. Once satisfied, the agent presents the final screenshot to the user alongside the diff
-
-The screenshot is included in the agent's context as an image, so the agent can reason about layout, colors, typography, spacing, and visual hierarchy. The visual diff and assertion results provide structured data that complements the visual reasoning.
-
-#### Self-Verification Assertions
-
-The agent can define and run **structured assertions** against the preview state using `preview_assert`. Assertions are ephemeral — they are not persisted as test files, but rather used by the agent within the current session to verify its own work.
-
-Assertion types:
-
-| Type | What It Checks | Example |
-|------|---------------|---------|
-| `element_exists` | A CSS selector matches at least one element | `{ "selector": ".checkout-button", "visible": true }` |
-| `element_text` | An element's text content matches (exact or contains) | `{ "selector": "h1", "contains": "Dashboard" }` |
-| `element_style` | An element's computed style matches | `{ "selector": ".header", "property": "background-color", "value": "#3b82f6" }` |
-| `element_count` | The number of elements matching a selector | `{ "selector": ".card", "min": 3, "max": 10 }` |
-| `no_console_errors` | No new console errors since last check | `{}` |
-| `page_title` | The page title matches | `{ "contains": "Settings" }` |
-| `viewport_screenshot_match` | A region of the screenshot matches expectations (described in natural language — the agent evaluates this) | `{ "region": { "x": 0, "y": 0, "w": 1280, "h": 80 }, "description": "blue header with white text and logo on the left" }` |
-
-The agent composes assertions based on what the user requested. For example, if the user says "add a red delete button to the card footer," the agent would assert:
-
-```json
-[
-  { "type": "element_exists", "selector": ".card-footer .delete-button", "visible": true },
-  { "type": "element_style", "selector": ".card-footer .delete-button", "property": "background-color", "value": "rgb(239, 68, 68)" },
-  { "type": "element_text", "selector": ".card-footer .delete-button", "contains": "Delete" },
-  { "type": "no_console_errors" }
-]
-```
-
-The assertion results are structured pass/fail (count + per-assertion detail), so the agent can programmatically decide whether to iterate or present the result. This transforms the agent from "make a change and hope it looks right" to "make a change, define what success looks like, and verify it."
-
-#### Console Error Detection
-
-After each code change, the agent should call `preview_console` to check for new errors. If the change introduced console errors (especially `TypeError`, `ReferenceError`, or React/Vue rendering errors), the agent should attempt to fix them before presenting the result. This catches a common class of bugs where the page appears to render but has runtime errors.
-
-#### Automatic Post-Change Screenshot
-
-The preview manager can optionally capture a screenshot automatically after detecting an HMR update or file change. This is enabled per-session and works as follows:
-
-1. The preview gateway detects an HMR WebSocket message indicating a module update
-2. After a 2-second stabilization delay, the preview manager calls `CaptureScreenshot` via the Preview Inspector
-3. The screenshot and any new console errors are attached to the session as a `preview_snapshot` event
-4. The agent receives the snapshot in its context if it is currently active
-5. The reviewer can see a timeline of snapshots in the session UI, showing how the preview evolved as the agent made changes
-
-This creates an automatic visual audit trail without requiring the agent to explicitly request screenshots.
-
-### Design Mode (Visual Feedback From Reviewer)
-
-Design Mode lets the reviewer interact with the preview visually and pass precise, element-level feedback to the agent. Instead of typing "make the header bigger," the reviewer clicks on the header element and types "make this bigger" — the agent receives the element context (component name, CSS selector, computed styles, bounding box) alongside the instruction.
-
-This is the reviewer-facing counterpart to the agent's visual feedback tools. Together they form a complete visual loop: the agent sees what it built, the reviewer points at what needs to change, and the agent receives both visual and structural context for the fix.
-
-#### How Design Mode Works
-
-Design Mode runs entirely in the **app origin** (`app.143.dev`), not in the preview iframe. It uses a transparent overlay on top of the preview iframe to capture click and annotation events, then uses the Preview Inspector's server-side headless browser to resolve what the user clicked on.
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│ app.143.dev (Session Page)                                       │
-│                                                                   │
-│  ┌─────────────────────────────────────────────────────────────┐ │
-│  │ Design Mode Overlay (transparent, captures clicks)          │ │
-│  │                                                              │ │
-│  │  ┌───────────────────────────────────────────────────────┐  │ │
-│  │  │ Preview iframe (<preview-id>.preview.143.dev)         │  │ │
-│  │  │                                                        │  │ │
-│  │  │  [rendered preview content]                            │  │ │
-│  │  │                                                        │  │ │
-│  │  └───────────────────────────────────────────────────────┘  │ │
-│  │                                                              │ │
-│  │  ┌─────────────┐  ┌──────────────────────────────────────┐  │ │
-│  │  │ [x] Element │  │ Describe your change...         [Send]│  │ │
-│  │  │  .header    │  │                                       │  │ │
-│  │  └─────────────┘  └──────────────────────────────────────┘  │ │
-│  └─────────────────────────────────────────────────────────────┘ │
-│                                                                   │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-Step by step:
-
-1. The reviewer toggles Design Mode via a button in the session UI
-2. A transparent overlay appears on top of the preview iframe, intercepting pointer events
-3. When the reviewer clicks on a point in the overlay, the frontend sends the `(x, y)` coordinates to the API server
-4. The API server calls `InspectElement(previewID, x, y)` on the Preview Inspector, which uses the headless browser to resolve the click coordinates to a DOM element
-5. The Preview Inspector returns `ElementInfo`: component name, CSS selector path, computed styles, bounding box, inner text, and surrounding DOM context
-6. The overlay highlights the selected element (draws a border based on the bounding box) and shows a floating panel with the element name and a text input
-7. The reviewer types their instruction (e.g., "make this bigger", "change the color to blue", "add padding")
-8. The instruction is sent to the agent as a structured `design_mode_feedback` message containing:
-   - The screenshot at the moment of selection (with the element highlighted)
-   - The `ElementInfo` (component name, CSS selector, computed styles)
-   - The user's natural language instruction
-   - The file path and line number of the component (if source maps are available)
-9. The agent receives this as rich context and can make targeted code changes
-
-#### Why The Overlay Instead of In-Iframe Interaction
-
-The preview iframe is sandboxed without `allow-same-origin`, so the app origin cannot inject JS or read its DOM — a hard security constraint. The overlay captures click coordinates client-side (no cross-origin access needed), and the server-side headless browser resolves those coordinates to DOM elements via `elementFromPoint`. Security boundary stays intact.
-
-#### Annotations
-
-Beyond clicking single elements, the reviewer can draw annotations on the overlay:
-
-- **Rectangles**: to indicate a region ("rearrange items in this area")
-- **Arrows**: to indicate relationships ("move this next to that")
-- **Freehand**: to circle or underline ("this text is wrong")
-
-Annotations are captured as SVG paths relative to the iframe viewport. They are rendered onto the screenshot image before being sent to the agent, so the agent sees a single annotated screenshot.
-
-#### Multi-Element Selection
-
-The reviewer can select multiple elements before sending feedback:
-
-1. Click element A → highlighted
-2. Shift-click element B → both highlighted
-3. Type instruction: "swap the positions of these two"
-4. The agent receives both `ElementInfo` objects and the instruction
-
-#### Element Reordering
-
-When the reviewer selects an element in Design Mode that is a child of a flex or grid container, the overlay shows **directional move controls** (up/down/left/right arrows) alongside the element highlight. Clicking an arrow sends a structured `reorder` message to the agent:
-
-```json
-{
-  "type": "reorder",
-  "element": { /* ElementInfo */ },
-  "parent": { /* ElementInfo of the container */ },
-  "direction": "up",
-  "siblings": ["NavLink:Home", "NavLink:Dashboard", "NavLink:Settings"]
-}
-```
-
-The agent receives enough context to find the component in source and reorder the JSX/HTML children. The sibling list (with component names) helps the agent understand the current order without needing to read the full file first.
-
-This covers the 80% case of layout reordering (list items, nav links, grid children, card order) without the complexity of full freeform drag-and-drop, which requires solving coordinate mapping between the overlay and the actual DOM layout engine. Full drag-and-drop is deferred to a later phase.
-
-#### Design Mode Constraints
-
-- Design Mode requires the preview to be in `ready` status
-- Design Mode is available to `member` role (same as starting a preview)
-- The overlay intercepts pointer events, so the reviewer cannot interact with the preview while Design Mode is active. There is a toggle to switch between "interact" mode (normal iframe interaction) and "design" mode (overlay captures clicks)
-- Design Mode uses the same headless browser instance as the agent's screenshot tools — no additional resource overhead
-
-### Visual Editing (Style Tweaks)
-
-For simple visual changes (colors, spacing, typography, layout), the reviewer can make edits directly in the Design Mode overlay without writing a natural language instruction. This creates a fast feedback loop for visual polish.
-
-#### How Visual Editing Works
-
-When the reviewer selects an element in Design Mode, the floating panel shows the element's key computed styles alongside interactive controls:
-
-| Control | What It Edits | UI |
-|---------|--------------|-----|
-| Color picker | `color`, `background-color`, `border-color` | Native color input + project token swatches (from Tailwind/CSS vars if detected) |
-| Spacing sliders | `margin`, `padding` (per-side) | Four-directional slider + project spacing scale presets |
-| Typography | `font-size`, `font-weight`, `line-height`, `letter-spacing` | Numeric inputs + project typography presets |
-| Layout | `display`, `flex-direction`, `justify-content`, `align-items`, `gap` | Segmented controls (e.g., row/column toggle) |
-| Size | `width`, `height`, `max-width` | Numeric input with unit selector (px, rem, %) |
-| Border radius | `border-radius` | Slider |
-
-#### Two-Phase Editing Model
-
-Visual edits happen in two phases, inspired by Cursor's approach:
-
-**Phase 1 — Visual Loop (instant, no code changes):**
-The reviewer adjusts a style control. The frontend sends the new CSS value to the preview iframe via a `postMessage` bridge that applies it as an inline style override. The reviewer sees the change instantly in the iframe. No code has been modified yet.
-
-The `postMessage` bridge works despite the origin isolation because the preview's bootstrap script registers a listener that accepts style-override messages from the app origin. The bridge only accepts a whitelisted set of CSS properties — it cannot execute arbitrary JavaScript or modify the DOM beyond inline styles.
-
-**Phase 2 — Code Loop (agent writes the actual change):**
-When the reviewer clicks "Apply", the accumulated style changes are sent to the agent as a structured `visual_edit` message containing:
-- The element's `ElementInfo` (component name, file path, CSS selector)
-- A list of `{property, oldValue, newValue}` tuples
-- A before/after screenshot pair
-
-The `visual_edit` message includes design token information when available:
-
-```json
-{
-  "element": { /* ElementInfo with ComponentFile, DesignTokens */ },
-  "changes": [
-    {
-      "property": "background-color",
-      "oldValue": "#3b82f6",
-      "newValue": "#ef4444",
-      "oldToken": "bg-blue-500",
-      "newToken": "bg-red-500"
-    }
-  ],
-  "beforeScreenshot": "blob://...",
-  "afterScreenshot": "blob://..."
-}
-```
-
-The agent uses the token names to generate idiomatic code changes — `bg-blue-500` → `bg-red-500` in Tailwind, `var(--color-primary)` → `var(--color-danger)` in CSS custom properties, etc. When no token matches the new value, the agent falls back to raw values. The dev server's HMR picks up the changes, and the agent captures a verification screenshot to confirm the code change matches the visual intent.
-
-#### Why Not Direct Code Generation From Visual Edits
-
-Visual edits produce CSS property changes, but translating those into code depends on the codebase (Tailwind classes, CSS Modules, styled-components, inline styles). The agent already understands the codebase's conventions, so it handles the translation. The UI captures intent; the agent generates code.
-
-#### Visual Editing Constraints
-
-- Visual edits in Phase 1 are ephemeral — if the page reloads (HMR, navigation), they are lost. This is by design: the reviewer is previewing the change, not committing it.
-- The `postMessage` bridge for style overrides is limited to CSS properties only. It cannot add/remove DOM elements, change text content, or execute scripts.
-- Visual editing is not available for non-CSS changes (adding a new button, changing text, restructuring layout). Those require natural language instructions via the Design Mode text input.
-
-### Agent-Driven Screenshot Timeline
-
-As the agent iterates on changes, the system builds a visual timeline that both the agent and reviewer can reference.
-
-#### How It Works
-
-1. When the preview becomes `ready`, the preview manager captures an **initial baseline screenshot** automatically
-2. After each agent code change that triggers an HMR update, a new screenshot is captured (with a 2-second stabilization delay)
-3. Each screenshot is stored as a `preview_snapshot` with metadata:
-   - `preview_instance_id`
-   - `trigger` (`baseline`, `agent_change`, `agent_explicit`, `user_request`, `design_mode`)
-   - `url_path` (the page that was captured)
-   - `png_data` (stored in blob storage, not the database)
-   - `console_errors` (any errors present at capture time)
-   - `file_changes` (list of files the agent modified since the previous snapshot)
-   - `created_at`
-4. The session UI shows a scrollable timeline of snapshots below the preview iframe. The reviewer can click any snapshot to see the state at that point, the associated file changes, and any console errors.
-5. The agent can reference previous snapshots in its context when reasoning about changes ("the header was correct in snapshot 3 but broke in snapshot 4").
-
-#### Storage And Retention
-
-- Screenshots are stored in blob storage (S3 or equivalent), not in PostgreSQL
-- The `preview_snapshots` table stores metadata and a blob reference
-- Snapshots are retained for the lifetime of the session plus 24 hours (for post-review reference)
-- Maximum 50 snapshots per preview instance (oldest are evicted if exceeded)
-- Each screenshot is ~100-500 KB (PNG, 1280x720 viewport)
-
-### Semantic Diff Awareness
-
-Static screenshots tell the agent what the preview looks like, but not what *changed*. After every code edit, the agent needs to understand the delta — both visually and structurally — to verify that the change matches intent and to catch unintended side effects.
-
-#### How Semantic Diffs Work
-
-The `preview_visual_diff` tool compares two preview snapshots (typically the before and after of a code change) and returns a structured `VisualDiff`:
-
-1. **Pixel diff**: The headless browser captures both states at the same viewport size. A pixel-level comparison identifies regions that changed, expressed as bounding boxes with severity ("minor" for small shifts, "major" for large repaints, "new" for added elements, "removed" for missing elements). An overlay image highlights changed regions in red.
-2. **DOM diff**: The system serializes the DOM tree of both snapshots and computes structural differences — elements added, removed, moved, or changed (text content, attributes). Each change is tagged with a CSS selector so the agent can map it back to code.
-3. **Style diff**: For elements that exist in both snapshots, the system compares computed styles and reports changes. If design tokens are available, the diff includes token names (e.g., "background-color changed from `bg-blue-500` to `bg-red-500`").
-4. **Summary**: A human-readable summary string that describes the visual impact in plain language: "Header height increased by 24px, causing nav items to wrap to a second line. Card grid shifted down by 24px."
-
-#### What The Agent Sees
-
-After making a change, the agent receives a structured `VisualDiff` containing: pixel diff percentage, bounding boxes of changed regions with severity, DOM change list (selectors + change types), style change list (with design token names), and a human-readable summary like "Header background changed from blue to red. No other layout or content changes detected."
-
-This tells the agent: "Your change did exactly what was intended and nothing else." Or, critically: "Your change to the header also shifted the card grid layout — investigate."
-
-#### When Semantic Diffs Run
-
-- **Automatically** after every HMR-triggered auto-screenshot (diffed against the previous snapshot)
-- **On demand** when the agent calls `preview_visual_diff` with two specific snapshot IDs
-- **In assertion flows** when the agent wants to verify that a change had no unintended side effects beyond the target elements
-
-The diff computation runs in the headless browser on the worker node. For a typical 1280x720 viewport, the pixel diff takes ~200ms and the DOM/style diff takes ~100ms.
-
-### Interaction Replay
-
-The agent needs to verify flows that require user input — form submission, login, navigation sequences, dropdown menus, modal dialogs. Without interaction capabilities, the agent can only verify static page loads. With `preview_interact`, the agent can script multi-step browser interactions and capture the result at each checkpoint.
-
-#### Interaction Model
-
-The agent composes a sequence of `InteractionStep` objects and executes them in a single `preview_interact` call. Each step performs one browser action and optionally waits for a condition and captures a screenshot:
-
-```json
-[
-  { "action": "navigate", "value": "/login" },
-  { "action": "type", "selector": "#email", "value": "test@example.com" },
-  { "action": "type", "selector": "#password", "value": "password123" },
-  { "action": "click", "selector": "#login-button", "wait_for": "networkidle", "screenshot": true },
-  { "action": "wait", "wait_for": ".dashboard-content", "timeout": "5s", "screenshot": true }
-]
-```
-
-The result includes per-step success/failure, screenshots at each checkpoint, the final URL, and any console errors introduced during the interaction.
-
-#### Use Cases
-
-| Scenario | Interaction Sequence | What The Agent Verifies |
-|----------|---------------------|------------------------|
-| Login flow | Navigate → type email → type password → click submit → wait for dashboard | Successful redirect, dashboard renders, no errors |
-| Form validation | Navigate → click submit (empty form) → check error messages → fill fields → submit → check success | Validation messages appear, successful submission after fix |
-| Navigation | Click nav link → wait for page → click another link → wait | All routes render without errors |
-| Modal dialog | Click trigger → wait for modal → interact with modal content → close | Modal opens/closes correctly, content renders |
-| Pagination | Navigate to list → click "next" → verify page 2 content → click "previous" → verify page 1 | Pagination works, content changes correctly |
-
-#### Safety Constraints
-
-- **Max steps per interaction**: 20 (prevents runaway interaction scripts)
-- **Max total duration**: 60 seconds
-- **No external navigation**: interactions cannot navigate outside the preview origin
-- **No file uploads**: the `type` action works only on text inputs, not file inputs
-- **Rate limited**: max 10 `preview_interact` calls per minute per preview
-- **Idempotent intent**: interactions are for verification, not for mutating application state in ways the agent depends on. The agent should not use interactions to "set up" state that its code changes depend on — instead, it should write the code correctly and use interactions to verify the result.
-
-#### Interaction Recording From Design Mode
-
-When the reviewer interacts with the preview in "interact" mode, the frontend optionally records the interaction sequence as a replayable script. After the agent makes changes, it replays the recorded interaction to verify the reviewer's workflow still works — a lightweight, ephemeral regression check. Recorded interactions are stored in memory for the session lifetime only.
-
-### Multi-Viewport Preview
-
-Frontend changes frequently break on viewports the developer didn't check. A responsive design change that looks perfect on desktop may wrap incorrectly on mobile or overflow on tablet. The `preview_multi_viewport` tool captures the preview at multiple viewport sizes in a single call, giving the agent a comprehensive view of how the change renders across screen sizes.
-
-#### Default Viewports
-
-When the agent calls `preview_multi_viewport` without specifying custom viewports, it captures three standard breakpoints:
-
-| Name | Width | Height | Represents |
-|------|-------|--------|------------|
-| `mobile` | 375 | 812 | iPhone SE / typical mobile |
-| `tablet` | 768 | 1024 | iPad / typical tablet |
-| `desktop` | 1280 | 720 | Standard desktop (same as default single screenshot) |
-
-The agent can override these or add custom viewports (e.g., `ultrawide` at 2560x1080) via the `viewports` parameter.
-
-The headless browser captures each viewport sequentially (~3-5 seconds total), collecting per-viewport console errors. The agent calls `preview_multi_viewport` after layout/styling changes, evaluates each viewport, and iterates if any viewport has issues. Particularly valuable for grid/flexbox, typography, navigation, and card layout changes.
-
-#### State Injection
-
-Beyond viewport sizes, the agent can capture the preview in different **application states** to verify edge cases:
-
-| State | How It's Set | What It Catches |
-|-------|-------------|----------------|
-| Empty state | Agent navigates to a route with no data (or uses `preview_interact` to clear data) | Missing empty state UI, broken layouts with no content |
-| Error state | Agent uses `preview_interact` to trigger an error (e.g., disconnect network, submit invalid data) | Error boundary rendering, error message display |
-| Loading state | Agent captures immediately after navigation (before data loads) | Loading spinner/skeleton display, layout shift during load |
-| Dark mode | Agent uses `preview_interact` to toggle theme (if the app supports it) | Color contrast issues, missing dark mode styles |
-
-State injection is not a separate tool — it's a pattern that combines `preview_interact` (to set up the state) with `preview_screenshot` or `preview_multi_viewport` (to capture it). The agent is responsible for knowing how to trigger different states in the specific app being previewed.
-
-#### Multi-Viewport Resource Constraints
-
-- Maximum viewports per call: 5
-- All viewports share the same headless browser instance on the worker
-- Multi-viewport captures count toward the same snapshot storage limits (each viewport is one snapshot)
-- The headless browser restores its default viewport (1280x720) after multi-viewport capture
+Viewers can read preview status, logs, and the screenshot timeline. Members can start/stop previews, use Design Mode and Visual Editing, capture screenshots, run interaction replay, multi-viewport capture, visual diff, and assertions. Admins configure preview configs, credentials, quotas, and defaults. Starting a preview is a member action because it causes sandbox execution.
 
 ## Security Model
 
@@ -1735,97 +1815,6 @@ Required controls:
 
 In multi-node mode, gateway-to-worker preview traffic must use authenticated service-to-service transport. Prefer mTLS or signed short-lived service tokens over trusting the internal network by default.
 
-## PR Preview Integration
-
-Preview environments are most valuable when they're connected to the code review workflow. Rather than treating previews as a standalone feature accessed through the session UI, the system should integrate directly into the GitHub PR lifecycle — while being careful not to waste resources on idle previews.
-
-### On-Demand PR Previews
-
-Previews are **not** auto-started when a PR is created. Instead, the system posts a PR comment with a **"Launch Preview"** button (a deep link to the 143 session page with `?preview=1`). Clicking the link navigates to the 143 session, which starts the preview on demand.
-
-```
-┌──────────────────────────────────────────────────────────┐
-│ 🔍 Preview available for this PR                          │
-│                                                            │
-│ [Launch Preview] — starts a live preview of this change    │
-│                                                            │
-│ Last preview: 2 hours ago (stopped — idle timeout)         │
-│ Preview snapshots: 12 screenshots from last session        │
-│ [View Screenshot Timeline]                                 │
-└──────────────────────────────────────────────────────────┘
-```
-
-This avoids burning resources on every PR. The preview starts when someone actually wants to look at it, and stops automatically via the existing idle timeout (15 min) and hard TTL (30 min, extendable to 2h).
-
-### PR Comment Lifecycle
-
-The system maintains a **single, updating PR comment** (not one per preview session) that reflects the current state:
-
-| PR State | Comment Content |
-|----------|----------------|
-| PR opened, no preview yet | "Launch Preview" button + link to 143 session |
-| Preview running | Live preview link + "View in 143" deep link + current screenshot thumbnail |
-| Preview stopped (idle timeout) | "Re-launch Preview" button + screenshot timeline from last session + "Last active: 5 min ago" |
-| Agent made changes after review feedback | Updated screenshot thumbnail + "Agent updated preview — 3 files changed" |
-| PR merged/closed | Final screenshot timeline preserved as static artifacts |
-
-The comment is posted via the GitHub API using the org's GitHub integration. It is scoped to the PR — one comment per PR, updated in place.
-
-### Agent-Driven PR Review Loop
-
-When a reviewer leaves a comment on the PR (e.g., "the button color is wrong"), the agent can:
-
-1. Read the PR review comment via the existing GitHub integration
-2. Start or resume the preview (if stopped)
-3. Make the code fix in the sandbox
-4. Wait for HMR to update the preview
-5. Capture a screenshot and run self-verification assertions
-6. Post a reply to the PR comment with the screenshot: "Fixed — here's the updated preview"
-7. Push the code change to the PR branch
-
-This creates a **visual review loop embedded in the PR**: reviewer comments → agent fixes → preview updates → agent posts screenshot proof → reviewer verifies. The preview only runs while the agent is actively working or the reviewer is actively looking at it.
-
-### Visual Diff Summary On PR
-
-When a preview is running for a PR, the system can optionally capture a **base branch vs. feature branch visual diff** and post it as a PR comment section:
-
-```
-### Visual Changes Detected
-
-3 regions changed across 1 page:
-
-| Region | Change | Severity |
-|--------|--------|----------|
-| Header (0,0 → 1280,80) | Background color: blue → red | Major |
-| Button (.card-footer .btn) | Padding increased by 8px | Minor |
-| Footer (0,640 → 1280,720) | New "Terms" link added | New element |
-
-[View full visual diff overlay →]
-```
-
-This runs by starting the preview for both the base branch and the feature branch (sequentially, not simultaneously — the base branch preview is captured as a snapshot, then the sandbox switches to the feature branch). The diff is computed using the existing `ComputeVisualDiff` infrastructure.
-
-**Resource note**: the base branch capture is a one-time cost per PR (cached as a snapshot keyed by `base_commit + preview_config_hash`). It does not require keeping two previews running simultaneously.
-
-### GitHub Deployment Status
-
-When a preview starts, 143 should:
-
-1. Update the session UI with preview status and logs
-2. Create or update a GitHub deployment pointing at a protected 143 URL (the session page, not the raw preview gateway)
-3. Update the PR comment with the current preview state
-4. Set a GitHub commit status (`preview/143`) to `pending` while starting, `success` when ready, `inactive` when stopped
-
-The deployment URL always points to `app.143.dev/sessions/{id}?preview=1`, which handles authentication and preview bootstrapping. Raw preview gateway URLs are never exposed in PR comments.
-
-### Preview Artifacts After Sandbox Teardown
-
-When a preview stops (idle timeout, hard TTL, or manual stop), the screenshot timeline, assertion results, and visual diff summaries are **preserved as static artifacts** on the PR comment. Reviewers can browse the visual history even after the sandbox is torn down.
-
-These artifacts are stored in blob storage with the same retention policy as screenshots (session lifetime + 24h). For PRs that remain open, artifacts are retained until the PR is merged or closed, up to a maximum of 7 days after the last preview session.
-
-When a reviewer clicks "Re-launch Preview" on a stopped preview, the system uses fast startup (filesystem snapshot caching, see below) to minimize wait time.
-
 ## Scaling Model
 
 ### What Scales Well
@@ -1899,34 +1888,6 @@ Concrete defaults for MVP:
 Multi-service previews with infrastructure consume significantly more resources than single-service previews. The concurrency caps count preview instances, not services or infrastructure containers — a preview with 2 services + PostgreSQL counts as 1 toward the cap. This keeps the model simple, but the node-level cap should be set conservatively to account for the higher resource footprint of infrastructure-heavy previews.
 
 These caps should be configurable by admins at the org level. The preview manager should return a clear error when a cap is hit: "Your org has reached its limit of 5 concurrent previews. Stop an existing preview to start a new one." The UI should show the current count and cap.
-
-### Process Health Checks
-
-The preview manager should poll **each service's** health endpoint after the initial readiness check succeeds:
-
-- Poll each service's `ready.http_path` on its respective port every **10 seconds**
-- If **3 consecutive checks** fail for any service, transition that service to `unhealthy` in `preview_services` and the preview instance to `unhealthy`
-- The UI should show which service failed: "Backend stopped responding — Restart preview?" with a one-click restart button
-- If the service recovers on its own (next health check passes), transition back to `ready`
-
-For multi-service previews, a single unhealthy support service makes the entire preview unhealthy because the primary service likely depends on it. The UI should clearly indicate which service is the source of the problem.
-
-This catches the common case where a dev server crashes mid-session due to a syntax error, bad import, or memory pressure, and gives the user a clear recovery path.
-
-### Process Recycling
-
-Long-running dev servers with HMR enabled are prone to memory leaks. After a configurable `max_uptime` (default: 60 minutes), the preview manager should:
-
-1. Gracefully stop all application service processes (SIGTERM, then SIGKILL after 10 seconds)
-2. Tear down and re-provision infrastructure containers (to ensure clean database state and avoid stale connections)
-3. Re-run init scripts against fresh infrastructure
-4. Restart all application services in dependency order using the same resolved config
-5. Wait for all readiness probes to pass
-6. Resume proxying
-
-In MVP, recycling restarts **everything** — infrastructure and all application services — to avoid inconsistencies (e.g., a backend restart that tries to reconnect to an infrastructure container with stale credentials or corrupted state).
-
-This happens transparently. The UI should show a brief "Preview restarting..." indicator. The `last_path` on the preview instance (see Edge Cases section) should be preserved so the user returns to where they were.
 
 ## More Realistic MVP Boundary
 
