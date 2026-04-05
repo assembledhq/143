@@ -51,7 +51,7 @@ provider-specific.
 | CI pipeline | `.github/workflows/ci.yml` | Lint, test, build, security scan, Docker image build |
 | Docker sandbox provider | `internal/services/agent/providers/docker.go` | Uses Docker API, supports gVisor (`runsc`) runtime |
 | Environment config | `.env.example` | All env vars documented |
-| Sandbox Dockerfile | **Does not exist** | Needs to be created |
+| Agent sandbox Dockerfile | **Does not exist** | `Dockerfile.agent` — needs to be created (see Step 6) |
 | Production compose | **Does not exist** | Needs to be created |
 | Deploy workflow | **Does not exist** | Needs to be created |
 | Caddy config | **Does not exist** | Needs to be created |
@@ -91,9 +91,12 @@ changes.
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-### Infrastructure to Provision
+### Practical Setup Guide
 
-**VPS requirements (provider-agnostic):**
+This is the step-by-step walkthrough. Provider-specific steps use Hetzner as the
+example, with equivalents noted for other providers.
+
+#### Step 1: VPS Requirements
 
 | Resource | Minimum | Recommended | Why |
 |----------|---------|-------------|-----|
@@ -111,22 +114,310 @@ changes.
 > | GCP | e2-standard-4 (4 vCPU / 16 GB) | ~$100 | Sustained use discount applies automatically |
 > | DigitalOcean | s-8vcpu-16gb | ~$96 | Simple, good for small teams |
 
-**On the VPS, install:**
+#### Step 2: Provision the VPS (Hetzner Example)
+
+1. **Create a Hetzner Cloud account** at console.hetzner.cloud. Add a payment
+   method. Billing is hourly — no upfront commitment.
+
+2. **Create a project** (e.g., "143-prod"). Hetzner organizes resources under
+   projects.
+
+3. **Generate and upload an SSH key.** Create a dedicated deploy key (don't reuse
+   personal keys):
+   ```bash
+   ssh-keygen -t ed25519 -f ~/.ssh/143-deploy -C "143-deploy"
+   ```
+   Upload the public key in Hetzner console → Security → SSH Keys.
+
+4. **Create a firewall** (Hetzner console → Firewalls → Create):
+
+   | Rule | Direction | Protocol | Port | Source | Why |
+   |------|-----------|----------|------|--------|-----|
+   | SSH | Inbound | TCP | 22 | Your IP (or 0.0.0.0/0) | Remote access |
+   | HTTP | Inbound | TCP | 80 | 0.0.0.0/0 | Caddy ACME cert challenges + HTTPS redirect |
+   | HTTPS | Inbound | TCP | 443 | 0.0.0.0/0 | Production traffic |
+
+   Postgres (5432) is **not exposed** — it only listens on localhost. It's only
+   exposed to the private network in Phase 3 when you separate the DB.
+
+   > **`[PROVIDER-SPECIFIC]` Firewall equivalents:**
+   > - **AWS:** Security Group attached to the EC2 instance
+   > - **GCP:** VPC Firewall Rules
+   > - **DigitalOcean:** Cloud Firewalls
+   >
+   > Same rules, different UI. The concept is identical on every provider.
+
+5. **Create the VPS** (Hetzner console → Servers → Create):
+   - Location: Falkenstein (fsn1) is cheapest; Nuremberg (nbg1) or Helsinki (hel1) also fine
+   - Image: Ubuntu 24.04
+   - Type: CX42 (8 vCPU / 16 GB / 160 GB SSD)
+   - SSH key: select the one you uploaded
+   - Firewall: select the one you created
+   - Name: `143-prod-1`
+
+   > **`[PROVIDER-SPECIFIC]` Equivalents:**
+   > - **AWS:** `aws ec2 run-instances --instance-type t3.xlarge --image-id ami-xxxxx --key-name 143-deploy --security-group-ids sg-xxxxx`
+   > - **GCP:** `gcloud compute instances create 143-prod-1 --machine-type=e2-standard-4 --image-family=ubuntu-2404-lts`
+   > - **DigitalOcean:** `doctl compute droplet create 143-prod-1 --size s-8vcpu-16gb --image ubuntu-24-04-x64`
+
+#### Step 3: Bootstrap the VPS
+
+SSH in and set up the machine. These commands are **identical on every provider**.
 
 ```bash
-# Docker
-curl -fsSL https://get.docker.com | sh
+ssh -i ~/.ssh/143-deploy root@<vps-ip>
 
-# gVisor (sandbox isolation)
-curl -fsSL https://gvisor.dev/archive.key | gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+# --- Create a non-root deploy user ---
+adduser --disabled-password --gecos "" deploy
+mkdir -p /home/deploy/.ssh
+cp ~/.ssh/authorized_keys /home/deploy/.ssh/
+chown -R deploy:deploy /home/deploy/.ssh
+chmod 700 /home/deploy/.ssh
+chmod 600 /home/deploy/.ssh/authorized_keys
+
+# --- Install Docker ---
+curl -fsSL https://get.docker.com | sh
+usermod -aG docker deploy
+
+# --- Install gVisor (sandbox isolation) ---
+curl -fsSL https://gvisor.dev/archive.key \
+  | gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
 echo "deb [arch=amd64 signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" \
   > /etc/apt/sources.list.d/gvisor.list
 apt-get update && apt-get install -y runsc
 runsc install
 systemctl restart docker
+
+# --- Verify ---
+docker run --rm --runtime=runsc hello-world
+# Should print "Hello from Docker!" using gVisor
+
+# --- Create the app directory ---
+mkdir -p /opt/143
+chown deploy:deploy /opt/143
 ```
 
-These commands work on any Ubuntu VPS regardless of provider.
+From this point on, **all work is done as the `deploy` user** — never root.
+
+#### Step 4: Container Registry (GHCR)
+
+We use **GitHub Container Registry (ghcr.io)** for Docker images. It's the right
+choice because:
+
+- **Free for public repos.** For private repos, included in your GitHub plan (the
+  free tier gives 500 MB storage + 1 GB egress/month; Team/Enterprise includes
+  much more). Given our image sizes (~100-200 MB compressed), the free tier is
+  plenty for a single-node deployment.
+- **Zero additional credentials.** GitHub Actions can push to GHCR using the
+  built-in `GITHUB_TOKEN` — no extra secrets to manage.
+- **Already where our CI runs.** No new service to sign up for or manage.
+- **Standard Docker registry API.** If you ever want to switch to ECR, GCR, or
+  Docker Hub, change the image URLs in the compose files. No code changes.
+
+**Set up GHCR access on the VPS** (as the `deploy` user):
+
+```bash
+su - deploy
+
+# Create a GitHub Personal Access Token (classic) with read:packages scope.
+# Settings → Developer settings → Personal access tokens → Tokens (classic)
+# This is ONLY for pulling images from the VPS — CI uses GITHUB_TOKEN.
+echo "<your-ghcr-read-token>" | docker login ghcr.io -u <github-username> --password-stdin
+```
+
+The Docker login credentials are saved to `~deploy/.docker/config.json` and
+persist across reboots.
+
+#### Step 5: Secrets
+
+The existing SOPS + age workflow works on any VPS. The `docker-entrypoint.sh`
+already decrypts `.env.production.enc` at boot using a single env var
+(`SOPS_AGE_KEY`).
+
+**Option A: Use SOPS (recommended if secrets are already in `.env.production.enc`):**
+
+The Dockerfile already has `sops` and `age` installed. The entrypoint handles
+everything. You just need the age private key on the VPS:
+
+```bash
+# /opt/143/.env (on the VPS — this is the ONLY secret on disk)
+SOPS_AGE_KEY=AGE-SECRET-KEY-1XXXXXX...
+DB_PASSWORD=<your-db-password>
+```
+
+Everything else (GitHub App keys, LLM API keys, webhook secrets, etc.) lives in
+`.env.production.enc` in the git repo and is decrypted at container start.
+
+If you don't have a deploy key yet:
+```bash
+# On your local machine:
+age-keygen -o /tmp/deploy-key.txt
+# Copy the public key (age1...) and add it to .sops.yaml
+# Then: make secrets-rotate && git add .sops.yaml .env.production.enc && git push
+# Copy the private key (AGE-SECRET-KEY-...) to the VPS .env file
+rm /tmp/deploy-key.txt   # don't leave this lying around
+```
+
+**Option B: Plain `.env` on the VPS (simpler for a single VPS):**
+
+Skip SOPS entirely. Put all secrets directly in `/opt/143/.env`:
+
+```bash
+# /opt/143/.env
+DATABASE_URL=postgres://onefortythree:secret@postgres:5432/onefortythree?sslmode=disable
+DB_PASSWORD=secret
+GITHUB_APP_ID=12345
+GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n..."
+GITHUB_WEBHOOK_SECRET=whsec_xxx
+LLM_API_KEY=sk-ant-xxx
+# ... etc (copy from Render's env var settings)
+```
+
+This is fine for a single VPS. The tradeoff: secrets aren't version-controlled
+and you need to manually keep the VPS `.env` in sync with any changes.
+
+#### Step 6: The Sandbox Image
+
+The code defaults to `Image: "143-agent:latest"` (in
+`internal/services/agent/adapter.go`), but **no Dockerfile for this image exists
+yet**. This image must be created and pushed to GHCR before sandboxes can run.
+
+The sandbox container runs with a read-only root filesystem (`--read-only`), only
+`/workspace` and `/tmp` are writable, and everything executes as a non-root
+`sandbox` user. The agent CLI tools are invoked via `sh -c` wrappers through
+`provider.ExecStream()`.
+
+**Create `Dockerfile.agent`** in the repo root:
+
+```dockerfile
+FROM ubuntu:24.04
+
+# Core utilities required by the sandbox provider.
+# All agent commands run via `sh -c`, file I/O uses cat/printf,
+# and snapshots use tar. These are non-negotiable.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    wget \
+    ca-certificates \
+    tar \
+    gzip \
+    jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# Language runtimes — needed both by agents working on repos and by CLI installs.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    nodejs npm \
+    python3 python3-pip python3-venv \
+    golang-go \
+    make \
+    && rm -rf /var/lib/apt/lists/*
+
+# Agent CLI tools — the orchestrator invokes these by name.
+# Claude Code CLI
+RUN curl -fsSL https://cli.anthropic.com/install.sh | sh
+
+# Codex CLI (OpenAI)
+RUN npm install -g @openai/codex
+
+# Gemini CLI (Google)
+RUN npm install -g @google/gemini-cli
+
+# Create the sandbox user. The Docker provider runs all commands as this user.
+# Home is /workspace so agent tools find their config files
+# (e.g., ~/.claude/, ~/.codex/auth.json) in the workspace.
+RUN useradd -m -d /workspace -s /bin/bash sandbox
+
+# Create directories that agent CLIs expect to write to.
+# These are inside /workspace so they survive the read-only rootfs.
+RUN mkdir -p /workspace/.claude /workspace/.codex /workspace/.gemini \
+    && chown -R sandbox:sandbox /workspace
+
+USER sandbox
+WORKDIR /workspace
+
+# The Docker provider starts the container with `sleep infinity`
+# and then exec's agent commands into it.
+CMD ["sleep", "infinity"]
+```
+
+**Build and push** as part of the CI workflow (see the deploy workflow below —
+it builds and pushes `ghcr.io/assembledhq/143-agent` alongside the server image).
+
+On the VPS, the image is pulled automatically by `docker compose pull`. For the
+initial bootstrap, pull it manually:
+
+```bash
+docker pull ghcr.io/assembledhq/143-agent:latest
+```
+
+#### Step 7: GitHub Webhooks
+
+Your GitHub App sends webhooks to `https://143.dev/api/github/webhooks` (or
+similar). After the DNS cutover, webhooks hit the VPS instead of Render.
+**Nothing changes in the GitHub App settings** — the webhook URL uses the domain,
+which stays the same.
+
+Verify after cutover:
+- Firewall allows port 443 from the internet (step 2)
+- `GITHUB_WEBHOOK_SECRET` in the VPS env matches the GitHub App config
+- Push a test commit or open a PR and check the server logs for webhook receipt
+
+#### Step 8: GitHub Actions Secrets
+
+Add these secrets in GitHub → Settings → Secrets and Variables → Actions:
+
+| Secret | Value | Notes |
+|--------|-------|-------|
+| `DEPLOY_HOST` | VPS IP address (e.g., `65.108.xxx.xxx`) | The public IP of your VPS |
+| `DEPLOY_SSH_KEY` | Contents of `~/.ssh/143-deploy` (the **private** key) | Used by the deploy workflow to SSH in |
+
+These are provider-agnostic — they work the same whether the VPS is on Hetzner,
+AWS, GCP, or anywhere else with SSH access.
+
+#### Step 9: Copy Config Files to the VPS
+
+```bash
+# From your local machine, with the repo checked out:
+scp -i ~/.ssh/143-deploy docker-compose.prod.yml deploy@<vps-ip>:/opt/143/
+scp -i ~/.ssh/143-deploy -r deploy/ deploy@<vps-ip>:/opt/143/deploy/
+scp -i ~/.ssh/143-deploy .env.production.enc deploy@<vps-ip>:/opt/143/
+
+# SSH in and verify:
+ssh -i ~/.ssh/143-deploy deploy@<vps-ip>
+ls /opt/143/
+# Should see: docker-compose.prod.yml  deploy/  .env  .env.production.enc
+```
+
+After the first deploy, the GitHub Actions workflow handles this automatically.
+This manual copy is only for the initial bootstrap.
+
+#### Step 10: Start Everything
+
+```bash
+ssh -i ~/.ssh/143-deploy deploy@<vps-ip>
+cd /opt/143
+
+# Pull images
+docker compose -f docker-compose.prod.yml pull
+
+# Start the stack
+docker compose -f docker-compose.prod.yml up -d
+
+# Run migrations
+docker compose -f docker-compose.prod.yml exec -T api /bin/migrate up
+
+# Verify
+docker compose -f docker-compose.prod.yml ps
+# All services should be "Up" and healthy
+
+curl http://localhost:8080/healthz
+# Should return 200
+```
+
+At this point, the VPS is running but serving on a raw IP. Caddy won't issue TLS
+certs until DNS points at it — see [DNS Cutover and TLS](#dns-cutover-and-tls)
+below. First, create the config files that `docker-compose.prod.yml` references.
 
 ### New Files to Create in the Repo
 
@@ -215,7 +506,13 @@ volumes:
 #### 2. `deploy/Caddyfile`
 
 ```
-{$BASE_URL:143.dev} {
+# Redirect www → apex (pick one canonical domain).
+# Replace 143.dev with your actual domain.
+www.143.dev {
+    redir https://143.dev{uri} permanent
+}
+
+143.dev {
     handle /api/* {
         reverse_proxy api:8080
     }
@@ -225,24 +522,37 @@ volumes:
 }
 ```
 
-Caddy automatically provisions TLS via Let's Encrypt. No cert management needed.
+Note: Caddy site addresses are literal hostnames, not environment variables.
+Update the domain directly in this file for your deployment.
+
+Caddy automatically provisions TLS certificates via Let's Encrypt for every
+domain listed in the Caddyfile. No cert management, no certbot cron, no renewal
+scripts. It just works.
+
+**You do NOT need a separate load balancer for Phase 1.** Caddy serves as the
+TLS-terminating reverse proxy on the same VPS. It listens on ports 80/443 and
+routes requests to the API and frontend containers. A dedicated load balancer
+only becomes relevant in Phase 3c (multiple API nodes).
 
 #### 3. `deploy/postgres/postgresql.conf`
 
 Production-tuned Postgres configuration. See the [PostgreSQL Configuration](#production-postgres-configuration) section below.
 
-#### 4. `Dockerfile.sandbox` (if sandbox image is separate from server)
+#### 4. `Dockerfile.agent`
 
-This does not exist yet. If sandboxes use a separate image (tools, languages,
-etc.), this Dockerfile needs to be created. If sandboxes just use a stock image
-with the workspace mounted, no Dockerfile is needed — configure via
-`SANDBOX_IMAGE` env var.
+The agent sandbox image. Contains the agent CLI tools (Claude Code, Codex,
+Gemini), git, core utilities, and common language runtimes. See
+[Step 6](#step-6-the-sandbox-image) for the full Dockerfile and rationale.
+
+Built and pushed to GHCR as `ghcr.io/assembledhq/143-agent:latest` by the CI
+workflow.
 
 ### Code Changes Required
 
-**None for Phase 1.** The existing `Dockerfile`, `docker.go` sandbox provider,
-and server binary all work as-is on any VPS with Docker. The only changes are
-new config files checked into the repo (`docker-compose.prod.yml`, `Caddyfile`,
+**No application code changes for Phase 1.** The existing `Dockerfile`, `docker.go`
+sandbox provider, and server binary all work as-is on any VPS with Docker. The
+changes are new config/infra files checked into the repo (`docker-compose.prod.yml`,
+`Dockerfile.agent`, `Caddyfile`,
 `postgresql.conf`).
 
 ### CI/CD: GitHub Actions Deploy Workflow
@@ -284,6 +594,7 @@ on:
 env:
   REGISTRY: ghcr.io
   SERVER_IMAGE: ghcr.io/assembledhq/143-server
+  AGENT_IMAGE: ghcr.io/assembledhq/143-agent
   FRONTEND_IMAGE: ghcr.io/assembledhq/143-frontend
 
 jobs:
@@ -310,6 +621,16 @@ jobs:
           tags: |
             ${{ env.SERVER_IMAGE }}:latest
             ${{ env.SERVER_IMAGE }}:${{ github.sha }}
+
+      - name: Build & push agent sandbox image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.agent
+          push: true
+          tags: |
+            ${{ env.AGENT_IMAGE }}:latest
+            ${{ env.AGENT_IMAGE }}:${{ github.sha }}
 
       # Add frontend build once Dockerfile.frontend exists
 
@@ -348,18 +669,106 @@ docker exec 143-postgres-1 \
   psql -U onefortythree -c "SELECT count(*) FROM organizations;"
 ```
 
+### DNS Cutover and TLS
+
+The goal is to move `143.dev` (and `www.143.dev`) from pointing at Render to
+pointing at the new VPS with minimal downtime. DNS is managed in Cloudflare.
+
+#### Before the cutover
+
+1. **Lower TTL.** In Cloudflare, set the TTL for `143.dev` and `www.143.dev` to
+   60 seconds (or "Auto" with Cloudflare proxy enabled). Do this **24 hours before**
+   the cutover so the old long TTL expires from caches worldwide.
+
+2. **Verify the VPS is fully working.** You can test by pointing a `/etc/hosts`
+   entry at the VPS IP, or by hitting the VPS IP directly:
+   ```bash
+   curl -H "Host: 143.dev" http://<vps-ip>/healthz
+   ```
+
+3. **Verify Caddy can issue certs.** Caddy needs to respond on port 80 for the
+   ACME HTTP-01 challenge. Make sure the VPS firewall allows inbound 80 and 443.
+   Caddy will automatically request certs the first time it receives traffic for
+   the domain.
+
+#### During the cutover
+
+4. **Flip the DNS records in Cloudflare:**
+
+   | Record | Type | Old Value (Render) | New Value |
+   |--------|------|--------------------|-----------|
+   | `143.dev` | A | Render's IP | `<vps-ip>` |
+   | `www.143.dev` | CNAME → A | Render's hostname | `<vps-ip>` (A record) or CNAME to `143.dev` |
+
+   If using Cloudflare's orange-cloud proxy (recommended during transition):
+   - Cloudflare terminates TLS and forwards to your VPS over HTTPS
+   - This gives you Cloudflare's DDoS protection and CDN caching for free
+   - Caddy still issues its own Let's Encrypt cert (Cloudflare connects to your
+     origin over HTTPS with Caddy's cert)
+
+   If using DNS-only (grey cloud):
+   - Traffic goes directly to your VPS
+   - Caddy handles TLS end-to-end
+   - Simpler, but no Cloudflare CDN/DDoS protection
+
+5. **Wait for propagation.** With the 60s TTL from step 1, most clients will see
+   the new IP within 1-2 minutes. You can check with:
+   ```bash
+   dig +short 143.dev
+   # Should return your VPS IP
+   ```
+
+6. **Verify TLS.** Open `https://143.dev` in a browser. Caddy should have
+   auto-provisioned the Let's Encrypt cert. If using Cloudflare proxy, the cert
+   chain is Cloudflare → Caddy (Let's Encrypt) → your app.
+
+#### After the cutover
+
+7. **Restore normal TTL.** Once everything is stable (give it a few hours), you
+   can raise the TTL back to 3600s or leave it at Auto.
+
+8. **Decommission Render.** Only after confirming everything works on the VPS.
+
+#### Downtime expectations
+
+The database migration (`pg_dump` → `pg_restore`) is the main source of
+downtime, not DNS. If you follow this order:
+
+1. Set up the VPS with everything running (new Postgres, fresh data)
+2. Put Render in maintenance mode / stop writes
+3. Do a final `pg_dump` from Render → `pg_restore` on VPS
+4. Flip DNS
+
+Then total downtime is roughly the duration of the final `pg_dump`/`pg_restore`
+(5-30 minutes depending on database size) plus DNS propagation (~1-2 minutes with
+low TTL).
+
 ### Migration Checklist
 
+**Preparation (days before):**
 - [ ] Provision VPS (any provider — see sizing table above)
-- [ ] Install Docker + gVisor
-- [ ] Create `deploy/` directory with config files (Caddyfile, postgresql.conf)
+- [ ] Install Docker + gVisor (Step 3)
+- [ ] Create `Dockerfile.agent` — agent sandbox image with CLI tools (Step 6)
+- [ ] Create `deploy/` directory: Caddyfile, postgresql.conf, deploy scripts
 - [ ] Create `docker-compose.prod.yml`
-- [ ] Create GitHub Actions deploy workflow
-- [ ] Push images to GHCR
-- [ ] `pg_dump` Render DB → `pg_restore` on VPS
-- [ ] Copy `.env` to VPS (or use SOPS-encrypted secrets)
-- [ ] Update DNS (Cloudflare A record → VPS IP)
-- [ ] Verify health checks (`/healthz`, `/readyz`)
+- [ ] Create `.github/workflows/deploy.yml` — builds and pushes server + agent images to GHCR
+- [ ] Verify images are pushed to GHCR: `ghcr.io/assembledhq/143-server` and `ghcr.io/assembledhq/143-agent`
+- [ ] Set up GHCR pull access on VPS (`docker login ghcr.io`) (Step 4)
+- [ ] Copy `.env` to VPS (or use SOPS-encrypted secrets) (Step 5)
+- [ ] Pull images and start all services on VPS; verify `/healthz` via direct IP (Step 10)
+- [ ] Lower DNS TTL to 60s in Cloudflare (24 hours before cutover)
+
+**Cutover day:**
+- [ ] Put Render in maintenance mode / stop writes
+- [ ] Final `pg_dump` from Render → `pg_restore` on VPS
+- [ ] Verify data on VPS: `SELECT count(*) FROM organizations;`
+- [ ] Flip DNS in Cloudflare (`143.dev` A record → VPS IP)
+- [ ] Verify `https://143.dev` loads correctly (TLS, API, frontend)
+- [ ] Verify `https://www.143.dev` redirects to `https://143.dev`
+
+**After cutover:**
+- [ ] Monitor for errors in logs for 24 hours
+- [ ] Restore DNS TTL to normal (3600s or Auto)
 - [ ] Decommission Render services
 
 ### Impact Assessment
@@ -369,8 +778,7 @@ docker exec 143-postgres-1 \
 | Application code | **None** | Zero changes to Go or frontend code |
 | Dockerfile | **None** | Existing multi-stage build works as-is |
 | Database | **Low** | `pg_dump`/`pg_restore`. ~30 min downtime for the cutover. |
-| DNS | **Low** | Update A records. Cloudflare can proxy during transition. |
-| TLS | **None** | Caddy handles Let's Encrypt automatically |
+| DNS + TLS | **Low** | Lower TTL 24h before, flip A record, Caddy auto-provisions certs. See [DNS Cutover](#dns-cutover-and-tls) section. |
 | CI/CD | **Medium** | New GitHub Actions workflow replaces Render auto-deploy |
 | Secrets | **None** | SOPS + age works identically anywhere |
 | Agent sandboxes | **Huge win** | Docker socket access — sandboxes work natively |
@@ -736,7 +1144,7 @@ services:
       MODE: worker
       NODE_ID: ${HOSTNAME}
       MAX_CONCURRENT_RUNS: ${MAX_CONCURRENT_RUNS:-5}
-      SANDBOX_IMAGE: ghcr.io/assembledhq/143-sandbox:latest
+      SANDBOX_IMAGE: ghcr.io/assembledhq/143-agent:latest
       SANDBOX_RUNTIME: runsc
     env_file:
       - .env
@@ -766,14 +1174,16 @@ docker compose -f docker-compose.worker.yml up -d
 
 | VPS Size | `MAX_CONCURRENT_RUNS` | Good for |
 |----------|----------------------|----------|
-| 4 CPU / 8 GB | 1-2 | Small / test |
-| 8 CPU / 16 GB | 3 | Medium |
-| 16 CPU / 32 GB | 5-7 | Production sweet spot |
-| 32 CPU / 64 GB | 10-15 | Heavy workloads |
+| 4 CPU / 8 GB | 1 | Small / test |
+| 8 CPU / 16 GB | 2-3 | Medium |
+| 16 CPU / 32 GB | 5-6 | Production sweet spot |
+| 32 CPU / 64 GB | 10-12 | Heavy workloads |
 
 Each sandbox gets `SANDBOX_CPU_LIMIT` (default 2) cores and
-`SANDBOX_MEMORY_LIMIT` (default 4 GB). Size the VPS to fit the desired
-concurrency plus headroom for the worker process and OS.
+`SANDBOX_MEMORY_LIMIT` (default 4 GB). Rule of thumb: reserve 2 CPU + 2 GB for
+the worker process and OS, then divide the remainder. For example, 16 CPU / 32 GB
+→ 14 CPU / 30 GB available → 6 sandboxes (12 CPU / 24 GB) with comfortable
+headroom.
 
 **Move to Step 3c when:** you need API redundancy (uptime SLA), or a single API
 node can't keep up with webhook volume.
@@ -781,55 +1191,114 @@ node can't keep up with webhook volume.
 #### Step 3c: Multiple API Nodes + Load Balancer
 
 API nodes are stateless — sessions live in Postgres. Add as many as needed behind
-a load balancer.
+a load balancer. Keep at least one node as `mode=all` so the scheduler runs. All
+`api` and `all` nodes serve the same HTTP traffic.
+
+##### Load Balancer Progression
+
+The LB strategy evolves with your scale. Here's the recommended path:
+
+**Stage A: Caddy on a dedicated small VPS (recommended starting point)**
+
+This is the natural evolution from Phase 1. You already have a Caddyfile — you
+just move Caddy off the app VPS onto its own small VPS (2 CPU / 2 GB is plenty)
+and add upstream backends.
 
 ```
-              ┌──────────────────┐
-              │   Load Balancer  │
-              └──┬──────────┬────┘
-                 │          │
-           ┌─────▼──┐  ┌───▼────┐
-           │ VPS-2  │  │ VPS-6  │
-           │ all    │  │ api    │
-           └────┬───┘  └───┬────┘
-                │          │
-┌───────────────▼──────────▼──────────────┐
-│              VPS-1 (DB)                  │
-│              Postgres                    │
-└──────────────────────────────────────────┘
+                 ┌──────────────────┐
+                 │  VPS-LB          │
+                 │  Caddy (2C/2GB)  │
+                 │  :443 → backends │
+                 └──┬──────────┬────┘
+                    │          │
+              ┌─────▼──┐  ┌───▼────┐
+              │ VPS-2  │  │ VPS-6  │
+              │ all    │  │ api    │
+              └────┬───┘  └───┬────┘
+                   │          │
+     ┌─────────────▼──────────▼────────────┐
+     │          VPS-1 (DB)                  │
+     │          Postgres                    │
+     └──────────────────────────────────────┘
 ```
 
-Keep at least one node as `mode=all` so the scheduler runs. All `api` and `all`
-nodes serve the same traffic.
-
-**Load balancer options (all provider-agnostic except managed LBs):**
-
-| Option | Provider-Agnostic? | Notes |
-|--------|-------------------|-------|
-| Caddy as reverse proxy on a VPS | Yes | Cheapest; add `reverse_proxy` upstream block |
-| nginx as reverse proxy on a VPS | Yes | More config, same result |
-| HAProxy on a VPS | Yes | Best for high-throughput |
-| Managed LB (cloud provider) | No | Simplest ops-wise |
-
-> **`[PROVIDER-SPECIFIC]` Managed load balancers:**
->
-> | Provider | Service | Cost |
-> |----------|---------|------|
-> | Hetzner | Hetzner Load Balancer | ~€6/mo |
-> | AWS | ALB | ~$16/mo + per-request |
-> | GCP | Cloud Load Balancing | ~$18/mo + per-request |
-
-**Caddy config for multi-node** (provider-agnostic):
+**`deploy/Caddyfile` (multi-node version):**
 
 ```
-app.143.dev {
-    reverse_proxy vps-2:8080 vps-6:8080 {
+www.143.dev {
+    redir https://143.dev{uri} permanent
+}
+
+143.dev {
+    # Health-checked round-robin across API nodes.
+    # Add/remove backends by editing this list and reloading:
+    #   docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
+    reverse_proxy api-1:8080 api-2:8080 {
         health_uri /healthz
         health_interval 10s
+        health_timeout 5s
         lb_policy round_robin
+
+        # Automatically remove unhealthy backends
+        fail_duration 30s
     }
 }
 ```
+
+Where `api-1` and `api-2` are private IPs (or hostnames if you set up internal
+DNS). On a private network, use the private IPs directly:
+
+```
+    reverse_proxy 10.0.0.3:8080 10.0.0.4:8080 {
+```
+
+**Pros:** Cloud-agnostic, cheap (~$4-8/mo for a small VPS), you already know
+Caddy from Phase 1, built-in health checks and automatic failover.
+
+**Cons:** Caddy VPS is itself a single point of failure. If it dies, everything
+is down until you restart it. For most teams this is fine — Caddy is extremely
+stable and restarts in <1 second.
+
+**Adding/removing backends:** Edit the Caddyfile upstream list and run
+`caddy reload`. No downtime.
+
+**Stage B: Managed cloud load balancer (when you need HA for the LB itself)**
+
+When you want the LB to be highly available without managing it yourself, switch
+to a managed LB. This is the only step that's provider-specific.
+
+> **`[PROVIDER-SPECIFIC]` Managed load balancers:**
+>
+> | Provider | Service | Cost | Health Checks | TLS Termination |
+> |----------|---------|------|---------------|-----------------|
+> | Hetzner | Hetzner Load Balancer | ~€6/mo | Yes (HTTP/TCP) | Yes (upload cert or Let's Encrypt) |
+> | AWS | ALB (Application LB) | ~$16/mo + per-request | Yes (HTTP path) | Yes (ACM certs, free) |
+> | GCP | Cloud Load Balancing | ~$18/mo + per-request | Yes (HTTP path) | Yes (managed certs) |
+> | DigitalOcean | DO Load Balancer | ~$12/mo | Yes (HTTP/TCP) | Yes (Let's Encrypt) |
+>
+> All of these support:
+> - HTTP health checks (point at `/healthz`)
+> - Round-robin or least-connections balancing
+> - TLS termination (so your API nodes only need to serve HTTP)
+> - Adding/removing backends via API or console
+>
+> **If using a managed LB with TLS termination**, you can simplify the API node
+> setup: remove Caddy from the API VPS entirely and let the LB handle TLS. The
+> API container serves plain HTTP on port 8080 and the LB wraps it in HTTPS.
+
+**When to switch from Caddy to managed LB:**
+
+| Signal | Action |
+|--------|--------|
+| Single Caddy VPS is acceptable SPOF | Stay with Caddy (Stage A) |
+| You need 99.9%+ uptime and can't tolerate LB downtime | Managed LB (Stage B) |
+| You're already heavily on one cloud provider | Managed LB may simplify ops |
+| You want to stay fully cloud-agnostic | Stay with Caddy (Stage A) |
+
+**Recommendation:** Start with Caddy on its own VPS (Stage A). It's the simplest
+path, works everywhere, and you already have the config. Move to a managed LB
+only if you need the LB itself to be HA, or if you're already committed to a
+specific cloud provider and want to reduce moving parts.
 
 #### Connection Pooling (PgBouncer) — When You Need It
 
@@ -878,6 +1347,7 @@ set -euo pipefail
 TAG="${1:-latest}"
 HOSTS_FILE="${FLEET_HOSTS:-/opt/143/fleet-hosts.txt}"
 SERVER_IMAGE="ghcr.io/assembledhq/143-server:$TAG"
+AGENT_IMAGE="ghcr.io/assembledhq/143-agent:$TAG"
 
 echo "Deploying $TAG to fleet..."
 
@@ -887,6 +1357,7 @@ while IFS= read -r IP; do
 
   ssh -o StrictHostKeyChecking=no deploy@"$IP" << REMOTE
     docker pull $SERVER_IMAGE
+    docker pull $AGENT_IMAGE
     cd /opt/143
     docker compose -f docker-compose.*.yml up -d --remove-orphans
 
@@ -955,7 +1426,7 @@ runcmd:
   # Pull images
   - docker login ghcr.io -u deploy -p ${REGISTRY_TOKEN}
   - docker pull ghcr.io/assembledhq/143-server:latest
-  - docker pull ghcr.io/assembledhq/143-sandbox:latest
+  - docker pull ghcr.io/assembledhq/143-agent:latest
 
   # Write compose file and start
   - mkdir -p /opt/143
@@ -1120,6 +1591,443 @@ the app only sees `DATABASE_URL`.
 | AWS RDS | Multi-AZ | ~$70/mo | Battle-tested |
 | GCP Cloud SQL | HA with failover | ~$80/mo | Native GCP integration |
 | Crunchy Bridge | Managed HA | ~$50/mo | Postgres-focused |
+
+---
+
+## Known Scaling Constraints
+
+These are application-level issues that don't need to be solved now, but will
+surface as you scale through the phases above. They are documented here so you
+can plan ahead and don't get surprised.
+
+### Things That Break in Multi-Node (Must Fix Before Phase 3)
+
+#### 1. Snapshot Storage is Local Disk
+
+**Current:** `FileSnapshotStore` writes session snapshots (tar.gz of the sandbox
+workspace) to the local filesystem of whichever node ran the agent.
+
+**Problem:** In a multi-node deployment, if worker node A creates a snapshot for
+a session, and the user later resumes that session via API node B, the snapshot
+file doesn't exist on node B. Multi-turn sessions break silently.
+
+**Fix (required for Phase 3):**
+- Switch `FileSnapshotStore` to an S3-compatible backend (`S3SnapshotStore`).
+  This is a straightforward change — the store interface is already abstracted.
+  Use the same S3-compatible storage configured for backups.
+- Alternatively, use a shared NFS mount across all nodes. Simpler but introduces
+  a new SPOF and I/O contention at scale.
+
+**Recommendation:** S3-compatible storage. It's what you'll need long-term anyway,
+and avoids the NFS operational burden.
+
+#### 2. Rate Limiting is Per-Node In-Memory
+
+**Current:** `middleware.RateLimit()` uses an in-memory rate limiter on each API
+node independently.
+
+**Problem:** With 3 API nodes behind a load balancer, the effective rate limit is
+3x what you configured. An org hitting all 3 nodes gets 3x the allowed requests.
+More importantly, there's no way to enforce org-level concurrency limits on agent
+runs across the fleet.
+
+**Fix (required for Phase 3c):**
+- Move rate limiting to a shared store. Options:
+  - **Postgres-backed** (simplest): rate limit check is a single
+    `SELECT count(*) FROM requests WHERE org_id = $1 AND created_at > now() - interval '1 minute'`.
+    Adds ~1ms per request. Fine up to ~1000 req/sec.
+  - **Redis** (standard): if you're already running Redis for caching, use it.
+    Adds operational complexity (another stateful service).
+  - **Load balancer sticky sessions**: route all requests from an org to the same
+    API node. Per-node rate limiting then works correctly. Simplest if your LB
+    supports it, but limits horizontal scaling benefits.
+- For org-level agent run concurrency, the existing `maxConcurrent` check already
+  queries Postgres, so it works correctly across nodes today. The concern is only
+  for HTTP request rate limiting.
+
+### Things That Degrade at Scale (Plan Ahead)
+
+#### 3. SSE Log Streaming Polls the Database
+
+**Current:** The `StreamLogs` SSE endpoint polls `session_logs` every 1 second
+per connected client, querying for new rows since `lastSeenID`.
+
+**Impact:** With 50 concurrent viewers streaming logs, that's 50 QPS against the
+`session_logs` table just for streaming — on top of the writes from active agent
+runs. This is fine at low scale but becomes a significant fraction of DB load as
+you grow.
+
+**When it matters:** When you regularly have 50+ concurrent streaming sessions
+across all API nodes. Monitor `session_logs` query frequency in `pg_stat_statements`.
+
+**Future fix options (not needed now):**
+- **Postgres LISTEN/NOTIFY**: The orchestrator issues `NOTIFY session_log, '<run_id>'`
+  on each log write. SSE handlers `LISTEN` on the channel and only query when
+  notified. Eliminates polling entirely. Medium code change.
+- **In-memory broadcast with cross-node pub/sub**: Each node maintains an
+  in-memory channel per active session. Log writes fan out locally. Cross-node
+  delivery via Postgres NOTIFY or Redis pub/sub. More complex but eliminates
+  per-client DB queries entirely.
+
+#### 4. Job Queue Contention Above ~20 Workers
+
+**Current:** Workers dequeue jobs via `FOR UPDATE SKIP LOCKED` on the `jobs`
+table. This is an excellent pattern for moderate scale — simple, reliable, no
+external dependencies.
+
+**Impact:** Each worker polls every 5 seconds. With 20 workers, that's 4 dequeue
+attempts/second, all competing for the same index. Postgres handles this fine.
+But at 50+ workers (250+ concurrent sandbox capacity), lock contention starts to
+degrade dequeue throughput.
+
+**When it matters:** When you see `jobs.dequeue.duration` p99 exceeding 100ms, or
+workers spending more time waiting for locks than executing jobs.
+
+**Future fix options (not needed now):**
+- **LISTEN/NOTIFY for job pickup**: Instead of polling every 5s, workers `LISTEN`
+  on a `jobs_pending` channel. The enqueue path issues `NOTIFY`. Workers only hit
+  the DB when there's actually work. Eliminates thundering herd. Low-medium code
+  change.
+- **Queue sharding by org_id**: Partition the dequeue query so workers claim jobs
+  for a subset of orgs. Reduces contention linearly. Medium code change.
+- **Dedicated job queue (Temporal, RabbitMQ)**: Replace the Postgres-backed queue
+  entirely. High code change, but unlocks 10-100x throughput. Only worth it if
+  you're processing >1000 jobs/sec.
+
+#### 5. Unbounded Table Growth
+
+Several tables grow without bound and will eventually degrade query performance
+and consume disk:
+
+| Table | Growth Pattern | Current Mitigation | Scaling Risk |
+|-------|---------------|-------------------|--------------|
+| `session_logs` | ~1000 rows/min per active agent | None (append-only) | Queries slow after ~10M rows |
+| `webhook_deliveries` | 1 row per webhook received | None | Table bloat, no reads after processing |
+| `audit_log` | 1 row per auditable action | Immutable (no UPDATE/DELETE trigger) | Slow queries for compliance reports |
+| `jobs` | 1 row per job (completed jobs stay) | None | Dequeue index includes dead rows |
+
+**When it matters:** When any of these tables exceeds ~10M rows. Monitor with
+`SELECT relname, n_live_tup FROM pg_stat_user_tables ORDER BY n_live_tup DESC`.
+
+**Future fix options:**
+- **Table partitioning** (Postgres native): Partition `session_logs` and
+  `audit_log` by month. Old partitions can be detached and archived. Queries
+  against recent data stay fast. Medium migration complexity.
+- **Job archival**: Move completed/dead-lettered jobs to a `jobs_archive` table
+  periodically. Keeps the hot `jobs` table small. Low code change.
+- **Webhook TTL**: Delete `webhook_deliveries` older than 30 days via cron.
+  They're only useful for debugging recent issues. Trivial.
+
+#### 6. Scheduler Is a Single-Node Bottleneck
+
+**Current:** The scheduler uses `pg_try_advisory_lock(143143143)` so only one
+node runs scheduled tasks (PM analysis, cleanup, etc.). This is correct — you
+don't want duplicate cron jobs — but it means:
+
+- If the lock-holding node dies, it takes up to 30 seconds (session timeout) for
+  another node to take over.
+- All scheduled work runs on one node. If a scheduled task is CPU/memory
+  intensive, it competes with that node's API or worker duties.
+
+**When it matters:** Rarely. The scheduler is lightweight and leader failover at
+30 seconds is fine for periodic tasks. Only becomes a concern if you add
+time-sensitive scheduled work (e.g., SLA-based alerting).
+
+**Future fix:** Run the scheduler on a dedicated `mode=scheduler` node, or reduce
+the advisory lock timeout. Low priority.
+
+---
+
+## Enterprise Scale Considerations
+
+The architecture described in Phases 1-4 works well from launch through moderate
+scale (tens of customers, dozens of concurrent agent runs). This section addresses
+what changes when targeting **thousands of large enterprise customers** with
+strict SLA, compliance, and security requirements.
+
+These are not things to build now — but they should inform design decisions today
+so the architecture doesn't paint us into a corner.
+
+### Zero-Downtime Deployments
+
+**The problem:** The current deploy scripts do `docker compose up -d --remove-orphans`,
+which restarts containers. During the restart (even if it's only seconds),
+in-flight requests fail and SSE streams disconnect.
+
+- **Phase 1 (single node):** Downtime during deploys is acceptable. You'll have
+  a maintenance window anyway.
+- **Phase 3+ (multi-node):** Unacceptable. Enterprise SLAs require deploys with
+  no visible impact to users.
+
+**The fix: drain → deploy → health check → re-add.** The fleet deploy script
+already iterates over nodes. The change is to remove each node from the load
+balancer before restarting, and only re-add it after the health check passes.
+
+**Zero-downtime deploy flow for Phase 3+:**
+
+```
+For each node in fleet:
+  1. Remove node from Caddy/LB upstream (stop sending traffic)
+  2. Wait for in-flight requests to complete (graceful drain, ~30s)
+  3. Pull new images
+  4. docker compose up -d --remove-orphans
+  5. Wait for /healthz to return 200
+  6. Re-add node to Caddy/LB upstream
+  7. Move to next node
+```
+
+**With Caddy as LB (Phase 3c Stage A):** Use the Caddy admin API to dynamically
+add/remove upstreams without editing the Caddyfile:
+
+```bash
+# Remove node from upstream
+curl -X DELETE http://caddy-lb:2019/config/apps/http/servers/srv0/routes/0/handle/0/upstreams/1
+
+# Re-add after deploy
+curl -X POST http://caddy-lb:2019/config/apps/http/servers/srv0/routes/0/handle/0/upstreams \
+  -H "Content-Type: application/json" \
+  -d '{"dial": "10.0.0.4:8080"}'
+```
+
+**With a managed LB:** Use the provider API to deregister/register target nodes.
+
+**For worker nodes:** Workers already support graceful shutdown — `SIGTERM`
+triggers drain (finish current jobs, stop accepting new ones, set status to
+`dead`). The deploy script should send `SIGTERM`, wait for drain, then restart.
+
+**Canary deploys:** Deploy to a single node first (`--canary` flag), monitor for
+5-10 minutes, then roll to the rest. A bad image only affects 1/N of traffic
+instead of everything.
+
+```bash
+# deploy-fleet.sh --canary
+# 1. Deploy to first node only
+# 2. Monitor error rate for 5 minutes
+# 3. If error rate > threshold, rollback that one node
+# 4. If clean, deploy to remaining nodes
+```
+
+### Multi-Tenancy and Noisy Neighbor Isolation
+
+**The problem:** All orgs share one Postgres, one job queue, one set of workers,
+and one Docker network. At enterprise scale:
+
+- One org running 50 agent jobs can starve every other org
+- No per-org resource quotas beyond the crude `maxConcurrent=3` limit
+- No billing-tier differentiation (paying customers get the same queue priority as free)
+
+**Direction:**
+
+1. **Weighted job queue priority.** Add a `priority` column to the `jobs` table
+   (or use the existing one) and assign higher priority to paying/enterprise
+   orgs. The dequeue query already sorts by `priority DESC` — this is a config
+   change, not an architecture change.
+
+2. **Per-org concurrency limits from the database.** Move `maxConcurrent` from a
+   hardcoded default to a per-org setting in the `organizations` table. Different
+   tiers get different limits:
+
+   | Tier | Max Concurrent Runs | Queue Priority |
+   |------|-------------------|----------------|
+   | Free | 1 | 0 (lowest) |
+   | Team | 5 | 50 |
+   | Enterprise | 20+ | 100 (highest) |
+
+3. **Dedicated worker pools (future).** Large enterprise customers could get
+   dedicated worker nodes tagged with their org ID. The job dequeue query filters
+   by node labels so their jobs only run on their dedicated workers. This provides
+   hard resource isolation without a separate deployment.
+
+### Sandbox Network Isolation
+
+**The problem:** All sandboxes on a worker node share the `143-sandbox` Docker
+bridge network. One sandbox can potentially reach another sandbox's network
+interfaces on the same node.
+
+**The fix:** Create an isolated Docker network per sandbox instead of sharing one.
+
+```go
+// In DockerProvider.Create():
+// 1. Create a unique network for this sandbox
+networkName := fmt.Sprintf("143-sandbox-%s", sandboxID)
+docker.NetworkCreate(ctx, networkName, types.NetworkCreate{
+    Driver: "bridge",
+    Labels: map[string]string{"143.sandbox_id": sandboxID},
+})
+
+// 2. Connect the sandbox to its own network
+// 3. On cleanup, remove the network
+```
+
+This is a small code change to `internal/services/agent/providers/docker.go`.
+Each sandbox gets its own network namespace — no cross-sandbox communication is
+possible. The only external connectivity is through the network's gateway (which
+the existing network policy restricts to LLM APIs and package registries).
+
+**Cost:** One additional Docker network per active sandbox. Docker supports
+thousands of networks per host. Negligible overhead.
+
+### Agent Image Optimization
+
+**The problem:** The `Dockerfile.agent` installs Ubuntu + Node + Python + Go +
+Make + agent CLIs. This will produce a ~1-2 GB image. Consequences:
+
+- Auto-scale cold start: image pull adds 1-3 minutes on top of VM provisioning
+- Disk fills up faster on workers (each image version persists)
+- CI builds take longer
+
+**Options (in order of preference):**
+
+1. **Minimal base + on-demand runtimes.** Ship a slim image (~200-300 MB) with
+   only git, shell utilities, and the agent CLIs. When an agent needs Node or
+   Python, it installs them from a pre-populated Docker volume cache on the
+   worker node. Pro: fast pulls, flexible. Con: first-run penalty per language.
+
+2. **Language-specific images.** Build `143-agent-node`, `143-agent-python`,
+   `143-agent-go`. The orchestrator selects the image based on the repo's primary
+   language (detectable from the repo's `languages` field in GitHub API). Pro:
+   each image is smaller and specialized. Con: more images to build and manage.
+
+3. **Single fat image (current plan).** Simplest to start with. Acceptable for
+   Phase 1-2. Revisit when image size becomes a bottleneck for auto-scaling cold
+   starts.
+
+**Recommendation:** Start with the single fat image (option 3). It's the simplest
+path and image pull time is irrelevant when you have a fixed fleet (Phase 1-3).
+Switch to option 1 or 2 when auto-scaling (Phase 4) makes cold start time matter.
+
+### Multi-Region
+
+**The problem:** Everything is single-region. If that region goes down, the
+entire platform is down. Enterprise customers with data residency requirements
+(GDPR, etc.) need their data to stay in specific geographies.
+
+**Why this is tractable later:** The architecture already separates state
+(Postgres) from compute (stateless API/workers). This means:
+
+- **Regional worker pools:** Workers in EU connect to the same Postgres (or a
+  regional replica) and process jobs for EU orgs. Workers in US process US jobs.
+  The job queue already has `org_id` — add a `region` column to orgs and filter
+  the dequeue query by region.
+
+- **Read replicas in each region:** Postgres logical replication to regional
+  replicas for read-heavy queries (dashboard, audit log). Writes go to the
+  primary. This uses the read/write splitting from Phase 3c.
+
+- **Full multi-primary (future):** Postgres Citus or CockroachDB for global
+  writes. This is a major migration but the app only sees `DATABASE_URL`, so the
+  application code doesn't change.
+
+**What to do now:** Nothing — but when choosing a cloud provider, prefer one with
+multiple regions. And keep the architecture stateless except for Postgres.
+
+### Observability and SLAs
+
+**The problem:** The doc mentions Datadog and Mezmo in passing but doesn't define
+what to measure or what SLAs to offer. You can't have SLAs without metrics.
+
+**SLIs to instrument (in priority order):**
+
+| SLI | What to Measure | Target |
+|-----|----------------|--------|
+| API availability | % of `/healthz` checks returning 200 | 99.9% |
+| Agent run success rate | % of runs completing without error | > 95% |
+| Agent run latency | p50 / p95 / p99 time from job enqueue to completion | p95 < 10 min |
+| Webhook processing time | Time from webhook receipt to job enqueue | p99 < 5s |
+| SSE stream reliability | % of log streams that don't disconnect unexpectedly | > 99% |
+| Deploy success rate | % of deploys that complete without rollback | > 99% |
+
+**Distributed tracing.** When a request flows from webhook → API → job queue →
+worker → sandbox → result, you need a trace ID that links all of these. Use
+OpenTelemetry — it's vendor-neutral (works with Datadog, Jaeger, Grafana Tempo)
+and the Go SDK is mature. Add a `trace_id` to the `jobs` table so you can
+correlate a job back to the webhook that triggered it.
+
+**Alerting.** Define on-call escalation for:
+- Postgres down for > 30 seconds
+- API error rate > 5% for > 2 minutes
+- Job queue depth > 100 for > 10 minutes (workers not keeping up)
+- Backup freshness > 12 hours
+- Disk usage > 85%
+
+### Compliance and Audit
+
+**Enterprise customers will ask about:**
+
+| Concern | Current State | Path Forward |
+|---------|--------------|-------------|
+| SOC2 Type II | Not started | Audit log table exists; need access controls, change management |
+| Data encryption at rest | Postgres data checksums only | Enable Postgres TDE or use encrypted volumes (LUKS, cloud-managed) |
+| Data encryption in transit | Caddy TLS for external; internal is plaintext | Add mTLS between nodes, or use `sslmode=verify-full` for Postgres |
+| Secret rotation | SOPS + age, manual rotation | Add rotation scripts, integrate with cloud secret managers |
+| Access control audit trail | `audit_log` table exists | Ensure all admin actions are logged, add `actor_id` to sensitive queries |
+| Data residency | Single region | Multi-region (see above) |
+| Right to deletion (GDPR) | No tooling | Add org data export + hard delete scripts |
+
+The audit log table already has an immutability trigger (no UPDATE/DELETE). This
+is a strong foundation — the main gap is instrumenting all access paths, not the
+storage layer.
+
+### PgBouncer and LISTEN/NOTIFY Conflict
+
+**The problem:** The "Known Scaling Constraints" section proposes Postgres
+LISTEN/NOTIFY as the future fix for both SSE polling (constraint #3) and job
+queue contention (constraint #4). But PgBouncer in `transaction` mode (required
+for SKIP LOCKED) **does not support LISTEN/NOTIFY** — notifications are tied to
+sessions, and transaction mode releases the backend connection after each
+transaction.
+
+**The fix:** Maintain a small number of **direct Postgres connections** (bypassing
+PgBouncer) specifically for LISTEN/NOTIFY channels. The pattern:
+
+```go
+// One persistent connection per API/worker node for pub/sub.
+// This connection does NOT go through PgBouncer.
+directConn, _ := pgx.Connect(ctx, directPostgresURL)  // port 5432, not 6432
+directConn.Exec(ctx, "LISTEN job_ready")
+directConn.Exec(ctx, "LISTEN session_log")
+
+// All transactional queries still go through PgBouncer.
+pool, _ := pgxpool.New(ctx, pgbouncerURL)  // port 6432
+```
+
+This uses 1 Postgres connection per node for pub/sub (N connections total) while
+all regular queries still go through PgBouncer. At 20 nodes, that's 20 direct
+connections — well within `max_connections=100`.
+
+### Frontend Containerization
+
+**The problem:** `docker-compose.prod.yml` references
+`ghcr.io/assembledhq/143-frontend:latest` but no `Dockerfile.frontend` exists.
+The CI workflow has a `# TODO` comment. This must be resolved before Phase 1 can
+work.
+
+**The fix:** Create `Dockerfile.frontend`:
+
+```dockerfile
+FROM node:22-alpine AS builder
+WORKDIR /app
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ .
+RUN npm run build
+
+FROM node:22-alpine
+WORKDIR /app
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
+COPY --from=builder /app/public ./public
+
+ENV NODE_ENV=production
+ENV PORT=3000
+EXPOSE 3000
+
+CMD ["node", "server.js"]
+```
+
+This uses Next.js standalone output mode (minimal Node.js server, no dev
+dependencies). The resulting image is ~150 MB. Add the build step to the CI
+workflow alongside the server and agent images.
 
 ---
 
