@@ -77,7 +77,9 @@ $$;
 --    bigserial columns own a *_id_seq sequence; renaming the table does NOT
 --    rename the sequence, so the subsequent CREATE TABLE would collide.
 ALTER TABLE session_logs RENAME TO session_logs_old;
-ALTER SEQUENCE session_logs_id_seq RENAME TO session_logs_id_seq_old;
+-- The sequence kept its original name (agent_run_logs_id_seq) when the table
+-- was renamed from agent_run_logs to session_logs in migration 000015.
+ALTER SEQUENCE agent_run_logs_id_seq RENAME TO agent_run_logs_id_seq_old;
 ALTER INDEX idx_session_logs_session RENAME TO idx_session_logs_session_old;
 ALTER INDEX idx_session_logs_timestamp RENAME TO idx_session_logs_timestamp_old;
 ALTER INDEX IF EXISTS idx_session_logs_thread RENAME TO idx_session_logs_thread_old;
