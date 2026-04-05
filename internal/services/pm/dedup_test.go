@@ -210,8 +210,8 @@ func TestExtractKeywords(t *testing.T) {
 func TestDeduplicateProposal_ScopeOverlap(t *testing.T) {
 	t.Parallel()
 
-	scope1 := "refactor authentication middleware and session handling"
-	scope2 := "refactor authentication middleware and token validation"
+	scope1 := "refactor authentication middleware session handling validation"
+	scope2 := "refactor authentication middleware session token validation"
 	result := DeduplicateProposal(
 		"Migrate database schema",
 		nil,
