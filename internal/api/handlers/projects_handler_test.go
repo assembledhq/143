@@ -441,6 +441,11 @@ func TestProjectHandler_UpdateTask_Success(t *testing.T) {
 				AddRow(newProjectTaskHandlerRow(taskID, projectID, orgID, models.ProjectTaskStatusPending, now)...),
 		)
 
+	// GetByID for parent project (seed field guard: title is a seed field)
+	mock.ExpectQuery("SELECT .+ FROM projects WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, uuid.New(), models.ProjectStatusDraft, now)...))
+
 	// Update task
 	mock.ExpectExec("UPDATE project_tasks SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
