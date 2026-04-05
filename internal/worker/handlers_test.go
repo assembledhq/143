@@ -1642,3 +1642,198 @@ func TestDataRetentionHandler_SkipsZeroRetentionDays(t *testing.T) {
 	require.NoError(t, err, "handler should skip cleanup when retention days are 0")
 	require.NoError(t, mock.ExpectationsWereMet(), "no DB calls should be made")
 }
+
+// --- Eval handler tests ---
+
+var evalRunTestCols = []string{
+	"id", "task_id", "org_id", "batch_id",
+	"input_manifest", "model", "server_deploy_sha", "pm_document_set_pin_id",
+	"config_ref", "context_overrides",
+	"agent_diff", "agent_trace", "token_usage",
+	"criterion_results", "final_score", "passed",
+	"status", "duration_seconds", "sandbox_id",
+	"started_at", "completed_at", "error_message", "created_at",
+}
+
+var evalTaskTestCols = []string{
+	"id", "org_id", "repo_id", "name", "description",
+	"base_commit_sha", "solution_commit_sha", "solution_diff",
+	"issue_description", "issue_context",
+	"server_deploy_sha", "pm_document_set_pin_id", "org_settings_version_id",
+	"memory_snapshot", "sandbox_image_digest", "context_overrides",
+	"scoring_criteria", "pass_threshold",
+	"source", "source_pr_number", "complexity", "tags",
+	"created_by", "created_at", "updated_at", "archived_at",
+}
+
+func newEvalTestStores(t *testing.T) (*Stores, pgxmock.PgxPoolIface) {
+	t.Helper()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	return &Stores{
+		EvalTasks:   db.NewEvalTaskStore(mock),
+		EvalRuns:    db.NewEvalRunStore(mock),
+		EvalBatches: db.NewEvalBatchStore(mock),
+	}, mock
+}
+
+func evalRunRow(runID, taskID, orgID uuid.UUID, now time.Time) []interface{} {
+	return []interface{}{
+		runID, taskID, orgID, nil,
+		nil, "claude-sonnet-4-6", nil, nil,
+		nil, json.RawMessage(`{}`),
+		nil, nil, nil,
+		nil, nil, nil,
+		"pending", nil, nil,
+		nil, nil, nil, now,
+	}
+}
+
+func evalTaskRow(taskID, orgID uuid.UUID, now time.Time, criteria json.RawMessage) []interface{} {
+	return []interface{}{
+		taskID, orgID, uuid.New(), "Test Task", "desc",
+		"abc123", nil, nil,
+		"Fix the bug", json.RawMessage(`{}`),
+		nil, nil, nil,
+		nil, nil, json.RawMessage(`{}`),
+		criteria, 0.7,
+		"manual", nil, "moderate", []string{"test"},
+		nil, now, now, nil,
+	}
+}
+
+func TestExecuteEvalRun(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns failed with placeholder message for valid criteria", func(t *testing.T) {
+		t.Parallel()
+
+		run := &models.EvalRun{Model: "claude-sonnet-4-6"}
+		task := &models.EvalTask{
+			ScoringCriteria: json.RawMessage(`[{"name":"tests_pass","grader_type":"code_check","weight":1.0}]`),
+		}
+		logger := zerolog.Nop()
+
+		result := executeEvalRun(context.Background(), &Stores{}, &Services{}, run, task, logger)
+		require.Equal(t, models.EvalRunStatusFailed, result.Status)
+		require.NotNil(t, result.ErrorMessage)
+		require.Contains(t, *result.ErrorMessage, "not yet implemented")
+	})
+
+	t.Run("returns failed on invalid scoring criteria JSON", func(t *testing.T) {
+		t.Parallel()
+
+		run := &models.EvalRun{Model: "claude-sonnet-4-6"}
+		task := &models.EvalTask{
+			ScoringCriteria: json.RawMessage(`not valid json`),
+		}
+		logger := zerolog.Nop()
+
+		result := executeEvalRun(context.Background(), &Stores{}, &Services{}, run, task, logger)
+		require.Equal(t, models.EvalRunStatusFailed, result.Status)
+		require.NotNil(t, result.ErrorMessage)
+		require.Contains(t, *result.ErrorMessage, "failed to parse scoring criteria")
+	})
+
+	t.Run("returns failed with empty criteria array", func(t *testing.T) {
+		t.Parallel()
+
+		run := &models.EvalRun{Model: "claude-sonnet-4-6"}
+		task := &models.EvalTask{
+			ScoringCriteria: json.RawMessage(`[]`),
+		}
+		logger := zerolog.Nop()
+
+		result := executeEvalRun(context.Background(), &Stores{}, &Services{}, run, task, logger)
+		require.Equal(t, models.EvalRunStatusFailed, result.Status)
+		require.NotNil(t, result.ErrorMessage)
+		require.Contains(t, *result.ErrorMessage, "not yet implemented")
+	})
+}
+
+func TestRunEvalHandler(t *testing.T) {
+	t.Parallel()
+
+	t.Run("invalid JSON payload returns error", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newEvalTestStores(t)
+		defer mock.Close()
+
+		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
+		err := handler(context.Background(), "run_eval", json.RawMessage(`{invalid`))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "unmarshal run_eval payload")
+	})
+
+	t.Run("missing org ID returns error", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newEvalTestStores(t)
+		defer mock.Close()
+
+		payload := json.RawMessage(`{"eval_run_id":"` + uuid.New().String() + `"}`)
+		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
+		err := handler(context.Background(), "run_eval", payload)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "parse org ID")
+	})
+
+	t.Run("invalid eval run ID returns error", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newEvalTestStores(t)
+		defer mock.Close()
+
+		payload := json.RawMessage(`{"eval_run_id":"not-a-uuid","org_id":"` + uuid.New().String() + `"}`)
+		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
+		err := handler(context.Background(), "run_eval", payload)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "parse eval run ID")
+	})
+
+	t.Run("successful run executes full lifecycle", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newEvalTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		runID := uuid.New()
+		taskID := uuid.New()
+		now := time.Now()
+
+		// GetByID for run
+		mock.ExpectQuery("SELECT .+ FROM eval_runs WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(evalRunTestCols).AddRow(evalRunRow(runID, taskID, orgID, now)...))
+
+		// GetByID for task
+		mock.ExpectQuery("SELECT .+ FROM eval_tasks WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(evalTaskTestCols).AddRow(
+				evalTaskRow(taskID, orgID, now, json.RawMessage(`[]`))...))
+
+		// UpdateStatus to running
+		mock.ExpectExec("UPDATE eval_runs SET status").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		// UpdateResult
+		mock.ExpectExec("UPDATE eval_runs SET").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		payload, _ := json.Marshal(map[string]string{
+			"eval_run_id": runID.String(),
+			"org_id":      orgID.String(),
+		})
+
+		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
+		err := handler(context.Background(), "run_eval", payload)
+		require.NoError(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
