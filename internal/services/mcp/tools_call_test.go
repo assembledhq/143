@@ -507,3 +507,167 @@ func TestCallToolIssueCreatorUnknownMethod(t *testing.T) {
 		t.Fatal("expected error for unknown method")
 	}
 }
+
+// --------------------------------------------------------------------------
+// Mock: ProjectProposer
+// --------------------------------------------------------------------------
+
+type mockProjectProposer struct {
+	name string
+}
+
+func (m *mockProjectProposer) Name() string { return m.name }
+
+func (m *mockProjectProposer) ProposeProject(_ context.Context, params integration.ProposeProjectParams) (*integration.ProposeProjectResult, error) {
+	var warning *string
+	if len(params.SimilarProjectIDs) > 0 {
+		w := "similar projects acknowledged"
+		warning = &w
+	}
+	return &integration.ProposeProjectResult{
+		ID:               "proj-new-123",
+		DuplicateWarning: warning,
+	}, nil
+}
+
+func buildFullTestRegistryWithProposer() *integration.Registry {
+	reg := buildFullTestRegistry()
+	reg.RegisterProjectProposer(&mockProjectProposer{name: "project"})
+	return reg
+}
+
+// --------------------------------------------------------------------------
+// Tests: ProjectProposer dispatch (callProjectProposer)
+// --------------------------------------------------------------------------
+
+func TestCallToolProjectProposerPropose(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildFullTestRegistryWithProposer())
+	args := `{"repository_id":"repo-1","title":"New feature","goal":"Ship it","reasoning":"Users want it"}`
+	result := tr.CallTool(context.Background(), "project_propose", json.RawMessage(args))
+
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+
+	var resp integration.ProposeProjectResult
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &resp); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if resp.ID != "proj-new-123" {
+		t.Errorf("id = %q, want %q", resp.ID, "proj-new-123")
+	}
+}
+
+func TestCallToolProjectProposerPropose_WithOptionalFields(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildFullTestRegistryWithProposer())
+	args := `{
+		"repository_id":"repo-1",
+		"title":"New feature",
+		"goal":"Ship it",
+		"reasoning":"Users want it",
+		"source_issue_ids":"id1,id2",
+		"similar_project_ids":"proj-a, proj-b",
+		"priority":80,
+		"tasks":"[{\"title\":\"task 1\"}]"
+	}`
+	result := tr.CallTool(context.Background(), "project_propose", json.RawMessage(args))
+
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+
+	var resp integration.ProposeProjectResult
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &resp); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if resp.DuplicateWarning == nil {
+		t.Error("expected duplicate warning for similar_project_ids")
+	}
+}
+
+func TestCallToolProjectProposerPropose_MissingRequired(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildFullTestRegistryWithProposer())
+
+	tests := []struct {
+		name string
+		args string
+		want string
+	}{
+		{"missing repo", `{"title":"t","goal":"g","reasoning":"r"}`, "repository_id is required"},
+		{"missing title", `{"repository_id":"r","goal":"g","reasoning":"r"}`, "title is required"},
+		{"missing goal", `{"repository_id":"r","title":"t","reasoning":"r"}`, "goal is required"},
+		{"missing reasoning", `{"repository_id":"r","title":"t","goal":"g"}`, "reasoning is required"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := tr.CallTool(context.Background(), "project_propose", json.RawMessage(tt.args))
+			if !result.IsError {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(result.Content[0].Text, tt.want) {
+				t.Errorf("expected %q in error, got: %s", tt.want, result.Content[0].Text)
+			}
+		})
+	}
+}
+
+func TestCallToolProjectProposerPropose_BadJSON(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildFullTestRegistryWithProposer())
+	result := tr.CallTool(context.Background(), "project_propose", json.RawMessage(`{bad`))
+
+	if !result.IsError {
+		t.Fatal("expected error for bad JSON")
+	}
+}
+
+func TestCallToolProjectProposerPropose_BadTasksJSON(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildFullTestRegistryWithProposer())
+	args := `{"repository_id":"r","title":"t","goal":"g","reasoning":"r","tasks":"not-json"}`
+	result := tr.CallTool(context.Background(), "project_propose", json.RawMessage(args))
+
+	if !result.IsError {
+		t.Fatal("expected error for bad tasks JSON")
+	}
+	if !strings.Contains(result.Content[0].Text, "invalid tasks JSON") {
+		t.Errorf("expected 'invalid tasks JSON' in error, got: %s", result.Content[0].Text)
+	}
+}
+
+func TestCallToolProjectProposerUnknownMethod(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildFullTestRegistryWithProposer())
+	result := tr.CallTool(context.Background(), "project_unknown", json.RawMessage(`{}`))
+
+	if !result.IsError {
+		t.Fatal("expected error for unknown method")
+	}
+	if !strings.Contains(result.Content[0].Text, "unknown project proposer method") {
+		t.Errorf("expected 'unknown project proposer method' in error, got: %s", result.Content[0].Text)
+	}
+}
+
+func TestListToolsIncludesProjectProposer(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildFullTestRegistryWithProposer())
+	tools := tr.ListTools()
+
+	found := false
+	for _, tool := range tools {
+		if tool.Name == "project_propose" {
+			found = true
+			if len(tool.InputSchema.Required) < 4 {
+				t.Errorf("expected at least 4 required fields, got %d", len(tool.InputSchema.Required))
+			}
+		}
+	}
+	if !found {
+		t.Error("project_propose tool not found in ListTools")
+	}
+}

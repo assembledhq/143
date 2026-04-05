@@ -595,6 +595,7 @@ export interface Project {
   proposed_by_pm: boolean;
   source_issue_ids?: string[];
   proposal_reasoning?: string;
+  similar_projects?: ProposalOverlap[];
   schedule_enabled: boolean;
   schedule_interval: number;
   schedule_unit: 'hours' | 'days' | 'weeks';
@@ -603,6 +604,18 @@ export interface Project {
   created_at: string;
   updated_at: string;
   completed_at?: string;
+}
+
+export interface ProposalOverlap {
+  project_id: string;
+  title: string;
+  overlap_score: number;
+  overlap_type: string;
+  explanation: string;
+}
+
+export interface ProposalSummary {
+  count: number;
 }
 
 export interface ProjectTask {

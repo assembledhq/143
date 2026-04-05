@@ -52,6 +52,10 @@ func BuildRegistryFromEnv(logger io.Writer) *integration.Registry {
 			creator := integration.NewInternalIssueCreator(token, apiURL)
 			reg.RegisterIssueCreator(creator)
 			fmt.Fprintln(logger, "143-tools: registered issue creator")
+
+			proposer := integration.NewInternalProjectProposer(token, apiURL)
+			reg.RegisterProjectProposer(proposer)
+			fmt.Fprintln(logger, "143-tools: registered project proposer")
 		}
 	}
 

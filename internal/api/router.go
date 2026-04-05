@@ -249,8 +249,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 
 	// Internal API routes (token-based auth — called by sandbox agents)
 	internalIssueHandler := handlers.NewInternalIssueHandler(issueStore, sessionStore, jobStore, orgStore, cfg.SessionSecret, logger)
+	internalProjectHandler := handlers.NewInternalProjectHandler(pool, projectStore, projectTaskStore, repoStore, cfg.SessionSecret, logger)
 	r.Route("/api/v1/internal", func(r chi.Router) {
 		r.Post("/issues", internalIssueHandler.Create)
+		r.Post("/projects/propose", internalProjectHandler.Propose)
 	})
 
 	// Public team routes (token-based, no auth)
@@ -327,6 +329,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/pm/decisions", pmHandler.Decisions)
 			r.Get("/api/v1/pm/status", pmHandler.Status)
 			r.Get("/api/v1/projects", projectHandler.List)
+			r.Get("/api/v1/projects/proposals/summary", projectHandler.ProposalSummary)
 			r.Get("/api/v1/projects/{id}", projectHandler.Get)
 			r.Get("/api/v1/projects/{id}/cycles", projectHandler.ListCycles)
 			r.Get("/api/v1/projects/{id}/cycles/{cycleId}", projectHandler.GetCycle)

@@ -25,20 +25,31 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/hooks/use-auth";
 import { useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "@/lib/api";
 import { RepoContextSwitcher } from "@/components/repo-context-switcher";
 
 const navItems = [
-  { label: "Autopilot", icon: Zap, href: "/autopilot" },
-  { label: "Sessions", icon: Play, href: "/sessions" },
-  { label: "Projects", icon: FolderKanban, href: "/projects" },
+  { label: "Autopilot", icon: Zap, href: "/autopilot", showProposalBadge: false },
+  { label: "Sessions", icon: Play, href: "/sessions", showProposalBadge: false },
+  { label: "Projects", icon: FolderKanban, href: "/projects", showProposalBadge: true },
 ];
 
 export function AuthenticatedLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const { user, isLoading, isAuthenticated, logout } = useAuth();
+
+  const { data: proposalSummary } = useQuery({
+    queryKey: ["proposalSummary"],
+    queryFn: () => api.projects.proposalSummary(),
+    refetchInterval: 30000,
+    enabled: isAuthenticated,
+  });
+  const proposalCount = proposalSummary?.data?.count ?? 0;
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated) {
@@ -116,6 +127,11 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
               >
                 <item.icon className="h-4 w-4" />
                 {item.label}
+                {item.showProposalBadge && proposalCount > 0 && (
+                  <Badge variant="secondary" className="ml-auto text-xs px-1.5 py-0 bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300">
+                    {proposalCount}
+                  </Badge>
+                )}
               </Link>
             );
           })}
