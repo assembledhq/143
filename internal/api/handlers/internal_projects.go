@@ -348,6 +348,7 @@ func hashTokenForProjects(token string) string {
 
 // repoAdvisoryLockKey derives a stable int64 advisory lock key from a repo UUID.
 // We use the first 8 bytes of the UUID interpreted as int64.
+// The overflow is intentional — we only need a deterministic key, not a meaningful number.
 func repoAdvisoryLockKey(repoID uuid.UUID) int64 {
-	return int64(binary.BigEndian.Uint64(repoID[:8]))
+	return int64(binary.BigEndian.Uint64(repoID[:8])) // #nosec G115
 }
