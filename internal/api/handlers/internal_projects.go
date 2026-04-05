@@ -241,7 +241,7 @@ func (h *InternalProjectHandler) Propose(w http.ResponseWriter, r *http.Request)
 	// 8. Marshal similar projects metadata.
 	similarProjects := dedupResult.SimilarProjects
 	if similarProjects == nil {
-		similarProjects = []pm.SimilarProject{}
+		similarProjects = []models.ProposalOverlap{}
 	}
 	similarJSON, err := json.Marshal(similarProjects)
 	if err != nil {
