@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
@@ -186,6 +187,101 @@ func TestSyncSentryHandler(t *testing.T) {
 				require.NoError(t, err, "sync_sentry handler should succeed")
 				require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 			}
+		})
+	}
+}
+
+func TestNewOrgIDJobHandler(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		payload   json.RawMessage
+		expectErr bool
+		errSubstr string
+	}{
+		{
+			name:      "invalid JSON returns unmarshal error",
+			payload:   json.RawMessage(`{invalid json}`),
+			expectErr: true,
+			errSubstr: "unmarshal pm_bootstrap payload",
+		},
+		{
+			name:      "invalid org ID returns parse error",
+			payload:   json.RawMessage(`{"org_id":"not-a-uuid"}`),
+			expectErr: true,
+			errSubstr: "parse org ID",
+		},
+		{
+			name:      "valid org ID invokes callback",
+			payload:   nil,
+			expectErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			logger := zerolog.Nop()
+			expectedOrgID := uuid.New()
+			payload := tt.payload
+			if payload == nil {
+				payload = json.RawMessage(`{"org_id":"` + expectedOrgID.String() + `"}`)
+			}
+
+			called := false
+			handler := newOrgIDJobHandler("pm_bootstrap", func(ctx context.Context, orgID uuid.UUID) error {
+				called = true
+				require.Equal(t, expectedOrgID, orgID, "newOrgIDJobHandler should pass the parsed org ID to the callback")
+				return nil
+			}, logger)
+
+			err := handler(context.Background(), "pm_bootstrap", payload)
+			if tt.expectErr {
+				require.Error(t, err, "newOrgIDJobHandler should return an error for invalid input")
+				require.Contains(t, err.Error(), tt.errSubstr, "error should contain the expected substring")
+				require.False(t, called, "newOrgIDJobHandler should not invoke the callback when input is invalid")
+				return
+			}
+
+			require.NoError(t, err, "newOrgIDJobHandler should succeed for valid input")
+			require.True(t, called, "newOrgIDJobHandler should invoke the callback for valid input")
+		})
+	}
+}
+
+func TestParseSlackTimestamp(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		ts       string
+		expected time.Time
+	}{
+		{
+			name:     "valid slack timestamp returns unix seconds",
+			ts:       "1678901234.567890",
+			expected: time.Unix(1678901234, 0),
+		},
+		{
+			name:     "missing fractional part still parses",
+			ts:       "1678901234",
+			expected: time.Unix(1678901234, 0),
+		},
+		{
+			name:     "invalid timestamp returns zero time",
+			ts:       "not-a-timestamp",
+			expected: time.Time{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := parseSlackTimestamp(tt.ts)
+			require.Equal(t, tt.expected, actual, "parseSlackTimestamp should return the expected time value")
 		})
 	}
 }
