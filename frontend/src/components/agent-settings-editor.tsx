@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, KeyRound, Sparkles } from "lucide-react";
 import { api } from "@/lib/api";
+import { captureError } from "@/lib/errors";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -132,7 +133,8 @@ export function AgentSettingsEditor({
       setSaveStatus("success");
       setTimeout(() => setSaveStatus("idle"), 2000);
     },
-    onError: () => {
+    onError: (error) => {
+      captureError(error, { feature: "agent-settings" });
       setSaveStatus("error");
       setTimeout(() => setSaveStatus("idle"), 3000);
     },
@@ -142,6 +144,9 @@ export function AgentSettingsEditor({
     mutationFn: () => api.codexAuth.disconnect(),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["codex-auth-status"] });
+    },
+    onError: (error) => {
+      captureError(error, { feature: "codex-disconnect" });
     },
   });
 

@@ -47,25 +47,25 @@ func TestClaudeCodeAdapter_PreparePrompt(t *testing.T) {
 		{
 			name: "low token mode",
 			input: &agent.AgentInput{
-				Issue:     &models.Issue{Title: "Bug", Source: "sentry"},
+				Issue:     &models.Issue{Title: "Bug", Source: models.IssueSourceSentry},
 				TokenMode: "low",
 			},
-			wantToken: lowTokenMax,
+			wantToken: defaultLowTokenMax,
 		},
 		{
 			name: "high token mode",
 			input: &agent.AgentInput{
-				Issue:     &models.Issue{Title: "Bug", Source: "sentry"},
+				Issue:     &models.Issue{Title: "Bug", Source: models.IssueSourceSentry},
 				TokenMode: "high",
 			},
-			wantToken: highTokenMax,
+			wantToken: defaultHighTokenMax,
 		},
 		{
 			name: "default token mode",
 			input: &agent.AgentInput{
 				Issue: &models.Issue{Title: "Bug"},
 			},
-			wantToken: lowTokenMax,
+			wantToken: defaultLowTokenMax,
 		},
 	}
 
@@ -85,6 +85,45 @@ func TestClaudeCodeAdapter_PreparePrompt(t *testing.T) {
 			require.NotEmpty(t, prompt.UserPrompt)
 		})
 	}
+}
+
+func TestResolveTokenLimit(t *testing.T) {
+	t.Parallel()
+
+	// Without context limits (nil), uses defaults
+	require.Equal(t, defaultLowTokenMax, resolveTokenLimit("low", nil))
+	require.Equal(t, defaultHighTokenMax, resolveTokenLimit("high", nil))
+	require.Equal(t, defaultLowTokenMax, resolveTokenLimit("", nil))
+
+	// With custom context limits
+	custom := &models.ContextLimits{
+		AgentLowTokenMax:  75_000,
+		AgentHighTokenMax: 250_000,
+	}
+	require.Equal(t, 75_000, resolveTokenLimit("low", custom))
+	require.Equal(t, 250_000, resolveTokenLimit("high", custom))
+	require.Equal(t, 75_000, resolveTokenLimit("", custom))
+
+	// Partial override (only low set)
+	partial := &models.ContextLimits{AgentLowTokenMax: 60_000}
+	require.Equal(t, 60_000, resolveTokenLimit("low", partial))
+	require.Equal(t, defaultHighTokenMax, resolveTokenLimit("high", partial))
+}
+
+func TestClaudeCodeAdapter_PreparePrompt_WithContextLimits(t *testing.T) {
+	t.Parallel()
+
+	a := NewClaudeCodeAdapter(zerolog.Nop())
+	input := &agent.AgentInput{
+		Issue:     &models.Issue{Title: "Bug", Source: models.IssueSourceSentry},
+		TokenMode: "high",
+		ContextLimits: &models.ContextLimits{
+			AgentHighTokenMax: 300_000,
+		},
+	}
+	prompt, err := a.PreparePrompt(context.Background(), input)
+	require.NoError(t, err)
+	require.Equal(t, 300_000, prompt.MaxTokens, "should use org-specific high token limit")
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +201,10 @@ func TestClaudeCodeAdapter_Execute(t *testing.T) {
 						_, _ = stderr.Write([]byte(tt.stderrOutput))
 					}
 					return tt.claudeExitCode, nil
+				}
+				if strings.HasPrefix(cmd, "git rev-parse") {
+					_, _ = stdout.Write([]byte("true\n"))
+					return 0, nil
 				}
 				if strings.HasPrefix(cmd, "git diff") {
 					_, _ = stdout.Write([]byte(tt.diffOutput))
@@ -269,6 +312,10 @@ func TestClaudeCodeAdapter_Execute_ContinuationUsesContinueMode(t *testing.T) {
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 		if strings.HasPrefix(cmd, "claude") {
 			_, _ = stdout.Write([]byte(`{"type":"assistant","content":"continuing the session"}`))
+			return 0, nil
+		}
+		if strings.HasPrefix(cmd, "git rev-parse") {
+			_, _ = stdout.Write([]byte("true\n"))
 			return 0, nil
 		}
 		if strings.HasPrefix(cmd, "git diff") {
@@ -509,6 +556,22 @@ func TestBuildSystemPrompt_Minimal(t *testing.T) {
 	require.NotContains(t, prompt, "Repository Conventions")
 }
 
+func TestBuildSystemPrompt_ManualSessionSkipsBaseTemplate(t *testing.T) {
+	t.Parallel()
+
+	input := &agent.AgentInput{
+		Issue:       &models.Issue{Title: "help me refactor", Source: models.IssueSourceManual},
+		ContextDocs: []string{"Use Go 1.22"},
+	}
+
+	prompt := buildSystemPrompt(input)
+	require.NotContains(t, prompt, "coding agent tasked with fixing a bug", "manual sessions should not include bug-fixing template")
+	require.NotContains(t, prompt, "testing_requirements", "manual sessions should not include testing requirements")
+	require.NotContains(t, prompt, "confidence_score", "manual sessions should not include confidence format")
+	require.Contains(t, prompt, "Repository Conventions", "manual sessions should still include repo conventions")
+	require.Contains(t, prompt, "Use Go 1.22")
+}
+
 // ---------------------------------------------------------------------------
 // buildUserPrompt
 // ---------------------------------------------------------------------------
@@ -528,6 +591,7 @@ func TestBuildUserPrompt(t *testing.T) {
 			input: &agent.AgentInput{
 				Issue: &models.Issue{
 					Title:       "Billing crash",
+					Source:      models.IssueSourceSentry,
 					Description: &desc,
 				},
 			},
@@ -538,7 +602,7 @@ func TestBuildUserPrompt(t *testing.T) {
 			input: &agent.AgentInput{
 				Issue: &models.Issue{
 					Title:  "NullPointer",
-					Source: "sentry",
+					Source: models.IssueSourceSentry,
 					RawData: json.RawMessage(`{
 						"entries": [{
 							"type": "exception",
@@ -566,6 +630,7 @@ func TestBuildUserPrompt(t *testing.T) {
 			input: &agent.AgentInput{
 				Issue: &models.Issue{
 					Title:                 "Error",
+					Source:                models.IssueSourceSentry,
 					OccurrenceCount:       150,
 					AffectedCustomerCount: 25,
 				},
@@ -577,6 +642,7 @@ func TestBuildUserPrompt(t *testing.T) {
 			input: &agent.AgentInput{
 				Issue: &models.Issue{
 					Title:    "Error",
+					Source:   models.IssueSourceSentry,
 					Severity: "critical",
 				},
 			},
@@ -585,7 +651,7 @@ func TestBuildUserPrompt(t *testing.T) {
 		{
 			name: "complexity estimate",
 			input: &agent.AgentInput{
-				Issue: &models.Issue{Title: "Error"},
+				Issue: &models.Issue{Title: "Error", Source: models.IssueSourceLinear},
 				ComplexityEstimate: &agent.ComplexityEstimate{
 					Tier:      2,
 					Reasoning: "Multiple files affected",
@@ -606,6 +672,26 @@ func TestBuildUserPrompt(t *testing.T) {
 	}
 }
 
+func TestBuildUserPrompt_ManualSessionReturnsRawMessage(t *testing.T) {
+	t.Parallel()
+
+	msg := "help me improve the margins in the session"
+	input := &agent.AgentInput{
+		Issue: &models.Issue{
+			Title:       "help me improve the margins",
+			Source:      models.IssueSourceManual,
+			Description: &msg,
+		},
+	}
+
+	prompt := buildUserPrompt(input)
+	require.Equal(t, msg, prompt, "manual session should return raw user message")
+	require.NotContains(t, prompt, "## Issue:")
+	require.NotContains(t, prompt, "### Description")
+	require.NotContains(t, prompt, "Customer Impact")
+	require.NotContains(t, prompt, "Severity")
+}
+
 // ---------------------------------------------------------------------------
 // extractFileHints
 // ---------------------------------------------------------------------------
@@ -622,14 +708,14 @@ func TestExtractFileHints(t *testing.T) {
 		{
 			name: "non-sentry source returns nil",
 			input: &agent.AgentInput{
-				Issue: &models.Issue{Title: "Bug", Source: "linear"},
+				Issue: &models.Issue{Title: "Bug", Source: models.IssueSourceLinear},
 			},
 			wantNil: true,
 		},
 		{
 			name: "empty raw data returns nil",
 			input: &agent.AgentInput{
-				Issue: &models.Issue{Title: "Bug", Source: "sentry", RawData: nil},
+				Issue: &models.Issue{Title: "Bug", Source: models.IssueSourceSentry, RawData: nil},
 			},
 			wantNil: true,
 		},
@@ -638,7 +724,7 @@ func TestExtractFileHints(t *testing.T) {
 			input: &agent.AgentInput{
 				Issue: &models.Issue{
 					Title:  "Bug",
-					Source: "sentry",
+					Source: models.IssueSourceSentry,
 					RawData: json.RawMessage(`{
 						"entries": [{
 							"type": "exception",
@@ -663,7 +749,7 @@ func TestExtractFileHints(t *testing.T) {
 			input: &agent.AgentInput{
 				Issue: &models.Issue{
 					Title:  "Bug",
-					Source: "sentry",
+					Source: models.IssueSourceSentry,
 					RawData: json.RawMessage(`{
 						"entries": [{
 							"type": "exception",
@@ -690,7 +776,7 @@ func TestExtractFileHints(t *testing.T) {
 			input: &agent.AgentInput{
 				Issue: &models.Issue{
 					Title:  "Bug",
-					Source: "sentry",
+					Source: models.IssueSourceSentry,
 					RawData: json.RawMessage(`{
 						"entries": [{
 							"type": "exception",
@@ -715,7 +801,7 @@ func TestExtractFileHints(t *testing.T) {
 			input: &agent.AgentInput{
 				Issue: &models.Issue{
 					Title:  "Bug",
-					Source: "sentry",
+					Source: models.IssueSourceSentry,
 					RawData: json.RawMessage(`{
 						"entries": [{
 							"type": "breadcrumbs",
@@ -737,7 +823,7 @@ func TestExtractFileHints(t *testing.T) {
 			input: &agent.AgentInput{
 				Issue: &models.Issue{
 					Title:   "Bug",
-					Source:  "sentry",
+					Source:  models.IssueSourceSentry,
 					RawData: json.RawMessage(`{not valid json`),
 				},
 			},
@@ -748,7 +834,7 @@ func TestExtractFileHints(t *testing.T) {
 			input: &agent.AgentInput{
 				Issue: &models.Issue{
 					Title:  "Bug",
-					Source: "sentry",
+					Source: models.IssueSourceSentry,
 					RawData: json.RawMessage(`{
 						"entries": [{
 							"type": "exception",
@@ -772,7 +858,7 @@ func TestExtractFileHints(t *testing.T) {
 			input: &agent.AgentInput{
 				Issue: &models.Issue{
 					Title:  "Bug",
-					Source: "sentry",
+					Source: models.IssueSourceSentry,
 					RawData: json.RawMessage(`{
 						"entries": [{
 							"type": "exception",
@@ -968,28 +1054,35 @@ func TestCollectDiff(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		stdout   string
-		exitCode int
-		execErr  error
-		wantDiff string
-		wantErr  bool
+		name         string
+		isGitRepo    bool // whether git rev-parse returns 0
+		diffStdout   string
+		diffExitCode int
+		execErr      error
+		wantDiff     string
+		wantErr      bool
 	}{
 		{
-			name:     "successful diff",
-			stdout:   "diff --git a/f.go b/f.go\n+fixed\n",
-			exitCode: 0,
-			wantDiff: "diff --git a/f.go b/f.go\n+fixed\n",
+			name:       "successful diff",
+			isGitRepo:  true,
+			diffStdout: "diff --git a/f.go b/f.go\n+fixed\n",
+			wantDiff:   "diff --git a/f.go b/f.go\n+fixed\n",
 		},
 		{
-			name:     "non-zero exit code",
-			exitCode: 1,
-			wantErr:  true,
+			name:         "non-zero diff exit code",
+			isGitRepo:    true,
+			diffExitCode: 1,
+			wantErr:      true,
 		},
 		{
-			name:    "exec error",
+			name:    "exec error on rev-parse",
 			execErr: context.DeadlineExceeded,
 			wantErr: true,
+		},
+		{
+			name:      "not a git repo returns empty diff",
+			isGitRepo: false,
+			wantDiff:  "",
 		},
 	}
 
@@ -1001,8 +1094,19 @@ func TestCollectDiff(t *testing.T) {
 				if tt.execErr != nil {
 					return 0, tt.execErr
 				}
-				_, _ = stdout.Write([]byte(tt.stdout))
-				return tt.exitCode, nil
+				if strings.HasPrefix(cmd, "git rev-parse") {
+					if tt.isGitRepo {
+						_, _ = stdout.Write([]byte("true\n"))
+						return 0, nil
+					}
+					_, _ = stderr.Write([]byte("fatal: not a git repository\n"))
+					return 128, nil
+				}
+				if strings.HasPrefix(cmd, "git diff") {
+					_, _ = stdout.Write([]byte(tt.diffStdout))
+					return tt.diffExitCode, nil
+				}
+				return 0, nil
 			}
 
 			sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}

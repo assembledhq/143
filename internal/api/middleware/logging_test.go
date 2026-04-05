@@ -77,7 +77,7 @@ func TestLogging_ErrorResponsesAreLoggedAtErrorLevel(t *testing.T) {
 		expectedErrorMessage string
 	}{
 		{
-			name: "500 response logs error details",
+			name: "500 response logs error details at error level",
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusInternalServerError)
@@ -86,6 +86,36 @@ func TestLogging_ErrorResponsesAreLoggedAtErrorLevel(t *testing.T) {
 			expectedLevel:        "error",
 			expectedErrorCode:    "AUTH_INITIATE_FAILED",
 			expectedErrorMessage: "failed to initiate device auth",
+		},
+		{
+			name: "400 response logs error details at warn level",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":{"code":"INVALID_BODY","message":"missing required field"}}`))
+			},
+			expectedLevel:        "warn",
+			expectedErrorCode:    "INVALID_BODY",
+			expectedErrorMessage: "missing required field",
+		},
+		{
+			name: "401 response logs error details at warn level",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error":{"code":"UNAUTHORIZED","message":"invalid session"}}`))
+			},
+			expectedLevel:        "warn",
+			expectedErrorCode:    "UNAUTHORIZED",
+			expectedErrorMessage: "invalid session",
+		},
+		{
+			name: "404 response logs at warn level without error details",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte("not found"))
+			},
+			expectedLevel: "warn",
 		},
 		{
 			name: "200 response stays info level",
@@ -123,10 +153,10 @@ func TestLogging_ErrorResponsesAreLoggedAtErrorLevel(t *testing.T) {
 			require.Equal(t, tt.expectedLevel, logEvent["level"], "logging middleware should use expected log level")
 
 			if tt.expectedErrorCode != "" {
-				require.Equal(t, tt.expectedErrorCode, logEvent["error_code"], "logging middleware should include API error code for 5xx responses")
+				require.Equal(t, tt.expectedErrorCode, logEvent["error_code"], "logging middleware should include API error code for error responses")
 			}
 			if tt.expectedErrorMessage != "" {
-				require.Equal(t, tt.expectedErrorMessage, logEvent["error_message"], "logging middleware should include API error message for 5xx responses")
+				require.Equal(t, tt.expectedErrorMessage, logEvent["error_message"], "logging middleware should include API error message for error responses")
 			}
 		})
 	}

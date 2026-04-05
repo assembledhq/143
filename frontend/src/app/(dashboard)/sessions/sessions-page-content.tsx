@@ -28,8 +28,10 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { api } from "@/lib/api";
-import { formatTimeAgo } from "@/lib/utils";
+import { formatTimeAgo, sessionTitle } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
+import { useSessionUserFilter } from "@/hooks/use-session-user-filter";
+import { SessionOwnerToggle } from "./session-owner-toggle";
 import type { Session, User } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
@@ -51,35 +53,27 @@ const statusConfig: Record<string, { dot: string; text: string; bg: string; labe
 
 const filterTabs = [
   { value: "all", label: "All" },
-  { value: "active", label: "Active" },
-  { value: "needs_human_guidance", label: "Needs guidance" },
-  { value: "failed", label: "Failed" },
+  { value: "needs_attention", label: "Needs attention" },
+  { value: "working", label: "Working" },
   { value: "done", label: "Done" },
   { value: "decisions", label: "Decisions" },
 ];
 
-const activeStatuses = new Set(["pending", "running", "awaiting_input"]);
-const doneStatuses = new Set(["completed", "pr_created"]);
+// Status groups — keep in sync with models.NeedsAttentionStatuses / WorkingStatuses / DoneStatuses.
+const needsAttentionStatuses = ["awaiting_input", "needs_human_guidance", "failed"];
+const workingStatuses = ["pending", "running"];
+const doneStatuses = ["completed", "pr_created", "cancelled", "skipped", "idle"];
 
-function isActive(s: Session): boolean {
-  return activeStatuses.has(s.status);
-}
+const needsAttentionSet = new Set(needsAttentionStatuses);
+const workingSet = new Set(workingStatuses);
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function filterSessions(sessions: Session[], filter: string | null): Session[] {
-  if (!filter || filter === "all") return sessions;
-  if (filter === "active") return sessions.filter(isActive);
-  if (filter === "done") return sessions.filter((s) => doneStatuses.has(s.status));
-  return sessions.filter((s) => s.status === filter);
-}
-
-function sessionTitle(session: Session): string {
-  if (session.result_summary) return session.result_summary;
-  if (session.pm_approach) return session.pm_approach;
-  return `Session ${session.id.slice(0, 8)}`;
+/** Map a filter tab value to the comma-separated status string for the API. */
+function filterToStatusParam(filter: string | null): string | undefined {
+  if (!filter || filter === "all" || filter === "decisions") return undefined;
+  if (filter === "needs_attention") return needsAttentionStatuses.join(",");
+  if (filter === "working") return workingStatuses.join(",");
+  if (filter === "done") return doneStatuses.join(",");
+  return filter;
 }
 
 // ---------------------------------------------------------------------------
@@ -87,9 +81,9 @@ function sessionTitle(session: Session): string {
 // ---------------------------------------------------------------------------
 
 function SessionStatusDot({ status }: { status: string }) {
-  const active = activeStatuses.has(status);
+  const working = workingSet.has(status);
   const cfg = statusConfig[status] || statusConfig.pending;
-  if (active) {
+  if (working) {
     return <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />;
   }
   return <StatusDot color={cfg.dot} />;
@@ -214,14 +208,34 @@ function buildColumns(members: User[]): ColumnDef<Session>[] {
 
 export function SessionsPageContent() {
   const router = useRouter();
+  const { currentUserFilter, triggeredByUserId, user, setUserFilter } = useSessionUserFilter();
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
   const [repo] = useQueryState("repo");
   const [sorting, setSorting] = useState<SortingState>([]);
 
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["sessions", repo],
-    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined }),
+  const currentFilter = activeFilter ?? "all";
+  const showDecisions = currentFilter === "decisions";
+  const statusParam = filterToStatusParam(currentFilter);
+
+  // Fetch all sessions (for tab badge counts and the "all" view).
+  // We also fetch a filtered query below when a tab is active. The two queries
+  // run in parallel on a 10s interval. The "all" query is cheap (limit 50) and
+  // needed for accurate badge counts; the filtered query ensures the displayed
+  // list reflects the correct server-side results even when total sessions exceed
+  // the limit. If polling cost becomes a concern, consider a dedicated
+  // /sessions/counts endpoint.
+  const { data: allData, isLoading, error } = useQuery({
+    queryKey: ["sessions", repo, triggeredByUserId],
+    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, triggered_by_user_id: triggeredByUserId }),
     refetchInterval: 10000,
+  });
+
+  // Fetch filtered sessions from the backend when a specific tab is selected.
+  const { data: filteredData } = useQuery({
+    queryKey: ["sessions", repo, statusParam, triggeredByUserId],
+    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, status: statusParam, triggered_by_user_id: triggeredByUserId }),
+    refetchInterval: 10000,
+    enabled: !!statusParam,
   });
 
   const { data: membersData } = useQuery({
@@ -229,19 +243,19 @@ export function SessionsPageContent() {
     queryFn: () => api.team.listMembers(),
   });
 
-  const allSessions = data?.data ?? [];
-  const members = membersData?.data ?? [];
+  const allSessions = useMemo(() => allData?.data ?? [], [allData?.data]);
+  const members = useMemo(() => membersData?.data ?? [], [membersData?.data]);
 
-  const currentFilter = activeFilter ?? "all";
-  const showDecisions = currentFilter === "decisions";
-
-  const activeSessions = allSessions.filter(isActive);
-  const failedSessions = allSessions.filter((s) => s.status === "failed");
-  const guidanceSessions = allSessions.filter((s) => s.status === "needs_human_guidance");
+  const needsAttentionSessions = allSessions.filter((s) => needsAttentionSet.has(s.status));
+  const workingSessions = allSessions.filter((s) => workingSet.has(s.status));
 
   const filteredSessions = useMemo(
-    () => (showDecisions ? [] : filterSessions(allSessions, activeFilter)),
-    [allSessions, activeFilter, showDecisions],
+    () => {
+      if (showDecisions) return [];
+      if (statusParam && filteredData) return filteredData.data;
+      return allSessions;
+    },
+    [allSessions, filteredData, statusParam, showDecisions],
   );
 
   const columns = useMemo(() => buildColumns(members), [members]);
@@ -262,43 +276,50 @@ export function SessionsPageContent() {
         description="Each agent execution creates a session."
       />
 
-      <PMStatusBanner hasActivePlanSession={activeSessions.length > 0} />
+      <PMStatusBanner hasActivePlanSession={workingSessions.length > 0} />
 
       {/* ── Tab filters ────────────────────────────────────────────── */}
-      <div className="flex items-center gap-0 border-b border-border">
-        {filterTabs.map((tab) => {
-          const isSelected = currentFilter === tab.value;
-          const count =
-            tab.value === "active" ? activeSessions.length
-            : tab.value === "failed" ? failedSessions.length
-            : tab.value === "needs_human_guidance" ? guidanceSessions.length
-            : 0;
-          return (
-            <button
-              key={tab.value}
-              className={`relative px-3 py-2.5 text-[13px] font-medium transition-colors duration-150 ${
-                isSelected
-                  ? "text-foreground"
-                  : "text-muted-foreground hover:text-foreground/80"
-              }`}
-              onClick={() => setActiveFilter(tab.value === "all" ? null : tab.value)}
-            >
-              <span className="flex items-center gap-1.5">
-                {tab.label}
-                {count > 0 && (
-                  <span className={`rounded-full text-white text-[10px] leading-none px-1.5 py-0.5 font-normal ${
-                    tab.value === "failed" ? "bg-destructive"
-                    : tab.value === "needs_human_guidance" ? "bg-orange-500"
-                    : "bg-primary"
-                  }`}>{count}</span>
+      <div className="flex items-center justify-between border-b border-border">
+        <div className="flex items-center gap-0">
+          {filterTabs.map((tab) => {
+            const isSelected = currentFilter === tab.value;
+            const count =
+              tab.value === "needs_attention" ? needsAttentionSessions.length
+              : tab.value === "working" ? workingSessions.length
+              : 0;
+            return (
+              <button
+                key={tab.value}
+                className={`relative px-3 py-2.5 text-[13px] font-medium transition-colors duration-150 ${
+                  isSelected
+                    ? "text-foreground"
+                    : "text-muted-foreground hover:text-foreground/80"
+                }`}
+                onClick={() => setActiveFilter(tab.value === "all" ? null : tab.value)}
+              >
+                <span className="flex items-center gap-1.5">
+                  {tab.label}
+                  {count > 0 && (
+                    <span className={`rounded-full text-white text-[10px] leading-none px-1.5 py-0.5 font-normal ${
+                      tab.value === "needs_attention" ? "bg-orange-500"
+                      : "bg-primary"
+                    }`}>{count}</span>
+                  )}
+                </span>
+                {isSelected && (
+                  <span className="absolute bottom-0 left-3 right-3 h-0.5 bg-[image:var(--gradient-primary)] rounded-full" />
                 )}
-              </span>
-              {isSelected && (
-                <span className="absolute bottom-0 left-3 right-3 h-0.5 bg-[image:var(--gradient-primary)] rounded-full" />
-              )}
-            </button>
-          );
-        })}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* User filter toggle */}
+        <SessionOwnerToggle
+          currentUserFilter={currentUserFilter}
+          onFilterChange={setUserFilter}
+          className="mr-2"
+        />
       </div>
 
       {/* ── Decisions tab ──────────────────────────────────────────── */}

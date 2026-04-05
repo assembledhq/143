@@ -20,7 +20,7 @@ func NewIssueStore(db DBTX) *IssueStore {
 
 type IssueFilters struct {
 	Status   string
-	Source   string
+	Source   models.IssueSource
 	Severity string
 	Sort     string
 	Limit    int

@@ -14,7 +14,7 @@ import (
 
 func newTestSlackClient(baseURL string) *SlackAPIClient {
 	return &SlackAPIClient{
-		client:  &http.Client{},
+		client:  &http.Client{Transport: &http.Transport{}},
 		logger:  zerolog.Nop(),
 		baseURL: baseURL,
 	}

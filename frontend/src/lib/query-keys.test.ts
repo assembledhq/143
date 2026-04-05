@@ -29,10 +29,36 @@ describe("queryKeys", () => {
       expect(queryKeys.sessions.messages("s-1")).toEqual(["session", "s-1", "messages"]);
     });
 
+    it("threads includes session id", () => {
+      expect(queryKeys.sessions.threads("s-1")).toEqual(["session", "s-1", "threads"]);
+    });
+
+    it("threadDetail includes session and thread id", () => {
+      expect(queryKeys.sessions.threadDetail("s-1", "t-1")).toEqual(["session", "s-1", "thread", "t-1"]);
+    });
+
+    it("threadMessages includes session and thread id", () => {
+      expect(queryKeys.sessions.threadMessages("s-1", "t-1")).toEqual(["session", "s-1", "thread", "t-1", "messages"]);
+    });
+
+    it("threadLogs includes session and thread id", () => {
+      expect(queryKeys.sessions.threadLogs("s-1", "t-1")).toEqual(["session", "s-1", "thread", "t-1", "logs"]);
+    });
+
     it("detail keys are distinct from list keys", () => {
       const list = queryKeys.sessions.list("s-1");
       const detail = queryKeys.sessions.detail("s-1");
       expect(list).not.toEqual(detail);
+    });
+  });
+
+  describe("repositories", () => {
+    it("all returns static key", () => {
+      expect(queryKeys.repositories.all).toEqual(["repositories"]);
+    });
+
+    it("branches includes repository id", () => {
+      expect(queryKeys.repositories.branches("repo-1")).toEqual(["repositories", "repo-1", "branches"]);
     });
   });
 

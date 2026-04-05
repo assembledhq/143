@@ -78,9 +78,37 @@ func (m *mockMsgSource) SearchMessages(_ context.Context, _ string, _ MessageFil
 }
 func (m *mockMsgSource) GetThread(_ context.Context, _ string) (*Thread, error) { return nil, nil }
 
+type mockCodeReviewSrc struct{ name string }
+
+func (m *mockCodeReviewSrc) Name() string { return m.name }
+func (m *mockCodeReviewSrc) ListRecentPRs(_ context.Context, _ PRFilter) ([]PRSummary, error) {
+	return nil, nil
+}
+func (m *mockCodeReviewSrc) GetPRReviews(_ context.Context, _ int) ([]PRReview, error) {
+	return nil, nil
+}
+
+type mockProjectProposer struct{ name string }
+
+func (m *mockProjectProposer) Name() string { return m.name }
+func (m *mockProjectProposer) ProposeProject(_ context.Context, _ ProposeProjectParams) (*ProposeProjectResult, error) {
+	return &ProposeProjectResult{ID: "proj-1"}, nil
+}
+
+type mockIssueCreator struct {
+	name   string
+	result *CreateIssueResult
+}
+
+func (m *mockIssueCreator) Name() string { return m.name }
+func (m *mockIssueCreator) CreateIssue(_ context.Context, _ CreateIssueParams) (*CreateIssueResult, error) {
+	return m.result, nil
+}
+
 // --- registry tests ---
 
 func TestRegistry_RegisterAndRetrieve(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 
 	// Register one of each type.
@@ -88,6 +116,7 @@ func TestRegistry_RegisterAndRetrieve(t *testing.T) {
 	r.RegisterTaskManager(&mockTaskManager{name: "linear"})
 	r.RegisterDocumentStore(&mockDocStore{name: "notion"})
 	r.RegisterMessageSource(&mockMsgSource{name: "slack"})
+	r.RegisterIssueCreator(&mockIssueCreator{name: "issue"})
 
 	if !r.HasAny() {
 		t.Fatal("expected HasAny to be true")
@@ -125,9 +154,18 @@ func TestRegistry_RegisterAndRetrieve(t *testing.T) {
 	if ms.Name() != "slack" {
 		t.Errorf("expected slack, got %s", ms.Name())
 	}
+
+	ic, err := r.IssueCreator("issue")
+	if err != nil {
+		t.Fatalf("IssueCreator: %v", err)
+	}
+	if ic.Name() != "issue" {
+		t.Errorf("expected issue, got %s", ic.Name())
+	}
 }
 
 func TestRegistry_NotFound(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 
 	_, err := r.ErrorTracker("sentry")
@@ -149,9 +187,15 @@ func TestRegistry_NotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing msg source")
 	}
+
+	_, err = r.IssueCreator("issue")
+	if err == nil {
+		t.Fatal("expected error for missing issue creator")
+	}
 }
 
 func TestRegistry_EmptyHasAny(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	if r.HasAny() {
 		t.Fatal("expected HasAny to be false on empty registry")
@@ -159,6 +203,7 @@ func TestRegistry_EmptyHasAny(t *testing.T) {
 }
 
 func TestRegistry_ListAll(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	r.RegisterErrorTracker(&mockErrorTracker{name: "sentry"})
 	r.RegisterErrorTracker(&mockErrorTracker{name: "datadog"})
@@ -178,9 +223,15 @@ func TestRegistry_ListAll(t *testing.T) {
 	if len(ds) != 0 {
 		t.Fatalf("expected 0 doc stores, got %d", len(ds))
 	}
+
+	ics := r.IssueCreators()
+	if len(ics) != 0 {
+		t.Fatalf("expected 0 issue creators, got %d", len(ics))
+	}
 }
 
 func TestRegistry_Summary(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	r.RegisterErrorTracker(&mockErrorTracker{name: "sentry"})
 	r.RegisterTaskManager(&mockTaskManager{name: "linear"})
@@ -194,7 +245,70 @@ func TestRegistry_Summary(t *testing.T) {
 	}
 }
 
+func TestRegistry_CodeReviewSource(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry()
+	r.RegisterCodeReviewSource(&mockCodeReviewSrc{name: "github"})
+
+	sources := r.CodeReviewSources()
+	if len(sources) != 1 {
+		t.Fatalf("expected 1 code review source, got %d", len(sources))
+	}
+
+	cr, err := r.CodeReviewSource("github")
+	if err != nil {
+		t.Fatalf("CodeReviewSource: %v", err)
+	}
+	if cr.Name() != "github" {
+		t.Errorf("expected github, got %s", cr.Name())
+	}
+
+	_, err = r.CodeReviewSource("nonexistent")
+	if err == nil {
+		t.Fatal("expected error for missing code review source")
+	}
+}
+
+func TestRegistry_ProjectProposer(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry()
+	r.RegisterProjectProposer(&mockProjectProposer{name: "project"})
+
+	proposers := r.ProjectProposers()
+	if len(proposers) != 1 {
+		t.Fatalf("expected 1 project proposer, got %d", len(proposers))
+	}
+
+	pp, err := r.ProjectProposer("project")
+	if err != nil {
+		t.Fatalf("ProjectProposer: %v", err)
+	}
+	if pp.Name() != "project" {
+		t.Errorf("expected project, got %s", pp.Name())
+	}
+
+	_, err = r.ProjectProposer("nonexistent")
+	if err == nil {
+		t.Fatal("expected error for missing project proposer")
+	}
+}
+
+func TestRegistry_MessageSources(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry()
+	r.RegisterMessageSource(&mockMsgSource{name: "slack"})
+
+	sources := r.MessageSources()
+	if len(sources) != 1 {
+		t.Fatalf("expected 1 message source, got %d", len(sources))
+	}
+	if sources[0].Name() != "slack" {
+		t.Errorf("expected slack, got %s", sources[0].Name())
+	}
+}
+
 func TestRegistry_OverwriteSameName(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 
 	et1 := &mockErrorTracker{name: "sentry", errors: []ErrorSummary{{ID: "1"}}}

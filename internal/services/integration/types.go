@@ -13,6 +13,7 @@ package integration
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -269,6 +270,80 @@ type Document struct {
 }
 
 // --------------------------------------------------------------------------
+// CodeReviewSource — GitHub, GitLab, Bitbucket, etc.
+// --------------------------------------------------------------------------
+
+// CodeReviewSource provides access to code review data from pull/merge requests.
+// The PM agent uses this to identify recurring review themes, quality patterns,
+// and areas of the codebase that consistently generate review friction.
+type CodeReviewSource interface {
+	// Name returns the provider identifier (e.g. "github").
+	Name() string
+
+	// ListRecentPRs returns recently merged pull requests matching the filter.
+	// The PM agent uses this to understand what's shipping and identify review patterns.
+	ListRecentPRs(ctx context.Context, filter PRFilter) ([]PRSummary, error)
+
+	// GetPRReviews returns all review comments and review decisions for a PR.
+	// The PM agent uses this to extract quality signals and recurring feedback themes.
+	GetPRReviews(ctx context.Context, prNumber int) ([]PRReview, error)
+}
+
+// PRFilter constrains which PRs to return from ListRecentPRs.
+type PRFilter struct {
+	State string // "merged", "open", "closed"; empty = "merged"
+	Limit int    // max results; 0 = provider default (20)
+}
+
+// PRSummary is a compact representation of a pull request for list views.
+type PRSummary struct {
+	Number       int       `json:"number"`
+	Title        string    `json:"title"`
+	Author       string    `json:"author"`
+	State        string    `json:"state"`         // "merged", "open", "closed"
+	ReviewStatus string    `json:"review_status"` // "has_reviews", "pending" (list endpoint can't distinguish approved/changes_requested)
+	Additions    int       `json:"additions"`
+	Deletions    int       `json:"deletions"`
+	ChangedFiles int       `json:"changed_files"`
+	CreatedAt    time.Time `json:"created_at"`
+	MergedAt     time.Time `json:"merged_at,omitempty"`
+	WebURL       string    `json:"web_url,omitempty"`
+}
+
+// PRReview is a single review or review comment on a pull request.
+type PRReview struct {
+	Author    string    `json:"author"`
+	State     string    `json:"state"` // "APPROVED", "CHANGES_REQUESTED", "COMMENTED"
+	Body      string    `json:"body,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	// Comments are inline review comments attached to specific lines.
+	Comments []PRReviewComment `json:"comments,omitempty"`
+}
+
+// PRReviewComment is an inline comment attached to a specific file/line in a review.
+type PRReviewComment struct {
+	Path     string `json:"path"`
+	Line     int    `json:"line,omitempty"`
+	Body     string `json:"body"`
+	Author   string `json:"author"`
+	DiffHunk string `json:"diff_hunk,omitempty"`
+}
+
+// StubCodeReviewSource is a no-op CodeReviewSource used only for skills doc
+// generation. It registers the tool names without making any HTTP requests.
+type StubCodeReviewSource struct {
+	ProviderName string
+}
+
+func (s *StubCodeReviewSource) Name() string { return s.ProviderName }
+func (s *StubCodeReviewSource) ListRecentPRs(_ context.Context, _ PRFilter) ([]PRSummary, error) {
+	return nil, fmt.Errorf("stub: use sandbox CLI tools (143-tools %s_list_recent_prs) instead of direct API calls", s.ProviderName)
+}
+func (s *StubCodeReviewSource) GetPRReviews(_ context.Context, _ int) ([]PRReview, error) {
+	return nil, fmt.Errorf("stub: use sandbox CLI tools (143-tools %s_get_pr_reviews) instead of direct API calls", s.ProviderName)
+}
+
+// --------------------------------------------------------------------------
 // MessageSource — Slack, Discord, Teams, etc.
 // --------------------------------------------------------------------------
 
@@ -308,4 +383,75 @@ type MessageSummary struct {
 type Thread struct {
 	Messages []MessageSummary `json:"messages"`
 	Channel  string           `json:"channel"`
+}
+
+// --------------------------------------------------------------------------
+// IssueCreator — internal 143 issue creation
+// --------------------------------------------------------------------------
+
+// IssueCreator allows agents to create first-class issues in the 143 database.
+// This is used by the PM agent when it identifies new work that should be tracked.
+type IssueCreator interface {
+	// Name returns the provider identifier (e.g. "143").
+	Name() string
+
+	// CreateIssue creates a new issue and returns the created issue's ID and title.
+	CreateIssue(ctx context.Context, params CreateIssueParams) (*CreateIssueResult, error)
+}
+
+// CreateIssueParams describes a new issue to create.
+type CreateIssueParams struct {
+	Title       string   `json:"title"`
+	Description string   `json:"description"`
+	Severity    string   `json:"severity,omitempty"` // info, warning, error, critical
+	Tags        []string `json:"tags,omitempty"`
+}
+
+// CreateIssueResult is returned after successfully creating an issue.
+type CreateIssueResult struct {
+	ID        string  `json:"id"`
+	Title     string  `json:"title"`
+	SessionID *string `json:"session_id,omitempty"`
+}
+
+// --------------------------------------------------------------------------
+// ProjectProposer — internal 143 project proposal creation
+// --------------------------------------------------------------------------
+
+// ProjectProposer allows the PM agent to propose new projects.
+type ProjectProposer interface {
+	// Name returns the provider identifier.
+	Name() string
+
+	// ProposeProject creates a new project proposal and returns the result.
+	ProposeProject(ctx context.Context, params ProposeProjectParams) (*ProposeProjectResult, error)
+}
+
+// ProposeProjectParams describes a new project proposal.
+type ProposeProjectParams struct {
+	RepositoryID       string               `json:"repository_id"`
+	Title              string               `json:"title"`
+	Goal               string               `json:"goal"`
+	Scope              *string              `json:"scope,omitempty"`
+	CompletionCriteria *string              `json:"completion_criteria,omitempty"`
+	Reasoning          string               `json:"reasoning"`
+	SourceIssueIDs     []string             `json:"source_issue_ids,omitempty"`
+	Priority           int                  `json:"priority"`
+	Tasks              []ProposeProjectTask `json:"tasks,omitempty"`
+	SimilarProjectIDs  []string             `json:"similar_project_ids,omitempty"`
+}
+
+// ProposeProjectTask is a seed task included in a proposal.
+type ProposeProjectTask struct {
+	Title       string  `json:"title"`
+	Description *string `json:"description,omitempty"`
+	Approach    *string `json:"approach,omitempty"`
+	Complexity  *string `json:"complexity,omitempty"`
+	Confidence  *string `json:"confidence,omitempty"`
+}
+
+// ProposeProjectResult is returned after successfully creating a proposal.
+type ProposeProjectResult struct {
+	ID               string  `json:"id"`
+	DuplicateWarning *string `json:"duplicate_warning,omitempty"`
 }

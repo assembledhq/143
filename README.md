@@ -2,83 +2,27 @@
 
 **from issues to validated PRs, on autopilot**
 
-[Local Development](docs/local-development.md) · [Architecture](docs/design/overall.md) · [How it works](#how-it-works)
+[Getting Started](#getting-started) · [Development Setup](docs/contributing/development-setup.md) · [Architecture](docs/design/overall.md) · [143.dev](https://www.143.dev)
 
 ---
 
-143 ingests production issues from Sentry, Linear, and support tickets. An AI product manager agent analyzes the full issue landscape, clusters related problems, and builds a prioritized plan. Coding agents execute the plan in sandboxed containers — fixing bugs, shipping improvements, and opening validated PRs.
+## Why 143
 
-Every PR review makes the next run smarter. Learned conventions are extracted and fed back into future agent executions, creating a flywheel that compounds over time.
+Most issues in your backlog don't need a sprint planning meeting. They need someone (or something) to analyze the landscape, prioritize what matters, write the fix, validate it, and open the PR.
 
-## Local Development
+143 gives you two things:
 
-### Setup
+### Bring your own coding agent
 
-Requires Go 1.24+, Node.js 18+, and PostgreSQL 17. The setup script installs anything missing via Homebrew (macOS) or apt (Linux).
+Use whatever coding agent you trust — Claude Code, Codex, Cursor, or your own custom agent. 143 orchestrates the work: it ingests issues, plans the approach, spins up sandboxed containers, and hands off execution to the coding agent you configure. You stay in control of how code gets written while 143 handles everything around it.
 
-```bash
-git clone https://github.com/assembledhq/143.git && cd 143 && ./setup.sh
-```
+### An autopilot PM that learns your product
 
-This creates the database, copies `.env.example` to `.env`, installs dependencies, and runs migrations.
+143 includes an AI product manager agent that understands your product roadmap and engineering philosophy. It analyzes your full issue landscape across Sentry errors, Linear tickets, and support requests — clusters related problems, identifies root causes, and builds a prioritized plan. Every PR review teaches it more about your codebase conventions and preferences, creating a flywheel that compounds over time.
 
-### Running
+The result: bugs get triaged, planned, fixed, validated, and shipped as PRs — without context-switching your team away from the work that matters.
 
-**Option A — with Docker Compose**:
-
-```bash
-make dev              # starts Postgres, API server, and frontend
-```
-
-**Option B — without Docker** (two terminals):
-
-```bash
-make server-dev       # Go API on localhost:8080
-make frontend-dev     # Next.js on localhost:3000
-```
-
-The frontend proxies `/api/*` to the Go server automatically.
-
-### Common commands
-
-```bash
-make test             # run all tests
-make test-race        # run tests with race detector
-make test-coverage    # generate coverage.html
-make migrate-up       # apply pending migrations
-make migrate-down     # roll back last migration
-make lint             # run golangci-lint
-```
-
-### Environment
-
-All config lives in `.env` (created by setup). The defaults work out of the box for local dev.
-
-To enable GitHub OAuth login and repo onboarding, set these in `.env`:
-
-- `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET` — create an OAuth app
-- `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` / `GITHUB_WEBHOOK_SECRET` — create a GitHub App
-
-See the [local development guide](docs/local-development.md) for step-by-step setup including webhook tunneling, and `.env.example` for the full list of variables.
-
-### Secrets & API Keys
-
-For local dev, just copy `.env.example` into `.env` and edit it directly — it's gitignored. For syncing secrets across machines or environments, we use [SOPS](https://github.com/getsops/sops) + [age](https://github.com/FiloSottile/age) to encrypt secrets into `.env.enc` (safe to commit). Production secrets are stored in `.env.production.enc`. See the [secrets management guide](docs/secrets/README.md) for full setup.
-
-```bash
-make secrets-setup                   # one-time: generate age keypair
-make secrets-encrypt                 # encrypt .env → .env.enc
-make secrets-decrypt                 # decrypt .env.enc → .env
-make secrets-encrypt ENV=production  # encrypt production secrets
-make secrets-decrypt ENV=production  # decrypt production secrets
-make secrets-rotate                  # re-encrypt after adding a team member's key
-```
-
-After running `make secrets-setup`, add this to your shell profile (`~/.bash_profile` or `~/.zshrc`):
-
-```bash
-export SOPS_AGE_KEY_FILE="$HOME/.config/sops/age/keys.txt"
-```
+> **Don't want to self-host?** [143.dev](https://www.143.dev) is the hosted version — connect your repos and start shipping fixes in minutes.
 
 ## How it works
 
@@ -96,39 +40,30 @@ issues in → PM agent plans → coding agents execute → validate → ship PRs
 6. **Observe** — measure post-deploy impact on error rates and support volume
 7. **Learn** — extract review feedback into conventions, feed back into future runs
 
-## Project structure
+## Built for production
 
+Every agent runs in a gVisor-isolated container with a read-only filesystem and network access limited to LLM APIs and package registries. PRs go through security scanning (gitleaks, semgrep), correctness checks, and your CI before a human ever sees them. Your code never leaves infrastructure you control.
+
+The architecture is symmetric — there's no primary node. A Postgres-backed job queue handles scheduling and leader election, so scaling out means running more copies of the same binary behind a load balancer.
+
+## Getting Started
+
+Requires Go 1.24+, Node.js 18+, and PostgreSQL 17. The setup script installs anything missing via Homebrew (macOS) or apt (Linux).
+
+```bash
+git clone https://github.com/assembledhq/143.git && cd 143 && ./setup.sh
+make dev
 ```
-cmd/
-  server/         # API server entrypoint
-  migrate/        # database migration runner
-internal/
-  api/
-    handlers/     # HTTP handlers (auth, repos, webhooks, health, settings)
-    middleware/   # auth, CORS, logging, org context
-    router.go     # chi router + route registration
-  config/         # env-based configuration
-  db/             # data access layer (pgx, named args, store-per-domain)
-  models/         # domain types + API response envelopes
-  services/
-    github/       # GitHub App JWT + installation token management
-  worker/         # background job processor
-  cluster/        # node heartbeat + scheduler leader lock
-  logging/        # zerolog setup
-migrations/       # SQL migration files
-frontend/         # Next.js app (App Router, shadcn/ui, TanStack Query)
-docs/design/      # numbered design docs
-```
+
+See the [development setup guide](docs/contributing/development-setup.md) for detailed instructions, make commands, environment configuration, and secrets management.
+
+## Contributing
+
+Read through the [design docs](docs/design/overall.md) to understand the architecture, then pick an issue and open a PR. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## Why "143"
 
 In 1943, Lockheed's Skunk Works team designed and built the XP-80 Shooting Star — America's first operational jet fighter — in just 143 days. A small, autonomous team with full ownership, no bureaucracy, and a bias toward shipping.
-
-Most issues in your backlog don't need a sprint planning meeting. They need someone (or something) to analyze the landscape, prioritize what matters, write the fix, validate it, and open the PR. 143 is that something.
-
-## Contributing
-
-Read through the [design docs](docs/design/overall.md) to understand the architecture, then pick an issue and open a PR.
 
 ## License
 

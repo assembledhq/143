@@ -1,5 +1,7 @@
 # Design: Smart Issue Routing
 
+> **Status:** Partially Implemented | **Last reviewed:** 2026-03-25
+
 This document describes how 143.dev estimates issue complexity, routes issues to the right execution strategy, and uses confidence scoring to gate fixes before they proceed.
 
 ## Problem

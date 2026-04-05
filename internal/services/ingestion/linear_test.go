@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -43,7 +44,7 @@ func TestLinearAdapter_ParseWebhook(t *testing.T) {
 			checkResult: func(t *testing.T, ni *NormalizedIssue, integrationID uuid.UUID) {
 				t.Helper()
 				require.Equal(t, "lin-123", ni.ExternalID, "should parse external ID from linear issue ID")
-				require.Equal(t, "linear", ni.Source, "source should be linear")
+				require.Equal(t, models.IssueSourceLinear, ni.Source, "source should be linear")
 				require.Equal(t, integrationID, ni.SourceIntegrationID, "should set integration ID")
 				require.Equal(t, "ENG-456: Fix authentication timeout", ni.Title, "should format title with identifier prefix")
 				require.Equal(t, "Users report session expiring too quickly", ni.Description, "should parse description")

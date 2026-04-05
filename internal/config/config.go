@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -11,6 +12,9 @@ import (
 )
 
 type Config struct {
+	// Environment
+	Env string `env:"ENV" envDefault:"development"`
+
 	// Core
 	DatabaseURL        string   `env:"DATABASE_URL"          envDefault:"postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable"`
 	Port               int      `env:"PORT"                  envDefault:"8080"`
@@ -56,8 +60,9 @@ type Config struct {
 	EncryptionMasterKey string `env:"ENCRYPTION_MASTER_KEY"`
 
 	// LLM
-	LLMModel          string `env:"LLM_MODEL"`
-	AnthropicAPIKey   string `env:"ANTHROPIC_API_KEY"`
+	LLMModel           string `env:"LLM_MODEL"`
+	LLMReasoningEffort string `env:"LLM_REASONING_EFFORT"`
+	AnthropicAPIKey    string `env:"ANTHROPIC_API_KEY"`
 	AnthropicBaseURL  string `env:"ANTHROPIC_BASE_URL"`
 	AnthropicModel    string `env:"ANTHROPIC_MODEL"`
 	OpenAIAPIKey      string `env:"OPENAI_API_KEY"`
@@ -74,12 +79,26 @@ type Config struct {
 	GeminiModel  string `env:"GEMINI_MODEL"`
 
 	// Sandbox
-	SandboxRuntime string `env:"SANDBOX_RUNTIME" envDefault:"runc"`
+	SandboxRuntime     string `env:"SANDBOX_RUNTIME" envDefault:"runc"`
+	SandboxRequireGVisor bool   `env:"SANDBOX_REQUIRE_GVISOR" envDefault:"false"`
+	// Data retention
+	DataRetentionWebhookDays int `env:"DATA_RETENTION_WEBHOOK_DAYS" envDefault:"30"`
+	DataRetentionLogsDays    int `env:"DATA_RETENTION_LOGS_DAYS"    envDefault:"90"`
+	DataRetentionJobsDays    int `env:"DATA_RETENTION_JOBS_DAYS"    envDefault:"30"`
+
+	// Upload storage (images/files attached to session messages)
+	UploadStorageDir      string `env:"UPLOAD_STORAGE_DIR"      envDefault:".data/uploads"`
+	UploadS3Bucket        string `env:"UPLOAD_S3_BUCKET"`
+	UploadS3Prefix        string `env:"UPLOAD_S3_PREFIX"        envDefault:"uploads"`
+	UploadS3Endpoint      string `env:"UPLOAD_S3_ENDPOINT"`      // e.g. https://mybucket.s3.amazonaws.com
+	UploadS3Region        string `env:"UPLOAD_S3_REGION"        envDefault:"us-east-1"`
+	UploadMaxAge          time.Duration `env:"UPLOAD_MAX_AGE"    envDefault:"2160h"` // 90 days
 
 	// Interactive session snapshots
 	SnapshotStorageDir    string        `env:"SNAPSHOT_STORAGE_DIR"    envDefault:".data/snapshots"`
 	SessionMaxIdleAge     time.Duration `env:"SESSION_MAX_IDLE_AGE"    envDefault:"2h"`
 	SessionReaperInterval time.Duration `env:"SESSION_REAPER_INTERVAL" envDefault:"5m"`
+	SessionMaxSnapshotAge time.Duration `env:"SESSION_MAX_SNAPSHOT_AGE" envDefault:"720h"` // 30 days
 }
 
 // Load reads configuration from env files and environment variables.
@@ -126,7 +145,8 @@ func Load() *Config {
 // LLMConfig returns the llm.Config derived from this Config.
 func (c *Config) LLMConfig() llm.Config {
 	return llm.Config{
-		Model:             c.LLMModel,
+		Model:             llm.ModelName(c.LLMModel),
+		ReasoningEffort:   llm.ReasoningEffort(c.LLMReasoningEffort),
 		AnthropicAPIKey:   c.AnthropicAPIKey,
 		AnthropicBaseURL:  c.AnthropicBaseURL,
 		OpenAIAPIKey:      c.OpenAIAPIKey,
@@ -281,9 +301,13 @@ func (c *Config) LogStatus(logger zerolog.Logger) {
 		providers = append(providers, "openrouter")
 	}
 
-	if c.LLMModel != "" && len(providers) > 0 {
+	llmModel := c.LLMModel
+	if llmModel == "" {
+		llmModel = "(default: gpt-5.4-mini)"
+	}
+	if len(providers) > 0 {
 		logger.Info().
-			Str("model", c.LLMModel).
+			Str("model", llmModel).
 			Strs("providers", providers).
 			Int("chain_length", len(providers)).
 			Msg("LLM configured")
@@ -293,7 +317,7 @@ func (c *Config) LogStatus(logger zerolog.Logger) {
 			Msg("LLM model set but no provider API keys configured — LLM checks will be skipped")
 	} else {
 		logger.Warn().
-			Msg("LLM not configured (set LLM_MODEL + at least one provider API key) — LLM checks will be skipped")
+			Msg("LLM not configured (set at least one provider API key) — LLM checks will be skipped")
 	}
 
 	if c.SessionSecret == "" {
@@ -303,4 +327,34 @@ func (c *Config) LogStatus(logger zerolog.Logger) {
 	if c.CSRFSigningKey == "" {
 		logger.Warn().Msg("CSRF_SIGNING_KEY is empty — CSRF protection will be ineffective")
 	}
+}
+
+// ValidateSecrets checks that security-sensitive configuration values meet
+// minimum strength requirements when running in production.
+func (c *Config) ValidateSecrets() error {
+	// Retention day validation applies in all environments.
+	if c.DataRetentionWebhookDays < 0 || c.DataRetentionLogsDays < 0 || c.DataRetentionJobsDays < 0 {
+		return errors.New("DATA_RETENTION_*_DAYS values must not be negative")
+	}
+
+	if c.Env != "production" {
+		return nil
+	}
+
+	if c.SessionSecret == "" || c.SessionSecret == "changeme" || len(c.SessionSecret) < 32 {
+		return errors.New("SESSION_SECRET must be set to a strong random value in production (min 32 characters)")
+	}
+
+	if c.EncryptionMasterKey == "" {
+		return errors.New("ENCRYPTION_MASTER_KEY must be set in production")
+	}
+	if len(c.EncryptionMasterKey) < 32 {
+		return errors.New("ENCRYPTION_MASTER_KEY must be at least 32 characters")
+	}
+
+	if c.CSRFSigningKey == "" || len(c.CSRFSigningKey) < 32 {
+		return errors.New("CSRF_SIGNING_KEY must be set to a strong random value in production (min 32 characters)")
+	}
+
+	return nil
 }

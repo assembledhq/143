@@ -53,15 +53,15 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Run go vet
-        run: go vet ./...
-
-      - name: Run migrations
-        run: go run cmd/migrate/main.go up
+      - name: Run go vet and migrations
+        run: |
+          go vet ./... &
+          go run cmd/migrate/main.go up
+          wait
 
       - name: Run tests with coverage
         run: |
-          go test ./internal/... -coverprofile=coverage.out -covermode=atomic -race
+          go test ./internal/... -coverprofile=coverage.out -covermode=atomic -race -timeout=120s
           go tool cover -func=coverage.out
 
       - name: Check backend coverage floor
@@ -116,6 +116,7 @@ jobs:
       - run: npm ci
 
       - name: Run tests with coverage
+        timeout-minutes: 5
         run: npx vitest run --coverage --coverage.reporter=text --coverage.reporter=json-summary
 
       - name: Check frontend coverage floor
@@ -179,11 +180,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
-      - name: Build Docker image
+      - name: Build app Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Build sandbox Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./sandbox
+          push: false
+          tags: 143-sandbox:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

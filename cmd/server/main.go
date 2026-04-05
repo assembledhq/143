@@ -29,6 +29,7 @@ import (
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/pm"
 	"github.com/assembledhq/143/internal/services/prioritization"
+	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/storage"
 	"github.com/assembledhq/143/internal/services/validation"
 	"github.com/assembledhq/143/internal/worker"
@@ -38,6 +39,10 @@ func main() {
 	cfg := config.Load()
 	logger := logging.NewLogger(cfg.LogLevel)
 	cfg.LogStatus(logger)
+
+	if err := cfg.ValidateSecrets(); err != nil {
+		logger.Fatal().Err(err).Msg("security configuration check failed")
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -66,7 +71,18 @@ func main() {
 		logger.Warn().Err(err).Msg("LLM client initialization failed — LLM-dependent features will be unavailable")
 	}
 
-	router, err := api.NewRouter(cfg, pool, logger, codexAuthSvc, llmClient)
+	// Create file reader for sandbox file browsing (optional — gracefully degrades
+	// to a no-op reader if Docker is not available).
+	var fileReader sandbox.FileReader
+	if apiDockerCli, dockerErr := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation()); dockerErr == nil {
+		defer apiDockerCli.Close()
+		fileReader = sandbox.NewDockerFileReader(apiDockerCli)
+	} else {
+		logger.Warn().Err(dockerErr).Msg("Docker not available for API file browsing — repo explorer will be disabled")
+		fileReader = sandbox.NoOpFileReader{}
+	}
+
+	router, err := api.NewRouter(cfg, pool, logger, codexAuthSvc, llmClient, fileReader)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}
@@ -97,6 +113,7 @@ func main() {
 		snapshotStore := storage.NewFileSnapshotStore(cfg.SnapshotStorageDir)
 
 		auditLogStore := db.NewAuditLogStore(pool)
+		sessionLogStore := db.NewSessionLogStore(pool)
 
 		stores := &worker.Stores{
 			Issues:              issueStore,
@@ -111,6 +128,7 @@ func main() {
 			Credentials:         credentialStore,
 			AuditLogs:           auditLogStore,
 			Organizations:       orgStore,
+			SessionLogs:         sessionLogStore,
 		}
 
 		// Build Phase 3+ services if runtime dependencies are available.
@@ -122,12 +140,22 @@ func main() {
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
 				sessionMessageStore, snapshotStore)
 		}
-		worker.RegisterHandlers(w, stores, services, logger)
+		retentionCfg := worker.DataRetentionConfig{
+			WebhookDays: cfg.DataRetentionWebhookDays,
+			LogsDays:    cfg.DataRetentionLogsDays,
+			JobsDays:    cfg.DataRetentionJobsDays,
+		}
+		worker.RegisterHandlers(w, stores, services, retentionCfg, logger)
 		go w.Start(ctx)
 		logger.Info().Msg("worker started with registered handlers")
 
-		reaper := agent.NewSessionReaper(sessionStore, snapshotStore, cfg.SessionMaxIdleAge, cfg.SessionReaperInterval, logger)
+		reaper := agent.NewSessionReaper(sessionStore, snapshotStore, cfg.SessionMaxIdleAge, cfg.SessionMaxSnapshotAge, cfg.SessionReaperInterval, logger)
 		go reaper.Run(ctx)
+
+		// Upload reaper: clean up old uploaded files (local mode only; use S3 lifecycle rules for S3).
+		uploadStore := storage.NewFileUploadStore(cfg.UploadStorageDir, "")
+		uploadReaper := storage.NewUploadReaper(uploadStore, cfg.UploadMaxAge, cfg.SessionReaperInterval, logger)
+		go uploadReaper.Run(ctx)
 
 		scheduler := cluster.NewScheduler(
 			cluster.NewSchedulerLock(pool),
@@ -139,6 +167,7 @@ func main() {
 			logger,
 		)
 		scheduler.SetProjectStore(projectStore)
+		scheduler.SetPMDocStore(pmDocumentStore)
 		go scheduler.Start(ctx, 10*time.Minute)
 	}
 
@@ -224,6 +253,20 @@ func buildServices(
 	}
 	sandboxProvider := providers.NewDockerProvider(dockerCli, logger, providers.WithRuntime(cfg.SandboxRuntime))
 
+	// Runtime health check: verify gVisor works if required.
+	if cfg.SandboxRuntime == "runsc" {
+		healthCtx, healthCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer healthCancel()
+		if err := sandboxProvider.HealthCheck(healthCtx); err != nil {
+			if cfg.SandboxRequireGVisor {
+				logger.Fatal().Err(err).Msg("gVisor health check failed — set SANDBOX_REQUIRE_GVISOR=false to disable")
+			} else {
+				logger.Warn().Err(err).Msg("gVisor not available, falling back to runc — NOT RECOMMENDED FOR PRODUCTION")
+				sandboxProvider = providers.NewDockerProvider(dockerCli, logger, providers.WithRuntime("runc"))
+			}
+		}
+	}
+
 	// LLM client (optional — validation/prioritization degrade gracefully without it).
 	llmClient, err := llm.NewClient(cfg.LLMConfig(), logger)
 	if err != nil {
@@ -247,19 +290,19 @@ func buildServices(
 		Sessions:         sessionStore,
 		SessionLogs:      sessionLogStore,
 		SessionQuestions: sessionQuestionStore,
-		SessionMessages:   sessionMessageStore,
-		DecisionLog:       pmDecisionLogStore,
-		ProjectTasks:      projectTaskUpdater,
-		Issues:            issueStore,
-		Repositories:      repoStore,
-		Orgs:              orgStore,
-		Jobs:              jobStore,
-		GitHub:            ghSvc,
-		CodexAuth:         codexAuthSvc,
-		Credentials:       credentialStore,
-		UserCredentials:   userCredentialStore,
-		Snapshots:         snapshotStore,
-		Logger:            logger,
+		SessionMessages:  sessionMessageStore,
+		DecisionLog:      pmDecisionLogStore,
+		ProjectTasks:     projectTaskUpdater,
+		Issues:           issueStore,
+		Repositories:     repoStore,
+		Orgs:             orgStore,
+		Jobs:             jobStore,
+		GitHub:           ghSvc,
+		CodexAuth:        codexAuthSvc,
+		Credentials:      credentialStore,
+		UserCredentials:  userCredentialStore,
+		Snapshots:        snapshotStore,
+		Logger:           logger,
 	})
 
 	// Validation service.
@@ -300,6 +343,9 @@ func buildServices(
 	pmSvc.SetProjectStores(projectStore, projectTaskStore, projectCycleStore)
 	pmSvc.SetPMDocumentStore(pmDocumentStore)
 	pmSvc.SetSlackStores(integrationStore, credentialStore)
+	pmSvc.SetSessionLogStore(sessionLogStore)
+	pmSvc.SetInternalAPI(cfg.BaseURL+"/api/v1/internal", cfg.SessionSecret)
+	pmSvc.SetSkillsBuilder(orchestrator)
 
 	logger.Info().
 		Int("adapters", len(agentAdapters)).

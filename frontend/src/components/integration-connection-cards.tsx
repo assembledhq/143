@@ -1,23 +1,47 @@
+import { useState } from "react";
+import { RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import Image from "next/image";
 import { Button } from "@/components/ui/button";
 import { IntegrationsCard } from "@/components/integrations-card";
-import { getIntegrationByKey } from "@/lib/integrations";
+import { getIntegrationByKey, type IntegrationKey } from "@/lib/integrations";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
-type SourceControlIntegrationCardProps = {
+type IntegrationCallbacks = {
+  onDisconnect?: (provider: IntegrationKey) => void;
+  disconnectingProvider?: IntegrationKey | null;
+  disconnectErrorProvider?: IntegrationKey | null;
+  disconnectError?: string | null;
+};
+
+type SourceControlIntegrationCardProps = IntegrationCallbacks & {
   githubConnected: boolean;
   githubRepoNames?: string[];
   onConnectGitHub: () => void;
+  onSyncRepos?: () => void;
+  isSyncing?: boolean;
 };
 
-type AdditionalIntegrationCardsProps = {
+type AdditionalIntegrationCardsProps = IntegrationCallbacks & {
   sentryConnected: boolean;
   linearConnected: boolean;
   linearLoading: boolean;
   slackConnected: boolean;
+  notionConnected: boolean;
+  notionLoading?: boolean;
   onConnectSentry: () => void;
   onConnectLinear: () => void;
   onConnectSlack: () => void;
+  onConnectNotion: () => void;
 };
 
 type AllIntegrationCardsProps = SourceControlIntegrationCardProps & AdditionalIntegrationCardsProps;
@@ -53,7 +77,104 @@ function IntegrationLogo({ name, src }: { name: string; src: string }) {
   );
 }
 
-export function SourceControlIntegrationCard({ githubConnected, githubRepoNames = [], onConnectGitHub }: SourceControlIntegrationCardProps) {
+const DISCONNECT_DESCRIPTIONS: Record<IntegrationKey, string> = {
+  github: "This will disconnect GitHub from your organization. Repositories will no longer sync and sessions won\u2019t have access to your code.",
+  sentry: "This will disconnect Sentry from your organization. Error tracking data will no longer sync.",
+  linear: "This will disconnect Linear from your organization. Issues will no longer sync.",
+  slack: "This will disconnect Slack from your organization. Channel monitoring will stop.",
+  notion: "This will disconnect Notion from your organization. Product docs will no longer sync.",
+};
+
+function IntegrationAction({
+  connected,
+  integrationKey,
+  integrationName,
+  onConnect,
+  onDisconnect,
+  disconnecting,
+  disconnectError,
+  loading,
+}: {
+  connected: boolean;
+  integrationKey: IntegrationKey;
+  integrationName: string;
+  onConnect: () => void;
+  onDisconnect?: (provider: IntegrationKey) => void;
+  disconnecting?: boolean;
+  disconnectError?: string | null;
+  loading?: boolean;
+}) {
+  const [confirmOpen, setConfirmOpen] = useState(false);
+
+  if (connected && onDisconnect) {
+    return (
+      <>
+        <div className="flex items-center gap-2">
+          {disconnectError && (
+            <span className="text-xs text-destructive">{disconnectError}</span>
+          )}
+          <span className="text-xs text-muted-foreground">Connected</span>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setConfirmOpen(true)}
+            loading={disconnecting}
+            disabled={disconnecting}
+            aria-label={`Disconnect ${integrationName}`}
+          >
+            {disconnecting ? "Disconnecting..." : "Disconnect"}
+          </Button>
+        </div>
+        <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Disconnect {integrationName}</AlertDialogTitle>
+              <AlertDialogDescription>
+                {DISCONNECT_DESCRIPTIONS[integrationKey]}
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={() => {
+                  setConfirmOpen(false);
+                  onDisconnect(integrationKey);
+                }}
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              >
+                Disconnect
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </>
+    );
+  }
+
+  return (
+    <Button
+      size="sm"
+      disabled={connected || loading}
+      loading={loading}
+      onClick={onConnect}
+      aria-label={connected ? `${integrationName} Connected` : `Connect ${integrationName}`}
+    >
+      {connected ? "Connected" : "Connect"}
+    </Button>
+  );
+}
+
+export function SourceControlIntegrationCard({
+  githubConnected,
+  githubRepoNames = [],
+  onConnectGitHub,
+  onDisconnect,
+  disconnectingProvider,
+  disconnectErrorProvider,
+  disconnectError,
+  onSyncRepos,
+  isSyncing,
+}: SourceControlIntegrationCardProps) {
   const github = getIntegrationByKey("github");
 
   return (
@@ -67,14 +188,29 @@ export function SourceControlIntegrationCard({ githubConnected, githubRepoNames 
           badge: <Badge variant="outline" className="text-xs">Required</Badge>,
           extra: githubConnected ? <ConnectedReposList repoNames={githubRepoNames} /> : undefined,
           action: (
-            <Button
-              size="sm"
-              disabled={githubConnected}
-              onClick={onConnectGitHub}
-              aria-label={githubConnected ? "GitHub Connected" : "Connect GitHub"}
-            >
-              {githubConnected ? "Connected" : "Connect"}
-            </Button>
+            <div className="flex items-center gap-1.5">
+              {githubConnected && onSyncRepos && (
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="h-8 w-8"
+                  onClick={onSyncRepos}
+                  disabled={isSyncing}
+                  aria-label="Sync repositories"
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 ${isSyncing ? "animate-spin" : ""}`} />
+                </Button>
+              )}
+              <IntegrationAction
+                connected={githubConnected}
+                integrationKey="github"
+                integrationName={github.name}
+                onConnect={onConnectGitHub}
+                onDisconnect={onDisconnect}
+                disconnecting={disconnectingProvider === "github"}
+                disconnectError={disconnectErrorProvider === "github" ? disconnectError : null}
+              />
+            </div>
           ),
         },
       ]}
@@ -87,13 +223,21 @@ export function AdditionalIntegrationCards({
   linearConnected,
   linearLoading,
   slackConnected,
+  notionConnected,
+  notionLoading,
   onConnectSentry,
   onConnectLinear,
   onConnectSlack,
+  onConnectNotion,
+  onDisconnect,
+  disconnectingProvider,
+  disconnectErrorProvider,
+  disconnectError,
 }: AdditionalIntegrationCardsProps) {
   const sentry = getIntegrationByKey("sentry");
   const linear = getIntegrationByKey("linear");
   const slack = getIntegrationByKey("slack");
+  const notion = getIntegrationByKey("notion");
 
   return (
     <IntegrationsCard
@@ -105,14 +249,15 @@ export function AdditionalIntegrationCards({
           logo: <IntegrationLogo name={sentry.name} src={sentry.logoSrc} />,
           badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
           action: (
-            <Button
-              size="sm"
-              disabled={sentryConnected}
-              onClick={onConnectSentry}
-              aria-label={sentryConnected ? "Sentry Connected" : "Connect Sentry"}
-            >
-              {sentryConnected ? "Connected" : "Connect"}
-            </Button>
+            <IntegrationAction
+              connected={sentryConnected}
+              integrationKey="sentry"
+              integrationName={sentry.name}
+              onConnect={onConnectSentry}
+              onDisconnect={onDisconnect}
+              disconnecting={disconnectingProvider === "sentry"}
+              disconnectError={disconnectErrorProvider === "sentry" ? disconnectError : null}
+            />
           ),
         },
         {
@@ -122,15 +267,16 @@ export function AdditionalIntegrationCards({
           logo: <IntegrationLogo name={linear.name} src={linear.logoSrc} />,
           badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
           action: (
-            <Button
-              size="sm"
-              aria-label={linearConnected ? "Linear Connected" : "Connect Linear"}
+            <IntegrationAction
+              connected={linearConnected}
+              integrationKey="linear"
+              integrationName={linear.name}
+              onConnect={onConnectLinear}
+              onDisconnect={onDisconnect}
+              disconnecting={disconnectingProvider === "linear"}
+              disconnectError={disconnectErrorProvider === "linear" ? disconnectError : null}
               loading={linearLoading}
-              disabled={linearConnected || linearLoading}
-              onClick={onConnectLinear}
-            >
-              {linearConnected ? "Connected" : "Connect"}
-            </Button>
+            />
           ),
         },
         {
@@ -140,14 +286,34 @@ export function AdditionalIntegrationCards({
           logo: <IntegrationLogo name={slack.name} src={slack.logoSrc} />,
           badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
           action: (
-            <Button
-              size="sm"
-              disabled={slackConnected}
-              onClick={onConnectSlack}
-              aria-label={slackConnected ? "Slack Connected" : "Connect Slack"}
-            >
-              {slackConnected ? "Connected" : "Connect"}
-            </Button>
+            <IntegrationAction
+              connected={slackConnected}
+              integrationKey="slack"
+              integrationName={slack.name}
+              onConnect={onConnectSlack}
+              onDisconnect={onDisconnect}
+              disconnecting={disconnectingProvider === "slack"}
+              disconnectError={disconnectErrorProvider === "slack" ? disconnectError : null}
+            />
+          ),
+        },
+        {
+          id: notion.key,
+          title: notion.name,
+          description: notion.description,
+          logo: <IntegrationLogo name={notion.name} src={notion.logoSrc} />,
+          badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
+          action: (
+            <IntegrationAction
+              connected={notionConnected}
+              integrationKey="notion"
+              integrationName={notion.name}
+              onConnect={onConnectNotion}
+              onDisconnect={onDisconnect}
+              disconnecting={disconnectingProvider === "notion"}
+              disconnectError={disconnectErrorProvider === "notion" ? disconnectError : null}
+              loading={notionLoading}
+            />
           ),
         },
       ]}
@@ -160,17 +326,25 @@ export function AllIntegrationCards({
   onConnectSentry,
   onConnectLinear,
   onConnectSlack,
+  onConnectNotion,
+  onDisconnect,
+  disconnectingProvider,
+  disconnectErrorProvider,
+  disconnectError,
   githubConnected,
   githubRepoNames = [],
   sentryConnected,
   linearConnected,
   linearLoading,
   slackConnected,
+  notionConnected,
+  notionLoading,
 }: AllIntegrationCardsProps) {
   const github = getIntegrationByKey("github");
   const sentry = getIntegrationByKey("sentry");
   const linear = getIntegrationByKey("linear");
   const slack = getIntegrationByKey("slack");
+  const notion = getIntegrationByKey("notion");
 
   return (
     <IntegrationsCard
@@ -183,14 +357,15 @@ export function AllIntegrationCards({
           badge: <Badge variant="outline" className="text-xs">Required</Badge>,
           extra: githubConnected ? <ConnectedReposList repoNames={githubRepoNames} /> : undefined,
           action: (
-            <Button
-              size="sm"
-              disabled={githubConnected}
-              onClick={onConnectGitHub}
-              aria-label={githubConnected ? "GitHub Connected" : "Connect GitHub"}
-            >
-              {githubConnected ? "Connected" : "Connect"}
-            </Button>
+            <IntegrationAction
+              connected={githubConnected}
+              integrationKey="github"
+              integrationName={github.name}
+              onConnect={onConnectGitHub}
+              onDisconnect={onDisconnect}
+              disconnecting={disconnectingProvider === "github"}
+              disconnectError={disconnectErrorProvider === "github" ? disconnectError : null}
+            />
           ),
         },
         {
@@ -200,14 +375,15 @@ export function AllIntegrationCards({
           logo: <IntegrationLogo name={sentry.name} src={sentry.logoSrc} />,
           badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
           action: (
-            <Button
-              size="sm"
-              disabled={sentryConnected}
-              onClick={onConnectSentry}
-              aria-label={sentryConnected ? "Sentry Connected" : "Connect Sentry"}
-            >
-              {sentryConnected ? "Connected" : "Connect"}
-            </Button>
+            <IntegrationAction
+              connected={sentryConnected}
+              integrationKey="sentry"
+              integrationName={sentry.name}
+              onConnect={onConnectSentry}
+              onDisconnect={onDisconnect}
+              disconnecting={disconnectingProvider === "sentry"}
+              disconnectError={disconnectErrorProvider === "sentry" ? disconnectError : null}
+            />
           ),
         },
         {
@@ -217,15 +393,16 @@ export function AllIntegrationCards({
           logo: <IntegrationLogo name={linear.name} src={linear.logoSrc} />,
           badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
           action: (
-            <Button
-              size="sm"
-              aria-label={linearConnected ? "Linear Connected" : "Connect Linear"}
+            <IntegrationAction
+              connected={linearConnected}
+              integrationKey="linear"
+              integrationName={linear.name}
+              onConnect={onConnectLinear}
+              onDisconnect={onDisconnect}
+              disconnecting={disconnectingProvider === "linear"}
+              disconnectError={disconnectErrorProvider === "linear" ? disconnectError : null}
               loading={linearLoading}
-              disabled={linearConnected || linearLoading}
-              onClick={onConnectLinear}
-            >
-              {linearConnected ? "Connected" : "Connect"}
-            </Button>
+            />
           ),
         },
         {
@@ -235,14 +412,34 @@ export function AllIntegrationCards({
           logo: <IntegrationLogo name={slack.name} src={slack.logoSrc} />,
           badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
           action: (
-            <Button
-              size="sm"
-              disabled={slackConnected}
-              onClick={onConnectSlack}
-              aria-label={slackConnected ? "Slack Connected" : "Connect Slack"}
-            >
-              {slackConnected ? "Connected" : "Connect"}
-            </Button>
+            <IntegrationAction
+              connected={slackConnected}
+              integrationKey="slack"
+              integrationName={slack.name}
+              onConnect={onConnectSlack}
+              onDisconnect={onDisconnect}
+              disconnecting={disconnectingProvider === "slack"}
+              disconnectError={disconnectErrorProvider === "slack" ? disconnectError : null}
+            />
+          ),
+        },
+        {
+          id: notion.key,
+          title: notion.name,
+          description: notion.description,
+          logo: <IntegrationLogo name={notion.name} src={notion.logoSrc} />,
+          badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
+          action: (
+            <IntegrationAction
+              connected={notionConnected}
+              integrationKey="notion"
+              integrationName={notion.name}
+              onConnect={onConnectNotion}
+              onDisconnect={onDisconnect}
+              disconnecting={disconnectingProvider === "notion"}
+              disconnectError={disconnectErrorProvider === "notion" ? disconnectError : null}
+              loading={notionLoading}
+            />
           ),
         },
       ]}

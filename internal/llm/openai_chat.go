@@ -48,15 +48,23 @@ func NewOpenAIChatProvider(apiKey string, opts ...OpenAIChatOption) *OpenAIChatP
 
 func (p *OpenAIChatProvider) Name() string { return "openai_chat" }
 
-func (p *OpenAIChatProvider) Complete(ctx context.Context, model, systemPrompt, userPrompt string) (string, error) {
+func (p *OpenAIChatProvider) Complete(ctx context.Context, model, systemPrompt, userPrompt string, reasoningEffort ReasoningEffort) (string, error) {
 	messages := []chatMessage{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: userPrompt},
 	}
 
+	// Only include reasoning_effort for models that support it. Sending it
+	// to non-reasoning models (e.g. gpt-4o) may cause a 400 error.
+	var effort ReasoningEffort
+	if modelSupportsReasoningEffort(model) {
+		effort = reasoningEffort
+	}
+
 	reqBody := chatCompletionsRequest{
-		Model:    model,
-		Messages: messages,
+		Model:           model,
+		Messages:        messages,
+		ReasoningEffort: effort,
 	}
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
@@ -96,9 +104,12 @@ func (p *OpenAIChatProvider) Complete(ctx context.Context, model, systemPrompt, 
 	return result.Choices[0].Message.Content, nil
 }
 
+// chatCompletionsRequest is the OpenAI Chat Completions request body.
+// It is also used by OpenRouterProvider, which uses the same API format.
 type chatCompletionsRequest struct {
-	Model    string        `json:"model"`
-	Messages []chatMessage `json:"messages"`
+	Model           string        `json:"model"`
+	Messages        []chatMessage `json:"messages"`
+	ReasoningEffort ReasoningEffort `json:"reasoning_effort,omitempty"`
 }
 
 type chatMessage struct {

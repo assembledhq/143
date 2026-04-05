@@ -1,11 +1,16 @@
 "use client";
 
 import { useCallback, useMemo, useRef, useState, useEffect } from "react";
+import { useQueryState } from "nuqs";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   ArrowUp,
+  ClipboardList,
   ExternalLink,
+  FileCode2,
+  GitPullRequest,
+  Loader2,
   RefreshCw,
   CheckCircle2,
   XCircle,
@@ -13,22 +18,45 @@ import {
   Square,
   PanelRightOpen,
   PanelRightClose,
+  Clock,
+  Timer,
+  User as UserIcon,
+  Bot,
+  Cpu,
+  MessageSquare,
+  Paperclip,
+  X,
 } from "lucide-react";
+import Image from "next/image";
 import { Badge } from "@/components/ui/badge";
+import { MarkdownContent } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { LogViewer } from "@/components/log-viewer";
-import { DiffViewer } from "@/components/diff-viewer";
 import { ChatTimeline } from "@/components/chat-timeline";
 import { api } from "@/lib/api";
+import { AGENT_TYPE_OPTIONS } from "@/lib/model-constants";
 import { SSE_EVENT, addSSEListener } from "@/lib/sse";
 import { buildTimeline } from "@/lib/timeline";
-import type { Session, SessionLog, User, Validation } from "@/lib/types";
+import { parseDiffStats, type DiffFile } from "@/lib/diff-parser";
+import { formatReviewMessage } from "@/lib/format-review-message";
+import type { Session, SessionLog, SessionMessage, SessionReviewComment, User, Validation } from "@/lib/types";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
-import { cn } from "@/lib/utils";
+import { cn, sessionTitle, isImageURL, fileNameFromURL, formatTimeAgo } from "@/lib/utils";
+import { DiffStatsBadge, FileTree, SessionFooter, CommentsSummary, ReviewDiffView, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
+import { useReviewComments } from "@/hooks/use-review-comments";
+import { useDiffViewState } from "@/hooks/use-diff-view-state";
+import { useReviewedFiles } from "@/hooks/use-reviewed-files";
 
 const statusConfig: Record<string, { color: string; label: string }> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
@@ -62,16 +90,6 @@ function formatDuration(startedAt?: string, completedAt?: string): string {
   return `${mins}m ${secs}s`;
 }
 
-function formatTimestamp(dateStr?: string): string {
-  if (!dateStr) return "-";
-  return new Date(dateStr).toLocaleString();
-}
-
-function confidenceColor(score: number): string {
-  if (score > 0.8) return "text-emerald-600 dark:text-emerald-400";
-  if (score >= 0.5) return "text-amber-600 dark:text-amber-400";
-  return "text-destructive";
-}
 
 const validationChecks: { key: string; label: string }[] = [
   { key: "direction_check", label: "Direction check" },
@@ -93,7 +111,7 @@ function checkResultBadge(result: string | null) {
 // Detail panel tabs (shown in right sidebar)
 // ---------------------------------------------------------------------------
 
-type DetailTab = "overview" | "changes" | "validation" | "logs";
+type DetailTab = "overview" | "changes" | "validation";
 
 function OverviewTab({ session, members }: { session: Session; members: User[] }) {
   const queryClient = useQueryClient();
@@ -108,72 +126,125 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
   const terminalStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
   const isActive = !terminalStatuses.has(session.status);
 
+  const triggeredByLabel = session.pm_plan_id && !session.triggered_by_user_id
+    ? "PM Agent"
+    : session.triggered_by_user_id
+      ? members.find((m) => m.id === session.triggered_by_user_id)?.name || "Unknown user"
+      : "System";
+
   return (
     <div className="space-y-4">
-      <Card>
-        <CardContent className="pt-6">
-          <div className="grid grid-cols-2 gap-5 text-sm">
-            <div>
-              <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Status</span>
-              <div className="mt-1">
-                <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${status.color}`}>
-                  {isActive && (
-                    <span className="relative mr-1.5 flex h-2 w-2">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                      <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
-                    </span>
-                  )}
-                  {status.label}
-                </span>
-              </div>
-            </div>
-            <div>
-              <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Agent Type</span>
-              <p className="mt-1 font-medium">{agentTypeLabels[session.agent_type] || session.agent_type}</p>
-            </div>
-            {session.triggered_by_user_id && (
-              <div>
-                <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Triggered by</span>
-                <p className="mt-1 font-medium">
-                  {members.find((m) => m.id === session.triggered_by_user_id)?.name || "Unknown user"}
-                </p>
-              </div>
-            )}
-            {session.confidence_score != null && (
-              <div>
-                <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Confidence</span>
-                <p className={`mt-1 font-medium ${confidenceColor(session.confidence_score)}`}>
-                  {(session.confidence_score * 100).toFixed(0)}%
-                </p>
-              </div>
-            )}
-            <div>
-              <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Duration</span>
-              <p className="mt-1 font-medium">{formatDuration(session.started_at, session.completed_at)}</p>
-            </div>
-            <div>
-              <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Started</span>
-              <p className="mt-1">{formatTimestamp(session.started_at)}</p>
-            </div>
-            <div>
-              <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">Completed</span>
-              <p className="mt-1">{formatTimestamp(session.completed_at)}</p>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
+      {/* Result card — most important for completed sessions, shown first */}
       {session.result_summary && (
-        <Card>
+        <Card className="border-l-2 border-l-emerald-500 bg-emerald-50/30 dark:bg-emerald-950/10">
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm">Result</CardTitle>
+            <CardTitle className="text-sm flex items-center gap-2">
+              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+              Result
+            </CardTitle>
           </CardHeader>
           <CardContent>
-            <p className="text-sm">{session.result_summary}</p>
+            <MarkdownContent content={session.result_summary} className="text-sm" />
           </CardContent>
         </Card>
       )}
 
+      {/* Failure card — shown prominently at top for failed sessions */}
+      {session.status === "failed" && (session.failure_explanation || session.error) && (
+        <Card className="border-l-2 border-l-destructive border-destructive/20 dark:border-destructive/30">
+          <CardHeader className="pb-2">
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-sm text-destructive flex items-center gap-2">
+                <XCircle className="h-3.5 w-3.5" />
+                Failure details
+                {session.failure_category && (
+                  <Badge variant="secondary" className="bg-destructive/10 text-destructive border-destructive/20 text-[11px]">
+                    {session.failure_category}
+                  </Badge>
+                )}
+              </CardTitle>
+              {session.failure_retry_advised && (
+                <Button
+                  size="xs"
+                  variant="outline"
+                  onClick={() => retryMutation.mutate()}
+                  disabled={retryMutation.isPending}
+                >
+                  <RefreshCw className={`mr-1.5 h-3 w-3 ${retryMutation.isPending ? "animate-spin" : ""}`} />
+                  {retryMutation.isPending ? "Retrying..." : "Retry"}
+                </Button>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-sm">{session.failure_explanation || session.error}</p>
+            {session.failure_next_steps && session.failure_next_steps.length > 0 && (
+              <div>
+                <p className="text-xs font-medium text-muted-foreground mb-1">Next steps</p>
+                <ul className="list-disc list-inside text-sm space-y-1">
+                  {session.failure_next_steps.map((step, i) => (
+                    <li key={i}>{step}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Session vitals — primary info row */}
+      <Card>
+        <CardContent className="p-4">
+          <div className="flex items-center gap-3 flex-wrap">
+            <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${status.color}`}>
+              {isActive && (
+                <span className="relative mr-1.5 flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+                </span>
+              )}
+              {status.label}
+            </span>
+            <span className="h-4 w-px bg-border" />
+            <span className="inline-flex items-center gap-1.5 text-sm">
+              <Cpu className="h-3.5 w-3.5 text-muted-foreground" />
+              <span className="font-medium">{agentTypeLabels[session.agent_type] || session.agent_type}</span>
+            </span>
+            <span className="h-4 w-px bg-border" />
+            <span className="inline-flex items-center gap-1.5 text-sm">
+              {session.pm_plan_id && !session.triggered_by_user_id ? (
+                <Bot className="h-3.5 w-3.5 text-primary" />
+              ) : (
+                <UserIcon className="h-3.5 w-3.5 text-muted-foreground" />
+              )}
+              <span className="font-medium">{triggeredByLabel}</span>
+            </span>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Timestamps — secondary reference data */}
+      <div className="flex items-center gap-x-4 gap-y-1 flex-wrap text-xs text-muted-foreground px-1">
+        <span className="inline-flex items-center gap-1.5">
+          <Timer className="h-3 w-3" />
+          {formatDuration(session.started_at, session.completed_at)}
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          {session.completed_at ? (
+            <>
+              <CheckCircle2 className="h-3 w-3" />
+              Completed {formatTimeAgo(session.completed_at)}
+            </>
+          ) : session.started_at ? (
+            <>
+              <Clock className="h-3 w-3" />
+              Started {formatTimeAgo(session.started_at)}
+            </>
+          ) : null}
+        </span>
+      </div>
+
+      {/* PM context */}
       {session.pm_plan_id && (session.pm_reasoning || session.pm_approach) && (
         <Card>
           <CardHeader className="pb-2">
@@ -196,45 +267,11 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
         </Card>
       )}
 
-      {session.status === "failed" && (session.failure_explanation || session.error) && (
-        <Card className="border-destructive/20 dark:border-destructive/30">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm text-destructive flex items-center gap-2">
-              <XCircle className="h-4 w-4" />
-              Failure details
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {session.failure_category && (
-              <Badge variant="secondary" className="bg-destructive/10 text-destructive border-destructive/20 text-[11px]">
-                {session.failure_category}
-              </Badge>
-            )}
-            <p className="text-sm">{session.failure_explanation || session.error}</p>
-            {session.failure_next_steps && session.failure_next_steps.length > 0 && (
-              <div>
-                <p className="text-xs font-medium text-muted-foreground mb-1">Next steps</p>
-                <ul className="list-disc list-inside text-sm space-y-1">
-                  {session.failure_next_steps.map((step, i) => (
-                    <li key={i}>{step}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-            {session.failure_retry_advised && (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => retryMutation.mutate()}
-                disabled={retryMutation.isPending}
-              >
-                <RefreshCw className={`mr-1.5 h-3 w-3 ${retryMutation.isPending ? "animate-spin" : ""}`} />
-                {retryMutation.isPending ? "Retrying..." : "Retry"}
-              </Button>
-            )}
-          </CardContent>
-        </Card>
-      )}
+      <AuditLogTrigger
+        filters={{ session_id: session.id }}
+        members={members}
+        title="Session activity"
+      />
     </div>
   );
 }
@@ -246,16 +283,27 @@ function ValidationTab({ sessionId }: { sessionId: string }) {
   });
 
   if (isLoading) {
-    return <div className="py-8 text-center text-sm text-muted-foreground">Loading validation...</div>;
-  }
-
-  if (error) {
-    return <div className="py-8 text-center text-sm text-muted-foreground">No validation data available.</div>;
+    return (
+      <div className="flex items-center justify-center py-12">
+        <div className="text-center space-y-2">
+          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/40 mx-auto" />
+          <p className="text-sm text-muted-foreground">Loading validation...</p>
+        </div>
+      </div>
+    );
   }
 
   const validation = data?.data;
-  if (!validation) {
-    return <div className="py-8 text-center text-sm text-muted-foreground">No validation data available.</div>;
+  if (error || !validation) {
+    return (
+      <div className="flex items-center justify-center py-12">
+        <div className="text-center space-y-2 max-w-[280px]">
+          <CheckCircle2 className="h-8 w-8 text-muted-foreground/40 mx-auto" />
+          <p className="text-sm font-medium text-muted-foreground">No validation data</p>
+          <p className="text-xs text-muted-foreground/60">Validation checks will appear here once the session produces results.</p>
+        </div>
+      </div>
+    );
   }
 
   const overallStatus = validation.status;
@@ -311,73 +359,290 @@ function ValidationTab({ sessionId }: { sessionId: string }) {
   );
 }
 
-function ChangesTab({ session, sessionId }: { session: Session; sessionId: string }) {
+const prStatusColor: Record<string, string> = {
+  open: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
+  merged: "bg-purple-500/10 text-purple-700 dark:text-purple-400",
+  closed: "bg-red-500/10 text-red-700 dark:text-red-400",
+};
+
+function PRCard({ sessionId }: { sessionId: string }) {
   const { data: prData, isLoading: prLoading } = useQuery({
     queryKey: ["session", sessionId, "pr"],
     queryFn: () => api.sessions.getPR(sessionId),
   });
 
   const pr = prData?.data;
-
-  const prStatusColor: Record<string, string> = {
-    open: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
-    merged: "bg-purple-500/10 text-purple-700 dark:text-purple-400",
-    closed: "bg-red-500/10 text-red-700 dark:text-red-400",
-  };
+  if (prLoading) return <div className="flex items-center justify-center gap-2 py-2 text-sm text-muted-foreground"><Loader2 className="h-3.5 w-3.5 animate-spin" />Loading PR...</div>;
+  if (!pr) return null;
 
   return (
-    <div className="space-y-4">
-      {pr && (
-        <Card>
-          <CardContent className="pt-6 space-y-4">
-            <div className="flex items-start justify-between">
-              <div>
-                <h3 className="text-sm font-medium">{pr.title}</h3>
-                <p className="text-xs text-muted-foreground mt-1">{pr.github_repo} #{pr.github_pr_number}</p>
-              </div>
-              <a href={pr.github_pr_url} target="_blank" rel="noopener noreferrer">
-                <Button variant="outline" size="sm">
-                  <ExternalLink className="mr-1.5 h-3 w-3" />
-                  View on GitHub
-                </Button>
-              </a>
+    <Card className="mx-4 mt-3">
+      <CardContent className="py-3 space-y-3">
+        <div className="flex items-start justify-between">
+          <div className="min-w-0">
+            <h3 className="text-sm font-medium truncate">{pr.title}</h3>
+            <p className="text-xs text-muted-foreground mt-0.5">{pr.github_repo} #{pr.github_pr_number}</p>
+          </div>
+          <a href={pr.github_pr_url} target="_blank" rel="noopener noreferrer">
+            <Button variant="outline" size="sm">
+              <ExternalLink className="mr-1.5 h-3 w-3" />
+              GitHub
+            </Button>
+          </a>
+        </div>
+        <div className="flex items-center gap-3 text-sm">
+          <div>
+            <span className="text-muted-foreground">Status: </span>
+            <Badge variant="secondary" className={`text-[11px] ${prStatusColor[pr.status] || "bg-muted text-muted-foreground"}`}>
+              {pr.status}
+            </Badge>
+          </div>
+          {pr.review_status && (
+            <div>
+              <span className="text-muted-foreground">Review: </span>
+              <Badge variant="secondary" className="text-[11px]">{pr.review_status}</Badge>
             </div>
+          )}
+          <div className="min-w-0">
+            <span className="text-muted-foreground">Branch: </span>
+            <code className="text-xs bg-muted px-1 py-0.5 rounded">{pr.branch_name}</code>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
 
-            <div className="flex items-center gap-3 text-sm">
-              <div>
-                <span className="text-muted-foreground">Status: </span>
-                <Badge variant="secondary" className={`text-[11px] ${prStatusColor[pr.status] || "bg-muted text-muted-foreground"}`}>
-                  {pr.status}
-                </Badge>
-              </div>
-              {pr.review_status && (
-                <div>
-                  <span className="text-muted-foreground">Review: </span>
-                  <Badge variant="secondary" className="text-[11px]">{pr.review_status}</Badge>
-                </div>
-              )}
-              <div>
-                <span className="text-muted-foreground">Branch: </span>
-                <code className="text-xs bg-muted px-1 py-0.5 rounded">{pr.branch_name}</code>
-              </div>
-            </div>
+function ChangesTab({
+  sessionId,
+  filteredFiles,
+  activeFileIndex,
+  onFileSelect,
+  onOpenReview,
+  reviewedFiles,
+  onToggleReviewed,
+  comments,
+  onCommentClick,
+  passes,
+  passRange,
+  onPassRangeChange,
+  emptyStatusText,
+}: {
+  sessionId: string;
+  filteredFiles: DiffFile[];
+  activeFileIndex: number;
+  onFileSelect: (index: number) => void;
+  onOpenReview: (fileIndex?: number) => void;
+  reviewedFiles: Set<string>;
+  onToggleReviewed: (filePath: string) => void;
+  comments: SessionReviewComment[];
+  onCommentClick: (filePath: string) => void;
+  passes: DiffPassEntry[];
+  passRange: PassRange | null;
+  onPassRangeChange: (range: PassRange | null) => void;
+  emptyStatusText: string;
+}) {
+  const hasDiff = filteredFiles.length > 0;
 
-            {pr.body && (
-              <div className="text-sm text-muted-foreground border-t border-border pt-3">
-                <p className="whitespace-pre-wrap">{pr.body}</p>
-              </div>
-            )}
-          </CardContent>
-        </Card>
+  const handleFileClick = useCallback(
+    (index: number) => {
+      onFileSelect(index);
+      onOpenReview(index);
+    },
+    [onFileSelect, onOpenReview]
+  );
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Pass selector */}
+      {passes.length >= 2 && (
+        <div className="px-4 py-3 border-b border-border">
+          <PassSelector
+            passes={passes}
+            selectedRange={passRange}
+            onRangeChange={onPassRangeChange}
+          />
+        </div>
       )}
 
-      {prLoading ? (
-        <div className="text-center text-sm text-muted-foreground py-2">Loading PR details...</div>
-      ) : session.diff ? (
-        <DiffViewer diff={session.diff} />
+      {/* Comments summary */}
+      {comments.length > 0 && (
+        <CommentsSummary
+          comments={comments}
+          onCommentClick={onCommentClick}
+        />
+      )}
+
+      {/* PR Card */}
+      <PRCard sessionId={sessionId} />
+
+      {/* Main content: file tree or empty state */}
+      {hasDiff ? (
+        <div className="flex flex-col flex-1 min-h-0">
+          {/* Review all button */}
+          <div className="px-4 py-3">
+            <button
+              onClick={() => onOpenReview()}
+              className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-md border border-border bg-background text-[12px] font-medium text-foreground hover:bg-muted/50 transition-colors"
+            >
+              <FileCode2 className="h-3.5 w-3.5" />
+              Review {filteredFiles.length} {filteredFiles.length === 1 ? "file" : "files"}
+            </button>
+          </div>
+
+          {/* File tree — always visible, it's the sidebar's purpose */}
+          <div className="flex-1 overflow-hidden">
+            <FileTree
+              files={filteredFiles}
+              activeFileIndex={activeFileIndex}
+              onFileSelect={handleFileClick}
+              reviewedFiles={reviewedFiles}
+              onToggleReviewed={onToggleReviewed}
+            />
+          </div>
+        </div>
       ) : (
-        <div className="py-8 text-center text-sm text-muted-foreground">
-          No diff available for this session.
+        <div className="flex-1 flex items-center justify-center py-12">
+          <div className="text-center space-y-2 max-w-[280px]">
+            <FileCode2 className="h-8 w-8 text-muted-foreground/40 mx-auto" />
+            <p className="text-sm font-medium text-muted-foreground">
+              No changes yet
+            </p>
+            <p className="text-xs text-muted-foreground/60">
+              {emptyStatusText}
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Review comment input bar (shown at bottom during review mode)
+// ---------------------------------------------------------------------------
+
+function ReviewCommentInput({
+  sessionId,
+  comments,
+  diffFiles,
+  canSendMessage,
+}: {
+  sessionId: string;
+  comments: SessionReviewComment[];
+  diffFiles: DiffFile[];
+  canSendMessage: boolean;
+}) {
+  const [message, setMessage] = useState("");
+  const queryClient = useQueryClient();
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const openComments = useMemo(() => comments.filter((c) => !c.resolved), [comments]);
+
+  const sendMutation = useMutation({
+    mutationFn: () => {
+      const formatted = formatReviewMessage(openComments, diffFiles, message);
+      return api.sessions.sendMessage(sessionId, formatted);
+    },
+    onSuccess: () => {
+      setMessage("");
+      if (textareaRef.current) {
+        textareaRef.current.style.height = "auto";
+      }
+      queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+      queryClient.invalidateQueries({ queryKey: ["session", sessionId, "messages"] });
+    },
+  });
+
+  // Auto-resize textarea
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+  }, [message]);
+
+  const hasContent = message.trim() || openComments.length > 0;
+
+  function handleKeyDown(e: React.KeyboardEvent) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      if (hasContent && canSendMessage && !sendMutation.isPending) {
+        sendMutation.mutate();
+      }
+    }
+  }
+
+  return (
+    <div className="border-t border-border p-3 bg-background shrink-0">
+      <div className={cn("rounded-xl border border-border bg-muted/30 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring")}>
+        {/* Open comments as chips */}
+        {openComments.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 px-3 pt-2.5 pb-1">
+            {openComments.map((c) => {
+              const fileName = c.file_path.split("/").pop() ?? c.file_path;
+              return (
+                <div
+                  key={c.id}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-[11px]"
+                >
+                  <MessageSquare className="h-3 w-3 text-muted-foreground shrink-0" />
+                  <span className="font-mono text-muted-foreground">
+                    {fileName}:{c.line_number}
+                  </span>
+                  <span className="text-muted-foreground/40">&mdash;</span>
+                  <span className="truncate max-w-[200px]">
+                    {c.body.length > 60 ? `${c.body.slice(0, 60)}...` : c.body}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <Textarea
+          ref={textareaRef}
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder={
+            openComments.length > 0
+              ? "Add instructions or send comments to agent..."
+              : "Ask to make changes, @mention files..."
+          }
+          disabled={!canSendMessage || sendMutation.isPending}
+          className="min-h-[44px] max-h-[200px] resize-none border-none bg-transparent shadow-none focus-visible:ring-0"
+        />
+
+        <div className="flex items-center gap-1 px-2 pb-2">
+          {openComments.length > 0 && (
+            <span className="text-[11px] text-muted-foreground">
+              {openComments.length} comment{openComments.length > 1 ? "s" : ""} attached
+            </span>
+          )}
+          <div className="ml-auto">
+            <Button
+              size="icon"
+              variant="default"
+              className="h-8 w-8 shrink-0 rounded-lg"
+              title="Send to agent"
+              disabled={!hasContent || !canSendMessage || sendMutation.isPending}
+              onClick={() => sendMutation.mutate()}
+            >
+              {sendMutation.isPending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <ArrowUp className="h-4 w-4" />
+              )}
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      {sendMutation.error && (
+        <div className="flex items-center gap-2 mt-2 text-xs text-destructive">
+          <AlertTriangle className="h-3 w-3 shrink-0" />
+          {sendMutation.error instanceof Error ? sendMutation.error.message : "Failed to send"}
         </div>
       )}
     </div>
@@ -390,20 +655,37 @@ function ChangesTab({ session, sessionId }: { session: Session; sessionId: strin
 
 const MAX_SSE_RECONNECT_ATTEMPTS = 5;
 const BASE_SSE_RECONNECT_DELAY_MS = 1000;
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
-function ChatPanel({ session, sessionId, isActive }: { session: Session; sessionId: string; isActive: boolean }) {
+function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Session; sessionId: string; isActive: boolean; onDiffClick?: () => void }) {
   const queryClient = useQueryClient();
   const [message, setMessage] = useState("");
+  const [planMode, setPlanMode] = useState(false);
+  const [selectedModel, setSelectedModel] = useState("");
   const [streamedLogs, setStreamedLogs] = useState<SessionLog[]>([]);
+  const [attachments, setAttachments] = useState<string[]>([]);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const seenLogIds = useRef<Set<number>>(new Set());
   const reconnectAttempts = useRef(0);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
+  const isClaudeCode = session.agent_type === "claude_code";
 
-  const isIdle = session.status === "idle";
   const isRunning = session.status === "running";
+  const isSnapshotExpired = session.sandbox_state === "destroyed";
+  // Allow messaging in any state except "skipped" (never ran, no workspace),
+  // "pending" (agent not started yet), and sessions whose sandbox snapshot has
+  // expired (sandbox_state === "destroyed") — the environment no longer exists.
+  const canSendMessage = session.status !== "skipped" && session.status !== "pending" && !isSnapshotExpired;
+
+  const availableModels = useMemo(() => {
+    const agentType = AGENT_TYPE_OPTIONS.find((a) => a.key === session.agent_type);
+    return agentType?.models ?? [];
+  }, [session.agent_type]);
 
   const { data: messagesData } = useQuery({
     queryKey: ["session", sessionId, "messages"],
@@ -417,6 +699,13 @@ function ChatPanel({ session, sessionId, isActive }: { session: Session; session
     refetchInterval: isActive ? 3000 : false,
   });
 
+  // Fetch the linked issue to display its description as the initial prompt.
+  const { data: issueData } = useQuery({
+    queryKey: ["issue", session.issue_id],
+    queryFn: () => api.issues.get(session.issue_id),
+    enabled: !!session.issue_id,
+  });
+
   // Merge fetched logs with streamed logs, deduplicating by ID.
   const allLogs = useMemo(() => {
     const fetched = logsData?.data || [];
@@ -427,9 +716,30 @@ function ChatPanel({ session, sessionId, isActive }: { session: Session; session
 
   const messages = messagesData?.data;
 
+  // Prepend the issue description as a synthetic user message for turn 0
+  // so the initial prompt is visible in the timeline.
+  const allMessages = useMemo(() => {
+    const issueDescription = issueData?.data?.description;
+    const msgs = messages || [];
+    if (!issueDescription) return msgs;
+    // Only prepend if there's no user message for turn 0 already.
+    const hasTurn0UserMsg = msgs.some((m) => m.role === "user" && m.turn_number === 0);
+    if (hasTurn0UserMsg) return msgs;
+    const syntheticMsg: SessionMessage = {
+      id: -1,
+      session_id: sessionId,
+      org_id: session.org_id,
+      turn_number: 0,
+      role: "user",
+      content: issueDescription,
+      created_at: session.created_at,
+    };
+    return [syntheticMsg, ...msgs];
+  }, [messages, issueData?.data?.description, sessionId, session.org_id, session.created_at]);
+
   const timelineEntries = useMemo(
-    () => buildTimeline(messages || [], allLogs),
-    [messages, allLogs]
+    () => buildTimeline(allMessages, allLogs),
+    [allMessages, allLogs]
   );
 
   // SSE streaming for real-time logs when the session is active.
@@ -505,10 +815,48 @@ function ChatPanel({ session, sessionId, isActive }: { session: Session; session
     };
   }, [sessionId, apiBase, isActive, mergeLogs, queryClient]);
 
+  async function handleFileUpload(event: React.ChangeEvent<HTMLInputElement>) {
+    const fileList = event.target.files;
+    if (!fileList || fileList.length === 0) return;
+
+    const files = Array.from(fileList);
+    const oversized = files.filter((f) => f.size > MAX_FILE_SIZE);
+    if (oversized.length > 0) {
+      setUploadError(`File${oversized.length > 1 ? "s" : ""} too large (max 10 MB): ${oversized.map((f) => f.name).join(", ")}`);
+      event.target.value = "";
+      return;
+    }
+
+    setIsUploading(true);
+    setUploadError(null);
+    try {
+      const results = await Promise.all(
+        files.map((file) => api.uploads.upload(file))
+      );
+      setAttachments((prev) => [...prev, ...results.map((r) => r.url)]);
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : "Upload failed");
+    } finally {
+      setIsUploading(false);
+      event.target.value = "";
+    }
+  }
+
+  function removeAttachment(url: string) {
+    setAttachments((prev) => prev.filter((a) => a !== url));
+  }
+
   const sendMutation = useMutation({
-    mutationFn: () => api.sessions.sendMessage(sessionId, message),
+    mutationFn: (opts: { planMode?: boolean; overrideMessage?: string } = {}) => {
+      setUploadError(null);
+      const msg = opts.overrideMessage ?? message;
+      const isPlan = opts.planMode ?? planMode;
+      return api.sessions.sendMessage(sessionId, msg, attachments.length > 0 ? attachments : undefined, isPlan, selectedModel || undefined);
+    },
     onSuccess: () => {
       setMessage("");
+      setAttachments([]);
+      setPlanMode(false);
       if (textareaRef.current) {
         textareaRef.current.style.height = "auto";
       }
@@ -522,6 +870,38 @@ function ChatPanel({ session, sessionId, isActive }: { session: Session; session
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
     },
+  });
+
+  const { data: prData } = useQuery({
+    queryKey: ["session", sessionId, "pr"],
+    queryFn: () => api.sessions.getPR(sessionId).catch((err) => {
+      // 404 means no PR exists yet — treat as empty data, not an error.
+      if (err?.code === "NOT_FOUND") return { data: null };
+      throw err;
+    }),
+  });
+  const hasPR = !!prData?.data;
+  const hasDiff = !!session.diff_stats;
+  const canCreatePR = hasDiff && !hasPR && !isRunning;
+
+  const [prQueued, setPRQueued] = useState(false);
+  const createPRMutation = useMutation({
+    mutationFn: () => api.sessions.createPR(sessionId),
+    onSuccess: () => {
+      setPRQueued(true);
+      // Clear the queued banner after 30s if the PR hasn't appeared yet.
+      setTimeout(() => setPRQueued(false), 30_000);
+      queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+      queryClient.invalidateQueries({ queryKey: ["session", sessionId, "pr"] });
+    },
+  });
+
+  // Fetch GitHub connection status for PR authorship indicator.
+  const { data: ghStatus } = useQuery({
+    queryKey: ["github-status"],
+    queryFn: () => api.githubStatus.get(),
+    enabled: canCreatePR,
+    staleTime: 5 * 60 * 1000, // 5 min
   });
 
   // Auto-resize textarea
@@ -539,12 +919,31 @@ function ChatPanel({ session, sessionId, isActive }: { session: Session; session
     }
   }, [timelineEntries.length]);
 
+  const hasContent = message.trim() || attachments.length > 0;
+
+  // Plan mode callbacks for the timeline approve/adjust buttons.
+  const handleApprovePlan = useCallback(() => {
+    if (!canSendMessage || sendMutation.isPending) return;
+    sendMutation.mutate({ planMode: false, overrideMessage: "The plan looks good. Please proceed with executing the implementation plan above. Make all the changes as described." });
+  }, [canSendMessage, sendMutation]);
+
+  const handleAdjustPlan = useCallback(() => {
+    setMessage("Please adjust the plan: ");
+    setPlanMode(false);
+    textareaRef.current?.focus();
+  }, []);
+
   function handleKeyDown(e: React.KeyboardEvent) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      if (message.trim() && isIdle && !sendMutation.isPending) {
-        sendMutation.mutate();
+      if (hasContent && canSendMessage && !sendMutation.isPending) {
+        sendMutation.mutate({});
       }
+    }
+    // Shift+Tab toggles plan mode for Claude Code sessions.
+    if (e.key === "Tab" && e.shiftKey && isClaudeCode && canSendMessage) {
+      e.preventDefault();
+      setPlanMode((prev) => !prev);
     }
   }
 
@@ -553,58 +952,234 @@ function ChatPanel({ session, sessionId, isActive }: { session: Session; session
       {/* Unified timeline */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto space-y-2 p-4">
         {timelineEntries.length === 0 && !isRunning && (
-          <div className="text-center py-8 text-sm text-muted-foreground">
-            No activity yet. The session is processing its initial turn.
+          <div className="flex items-center justify-center py-12">
+            <div className="text-center space-y-2 max-w-[280px]">
+              <MessageSquare className="h-8 w-8 text-muted-foreground/40 mx-auto" />
+              <p className="text-sm font-medium text-muted-foreground">No activity yet</p>
+              <p className="text-xs text-muted-foreground/60">The session is processing its initial turn.</p>
+            </div>
           </div>
         )}
-        <ChatTimeline entries={timelineEntries} isRunning={isRunning} />
+        <ChatTimeline
+          entries={timelineEntries}
+          isRunning={isRunning}
+          diffStats={session.diff_stats}
+          onDiffClick={onDiffClick}
+          onApprovePlan={canSendMessage ? handleApprovePlan : undefined}
+          onAdjustPlan={canSendMessage ? handleAdjustPlan : undefined}
+        />
       </div>
 
-      {/* Error display */}
-      {(sendMutation.error || endMutation.error) && (
-        <div className="flex items-center gap-2 px-4 py-2 text-xs text-destructive border-t bg-destructive/5">
-          <AlertTriangle className="h-3 w-3 shrink-0" />
-          {sendMutation.error instanceof Error ? sendMutation.error.message : endMutation.error instanceof Error ? endMutation.error.message : "An error occurred"}
+      {/* PR queued indicator */}
+      {prQueued && !hasPR && (
+        <div className="flex items-center gap-2 px-4 py-2 text-xs text-muted-foreground border-t bg-muted/30">
+          <GitPullRequest className="h-3 w-3 shrink-0" />
+          PR creation queued — it will appear shortly.
         </div>
       )}
 
-      {/* Input bar */}
-      <div className="border-t border-border p-3 bg-background">
-        <div className="flex items-end gap-2">
+      {/* Error display */}
+      {(() => {
+        const firstError = uploadError || [sendMutation, endMutation, createPRMutation].find(m => m.error)?.error;
+        if (!firstError) return null;
+        const msg = typeof firstError === "string" ? firstError : (firstError instanceof Error ? firstError.message : "An error occurred");
+        return (
+          <div className="flex items-center gap-2 px-4 py-2 text-xs text-destructive border-t bg-destructive/5">
+            <AlertTriangle className="h-3 w-3 shrink-0" />
+            {msg}
+          </div>
+        );
+      })()}
+
+      {/* Snapshot expired banner */}
+      {isSnapshotExpired && (
+        <div className="flex items-center gap-2 px-4 py-2.5 text-xs border-t bg-amber-50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800/40 text-amber-800 dark:text-amber-300">
+          <Clock className="h-3.5 w-3.5 shrink-0" />
+          <span>
+            This session&apos;s environment has expired. Sessions can be continued for up to 30 days after their last activity. To make further changes, please start a new session.
+          </span>
+        </div>
+      )}
+
+      {/* Input bar — hidden for PM agent sessions (PM agent doesn't accept interactive input) */}
+      {session.agent_type !== "pm_agent" && <div className="border-t border-border p-3 bg-background">
+        {/* Plan mode indicator */}
+        {planMode && (
+          <div className="flex items-center gap-2 mb-2 px-1">
+            <div className="flex items-center gap-1.5 rounded-full bg-amber-500/10 border border-amber-200 dark:border-amber-800/50 px-2.5 py-1">
+              <ClipboardList className="h-3 w-3 text-amber-600 dark:text-amber-400" />
+              <span className="text-[11px] font-medium text-amber-700 dark:text-amber-400">Plan Mode</span>
+              <button
+                onClick={() => setPlanMode(false)}
+                className="ml-1 text-amber-600/60 hover:text-amber-600 dark:text-amber-400/60 dark:hover:text-amber-400 text-xs"
+                title="Exit plan mode"
+              >
+                &times;
+              </button>
+            </div>
+            <span className="text-[11px] text-muted-foreground">Agent will create a plan for review before making changes</span>
+          </div>
+        )}
+        <div className={cn("rounded-xl border bg-muted/30 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring", planMode ? "border-amber-200 dark:border-amber-800/50" : "border-border")}>
           <Textarea
             ref={textareaRef}
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder={isIdle ? "Send a follow-up message..." : isRunning ? "Agent is working..." : "Session is not active"}
-            disabled={!isIdle || sendMutation.isPending}
-            className="min-h-[44px] max-h-[200px] resize-none"
+            placeholder={
+              isSnapshotExpired
+                ? "Session environment has expired and can no longer be continued"
+                : !canSendMessage
+                ? "Session is not active"
+                : planMode
+                ? "Describe what you want to plan..."
+                : isRunning
+                ? "Send a message to the agent..."
+                : "Send a follow-up message..."
+            }
+            disabled={!canSendMessage || sendMutation.isPending}
+            className="min-h-[44px] max-h-[200px] resize-none border-none bg-transparent shadow-none focus-visible:ring-0"
           />
-          <div className="flex flex-col gap-1">
+
+          {/* Attachment previews */}
+          {(attachments.length > 0 || isUploading) && (
+            <div className="flex flex-wrap items-center gap-2 px-3 pb-2">
+              {attachments.map((url) => {
+                const isImage = isImageURL(url);
+                const fileName = fileNameFromURL(url);
+                return (
+                  <div key={url} className="relative group">
+                    {isImage ? (
+                      <Image
+                        src={url}
+                        alt={fileName}
+                        width={64}
+                        height={64}
+                        unoptimized
+                        className="h-16 w-16 rounded-md object-cover border border-border"
+                      />
+                    ) : (
+                      <div className="h-16 px-3 flex items-center rounded-md border border-border bg-muted text-xs text-muted-foreground">
+                        {fileName}
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => removeAttachment(url)}
+                      className="absolute -top-1.5 -right-1.5 h-5 w-5 rounded-full bg-background border border-border flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                      aria-label={`Remove ${fileName}`}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                );
+              })}
+              {isUploading && (
+                <div className="h-16 w-16 rounded-md border border-border bg-muted flex items-center justify-center">
+                  <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="flex items-center gap-1 px-2 pb-2">
+            {/* File upload button */}
             <Button
+              type="button"
               size="icon"
-              variant="default"
-              className="h-8 w-8 shrink-0"
-              disabled={!message.trim() || !isIdle || sendMutation.isPending}
-              onClick={() => sendMutation.mutate()}
+              variant="ghost"
+              className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
+              title="Attach files or images"
+              disabled={!canSendMessage || isUploading}
+              onClick={() => uploadInputRef.current?.click()}
             >
-              <ArrowUp className="h-4 w-4" />
+              {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
             </Button>
-            {isIdle && (
-              <Button
-                size="icon"
-                variant="outline"
-                className="h-8 w-8 shrink-0"
-                title="End session"
-                disabled={endMutation.isPending}
-                onClick={() => endMutation.mutate()}
-              >
-                <Square className="h-3 w-3" />
-              </Button>
+            <input
+              ref={uploadInputRef}
+              type="file"
+              accept="image/*,.pdf,.txt,.md,.json,.csv"
+              multiple
+              className="hidden"
+              onChange={handleFileUpload}
+            />
+
+            {availableModels.length > 0 && (
+              <Select value={selectedModel} onValueChange={setSelectedModel}>
+                <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-[13px] text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
+                  <SelectValue placeholder="Default model" />
+                </SelectTrigger>
+                <SelectContent>
+                  {availableModels.map((model) => (
+                    <SelectItem key={model} value={model}>
+                      {model}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             )}
+            {isClaudeCode && canSendMessage && !planMode && (
+              <button
+                onClick={() => setPlanMode(true)}
+                className="flex items-center gap-1 h-8 px-2 text-[13px] text-muted-foreground hover:text-foreground transition-colors rounded-md"
+                title="Switch to plan mode (Shift+Tab)"
+              >
+                <ClipboardList className="h-3.5 w-3.5" />
+                <span>Plan</span>
+              </button>
+            )}
+
+            <div className="ml-auto flex items-center gap-1">
+              {canCreatePR && (
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
+                  title={
+                    ghStatus?.connected && ghStatus?.has_repo_scope
+                      ? `Create PR as @${ghStatus.github_login}`
+                      : ghStatus?.connected && !ghStatus?.has_repo_scope
+                        ? "Create PR (app token — reconnect GitHub with repo access for user-authored PRs)"
+                        : ghStatus?.pr_authorship_mode === "user_required"
+                          ? "Connect GitHub to create PRs"
+                          : "Create PR"
+                  }
+                  disabled={
+                    createPRMutation.isPending ||
+                    (ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected)
+                  }
+                  onClick={() => createPRMutation.mutate()}
+                >
+                  <GitPullRequest className="h-3.5 w-3.5" />
+                </Button>
+              )}
+              {isRunning ? (
+                <Button
+                  size="icon"
+                  variant="outline"
+                  className="h-8 w-8 shrink-0 rounded-lg"
+                  title="Stop session"
+                  disabled={endMutation.isPending}
+                  onClick={() => endMutation.mutate()}
+                >
+                  <Square className="h-3 w-3" />
+                </Button>
+              ) : (
+                <Button
+                  size="icon"
+                  variant={planMode ? "outline" : "default"}
+                  className={cn("h-8 w-8 shrink-0 rounded-lg", planMode && "border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/30")}
+                  title={planMode ? "Send plan request" : "Send message"}
+                  disabled={!hasContent || !canSendMessage || sendMutation.isPending}
+                  onClick={() => sendMutation.mutate({})}
+                >
+                  {planMode ? <ClipboardList className="h-4 w-4" /> : <ArrowUp className="h-4 w-4" />}
+                </Button>
+              )}
+            </div>
           </div>
         </div>
-      </div>
+      </div>}
     </div>
   );
 }
@@ -619,14 +1194,38 @@ const DEFAULT_DETAIL = 384;
 
 export function SessionDetailContent({ id }: { id: string }) {
   const terminalStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
+  const [reviewParam, setReviewParam] = useQueryState("review");
+  const centerMode = reviewParam === "active" ? "review" : "chat";
   const [detailTab, setDetailTab] = useState<DetailTab>("overview");
   const [showDetailPanel, setShowDetailPanel] = useState(true);
   const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL);
+  const [activeFileIndex, setActiveFileIndex] = useState(0);
 
   const handleDetailResize = useCallback((delta: number) => {
-    // Negative delta = dragging left = panel gets wider
     setDetailWidth((w) => Math.min(MAX_DETAIL, Math.max(MIN_DETAIL, w - delta)));
   }, []);
+
+  // --- Enter review mode ---
+  const openReview = useCallback((fileIndex?: number) => {
+    if (fileIndex !== undefined) setActiveFileIndex(fileIndex);
+    setReviewParam("active");
+    setDetailTab("changes");
+    setShowDetailPanel(true);
+  }, [setReviewParam]);
+
+  // --- Exit review mode ---
+  const exitReview = useCallback(() => {
+    setReviewParam(null);
+  }, [setReviewParam]);
+
+  // --- Handle detail tab click ---
+  const handleDetailTabClick = useCallback((tab: DetailTab) => {
+    setDetailTab(tab);
+    // Clicking a non-changes tab exits review mode
+    if (tab !== "changes" && centerMode === "review") {
+      exitReview();
+    }
+  }, [centerMode, exitReview]);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["session", id],
@@ -641,12 +1240,78 @@ export function SessionDetailContent({ id }: { id: string }) {
   const session = data?.data;
   const members = membersData?.data ?? [];
   const isActive = session ? !terminalStatuses.has(session.status) : false;
-  const isMultiTurn = session && session.current_turn > 0;
+  const sessionDiff = session?.diff;
+  const diffStats = useMemo(() => {
+    if (!sessionDiff) return null;
+    return parseDiffStats(sessionDiff);
+  }, [sessionDiff]);
+
+  // --- Shared review state (lifted from old ChangesTab) ---
+  const queryClient = useQueryClient();
+
+  // Hooks can't be called conditionally, so provide a stub when session hasn't loaded yet.
+  // useDiffViewState only reads `diff` and `diff_history` — the stub satisfies that contract.
+  const diffViewState = useDiffViewState(session ?? { diff: null, diff_history: [] } as unknown as Session);
+  const { files: allDiffFiles, filteredFiles, passes, passRange, setPassRange, diffSearchQuery, setDiffSearchQuery } = diffViewState;
+
+  const { reviewedFiles, toggleReviewed } = useReviewedFiles(id);
+  const {
+    comments,
+    commentsByLine,
+    openCount: footerOpenCommentCount,
+    createComment,
+    updateComment,
+    deleteComment,
+  } = useReviewComments(id);
+
+  const [activeCommentLine, setActiveCommentLine] = useState<{
+    filePath: string;
+    lineNumber: number;
+    side: "old" | "new";
+  } | null>(null);
+
+  const handleAddComment = useCallback(
+    (filePath: string, lineNumber: number, side: "old" | "new") => {
+      setActiveCommentLine({ filePath, lineNumber, side });
+    },
+    []
+  );
+
+  const handleSubmitComment = useCallback(
+    (body: string) => {
+      if (!activeCommentLine) return;
+      createComment({
+        file_path: activeCommentLine.filePath,
+        line_number: activeCommentLine.lineNumber,
+        side: activeCommentLine.side,
+        body,
+      });
+      setActiveCommentLine(null);
+    },
+    [activeCommentLine, createComment]
+  );
+
+  const handleCancelComment = useCallback(() => {
+    setActiveCommentLine(null);
+  }, []);
+
+  const handleCommentClick = useCallback(
+    (filePath: string) => {
+      const fileIndex = filteredFiles.findIndex((f) => f.newPath === filePath);
+      if (fileIndex >= 0) {
+        openReview(fileIndex);
+      }
+    },
+    [filteredFiles, openReview]
+  );
 
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <div className="text-sm text-muted-foreground">Loading session...</div>
+        <div className="text-center space-y-2">
+          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/40 mx-auto" />
+          <p className="text-sm text-muted-foreground">Loading session...</p>
+        </div>
       </div>
     );
   }
@@ -654,97 +1319,166 @@ export function SessionDetailContent({ id }: { id: string }) {
   if (error || !session) {
     return (
       <div className="flex items-center justify-center h-full">
-        <div className="text-sm text-muted-foreground">Failed to load session details.</div>
+        <div className="text-center space-y-2 max-w-[280px]">
+          <AlertTriangle className="h-5 w-5 text-muted-foreground/40 mx-auto" />
+          <p className="text-sm font-medium text-muted-foreground">Failed to load session</p>
+          <p className="text-xs text-muted-foreground/60">The session could not be found or an error occurred.</p>
+        </div>
       </div>
     );
   }
 
   const status = statusConfig[session.status] || statusConfig.pending;
 
-  const detailTabs: { value: DetailTab; label: string }[] = [
-    { value: "overview", label: "Overview" },
-    { value: "changes", label: "Changes" },
-    { value: "validation", label: "Validation" },
-    { value: "logs", label: "Logs" },
-  ];
+  const changesCount = diffStats?.filesChanged;
+  const showValidationTab = !session.triggered_by_user_id;
 
   return (
     <div className="flex h-full">
-      {/* Main chat area */}
+      {/* Center area: chat or review diff view */}
       <div className="flex-1 min-w-0 flex flex-col">
         {/* Session header bar */}
         <div className="border-b border-border px-4 py-3 bg-background flex items-center justify-between shrink-0">
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <h1 className="text-sm font-semibold text-foreground truncate">
-                {session.result_summary || `Session ${session.id.slice(0, 8)}`}
-              </h1>
-              <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium shrink-0 ${status.color}`}>
-                {status.label}
-              </span>
-            </div>
-            <p className="text-[12px] text-muted-foreground mt-0.5">
-              {agentTypeLabels[session.agent_type] || session.agent_type}
-              {isMultiTurn && ` \u00B7 Turn ${session.current_turn}`}
-            </p>
+          <div className="min-w-0 flex-1 flex items-center gap-2">
+            <h1 className="text-sm font-semibold text-foreground truncate">
+              {sessionTitle(session)}
+            </h1>
+            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium shrink-0 ${status.color}`}>
+              {status.label}
+            </span>
+            {diffStats && (
+              <DiffStatsBadge
+                added={diffStats.added}
+                removed={diffStats.removed}
+                className="shrink-0"
+                onClick={() => openReview()}
+              />
+            )}
           </div>
-          <div className="flex items-center gap-2 shrink-0">
-            <AuditLogTrigger
-              filters={{ session_id: session.id }}
-              members={members}
-              title="Session activity"
-            />
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8"
-              onClick={() => setShowDetailPanel(!showDetailPanel)}
-              title={showDetailPanel ? "Hide details" : "Show details"}
-            >
-              {showDetailPanel ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
-            </Button>
-          </div>
+          <Button
+            variant="ghost"
+            size="icon"
+            className={cn("h-8 w-8 shrink-0", centerMode === "review" && showDetailPanel && "opacity-30 cursor-not-allowed")}
+            disabled={centerMode === "review" && showDetailPanel}
+            onClick={() => setShowDetailPanel(!showDetailPanel)}
+            title={
+              centerMode === "review" && showDetailPanel
+                ? "File tree required during review"
+                : showDetailPanel ? "Hide details" : "Show details"
+            }
+          >
+            {showDetailPanel ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
+          </Button>
         </div>
 
-        {/* Chat panel */}
-        <div className="flex-1 min-h-0">
-          <ChatPanel session={session} sessionId={id} isActive={isActive} />
+        {/* Center content — either chat or diff review */}
+        <div className="flex-1 min-h-0 relative">
+          {/* Chat panel — always mounted to preserve scroll, SSE connections, etc. */}
+          <div className={cn("h-full", centerMode !== "chat" && "hidden")}>
+            <ChatPanel session={session} sessionId={id} isActive={isActive} onDiffClick={() => openReview()} />
+          </div>
+          {/* Review diff view — mounted only when active */}
+          {centerMode === "review" && (
+            <div className="h-full animate-in fade-in duration-150 flex flex-col">
+              <div className="flex-1 min-h-0">
+                <ReviewDiffView
+                  sessionId={id}
+                  files={filteredFiles}
+                  allFiles={allDiffFiles}
+                  activeFileIndex={activeFileIndex}
+                  onFileChange={setActiveFileIndex}
+                  onBack={exitReview}
+                  commentsByLine={commentsByLine}
+                  activeCommentLine={activeCommentLine}
+                  onAddComment={handleAddComment}
+                  onSubmitComment={handleSubmitComment}
+                  onCancelComment={handleCancelComment}
+                  onUpdateComment={updateComment}
+                  onDeleteComment={deleteComment}
+                  diffSearchQuery={diffSearchQuery}
+                  onDiffSearchChange={setDiffSearchQuery}
+                />
+              </div>
+              <ReviewCommentInput
+                sessionId={id}
+                comments={comments}
+                diffFiles={filteredFiles}
+                canSendMessage={session.status !== "skipped" && session.status !== "pending" && session.sandbox_state !== "destroyed"}
+              />
+            </div>
+          )}
         </div>
+
+        {/* Session footer bar */}
+        <SessionFooter
+          status={session.status}
+          currentTurn={session.current_turn}
+          diffStats={diffStats}
+          onDiffClick={centerMode === "review" ? undefined : () => openReview()}
+          openCommentCount={footerOpenCommentCount}
+          onCommentsClick={centerMode === "review" ? undefined : () => openReview()}
+        />
       </div>
 
       {/* Detail panel (collapsible right sidebar) */}
       {showDetailPanel && (
         <>
         <ResizeHandle onResize={handleDetailResize} />
-        <div style={{ width: detailWidth }} className="border-l border-border bg-muted/20 flex flex-col shrink-0 overflow-hidden">
+        <div
+          style={{ width: detailWidth }}
+          className="border-l border-border bg-muted/20 flex flex-col shrink-0 overflow-hidden"
+        >
           {/* Detail tabs */}
-          <div className="flex items-center gap-0 border-b border-border px-2 shrink-0">
-            {detailTabs.map((tab) => (
-              <button
-                key={tab.value}
-                className={cn(
-                  "relative px-3 py-2.5 text-[12px] font-medium transition-colors",
-                  detailTab === tab.value
-                    ? "text-foreground"
-                    : "text-muted-foreground hover:text-foreground/80"
+          <Tabs
+            value={detailTab}
+            onValueChange={(v) => handleDetailTabClick(v as DetailTab)}
+            className="flex flex-col flex-1 min-h-0 gap-0"
+          >
+            <TabsList variant="line" size="sm" className="border-b border-border px-2 shrink-0 w-full">
+              <TabsTrigger value="overview">Overview</TabsTrigger>
+              <TabsTrigger value="changes">
+                Changes
+                {changesCount != null && changesCount > 0 && (
+                  <Badge variant="secondary" className="ml-1 min-w-[18px] h-[18px] rounded-full px-1 text-[10px] font-semibold leading-none">
+                    {changesCount}
+                  </Badge>
                 )}
-                onClick={() => setDetailTab(tab.value)}
-              >
-                {tab.label}
-                {detailTab === tab.value && (
-                  <span className="absolute bottom-0 left-3 right-3 h-0.5 bg-[image:var(--gradient-primary)] rounded-full" />
-                )}
-              </button>
-            ))}
-          </div>
+              </TabsTrigger>
+              {showValidationTab && (
+                <TabsTrigger value="validation">Validation</TabsTrigger>
+              )}
+            </TabsList>
 
-          {/* Detail content */}
-          <div className="flex-1 overflow-y-auto p-4">
-            {detailTab === "overview" && <OverviewTab session={session} members={members} />}
-            {detailTab === "changes" && <ChangesTab session={session} sessionId={id} />}
-            {detailTab === "validation" && <ValidationTab sessionId={id} />}
-            {detailTab === "logs" && <LogViewer runId={id} isActive={isActive} />}
-          </div>
+            <TabsContent value="changes" className="flex-1 min-h-0">
+              <ChangesTab
+                sessionId={id}
+                filteredFiles={filteredFiles}
+                activeFileIndex={activeFileIndex}
+                onFileSelect={setActiveFileIndex}
+                onOpenReview={openReview}
+                reviewedFiles={reviewedFiles}
+                onToggleReviewed={toggleReviewed}
+                comments={comments}
+                onCommentClick={handleCommentClick}
+                passes={passes}
+                passRange={passRange}
+                onPassRangeChange={setPassRange}
+                emptyStatusText={
+                  session.status === "running" || session.status === "pending"
+                    ? "Changes will appear here as the agent modifies files."
+                    : "This session did not produce any file changes."
+                }
+              />
+            </TabsContent>
+            <TabsContent value="overview" className="flex-1 overflow-y-auto p-4">
+              <OverviewTab session={session} members={members} />
+            </TabsContent>
+            {showValidationTab && (
+              <TabsContent value="validation" className="flex-1 overflow-y-auto p-4">
+                <ValidationTab sessionId={id} />
+              </TabsContent>
+            )}
+          </Tabs>
         </div>
         </>
       )}

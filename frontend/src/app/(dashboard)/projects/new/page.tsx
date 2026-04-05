@@ -2,10 +2,18 @@
 
 import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Sparkles, PenLine, Timer, Bot, ShieldCheck, TestTube2, Wrench, CalendarClock, Target } from "lucide-react";
+import {
+  Sparkles,
+  Timer,
+  Bot,
+  ShieldCheck,
+  TestTube2,
+  Wrench,
+  ChevronDown,
+  Loader2,
+} from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -17,8 +25,16 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api";
 import { AGENT_TYPE_OPTIONS } from "@/lib/model-constants";
+import { NoReposWarning } from "@/components/no-repos-warning";
+import { cn } from "@/lib/utils";
 import type { OrgSettings, Organization, SingleResponse } from "@/lib/types";
 
 const PRIORITY_OPTIONS = [
@@ -33,9 +49,6 @@ type PriorityLevel = (typeof PRIORITY_OPTIONS)[number]["value"];
 function priorityLevelToNumeric(level: PriorityLevel): number {
   return PRIORITY_OPTIONS.find((o) => o.value === level)!.numeric;
 }
-
-type CreationMode = "describe" | "form";
-type ProjectType = "one-off" | "scheduled";
 
 interface ScheduledTemplate {
   id: string;
@@ -88,10 +101,8 @@ const SCHEDULED_TEMPLATES: ScheduledTemplate[] = [
 
 export default function NewProjectPage() {
   const router = useRouter();
-  const [projectType, setProjectType] = useState<ProjectType>("one-off");
-  const [mode, setMode] = useState<CreationMode>("describe");
 
-  // AI describe mode state
+  // AI description
   const [description, setDescription] = useState("");
 
   // Form fields
@@ -108,9 +119,24 @@ export default function NewProjectPage() {
   const [selectedModel, setSelectedModel] = useState("");
   const [hasGenerated, setHasGenerated] = useState(false);
 
-  // Schedule fields
+  // Schedule
+  const [scheduleEnabled, setScheduleEnabled] = useState(false);
   const [scheduleInterval, setScheduleInterval] = useState(1);
-  const [scheduleUnit, setScheduleUnit] = useState<"hours" | "days" | "weeks">("days");
+  const [scheduleUnit, setScheduleUnit] = useState<
+    "hours" | "days" | "weeks"
+  >("days");
+
+  // Advanced section
+  const [showAdvanced, setShowAdvanced] = useState(false);
+
+  // Platform detection for keyboard shortcut hint
+  const isMac = useMemo(
+    () =>
+      typeof navigator !== "undefined"
+        ? /Mac|iPhone|iPad/.test(navigator.userAgent)
+        : true,
+    [],
+  );
 
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
     queryKey: ["settings"],
@@ -134,7 +160,8 @@ export default function NewProjectPage() {
   const repos = reposData?.data ?? [];
 
   const generateMutation = useMutation({
-    mutationFn: () => api.projects.aiGenerate({ description: description.trim() }),
+    mutationFn: () =>
+      api.projects.aiGenerate({ description: description.trim() }),
     onSuccess: (response) => {
       const gen = response.data;
       setTitle(gen.title);
@@ -143,7 +170,6 @@ export default function NewProjectPage() {
       setCompletionCriteria(gen.completion_criteria ?? "");
       setExecutionMode(gen.execution_mode || "sequential");
       setHasGenerated(true);
-      setMode("form");
     },
   });
 
@@ -154,16 +180,19 @@ export default function NewProjectPage() {
         goal: goal.trim(),
         repository_id: repositoryId,
         scope: scope.trim() || undefined,
-        completion_criteria: projectType === "one-off" ? (completionCriteria.trim() || undefined) : undefined,
+        completion_criteria: !scheduleEnabled
+          ? completionCriteria.trim() || undefined
+          : undefined,
         execution_mode: executionMode,
-        max_concurrent: executionMode === "parallel" ? maxConcurrent : undefined,
+        max_concurrent:
+          executionMode === "parallel" ? maxConcurrent : undefined,
         priority: priorityLevelToNumeric(priorityLevel),
         base_branch: baseBranch.trim() || undefined,
         agent_type: agentType || undefined,
         model: selectedModel || undefined,
-        schedule_enabled: projectType === "scheduled" ? true : undefined,
-        schedule_interval: projectType === "scheduled" ? scheduleInterval : undefined,
-        schedule_unit: projectType === "scheduled" ? scheduleUnit : undefined,
+        schedule_enabled: scheduleEnabled ? true : undefined,
+        schedule_interval: scheduleEnabled ? scheduleInterval : undefined,
+        schedule_unit: scheduleEnabled ? scheduleUnit : undefined,
       }),
     onSuccess: (response) => {
       router.push(`/projects/${response.data.id}`);
@@ -173,241 +202,224 @@ export default function NewProjectPage() {
   function applyTemplate(template: ScheduledTemplate) {
     setTitle(template.name);
     setGoal(template.goal);
+    setScheduleEnabled(true);
     setScheduleInterval(template.scheduleInterval);
     setScheduleUnit(template.scheduleUnit);
-    setMode("form");
+  }
+
+  function clearGenerated() {
+    if (hasGenerated) setHasGenerated(false);
+  }
+
+  function handleDescriptionKeyDown(e: React.KeyboardEvent) {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      if (description.trim().length > 0 && !generateMutation.isPending) {
+        generateMutation.mutate();
+      }
+    }
   }
 
   const canSubmit =
-    title.trim().length > 0 && goal.trim().length > 0 && repositoryId.length > 0;
+    title.trim().length > 0 &&
+    goal.trim().length > 0 &&
+    repositoryId.length > 0;
 
   return (
     <div className="p-6 max-w-2xl mx-auto">
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-xl font-bold text-foreground">New project</h1>
-        <p className="text-sm text-muted-foreground mt-1">Create a project for the PM agent to manage.</p>
-      </div>
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-xl font-bold text-foreground">New project</h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            Describe what you want to build and we&apos;ll set it up for you.
+          </p>
+        </div>
 
-      {/* Project Type Selector */}
-      <div className="flex gap-3">
-        <button
-          type="button"
-          onClick={() => setProjectType("one-off")}
-          className={`flex items-center gap-2 rounded-lg border px-4 py-3 text-[13px] font-medium transition-colors ${
-            projectType === "one-off"
-              ? "border-primary bg-primary/5 text-primary"
-              : "border-border bg-background text-muted-foreground hover:border-primary/40 hover:text-foreground"
-          }`}
-        >
-          <Target className="h-4 w-4" />
-          One-off project
-        </button>
-        <button
-          type="button"
-          onClick={() => setProjectType("scheduled")}
-          className={`flex items-center gap-2 rounded-lg border px-4 py-3 text-[13px] font-medium transition-colors ${
-            projectType === "scheduled"
-              ? "border-primary bg-primary/5 text-primary"
-              : "border-border bg-background text-muted-foreground hover:border-primary/40 hover:text-foreground"
-          }`}
-        >
-          <CalendarClock className="h-4 w-4" />
-          Scheduled project
-        </button>
-      </div>
-
-      {projectType === "one-off" && (
-        <p className="text-xs text-muted-foreground">
-          A one-off project runs towards a specific goal and completes when done.
-        </p>
-      )}
-      {projectType === "scheduled" && (
-        <p className="text-xs text-muted-foreground">
-          A scheduled project runs automatically on a recurring interval. Great for ongoing maintenance, triage, and monitoring tasks.
-        </p>
-      )}
-
-      {/* Scheduled Templates */}
-      {projectType === "scheduled" && mode !== "form" && (
-        <section className="space-y-3">
-          <h2 className="text-[13px] font-medium text-foreground">Start from a template</h2>
-          <div className="grid gap-3 md:grid-cols-2">
-            {SCHEDULED_TEMPLATES.map((template) => (
-              <Card key={template.id}>
-                <CardContent className="py-4">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="space-y-1.5">
-                      <div className="flex items-center gap-2">
-                        <template.icon className="h-4 w-4 text-muted-foreground" />
-                        <p className="text-sm font-medium text-foreground">{template.name}</p>
-                      </div>
-                      <p className="text-xs text-muted-foreground">{template.description}</p>
-                      <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                        <Timer className="h-3 w-3" />
-                        Every {template.scheduleInterval} {template.scheduleUnit}
-                      </div>
-                    </div>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => applyTemplate(template)}
-                    >
-                      Use
-                    </Button>
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
-          </div>
-        </section>
-      )}
-
-      {/* Creation Mode Selector */}
-      <div className="flex gap-3">
-        <button
-          type="button"
-          onClick={() => setMode("describe")}
-          className={`flex items-center gap-2 rounded-lg border px-4 py-3 text-[13px] font-medium transition-colors ${
-            mode === "describe"
-              ? "border-primary bg-primary/5 text-primary"
-              : "border-border bg-background text-muted-foreground hover:border-primary/40 hover:text-foreground"
-          }`}
-        >
-          <Sparkles className="h-4 w-4" />
-          Describe with AI
-        </button>
-        <button
-          type="button"
-          onClick={() => setMode("form")}
-          className={`flex items-center gap-2 rounded-lg border px-4 py-3 text-[13px] font-medium transition-colors ${
-            mode === "form"
-              ? "border-primary bg-primary/5 text-primary"
-              : "border-border bg-background text-muted-foreground hover:border-primary/40 hover:text-foreground"
-          }`}
-        >
-          <PenLine className="h-4 w-4" />
-          Fill out manually
-        </button>
-      </div>
-
-      {/* AI Describe Mode */}
-      {mode === "describe" && (
-        <Card>
-          <CardContent className="space-y-4 pt-6">
-            <div className="space-y-2">
-              <Label htmlFor="description">Describe your project</Label>
-              <Textarea
-                id="description"
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder={
-                  projectType === "scheduled"
-                    ? 'Describe what this scheduled project should do each run. For example: "Every day, scan for flaky tests in CI, reproduce them locally, and open PRs with fixes."'
-                    : 'Describe what you want to build in plain language. For example: "Add dark mode support across the entire app. It should respect the user\'s OS preference and also have a manual toggle in settings."'
-                }
-                rows={6}
-              />
-              <p className="text-xs text-muted-foreground">
-                We&apos;ll use AI to turn your description into a structured project. You can edit everything before creating.
-              </p>
-            </div>
-
-            <div className="flex items-center gap-3">
-              <Button
-                onClick={() => generateMutation.mutate()}
-                disabled={description.trim().length === 0 || generateMutation.isPending}
-              >
-                <Sparkles className="mr-2 h-4 w-4" />
-                {generateMutation.isPending ? "Generating..." : "Generate project"}
-              </Button>
-              {generateMutation.isError && (
-                <p className="text-xs text-destructive">
-                  Failed to generate project. Try again or switch to manual mode.
-                </p>
+        {/* ── AI Description Input ─────────────────────────────── */}
+        <div className="space-y-2">
+          <div className="relative">
+            <Textarea
+              id="description"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              onKeyDown={handleDescriptionKeyDown}
+              placeholder='Describe your project in plain language, e.g. "Add dark mode support across the entire app with an OS-preference toggle in settings"'
+              rows={3}
+              className="pr-24 resize-none"
+            />
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => generateMutation.mutate()}
+              disabled={
+                description.trim().length === 0 || generateMutation.isPending
+              }
+              className="absolute right-2 bottom-2 h-7 gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+            >
+              {generateMutation.isPending ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Sparkles className="h-3.5 w-3.5" />
               )}
+              {generateMutation.isPending ? "Generating" : "Generate"}
+            </Button>
+          </div>
+          <p className="text-[11px] text-muted-foreground/60">
+            {generateMutation.isPending
+              ? "Generating project details..."
+              : `Press ${isMac ? "⌘" : "Ctrl+"} Enter to generate, or fill in the form directly below.`}
+          </p>
+          {generateMutation.isError && (
+            <p className="text-xs text-destructive">
+              Failed to generate. Try again or fill in the form manually.
+            </p>
+          )}
+        </div>
+
+        {/* ── Divider ──────────────────────────────────────────── */}
+        <div className="relative">
+          <div className="absolute inset-0 flex items-center">
+            <span className="w-full border-t" />
+          </div>
+          <div className="relative flex justify-center text-[11px]">
+            <span className="bg-background px-3 text-muted-foreground/50">
+              project details
+            </span>
+          </div>
+        </div>
+
+        {/* ── Main Form ────────────────────────────────────────── */}
+        <div className="space-y-4 rounded-lg border border-border bg-card p-5">
+          {hasGenerated && (
+            <div className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2.5 text-[13px] text-primary flex items-center gap-2">
+              <Sparkles className="h-3.5 w-3.5 shrink-0" />
+              Generated from your description. Review and edit as needed.
             </div>
-          </CardContent>
-        </Card>
-      )}
+          )}
 
-      {/* Manual Form Mode */}
-      {mode === "form" && (
-        <Card>
-          <CardContent className="space-y-5 pt-6">
-            {hasGenerated && (
-              <div className="rounded-md border border-primary/20 bg-primary/5 px-4 py-3 text-[13px] text-primary">
-                Project details generated from your description. Review and edit as needed, then select a repository and create.
-              </div>
-            )}
+          <div className="space-y-1.5">
+            <Label htmlFor="title">Title</Label>
+            <Input
+              id="title"
+              value={title}
+              onChange={(e) => {
+                setTitle(e.target.value);
+                clearGenerated();
+              }}
+              placeholder="Project title"
+            />
+          </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="title">Title</Label>
-              <Input
-                id="title"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="Project title"
-              />
-            </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="goal">Goal</Label>
+            <Textarea
+              id="goal"
+              value={goal}
+              onChange={(e) => {
+                setGoal(e.target.value);
+                clearGenerated();
+              }}
+              placeholder={
+                scheduleEnabled
+                  ? "What should this project do on each scheduled run?"
+                  : "What should this project accomplish?"
+              }
+              rows={3}
+            />
+          </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="goal">Goal</Label>
+          <div className="space-y-1.5">
+            <Label htmlFor="scope">
+              Scope{" "}
+              <span className="text-muted-foreground font-normal">
+                (optional)
+              </span>
+            </Label>
+            <Textarea
+              id="scope"
+              value={scope}
+              onChange={(e) => setScope(e.target.value)}
+              placeholder="What files or areas are in scope?"
+              rows={2}
+            />
+          </div>
+
+          {!scheduleEnabled && (
+            <div className="space-y-1.5">
+              <Label htmlFor="completion-criteria">
+                Completion criteria{" "}
+                <span className="text-muted-foreground font-normal">
+                  (optional)
+                </span>
+              </Label>
               <Textarea
-                id="goal"
-                value={goal}
-                onChange={(e) => setGoal(e.target.value)}
-                placeholder={
-                  projectType === "scheduled"
-                    ? "What should this project do on each scheduled run?"
-                    : "What should this project accomplish?"
-                }
-                rows={3}
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="scope">Scope (optional)</Label>
-              <Textarea
-                id="scope"
-                value={scope}
-                onChange={(e) => setScope(e.target.value)}
-                placeholder="What files/areas are in scope?"
+                id="completion-criteria"
+                value={completionCriteria}
+                onChange={(e) => setCompletionCriteria(e.target.value)}
+                placeholder="How do we know the project is done?"
                 rows={2}
               />
             </div>
+          )}
 
-            {projectType === "one-off" && (
-              <div className="space-y-2">
-                <Label htmlFor="completion-criteria">
-                  Completion Criteria (optional)
-                </Label>
-                <Textarea
-                  id="completion-criteria"
-                  value={completionCriteria}
-                  onChange={(e) => setCompletionCriteria(e.target.value)}
-                  placeholder="How do we know the project is done?"
-                  rows={2}
-                />
-              </div>
-            )}
+          {repos.length === 0 && <NoReposWarning />}
 
-            {/* Schedule Config - only for scheduled projects */}
-            {projectType === "scheduled" && (
-              <div className="space-y-2">
-                <Label>Schedule</Label>
+          <div className="space-y-1.5">
+            <Label>Repository</Label>
+            <Select value={repositoryId} onValueChange={setRepositoryId}>
+              <SelectTrigger>
+                <SelectValue placeholder="Select a repository" />
+              </SelectTrigger>
+              <SelectContent>
+                {repos.map((repo) => (
+                  <SelectItem key={repo.id} value={repo.id}>
+                    {repo.full_name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          {/* ── Schedule toggle ───────────────────────────────── */}
+          <div className="rounded-lg border border-border p-3 space-y-3">
+            <div className="flex items-center justify-between">
+              <Label
+                htmlFor="schedule-toggle"
+                className="flex items-center gap-2 cursor-pointer font-medium"
+              >
+                <Timer className="h-4 w-4 text-muted-foreground" />
+                Run on a schedule
+              </Label>
+              <Switch
+                id="schedule-toggle"
+                checked={scheduleEnabled}
+                onCheckedChange={setScheduleEnabled}
+              />
+            </div>
+
+            {scheduleEnabled && (
+              <div className="space-y-3">
                 <div className="flex items-center gap-2">
-                  <span className="text-sm text-muted-foreground">Run every</span>
+                  <span className="text-sm text-muted-foreground">
+                    Run every
+                  </span>
                   <Input
                     type="number"
                     min={1}
                     max={365}
                     value={scheduleInterval}
-                    onChange={(e) => setScheduleInterval(Number(e.target.value))}
-                    className="w-20"
+                    onChange={(e) =>
+                      setScheduleInterval(Number(e.target.value))
+                    }
+                    className="w-20 h-8"
                   />
-                  <Select value={scheduleUnit} onValueChange={(v) => setScheduleUnit(v as "hours" | "days" | "weeks")}>
-                    <SelectTrigger className="w-28">
+                  <Select
+                    value={scheduleUnit}
+                    onValueChange={(v) =>
+                      setScheduleUnit(v as "hours" | "days" | "weeks")
+                    }
+                  >
+                    <SelectTrigger className="w-28 h-8">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -417,151 +429,184 @@ export default function NewProjectPage() {
                     </SelectContent>
                   </Select>
                 </div>
+
+                {/* Template quick-start pills */}
+                <div className="space-y-1.5">
+                  <p className="text-[11px] text-muted-foreground/60">
+                    Quick start from a template
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {SCHEDULED_TEMPLATES.map((template) => (
+                      <button
+                        key={template.id}
+                        type="button"
+                        onClick={() => applyTemplate(template)}
+                        className="inline-flex items-center gap-1.5 rounded-full border border-border bg-background px-2.5 py-1 text-[11px] text-muted-foreground hover:border-primary/40 hover:text-foreground transition-colors"
+                      >
+                        <template.icon className="h-3 w-3" />
+                        {template.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
             )}
+          </div>
 
-            <div className="space-y-2">
-              <Label>Repository</Label>
-              <Select value={repositoryId} onValueChange={setRepositoryId}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select a repository" />
-                </SelectTrigger>
-                <SelectContent>
-                  {repos.map((repo) => (
-                    <SelectItem key={repo.id} value={repo.id}>
-                      {repo.full_name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="grid gap-4 md:grid-cols-2">
-              <div className="space-y-2">
-                <Label>Agent</Label>
-                <Select
-                  value={agentType}
-                  onValueChange={(value) => {
-                    setAgentType(value);
-                    setSelectedModel("");
-                  }}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder={`Default (${AGENT_TYPE_OPTIONS.find((a) => a.key === defaultAgentType)?.label ?? defaultAgentType})`} />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {AGENT_TYPE_OPTIONS.map((agent) => (
-                      <SelectItem key={agent.key} value={agent.key}>
-                        {agent.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="space-y-2">
-                <Label>Model</Label>
-                <Select value={selectedModel} onValueChange={setSelectedModel}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Default model" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {availableModels.map((model) => (
-                      <SelectItem key={model} value={model}>
-                        {model}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <Label>Execution mode</Label>
-              <RadioGroup
-                value={executionMode}
-                onValueChange={setExecutionMode}
-                className="flex gap-4"
-              >
-                <div className="flex items-center space-x-2">
-                  <RadioGroupItem value="sequential" id="exec-sequential" />
-                  <Label htmlFor="exec-sequential" className="font-normal">
-                    Sequential
-                  </Label>
-                </div>
-                <div className="flex items-center space-x-2">
-                  <RadioGroupItem value="parallel" id="exec-parallel" />
-                  <Label htmlFor="exec-parallel" className="font-normal">
-                    Parallel
-                  </Label>
-                </div>
-              </RadioGroup>
-            </div>
-
-            {executionMode === "parallel" && (
-              <div className="space-y-2">
-                <Label htmlFor="max-concurrent">Max concurrent tasks</Label>
-                <Input
-                  id="max-concurrent"
-                  type="number"
-                  min={1}
-                  max={10}
-                  value={maxConcurrent}
-                  onChange={(e) => setMaxConcurrent(Number(e.target.value))}
-                />
-              </div>
-            )}
-
-            <div className="space-y-2">
-              <Label>Priority</Label>
-              <Select
-                value={priorityLevel}
-                onValueChange={(v) => setPriorityLevel(v as PriorityLevel)}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {PRIORITY_OPTIONS.map((opt) => (
-                    <SelectItem key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="base-branch">Base branch</Label>
-              <Input
-                id="base-branch"
-                value={baseBranch}
-                onChange={(e) => setBaseBranch(e.target.value)}
-                placeholder="main"
+          {/* ── Advanced Settings ─────────────────────────────── */}
+          <Collapsible open={showAdvanced} onOpenChange={setShowAdvanced}>
+            <CollapsibleTrigger className="flex items-center gap-1.5 text-[13px] text-muted-foreground hover:text-foreground transition-colors py-1">
+              <ChevronDown
+                className={cn(
+                  "h-3.5 w-3.5 transition-transform",
+                  showAdvanced && "rotate-180",
+                )}
               />
-            </div>
+              Advanced options
+            </CollapsibleTrigger>
+            <CollapsibleContent className="space-y-4 pt-3">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label>Agent</Label>
+                  <Select
+                    value={agentType}
+                    onValueChange={(value) => {
+                      setAgentType(value);
+                      setSelectedModel("");
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue
+                        placeholder={`Default (${AGENT_TYPE_OPTIONS.find((a) => a.key === defaultAgentType)?.label ?? defaultAgentType})`}
+                      />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {AGENT_TYPE_OPTIONS.map((agent) => (
+                        <SelectItem key={agent.key} value={agent.key}>
+                          {agent.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
 
-            <div className="flex items-center gap-3 pt-2">
-              <Button
-                onClick={() => createMutation.mutate()}
-                disabled={!canSubmit || createMutation.isPending}
-              >
-                {createMutation.isPending
-                  ? "Creating..."
-                  : projectType === "scheduled"
-                    ? "Create scheduled project"
-                    : "Create project"}
-              </Button>
-              {createMutation.isError && (
-                <p className="text-xs text-destructive">
-                  Failed to create project. Please try again.
-                </p>
+                <div className="space-y-1.5">
+                  <Label>Model</Label>
+                  <Select
+                    value={selectedModel}
+                    onValueChange={setSelectedModel}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Default model" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {availableModels.map((model) => (
+                        <SelectItem key={model} value={model}>
+                          {model}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label>Execution mode</Label>
+                <RadioGroup
+                  value={executionMode}
+                  onValueChange={setExecutionMode}
+                  className="flex gap-4"
+                >
+                  <div className="flex items-center space-x-2">
+                    <RadioGroupItem
+                      value="sequential"
+                      id="exec-sequential"
+                    />
+                    <Label htmlFor="exec-sequential" className="font-normal">
+                      Sequential
+                    </Label>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <RadioGroupItem value="parallel" id="exec-parallel" />
+                    <Label htmlFor="exec-parallel" className="font-normal">
+                      Parallel
+                    </Label>
+                  </div>
+                </RadioGroup>
+              </div>
+
+              {executionMode === "parallel" && (
+                <div className="space-y-1.5">
+                  <Label htmlFor="max-concurrent">Max concurrent tasks</Label>
+                  <Input
+                    id="max-concurrent"
+                    type="number"
+                    min={1}
+                    max={10}
+                    value={maxConcurrent}
+                    onChange={(e) => setMaxConcurrent(Number(e.target.value))}
+                  />
+                </div>
               )}
-            </div>
-          </CardContent>
-        </Card>
-      )}
-    </div>
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label>Priority</Label>
+                  <Select
+                    value={priorityLevel}
+                    onValueChange={(v) =>
+                      setPriorityLevel(v as PriorityLevel)
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {PRIORITY_OPTIONS.map((opt) => (
+                        <SelectItem key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label htmlFor="base-branch">Base branch</Label>
+                  <Input
+                    id="base-branch"
+                    value={baseBranch}
+                    onChange={(e) => setBaseBranch(e.target.value)}
+                    placeholder="main"
+                  />
+                </div>
+              </div>
+            </CollapsibleContent>
+          </Collapsible>
+
+          {/* ── Submit ────────────────────────────────────────── */}
+          <div className="flex items-center gap-3 pt-2">
+            <Button
+              onClick={() => createMutation.mutate()}
+              disabled={!canSubmit || createMutation.isPending}
+            >
+              {createMutation.isPending ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Creating...
+                </>
+              ) : (
+                "Create project"
+              )}
+            </Button>
+            {createMutation.isError && (
+              <p className="text-xs text-destructive">
+                Failed to create project. Please try again.
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

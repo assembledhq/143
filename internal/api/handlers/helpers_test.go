@@ -93,7 +93,8 @@ func TestWriteError(t *testing.T) {
 	t.Parallel()
 
 	w := httptest.NewRecorder()
-	writeError(w, http.StatusBadRequest, "BAD_REQUEST", "something went wrong")
+	r := httptest.NewRequest(http.MethodGet, "/test", nil)
+	writeError(w, r, http.StatusBadRequest, "BAD_REQUEST", "something went wrong")
 
 	require.Equal(t, http.StatusBadRequest, w.Code, "should return expected status code")
 	require.Contains(t, w.Body.String(), "BAD_REQUEST", "should contain error code")

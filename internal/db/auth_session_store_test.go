@@ -20,10 +20,11 @@ var sessionColumns = []string{
 	"container_id", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
-	"pm_plan_id", "pm_approach", "pm_reasoning",
+	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at",
-	"sandbox_state", "snapshot_key",
+	"sandbox_state", "snapshot_key", "target_branch", "working_branch",
+	"repository_id", "diff_stats", "diff_history",
 	"created_at",
 }
 
@@ -34,7 +35,7 @@ func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 		nil, nil, nil, json.RawMessage(`{}`),
 		nil, nil, []string{}, nil,
 		nil, json.RawMessage(`{}`), nil, nil, nil,
-		nil, nil, nil,
+		nil, nil, nil, nil,
 		nil, // project_task_id
 		nil, // model_override
 		nil, // triggered_by_user_id
@@ -43,6 +44,11 @@ func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 		nil, // last_activity_at
 		"none", // sandbox_state
 		nil,    // snapshot_key
+		nil,    // target_branch
+		nil,    // working_branch
+		nil,    // repository_id
+		nil,    // diff_stats
+		nil,    // diff_history
 		now,
 	}
 }
@@ -79,7 +85,7 @@ func TestSessionStore_ListByOrg(t *testing.T) {
 		},
 		{
 			name:    "returns filtered agent runs by status",
-			filters: SessionFilters{Status: models.SessionStatusRunning},
+			filters: SessionFilters{Statuses: []models.SessionStatus{models.SessionStatusRunning}},
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id .+ AND status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -89,6 +95,20 @@ func TestSessionStore_ListByOrg(t *testing.T) {
 					)
 			},
 			expected: 1,
+		},
+		{
+			name:    "returns filtered agent runs by multiple statuses",
+			filters: SessionFilters{Statuses: []models.SessionStatus{models.SessionStatusPending, models.SessionStatusRunning}},
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id .+ AND status = ANY").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionColumns).
+							AddRow(newSessionRow(runID1, issueID, orgID, now)...).
+							AddRow(newSessionRow(runID2, issueID, orgID, now)...),
+					)
+			},
+			expected: 2,
 		},
 		{
 			name:    "returns only ad-hoc runs when AdHocOnly is true",
@@ -237,7 +257,8 @@ func TestSessionStore_Create(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at"}).
 				AddRow(generatedID, now),
@@ -274,7 +295,8 @@ func TestSessionStore_Create_AllowsNilIssueID(t *testing.T) {
 		WithArgs(nil, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at"}).
 				AddRow(generatedID, now),

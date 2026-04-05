@@ -68,13 +68,13 @@ describe("buildTimeline", () => {
     expect(result[0].kind).toBe("error");
   });
 
-  it("keeps streamed assistant output logs until a persisted assistant message exists", () => {
+  it("shows streamed assistant output logs as assistant_output when no persisted message exists", () => {
     const logs = [
       makeLog({ id: 1, created_at: "2026-01-01T00:00:01Z", level: "output", message: "assistant text" }),
     ];
     const result = buildTimeline([], logs);
     expect(result).toHaveLength(1);
-    expect(result[0].kind).toBe("log");
+    expect(result[0].kind).toBe("assistant_output");
   });
 
   it("filters duplicate output-level logs after the assistant message is persisted", () => {

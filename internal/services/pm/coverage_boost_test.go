@@ -708,12 +708,12 @@ func TestCanDispatchForProject_DependencyGraphMode(t *testing.T) {
 		ExecutionMode: models.ProjectExecModeDependencyGraph,
 	}
 
-	t.Run("no active tasks allows 1", func(t *testing.T) {
+	t.Run("no active tasks allows 1", func(t *testing.T) { //nolint:paralleltest // subtests share mutable mock state
 		got := svc.canDispatchForProject(context.Background(), uuid.New(), project)
 		require.Equal(t, 1, got)
 	})
 
-	t.Run("active tasks blocks dispatch", func(t *testing.T) {
+	t.Run("active tasks blocks dispatch", func(t *testing.T) { //nolint:paralleltest // subtests share mutable mock state
 		pts.countByStatus = map[string]int{string(models.ProjectTaskStatusRunning): 1}
 		got := svc.canDispatchForProject(context.Background(), uuid.New(), project)
 		require.Equal(t, 0, got)
@@ -901,7 +901,7 @@ func TestSummarizeIssue_NilDescription(t *testing.T) {
 
 	issue := models.Issue{
 		ID:          uuid.New(),
-		Source:      "github",
+		Source:      models.IssueSource("github"),
 		Title:       "Issue without description",
 		Description: nil,
 		Severity:    "low",
@@ -909,7 +909,7 @@ func TestSummarizeIssue_NilDescription(t *testing.T) {
 		LastSeenAt:  time.Now(),
 	}
 
-	summary := summarizeIssue(issue)
+	summary := summarizeIssue(issue, 500)
 	require.Equal(t, "", summary.Description)
 }
 
@@ -1135,6 +1135,7 @@ func TestDispatchProjectTasks_TaskWithApproachAndReasoning(t *testing.T) {
 	dispatched := svc.dispatchProjectTasks(context.Background(), orgID, project, settings, uuid.New())
 	require.Equal(t, 1, dispatched)
 	require.Len(t, sessions.created, 1)
+	require.NotNil(t, sessions.created[0].Title, "session title should be set")
 	require.Equal(t, "my approach", *sessions.created[0].PMApproach)
 	require.Equal(t, "my reasoning", *sessions.created[0].PMReasoning)
 	require.Equal(t, "high", sessions.created[0].TokenMode, "complex should map to high")

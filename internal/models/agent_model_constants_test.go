@@ -23,7 +23,7 @@ func TestClaudeCodeModelConstants(t *testing.T) {
 	t.Parallel()
 
 	require.Equal(t,
-		[]string{ClaudeCodeModelOpus, ClaudeCodeModelSonnet, ClaudeCodeModelHaiku},
+		[]string{ClaudeCodeModelOpus, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet, ClaudeCodeModelHaiku},
 		AvailableClaudeCodeModels,
 		"AvailableClaudeCodeModels should be ordered by capability",
 	)
@@ -43,7 +43,7 @@ func TestCodexModelConstants(t *testing.T) {
 	t.Parallel()
 
 	require.Equal(t,
-		[]string{CodexModelGPT53Codex, CodexModelGPT52Codex, CodexModelGPT5Codex, CodexModelGPT53CodexSpark},
+		[]string{CodexModelGPT54, CodexModelGPT54Mini, CodexModelGPT53Codex, CodexModelGPT52Codex, CodexModelGPT5Codex, CodexModelGPT53CodexSpark},
 		AvailableCodexModels,
 		"AvailableCodexModels should include the latest Codex model family",
 	)
@@ -54,7 +54,7 @@ func TestLLMModelConstants(t *testing.T) {
 
 	require.Equal(t, []string{
 		"claude-opus-4-6", "claude-sonnet-4-5", "claude-haiku-4-5",
-		"gpt-4o", "gpt-4o-mini", "o3-mini",
+		"gpt-4o", "gpt-4o-mini", "gpt-5.4-mini", "gpt-5-nano", "o3-mini",
 	}, AvailableLLMModels, "AvailableLLMModels should contain all supported LLM models")
 }
 
@@ -67,7 +67,7 @@ func TestLLMModelsByProvider(t *testing.T) {
 	require.Contains(t, byProvider, "openai")
 	require.Contains(t, byProvider, "openrouter")
 	require.Equal(t, []string{"claude-opus-4-6", "claude-sonnet-4-5", "claude-haiku-4-5"}, byProvider["anthropic"])
-	require.Equal(t, []string{"gpt-4o", "gpt-4o-mini", "o3-mini"}, byProvider["openai"])
+	require.Equal(t, []string{"gpt-4o", "gpt-4o-mini", "gpt-5.4-mini", "gpt-5-nano", "o3-mini"}, byProvider["openai"])
 }
 
 func TestIsSupportedLLMModel(t *testing.T) {
@@ -169,6 +169,19 @@ func TestValidateSettingsModels(t *testing.T) {
 			settings: OrgSettings{
 				LLMModel: "gpt-4o",
 			},
+		},
+		{
+			name: "accepts valid reasoning effort",
+			settings: OrgSettings{
+				LLMReasoningEffort: ReasoningEffortLow,
+			},
+		},
+		{
+			name: "rejects invalid reasoning effort",
+			settings: OrgSettings{
+				LLMReasoningEffort: "invalid",
+			},
+			wantErr: true,
 		},
 		{
 			name: "rejects invalid llm model",

@@ -23,6 +23,16 @@ func newTestWorker(t *testing.T) (*Worker, pgxmock.PgxPoolIface) {
 	return w, mock
 }
 
+func TestRetryableError(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("capacity reached")
+	retryable := &RetryableError{Err: cause}
+
+	require.Equal(t, "capacity reached", retryable.Error(), "Error should return the wrapped error message")
+	require.ErrorIs(t, retryable.Unwrap(), cause, "Unwrap should expose the wrapped error")
+}
+
 // ---------------------------------------------------------------------------
 // Direct tests for job lifecycle methods
 // ---------------------------------------------------------------------------
@@ -115,6 +125,66 @@ func TestWorker_DeadLetterJob(t *testing.T) {
 	w.deadLetterJob(context.Background(), jobID, errMsg)
 
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestWorker_LifecycleMethodsLogWarningOnExecFailure(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		expectSQL     string
+		invoke        func(w *Worker, ctx context.Context, jobID uuid.UUID)
+		expectedArg1  string
+	}{
+		{
+			name:      "succeedJob logs warning when update fails",
+			expectSQL: "UPDATE jobs SET status = 'succeeded'",
+			invoke: func(w *Worker, ctx context.Context, jobID uuid.UUID) {
+				w.succeedJob(ctx, jobID)
+			},
+		},
+		{
+			name:      "failJob logs warning when update fails",
+			expectSQL: "UPDATE jobs SET status = 'failed'",
+			invoke: func(w *Worker, ctx context.Context, jobID uuid.UUID) {
+				w.failJob(ctx, jobID, "boom")
+			},
+			expectedArg1: "boom",
+		},
+		{
+			name:      "deadLetterJob logs warning when update fails",
+			expectSQL: "UPDATE jobs SET status = 'dead_letter'",
+			invoke: func(w *Worker, ctx context.Context, jobID uuid.UUID) {
+				w.deadLetterJob(ctx, jobID, "boom")
+			},
+			expectedArg1: "boom",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			w, mock := newTestWorker(t)
+			defer mock.Close()
+
+			jobID := uuid.New()
+			if tt.expectedArg1 == "" {
+				mock.ExpectExec(tt.expectSQL).
+					WithArgs(jobID).
+					WillReturnError(errors.New("write failed"))
+			} else {
+				mock.ExpectExec(tt.expectSQL).
+					WithArgs(tt.expectedArg1, jobID).
+					WillReturnError(errors.New("write failed"))
+			}
+
+			require.NotPanics(t, func() {
+				tt.invoke(w, context.Background(), jobID)
+			}, "lifecycle helpers should swallow best-effort update failures after logging")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -405,7 +475,7 @@ func TestWorker_Start_StopsOnContextCancel(t *testing.T) {
 	select {
 	case <-done:
 		// Worker stopped as expected.
-	case <-time.After(2 * time.Second):
+	case <-time.After(500 * time.Millisecond):
 		t.Fatal("Worker.Start did not stop after context cancellation")
 	}
 }

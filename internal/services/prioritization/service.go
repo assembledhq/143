@@ -10,7 +10,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
 
 	llmpkg "github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/models"
@@ -54,10 +53,10 @@ type jobStore interface {
 // unification is not done because the nested struct shapes differ slightly
 // (e.g. ConfidenceThresholds, PriorityWeights use inline structs here).
 type OrgSettings struct {
-	AutonomyLevel    string `json:"autonomy_level"`
-	Aggressiveness   int    `json:"execution_aggressiveness"`
-	MaxConcurrentRuns int   `json:"max_concurrent_runs"`
-	AgentAutonomy    string `json:"agent_autonomy"`
+	AutonomyLevel        string `json:"autonomy_level"`
+	Aggressiveness       int    `json:"execution_aggressiveness"`
+	MaxConcurrentRuns    int    `json:"max_concurrent_runs"`
+	AgentAutonomy        string `json:"agent_autonomy"`
 	ConfidenceThresholds struct {
 		AutoProceed float64 `json:"auto_proceed"`
 		HumanReview float64 `json:"human_review"`
@@ -79,7 +78,7 @@ const (
 	defaultWeightSeverity       = 0.25
 	defaultWeightRecency        = 0.20
 	defaultWeightRevenueRisk    = 0.20
-	defaultMaxConcurrentRuns    = 3
+	defaultMaxConcurrentRuns    = 10
 	defaultMinPriorityThreshold = 30.0
 
 	// recencyHalfLifeHours is the half-life in hours for recency decay (1 week).
@@ -92,7 +91,7 @@ type Service struct {
 	issues     issueStore
 	priorities priorityScoreStore
 	complexity complexityEstimateStore
-	sessions  sessionStore
+	sessions   sessionStore
 	orgs       orgStore
 	jobs       jobStore
 	llm        llmpkg.Client // can be nil
@@ -114,7 +113,7 @@ func NewService(
 		issues:     issues,
 		priorities: priorities,
 		complexity: complexity,
-		sessions:  sessions,
+		sessions:   sessions,
 		orgs:       orgs,
 		jobs:       jobs,
 		llm:        llmClient,
@@ -134,7 +133,7 @@ func (s *Service) ComputeScore(ctx context.Context, orgID, issueID uuid.UUID) (*
 		return nil, fmt.Errorf("fetch org: %w", err)
 	}
 
-	settings := parseOrgSettings(org.Settings)
+	settings := parseOrgSettings(s.logger, org.Settings)
 
 	// Compute sub-scores.
 	customerImpact := computeCustomerImpact(issue.AffectedCustomerCount, issue.OccurrenceCount)
@@ -276,7 +275,7 @@ func (s *Service) CheckAutoTrigger(ctx context.Context, orgID uuid.UUID, score *
 	if err != nil {
 		return fmt.Errorf("fetch org: %w", err)
 	}
-	settings := parseOrgSettings(org.Settings)
+	settings := parseOrgSettings(s.logger, org.Settings)
 
 	// Gate 1: autonomy level.
 	if settings.AutonomyLevel == string(models.AutonomyLevelManual) {
@@ -331,12 +330,12 @@ func (s *Service) CheckAutoTrigger(ctx context.Context, orgID uuid.UUID, score *
 		agentType = models.DefaultDefaultAgentType
 	}
 	run := &models.Session{
-		IssueID:       issue.ID,
-		OrgID:         orgID,
-		AgentType:     agentType,
-		Status:        "pending",
-		AutonomyLevel: settings.AutonomyLevel,
-		TokenMode:     "low",
+		IssueID:        issue.ID,
+		OrgID:          orgID,
+		AgentType:      agentType,
+		Status:         "pending",
+		AutonomyLevel:  settings.AutonomyLevel,
+		TokenMode:      "low",
 		ComplexityTier: &estimate.Tier,
 	}
 	if err := s.sessions.Create(ctx, run); err != nil {
@@ -345,7 +344,7 @@ func (s *Service) CheckAutoTrigger(ctx context.Context, orgID uuid.UUID, score *
 
 	payload := map[string]string{
 		"session_id": run.ID.String(),
-		"org_id":       orgID.String(),
+		"org_id":     orgID.String(),
 	}
 	dedupeKey := fmt.Sprintf("run_agent:%s", run.ID.String())
 	if _, err := s.jobs.Enqueue(ctx, orgID, "agent", "run_agent", payload, 5, &dedupeKey); err != nil {
@@ -493,11 +492,11 @@ func heuristicComplexity(issue *models.Issue) (tier int, label string, confidenc
 }
 
 // parseOrgSettings parses OrgSettings from raw JSON, returning defaults for missing values.
-func parseOrgSettings(raw json.RawMessage) OrgSettings {
+func parseOrgSettings(logger zerolog.Logger, raw json.RawMessage) OrgSettings {
 	var settings OrgSettings
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &settings); err != nil {
-			log.Warn().Err(err).Msg("failed to parse org settings for prioritization, using defaults")
+			logger.Warn().Err(err).Msg("failed to parse org settings for prioritization, using defaults")
 		}
 	}
 	return settings

@@ -57,11 +57,11 @@ describe('ProjectSidebar', () => {
     renderWithProviders(<ProjectSidebar />);
     await screen.findByText('Test Project');
 
-    expect(screen.getByRole('button', { name: /All/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Active/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Draft/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Done/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Paused/ })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /All/ })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /Active/ })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /Draft/ })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /Done/ })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /Paused/ })).toBeInTheDocument();
   });
 
   it('has search input', () => {

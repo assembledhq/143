@@ -82,7 +82,7 @@ type Issue struct {
 	ID                    uuid.UUID       `db:"id" json:"id"`
 	OrgID                 uuid.UUID       `db:"org_id" json:"org_id"`
 	ExternalID            string          `db:"external_id" json:"external_id"`
-	Source                string          `db:"source" json:"source"`
+	Source                IssueSource     `db:"source" json:"source"`
 	SourceIntegrationID   *uuid.UUID      `db:"source_integration_id" json:"source_integration_id,omitempty"`
 	RepositoryID          *uuid.UUID      `db:"repository_id" json:"repository_id,omitempty"`
 	Title                 string          `db:"title" json:"title"`
@@ -127,6 +127,7 @@ type Session struct {
 	ResultSummary        *string         `db:"result_summary" json:"result_summary,omitempty"`
 	Diff                 *string         `db:"diff" json:"diff,omitempty"`
 	PMPlanID             *uuid.UUID      `db:"pm_plan_id" json:"pm_plan_id,omitempty"`
+	Title                *string         `db:"title" json:"title,omitempty"`
 	PMApproach           *string         `db:"pm_approach" json:"pm_approach,omitempty"`
 	PMReasoning          *string         `db:"pm_reasoning" json:"pm_reasoning,omitempty"`
 	ProjectTaskID        *uuid.UUID      `db:"project_task_id" json:"project_task_id,omitempty"`
@@ -137,7 +138,21 @@ type Session struct {
 	LastActivityAt       *time.Time      `db:"last_activity_at" json:"last_activity_at,omitempty"`
 	SandboxState         string          `db:"sandbox_state" json:"sandbox_state"`
 	SnapshotKey          *string         `db:"snapshot_key" json:"snapshot_key,omitempty"`
+	TargetBranch         *string         `db:"target_branch" json:"target_branch,omitempty"`
+	WorkingBranch        *string         `db:"working_branch" json:"working_branch,omitempty"`
+	RepositoryID         *uuid.UUID      `db:"repository_id" json:"repository_id,omitempty"`
+	DiffStats   json.RawMessage `db:"diff_stats" json:"diff_stats,omitempty"`   // nil for list queries (excluded to reduce payload size)
+	// DiffHistory is only populated on single-session fetches (GetByID, ClaimIdle, etc.).
+	// List queries return NULL to avoid multi-megabyte payloads — do not rely on this
+	// field being non-nil unless the session was fetched individually.
+	DiffHistory json.RawMessage `db:"diff_history" json:"diff_history,omitempty"`
 	CreatedAt            time.Time       `db:"created_at" json:"created_at"`
+}
+
+// SessionDetail is the API response for a single session, enriched with threads.
+type SessionDetail struct {
+	Session
+	Threads []SessionThread `json:"threads"`
 }
 
 // SessionResult holds the result fields to update on an agent run.
@@ -149,6 +164,7 @@ type SessionResult struct {
 	ResultSummary       *string         `json:"result_summary,omitempty"`
 	Diff                *string         `json:"diff,omitempty"`
 	Error               *string         `json:"error,omitempty"`
+	FailureCategory     *string         `json:"failure_category,omitempty"`
 }
 
 // Validation represents validation results for an agent run.
@@ -191,6 +207,7 @@ type PullRequest struct {
 type SessionLog struct {
 	ID         int64           `db:"id" json:"id"`
 	SessionID  uuid.UUID       `db:"session_id" json:"session_id"`
+	ThreadID   *uuid.UUID      `db:"thread_id" json:"thread_id,omitempty"`
 	Timestamp  time.Time       `db:"timestamp" json:"created_at"`
 	Level      string          `db:"level" json:"level"`
 	Message    string          `db:"message" json:"message"`
@@ -203,6 +220,7 @@ type SessionMessage struct {
 	ID          int64           `db:"id" json:"id"`
 	SessionID   uuid.UUID       `db:"session_id" json:"session_id"`
 	OrgID       uuid.UUID       `db:"org_id" json:"org_id"`
+	ThreadID    *uuid.UUID      `db:"thread_id" json:"thread_id,omitempty"`
 	UserID      *uuid.UUID      `db:"user_id" json:"user_id,omitempty"`
 	TurnNumber  int             `db:"turn_number" json:"turn_number"`
 	Role        MessageRole     `db:"role" json:"role"`
@@ -210,6 +228,32 @@ type SessionMessage struct {
 	Attachments []string        `db:"attachments" json:"attachments,omitempty"`
 	TokenUsage  json.RawMessage `db:"token_usage" json:"token_usage,omitempty"`
 	CreatedAt   time.Time       `db:"created_at" json:"created_at"`
+}
+
+// SessionThread represents an agent thread within a multi-agent session.
+// Each thread is one agent doing one piece of work. All threads in a session
+// share the same container and filesystem.
+type SessionThread struct {
+	ID                 uuid.UUID  `db:"id" json:"id"`
+	SessionID          uuid.UUID  `db:"session_id" json:"session_id"`
+	OrgID              uuid.UUID  `db:"org_id" json:"org_id"`
+	AgentType          AgentType  `db:"agent_type" json:"agent_type"`
+	ModelOverride      *string    `db:"model_override" json:"model_override,omitempty"`
+	Label              string     `db:"label" json:"label"`
+	Instructions       *string    `db:"instructions" json:"instructions,omitempty"`
+	FileScope          []string   `db:"file_scope" json:"file_scope,omitempty"`
+	Status             ThreadStatus `db:"status" json:"status"`
+	AgentSessionID     *string    `db:"agent_session_id" json:"agent_session_id,omitempty"`
+	CurrentTurn        int        `db:"current_turn" json:"current_turn"`
+	LastActivityAt     *time.Time `db:"last_activity_at" json:"last_activity_at,omitempty"`
+	ConfidenceScore    *float64   `db:"confidence_score" json:"confidence_score,omitempty"`
+	ResultSummary      *string    `db:"result_summary" json:"result_summary,omitempty"`
+	Diff               *string    `db:"diff" json:"diff,omitempty"`
+	FailureExplanation *string    `db:"failure_explanation" json:"failure_explanation,omitempty"`
+	FailureCategory    *string    `db:"failure_category" json:"failure_category,omitempty"`
+	StartedAt          *time.Time `db:"started_at" json:"started_at,omitempty"`
+	CompletedAt        *time.Time `db:"completed_at" json:"completed_at,omitempty"`
+	CreatedAt          time.Time  `db:"created_at" json:"created_at"`
 }
 
 // SessionQuestion represents a question the agent asks a human during a run.
@@ -291,6 +335,14 @@ type WebhookDelivery struct {
 	CreatedAt      time.Time       `db:"created_at" json:"created_at"`
 }
 
+// Job type constants for async work queue items.
+const (
+	JobTypePMAnalyze        = "pm_analyze"
+	JobTypePMBootstrap      = "pm_bootstrap"
+	JobTypePMContextRefresh = "pm_context_refresh"
+	JobTypeProjectCycle     = "project_cycle"
+)
+
 // Job represents an async work queue item.
 type Job struct {
 	ID             uuid.UUID       `db:"id" json:"id"`
@@ -310,6 +362,24 @@ type Job struct {
 	CreatedAt      time.Time       `db:"created_at" json:"created_at"`
 	UpdatedAt      time.Time       `db:"updated_at" json:"updated_at"`
 	CompletedAt    *time.Time      `db:"completed_at" json:"completed_at,omitempty"`
+}
+
+// SessionReviewComment represents an inline review comment on a session diff.
+type SessionReviewComment struct {
+	ID             uuid.UUID  `db:"id" json:"id"`
+	SessionID      uuid.UUID  `db:"session_id" json:"session_id"`
+	OrgID          uuid.UUID  `db:"org_id" json:"org_id"`
+	UserID         uuid.UUID  `db:"user_id" json:"user_id"`
+	FilePath       string     `db:"file_path" json:"file_path"`
+	LineNumber     int        `db:"line_number" json:"line_number"`
+	DiffSide       string     `db:"diff_side" json:"diff_side"`
+	Body           string     `db:"body" json:"body"`
+	Resolved       bool       `db:"resolved" json:"resolved"`
+	ResolvedAt     *time.Time `db:"resolved_at" json:"resolved_at,omitempty"`
+	ResolvedByPass *int       `db:"resolved_by_pass" json:"resolved_by_pass,omitempty"`
+	PassNumber     int        `db:"pass_number" json:"pass_number"`
+	CreatedAt      time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt      time.Time  `db:"updated_at" json:"updated_at"`
 }
 
 // ReviewComment represents a captured review comment on a 143-generated PR.

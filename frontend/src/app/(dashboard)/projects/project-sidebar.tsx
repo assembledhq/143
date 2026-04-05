@@ -8,9 +8,12 @@ import { useMemo, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { cn, formatTimeAgo } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Separator } from "@/components/ui/separator";
 import { api } from "@/lib/api";
 import { projectStatusConfig, projectStatusDotColor } from "@/lib/types";
 import type { Project } from "@/lib/types";
+import { ProposalInbox } from "@/components/proposal-inbox";
 
 const filterTabs = [
   { value: "all", label: "All" },
@@ -51,7 +54,15 @@ export function ProjectSidebar() {
     refetchInterval: 10000,
   });
 
-  const allProjects = data?.data ?? [];
+  const { proposals, allProjects } = useMemo(() => {
+    const raw = data?.data ?? [];
+    const props: Project[] = [];
+    const rest: Project[] = [];
+    for (const p of raw) {
+      (p.status === "proposed" ? props : rest).push(p);
+    }
+    return { proposals: props, allProjects: rest };
+  }, [data?.data]);
   const currentFilter = activeFilter ?? "all";
 
   const activeCount = allProjects.filter(isActive).length;
@@ -77,17 +88,9 @@ export function ProjectSidebar() {
 
   return (
     <div className="w-full h-full border-r border-border bg-muted/30 flex flex-col">
-      {/* New project button */}
-      <Link
-        href="/projects/new"
-        className="flex items-center gap-2.5 px-4 py-3 border-b border-border/50 text-[13px] font-medium text-muted-foreground hover:text-foreground transition-colors"
-      >
-        <Plus className="h-4 w-4" />
-        New project
-      </Link>
-
       {/* Header */}
-      <div className="px-4 pt-3 pb-2 space-y-3">
+      <div className="px-4 pt-3 pb-3 space-y-3">
+
         {/* Search */}
         <div className="relative">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground/50" />
@@ -100,44 +103,59 @@ export function ProjectSidebar() {
           />
         </div>
 
+        {/* New project button */}
+        <Link
+          href="/projects/new"
+          className="flex items-center justify-center gap-2 w-full h-9 rounded-md border border-border bg-background text-[13px] font-medium text-foreground hover:bg-accent transition-colors shadow-sm"
+        >
+          <Plus className="h-4 w-4" />
+          New project
+        </Link>
+
         {/* Filter tabs */}
-        <div className="flex items-center gap-0.5 overflow-x-auto">
-          {filterTabs.map((tab) => {
-            const isSelected = currentFilter === tab.value;
-            const count =
-              tab.value === "active" ? activeCount
-              : tab.value === "paused" ? pausedCount
-              : tab.value === "scheduled" ? scheduledCount
-              : 0;
-            return (
-              <button
-                key={tab.value}
-                className={cn(
-                  "px-2 py-1 rounded-md text-[11px] font-medium transition-colors whitespace-nowrap",
-                  isSelected
-                    ? "bg-background text-foreground shadow-sm border border-border/50"
-                    : "text-muted-foreground hover:text-foreground hover:bg-background/50"
-                )}
-                onClick={() => setActiveFilter(tab.value === "all" ? null : tab.value)}
-              >
-                {tab.label}
-                {count > 0 && (
-                  <span className={cn(
-                    "ml-1 rounded-full text-white text-[9px] leading-none px-1.5 py-0.5",
-                    tab.value === "active" ? "bg-primary"
-                    : tab.value === "scheduled" ? "bg-purple-500"
-                    : tab.value === "paused" ? "bg-orange-500"
-                    : "bg-primary"
-                  )}>{count}</span>
-                )}
-              </button>
-            );
-          })}
-        </div>
+        <Tabs
+          value={currentFilter}
+          onValueChange={(v) => setActiveFilter(v === "all" ? null : v)}
+          className="gap-0"
+        >
+          <TabsList size="sm" className="overflow-x-auto">
+            {filterTabs.map((tab) => {
+              const count =
+                tab.value === "active" ? activeCount
+                : tab.value === "paused" ? pausedCount
+                : tab.value === "scheduled" ? scheduledCount
+                : 0;
+              return (
+                <TabsTrigger key={tab.value} value={tab.value}>
+                  {tab.label}
+                  {count > 0 && (
+                    <span className={cn(
+                      "rounded-full text-white text-[9px] leading-none px-1.5 py-0.5",
+                      tab.value === "active" ? "bg-primary"
+                      : tab.value === "scheduled" ? "bg-purple-500"
+                      : tab.value === "paused" ? "bg-orange-500"
+                      : "bg-primary"
+                    )}>{count}</span>
+                  )}
+                </TabsTrigger>
+              );
+            })}
+          </TabsList>
+        </Tabs>
       </div>
 
       {/* Project list */}
       <div className="flex-1 overflow-y-auto px-2 pb-2">
+        {/* Proposal inbox */}
+        {proposals.length > 0 && (
+          <>
+            <div className="px-1 py-2">
+              <ProposalInbox proposals={proposals} />
+            </div>
+            <Separator className="my-2" />
+          </>
+        )}
+
         {/* Ghost "New project" entry when creating */}
         {isNewProject && (
           <Link
@@ -208,11 +226,11 @@ export function ProjectSidebar() {
                     {project.title}
                   </p>
 
-                  <div className="flex items-center gap-2 mt-0.5">
-                    <span className="text-[11px] text-muted-foreground">
+                  <div className="flex items-center gap-3 mt-0.5">
+                    <span className="text-[11px] text-muted-foreground shrink-0">
                       {cfg.label}
                     </span>
-                    <span className="text-[11px] text-muted-foreground/50">
+                    <span className="text-[11px] text-muted-foreground/50 truncate">
                       {formatTimeAgo(ts)}
                     </span>
                   </div>

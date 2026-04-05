@@ -81,7 +81,38 @@ function del<T>(path: string): Promise<T> {
   return request<T>(path, { method: 'DELETE' });
 }
 
+async function uploadFile(file: File): Promise<{ url: string; file_name: string; content_type: string }> {
+  const formData = new FormData();
+  formData.append('file', file);
+
+  const headers: Record<string, string> = {
+    'X-CSRF-Token': getCSRFToken(),
+  };
+  // Do NOT set Content-Type — the browser sets it with the multipart boundary.
+
+  const res = await fetch(`${API_BASE}/api/v1/uploads`, {
+    method: 'POST',
+    credentials: 'include',
+    headers,
+    body: formData,
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new ApiError(
+      body?.error?.code || 'UNKNOWN',
+      body?.error?.message || res.statusText,
+      body?.error?.details
+    );
+  }
+
+  return res.json();
+}
+
 export const api = {
+  uploads: {
+    upload: uploadFile,
+  },
   auth: {
     providers: () => get<import('./types').SingleResponse<import('./types').AuthProviders>>('/api/v1/auth/providers'),
     me: () => get<import('./types').SingleResponse<import('./types').User>>('/api/v1/auth/me'),
@@ -120,6 +151,7 @@ export const api = {
       patch<import('./types').SingleResponse<import('./types').Repository>>(`/api/v1/repositories/${id}`, data),
     delete: (id: string) => del(`/api/v1/repositories/${id}`),
     summary: () => get<import('./types').ListResponse<import('./types').RepoSummary>>('/api/v1/repositories/summary'),
+    branches: (id: string) => get<import('./types').ListResponse<{ name: string; protected: boolean }>>(`/api/v1/repositories/${id}/branches`),
   },
   issues: {
     list: (params?: { status?: string; source?: string; severity?: string; sort?: string; cursor?: string; limit?: number }) => {
@@ -140,6 +172,7 @@ export const api = {
   pm: {
     // Cursor format for /pm/plans: "<created_at RFC3339Nano>|<uuid>" (treat as opaque).
     analyze: () => post<{ data: { job_id: string } }>('/api/v1/pm/analyze'),
+    current: () => get<import('./types').SingleResponse<import('./types').PMCurrentRecommendation>>('/api/v1/pm/current'),
     list: (params?: { cursor?: string; limit?: number }) => {
       const searchParams = new URLSearchParams();
       if (params?.cursor) searchParams.set('cursor', params.cursor);
@@ -170,30 +203,71 @@ export const api = {
       del(`/api/v1/pm/documents/${docId}`),
   },
   sessions: {
-    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string }) => {
+    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; triggered_by_user_id?: string }) => {
       const searchParams = new URLSearchParams();
       if (params?.status) searchParams.set('status', params.status);
       if (params?.cursor) searchParams.set('cursor', params.cursor);
       if (params?.limit) searchParams.set('limit', String(params.limit));
       if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
+      if (params?.triggered_by_user_id) searchParams.set('triggered_by_user_id', params.triggered_by_user_id);
       const qs = searchParams.toString();
       return get<import('./types').ListResponse<import('./types').Session>>(`/api/v1/sessions${qs ? `?${qs}` : ''}`);
     },
-    get: (id: string) => get<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${id}`),
+    get: (id: string) => get<import('./types').SingleResponse<import('./types').SessionDetail>>(`/api/v1/sessions/${id}`),
     getLogs: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/logs`),
     getValidation: (sessionId: string) => get<import('./types').SingleResponse<import('./types').Validation>>(`/api/v1/sessions/${sessionId}/validation`),
     getPR: (sessionId: string) => get<import('./types').SingleResponse<import('./types').PullRequest>>(`/api/v1/sessions/${sessionId}/pr`),
+    createPR: (sessionId: string) => post<{ status: string }>(`/api/v1/sessions/${sessionId}/pr`),
     getQuestions: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions`),
     answerQuestion: (sessionId: string, questionId: string, answer: string) =>
       post<import('./types').SingleResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions/${questionId}/answer`, { answer }),
-    createManual: (body: { message: string; images?: string[]; agent_type?: string; model?: string; autonomy_level?: string; token_mode?: string }) =>
+    createManual: (body: { message: string; images?: string[]; agent_type?: string; model?: string; autonomy_level?: string; token_mode?: string; repository_id?: string; branch?: string }) =>
       post<import('./types').SingleResponse<import('./types').Session>>('/api/v1/sessions/manual', body),
     getMessages: (sessionId: string) =>
       get<import('./types').ListResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/messages`),
-    sendMessage: (sessionId: string, message: string, images?: string[]) =>
-      post<import('./types').SingleResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/messages`, { message, images }),
+    sendMessage: (sessionId: string, message: string, images?: string[], planMode?: boolean, model?: string) =>
+      post<import('./types').SingleResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/messages`, { message, images, plan_mode: planMode || undefined, ...(model ? { model } : {}) }),
     endSession: (sessionId: string) =>
       post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${sessionId}/end`),
+    // Thread endpoints
+    listThreads: (sessionId: string) =>
+      get<import('./types').ListResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads`),
+    getThread: (sessionId: string, threadId: string) =>
+      get<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads/${threadId}`),
+    createThread: (sessionId: string, body: { agent_type?: string; model?: string; label: string; instructions?: string; file_scope?: string[] }) =>
+      post<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads`, body),
+    sendThreadMessage: (sessionId: string, threadId: string, message: string, images?: string[]) =>
+      post<import('./types').SingleResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/messages`, { message, images }),
+    endThread: (sessionId: string, threadId: string) =>
+      post<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/end`),
+    getThreadMessages: (sessionId: string, threadId: string) =>
+      get<import('./types').ListResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/messages`),
+    getThreadLogs: (sessionId: string, threadId: string) =>
+      get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/logs`),
+    listReviewComments: (sessionId: string) =>
+      get<import('./types').ListResponse<import('./types').SessionReviewComment>>(`/api/v1/sessions/${sessionId}/review-comments`),
+    createReviewComment: (sessionId: string, body: { file_path: string; line_number: number; side?: string; body: string }) =>
+      post<import('./types').SingleResponse<import('./types').SessionReviewComment>>(`/api/v1/sessions/${sessionId}/review-comments`, body),
+    updateReviewComment: (sessionId: string, commentId: string, body: { body?: string; resolved?: boolean }) =>
+      patch<import('./types').SingleResponse<import('./types').SessionReviewComment>>(`/api/v1/sessions/${sessionId}/review-comments/${commentId}`, body),
+    deleteReviewComment: (sessionId: string, commentId: string) =>
+      del(`/api/v1/sessions/${sessionId}/review-comments/${commentId}`),
+    sendReviewComments: (sessionId: string) =>
+      post<import('./types').SingleResponse<{ message: string; sent: boolean }>>(`/api/v1/sessions/${sessionId}/review-comments/send`),
+    listFiles: (sessionId: string, path?: string) => {
+      const params = new URLSearchParams();
+      if (path) params.set('path', path);
+      const qs = params.toString();
+      return get<import('./types').ListResponse<import('./types').FileEntry>>(`/api/v1/sessions/${sessionId}/files${qs ? `?${qs}` : ''}`);
+    },
+    getFileContent: (sessionId: string, path: string) =>
+      get<import('./types').SingleResponse<import('./types').FileContent>>(`/api/v1/sessions/${sessionId}/files/content?path=${encodeURIComponent(path)}`),
+    getFileContext: (sessionId: string, path: string, line: number, above?: number, below?: number) => {
+      const params = new URLSearchParams({ path, line: String(line) });
+      if (above != null) params.set('above', String(above));
+      if (below != null) params.set('below', String(below));
+      return get<import('./types').SingleResponse<import('./types').FileContextResponse>>(`/api/v1/sessions/${sessionId}/files/context?${params.toString()}`);
+    },
   },
   settings: {
     get: () => get<import('./types').SingleResponse<import('./types').Organization>>('/api/v1/settings'),
@@ -251,11 +325,19 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify({ channel_ids: channelIds }),
     }),
+    connectNotion: (accessToken: string) => post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/notion/connect', { access_token: accessToken }),
+    disconnect: (provider: string) => del(`/api/v1/integrations/${provider}/disconnect`),
+    syncGitHub: () => post<{ data: { repos_synced: number; errors: number } }>('/api/v1/integrations/github/sync'),
   },
   codexAuth: {
     initiate: () => post<import('./types').SingleResponse<import('./types').CodexDeviceAuth>>('/api/v1/settings/codex-auth/initiate'),
     status: () => get<import('./types').SingleResponse<import('./types').CodexAuthStatus>>('/api/v1/settings/codex-auth/status'),
     disconnect: () => post('/api/v1/settings/codex-auth/disconnect'),
+  },
+  githubStatus: {
+    get: () => get<{ connected: boolean; has_repo_scope: boolean; github_login?: string; pr_authorship_mode: string }>('/api/v1/users/me/github-status'),
+    connect: () => { window.location.href = `${API_BASE}/api/v1/users/me/github/connect`; },
+    disconnect: () => post('/api/v1/users/me/github/disconnect'),
   },
   priority: {
     getForIssue: (issueId: string) => get<import('./types').SingleResponse<import('./types').PriorityScore>>(`/api/v1/issues/${issueId}/priority`),
@@ -319,7 +401,9 @@ export const api = {
     pause: (id: string) => post(`/api/v1/projects/${id}/pause`),
     resume: (id: string) => post(`/api/v1/projects/${id}/resume`),
     approve: (id: string) => post(`/api/v1/projects/${id}/approve`),
-    dismiss: (id: string) => post(`/api/v1/projects/${id}/dismiss`),
+    dismiss: (id: string, reason?: string) => post(`/api/v1/projects/${id}/dismiss`, reason ? { reason } : undefined),
+    proposalSummary: () =>
+      get<import('./types').SingleResponse<import('./types').ProposalSummary>>('/api/v1/projects/proposals/summary'),
     runNow: (id: string) => post<import('./types').SingleResponse<{ job_id: string }>>(`/api/v1/projects/${id}/run`),
     createTask: (projectId: string, body: { title: string; description?: string; approach?: string }) =>
       post<import('./types').SingleResponse<import('./types').ProjectTask>>(`/api/v1/projects/${projectId}/tasks`, body),

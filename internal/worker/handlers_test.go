@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
@@ -190,6 +191,101 @@ func TestSyncSentryHandler(t *testing.T) {
 	}
 }
 
+func TestNewOrgIDJobHandler(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		payload   json.RawMessage
+		expectErr bool
+		errSubstr string
+	}{
+		{
+			name:      "invalid JSON returns unmarshal error",
+			payload:   json.RawMessage(`{invalid json}`),
+			expectErr: true,
+			errSubstr: "unmarshal pm_bootstrap payload",
+		},
+		{
+			name:      "invalid org ID returns parse error",
+			payload:   json.RawMessage(`{"org_id":"not-a-uuid"}`),
+			expectErr: true,
+			errSubstr: "parse org ID",
+		},
+		{
+			name:      "valid org ID invokes callback",
+			payload:   nil,
+			expectErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			logger := zerolog.Nop()
+			expectedOrgID := uuid.New()
+			payload := tt.payload
+			if payload == nil {
+				payload = json.RawMessage(`{"org_id":"` + expectedOrgID.String() + `"}`)
+			}
+
+			called := false
+			handler := newOrgIDJobHandler("pm_bootstrap", func(ctx context.Context, orgID uuid.UUID) error {
+				called = true
+				require.Equal(t, expectedOrgID, orgID, "newOrgIDJobHandler should pass the parsed org ID to the callback")
+				return nil
+			}, logger)
+
+			err := handler(context.Background(), "pm_bootstrap", payload)
+			if tt.expectErr {
+				require.Error(t, err, "newOrgIDJobHandler should return an error for invalid input")
+				require.Contains(t, err.Error(), tt.errSubstr, "error should contain the expected substring")
+				require.False(t, called, "newOrgIDJobHandler should not invoke the callback when input is invalid")
+				return
+			}
+
+			require.NoError(t, err, "newOrgIDJobHandler should succeed for valid input")
+			require.True(t, called, "newOrgIDJobHandler should invoke the callback for valid input")
+		})
+	}
+}
+
+func TestParseSlackTimestamp(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		ts       string
+		expected time.Time
+	}{
+		{
+			name:     "valid slack timestamp returns unix seconds",
+			ts:       "1678901234.567890",
+			expected: time.Unix(1678901234, 0),
+		},
+		{
+			name:     "missing fractional part still parses",
+			ts:       "1678901234",
+			expected: time.Unix(1678901234, 0),
+		},
+		{
+			name:     "invalid timestamp returns zero time",
+			ts:       "not-a-timestamp",
+			expected: time.Time{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := parseSlackTimestamp(tt.ts)
+			require.Equal(t, tt.expected, actual, "parseSlackTimestamp should return the expected time value")
+		})
+	}
+}
+
 func TestRunAgentHandler(t *testing.T) {
 	t.Parallel()
 
@@ -365,6 +461,16 @@ func (m *mockPMService) AnalyzeProject(ctx context.Context, orgID, projectID uui
 	return nil
 }
 
+func (m *mockPMService) RunBootstrap(ctx context.Context, orgID uuid.UUID) error {
+	m.calledOrgID = orgID
+	return nil
+}
+
+func (m *mockPMService) RunRefresh(ctx context.Context, orgID uuid.UUID) error {
+	m.calledOrgID = orgID
+	return nil
+}
+
 func TestPMAnalyzeHandler_InvalidJSON(t *testing.T) {
 	t.Parallel()
 
@@ -452,12 +558,13 @@ func TestRegisterHandlers_AllRegistered(t *testing.T) {
 	logger := zerolog.Nop()
 
 	w := New(nil, logger, "test-node")
-	RegisterHandlers(w, stores, nil, logger)
+	RegisterHandlers(w, stores, nil, DataRetentionConfig{}, logger)
 
 	expectedHandlers := []string{
 		"ingest_webhook",
 		"sync_sentry",
 		"sync_slack",
+		"data_retention_cleanup",
 	}
 	for _, name := range expectedHandlers {
 		_, ok := w.handlers[name]
@@ -476,7 +583,7 @@ func TestRegisterHandlers_AllRegistered(t *testing.T) {
 
 	// Now test with PM service — pm_analyze and project_cycle should be registered
 	w2 := New(nil, logger, "test-node")
-	RegisterHandlers(w2, stores, &Services{PM: &mockPMService{}}, logger)
+	RegisterHandlers(w2, stores, &Services{PM: &mockPMService{}}, DataRetentionConfig{}, logger)
 	for _, name := range []string{"pm_analyze", "project_cycle"} {
 		_, ok := w2.handlers[name]
 		require.True(t, ok, "%s handler should be registered with PM service", name)
@@ -861,7 +968,7 @@ func TestRegisterHandlers_WithAllServices(t *testing.T) {
 	}
 
 	w := New(nil, logger, "test-node")
-	RegisterHandlers(w, stores, services, logger)
+	RegisterHandlers(w, stores, services, DataRetentionConfig{}, logger)
 
 	allExpected := []string{
 		"ingest_webhook",
@@ -875,6 +982,7 @@ func TestRegisterHandlers_WithAllServices(t *testing.T) {
 		"analyze_failure",
 		"process_review_comment",
 		"update_memories",
+		"data_retention_cleanup",
 	}
 	for _, name := range allExpected {
 		_, ok := w.handlers[name]
@@ -894,7 +1002,7 @@ func TestRegisterHandlers_WithOnlyPrioritization(t *testing.T) {
 	}
 
 	w := New(nil, logger, "test-node")
-	RegisterHandlers(w, stores, services, logger)
+	RegisterHandlers(w, stores, services, DataRetentionConfig{}, logger)
 
 	_, ok := w.handlers["prioritize"]
 	require.True(t, ok, "prioritize handler should be registered")
@@ -917,7 +1025,7 @@ func TestRegisterHandlers_WithOnlyFeedback(t *testing.T) {
 	}
 
 	w := New(nil, logger, "test-node")
-	RegisterHandlers(w, stores, services, logger)
+	RegisterHandlers(w, stores, services, DataRetentionConfig{}, logger)
 
 	_, ok := w.handlers["process_review_comment"]
 	require.True(t, ok, "process_review_comment handler should be registered")
@@ -939,7 +1047,7 @@ func TestRegisterHandlers_WithOnlyPM(t *testing.T) {
 	}
 
 	w := New(nil, logger, "test-node")
-	RegisterHandlers(w, stores, services, logger)
+	RegisterHandlers(w, stores, services, DataRetentionConfig{}, logger)
 
 	_, ok := w.handlers["pm_analyze"]
 	require.True(t, ok, "pm_analyze handler should be registered")
@@ -1050,6 +1158,14 @@ func (m *mockPMServiceError) Analyze(ctx context.Context, orgID uuid.UUID, trigg
 
 func (m *mockPMServiceError) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID) error {
 	return errors.New("project analysis failed")
+}
+
+func (m *mockPMServiceError) RunBootstrap(ctx context.Context, orgID uuid.UUID) error {
+	return errors.New("bootstrap failed")
+}
+
+func (m *mockPMServiceError) RunRefresh(ctx context.Context, orgID uuid.UUID) error {
+	return errors.New("refresh failed")
 }
 
 func TestPMAnalyzeHandler_ServiceError(t *testing.T) {
@@ -1436,4 +1552,93 @@ func TestPrioritizeHandler_InvalidIssueID(t *testing.T) {
 	err := handler(context.Background(), "prioritize", payload)
 	require.Error(t, err, "prioritize handler should fail for invalid issue ID")
 	require.Contains(t, err.Error(), "parse issue ID", "error should mention issue ID")
+}
+
+// ---------------------------------------------------------------------------
+// Data retention cleanup handler tests
+// ---------------------------------------------------------------------------
+
+func newRetentionTestStores(t *testing.T) (*Stores, pgxmock.PgxPoolIface) {
+	t.Helper()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	stores := &Stores{
+		Webhooks:    db.NewWebhookDeliveryStore(mock),
+		SessionLogs: db.NewSessionLogStore(mock),
+		Jobs:        db.NewJobStore(mock),
+	}
+	return stores, mock
+}
+
+func TestDataRetentionHandler_AllStoresSucceed(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newRetentionTestStores(t)
+	defer mock.Close()
+
+	cfg := DataRetentionConfig{WebhookDays: 30, LogsDays: 90, JobsDays: 30}
+
+	mock.ExpectQuery("SELECT delete_expired_webhook_deliveries").
+		WithArgs(30).
+		WillReturnRows(pgxmock.NewRows([]string{"delete_expired_webhook_deliveries"}).AddRow(int64(5)))
+	mock.ExpectQuery("SELECT delete_expired_session_logs").
+		WithArgs(90).
+		WillReturnRows(pgxmock.NewRows([]string{"delete_expired_session_logs"}).AddRow(int64(10)))
+	mock.ExpectQuery("SELECT delete_expired_completed_jobs").
+		WithArgs(30).
+		WillReturnRows(pgxmock.NewRows([]string{"delete_expired_completed_jobs"}).AddRow(int64(3)))
+
+	handler := newDataRetentionCleanupHandler(stores, cfg, zerolog.Nop())
+	err := handler(context.Background(), "data_retention_cleanup", nil)
+	require.NoError(t, err, "handler should succeed when all stores succeed")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDataRetentionHandler_ReturnsErrorOnFailure(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newRetentionTestStores(t)
+	defer mock.Close()
+
+	cfg := DataRetentionConfig{WebhookDays: 30, LogsDays: 90, JobsDays: 30}
+
+	mock.ExpectQuery("SELECT delete_expired_webhook_deliveries").
+		WithArgs(30).
+		WillReturnError(errors.New("db connection lost"))
+	mock.ExpectQuery("SELECT delete_expired_session_logs").
+		WithArgs(90).
+		WillReturnRows(pgxmock.NewRows([]string{"delete_expired_session_logs"}).AddRow(int64(0)))
+	mock.ExpectQuery("SELECT delete_expired_completed_jobs").
+		WithArgs(30).
+		WillReturnRows(pgxmock.NewRows([]string{"delete_expired_completed_jobs"}).AddRow(int64(0)))
+
+	handler := newDataRetentionCleanupHandler(stores, cfg, zerolog.Nop())
+	err := handler(context.Background(), "data_retention_cleanup", nil)
+	require.Error(t, err, "handler should return error when a store fails")
+	require.Contains(t, err.Error(), "delete expired webhook deliveries")
+}
+
+func TestDataRetentionHandler_SkipsNilStores(t *testing.T) {
+	t.Parallel()
+
+	stores := &Stores{} // all nil
+	cfg := DataRetentionConfig{WebhookDays: 30, LogsDays: 90, JobsDays: 30}
+
+	handler := newDataRetentionCleanupHandler(stores, cfg, zerolog.Nop())
+	err := handler(context.Background(), "data_retention_cleanup", nil)
+	require.NoError(t, err, "handler should succeed with nil stores")
+}
+
+func TestDataRetentionHandler_SkipsZeroRetentionDays(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newRetentionTestStores(t)
+	defer mock.Close()
+
+	cfg := DataRetentionConfig{WebhookDays: 0, LogsDays: 0, JobsDays: 0}
+
+	handler := newDataRetentionCleanupHandler(stores, cfg, zerolog.Nop())
+	err := handler(context.Background(), "data_retention_cleanup", nil)
+	require.NoError(t, err, "handler should skip cleanup when retention days are 0")
+	require.NoError(t, mock.ExpectationsWereMet(), "no DB calls should be made")
 }

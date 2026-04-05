@@ -17,6 +17,7 @@ import (
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/rs/zerolog"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/assembledhq/143/internal/api/middleware"
@@ -26,17 +27,23 @@ import (
 )
 
 type AuthHandler struct {
-	cfg             *config.Config
-	orgStore        *db.OrganizationStore
-	userStore       *db.UserStore
-	sessionStore    *db.AuthSessionStore
-	invitationStore *db.InvitationStore
-	audit           *db.AuditEmitter
+	cfg              *config.Config
+	orgStore         *db.OrganizationStore
+	userStore        *db.UserStore
+	sessionStore     *db.AuthSessionStore
+	invitationStore  *db.InvitationStore
+	userCredentials  *db.UserCredentialStore
+	audit            *db.AuditEmitter
 }
 
 // SetAuditEmitter injects the audit emitter for logging auth events.
 func (h *AuthHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 	h.audit = audit
+}
+
+// SetUserCredentialStore injects the user credential store for storing GitHub tokens.
+func (h *AuthHandler) SetUserCredentialStore(store *db.UserCredentialStore) {
+	h.userCredentials = store
 }
 
 func NewAuthHandler(cfg *config.Config, orgStore *db.OrganizationStore, userStore *db.UserStore, sessionStore *db.AuthSessionStore, invitationStore *db.InvitationStore) *AuthHandler {
@@ -64,7 +71,7 @@ func (h *AuthHandler) Providers(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserFromContext(r.Context())
 	if user == nil {
-		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "not authenticated")
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "not authenticated")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": user})
@@ -80,7 +87,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		Invitation string `json:"invitation"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
 		return
 	}
 
@@ -88,27 +95,27 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	body.Name = strings.TrimSpace(body.Name)
 
 	if body.Name == "" {
-		writeError(w, http.StatusBadRequest, "MISSING_NAME", "Name is required.")
+		writeError(w, r, http.StatusBadRequest, "MISSING_NAME", "Name is required.")
 		return
 	}
 	if _, err := mail.ParseAddress(body.Email); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_EMAIL", "Invalid email address.")
+		writeError(w, r, http.StatusBadRequest, "INVALID_EMAIL", "Invalid email address.")
 		return
 	}
 	if len(body.Password) < 8 {
-		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "Password must be at least 8 characters.")
+		writeError(w, r, http.StatusBadRequest, "WEAK_PASSWORD", "Password must be at least 8 characters.")
 		return
 	}
 
 	// Check for existing user
 	if _, err := h.userStore.GetByEmail(r.Context(), body.Email); err == nil {
-		writeError(w, http.StatusConflict, "EMAIL_EXISTS", "An account with this email already exists.")
+		writeError(w, r, http.StatusConflict, "EMAIL_EXISTS", "An account with this email already exists.")
 		return
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(body.Password), bcrypt.DefaultCost)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to hash password")
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to hash password", err)
 		return
 	}
 
@@ -121,11 +128,11 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 
 		user, invErr, registerErr := h.createInvitedUserWithPassword(r.Context(), body.Invitation, body.Email, body.Name, hashStr)
 		if invErr != nil {
-			writeError(w, invErr.status, invErr.code, invErr.message)
+			writeError(w, r, invErr.status, invErr.code, invErr.message)
 			return
 		}
 		if registerErr != nil {
-			writeError(w, http.StatusInternalServerError, "USER_CREATE_FAILED", "failed to create user")
+			writeError(w, r, http.StatusInternalServerError, "USER_CREATE_FAILED", "failed to create user", registerErr)
 			return
 		}
 		h.emitAuthEvent(r, user, models.AuditActionAuthRegister)
@@ -139,7 +146,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		Settings: json.RawMessage(`{}`),
 	}
 	if err := h.orgStore.Create(r.Context(), org); err != nil {
-		writeError(w, http.StatusInternalServerError, "ORG_CREATE_FAILED", "Failed to create organization.")
+		writeError(w, r, http.StatusInternalServerError, "ORG_CREATE_FAILED", "Failed to create organization.", err)
 		return
 	}
 
@@ -151,7 +158,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		PasswordHash: &hashStr,
 	}
 	if err := h.userStore.CreateWithPassword(r.Context(), user); err != nil {
-		writeError(w, http.StatusInternalServerError, "USER_CREATE_FAILED", "failed to create user")
+		writeError(w, r, http.StatusInternalServerError, "USER_CREATE_FAILED", "failed to create user", err)
 		return
 	}
 
@@ -166,7 +173,7 @@ func (h *AuthHandler) EmailLogin(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"` // #nosec G117 -- request body field
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
 		return
 	}
 
@@ -174,17 +181,17 @@ func (h *AuthHandler) EmailLogin(w http.ResponseWriter, r *http.Request) {
 
 	user, err := h.userStore.GetByEmail(r.Context(), body.Email)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "Invalid email or password.")
+		writeError(w, r, http.StatusUnauthorized, "INVALID_CREDENTIALS", "Invalid email or password.")
 		return
 	}
 
 	if user.PasswordHash == nil {
-		writeError(w, http.StatusUnauthorized, "OAUTH_ONLY", "This account uses social login. Please sign in with GitHub or Google.")
+		writeError(w, r, http.StatusUnauthorized, "OAUTH_ONLY", "This account uses social login. Please sign in with GitHub or Google.")
 		return
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(*user.PasswordHash), []byte(body.Password)); err != nil {
-		writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "Invalid email or password.")
+		writeError(w, r, http.StatusUnauthorized, "INVALID_CREDENTIALS", "Invalid email or password.")
 		return
 	}
 
@@ -197,7 +204,7 @@ func (h *AuthHandler) EmailLogin(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	state, err := setOAuthState(w, githubOAuthStateCookie)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate state")
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate state", err)
 		return
 	}
 
@@ -235,11 +242,16 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 
 // Callback handles GitHub OAuth callback.
 func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
-	// GitHub App installation redirects here with setup_action=install.
+	// GitHub App installation redirects here with setup_action=install (new)
+	// or setup_action=update (reconfigured existing installation).
 	// This is not an OAuth flow — redirect to the authenticated integration
 	// endpoint that creates the integration record for the user's org.
-	if r.URL.Query().Get("setup_action") == "install" {
-		http.Redirect(w, r, h.cfg.BaseURL+"/api/v1/integrations/github/installed", http.StatusTemporaryRedirect)
+	if sa := r.URL.Query().Get("setup_action"); sa == "install" || sa == "update" {
+		redirectURL := h.cfg.BaseURL + "/api/v1/integrations/github/installed"
+		if qs := r.URL.RawQuery; qs != "" {
+			redirectURL += "?" + qs
+		}
+		http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 		return
 	}
 
@@ -251,14 +263,14 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	// Exchange code for access token
 	tokenResp, err := h.exchangeGitHubCode(code)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "TOKEN_EXCHANGE_FAILED", "failed to exchange code")
+		writeError(w, r, http.StatusInternalServerError, "TOKEN_EXCHANGE_FAILED", "failed to exchange code", err)
 		return
 	}
 
 	// Fetch GitHub user
 	ghUser, err := h.fetchGitHubUser(tokenResp.AccessToken)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "GITHUB_API_FAILED", "failed to fetch GitHub user")
+		writeError(w, r, http.StatusInternalServerError, "GITHUB_API_FAILED", "failed to fetch GitHub user", err)
 		return
 	}
 
@@ -276,9 +288,10 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		existingUser.GitHubLogin = &ghUser.Login
 		existingUser.AvatarURL = &ghUser.AvatarURL
 		if upsertErr := h.userStore.UpsertFromGitHub(r.Context(), &existingUser); upsertErr != nil {
-			writeError(w, http.StatusInternalServerError, "USER_UPSERT_FAILED", "failed to upsert user")
+			writeError(w, r, http.StatusInternalServerError, "USER_UPSERT_FAILED", "failed to upsert user", upsertErr)
 			return
 		}
+		h.storeGitHubToken(r, &existingUser, tokenResp)
 		h.emitAuthEvent(r, &existingUser, models.AuditActionAuthLogin)
 		h.createSessionAndRedirect(w, r, &existingUser)
 		return
@@ -287,9 +300,10 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	// Try email match for account linking
 	if emailUser, emailErr := h.userStore.GetByEmail(r.Context(), email); emailErr == nil {
 		if linkErr := h.userStore.LinkGitHubAccount(r.Context(), emailUser.ID, emailUser.OrgID, ghUser.ID, ghUser.Login, ghUser.AvatarURL); linkErr != nil {
-			writeError(w, http.StatusInternalServerError, "LINK_FAILED", "failed to link GitHub account")
+			writeError(w, r, http.StatusInternalServerError, "LINK_FAILED", "failed to link GitHub account", linkErr)
 			return
 		}
+		h.storeGitHubToken(r, &emailUser, tokenResp)
 		h.emitAuthEvent(r, &emailUser, models.AuditActionAuthLogin)
 		h.createSessionAndRedirect(w, r, &emailUser)
 		return
@@ -318,7 +332,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 			Settings: json.RawMessage(`{}`),
 		}
 		if createErr := h.orgStore.Create(r.Context(), org); createErr != nil {
-			writeError(w, http.StatusInternalServerError, "ORG_CREATE_FAILED", "Failed to create organization.")
+			writeError(w, r, http.StatusInternalServerError, "ORG_CREATE_FAILED", "Failed to create organization.", createErr)
 			return
 		}
 		orgID = org.ID
@@ -344,23 +358,25 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 			},
 		)
 		if invErr != nil {
-			writeError(w, invErr.status, invErr.code, invErr.message)
+			writeError(w, r, invErr.status, invErr.code, invErr.message)
 			return
 		}
 		if createErr != nil {
-			writeError(w, http.StatusInternalServerError, "USER_UPSERT_FAILED", "failed to upsert user")
+			writeError(w, r, http.StatusInternalServerError, "USER_UPSERT_FAILED", "failed to upsert user", createErr)
 			return
 		}
+		h.storeGitHubToken(r, createdUser, tokenResp)
 		h.emitAuthEvent(r, createdUser, models.AuditActionAuthRegister)
 		h.createSessionAndRedirect(w, r, createdUser)
 		return
 	}
 
 	if err := h.userStore.UpsertFromGitHub(r.Context(), user); err != nil {
-		writeError(w, http.StatusInternalServerError, "USER_UPSERT_FAILED", "failed to upsert user")
+		writeError(w, r, http.StatusInternalServerError, "USER_UPSERT_FAILED", "failed to upsert user", err)
 		return
 	}
 
+	h.storeGitHubToken(r, user, tokenResp)
 	h.emitAuthEvent(r, user, models.AuditActionAuthRegister)
 	h.createSessionAndRedirect(w, r, user)
 }
@@ -370,7 +386,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) GoogleLogin(w http.ResponseWriter, r *http.Request) {
 	state, err := setOAuthState(w, googleOAuthStateCookie)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate state")
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate state", err)
 		return
 	}
 
@@ -417,14 +433,14 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 	// Exchange code for access token
 	tokenResp, err := h.exchangeGoogleCode(code)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "TOKEN_EXCHANGE_FAILED", "failed to exchange code")
+		writeError(w, r, http.StatusInternalServerError, "TOKEN_EXCHANGE_FAILED", "failed to exchange code", err)
 		return
 	}
 
 	// Fetch Google user info
 	gUser, err := h.fetchGoogleUser(tokenResp.AccessToken)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "GOOGLE_API_FAILED", "failed to fetch Google user")
+		writeError(w, r, http.StatusInternalServerError, "GOOGLE_API_FAILED", "failed to fetch Google user", err)
 		return
 	}
 
@@ -437,7 +453,7 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 
 	if emailUser, emailErr := h.userStore.GetByEmail(r.Context(), gUser.Email); emailErr == nil {
 		if linkErr := h.userStore.LinkGoogleAccount(r.Context(), emailUser.ID, emailUser.OrgID, gUser.Sub, gUser.Picture); linkErr != nil {
-			writeError(w, http.StatusInternalServerError, "LINK_FAILED", "failed to link Google account")
+			writeError(w, r, http.StatusInternalServerError, "LINK_FAILED", "failed to link Google account", linkErr)
 			return
 		}
 		h.emitAuthEvent(r, &emailUser, models.AuditActionAuthLogin)
@@ -472,7 +488,7 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 			Settings: json.RawMessage(`{}`),
 		}
 		if createErr := h.orgStore.Create(r.Context(), org); createErr != nil {
-			writeError(w, http.StatusInternalServerError, "ORG_CREATE_FAILED", "Failed to create organization.")
+			writeError(w, r, http.StatusInternalServerError, "ORG_CREATE_FAILED", "Failed to create organization.", createErr)
 			return
 		}
 		orgID = org.ID
@@ -497,11 +513,11 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 			},
 		)
 		if invErr != nil {
-			writeError(w, invErr.status, invErr.code, invErr.message)
+			writeError(w, r, invErr.status, invErr.code, invErr.message)
 			return
 		}
 		if createErr != nil {
-			writeError(w, http.StatusInternalServerError, "USER_UPSERT_FAILED", "failed to upsert user")
+			writeError(w, r, http.StatusInternalServerError, "USER_UPSERT_FAILED", "failed to upsert user", createErr)
 			return
 		}
 		h.emitAuthEvent(r, createdUser, models.AuditActionAuthRegister)
@@ -510,7 +526,7 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.userStore.UpsertFromGoogle(r.Context(), user); err != nil {
-		writeError(w, http.StatusInternalServerError, "USER_UPSERT_FAILED", "failed to upsert user")
+		writeError(w, r, http.StatusInternalServerError, "USER_UPSERT_FAILED", "failed to upsert user", err)
 		return
 	}
 
@@ -522,7 +538,7 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	cookie, err := r.Cookie("session_token")
 	if err == nil {
 		if deleteErr := h.sessionStore.DeleteByToken(r.Context(), cookie.Value); deleteErr != nil {
-			writeError(w, http.StatusInternalServerError, "SESSION_DELETE_FAILED", "failed to delete session")
+			writeError(w, r, http.StatusInternalServerError, "SESSION_DELETE_FAILED", "failed to delete session", deleteErr)
 			return
 		}
 	}
@@ -556,7 +572,7 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) createSessionAndRedirect(w http.ResponseWriter, r *http.Request, user *models.User) {
 	sessionToken, err := generateRandomString(32)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate session token")
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate session token", err)
 		return
 	}
 	session := &models.AuthSession{
@@ -566,7 +582,7 @@ func (h *AuthHandler) createSessionAndRedirect(w http.ResponseWriter, r *http.Re
 		ExpiresAt: time.Now().Add(30 * 24 * time.Hour),
 	}
 	if err := h.sessionStore.Create(r.Context(), session); err != nil {
-		writeError(w, http.StatusInternalServerError, "SESSION_CREATE_FAILED", "failed to create session")
+		writeError(w, r, http.StatusInternalServerError, "SESSION_CREATE_FAILED", "failed to create session", err)
 		return
 	}
 
@@ -580,7 +596,7 @@ func (h *AuthHandler) createSessionAndRedirect(w http.ResponseWriter, r *http.Re
 	})
 
 	if err := middleware.SetCSRFCookie(w, r, []byte(h.cfg.CSRFSigningKey)); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate CSRF token")
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate CSRF token", err)
 		return
 	}
 
@@ -600,7 +616,7 @@ func (h *AuthHandler) createSessionAndRedirect(w http.ResponseWriter, r *http.Re
 func (h *AuthHandler) createSessionAndRespond(w http.ResponseWriter, r *http.Request, user *models.User) {
 	sessionToken, err := generateRandomString(32)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate session token")
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate session token", err)
 		return
 	}
 	session := &models.AuthSession{
@@ -610,7 +626,7 @@ func (h *AuthHandler) createSessionAndRespond(w http.ResponseWriter, r *http.Req
 		ExpiresAt: time.Now().Add(30 * 24 * time.Hour),
 	}
 	if err := h.sessionStore.Create(r.Context(), session); err != nil {
-		writeError(w, http.StatusInternalServerError, "SESSION_CREATE_FAILED", "failed to create session")
+		writeError(w, r, http.StatusInternalServerError, "SESSION_CREATE_FAILED", "failed to create session", err)
 		return
 	}
 
@@ -624,11 +640,28 @@ func (h *AuthHandler) createSessionAndRespond(w http.ResponseWriter, r *http.Req
 	})
 
 	if err := middleware.SetCSRFCookie(w, r, []byte(h.cfg.CSRFSigningKey)); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate CSRF token")
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate CSRF token", err)
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"data": user})
+}
+
+// storeGitHubToken persists the user's GitHub OAuth token for PR creation.
+// Non-fatal: user can still sign in even if token storage fails.
+func (h *AuthHandler) storeGitHubToken(r *http.Request, user *models.User, tokenResp *githubTokenResponse) {
+	if h.userCredentials == nil || tokenResp == nil || tokenResp.AccessToken == "" {
+		return
+	}
+	cfg := models.GitHubOAuthConfig{
+		AccessToken: tokenResp.AccessToken,
+		TokenType:   tokenResp.TokenType,
+		Scope:       tokenResp.Scope,
+	}
+	if err := h.userCredentials.Upsert(r.Context(), user.ID, user.OrgID, cfg, false); err != nil {
+		// Non-fatal — user can still sign in, just can't create PRs as themselves.
+		zerolog.Ctx(r.Context()).Warn().Err(err).Str("user_id", user.ID.String()).Msg("failed to store GitHub OAuth token for PR authorship")
+	}
 }
 
 // --- GitHub OAuth helpers ---
@@ -648,9 +681,15 @@ type githubUser struct {
 }
 
 func (h *AuthHandler) exchangeGitHubCode(code string) (*githubTokenResponse, error) {
+	return exchangeGitHubOAuthCode(h.cfg.GitHubOAuthClientID, h.cfg.GitHubOAuthClientSecret, code)
+}
+
+// exchangeGitHubOAuthCode is the shared implementation for exchanging a GitHub
+// OAuth authorization code for an access token.
+func exchangeGitHubOAuthCode(clientID, clientSecret, code string) (*githubTokenResponse, error) {
 	data := url.Values{
-		"client_id":     {h.cfg.GitHubOAuthClientID},
-		"client_secret": {h.cfg.GitHubOAuthClientSecret},
+		"client_id":     {clientID},
+		"client_secret": {clientSecret},
 		"code":          {code},
 	}
 

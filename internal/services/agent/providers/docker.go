@@ -76,6 +76,66 @@ func NewDockerProvider(cli DockerClient, logger zerolog.Logger, opts ...DockerPr
 	return p
 }
 
+// HealthCheck verifies the configured runtime is available by running a test
+// container. Returns an error if the runtime (e.g. gVisor/runsc) is not functional.
+func (d *DockerProvider) HealthCheck(ctx context.Context) error {
+	if d.runtime == "runc" {
+		return nil // runc is always available
+	}
+
+	d.logger.Info().Str("runtime", d.runtime).Msg("running sandbox runtime health check")
+
+	pidsLimit := int64(16)
+	resp, err := d.client.ContainerCreate(ctx, &container.Config{
+		Image: "busybox:latest",
+		Cmd:   []string{"echo", "runtime-ok"},
+	}, &container.HostConfig{
+		Runtime: d.runtime,
+		Resources: container.Resources{
+			PidsLimit: &pidsLimit,
+		},
+	}, nil, nil, "")
+	if err != nil {
+		return fmt.Errorf("runtime %s health check: failed to create test container: %w", d.runtime, err)
+	}
+
+	// Ensure cleanup using a background context so removal succeeds even if
+	// the parent context has timed out.
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = d.client.ContainerRemove(cleanupCtx, resp.ID, container.RemoveOptions{Force: true})
+	}()
+
+	if err := d.client.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		return fmt.Errorf("runtime %s health check: failed to start test container: %w", d.runtime, err)
+	}
+
+	// Wait for the container to finish by polling ContainerInspect.
+	// The test command (echo) completes nearly instantly.
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("runtime %s health check: timed out waiting for test container: %w", d.runtime, ctx.Err())
+		case <-ticker.C:
+			info, err := d.client.ContainerInspect(ctx, resp.ID)
+			if err != nil {
+				return fmt.Errorf("runtime %s health check: failed to inspect test container: %w", d.runtime, err)
+			}
+			if info.State == nil || info.State.Running {
+				continue
+			}
+			if info.State.ExitCode != 0 {
+				return fmt.Errorf("runtime %s health check: test container exited with code %d", d.runtime, info.State.ExitCode)
+			}
+			d.logger.Info().Str("runtime", d.runtime).Msg("sandbox runtime health check passed")
+			return nil
+		}
+	}
+}
+
 // Name returns the provider identifier.
 func (d *DockerProvider) Name() string {
 	return "docker"
@@ -121,7 +181,8 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 		SecurityOpt:    []string{"no-new-privileges:true"},
 		ReadonlyRootfs: true,
 		Tmpfs: map[string]string{
-			"/tmp": "rw,noexec,nosuid,size=1073741824",
+			"/tmp":      "rw,noexec,nosuid,size=1073741824",
+			cfg.WorkDir: "rw,nosuid,mode=1777,size=5368709120", // 5GB writable workspace
 		},
 	}
 
@@ -373,6 +434,8 @@ func (d *DockerProvider) Restore(ctx context.Context, sb *agent.Sandbox, reader 
 	if _, err := io.Copy(attachResp.Conn, reader); err != nil {
 		return fmt.Errorf("write snapshot to container: %w", err)
 	}
+	// Intentionally ignored: CloseWrite signals EOF to the exec process; any error here
+	// does not affect the snapshot data already written.
 	_ = attachResp.CloseWrite()
 
 	// Drain stdout/stderr so the exec process can finish writing.

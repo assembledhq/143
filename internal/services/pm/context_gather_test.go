@@ -18,6 +18,10 @@ type gatherIssueStoreMock struct {
 	errByKey map[string]error
 }
 
+func (m *gatherIssueStoreMock) GetByID(ctx context.Context, orgID, issueID uuid.UUID) (models.Issue, error) {
+	return models.Issue{}, nil
+}
+
 func (m *gatherIssueStoreMock) ListByOrg(ctx context.Context, orgID uuid.UUID, filters db.IssueFilters) ([]models.Issue, error) {
 	if err := m.errByKey[filters.Status]; err != nil {
 		return nil, err
@@ -48,11 +52,21 @@ func (m *gatherSessionStoreMock) Create(ctx context.Context, run *models.Session
 }
 
 func (m *gatherSessionStoreMock) ListByOrg(ctx context.Context, orgID uuid.UUID, filters db.SessionFilters) ([]models.Session, error) {
-	key := string(filters.Status)
-	if err := m.errByKey[key]; err != nil {
-		return nil, err
+	var result []models.Session
+	for _, s := range filters.Statuses {
+		key := string(s)
+		if err := m.errByKey[key]; err != nil {
+			return nil, err
+		}
+		result = append(result, m.byStatus[key]...)
 	}
-	return m.byStatus[key], nil
+	if len(filters.Statuses) == 0 {
+		if err := m.errByKey[""]; err != nil {
+			return nil, err
+		}
+		return m.byStatus[""], nil
+	}
+	return result, nil
 }
 
 func (m *gatherSessionStoreMock) ListRecentByOrg(ctx context.Context, orgID uuid.UUID, statuses []string, limit int) ([]models.Session, error) {
@@ -60,6 +74,14 @@ func (m *gatherSessionStoreMock) ListRecentByOrg(ctx context.Context, orgID uuid
 		return nil, err
 	}
 	return m.recent, nil
+}
+
+func (m *gatherSessionStoreMock) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string) error {
+	return nil
+}
+
+func (m *gatherSessionStoreMock) UpdatePMPlanID(ctx context.Context, orgID, runID, planID uuid.UUID) error {
+	return nil
 }
 
 type gatherOrgStoreMock struct {
@@ -170,7 +192,7 @@ func TestServiceGatherContext(t *testing.T) {
 				"open": {
 					{
 						ID:                    issueID,
-						Source:                "sentry",
+						Source:                models.IssueSourceSentry,
 						Title:                 "payment request panic",
 						Description:           &desc,
 						Severity:              "high",
@@ -185,7 +207,7 @@ func TestServiceGatherContext(t *testing.T) {
 				"triaged": {
 					{
 						ID:                    secondIssueID,
-						Source:                "github",
+						Source:                models.IssueSource("github"),
 						Title:                 "retry policy bug",
 						Severity:              "medium",
 						OccurrenceCount:       3,

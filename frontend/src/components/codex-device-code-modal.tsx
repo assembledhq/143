@@ -2,7 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
+import { captureError } from "@/lib/errors";
 import { Button } from "@/components/ui/button";
+import { Check, Copy } from "lucide-react";
 import type { CodexDeviceAuth } from "@/lib/types";
 
 export function CodexDeviceCodeModal({
@@ -16,6 +18,8 @@ export function CodexDeviceCodeModal({
   const [status, setStatus] = useState<string>("initiating");
   const [error, setError] = useState("");
   const [timeLeft, setTimeLeft] = useState(0);
+  const [copied, setCopied] = useState(false);
+  const copyTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const pollRef = useRef<NodeJS.Timeout | null>(null);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const onConnectedRef = useRef(onConnected);
@@ -32,7 +36,8 @@ export function CodexDeviceCodeModal({
       setDeviceAuth(resp.data);
       setTimeLeft(resp.data.expires_in);
       setStatus("pending");
-    } catch {
+    } catch (err) {
+      captureError(err, { feature: "codex-auth" });
       setError("Failed to start authentication. Please try again.");
       setStatus("error");
     }
@@ -70,7 +75,7 @@ export function CodexDeviceCodeModal({
           if (timerRef.current) clearInterval(timerRef.current);
         }
       } catch (err) {
-        console.warn("codex auth poll failed:", err);
+        captureError(err, { feature: "codex-auth-poll" });
       }
     }, 3000);
 
@@ -81,6 +86,7 @@ export function CodexDeviceCodeModal({
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
       if (timerRef.current) clearInterval(timerRef.current);
+      if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
     };
   }, [status]);
 
@@ -102,7 +108,32 @@ export function CodexDeviceCodeModal({
               <p className="text-sm text-muted-foreground">2. Enter this code:</p>
               <div className="flex items-center gap-2">
                 <code className="rounded-md border bg-muted px-4 py-2 text-2xl font-mono font-bold tracking-widest">{deviceAuth.user_code}</code>
-                <Button size="sm" variant="outline" onClick={() => navigator.clipboard.writeText(deviceAuth.user_code)}>Copy</Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="min-w-[90px] transition-all duration-200"
+                  onClick={() => {
+                    navigator.clipboard.writeText(deviceAuth.user_code).then(() => {
+                      setCopied(true);
+                      if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
+                      copyTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
+                    }).catch(() => {
+                      // Clipboard write failed — don't show "Copied"
+                    });
+                  }}
+                >
+                  {copied ? (
+                    <span className="flex items-center gap-1.5 text-green-600">
+                      <Check className="h-3.5 w-3.5" />
+                      Copied
+                    </span>
+                  ) : (
+                    <span className="flex items-center gap-1.5">
+                      <Copy className="h-3.5 w-3.5" />
+                      Copy
+                    </span>
+                  )}
+                </Button>
               </div>
             </div>
             <div className="space-y-2">

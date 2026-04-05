@@ -36,6 +36,17 @@ func (s SessionStatus) Validate() error {
 	}
 }
 
+// Status groups used by the frontend filter tabs. Defined here so the backend
+// is the source of truth; the frontend arrays must stay in sync.
+var (
+	// NeedsAttentionStatuses are statuses where user action is required.
+	NeedsAttentionStatuses = []SessionStatus{SessionStatusAwaitingInput, SessionStatusNeedsHumanGuidance, SessionStatusFailed}
+	// WorkingStatuses are statuses where the agent is actively executing.
+	WorkingStatuses = []SessionStatus{SessionStatusPending, SessionStatusRunning}
+	// DoneStatuses are terminal or parked statuses.
+	DoneStatuses = []SessionStatus{SessionStatusCompleted, SessionStatusPRCreated, SessionStatusCancelled, SessionStatusSkipped, SessionStatusIdle}
+)
+
 // SandboxState tracks the lifecycle of a session's sandbox.
 type SandboxState string
 
@@ -54,6 +65,37 @@ func (s SandboxState) Validate() error {
 		return fmt.Errorf("invalid SandboxState: %q", s)
 	}
 }
+
+// ThreadStatus captures the lifecycle of a thread within a session.
+type ThreadStatus string
+
+const (
+	ThreadStatusPending       ThreadStatus = "pending"
+	ThreadStatusRunning       ThreadStatus = "running"
+	ThreadStatusIdle          ThreadStatus = "idle"
+	ThreadStatusAwaitingInput ThreadStatus = "awaiting_input"
+	ThreadStatusCompleted     ThreadStatus = "completed"
+	ThreadStatusFailed        ThreadStatus = "failed"
+	ThreadStatusCancelled     ThreadStatus = "cancelled"
+)
+
+func (s ThreadStatus) Validate() error {
+	switch s {
+	case ThreadStatusPending,
+		ThreadStatusRunning,
+		ThreadStatusIdle,
+		ThreadStatusAwaitingInput,
+		ThreadStatusCompleted,
+		ThreadStatusFailed,
+		ThreadStatusCancelled:
+		return nil
+	default:
+		return fmt.Errorf("invalid ThreadStatus: %q", s)
+	}
+}
+
+// MaxThreadsPerSession is the maximum number of threads allowed in a single session.
+const MaxThreadsPerSession = 4
 
 // MessageRole identifies who sent a session message.
 type MessageRole string

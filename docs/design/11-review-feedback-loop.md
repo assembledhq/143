@@ -1,5 +1,7 @@
 # Design: PR Review Feedback -> Agent Improvement Loop
 
+> **Status:** Partially Implemented | **Last reviewed:** 2026-03-25
+
 This document describes how 143.dev captures human PR review feedback and uses it to improve future agent runs — creating a flywheel where every human review makes every future agent run better.
 
 ## Overview

@@ -1,5 +1,7 @@
 # Design: Frontend Architecture
 
+> **Status:** Partially Implemented | **Last reviewed:** 2026-03-25
+
 This document defines the frontend architecture for 143.dev.
 
 ## Design Principles

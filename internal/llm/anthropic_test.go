@@ -35,7 +35,7 @@ func TestAnthropicProvider_Complete_Success(t *testing.T) {
 	p := NewAnthropicProvider("test-key", WithAnthropicBaseURL(server.URL), WithAnthropicHTTPClient(server.Client()))
 	require.Equal(t, "anthropic", p.Name(), "provider name should be anthropic")
 
-	resp, err := p.Complete(context.Background(), "test-model", "system", "user prompt")
+	resp, err := p.Complete(context.Background(), "test-model", "system", "user prompt", "")
 	require.NoError(t, err, "should complete without error")
 	require.Equal(t, "hello from anthropic", resp, "should return text content")
 }
@@ -50,7 +50,7 @@ func TestAnthropicProvider_Complete_RateLimit(t *testing.T) {
 	defer server.Close()
 
 	p := NewAnthropicProvider("key", WithAnthropicBaseURL(server.URL), WithAnthropicHTTPClient(server.Client()))
-	_, err := p.Complete(context.Background(), "model", "sys", "user")
+	_, err := p.Complete(context.Background(), "model", "sys", "user", "")
 	require.Error(t, err, "should return error on rate limit")
 	require.ErrorIs(t, err, ErrRateLimit, "should wrap rate limit error")
 }
@@ -65,7 +65,7 @@ func TestAnthropicProvider_Complete_ServerError(t *testing.T) {
 	defer server.Close()
 
 	p := NewAnthropicProvider("key", WithAnthropicBaseURL(server.URL), WithAnthropicHTTPClient(server.Client()))
-	_, err := p.Complete(context.Background(), "model", "sys", "user")
+	_, err := p.Complete(context.Background(), "model", "sys", "user", "")
 	require.Error(t, err, "should return error on server error")
 	require.ErrorIs(t, err, ErrServerError, "should wrap server error")
 }
@@ -80,7 +80,7 @@ func TestAnthropicProvider_Complete_AuthError(t *testing.T) {
 	defer server.Close()
 
 	p := NewAnthropicProvider("bad-key", WithAnthropicBaseURL(server.URL), WithAnthropicHTTPClient(server.Client()))
-	_, err := p.Complete(context.Background(), "model", "sys", "user")
+	_, err := p.Complete(context.Background(), "model", "sys", "user", "")
 	require.Error(t, err, "should return error on auth failure")
 	require.ErrorIs(t, err, ErrAuthError, "should wrap auth error")
 }
@@ -97,7 +97,7 @@ func TestAnthropicProvider_Complete_NoTextContent(t *testing.T) {
 	defer server.Close()
 
 	p := NewAnthropicProvider("key", WithAnthropicBaseURL(server.URL), WithAnthropicHTTPClient(server.Client()))
-	_, err := p.Complete(context.Background(), "model", "sys", "user")
+	_, err := p.Complete(context.Background(), "model", "sys", "user", "")
 	require.Error(t, err, "should return error when no text content")
 	require.Contains(t, err.Error(), "no text content", "error should mention missing text content")
 }

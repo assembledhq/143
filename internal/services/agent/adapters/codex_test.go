@@ -15,6 +15,8 @@ import (
 )
 
 func TestCodexAdapter_Name(t *testing.T) {
+	t.Parallel()
+
 	a := NewCodexAdapter(zerolog.Nop())
 	if a.Name() != models.AgentTypeCodex {
 		t.Errorf("expected name 'codex', got %q", a.Name())
@@ -22,8 +24,9 @@ func TestCodexAdapter_Name(t *testing.T) {
 }
 
 func TestCodexAdapter_PreparePrompt(t *testing.T) {
-	a := NewCodexAdapter(zerolog.Nop())
+	t.Parallel()
 
+	a := NewCodexAdapter(zerolog.Nop())
 	tests := []struct {
 		name      string
 		input     *agent.AgentInput
@@ -48,12 +51,12 @@ func TestCodexAdapter_PreparePrompt(t *testing.T) {
 				Issue: &models.Issue{
 					Title:    "NilPointerException in user service",
 					Severity: "high",
-					Source:   "sentry",
+					Source:   models.IssueSourceSentry,
 				},
 				TokenMode: "low",
 			},
 			wantErr:   false,
-			wantToken: lowTokenMax,
+			wantToken: defaultLowTokenMax,
 		},
 		{
 			name: "high token mode",
@@ -61,17 +64,18 @@ func TestCodexAdapter_PreparePrompt(t *testing.T) {
 				Issue: &models.Issue{
 					Title:    "Complex refactor needed",
 					Severity: "medium",
-					Source:   "sentry",
+					Source:   models.IssueSourceSentry,
 				},
 				TokenMode: "high",
 			},
 			wantErr:   false,
-			wantToken: highTokenMax,
+			wantToken: defaultHighTokenMax,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			prompt, err := a.PreparePrompt(context.Background(), tt.input)
 			if tt.wantErr {
 				if err == nil {
@@ -96,8 +100,9 @@ func TestCodexAdapter_PreparePrompt(t *testing.T) {
 }
 
 func TestParseCodexOutput_JSON(t *testing.T) {
-	output := []byte(`{"response": "Fixed the null pointer by adding a nil check.", "stats": {"inputTokens": 1500, "outputTokens": 500}}`)
+	t.Parallel()
 
+	output := []byte(`{"response": "Fixed the null pointer by adding a nil check.", "stats": {"inputTokens": 1500, "outputTokens": 500}}`)
 	result := &agent.AgentResult{}
 	logCh := make(chan agent.LogEntry, 100)
 
@@ -116,8 +121,9 @@ func TestParseCodexOutput_JSON(t *testing.T) {
 }
 
 func TestParseCodexOutput_PlainText(t *testing.T) {
-	output := []byte("I fixed the bug by adding a nil check on line 42.")
+	t.Parallel()
 
+	output := []byte("I fixed the bug by adding a nil check on line 42.")
 	result := &agent.AgentResult{}
 	logCh := make(chan agent.LogEntry, 100)
 
@@ -130,8 +136,9 @@ func TestParseCodexOutput_PlainText(t *testing.T) {
 }
 
 func TestParseCodexOutput_WithConfidence(t *testing.T) {
-	output := []byte(`{"response": "Fixed it.\n\n` + "```json\\n{\\\"confidence_score\\\": 0.85, \\\"confidence_reasoning\\\": \\\"Simple nil check\\\", \\\"risk_factors\\\": [\\\"none\\\"]}\\n```" + `"}`)
+	t.Parallel()
 
+	output := []byte(`{"response": "Fixed it.\n\n` + "```json\\n{\\\"confidence_score\\\": 0.85, \\\"confidence_reasoning\\\": \\\"Simple nil check\\\", \\\"risk_factors\\\": [\\\"none\\\"]}\\n```" + `"}`)
 	result := &agent.AgentResult{}
 	logCh := make(chan agent.LogEntry, 100)
 
@@ -144,6 +151,8 @@ func TestParseCodexOutput_WithConfidence(t *testing.T) {
 }
 
 func TestParseCodexOutput_Empty(t *testing.T) {
+	t.Parallel()
+
 	result := &agent.AgentResult{}
 	logCh := make(chan agent.LogEntry, 100)
 
@@ -156,8 +165,9 @@ func TestParseCodexOutput_Empty(t *testing.T) {
 }
 
 func TestParseCodexOutput_JSONWithError(t *testing.T) {
-	output := []byte(`{"response": "Attempted fix.", "error": "rate limit exceeded"}`)
+	t.Parallel()
 
+	output := []byte(`{"response": "Attempted fix.", "error": "rate limit exceeded"}`)
 	result := &agent.AgentResult{}
 	logCh := make(chan agent.LogEntry, 100)
 
@@ -404,6 +414,90 @@ func TestParseCodexStreamOutput(t *testing.T) {
 			},
 		},
 		{
+			name:   "item.completed agent_message surfaces as output",
+			output: `{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I found the bug and fixed it."}}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Len(t, logs, 1)
+				require.Equal(t, "output", logs[0].Level)
+				require.Contains(t, logs[0].Message, "I found the bug and fixed it.")
+				require.Contains(t, result.Summary, "I found the bug and fixed it.")
+			},
+		},
+		{
+			name:   "item.completed command_execution surfaces as tool_use",
+			output: `{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'ls -la /workspace'","aggregated_output":"total 8\ndrwxr-xr-x  2 root root 4096 main.go","exit_code":0,"status":"completed"}}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Len(t, logs, 2, "should have tool_use + tool_result")
+				require.Equal(t, "tool_use", logs[0].Level)
+				require.Equal(t, "command_execution", logs[0].Metadata["tool"])
+				inputMap, ok := logs[0].Metadata["input"].(map[string]interface{})
+				require.True(t, ok)
+				require.Contains(t, inputMap["command"], "ls -la /workspace")
+				require.Equal(t, "output", logs[1].Level)
+				require.Equal(t, "tool_result", logs[1].Metadata["type"])
+			},
+		},
+		{
+			name:   "item.completed command_execution with failed status",
+			output: `{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"/bin/bash -c 'ls'","aggregated_output":"bwrap: No permissions","exit_code":1,"status":"failed"}}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Len(t, logs, 2)
+				require.Equal(t, "tool_use", logs[0].Level)
+				require.Equal(t, "failed", logs[0].Metadata["status"])
+				exitCode, ok := logs[0].Metadata["exit_code"]
+				require.True(t, ok)
+				require.Equal(t, 1, exitCode)
+			},
+		},
+		{
+			name:   "turn.completed extracts usage info",
+			output: `{"type":"turn.completed","usage":{"input_tokens":45439,"cached_input_tokens":39296,"output_tokens":870}}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Equal(t, 45439, result.TokenUsage.InputTokens)
+				require.Equal(t, 870, result.TokenUsage.OutputTokens)
+				require.Len(t, logs, 1)
+				require.Equal(t, "debug", logs[0].Level)
+			},
+		},
+		{
+			name: "full Codex CLI stream with item events",
+			output: `{"type":"thread.started","thread_id":"019d049e-f7f8-7b71-bb08-e174ba50c73c"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I'm going to inspect the workspace."}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'ls /workspace'","aggregated_output":"main.go","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"I found the issue and applied a fix."}}
+{"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":500,"output_tokens":200}}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Contains(t, result.Summary, "I'm going to inspect the workspace.")
+				require.Contains(t, result.Summary, "I found the issue and applied a fix.")
+				require.Equal(t, 1000, result.TokenUsage.InputTokens)
+				require.Equal(t, 200, result.TokenUsage.OutputTokens)
+
+				// Count visible entries by level.
+				outputCount := 0
+				toolUseCount := 0
+				debugCount := 0
+				for _, log := range logs {
+					switch log.Level {
+					case "output":
+						outputCount++
+					case "tool_use":
+						toolUseCount++
+					case "debug":
+						debugCount++
+					}
+				}
+				require.Equal(t, 3, outputCount, "2 agent_messages + 1 tool_result should produce output logs")
+				require.Equal(t, 1, toolUseCount, "command_execution should produce tool_use log")
+				require.GreaterOrEqual(t, debugCount, 3, "thread.started, turn.started, turn.completed should be debug")
+			},
+		},
+		{
 			name:   "unknown event type logged as debug",
 			output: `{"type":"custom_unknown","content":"whatever"}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
@@ -540,6 +634,10 @@ func TestCodexAdapter_Execute(t *testing.T) {
 					}
 					return tt.codexExitCode, nil
 				}
+				if strings.HasPrefix(cmd, "git rev-parse") {
+					_, _ = stdout.Write([]byte("true\n"))
+					return 0, nil
+				}
 				if strings.HasPrefix(cmd, "git diff") {
 					_, _ = stdout.Write([]byte(tt.diffOutput))
 					return tt.diffExitCode, nil
@@ -644,8 +742,12 @@ func TestCodexAdapter_Execute_ContinuationWithoutSessionIDUsesResumeLast(t *test
 
 	provider := testutil.NewMockSandboxProvider()
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-		if strings.HasPrefix(cmd, "codex resume") {
+		if strings.HasPrefix(cmd, "codex exec resume") {
 			_, _ = stdout.Write([]byte(`{"type":"message","content":"continuing prior session"}`))
+			return 0, nil
+		}
+		if strings.HasPrefix(cmd, "git rev-parse") {
+			_, _ = stdout.Write([]byte("true\n"))
 			return 0, nil
 		}
 		if strings.HasPrefix(cmd, "git diff") {
@@ -668,12 +770,234 @@ func TestCodexAdapter_Execute_ContinuationWithoutSessionIDUsesResumeLast(t *test
 	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
 	require.NoError(t, err, "continuation should succeed without an explicit session ID")
 	require.NotNil(t, result, "continuation should return a result")
-	require.Contains(t, provider.ExecCalls[0], "codex resume --last", "continuation without a session ID should resume the latest restored Codex session")
+	require.Contains(t, provider.ExecCalls[0], "codex exec resume --last --dangerously-bypass-approvals-and-sandbox --sandbox danger-full-access", "continuation without a session ID should resume the latest restored Codex session")
 	_, exists := provider.Files["/workspace/.143-prompt.md"]
 	require.False(t, exists, "continuation should not write a fresh prompt file")
 }
 
+func TestIsDuplicateOutput(t *testing.T) {
+	t.Parallel()
+
+	t.Run("first content is not a duplicate", func(t *testing.T) {
+		t.Parallel()
+		m := make(map[string]string)
+		require.False(t, isDuplicateOutput("message", "hello", m))
+		require.Equal(t, "hello", m["message"])
+	})
+
+	t.Run("same content same type is a duplicate", func(t *testing.T) {
+		t.Parallel()
+		m := map[string]string{"message": "hello"}
+		require.True(t, isDuplicateOutput("message", "hello", m))
+	})
+
+	t.Run("different content is not a duplicate", func(t *testing.T) {
+		t.Parallel()
+		m := map[string]string{"message": "hello"}
+		require.False(t, isDuplicateOutput("message", "world", m))
+		require.Equal(t, "world", m["message"])
+	})
+
+	t.Run("same content different type is not a duplicate", func(t *testing.T) {
+		t.Parallel()
+		m := map[string]string{"message": "hello"}
+		require.False(t, isDuplicateOutput("item.completed.agent_message", "hello", m))
+	})
+
+	t.Run("empty content is never a duplicate", func(t *testing.T) {
+		t.Parallel()
+		m := map[string]string{"message": "hello"}
+		require.False(t, isDuplicateOutput("message", "", m))
+	})
+}
+
+
+func TestParseCodexStreamLine_DeduplicatesConsecutiveOutput(t *testing.T) {
+	t.Parallel()
+
+	result := &agent.AgentResult{}
+	logCh := make(chan agent.LogEntry, 100)
+	var summaryParts []string
+	lastByType := make(map[string]string)
+
+	line := []byte(`{"type":"message","content":"Hello world"}`)
+
+	// Send the same line twice — only one log entry should be emitted.
+	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType)
+	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType)
+	close(logCh)
+
+	var logs []agent.LogEntry
+	for entry := range logCh {
+		logs = append(logs, entry)
+	}
+
+	require.Len(t, logs, 1, "consecutive duplicate messages should be deduplicated to 1 log entry")
+	require.Len(t, summaryParts, 1, "summary should only contain 1 entry for deduplicated output")
+}
+
+func TestParseCodexStreamLine_AllowsNonConsecutiveDuplicates(t *testing.T) {
+	t.Parallel()
+
+	result := &agent.AgentResult{}
+	logCh := make(chan agent.LogEntry, 100)
+	var summaryParts []string
+	lastByType := make(map[string]string)
+
+	lineA := []byte(`{"type":"message","content":"A"}`)
+	lineB := []byte(`{"type":"message","content":"B"}`)
+
+	// A, B, A — all 3 should pass through because A is non-consecutive.
+	parseCodexStreamLine(lineA, result, logCh, &summaryParts, lastByType)
+	parseCodexStreamLine(lineB, result, logCh, &summaryParts, lastByType)
+	parseCodexStreamLine(lineA, result, logCh, &summaryParts, lastByType)
+	close(logCh)
+
+	var logs []agent.LogEntry
+	for entry := range logCh {
+		logs = append(logs, entry)
+	}
+
+	require.Len(t, logs, 3, "non-consecutive duplicates should all pass through")
+	require.Equal(t, "A", logs[0].Message)
+	require.Equal(t, "B", logs[1].Message)
+	require.Equal(t, "A", logs[2].Message)
+}
+
+func TestParseCodexStreamLine_DeduplicatesItemCompleted(t *testing.T) {
+	t.Parallel()
+
+	result := &agent.AgentResult{}
+	logCh := make(chan agent.LogEntry, 100)
+	var summaryParts []string
+	lastByType := make(map[string]string)
+
+	line := []byte(`{"type":"item.completed","item":{"type":"agent_message","text":"Final answer"}}`)
+
+	// Same item.completed agent_message twice.
+	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType)
+	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType)
+	close(logCh)
+
+	var logs []agent.LogEntry
+	for entry := range logCh {
+		logs = append(logs, entry)
+	}
+
+	require.Len(t, logs, 1, "consecutive duplicate item.completed agent_message should be deduplicated")
+	require.Len(t, summaryParts, 1, "summary should only contain 1 entry for deduplicated item.completed")
+}
+
+func TestParseCodexStreamLine_SuppressesRefreshTokenFromStdout(t *testing.T) {
+	t.Parallel()
+
+	result := &agent.AgentResult{}
+	logCh := make(chan agent.LogEntry, 100)
+	var summaryParts []string
+	lastByType := make(map[string]string)
+
+	// Simulate the exact stderr-style errors that arrive via stdout at session end.
+	lines := [][]byte{
+		[]byte(`2026-03-20T04:36:19.827548Z ERROR codex_core::auth: Failed to refresh token: 401 Unauthorized: { "error": { "message": "Your refresh token has already been used", "type": "invalid_request_error", "param": null, "code": "refresh_token_reused" } }`),
+		[]byte(`2026-03-20T04:36:19.827634Z ERROR codex_core::auth: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.`),
+	}
+	for _, line := range lines {
+		parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType)
+	}
+	close(logCh)
+
+	var logs []agent.LogEntry
+	for entry := range logCh {
+		logs = append(logs, entry)
+	}
+
+	require.Empty(t, logs, "refresh token errors arriving via stdout should be suppressed entirely")
+	require.Empty(t, summaryParts, "refresh token errors should not appear in summary")
+}
+
+func TestIsRefreshTokenError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		msg  string
+		want bool
+	}{
+		{"refresh_token_reused", true},
+		{`401 Unauthorized: { "error": { "code": "refresh_token_reused" } }`, true},
+		{"Failed to refresh token: Your access token could not be refreshed because your refresh token was already used.", true},
+		{`Failed to refresh token: 401 Unauthorized: { "error": { "message": "bad", "type": "invalid_request_error" } }`, true},
+		// Multi-line blob with fragments — overall blob contains the keyword.
+		{`"error": { "type": "invalid_request_error", "param": null, } } Failed to refresh token: done`, true},
+		{"context deadline exceeded", false},
+		{"command not found", false},
+		{`"error": { "type": "invalid_request_error" }`, false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		require.Equal(t, tt.want, isRefreshTokenError(tt.msg), "isRefreshTokenError(%q)", tt.msg)
+	}
+}
+
+func TestFilterRefreshTokenLines(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		input  string
+		expect string
+	}{
+		{
+			name:   "entire stderr is refresh token errors",
+			input:  "ERROR codex_core::auth: Failed to refresh token: refresh_token_reused\nERROR codex_core::auth: Your refresh token was already used.",
+			expect: "",
+		},
+		{
+			name:   "mixed lines: refresh lines removed, real errors preserved",
+			input:  "\"error\": { \"type\": \"invalid_request_error\", \"param\": null, } }\nFailed to refresh token: refresh_token_reused\n\"error\": { \"type\": \"invalid_request_error\" }",
+			expect: "\"error\": { \"type\": \"invalid_request_error\", \"param\": null, } }\n\"error\": { \"type\": \"invalid_request_error\" }",
+		},
+		{
+			name:   "empty input",
+			input:  "",
+			expect: "",
+		},
+		{
+			name:   "no refresh token content at all — preserved as-is",
+			input:  "real error line 1\nreal error line 2",
+			expect: "real error line 1\nreal error line 2",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expect, filterRefreshTokenLines(tt.input))
+		})
+	}
+}
+
+func TestParseCodexStreamLine_SuppressesRefreshTokenError(t *testing.T) {
+	t.Parallel()
+
+	result := &agent.AgentResult{}
+	logCh := make(chan agent.LogEntry, 100)
+	var summaryParts []string
+	lastByType := make(map[string]string)
+
+	line := []byte(`{"type":"error","error":"401 Unauthorized: refresh_token_reused"}`)
+	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType)
+	close(logCh)
+
+	var logs []agent.LogEntry
+	for entry := range logCh {
+		logs = append(logs, entry)
+	}
+
+	require.Empty(t, logs, "refresh_token_reused error events should be suppressed entirely")
+}
+
 func TestShellEscapeCodex(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		input    string
@@ -687,6 +1011,7 @@ func TestShellEscapeCodex(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := shellEscapeCodex(tt.input)
 			if got != tt.expected {
 				t.Errorf("shellEscapeCodex(%q) = %q, want %q", tt.input, got, tt.expected)

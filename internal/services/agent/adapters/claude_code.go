@@ -19,9 +19,28 @@ import (
 )
 
 const (
-	lowTokenMax  = 50_000
-	highTokenMax = 200_000
+	defaultLowTokenMax  = 50_000
+	defaultHighTokenMax = 200_000
 )
+
+// resolveTokenLimit returns the appropriate max token limit based on
+// the token mode and optional org-specific context limits.
+func resolveTokenLimit(mode string, limits *models.ContextLimits) int {
+	low := defaultLowTokenMax
+	high := defaultHighTokenMax
+	if limits != nil {
+		if limits.AgentLowTokenMax > 0 {
+			low = limits.AgentLowTokenMax
+		}
+		if limits.AgentHighTokenMax > 0 {
+			high = limits.AgentHighTokenMax
+		}
+	}
+	if mode == "high" {
+		return high
+	}
+	return low
+}
 
 // ClaudeCodeAdapter runs the Claude Code CLI inside a sandbox.
 type ClaudeCodeAdapter struct {
@@ -47,10 +66,7 @@ func (a *ClaudeCodeAdapter) PreparePrompt(ctx context.Context, input *agent.Agen
 		return nil, fmt.Errorf("agent input and issue are required")
 	}
 
-	maxTokens := lowTokenMax
-	if input.TokenMode == "high" {
-		maxTokens = highTokenMax
-	}
+	maxTokens := resolveTokenLimit(input.TokenMode, input.ContextLimits)
 
 	systemPrompt := buildSystemPrompt(input)
 	userPrompt := buildUserPrompt(input)
@@ -238,10 +254,15 @@ func WithSandboxProvider(ctx context.Context, p agent.SandboxProvider) context.C
 func buildSystemPrompt(input *agent.AgentInput) string {
 	var b strings.Builder
 
-	base := prompts.AgentSystemPromptBase()
-	b.WriteString(base)
-	if !strings.HasSuffix(base, "\n\n") {
-		b.WriteString("\n\n")
+	// Manual sessions skip the bug-fixing template — the user's raw message
+	// is the entire prompt. Only inject repo conventions and integration
+	// skills so the agent knows what tools and patterns are available.
+	if input.Issue.Source != models.IssueSourceManual {
+		base := prompts.CodingTaskPreamble()
+		b.WriteString(base)
+		if !strings.HasSuffix(base, "\n\n") {
+			b.WriteString("\n\n")
+		}
 	}
 
 	// Repo conventions from context docs.
@@ -282,7 +303,7 @@ func buildSystemPrompt(input *agent.AgentInput) string {
 		b.WriteString("\n\n")
 	}
 
-	// PM context: inject PM guidance when available.
+	// PM context: inject PM guidance when available (never set for manual sessions).
 	if input.PMContext != nil {
 		b.WriteString("## Product Manager Analysis\n\n")
 		if input.PMContext.Reasoning != "" {
@@ -321,6 +342,14 @@ func buildSystemPrompt(input *agent.AgentInput) string {
 
 // buildUserPrompt constructs the user prompt with issue-specific details.
 func buildUserPrompt(input *agent.AgentInput) string {
+	// Manual sessions: pass through the user's raw message without any wrapping.
+	if input.Issue.Source == models.IssueSourceManual {
+		if input.Issue.Description != nil {
+			return *input.Issue.Description
+		}
+		return input.Issue.Title
+	}
+
 	var b strings.Builder
 
 	b.WriteString(fmt.Sprintf("## Issue: %s\n\n", input.Issue.Title))
@@ -330,7 +359,7 @@ func buildUserPrompt(input *agent.AgentInput) string {
 	}
 
 	// Add stack trace from raw data if this is a Sentry issue.
-	if input.Issue.Source == "sentry" {
+	if input.Issue.Source == models.IssueSourceSentry {
 		stackTrace := extractStackTrace(input.Issue.RawData)
 		if stackTrace != "" {
 			b.WriteString(fmt.Sprintf("### Stack Trace\n\n```\n%s\n```\n\n", stackTrace))
@@ -367,7 +396,7 @@ func buildUserPrompt(input *agent.AgentInput) string {
 // extractFileHints parses the issue's raw data for file paths from
 // Sentry stack trace frames.
 func extractFileHints(input *agent.AgentInput) []string {
-	if input.Issue.Source != "sentry" || len(input.Issue.RawData) == 0 {
+	if input.Issue.Source != models.IssueSourceSentry || len(input.Issue.RawData) == 0 {
 		return nil
 	}
 
@@ -611,7 +640,20 @@ func shellEscapeDouble(s string) string {
 }
 
 // collectDiff runs git diff inside the sandbox to capture changes.
+// Returns an empty string (not an error) when the workspace is not a git repository,
+// which happens when no repository was configured for the issue.
 func collectDiff(ctx context.Context, provider agent.SandboxProvider, sandbox *agent.Sandbox) (string, error) {
+	// Check if the workspace is a git repository before attempting diff.
+	var checkStdout, checkStderr bytes.Buffer
+	checkExit, err := provider.Exec(ctx, sandbox, "git rev-parse --is-inside-work-tree", &checkStdout, &checkStderr)
+	if err != nil {
+		return "", fmt.Errorf("check git repo: %w", err)
+	}
+	if checkExit != 0 {
+		// Not a git repository — no diff to collect.
+		return "", nil
+	}
+
 	var stdout, stderr bytes.Buffer
 	exitCode, err := provider.Exec(ctx, sandbox, "git diff", &stdout, &stderr)
 	if err != nil {

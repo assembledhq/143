@@ -36,7 +36,7 @@ func TestNewRouter_EncryptionKeyValidation(t *testing.T) {
 
 			cfg := &config.Config{EncryptionMasterKey: tt.masterKey}
 			codexSvc := codexauth.NewService(nil, zerolog.Nop())
-			router, err := NewRouter(cfg, nil, zerolog.Nop(), codexSvc, nil)
+			router, err := NewRouter(cfg, nil, zerolog.Nop(), codexSvc, nil, nil)
 			if tt.expectErr {
 				require.Error(t, err, "NewRouter should return an error when encryption key is invalid")
 				require.Nil(t, router, "NewRouter should not construct a router with an invalid encryption key")

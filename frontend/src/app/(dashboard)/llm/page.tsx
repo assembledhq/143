@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { captureError } from "@/lib/errors";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -95,6 +96,7 @@ export default function LLMPage() {
 
   // Form state
   const [llmModel, setLlmModel] = useState(DEFAULT_LLM_MODEL);
+  const [reasoningEffort, setReasoningEffort] = useState<string>("");
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
   const [saveStatus, setSaveStatus] = useState<"idle" | "success" | "error">("idle");
@@ -107,6 +109,7 @@ export default function LLMPage() {
   if (settingsData && settingsData !== prevSettingsRef) {
     setPrevSettingsRef(settingsData);
     setLlmModel(orgSettings.llm_model || DEFAULT_LLM_MODEL);
+    setReasoningEffort(orgSettings.llm_reasoning_effort || "");
   }
 
   // Determine which providers are configured (org-level or platform-level)
@@ -141,7 +144,8 @@ export default function LLMPage() {
       setSaveStatus("success");
       setTimeout(() => setSaveStatus("idle"), 2000);
     },
-    onError: () => {
+    onError: (error) => {
+      captureError(error, { feature: "llm-model-save" });
       setSaveStatus("error");
       setTimeout(() => setSaveStatus("idle"), 3000);
     },
@@ -159,7 +163,8 @@ export default function LLMPage() {
         setKeySaveStatus((prev) => ({ ...prev, [variables.provider]: "idle" }));
       }, 2000);
     },
-    onError: (_err, variables) => {
+    onError: (err, variables) => {
+      captureError(err, { feature: "llm-key-save" });
       setKeySaveStatus((prev) => ({ ...prev, [variables.provider]: "error" }));
       setTimeout(() => {
         setKeySaveStatus((prev) => ({ ...prev, [variables.provider]: "idle" }));
@@ -174,11 +179,17 @@ export default function LLMPage() {
       queryClient.invalidateQueries({ queryKey: ["credentials"] });
       setRemovingProvider(null);
     },
+    onError: (error) => {
+      captureError(error, { feature: "llm-key-delete" });
+    },
   });
 
   function handleSaveModel() {
     modelMutation.mutate({
-      settings: { llm_model: llmModel },
+      settings: {
+        llm_model: llmModel,
+        llm_reasoning_effort: reasoningEffort || "",
+      },
     });
   }
 
@@ -337,6 +348,24 @@ export default function LLMPage() {
                   <p className="text-xs text-muted-foreground">
                     The model used for validation, prioritization, and other general LLM tasks.
                     Only models from configured providers are shown.
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="reasoning-effort">Reasoning effort</Label>
+                  <Select value={reasoningEffort || "none"} onValueChange={(v) => setReasoningEffort(v === "none" ? "" : v)}>
+                    <SelectTrigger id="reasoning-effort" aria-label="Reasoning effort">
+                      <SelectValue placeholder="Default (none)" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">Default (none)</SelectItem>
+                      <SelectItem value="low">Low</SelectItem>
+                      <SelectItem value="medium">Medium</SelectItem>
+                      <SelectItem value="high">High</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    Controls how much reasoning the model uses. Lower values reduce latency and cost.
+                    Only applies to models that support reasoning.
                   </p>
                 </div>
               </div>

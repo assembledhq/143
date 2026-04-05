@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
@@ -328,6 +330,88 @@ func TestRepositoryHandler_Summary(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestRepositoryHandler_ListBranches_NoPRService(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	store := db.NewRepositoryStore(mock)
+	handler := NewRepositoryHandler(store) // no SetPRService call
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/repositories/"+repoID.String()+"/branches", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", repoID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.ListBranches(w, req)
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, "should return 503 when prService is nil")
+	require.Contains(t, w.Body.String(), "GITHUB_NOT_CONFIGURED", "error code should indicate GitHub is not configured")
+}
+
+func TestRepositoryHandler_ListBranches_InvalidID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	store := db.NewRepositoryStore(mock)
+	handler := NewRepositoryHandler(store)
+	// Set a non-nil prService so we get past the nil check.
+	handler.prService = &ghservice.PRService{}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/repositories/not-a-uuid/branches", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "not-a-uuid")
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.ListBranches(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "should return 400 for invalid UUID")
+	require.Contains(t, w.Body.String(), "INVALID_ID", "error code should indicate invalid ID")
+}
+
+func TestRepositoryHandler_ListBranches_RepoNotFound(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	store := db.NewRepositoryStore(mock)
+	handler := NewRepositoryHandler(store)
+	handler.prService = &ghservice.PRService{}
+
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(fmt.Errorf("no rows"))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/repositories/"+repoID.String()+"/branches", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", repoID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.ListBranches(w, req)
+	require.Equal(t, http.StatusNotFound, w.Code, "should return 404 when repo is not found")
+	require.Contains(t, w.Body.String(), "NOT_FOUND", "error code should indicate not found")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestRepositoryHandler_Delete_Success(t *testing.T) {

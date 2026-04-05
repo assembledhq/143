@@ -1,5 +1,7 @@
 # Design: Observability & Impact Measurement
 
+> **Status:** Partially Implemented | **Last reviewed:** 2026-03-25
+
 This document describes how 143.dev measures the real-world impact of deployed fixes (Step 6 in the overall flow).
 
 ## Overview

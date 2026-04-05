@@ -1,5 +1,7 @@
 # Design: Projects — Iterative Multi-Task Agent Orchestration
 
+> **Status:** Partially Implemented | **Last reviewed:** 2026-03-25
+
 **Status**: Proposal
 **Depends on**: [06-agent-orchestrator.md](06-agent-orchestrator.md)
 **Inspired by**: [OpenAI Symphony](https://github.com/openai/symphony)
@@ -500,8 +502,9 @@ The PM output gains `slot_allocation` and `project_plans` sections:
   "clusters": [ ... ],        // existing, unchanged
   "skip": [ ... ],            // existing, unchanged
 
-  "proposed_projects": [           // NEW: PM suggests new projects
+  "proposed_projects": [           // NEW: PM summarizes projects it proposed during the run
     {
+      "repository_id": "<uuid>",
       "title": "Standardize error handling in payments",
       "goal": "All payment endpoints use consistent error types and HTTP codes",
       "scope": "internal/api/handlers/payment*.go",
@@ -591,10 +594,9 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger PMTrigge
         s.executeProjectPlan(ctx, orgID, projectPlan, ctxBundle.settings)
     }
 
-    // 6. Create PM-proposed projects (status: proposed, no work starts)
-    for _, proposal := range plan.ProposedProjects {
-        s.createProposedProject(ctx, orgID, proposal)
-    }
+    // 6. PM-proposed projects are created during the run via an internal CLI
+    // tool. The final plan may still summarize those proposals for auditability,
+    // but is not the canonical mutation path.
 
     return plan, nil
 }
@@ -1135,9 +1137,9 @@ The key philosophical difference: Symphony trusts the human to manage the projec
 
 - Add `ActiveProjects` to `PMContext`, implement `buildProjectSummary`
 - Extend PM system prompt with project planning + project proposal sections
-- Parse `project_plans` and `proposed_projects` from PM output
+- Parse `project_plans` from PM output and treat `proposed_projects` as summary metadata
 - `executeProjectPlan` creates tasks, dispatches to agents
-- `createProposedProject` creates projects with status `proposed`
+- Add an internal PM tool for creating repo-scoped projects with status `proposed`
 - Agent run completion updates project task status + project progress
 - Record `project_cycles` for each PM cycle that touches a project
 - Approve/dismiss endpoints for PM-proposed projects

@@ -32,7 +32,7 @@ func TestGeminiCLIAdapter_PreparePrompt(t *testing.T) {
 		{
 			name: "low token mode",
 			input: &agent.AgentInput{
-				Issue:     newTestIssue("sentry", true),
+				Issue:     newTestIssue(models.IssueSourceSentry, true),
 				TokenMode: "low",
 			},
 			expectedMaxTokens: 50_000,
@@ -40,7 +40,7 @@ func TestGeminiCLIAdapter_PreparePrompt(t *testing.T) {
 		{
 			name: "high token mode",
 			input: &agent.AgentInput{
-				Issue:     newTestIssue("linear", true),
+				Issue:     newTestIssue(models.IssueSourceLinear, true),
 				TokenMode: "high",
 			},
 			expectedMaxTokens: 200_000,
@@ -80,7 +80,7 @@ func TestGeminiCLIAdapter_PreparePrompt(t *testing.T) {
 	}
 }
 
-func newTestIssue(source string, hasDescription bool) *models.Issue {
+func newTestIssue(source models.IssueSource, hasDescription bool) *models.Issue {
 	issue := &models.Issue{
 		Source: source,
 		Title:  "Test issue",
@@ -200,6 +200,10 @@ func TestGeminiCLIAdapter_Execute(t *testing.T) {
 				if strings.HasPrefix(cmd, "gemini") {
 					_, _ = stdout.Write([]byte(tt.geminiOutput))
 					return tt.geminiExitCode, nil
+				}
+				if strings.HasPrefix(cmd, "git rev-parse") {
+					_, _ = stdout.Write([]byte("true\n"))
+					return 0, nil
 				}
 				if strings.HasPrefix(cmd, "git diff") {
 					_, _ = stdout.Write([]byte(tt.diffOutput))
@@ -631,6 +635,10 @@ func TestGeminiCLIAdapter_Execute_StreamingOutput(t *testing.T) {
 			_, _ = stdout.Write([]byte(streamOutput))
 			return 0, nil
 		}
+		if strings.HasPrefix(cmd, "git rev-parse") {
+			_, _ = stdout.Write([]byte("true\n"))
+			return 0, nil
+		}
 		if strings.HasPrefix(cmd, "git diff") {
 			_, _ = stdout.Write([]byte("diff --git a/main.go b/main.go\n"))
 			return 0, nil
@@ -675,6 +683,10 @@ func TestGeminiCLIAdapter_Execute_ContinuationWithoutSessionIDUsesResumeMode(t *
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 		if strings.HasPrefix(cmd, "gemini --resume") {
 			_, _ = stdout.Write([]byte(`{"type":"text","content":"continuing gemini session"}`))
+			return 0, nil
+		}
+		if strings.HasPrefix(cmd, "git rev-parse") {
+			_, _ = stdout.Write([]byte("true\n"))
 			return 0, nil
 		}
 		if strings.HasPrefix(cmd, "git diff") {

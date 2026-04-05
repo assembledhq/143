@@ -100,7 +100,7 @@ func TestSummarizeIssue(t *testing.T) {
 	longDescription := strings.Repeat("x", 600)
 	issue := models.Issue{
 		ID:                    uuid.New(),
-		Source:                "sentry",
+		Source:                models.IssueSourceSentry,
 		Title:                 "nil pointer panic",
 		Description:           &longDescription,
 		Severity:              "critical",
@@ -112,9 +112,9 @@ func TestSummarizeIssue(t *testing.T) {
 		RawData:               json.RawMessage(`{"stacktrace":"line 1"}`),
 	}
 
-	summary := summarizeIssue(issue)
+	summary := summarizeIssue(issue, 500)
 	require.Equal(t, issue.ID.String(), summary.ID, "summary should include issue ID")
-	require.Equal(t, issue.Source, summary.Source, "summary should include source")
+	require.Equal(t, string(issue.Source), summary.Source, "summary should include source")
 	require.Equal(t, issue.Title, summary.Title, "summary should include title")
 	require.Len(t, []rune(summary.Description), 500, "summary description should be truncated to 500 runes")
 	require.Equal(t, issue.Severity, summary.Severity, "summary should include severity")

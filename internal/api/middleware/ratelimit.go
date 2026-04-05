@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 )
 
 // RateLimitConfig defines rate limiting parameters.
@@ -144,6 +145,7 @@ func RateLimit(config RateLimitConfig) func(http.Handler) http.Handler {
 			// Check IP rate limit
 			ip := extractIP(r)
 			if !limiter.getIPBucket(ip).allow() {
+				zerolog.Ctx(r.Context()).Warn().Str("ip", ip).Msg("IP rate limit exceeded")
 				w.Header().Set("Retry-After", "1")
 				http.Error(w, `{"error":{"code":"RATE_LIMITED","message":"too many requests"}}`, http.StatusTooManyRequests)
 				return
@@ -153,6 +155,7 @@ func RateLimit(config RateLimitConfig) func(http.Handler) http.Handler {
 			orgID := OrgIDFromContext(r.Context())
 			if orgID != uuid.Nil {
 				if !limiter.getOrgBucket(orgID).allow() {
+					zerolog.Ctx(r.Context()).Warn().Str("org_id", orgID.String()).Msg("org rate limit exceeded")
 					w.Header().Set("Retry-After", "1")
 					http.Error(w, `{"error":{"code":"RATE_LIMITED","message":"org rate limit exceeded"}}`, http.StatusTooManyRequests)
 					return
@@ -173,7 +176,7 @@ func extractIP(r *http.Request) string {
 				if c == ',' {
 					return xff[:i]
 				}
-				_ = i
+				_ = i // suppress unused variable
 			}
 			return xff
 		}

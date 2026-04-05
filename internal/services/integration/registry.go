@@ -14,20 +14,26 @@ import (
 //   - MCP servers (for runtime tool access inside sandboxes)
 //   - Static context writers (for pre-populating sandbox files)
 type Registry struct {
-	mu             sync.RWMutex
-	errorTrackers  map[string]ErrorTracker
-	taskManagers   map[string]TaskManager
-	documentStores map[string]DocumentStore
-	messageSources map[string]MessageSource
+	mu                sync.RWMutex
+	errorTrackers     map[string]ErrorTracker
+	taskManagers      map[string]TaskManager
+	documentStores    map[string]DocumentStore
+	messageSources    map[string]MessageSource
+	codeReviewSources map[string]CodeReviewSource
+	issueCreators     map[string]IssueCreator
+	projectProposers  map[string]ProjectProposer
 }
 
 // NewRegistry creates an empty integration registry.
 func NewRegistry() *Registry {
 	return &Registry{
-		errorTrackers:  make(map[string]ErrorTracker),
-		taskManagers:   make(map[string]TaskManager),
-		documentStores: make(map[string]DocumentStore),
-		messageSources: make(map[string]MessageSource),
+		errorTrackers:     make(map[string]ErrorTracker),
+		taskManagers:      make(map[string]TaskManager),
+		documentStores:    make(map[string]DocumentStore),
+		messageSources:    make(map[string]MessageSource),
+		codeReviewSources: make(map[string]CodeReviewSource),
+		issueCreators:     make(map[string]IssueCreator),
+		projectProposers:  make(map[string]ProjectProposer),
 	}
 }
 
@@ -147,6 +153,93 @@ func (r *Registry) MessageSource(name string) (MessageSource, error) {
 	return ms, nil
 }
 
+// RegisterCodeReviewSource adds a code review source (e.g. GitHub, GitLab).
+func (r *Registry) RegisterCodeReviewSource(provider CodeReviewSource) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.codeReviewSources[provider.Name()] = provider
+}
+
+// CodeReviewSources returns all registered code review sources.
+func (r *Registry) CodeReviewSources() []CodeReviewSource {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result := make([]CodeReviewSource, 0, len(r.codeReviewSources))
+	for _, cr := range r.codeReviewSources {
+		result = append(result, cr)
+	}
+	return result
+}
+
+// CodeReviewSource returns a specific code review source by name, or an error if not found.
+func (r *Registry) CodeReviewSource(name string) (CodeReviewSource, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	cr, ok := r.codeReviewSources[name]
+	if !ok {
+		return nil, fmt.Errorf("code review source %q not registered", name)
+	}
+	return cr, nil
+}
+
+// RegisterIssueCreator adds an issue creator (e.g. internal 143 API).
+func (r *Registry) RegisterIssueCreator(provider IssueCreator) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.issueCreators[provider.Name()] = provider
+}
+
+// IssueCreators returns all registered issue creators.
+func (r *Registry) IssueCreators() []IssueCreator {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result := make([]IssueCreator, 0, len(r.issueCreators))
+	for _, ic := range r.issueCreators {
+		result = append(result, ic)
+	}
+	return result
+}
+
+// IssueCreator returns a specific issue creator by name, or an error if not found.
+func (r *Registry) IssueCreator(name string) (IssueCreator, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	ic, ok := r.issueCreators[name]
+	if !ok {
+		return nil, fmt.Errorf("issue creator %q not registered", name)
+	}
+	return ic, nil
+}
+
+// RegisterProjectProposer adds a project proposer (e.g. internal 143 API).
+func (r *Registry) RegisterProjectProposer(provider ProjectProposer) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.projectProposers[provider.Name()] = provider
+}
+
+// ProjectProposers returns all registered project proposers.
+func (r *Registry) ProjectProposers() []ProjectProposer {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result := make([]ProjectProposer, 0, len(r.projectProposers))
+	for _, pp := range r.projectProposers {
+		result = append(result, pp)
+	}
+	return result
+}
+
+// ProjectProposer returns a specific project proposer by name, or an error if not found.
+func (r *Registry) ProjectProposer(name string) (ProjectProposer, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	pp, ok := r.projectProposers[name]
+	if !ok {
+		return nil, fmt.Errorf("project proposer %q not registered", name)
+	}
+	return pp, nil
+}
+
 // HasAny returns true if at least one provider is registered.
 func (r *Registry) HasAny() bool {
 	r.mu.RLock()
@@ -154,7 +247,10 @@ func (r *Registry) HasAny() bool {
 	return len(r.errorTrackers) > 0 ||
 		len(r.taskManagers) > 0 ||
 		len(r.documentStores) > 0 ||
-		len(r.messageSources) > 0
+		len(r.messageSources) > 0 ||
+		len(r.codeReviewSources) > 0 ||
+		len(r.issueCreators) > 0 ||
+		len(r.projectProposers) > 0
 }
 
 // Summary returns a human-readable summary of registered providers.
@@ -173,6 +269,15 @@ func (r *Registry) Summary() map[string][]string {
 	}
 	for name := range r.messageSources {
 		m["message_sources"] = append(m["message_sources"], name)
+	}
+	for name := range r.codeReviewSources {
+		m["code_review_sources"] = append(m["code_review_sources"], name)
+	}
+	for name := range r.issueCreators {
+		m["issue_creators"] = append(m["issue_creators"], name)
+	}
+	for name := range r.projectProposers {
+		m["project_proposers"] = append(m["project_proposers"], name)
 	}
 	return m
 }

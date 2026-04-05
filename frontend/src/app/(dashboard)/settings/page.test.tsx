@@ -4,12 +4,18 @@ import SettingsPage from './page';
 
 const {
   settingsGetMock,
+  githubStatusGetMock,
 } = vi.hoisted(() => ({
   settingsGetMock: vi.fn().mockResolvedValue({
     data: {
       name: 'Test Org',
       settings: {},
     },
+  }),
+  githubStatusGetMock: vi.fn().mockResolvedValue({
+    connected: false,
+    has_repo_scope: false,
+    pr_authorship_mode: 'user_preferred',
   }),
 }));
 
@@ -18,7 +24,16 @@ vi.mock('@/lib/api', () => ({
     settings: {
       get: settingsGetMock,
     },
+    githubStatus: {
+      get: githubStatusGetMock,
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+    },
   },
+}));
+
+vi.mock('next-themes', () => ({
+  useTheme: () => ({ theme: 'system', setTheme: vi.fn() }),
 }));
 
 describe('SettingsPage', () => {
@@ -63,5 +78,16 @@ describe('SettingsPage', () => {
     await waitFor(() => {
       expect(screen.getByLabelText('Organization name')).toBeDisabled();
     });
+  });
+
+  it('renders the Appearance section with theme selector', async () => {
+    renderWithProviders(<SettingsPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Appearance')).toBeInTheDocument();
+    });
+
+    expect(screen.getByText('Theme')).toBeInTheDocument();
+    expect(screen.getByText('Select your preferred color scheme')).toBeInTheDocument();
   });
 });

@@ -49,11 +49,13 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 		settings = models.MergeRepoPMSettings(settings, repoSettings)
 	}
 
-	openIssues, err := s.issues.ListByOrg(ctx, orgID, db.IssueFilters{Status: "open", Limit: 100})
+	limits := settings.ContextLimits
+
+	openIssues, err := s.issues.ListByOrg(ctx, orgID, db.IssueFilters{Status: "open", Limit: limits.MaxOpenIssues})
 	if err != nil {
 		return nil, err
 	}
-	triagedIssues, err := s.issues.ListByOrg(ctx, orgID, db.IssueFilters{Status: "triaged", Limit: 100})
+	triagedIssues, err := s.issues.ListByOrg(ctx, orgID, db.IssueFilters{Status: "triaged", Limit: limits.MaxTriagedIssues})
 	if err != nil {
 		return nil, err
 	}
@@ -63,20 +65,18 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 
 	issueSummaries := make([]IssueSummary, 0, len(allIssues))
 	for _, issue := range allIssues {
-		issueSummaries = append(issueSummaries, summarizeIssue(issue))
+		issueSummaries = append(issueSummaries, summarizeIssue(issue, limits.IssueDescriptionMax))
 	}
 
-	pendingRuns, err := s.sessions.ListByOrg(ctx, orgID, db.SessionFilters{Status: models.SessionStatusPending, Limit: 50})
+	// Fetch pending + running sessions in a single query. Results are ordered by
+	// created_at DESC (interleaved), which is fine since we only summarize them.
+	inFlight, err := s.sessions.ListByOrg(ctx, orgID, db.SessionFilters{
+		Statuses: []models.SessionStatus{models.SessionStatusPending, models.SessionStatusRunning},
+		Limit:    limits.MaxInFlightRuns,
+	})
 	if err != nil {
 		return nil, err
 	}
-	runningRuns, err := s.sessions.ListByOrg(ctx, orgID, db.SessionFilters{Status: models.SessionStatusRunning, Limit: 50})
-	if err != nil {
-		return nil, err
-	}
-	inFlight := make([]models.Session, 0, len(pendingRuns)+len(runningRuns))
-	inFlight = append(inFlight, pendingRuns...)
-	inFlight = append(inFlight, runningRuns...)
 
 	inFlightSummaries := make([]RunSummary, 0, len(inFlight))
 	for _, run := range inFlight {
@@ -88,7 +88,7 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 		})
 	}
 
-	recentRuns, err := s.sessions.ListRecentByOrg(ctx, orgID, []string{"completed", "failed", "needs_human_guidance"}, 20)
+	recentRuns, err := s.sessions.ListRecentByOrg(ctx, orgID, []string{"completed", "failed", "needs_human_guidance"}, limits.MaxRecentOutcomes)
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +107,7 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 
 	prSummaries := make([]PRSummary, 0)
 	if s.pullRequests != nil {
-		prs, err := s.pullRequests.ListByOrg(ctx, orgID, db.PullRequestFilters{Limit: 20})
+		prs, err := s.pullRequests.ListByOrg(ctx, orgID, db.PullRequestFilters{Limit: limits.MaxRecentPRs})
 		if err != nil {
 			return nil, err
 		}
@@ -125,7 +125,7 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 
 	decisionSummaries := make([]DecisionLogEntrySummary, 0)
 	if s.decisionLog != nil {
-		decisions, err := s.decisionLog.ListRecentByOrg(ctx, orgID, 50)
+		decisions, err := s.decisionLog.ListRecentByOrg(ctx, orgID, limits.MaxDecisionHistory)
 		if err != nil {
 			return nil, err
 		}
@@ -168,10 +168,10 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 		}
 	}
 
-	// Gather PM documents if store is configured.
+	// Gather PM documents if store is configured, excluding pending refresh docs.
 	var pmDocs []models.PMDocument
 	if s.pmDocuments != nil {
-		docs, err := s.pmDocuments.ListByOrg(ctx, orgID)
+		docs, err := s.pmDocuments.ListByOrgExcludeSourceType(ctx, orgID, models.PMDocSourceRefresh, 100)
 		if err != nil {
 			s.logger.Warn().Err(err).Msg("failed to load PM documents for context")
 		} else {
@@ -247,16 +247,16 @@ func (s *Service) gatherSlackContext(ctx context.Context, orgID uuid.UUID) ([]Sl
 	return summaries, threadData, nil
 }
 
-func summarizeIssue(issue models.Issue) IssueSummary {
+func summarizeIssue(issue models.Issue, descriptionMax int) IssueSummary {
 	description := ""
 	if issue.Description != nil {
 		description = *issue.Description
 	}
-	description = truncate(description, 500)
+	description = truncate(description, descriptionMax)
 
 	summary := IssueSummary{
 		ID:                    issue.ID.String(),
-		Source:                issue.Source,
+		Source:                string(issue.Source),
 		Title:                 issue.Title,
 		Description:           description,
 		Severity:              issue.Severity,
@@ -270,9 +270,9 @@ func summarizeIssue(issue models.Issue) IssueSummary {
 
 	// Enrich with source-specific metadata.
 	switch issue.Source {
-	case "sentry":
+	case models.IssueSourceSentry:
 		summary.StackTraceSummary = extractStackTraceSummary(issue.RawData)
-	case "linear":
+	case models.IssueSourceLinear:
 		enrichLinearMetadata(&summary, issue.RawData)
 	}
 

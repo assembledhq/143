@@ -31,10 +31,10 @@ var sessionColumns = []string{
 	"container_id", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
-	"pm_plan_id", "pm_approach", "pm_reasoning", "project_task_id",
+	"pm_plan_id", "title", "pm_approach", "pm_reasoning", "project_task_id",
 	"model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
-	"created_at",
+	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "created_at",
 }
 
 // newMockPool creates a pgxmock pool and returns it with a cleanup.
@@ -130,10 +130,15 @@ func TestHandlePullRequestEvent_MergedFlow(t *testing.T) {
 					nil, nil, nil, nil,
 					nil, nil, nil, nil,
 					nil, nil, nil, nil, nil,
-					nil, nil, nil, nil,
+					nil, nil, nil, nil, nil,
 					nil, // model_override
 					nil, // triggered_by_user_id
 					nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+					nil, // target_branch
+					nil, // working_branch
+					nil, // repository_id
+					nil, // diff_stats
+					nil, // diff_history
 					now),
 		)
 
@@ -862,7 +867,7 @@ func TestFormatPRBody_WithValidationStore(t *testing.T) {
 		ResultSummary: &summary,
 	}
 	issue := &models.Issue{
-		Source:                "sentry",
+		Source:                models.IssueSourceSentry,
 		Severity:              "high",
 		AffectedCustomerCount: 5,
 		OccurrenceCount:       20,
@@ -887,10 +892,10 @@ func TestFormatPRBody_WithValidationStore(t *testing.T) {
 		)
 
 	body := svc.formatPRBody(context.Background(), run, issue)
-	require.Contains(t, body, "## Validation", "PR body should contain Validation section when validation exists")
-	require.Contains(t, body, "Direction alignment", "PR body should contain direction check row")
-	require.Contains(t, body, "Correctness", "PR body should contain correctness check row")
-	require.Contains(t, body, "Security scan", "PR body should contain security scan row")
+	require.Contains(t, body, "## Test plan", "PR body should contain Test plan section")
+	require.Contains(t, body, "Regression tests passed", "PR body should contain regression test status")
+	require.Contains(t, body, "Correctness check passed", "PR body should contain correctness check status")
+	require.Contains(t, body, "Security scan passed", "PR body should contain security scan status")
 }
 
 func TestHandlePullRequestEvent_MergedWithUpdateStatusError(t *testing.T) {
@@ -1427,4 +1432,115 @@ func TestPushRevision_WithParentSessionID(t *testing.T) {
 	err := svc.PushRevision(context.Background(), pr, run)
 	require.NoError(t, err, "PushRevision should not return an error with parent session ID")
 	require.Contains(t, capturedCommitMsg, parentID.String(), "commit message should reference parent session ID")
+}
+
+func TestListBranches_Success(t *testing.T) {
+	t.Parallel()
+
+	branches := []GitHubBranch{
+		{Name: "main", Protected: true},
+		{Name: "develop", Protected: false},
+		{Name: "feature/foo", Protected: false},
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodGet, r.Method, "ListBranches should use GET")
+		require.Contains(t, r.URL.Path, "/repos/owner/repo/branches", "request path should target branches endpoint")
+		require.Equal(t, "token test-token", r.Header.Get("Authorization"), "should send authorization header")
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(branches)
+	}))
+	defer server.Close()
+
+	svc := &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		logger:     zerolog.Nop(),
+	}
+
+	result, err := svc.ListBranches(context.Background(), "test-token", "owner", "repo")
+	require.NoError(t, err, "ListBranches should not return an error")
+	require.Len(t, result, 3, "should return all branches")
+	require.Equal(t, "main", result[0].Name, "first branch should be main")
+	require.True(t, result[0].Protected, "main branch should be protected")
+	require.Equal(t, "feature/foo", result[2].Name, "third branch should be feature/foo")
+}
+
+func TestListBranches_Pagination(t *testing.T) {
+	t.Parallel()
+
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+
+		if callCount == 1 {
+			// Return exactly 100 branches to trigger pagination.
+			branches := make([]GitHubBranch, 100)
+			for i := range branches {
+				branches[i] = GitHubBranch{Name: fmt.Sprintf("branch-%d", i)}
+			}
+			json.NewEncoder(w).Encode(branches)
+		} else {
+			// Second page returns fewer than 100.
+			branches := []GitHubBranch{{Name: "last-branch"}}
+			json.NewEncoder(w).Encode(branches)
+		}
+	}))
+	defer server.Close()
+
+	svc := &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		logger:     zerolog.Nop(),
+	}
+
+	result, err := svc.ListBranches(context.Background(), "test-token", "owner", "repo")
+	require.NoError(t, err, "ListBranches should not return an error")
+	require.Len(t, result, 101, "should return all branches across pages")
+	require.Equal(t, 2, callCount, "should make exactly 2 API calls")
+	require.Equal(t, "last-branch", result[100].Name, "last branch should be from second page")
+}
+
+func TestListBranches_APIError(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"message":"internal error"}`))
+	}))
+	defer server.Close()
+
+	svc := &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		logger:     zerolog.Nop(),
+	}
+
+	result, err := svc.ListBranches(context.Background(), "test-token", "owner", "repo")
+	require.Error(t, err, "ListBranches should return an error on API failure")
+	require.Nil(t, result, "result should be nil on error")
+	require.Contains(t, err.Error(), "list branches", "error should include context")
+}
+
+func TestGetInstallationToken_DelegatesToTokenProvider(t *testing.T) {
+	t.Parallel()
+
+	tokenSvc := &Service{
+		cache: make(map[int64]*cachedToken),
+	}
+	tokenSvc.cache[42] = &cachedToken{
+		Token:     "cached-install-token",
+		ExpiresAt: time.Now().Add(30 * time.Minute),
+	}
+
+	svc := &PRService{
+		tokenProvider: tokenSvc,
+		logger:        zerolog.Nop(),
+	}
+
+	token, err := svc.GetInstallationToken(context.Background(), 42)
+	require.NoError(t, err, "GetInstallationToken should not return an error")
+	require.Equal(t, "cached-install-token", token, "should return the cached token")
 }

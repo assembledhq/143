@@ -53,6 +53,12 @@ func (s *Service) executePlan(ctx context.Context, orgID uuid.UUID, plan *Plan, 
 			agentType = models.DefaultDefaultAgentType
 		}
 
+		// Look up issue to get its repository ID for the session.
+		var repoID *uuid.UUID
+		if primaryIssue, issueErr := s.issues.GetByID(ctx, orgID, primaryIssueID); issueErr == nil {
+			repoID = primaryIssue.RepositoryID
+		}
+
 		run := &models.Session{
 			IssueID:       primaryIssueID,
 			OrgID:         orgID,
@@ -61,8 +67,10 @@ func (s *Service) executePlan(ctx context.Context, orgID uuid.UUID, plan *Plan, 
 			AutonomyLevel: string(settings.AutonomyLevel),
 			TokenMode:     tokenModeFromComplexity(task.Complexity),
 			PMPlanID:      &plan.ID,
+			Title:         &task.Title,
 			PMApproach:    &task.Approach,
 			PMReasoning:   &task.Reasoning,
+			RepositoryID:  repoID,
 		}
 		if err := s.sessions.Create(ctx, run); err != nil {
 			s.logger.Error().Err(err).Msg("failed to create agent run from PM plan")

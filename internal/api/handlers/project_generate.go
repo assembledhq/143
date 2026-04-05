@@ -33,25 +33,25 @@ type GenerateProjectResponse struct {
 
 func (h *ProjectGenerateHandler) Generate(w http.ResponseWriter, r *http.Request) {
 	if h.llmClient == nil {
-		writeError(w, http.StatusServiceUnavailable, "LLM_NOT_CONFIGURED", "AI project generation is not available — no LLM provider configured")
+		writeError(w, r, http.StatusServiceUnavailable, "LLM_NOT_CONFIGURED", "AI project generation is not available — no LLM provider configured")
 		return
 	}
 
 	var req GenerateProjectRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
 
 	desc := strings.TrimSpace(req.Description)
 	if desc == "" {
-		writeError(w, http.StatusBadRequest, "MISSING_FIELD", "description is required")
+		writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", "description is required")
 		return
 	}
 
 	response, err := h.llmClient.Complete(r.Context(), prompts.ProjectGeneratePrompt(), desc)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LLM_ERROR", "failed to generate project: "+err.Error())
+		writeError(w, r, http.StatusInternalServerError, "LLM_ERROR", "failed to generate project: "+err.Error(), err)
 		return
 	}
 
@@ -67,7 +67,7 @@ func (h *ProjectGenerateHandler) Generate(w http.ResponseWriter, r *http.Request
 
 	var result GenerateProjectResponse
 	if err := json.Unmarshal([]byte(cleaned), &result); err != nil {
-		writeError(w, http.StatusInternalServerError, "PARSE_ERROR", "failed to parse AI response")
+		writeError(w, r, http.StatusInternalServerError, "PARSE_ERROR", "failed to parse AI response", err)
 		return
 	}
 

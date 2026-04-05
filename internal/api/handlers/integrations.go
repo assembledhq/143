@@ -4,16 +4,21 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 )
 
@@ -41,12 +46,12 @@ const (
 	// OAuth state cookie names — each flow gets its own cookie so concurrent
 	// flows cannot collide. Integration cookies use the _integration_ infix to
 	// distinguish them from the user-auth cookies in auth.go.
-	githubOAuthStateCookie              = "github_oauth_state"
-	googleOAuthStateCookie              = "google_oauth_state"
-	linearIntegrationOAuthStateCookie   = "linear_integration_oauth_state"
-	sentryIntegrationOAuthStateCookie   = "sentry_integration_oauth_state"
-	githubIntegrationOAuthStateCookie   = "github_integration_oauth_state"
-	slackIntegrationOAuthStateCookie    = "slack_integration_oauth_state"
+	githubOAuthStateCookie            = "github_oauth_state"
+	googleOAuthStateCookie            = "google_oauth_state"
+	linearIntegrationOAuthStateCookie = "linear_integration_oauth_state"
+	sentryIntegrationOAuthStateCookie = "sentry_integration_oauth_state"
+	githubIntegrationOAuthStateCookie = "github_integration_oauth_state"
+	slackIntegrationOAuthStateCookie  = "slack_integration_oauth_state"
 )
 
 type integrationCredentialStore interface {
@@ -86,10 +91,10 @@ type linearViewerResponse struct {
 // --- Slack types ---
 
 type slackTokenResponse struct {
-	AccessToken string          `json:"access_token"`
-	TokenType   string          `json:"token_type"`
-	Scope       string          `json:"scope"`
-	Team        slackTeamInfo   `json:"team"`
+	AccessToken string        `json:"access_token"`
+	TokenType   string        `json:"token_type"`
+	Scope       string        `json:"scope"`
+	Team        slackTeamInfo `json:"team"`
 }
 
 type slackTeamInfo struct {
@@ -149,6 +154,11 @@ type IntegrationHandler struct {
 	// Slack OAuth
 	slackClientID string
 	slackSecret   string
+
+	// PM context auto-trigger (nil-safe: disabled if not configured)
+	pmAutoTriggerJobs   pmAutoTriggerJobStore
+	pmAutoTriggerDocs   pmAutoTriggerDocStore
+	pmAutoTriggerLogger zerolog.Logger
 }
 
 // IntegrationOAuthConfig holds all integration OAuth credentials.
@@ -218,6 +228,25 @@ func WithGitHubApp(svc githubAppService, repoStore *db.RepositoryStore) Integrat
 	}
 }
 
+// pmAutoTriggerJobStore is the minimal job enqueue interface for PM context auto-triggers.
+type pmAutoTriggerJobStore interface {
+	Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
+}
+
+// pmAutoTriggerDocStore is the minimal PM doc interface for checking if bootstrap is needed.
+type pmAutoTriggerDocStore interface {
+	GetByOrgAndSourceType(ctx context.Context, orgID uuid.UUID, sourceType string) (models.PMDocument, error)
+}
+
+// WithPMContextAutoTrigger enables automatic bootstrap/refresh when new integrations are connected.
+func WithPMContextAutoTrigger(jobs pmAutoTriggerJobStore, docs pmAutoTriggerDocStore, logger zerolog.Logger) IntegrationHandlerOption {
+	return func(h *IntegrationHandler) {
+		h.pmAutoTriggerJobs = jobs
+		h.pmAutoTriggerDocs = docs
+		h.pmAutoTriggerLogger = logger
+	}
+}
+
 // WithSlackOAuth configures Slack OAuth credentials.
 func WithSlackOAuth(clientID, secret string) IntegrationHandlerOption {
 	return func(h *IntegrationHandler) {
@@ -234,7 +263,7 @@ func (h *IntegrationHandler) ListIntegrations(w http.ResponseWriter, r *http.Req
 	orgID := middleware.OrgIDFromContext(r.Context())
 	integrations, err := h.integrationStore.ListByOrg(r.Context(), orgID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list integrations")
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list integrations", err)
 		return
 	}
 	if integrations == nil {
@@ -243,19 +272,62 @@ func (h *IntegrationHandler) ListIntegrations(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, models.ListResponse[models.Integration]{Data: integrations})
 }
 
+// DisconnectIntegration sets the integration status to inactive for a given provider.
+// The provider is extracted from the URL path: /api/v1/integrations/{provider}/disconnect.
+func (h *IntegrationHandler) DisconnectIntegration(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+
+	// Extract provider from the URL path. We use explicit routes per provider
+	// (rather than chi's {provider} param) to avoid routing conflicts with
+	// other static integration routes like /integrations/github/sync.
+	providerStr := chi.URLParam(r, "provider")
+	if providerStr == "" {
+		segments := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		// Expected: api / v1 / integrations / {provider} / disconnect
+		if len(segments) >= 5 {
+			providerStr = segments[3]
+		}
+	}
+
+	provider := models.IntegrationProvider(providerStr)
+	if err := provider.Validate(); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_PROVIDER", "invalid integration provider")
+		return
+	}
+
+	activeIntegrations, err := h.integrationStore.ListByOrgAndProvider(r.Context(), orgID, string(provider))
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to look up integration", err)
+		return
+	}
+	if len(activeIntegrations) == 0 {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	for _, integration := range activeIntegrations {
+		if err := h.integrationStore.UpdateStatus(r.Context(), orgID, integration.ID, string(models.IntegrationStatusInactive)); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to disconnect integration", err)
+			return
+		}
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Linear OAuth
 // ──────────────────────────────────────────────────────────────────────────────
 
 func (h *IntegrationHandler) StartLinearOAuth(w http.ResponseWriter, r *http.Request) {
 	if h.linearClientID == "" || h.linearSecret == "" {
-		writeError(w, http.StatusServiceUnavailable, "LINEAR_OAUTH_NOT_CONFIGURED", "linear oauth is not configured")
+		writeError(w, r, http.StatusServiceUnavailable, "LINEAR_OAUTH_NOT_CONFIGURED", "linear oauth is not configured")
 		return
 	}
 
 	state, err := setOAuthState(w, linearIntegrationOAuthStateCookie)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate oauth state")
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate oauth state", err)
 		return
 	}
 
@@ -278,20 +350,20 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 
 	token, err := h.exchangeLinearCode(r.Context(), code)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "TOKEN_EXCHANGE_FAILED", "failed to exchange code")
+		writeError(w, r, http.StatusInternalServerError, "TOKEN_EXCHANGE_FAILED", "failed to exchange code", err)
 		return
 	}
 
 	workspaceID, workspaceName, err := h.fetchLinearWorkspace(r.Context(), token.AccessToken)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LINEAR_API_FAILED", "failed to fetch linear workspace")
+		writeError(w, r, http.StatusInternalServerError, "LINEAR_API_FAILED", "failed to fetch linear workspace", err)
 		return
 	}
 
 	orgID := middleware.OrgIDFromContext(r.Context())
 
 	if h.credentialStore == nil {
-		writeError(w, http.StatusInternalServerError, "CREDENTIAL_STORE_UNAVAILABLE", "credential store unavailable")
+		writeError(w, r, http.StatusInternalServerError, "CREDENTIAL_STORE_UNAVAILABLE", "credential store unavailable")
 		return
 	}
 
@@ -303,12 +375,12 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 		WorkspaceName: workspaceName,
 	}
 	if err := h.credentialStore.Upsert(r.Context(), orgID, linearConfig); err != nil {
-		writeError(w, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to store linear credential")
+		writeError(w, r, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to store linear credential", err)
 		return
 	}
 
 	if _, _, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderLinear); err != nil {
-		writeError(w, http.StatusInternalServerError, "CONNECT_LINEAR_FAILED", "failed to connect linear integration")
+		writeError(w, r, http.StatusInternalServerError, "CONNECT_LINEAR_FAILED", "failed to connect linear integration", err)
 		return
 	}
 
@@ -319,7 +391,7 @@ func (h *IntegrationHandler) ConnectLinear(w http.ResponseWriter, r *http.Reques
 	orgID := middleware.OrgIDFromContext(r.Context())
 	integration, created, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderLinear)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "CONNECT_LINEAR_FAILED", "failed to connect linear integration")
+		writeError(w, r, http.StatusInternalServerError, "CONNECT_LINEAR_FAILED", "failed to connect linear integration", err)
 		return
 	}
 	if created {
@@ -335,13 +407,13 @@ func (h *IntegrationHandler) ConnectLinear(w http.ResponseWriter, r *http.Reques
 
 func (h *IntegrationHandler) StartSentryOAuth(w http.ResponseWriter, r *http.Request) {
 	if h.sentryClientID == "" || h.sentrySecret == "" {
-		writeError(w, http.StatusServiceUnavailable, "SENTRY_OAUTH_NOT_CONFIGURED", "sentry oauth is not configured")
+		writeError(w, r, http.StatusServiceUnavailable, "SENTRY_OAUTH_NOT_CONFIGURED", "sentry oauth is not configured")
 		return
 	}
 
 	state, err := setOAuthState(w, sentryIntegrationOAuthStateCookie)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate oauth state")
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate oauth state", err)
 		return
 	}
 
@@ -364,20 +436,20 @@ func (h *IntegrationHandler) HandleSentryOAuthCallback(w http.ResponseWriter, r 
 
 	token, err := h.exchangeSentryCode(r.Context(), code)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "TOKEN_EXCHANGE_FAILED", "failed to exchange code")
+		writeError(w, r, http.StatusInternalServerError, "TOKEN_EXCHANGE_FAILED", "failed to exchange code", err)
 		return
 	}
 
 	orgSlug, orgName, err := h.fetchSentryOrganization(r.Context(), token.AccessToken)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "SENTRY_API_FAILED", "failed to fetch sentry organization")
+		writeError(w, r, http.StatusInternalServerError, "SENTRY_API_FAILED", "failed to fetch sentry organization", err)
 		return
 	}
 
 	orgID := middleware.OrgIDFromContext(r.Context())
 
 	if h.credentialStore == nil {
-		writeError(w, http.StatusInternalServerError, "CREDENTIAL_STORE_UNAVAILABLE", "credential store unavailable")
+		writeError(w, r, http.StatusInternalServerError, "CREDENTIAL_STORE_UNAVAILABLE", "credential store unavailable")
 		return
 	}
 
@@ -389,12 +461,12 @@ func (h *IntegrationHandler) HandleSentryOAuthCallback(w http.ResponseWriter, r 
 		OrgName:      orgName,
 	}
 	if err := h.credentialStore.Upsert(r.Context(), orgID, sentryConfig); err != nil {
-		writeError(w, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to store sentry credential")
+		writeError(w, r, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to store sentry credential", err)
 		return
 	}
 
 	if _, _, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderSentry); err != nil {
-		writeError(w, http.StatusInternalServerError, "CONNECT_SENTRY_FAILED", "failed to connect sentry integration")
+		writeError(w, r, http.StatusInternalServerError, "CONNECT_SENTRY_FAILED", "failed to connect sentry integration", err)
 		return
 	}
 
@@ -405,7 +477,7 @@ func (h *IntegrationHandler) ConnectSentry(w http.ResponseWriter, r *http.Reques
 	orgID := middleware.OrgIDFromContext(r.Context())
 	integration, created, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderSentry)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "CONNECT_SENTRY_FAILED", "failed to connect sentry integration")
+		writeError(w, r, http.StatusInternalServerError, "CONNECT_SENTRY_FAILED", "failed to connect sentry integration", err)
 		return
 	}
 	if created {
@@ -428,7 +500,7 @@ func (h *IntegrationHandler) StartGitHubOAuth(w http.ResponseWriter, r *http.Req
 	if h.githubAppSlug != "" {
 		state, err := setOAuthState(w, githubIntegrationOAuthStateCookie)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate oauth state")
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate oauth state", err)
 			return
 		}
 
@@ -438,13 +510,13 @@ func (h *IntegrationHandler) StartGitHubOAuth(w http.ResponseWriter, r *http.Req
 	}
 
 	if h.githubClientID == "" || h.githubSecret == "" {
-		writeError(w, http.StatusServiceUnavailable, "GITHUB_OAUTH_NOT_CONFIGURED", "github integration oauth is not configured")
+		writeError(w, r, http.StatusServiceUnavailable, "GITHUB_OAUTH_NOT_CONFIGURED", "github integration oauth is not configured")
 		return
 	}
 
 	state, err := setOAuthState(w, githubIntegrationOAuthStateCookie)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate oauth state")
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate oauth state", err)
 		return
 	}
 
@@ -459,6 +531,15 @@ func (h *IntegrationHandler) StartGitHubOAuth(w http.ResponseWriter, r *http.Req
 }
 
 func (h *IntegrationHandler) HandleGitHubOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	// When a GitHub App has "Request user authorization during installation"
+	// enabled, GitHub redirects here with installation_id and setup_action
+	// instead of the Setup URL. Delegate to the App installation handler
+	// which stores the installation_id and syncs repos.
+	if r.URL.Query().Get("installation_id") != "" && r.URL.Query().Get("setup_action") == "install" {
+		h.HandleGitHubAppInstalled(w, r)
+		return
+	}
+
 	code, ok := validateOAuthCallback(w, r, githubIntegrationOAuthStateCookie)
 	if !ok {
 		return
@@ -466,14 +547,14 @@ func (h *IntegrationHandler) HandleGitHubOAuthCallback(w http.ResponseWriter, r 
 
 	token, err := h.exchangeGitHubCode(r.Context(), code)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "TOKEN_EXCHANGE_FAILED", "failed to exchange code")
+		writeError(w, r, http.StatusInternalServerError, "TOKEN_EXCHANGE_FAILED", "failed to exchange code", err)
 		return
 	}
 
 	orgID := middleware.OrgIDFromContext(r.Context())
 
 	if h.credentialStore == nil {
-		writeError(w, http.StatusInternalServerError, "CREDENTIAL_STORE_UNAVAILABLE", "credential store unavailable")
+		writeError(w, r, http.StatusInternalServerError, "CREDENTIAL_STORE_UNAVAILABLE", "credential store unavailable")
 		return
 	}
 
@@ -483,12 +564,12 @@ func (h *IntegrationHandler) HandleGitHubOAuthCallback(w http.ResponseWriter, r 
 		Scope:       token.Scope,
 	}
 	if err := h.credentialStore.Upsert(r.Context(), orgID, ghConfig); err != nil {
-		writeError(w, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to store github credential")
+		writeError(w, r, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to store github credential", err)
 		return
 	}
 
 	if _, _, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderGitHub); err != nil {
-		writeError(w, http.StatusInternalServerError, "CONNECT_GITHUB_FAILED", "failed to connect github integration")
+		writeError(w, r, http.StatusInternalServerError, "CONNECT_GITHUB_FAILED", "failed to connect github integration", err)
 		return
 	}
 
@@ -505,7 +586,7 @@ func (h *IntegrationHandler) HandleGitHubAppInstalled(w http.ResponseWriter, r *
 
 	integration, _, err := h.ensureIntegration(ctx, orgID, models.IntegrationProviderGitHub)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "CONNECT_GITHUB_FAILED", "failed to connect github integration")
+		writeError(w, r, http.StatusInternalServerError, "CONNECT_GITHUB_FAILED", "failed to connect github integration", err)
 		return
 	}
 
@@ -578,6 +659,99 @@ func (h *IntegrationHandler) syncInstallationRepos(ctx context.Context, orgID uu
 	}
 }
 
+// SyncGitHubRepos re-syncs repositories from a GitHub App installation.
+// This is a recovery mechanism for when the initial webhook-based sync fails.
+func (h *IntegrationHandler) SyncGitHubRepos(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	orgID := middleware.OrgIDFromContext(ctx)
+
+	if h.githubService == nil || h.repoStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "GITHUB_APP_NOT_CONFIGURED", "github app is not configured")
+		return
+	}
+
+	integrations, err := h.integrationStore.ListByOrgAndProvider(ctx, orgID, string(models.IntegrationProviderGitHub))
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "LIST_INTEGRATIONS_FAILED", "failed to list integrations", err)
+		return
+	}
+	if len(integrations) == 0 {
+		writeError(w, r, http.StatusNotFound, "NO_GITHUB_INTEGRATION", "no active github integration found")
+		return
+	}
+
+	integration := integrations[0]
+
+	// Extract installation_id from integration config.
+	var config struct {
+		InstallationID int64 `json:"installation_id"`
+	}
+	if integration.Config != nil {
+		if err := json.Unmarshal(integration.Config, &config); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CONFIG", "failed to parse integration config")
+			return
+		}
+	}
+	if config.InstallationID == 0 {
+		writeError(w, r, http.StatusBadRequest, "MISSING_INSTALLATION_ID", "integration config missing installation_id")
+		return
+	}
+
+	token, err := h.githubService.GetInstallationToken(ctx, config.InstallationID)
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Msg("failed to get installation token for sync")
+		writeError(w, r, http.StatusBadGateway, "TOKEN_FAILED", "failed to get github installation token")
+		return
+	}
+
+	repos, err := h.listInstallationRepos(ctx, token)
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Msg("failed to list installation repos for sync")
+		writeError(w, r, http.StatusBadGateway, "LIST_REPOS_FAILED", "failed to list github repositories")
+		return
+	}
+
+	synced := 0
+	syncErrors := 0
+	for _, ghRepo := range repos {
+		repo := &models.Repository{
+			OrgID:          orgID,
+			IntegrationID:  integration.ID,
+			GitHubID:       ghRepo.ID,
+			FullName:       ghRepo.FullName,
+			DefaultBranch:  ghRepo.DefaultBranch,
+			Private:        ghRepo.Private,
+			CloneURL:       ghRepo.CloneURL,
+			InstallationID: config.InstallationID,
+			Status:         "active",
+			Settings:       json.RawMessage(`{}`),
+		}
+		if repo.DefaultBranch == "" {
+			repo.DefaultBranch = "main"
+		}
+		if repo.CloneURL == "" {
+			repo.CloneURL = "https://github.com/" + ghRepo.FullName + ".git"
+		}
+		if err := h.repoStore.UpsertFromGitHub(ctx, repo); err != nil {
+			zerolog.Ctx(ctx).Warn().Err(err).Str("repo", ghRepo.FullName).Msg("failed to upsert repo during sync")
+			syncErrors++
+			continue
+		}
+		synced++
+	}
+
+	if err := h.integrationStore.UpdateLastSyncedAt(ctx, orgID, integration.ID, time.Now()); err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Msg("failed to update last_synced_at after sync")
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": map[string]any{
+			"repos_synced": synced,
+			"errors":       syncErrors,
+		},
+	})
+}
+
 // githubInstallationRepo is the subset of fields returned by
 // GET /installation/repositories.
 type githubInstallationRepo struct {
@@ -621,7 +795,7 @@ func (h *IntegrationHandler) ConnectGitHub(w http.ResponseWriter, r *http.Reques
 	orgID := middleware.OrgIDFromContext(r.Context())
 	integration, created, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderGitHub)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "CONNECT_GITHUB_FAILED", "failed to connect github integration")
+		writeError(w, r, http.StatusInternalServerError, "CONNECT_GITHUB_FAILED", "failed to connect github integration", err)
 		return
 	}
 	if created {
@@ -637,13 +811,13 @@ func (h *IntegrationHandler) ConnectGitHub(w http.ResponseWriter, r *http.Reques
 
 func (h *IntegrationHandler) StartSlackOAuth(w http.ResponseWriter, r *http.Request) {
 	if h.slackClientID == "" || h.slackSecret == "" {
-		writeError(w, http.StatusServiceUnavailable, "SLACK_OAUTH_NOT_CONFIGURED", "slack oauth is not configured")
+		writeError(w, r, http.StatusServiceUnavailable, "SLACK_OAUTH_NOT_CONFIGURED", "slack oauth is not configured")
 		return
 	}
 
 	state, err := setOAuthState(w, slackIntegrationOAuthStateCookie)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate oauth state")
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate oauth state", err)
 		return
 	}
 
@@ -665,14 +839,14 @@ func (h *IntegrationHandler) HandleSlackOAuthCallback(w http.ResponseWriter, r *
 
 	token, err := h.exchangeSlackCode(r.Context(), code)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "TOKEN_EXCHANGE_FAILED", "failed to exchange code")
+		writeError(w, r, http.StatusInternalServerError, "TOKEN_EXCHANGE_FAILED", "failed to exchange code", err)
 		return
 	}
 
 	orgID := middleware.OrgIDFromContext(r.Context())
 
 	if h.credentialStore == nil {
-		writeError(w, http.StatusInternalServerError, "CREDENTIAL_STORE_UNAVAILABLE", "credential store unavailable")
+		writeError(w, r, http.StatusInternalServerError, "CREDENTIAL_STORE_UNAVAILABLE", "credential store unavailable")
 		return
 	}
 
@@ -683,12 +857,12 @@ func (h *IntegrationHandler) HandleSlackOAuthCallback(w http.ResponseWriter, r *
 		Scope:       token.Scope,
 	}
 	if err := h.credentialStore.Upsert(r.Context(), orgID, slackConfig); err != nil {
-		writeError(w, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to store slack credential")
+		writeError(w, r, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to store slack credential", err)
 		return
 	}
 
 	if _, _, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderSlack); err != nil {
-		writeError(w, http.StatusInternalServerError, "CONNECT_SLACK_FAILED", "failed to connect slack integration")
+		writeError(w, r, http.StatusInternalServerError, "CONNECT_SLACK_FAILED", "failed to connect slack integration", err)
 		return
 	}
 
@@ -699,7 +873,7 @@ func (h *IntegrationHandler) ConnectSlack(w http.ResponseWriter, r *http.Request
 	orgID := middleware.OrgIDFromContext(r.Context())
 	integration, created, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderSlack)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "CONNECT_SLACK_FAILED", "failed to connect slack integration")
+		writeError(w, r, http.StatusInternalServerError, "CONNECT_SLACK_FAILED", "failed to connect slack integration", err)
 		return
 	}
 	if created {
@@ -715,21 +889,21 @@ func (h *IntegrationHandler) ListSlackChannels(w http.ResponseWriter, r *http.Re
 
 	cred, err := h.getSlackCredential(r.Context(), orgID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "SLACK_NOT_CONNECTED", "slack integration not connected")
+		writeError(w, r, http.StatusBadRequest, "SLACK_NOT_CONNECTED", "slack integration not connected")
 		return
 	}
 
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet,
 		slackAPIURL+"/conversations.list?types=public_channel&exclude_archived=true&limit=200", nil)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create request")
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create request", err)
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+cred.AccessToken)
 
 	resp, err := h.client.Do(req)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "SLACK_API_FAILED", "failed to fetch channels")
+		writeError(w, r, http.StatusBadGateway, "SLACK_API_FAILED", "failed to fetch channels")
 		return
 	}
 	defer resp.Body.Close()
@@ -743,11 +917,11 @@ func (h *IntegrationHandler) ListSlackChannels(w http.ResponseWriter, r *http.Re
 		Error string `json:"error,omitempty"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&slackResp); err != nil {
-		writeError(w, http.StatusInternalServerError, "DECODE_FAILED", "failed to decode slack response")
+		writeError(w, r, http.StatusInternalServerError, "DECODE_FAILED", "failed to decode slack response", err)
 		return
 	}
 	if !slackResp.OK {
-		writeError(w, http.StatusBadGateway, "SLACK_API_ERROR", slackResp.Error)
+		writeError(w, r, http.StatusBadGateway, "SLACK_API_ERROR", slackResp.Error)
 		return
 	}
 
@@ -779,19 +953,19 @@ func (h *IntegrationHandler) UpdateSlackChannels(w http.ResponseWriter, r *http.
 		ChannelIDs []string `json:"channel_ids"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
 		return
 	}
 
 	cred, err := h.getSlackCredential(r.Context(), orgID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "SLACK_NOT_CONNECTED", "slack integration not connected")
+		writeError(w, r, http.StatusBadRequest, "SLACK_NOT_CONNECTED", "slack integration not connected")
 		return
 	}
 
 	cred.ChannelIDs = body.ChannelIDs
 	if err := h.credentialStore.Upsert(r.Context(), orgID, *cred); err != nil {
-		writeError(w, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to update slack channels")
+		writeError(w, r, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to update slack channels", err)
 		return
 	}
 
@@ -827,7 +1001,7 @@ func setOAuthState(w http.ResponseWriter, cookieName string) (string, error) {
 func validateOAuthCallback(w http.ResponseWriter, r *http.Request, cookieName string) (code string, ok bool) {
 	stateCookie, err := r.Cookie(cookieName)
 	if err != nil || stateCookie.Value != r.URL.Query().Get("state") {
-		writeError(w, http.StatusBadRequest, "INVALID_STATE", "OAuth state mismatch")
+		writeError(w, r, http.StatusBadRequest, "INVALID_STATE", "OAuth state mismatch")
 		return "", false
 	}
 
@@ -842,7 +1016,7 @@ func validateOAuthCallback(w http.ResponseWriter, r *http.Request, cookieName st
 
 	code = r.URL.Query().Get("code")
 	if code == "" {
-		writeError(w, http.StatusBadRequest, "MISSING_CODE", "missing authorization code")
+		writeError(w, r, http.StatusBadRequest, "MISSING_CODE", "missing authorization code")
 		return "", false
 	}
 
@@ -852,6 +1026,39 @@ func validateOAuthCallback(w http.ResponseWriter, r *http.Request, cookieName st
 // ──────────────────────────────────────────────────────────────────────────────
 // Shared helpers
 // ──────────────────────────────────────────────────────────────────────────────
+
+// maybeEnqueuePMContext checks if a PM context bootstrap or refresh should be
+// auto-triggered after a new integration is connected. If no autogenerated doc
+// exists, it enqueues a bootstrap. If one exists, it enqueues a refresh so the
+// new integration's data gets incorporated.
+func (h *IntegrationHandler) maybeEnqueuePMContext(ctx context.Context, orgID uuid.UUID) {
+	if h.pmAutoTriggerJobs == nil || h.pmAutoTriggerDocs == nil {
+		return
+	}
+
+	_, err := h.pmAutoTriggerDocs.GetByOrgAndSourceType(ctx, orgID, models.PMDocSourceAutogenerated)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			// Transient DB error — log and bail rather than incorrectly triggering bootstrap.
+			h.pmAutoTriggerLogger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to check autogenerated doc; skipping PM context auto-trigger")
+			return
+		}
+		// No autogenerated doc exists — enqueue a bootstrap.
+		dedupeKey := fmt.Sprintf("pm_bootstrap:%s", orgID.String())
+		payload := map[string]string{"org_id": orgID.String()}
+		if _, err := h.pmAutoTriggerJobs.Enqueue(ctx, orgID, "default", models.JobTypePMBootstrap, payload, 3, &dedupeKey); err != nil {
+			h.pmAutoTriggerLogger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to auto-enqueue pm_bootstrap after integration connect")
+		}
+		return
+	}
+
+	// Autogenerated doc exists — enqueue a refresh to pick up the new integration.
+	dedupeKey := fmt.Sprintf("pm_context_refresh:%s", orgID.String())
+	payload := map[string]string{"org_id": orgID.String()}
+	if _, err := h.pmAutoTriggerJobs.Enqueue(ctx, orgID, "default", models.JobTypePMContextRefresh, payload, 3, &dedupeKey); err != nil {
+		h.pmAutoTriggerLogger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to auto-enqueue pm_context_refresh after integration connect")
+	}
+}
 
 func (h *IntegrationHandler) ensureIntegration(ctx context.Context, orgID uuid.UUID, provider models.IntegrationProvider) (models.Integration, bool, error) {
 	activeIntegrations, err := h.integrationStore.ListByOrgAndProvider(ctx, orgID, string(provider))
@@ -871,6 +1078,9 @@ func (h *IntegrationHandler) ensureIntegration(ctx context.Context, orgID uuid.U
 	if err := h.integrationStore.Create(ctx, integration); err != nil {
 		return models.Integration{}, false, err
 	}
+
+	// Auto-trigger PM context bootstrap or refresh for the new integration.
+	h.maybeEnqueuePMContext(ctx, orgID)
 
 	return *integration, true, nil
 }
@@ -1144,4 +1354,94 @@ func (h *IntegrationHandler) getSlackCredential(ctx context.Context, orgID uuid.
 	}
 
 	return &cfg, nil
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Notion (token-based, no OAuth)
+// ──────────────────────────────────────────────────────────────────────────────
+
+// ConnectNotion accepts an API token, validates it against the Notion API,
+// stores the credential, and creates an active integration record.
+// Unlike other integrations, Notion uses a simple internal integration token
+// rather than an OAuth flow.
+func (h *IntegrationHandler) ConnectNotion(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+
+	var req struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+	if req.AccessToken == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_TOKEN", "access_token is required")
+		return
+	}
+
+	// Validate the token by calling the Notion API.
+	workspaceName, err := h.validateNotionToken(r.Context(), req.AccessToken)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_TOKEN", "failed to validate Notion token: "+err.Error())
+		return
+	}
+
+	// Store the credential.
+	cfg := models.NotionConfig{
+		AccessToken:   req.AccessToken,
+		WorkspaceName: workspaceName,
+	}
+	if err := h.credentialStore.Upsert(r.Context(), orgID, cfg); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CREDENTIAL_SAVE_FAILED", "failed to save Notion credentials", err)
+		return
+	}
+
+	// Ensure the integration record exists.
+	integration, created, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderNotion)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CONNECT_NOTION_FAILED", "failed to create Notion integration", err)
+		return
+	}
+
+	if created {
+		writeJSON(w, http.StatusCreated, models.SingleResponse[models.Integration]{Data: integration})
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.Integration]{Data: integration})
+}
+
+// validateNotionToken calls the Notion /v1/users/me endpoint to verify the
+// token is valid and extract the workspace name. Returns the bot's workspace
+// name on success, or an error if the token is invalid.
+func (h *IntegrationHandler) validateNotionToken(ctx context.Context, token string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.notion.com/v1/users/me", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Notion-Version", "2022-06-28")
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return "", fmt.Errorf("invalid or expired token")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("notion API returned %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Bot struct {
+			WorkspaceName string `json:"workspace_name"`
+		} `json:"bot"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&result); err != nil {
+		return "", fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	return result.Bot.WorkspaceName, nil
 }

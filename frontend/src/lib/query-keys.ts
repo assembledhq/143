@@ -15,9 +15,29 @@ export const queryKeys = {
     validation: (id: string) => ["session", id, "validation"] as const,
     pr: (id: string) => ["session", id, "pr"] as const,
     messages: (id: string) => ["session", id, "messages"] as const,
+    threads: (id: string) => ["session", id, "threads"] as const,
+    threadDetail: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId] as const,
+    threadMessages: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId, "messages"] as const,
+    threadLogs: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId, "logs"] as const,
+  },
+  repositories: {
+    all: ["repositories"] as const,
+    branches: (id: string) => ["repositories", id, "branches"] as const,
   },
   settings: {
     all: ["settings"] as const,
+    agentDefaults: ["agent-defaults"] as const,
+  },
+  codexAuth: {
+    status: ["codex-auth-status"] as const,
+  },
+  integrations: {
+    all: ["integrations"] as const,
+  },
+  pm: {
+    status: ["pm", "status"] as const,
+    latest: ["pm", "latest"] as const,
+    documents: ["pm", "documents"] as const,
   },
   team: {
     members: ["team", "members"] as const,

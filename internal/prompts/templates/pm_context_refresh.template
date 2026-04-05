@@ -1,0 +1,77 @@
+You are refreshing the PM context for an AI engineering team manager.
+
+An existing context file was written on a previous bootstrap/refresh cycle.
+It is available at:
+  /workspace/.pm-context/CONTEXT.md
+
+Your job is to:
+1. Read the existing context file
+2. Explore integrations and the codebase for changes since {{.LastSyncedAt}}
+3. Update the context file with new information
+4. Write a suggestions summary explaining what changed and why
+
+You MUST write TWO files:
+
+1. /workspace/.pm-context/CONTEXT.md — The full updated context file.
+   Keep the same structure. Update sections that changed, leave stable
+   sections alone. Do not rewrite sections that are still accurate.
+
+2. /workspace/.pm-context/SUGGESTIONS.md — A human-readable summary of
+   what you changed and why. This will be shown to the operator for review.
+   Format each change as:
+
+   ### UPDATE: {Section Name}
+   **What changed:** {description}
+   **Confidence:** {High/Medium/Low} ({evidence source})
+
+   ### ADD: {New Item}
+   **What:** {description}
+   **Why it matters:** {reason}
+   **Confidence:** {High/Medium/Low}
+
+   Also include a "## No Changes Needed" section listing sections that
+   are still accurate.
+
+Remember the same rules as the initial bootstrap:
+- Focus on durable context (true for 6+ weeks)
+- Do NOT add temporal data (ticket counts, who's assigned, sprint progress)
+- Stay under 12,000 tokens for CONTEXT.md
+- Be opinionated — the PM agent needs your judgment
+
+You have access to `143-tools`, a CLI for querying integrations.
+Run `143-tools --help` for the full list. Key tools:
+{{.SkillsDoc}}
+{{if .HasNotion}}
+For Notion: Search for new or updated documents since last refresh:
+  143-tools notion_search_documents --query "roadmap"
+  143-tools notion_search_documents --query "strategy"
+  143-tools notion_search_documents --query "post-mortem"
+For each relevant result, fetch the full document:
+  143-tools notion_get_document --doc_id <id>
+{{end}}
+{{if .HasLinear}}
+For Linear: Check for new projects, completed initiatives, priority shifts:
+  143-tools linear_list_tasks --limit 50
+  143-tools linear_list_tasks --priority urgent
+{{end}}
+{{if .HasSentry}}
+For Sentry: Check for new error patterns or shifts in reliability:
+  143-tools sentry_list_errors --severity critical --limit 20
+{{end}}
+{{if .HasGitHub}}
+For GitHub PRs: Check for new code review patterns since the last refresh:
+  143-tools github_list_recent_prs --limit 20
+  143-tools github_get_pr_reviews --pr_number <number>
+Look for shifts in review feedback themes or new quality concerns.
+{{end}}
+
+For the codebase: Check git log for changes since the last refresh:
+  git log --stat --oneline --since="{{.LastSyncedAt}}"
+
+Existing seed context is at: /workspace/.bootstrap-input.json
+
+CONSTRAINTS:
+- Updated CONTEXT.md MUST be under 12,000 tokens.
+- SUGGESTIONS.md should be concise — focus on what changed, not what stayed the same.
+- Include confidence levels so the operator knows how certain you are.
+- If nothing meaningful changed, say so. Don't invent changes.

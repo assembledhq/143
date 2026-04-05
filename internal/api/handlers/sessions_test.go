@@ -30,9 +30,11 @@ func newSessionHandler(t *testing.T, mock pgxmock.PgxPoolIface) *SessionHandler 
 		db.NewValidationStore(mock),
 		db.NewPullRequestStore(mock),
 		db.NewIssueStore(mock),
+		db.NewRepositoryStore(mock),
 		db.NewOrganizationStore(mock),
 		db.NewJobStore(mock),
 		db.NewSessionMessageStore(mock),
+		db.NewSessionThreadStore(mock),
 		nil, // llmClient — not needed in unit tests
 		zerolog.Nop(),
 	)
@@ -45,10 +47,10 @@ var sessionColumns = []string{
 	"container_id", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
-	"pm_plan_id", "pm_approach", "pm_reasoning",
+	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
-	"created_at",
+	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "created_at",
 }
 
 func TestSessionHandler_List(t *testing.T) {
@@ -75,11 +77,16 @@ func TestSessionHandler_List(t *testing.T) {
 							nil, &now, &now, nil,
 							nil, nil, nil, nil,
 							nil, nil, nil, nil, nil,
-							nil, nil, nil,
-							nil, // project_task_id
-							nil, // model_override
-							nil, // triggered_by_user_id
+							nil, nil, nil, nil,
+							nil,                      // project_task_id
+							nil,                      // model_override
+							nil,                      // triggered_by_user_id
 							nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+							nil, // target_branch
+							nil, // working_branch
+							nil, // repository_id
+							nil, // diff_stats
+							nil, // diff_history
 							now,
 						),
 					)
@@ -143,7 +150,7 @@ func TestSessionHandler_List_WithRepositoryID(t *testing.T) {
 	now := time.Now()
 	runID := uuid.New()
 	issueID := uuid.New()
-	mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id .+ issue_id IN").
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id .+ repository_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(sessionColumns).AddRow(
@@ -152,10 +159,15 @@ func TestSessionHandler_List_WithRepositoryID(t *testing.T) {
 				nil, &now, &now, nil,
 				nil, nil, nil, nil,
 				nil, nil, nil, nil, nil,
-				nil, nil, nil,
+				nil, nil, nil, nil,
 				nil, nil,
-				nil, // triggered_by_user_id
+				nil,                      // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+				nil, // target_branch
+				nil, // working_branch
+				nil, // repository_id
+				nil, // diff_stats
+				nil, // diff_history
 				now,
 			),
 		)
@@ -196,6 +208,77 @@ func TestSessionHandler_List_InvalidRepositoryID(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionHandler_List_InvalidStatus(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions?status=bogus", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.List(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "should return 400 for invalid status")
+	require.Contains(t, w.Body.String(), "INVALID_STATUS", "error code should indicate invalid status")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_List_CommaSeparatedStatuses(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	now := time.Now()
+	runID := uuid.New()
+	issueID := uuid.New()
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id .+ AND status = ANY").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).AddRow(
+				runID, issueID, orgID, "claude-code", "pending", "supervised", "standard",
+				nil, nil, nil, nil,
+				nil, &now, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil, // triggered_by_user_id
+				nil, 0, nil, "none", nil,
+				nil, // target_branch
+				nil, // working_branch
+				nil, // repository_id
+				nil, // diff_stats
+				nil, // diff_history
+				now,
+			),
+		)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions?status=pending,running", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.List(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "should return 200 for comma-separated statuses")
+
+	var resp models.ListResponse[models.Session]
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err, "response body should be valid JSON")
+	require.Equal(t, 1, len(resp.Data), "should return filtered sessions")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionHandler_Get(t *testing.T) {
 	t.Parallel()
 
@@ -222,11 +305,16 @@ func TestSessionHandler_Get(t *testing.T) {
 							nil, &now, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil, nil, nil, nil,
-							nil, nil, nil,
-							nil, // project_task_id
-							nil, // model_override
-							nil, // triggered_by_user_id
+							nil, nil, nil, nil,
+							nil,                      // project_task_id
+							nil,                      // model_override
+							nil,                      // triggered_by_user_id
 							nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+							nil, // target_branch
+							nil, // working_branch
+							nil, // repository_id
+							nil, // diff_stats
+							nil, // diff_history
 							now,
 						),
 					)
@@ -300,13 +388,14 @@ func triggerFixIssueMock(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
 			),
 		)
 
-	// Mock agent run create (14 named args)
+	// Mock agent run create (17 named args)
 	runID := uuid.New()
 	mock.ExpectQuery("INSERT INTO sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
 
 	// Mock job enqueue (6 named args)
@@ -347,13 +436,14 @@ func triggerFixIssueAndOrgDefaultMock(mock pgxmock.PgxPoolIface, orgID uuid.UUID
 				AddRow(orgID, "Acme", []byte(settings), now, now),
 		)
 
-	// Mock agent run create (14 named args)
+	// Mock agent run create (17 named args)
 	runID := uuid.New()
 	mock.ExpectQuery("INSERT INTO sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
 
 	// Mock job enqueue (6 named args)
@@ -928,10 +1018,15 @@ func TestSessionHandler_GetLogs_Success(t *testing.T) {
 				nil, &now, &now, nil,
 				nil, nil, nil, nil,
 				nil, nil, nil, nil, nil,
-				nil, nil, nil,
+				nil, nil, nil, nil,
 				nil, nil,
-				nil, // triggered_by_user_id
+				nil,                      // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+				nil, // target_branch
+				nil, // working_branch
+				nil, // repository_id
+				nil, // diff_stats
+				nil, // diff_history
 				now,
 			),
 		)
@@ -940,9 +1035,9 @@ func TestSessionHandler_GetLogs_Success(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM session_logs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "session_id", "timestamp", "level", "message", "metadata", "turn_number"}).
-				AddRow(int64(1), runID, now, "info", "Starting agent", nil, nil).
-				AddRow(int64(2), runID, now, "info", "Agent completed", nil, nil),
+			pgxmock.NewRows([]string{"id", "session_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}).
+				AddRow(int64(1), runID, nil, now, "info", "Starting agent", nil, nil).
+				AddRow(int64(2), runID, nil, now, "info", "Agent completed", nil, nil),
 		)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+runID.String()+"/logs", nil)
@@ -1009,17 +1104,22 @@ func TestSessionHandler_GetLogs_EmptyLogs(t *testing.T) {
 				nil, &now, &now, nil,
 				nil, nil, nil, nil,
 				nil, nil, nil, nil, nil,
-				nil, nil, nil,
+				nil, nil, nil, nil,
 				nil, nil,
-				nil, // triggered_by_user_id
+				nil,                      // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+				nil, // target_branch
+				nil, // working_branch
+				nil, // repository_id
+				nil, // diff_stats
+				nil, // diff_history
 				now,
 			),
 		)
 
 	mock.ExpectQuery("SELECT .+ FROM session_logs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "session_id", "timestamp", "level", "message", "metadata", "turn_number"}))
+		WillReturnRows(pgxmock.NewRows([]string{"id", "session_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+runID.String()+"/logs", nil)
 	rctx := chi.NewRouteContext()
@@ -1063,10 +1163,15 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil, &now, &now, nil,
 				nil, nil, nil, nil,
 				nil, nil, nil, nil, nil,
-				nil, nil, nil,
+				nil, nil, nil, nil,
 				nil, nil,
-				nil, // triggered_by_user_id
+				nil,                      // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+				nil, // target_branch
+				nil, // working_branch
+				nil, // repository_id
+				nil, // diff_stats
+				nil, // diff_history
 				now,
 			),
 		)
@@ -1081,10 +1186,15 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil, &now, &now, nil,
 				nil, nil, nil, nil,
 				nil, nil, nil, nil, nil,
-				nil, nil, nil,
+				nil, nil, nil, nil,
 				nil, nil,
-				nil, // triggered_by_user_id
+				nil,                      // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+				nil, // target_branch
+				nil, // working_branch
+				nil, // repository_id
+				nil, // diff_stats
+				nil, // diff_history
 				now,
 			),
 		)
@@ -1092,8 +1202,8 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM session_logs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "session_id", "timestamp", "level", "message", "metadata", "turn_number"}).
-				AddRow(int64(1), runID, now, "info", "Done", nil, nil),
+			pgxmock.NewRows([]string{"id", "session_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}).
+				AddRow(int64(1), runID, nil, now, "info", "Done", nil, nil),
 		)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+runID.String()+"/logs/stream", nil)
@@ -1151,6 +1261,12 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 				runID := uuid.New()
 				jobID := uuid.New()
 
+				// Mock org settings lookup
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+						AddRow(orgID, "test-org", nil, now, now))
+
 				// Mock issue upsert (16 named args)
 				mock.ExpectQuery("INSERT INTO issues").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -1159,13 +1275,19 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(issueID, now, now))
 
-				// Mock session create (14 named args)
+				// Mock session create (17 named args)
 				mock.ExpectQuery("INSERT INTO sessions").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
+
+				// Mock concurrency check
+				mock.ExpectQuery("SELECT count").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
 				// Mock job enqueue (6 named args)
 				mock.ExpectQuery("INSERT INTO jobs").
@@ -1206,8 +1328,14 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
+
+				// Mock concurrency check
+				mock.ExpectQuery("SELECT count").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
 				// Mock job enqueue
 				mock.ExpectQuery("INSERT INTO jobs").
@@ -1233,25 +1361,71 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 			expectedBody: "INVALID_BODY",
 		},
 		{
-			name:         "returns bad request for invalid agent type",
-			body:         `{"message":"Fix bug","agent_type":"invalid"}`,
-			setupMock:    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {},
+			name: "returns bad request for invalid agent type",
+			body: `{"message":"Fix bug","agent_type":"invalid"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+						AddRow(orgID, "test-org", nil, now, now))
+			},
 			expectedCode: http.StatusBadRequest,
 			expectedBody: "INVALID_AGENT_TYPE",
 		},
 		{
-			name:         "returns bad request for invalid autonomy level",
-			body:         `{"message":"Fix bug","agent_type":"claude_code","autonomy_level":"chaos"}`,
-			setupMock:    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {},
+			name: "returns bad request for invalid autonomy level",
+			body: `{"message":"Fix bug","agent_type":"claude_code","autonomy_level":"chaos"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+						AddRow(orgID, "test-org", nil, now, now))
+			},
 			expectedCode: http.StatusBadRequest,
 			expectedBody: "INVALID_AUTONOMY_LEVEL",
 		},
 		{
-			name:         "returns bad request for invalid token mode",
-			body:         `{"message":"Fix bug","agent_type":"claude_code","token_mode":"extreme"}`,
-			setupMock:    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {},
+			name: "returns bad request for invalid token mode",
+			body: `{"message":"Fix bug","agent_type":"claude_code","token_mode":"extreme"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+						AddRow(orgID, "test-org", nil, now, now))
+			},
 			expectedCode: http.StatusBadRequest,
 			expectedBody: "INVALID_TOKEN_MODE",
+		},
+		{
+			name:         "returns bad request for invalid branch characters",
+			body:         `{"message":"Fix bug","agent_type":"claude_code","branch":"main..exploit"}`,
+			setupMock:    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_BRANCH",
+		},
+		{
+			name:         "returns bad request for invalid repository_id format",
+			body:         `{"message":"Fix bug","agent_type":"claude_code","repository_id":"not-a-uuid"}`,
+			setupMock:    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_REPOSITORY_ID",
+		},
+		{
+			name: "returns not found for non-existent repository",
+			body: `{"message":"Fix bug","agent_type":"claude_code","repository_id":"` + uuid.New().String() + `"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				mock.ExpectQuery("SELECT").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{
+						"id", "org_id", "platform", "platform_id", "full_name",
+						"default_branch", "installed_at", "created_at", "updated_at",
+					}))
+			},
+			expectedCode: http.StatusNotFound,
+			expectedBody: "REPOSITORY_NOT_FOUND",
 		},
 	}
 
@@ -1304,10 +1478,15 @@ func TestSessionHandler_EndSession_EnqueuesValidation(t *testing.T) {
 				nil, &now, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil, nil, nil, nil,
-				nil, nil, nil,
+				nil, nil, nil, nil,
 				nil, nil,
 				nil, // triggered_by_user_id
 				nil, 1, &now, "snapshotted", stringPtr("snapshots/test.tar"),
+				nil, // target_branch
+				nil, // working_branch
+				nil, // repository_id
+				nil, // diff_stats
+				nil, // diff_history
 				now,
 			),
 		)
@@ -1328,7 +1507,66 @@ func TestSessionHandler_EndSession_EnqueuesValidation(t *testing.T) {
 
 	handler.EndSession(w, req)
 
-	require.Equal(t, http.StatusOK, w.Code, "ending an idle interactive session should succeed")
+	require.Equal(t, http.StatusOK, w.Code, "ending an idle non-manual session should enqueue validation")
+	require.Contains(t, w.Body.String(), `"status":"completed"`, "response should return the completed session")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_EndSession_ManualSkipsValidation(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	userID := uuid.New()
+	jobID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).AddRow(
+				sessionID, issueID, orgID, "claude_code", "idle", "semi", "low",
+				nil, nil, nil, nil,
+				nil, &now, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				&userID, // triggered_by_user_id
+				nil, 1, &now, "snapshotted", stringPtr("snapshots/test.tar"),
+				nil, // target_branch
+				nil, // working_branch
+				nil, // repository_id
+				nil, // diff_stats
+				nil, // diff_history
+				now,
+			),
+		)
+	mock.ExpectExec("UPDATE sessions SET status = @status, completed_at = now\\(\\) WHERE id = @id AND org_id = @org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	// Expect open_pr job instead of validate.
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/end", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.EndSession(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "ending a manual session should skip validation and enqueue open_pr")
 	require.Contains(t, w.Body.String(), `"status":"completed"`, "response should return the completed session")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
@@ -1421,9 +1659,37 @@ func TestManualSessionTitle(t *testing.T) {
 	}
 }
 
+func TestIsValidGitRef(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		ref   string
+		valid bool
+	}{
+		{"main", true},
+		{"feature/add-auth", true},
+		{"fix-123", true},
+		{"refs/heads/main", true},
+		{"", false},
+		{"main..develop", false},
+		{"branch~1", false},
+		{"branch^2", false},
+		{"branch:file", false},
+		{"branch name", false},
+		{"branch\\path", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.ref, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.valid, isValidGitRef(tt.ref))
+		})
+	}
+}
+
 // messageColumns is the standard column set for session_messages queries.
 var messageColumns = []string{
-	"id", "session_id", "org_id", "user_id", "turn_number", "role", "content", "attachments", "token_usage", "created_at",
+	"id", "session_id", "org_id", "thread_id", "user_id", "turn_number", "role", "content", "attachments", "token_usage", "created_at",
 }
 
 func TestSessionHandler_ListMessages(t *testing.T) {
@@ -1449,10 +1715,15 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							nil, &now, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil, nil, nil, nil,
-							nil, nil, nil,
+							nil, nil, nil, nil,
 							nil, nil,
 							nil, // triggered_by_user_id
 							nil, 1, &now, "snapshotted", nil,
+							nil, // target_branch
+							nil, // working_branch
+							nil, // repository_id
+							nil, // diff_stats
+							nil, // diff_history
 							now,
 						),
 					)
@@ -1462,8 +1733,8 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(messageColumns).
-							AddRow(int64(1), sessionID, orgID, &userID, 1, "user", "Hello", nil, nil, now).
-							AddRow(int64(2), sessionID, orgID, nil, 1, "assistant", "Hi there", nil, nil, now),
+							AddRow(int64(1), sessionID, orgID, nil, &userID, 1, "user", "Hello", nil, nil, now).
+							AddRow(int64(2), sessionID, orgID, nil, nil, 1, "assistant", "Hi there", nil, nil, now),
 					)
 			},
 			expectedCode: http.StatusOK,
@@ -1482,10 +1753,15 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							nil, &now, &now, nil,
 							nil, nil, nil, nil,
 							nil, nil, nil, nil, nil,
-							nil, nil, nil,
+							nil, nil, nil, nil,
 							nil, nil,
 							nil, // triggered_by_user_id
 							nil, 0, nil, "none", nil,
+							nil, // target_branch
+							nil, // working_branch
+							nil, // repository_id
+							nil, // diff_stats
+							nil, // diff_history
 							now,
 						),
 					)
@@ -1547,7 +1823,29 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 			body: `{"message":"Please add tests"}`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
 				now := time.Now()
-				// ClaimIdle.
+				// GetByID — session is idle.
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionColumns).AddRow(
+							sessionID, uuid.New(), orgID, "claude-code", "idle", "semi", "low",
+							nil, nil, nil, nil,
+							nil, &now, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil, // triggered_by_user_id
+							nil, 1, &now, "snapshotted", stringPtr("snapshots/test"),
+							nil, // target_branch
+							nil, // working_branch
+							nil, // repository_id
+							nil, // diff_stats
+							nil, // diff_history
+							now,
+						),
+					)
+				// ClaimIdle succeeds.
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
@@ -1557,16 +1855,21 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, &now, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil, nil, nil, nil,
-							nil, nil, nil,
+							nil, nil, nil, nil,
 							nil, nil,
 							nil, // triggered_by_user_id
 							nil, 1, &now, "snapshotted", stringPtr("snapshots/test"),
+							nil, // target_branch
+							nil, // working_branch
+							nil, // repository_id
+							nil, // diff_stats
+							nil, // diff_history
 							now,
 						),
 					)
 				// Create message.
 				mock.ExpectQuery("INSERT INTO session_messages").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
 				// Enqueue job.
 				mock.ExpectQuery("INSERT INTO jobs").
@@ -1577,23 +1880,11 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 			expectedBody: "Please add tests",
 		},
 		{
-			name: "rejects empty message",
-			body: `{"message":""}`,
-			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
-			},
-			expectedCode: http.StatusBadRequest,
-			expectedBody: "MISSING_MESSAGE",
-		},
-		{
-			name: "rejects when session is not idle",
-			body: `{"message":"More work"}`,
+			name: "sends message to running session without enqueuing job",
+			body: `{"message":"Quick note while you work"}`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
 				now := time.Now()
-				// ClaimIdle fails (no row returned).
-				mock.ExpectQuery("UPDATE sessions SET status").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows(sessionColumns))
-				// Fallback lookup.
+				// GetByID — session is running.
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
@@ -1603,16 +1894,189 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, &now, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil, nil, nil, nil,
-							nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil, // triggered_by_user_id
+							nil, 2, &now, "running", nil,
+							nil, // target_branch
+							nil, // working_branch
+							nil, // repository_id
+							nil, // diff_stats
+							nil, // diff_history
+							now,
+						),
+					)
+				// Create message — no ClaimIdle, no ClaimForResume, no Enqueue.
+				mock.ExpectQuery("INSERT INTO session_messages").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
+			},
+			expectedCode: http.StatusCreated,
+			expectedBody: "Quick note while you work",
+		},
+		{
+			name: "rejects empty message",
+			body: `{"message":""}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
+			},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "MISSING_MESSAGE",
+		},
+		{
+			name: "rejects when session is not idle or resumable",
+			body: `{"message":"More work"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
+				now := time.Now()
+				// GetByID — session is pending (not running, not idle, not terminal).
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionColumns).AddRow(
+							sessionID, uuid.New(), orgID, "claude-code", "pending", "semi", "low",
+							nil, nil, nil, nil,
+							nil, &now, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
 							nil, nil,
 							nil, // triggered_by_user_id
 							nil, 0, nil, "none", nil,
+							nil, // target_branch
+							nil, // working_branch
+							nil, // repository_id
+							nil, // diff_stats
+							nil, // diff_history
+							now,
+						),
+					)
+				// ClaimIdle fails (no row returned).
+				mock.ExpectQuery("UPDATE sessions SET status").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionColumns))
+				// ClaimForResume also fails (no row returned).
+				mock.ExpectQuery("UPDATE sessions SET status").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionColumns))
+			},
+			expectedCode: http.StatusConflict,
+			expectedBody: "NOT_RESUMABLE",
+		},
+		{
+			name: "rejects message to completed session with destroyed sandbox snapshot",
+			body: `{"message":"Continue please"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionColumns).AddRow(
+							sessionID, uuid.New(), orgID, "claude-code", "completed", "semi", "low",
+							nil, nil, nil, nil,
+							nil, &now, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil, // triggered_by_user_id
+							nil, 3, &now, "destroyed", nil,
+							nil, nil, nil, nil, nil,
 							now,
 						),
 					)
 			},
-			expectedCode: http.StatusConflict,
-			expectedBody: "NOT_IDLE",
+			expectedCode: http.StatusGone,
+			expectedBody: "SNAPSHOT_EXPIRED",
+		},
+		{
+			name: "rejects message to idle session with destroyed sandbox snapshot",
+			body: `{"message":"Continue please"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionColumns).AddRow(
+							sessionID, uuid.New(), orgID, "claude-code", "idle", "semi", "low",
+							nil, nil, nil, nil,
+							nil, &now, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil, // triggered_by_user_id
+							nil, 2, &now, "destroyed", nil,
+							nil, nil, nil, nil, nil,
+							now,
+						),
+					)
+			},
+			expectedCode: http.StatusGone,
+			expectedBody: "SNAPSHOT_EXPIRED",
+		},
+		{
+			name: "sends message to completed session via ClaimForResume",
+			body: `{"message":"Continue working on this"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
+				now := time.Now()
+				// GetByID — session is completed.
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionColumns).AddRow(
+							sessionID, uuid.New(), orgID, "claude-code", "completed", "semi", "low",
+							nil, nil, nil, nil,
+							nil, &now, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil, // triggered_by_user_id
+							nil, 1, &now, "snapshotted", stringPtr("snapshots/test"),
+							nil, // target_branch
+							nil, // working_branch
+							nil, // repository_id
+							nil, // diff_stats
+							nil, // diff_history
+							now,
+						),
+					)
+				// ClaimIdle fails (no row returned).
+				mock.ExpectQuery("UPDATE sessions SET status").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionColumns))
+				// ClaimForResume succeeds.
+				mock.ExpectQuery("UPDATE sessions SET status").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionColumns).AddRow(
+							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
+							nil, nil, nil, nil,
+							nil, &now, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil, // triggered_by_user_id
+							nil, 1, &now, "snapshotted", stringPtr("snapshots/test"),
+							nil, // target_branch
+							nil, // working_branch
+							nil, // repository_id
+							nil, // diff_stats
+							nil, // diff_history
+							now,
+						),
+					)
+				// Create message.
+				mock.ExpectQuery("INSERT INTO session_messages").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
+				// Enqueue job.
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+			},
+			expectedCode: http.StatusCreated,
+			expectedBody: "Continue working on this",
 		},
 	}
 
@@ -1731,9 +2195,11 @@ func TestSessionHandler_CreateManual_WithLLMTitle(t *testing.T) {
 		db.NewValidationStore(mock),
 		db.NewPullRequestStore(mock),
 		db.NewIssueStore(mock),
+		db.NewRepositoryStore(mock),
 		db.NewOrganizationStore(mock),
 		db.NewJobStore(mock),
 		db.NewSessionMessageStore(mock),
+		db.NewSessionThreadStore(mock),
 		llmClient,
 		zerolog.Nop(),
 	)
@@ -1742,6 +2208,12 @@ func TestSessionHandler_CreateManual_WithLLMTitle(t *testing.T) {
 	issueID := uuid.New()
 	runID := uuid.New()
 	jobID := uuid.New()
+
+	// Mock org settings lookup
+	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+			AddRow(orgID, "test-org", nil, now, now))
 
 	// Mock issue upsert
 	mock.ExpectQuery("INSERT INTO issues").
@@ -1756,8 +2228,14 @@ func TestSessionHandler_CreateManual_WithLLMTitle(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
+
+	// Mock concurrency check
+	mock.ExpectQuery("SELECT count").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
 	// Mock job enqueue
 	mock.ExpectQuery("INSERT INTO jobs").
@@ -1766,7 +2244,7 @@ func TestSessionHandler_CreateManual_WithLLMTitle(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
 
 	// Mock UpdateTitle call
-	mock.ExpectExec("UPDATE sessions SET pm_approach").
+	mock.ExpectExec("UPDATE sessions SET title").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
@@ -1786,8 +2264,8 @@ func TestSessionHandler_CreateManual_WithLLMTitle(t *testing.T) {
 	var resp models.SingleResponse[models.Session]
 	err = json.Unmarshal(w.Body.Bytes(), &resp)
 	require.NoError(t, err)
-	require.NotNil(t, resp.Data.PMApproach)
-	require.Equal(t, "Fix authentication login flow", *resp.Data.PMApproach)
+	require.NotNil(t, resp.Data.Title)
+	require.Equal(t, "Fix authentication login flow", *resp.Data.Title)
 
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -1809,9 +2287,11 @@ func TestSessionHandler_CreateManual_LLMError_Returns500(t *testing.T) {
 		db.NewValidationStore(mock),
 		db.NewPullRequestStore(mock),
 		db.NewIssueStore(mock),
+		db.NewRepositoryStore(mock),
 		db.NewOrganizationStore(mock),
 		db.NewJobStore(mock),
 		db.NewSessionMessageStore(mock),
+		db.NewSessionThreadStore(mock),
 		llmClient,
 		zerolog.Nop(),
 	)
@@ -1820,6 +2300,12 @@ func TestSessionHandler_CreateManual_LLMError_Returns500(t *testing.T) {
 	issueID := uuid.New()
 	runID := uuid.New()
 	jobID := uuid.New()
+
+	// Mock org settings lookup
+	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+			AddRow(orgID, "test-org", nil, now, now))
 
 	// Mock issue upsert
 	mock.ExpectQuery("INSERT INTO issues").
@@ -1834,8 +2320,14 @@ func TestSessionHandler_CreateManual_LLMError_Returns500(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
+
+	// Mock concurrency check
+	mock.ExpectQuery("SELECT count").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
 	// Mock job enqueue
 	mock.ExpectQuery("INSERT INTO jobs").
@@ -1860,6 +2352,268 @@ func TestSessionHandler_CreateManual_LLMError_Returns500(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, w.Code, "LLM title generation failure should return 500")
 
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionHandler_CreatePR_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	jobID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	diff := "--- a/file.go\n+++ b/file.go\n@@ -1 +1 @@\n-old\n+new"
+
+	// Mock session lookup — session has a diff.
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).AddRow(
+				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+				nil, nil, nil, nil,
+				nil, &now, &now, nil,
+				nil, nil, nil, nil,
+				nil, nil, nil, nil, &diff,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,                      // triggered_by_user_id
+				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+				nil, // target_branch
+				nil, // working_branch
+				nil, // repository_id
+				nil, // diff_stats
+				nil, // diff_history
+				now,
+			),
+		)
+
+	// Mock PR lookup — no existing PR (returns empty result).
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
+			"title", "body", "status", "review_status", "merged_at", "created_at", "updated_at",
+		}))
+
+	// Mock job enqueue.
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CreatePR(w, req)
+
+	require.Equal(t, http.StatusAccepted, w.Code, "should return 202 Accepted")
+	require.Contains(t, w.Body.String(), `"status":"queued"`, "response should indicate job was queued")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_CreatePR_NoDiff(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	// Mock session lookup — session has no diff.
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).AddRow(
+				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+				nil, nil, nil, nil,
+				nil, &now, &now, nil,
+				nil, nil, nil, nil,
+				nil, nil, nil, nil, nil, // diff is nil
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,
+				nil, 0, nil, "none", nil,
+				nil, nil, nil, nil, nil,
+				now,
+			),
+		)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CreatePR(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "should return 400 when session has no diff")
+	require.Contains(t, w.Body.String(), "NO_DIFF", "error code should indicate missing diff")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_CreatePR_AlreadyExists(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	prID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	diff := "--- a/file.go\n+++ b/file.go\n@@ -1 +1 @@\n-old\n+new"
+
+	// Mock session lookup — session has a diff.
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).AddRow(
+				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+				nil, nil, nil, nil,
+				nil, &now, &now, nil,
+				nil, nil, nil, nil,
+				nil, nil, nil, nil, &diff,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,
+				nil, 0, nil, "none", nil,
+				nil, nil, nil, nil, nil,
+				now,
+			),
+		)
+
+	// Mock PR lookup — PR already exists.
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
+				"title", "body", "status", "review_status", "merged_at", "created_at", "updated_at",
+			}).AddRow(
+				prID, sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "org/repo",
+				"Fix bug", (*string)(nil), "open", "pending", (*time.Time)(nil), now, now,
+			),
+		)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CreatePR(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "should return 409 when PR already exists")
+	require.Contains(t, w.Body.String(), "PR_EXISTS", "error code should indicate PR already exists")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_CreatePR_SessionNotFound(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	// Mock session lookup — not found.
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionColumns))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CreatePR(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "should return 404 when session not found")
+	require.Contains(t, w.Body.String(), "NOT_FOUND", "error code should indicate session not found")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_CreatePR_PRLookupDBError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	diff := "--- a/file.go\n+++ b/file.go\n@@ -1 +1 @@\n-old\n+new"
+
+	// Mock session lookup — session has a diff.
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).AddRow(
+				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+				nil, nil, nil, nil,
+				nil, &now, &now, nil,
+				nil, nil, nil, nil,
+				nil, nil, nil, nil, &diff,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,
+				nil, 0, nil, "none", nil,
+				nil, nil, nil, nil, nil,
+				now,
+			),
+		)
+
+	// Mock PR lookup — returns a database error.
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(fmt.Errorf("connection refused"))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CreatePR(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code, "should return 500 on PR lookup DB error")
+	require.Contains(t, w.Body.String(), "INTERNAL_ERROR", "error code should indicate internal error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func stringPtr(s string) *string {

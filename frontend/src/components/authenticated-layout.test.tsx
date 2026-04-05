@@ -11,7 +11,7 @@ const { pushMock, replaceMock, logoutMock } = vi.hoisted(() => ({
 }));
 
 vi.mock("next/navigation", () => ({
-  usePathname: () => "/overview",
+  usePathname: () => "/autopilot",
   useRouter: () => ({
     push: pushMock,
     replace: replaceMock,
@@ -43,6 +43,16 @@ describe("AuthenticatedLayout", () => {
     expect(screen.getByRole("link", { name: "Projects" })).toHaveAttribute("href", "/projects");
   });
 
+  it("shows Autopilot in the primary navigation", () => {
+    renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
+
+    expect(screen.getByRole("link", { name: "Autopilot" })).toHaveAttribute("href", "/autopilot");
+  });
+
   it("uses a full-width content area with generous padding", () => {
     const { container } = renderWithProviders(
       <AuthenticatedLayout>
@@ -70,7 +80,7 @@ describe("AuthenticatedLayout", () => {
     expect(await screen.findByRole("menuitem", { name: "General" })).toBeInTheDocument();
     expect(await screen.findByRole("menuitem", { name: "Integrations" })).toBeInTheDocument();
     expect(await screen.findByRole("menuitem", { name: "Coding agents" })).toBeInTheDocument();
-    expect(await screen.findByRole("menuitem", { name: "Prioritization" })).toBeInTheDocument();
+    expect(await screen.findByRole("menuitem", { name: "Autopilot settings" })).toBeInTheDocument();
     expect(await screen.findByRole("menuitem", { name: "Team" })).toBeInTheDocument();
   });
 
@@ -97,6 +107,11 @@ describe("AuthenticatedLayout", () => {
     await user.click(await screen.findByRole("menuitem", { name: "Coding agents" }));
 
     expect(pushMock).toHaveBeenCalledWith("/agent");
+
+    await user.click(screen.getByRole("button", { name: /Alex Doe/ }));
+    await user.click(await screen.findByRole("menuitem", { name: "Autopilot settings" }));
+
+    expect(pushMock).toHaveBeenCalledWith("/settings/autopilot");
   });
 
   it("does not show repo context switcher when org has only 1 repo", async () => {

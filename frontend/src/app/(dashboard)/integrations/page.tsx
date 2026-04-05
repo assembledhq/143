@@ -7,7 +7,19 @@ import { AllIntegrationCards } from "@/components/integration-connection-cards";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { useDisconnectIntegration } from "@/hooks/use-disconnect-integration";
 
 function SlackChannelPicker() {
   const queryClient = useQueryClient();
@@ -115,6 +127,7 @@ function SlackChannelPicker() {
 }
 
 export default function IntegrationsPage() {
+  const queryClient = useQueryClient();
   const { data: integrationsResp } = useQuery({
     queryKey: ["integrations"],
     queryFn: () => api.integrations.list(),
@@ -123,6 +136,26 @@ export default function IntegrationsPage() {
     queryKey: ["repositories"],
     queryFn: () => api.repositories.list(),
   });
+  const disconnectMutation = useDisconnectIntegration();
+
+  // Notion token dialog state.
+  const [notionDialogOpen, setNotionDialogOpen] = useState(false);
+  const [notionToken, setNotionToken] = useState("");
+  const [notionError, setNotionError] = useState<string | null>(null);
+
+  const notionConnectMutation = useMutation({
+    mutationFn: (token: string) => api.integrations.connectNotion(token),
+    onSuccess: () => {
+      setNotionDialogOpen(false);
+      setNotionToken("");
+      setNotionError(null);
+      queryClient.invalidateQueries({ queryKey: ["integrations"] });
+    },
+    onError: (err: Error) => {
+      setNotionError(err.message || "Failed to connect Notion. Check your token.");
+    },
+  });
+
   const githubIntegration = integrationsResp?.data?.find(
     (integration) => integration.provider === "github" && integration.status === "active"
   );
@@ -134,6 +167,9 @@ export default function IntegrationsPage() {
   );
   const slackIntegration = integrationsResp?.data?.find(
     (integration) => integration.provider === "slack" && integration.status === "active"
+  );
+  const notionIntegration = integrationsResp?.data?.find(
+    (integration) => integration.provider === "notion" && integration.status === "active"
   );
 
   const connectedRepoNames = (reposResp?.data ?? [])
@@ -154,13 +190,70 @@ export default function IntegrationsPage() {
         linearConnected={Boolean(linearIntegration)}
         linearLoading={false}
         slackConnected={Boolean(slackIntegration)}
+        notionConnected={Boolean(notionIntegration)}
+        notionLoading={notionConnectMutation.isPending}
         onConnectGitHub={() => api.integrations.loginGitHub()}
         onConnectSentry={() => api.auth.loginSentry()}
         onConnectLinear={() => api.integrations.loginLinear()}
         onConnectSlack={() => api.integrations.loginSlack()}
+        onConnectNotion={() => {
+          setNotionError(null);
+          setNotionToken("");
+          setNotionDialogOpen(true);
+        }}
+        onDisconnect={(provider) => disconnectMutation.mutate(provider)}
+        disconnectingProvider={disconnectMutation.isPending ? disconnectMutation.variables : null}
+        disconnectErrorProvider={disconnectMutation.isError ? disconnectMutation.variables ?? null : null}
+        disconnectError={disconnectMutation.isError ? "Failed to disconnect." : null}
       />
       {slackIntegration && <SlackChannelPicker />}
       </div>
+
+      <AlertDialog open={notionDialogOpen} onOpenChange={setNotionDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Connect Notion</AlertDialogTitle>
+            <AlertDialogDescription>
+              Enter your Notion internal integration token. You can create one at{" "}
+              <a
+                href="https://www.notion.so/my-integrations"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline"
+              >
+                notion.so/my-integrations
+              </a>
+              . Make sure to share the pages you want accessible with the integration.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="grid gap-1.5">
+            <Label htmlFor="notion-token">Integration Token</Label>
+            <Input
+              id="notion-token"
+              type="password"
+              placeholder="ntn_..."
+              value={notionToken}
+              onChange={(e) => {
+                setNotionToken(e.target.value);
+                setNotionError(null);
+              }}
+            />
+            {notionError && (
+              <p className="text-xs text-destructive">{notionError}</p>
+            )}
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <Button
+              onClick={() => notionConnectMutation.mutate(notionToken)}
+              disabled={!notionToken.trim() || notionConnectMutation.isPending}
+              loading={notionConnectMutation.isPending}
+            >
+              Connect
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </PageContainer>
   );
 }

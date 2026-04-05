@@ -40,10 +40,7 @@ func (a *GeminiCLIAdapter) PreparePrompt(ctx context.Context, input *agent.Agent
 		return nil, fmt.Errorf("agent input and issue are required")
 	}
 
-	maxTokens := lowTokenMax
-	if input.TokenMode == "high" {
-		maxTokens = highTokenMax
-	}
+	maxTokens := resolveTokenLimit(input.TokenMode, input.ContextLimits)
 
 	systemPrompt := buildSystemPrompt(input)
 	userPrompt := buildUserPrompt(input)
@@ -70,13 +67,13 @@ func (a *GeminiCLIAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, 
 		msg := shellEscapeDouble(prompt.UserMessage)
 		if prompt.ResumeSessionID != "" {
 			cmd = fmt.Sprintf(
-				"gemini --resume %s --yolo --output-format stream-json -p \"%s\"",
+				"gemini --resume %s --approval-mode=yolo --output-format stream-json -p \"%s\"",
 				shellEscapeGemini(prompt.ResumeSessionID),
 				msg,
 			)
 		} else {
 			cmd = fmt.Sprintf(
-				"gemini --resume --yolo --output-format stream-json -p \"%s\"",
+				"gemini --resume latest --approval-mode=yolo --output-format stream-json -p \"%s\"",
 				msg,
 			)
 		}
@@ -88,7 +85,7 @@ func (a *GeminiCLIAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, 
 			return nil, fmt.Errorf("write prompt file: %w", err)
 		}
 		cmd = fmt.Sprintf(
-			"gemini -p \"$(cat '%s')\" --yolo --output-format stream-json",
+			"gemini -p \"$(cat '%s')\" --approval-mode=yolo --output-format stream-json",
 			shellEscapeGemini(promptPath),
 		)
 	}

@@ -2,7 +2,9 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/google/uuid"
@@ -10,6 +12,11 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 )
+
+// safePassExprRE validates that a pass expression only contains safe SQL tokens
+// (column names, casts, functions like COALESCE). This prevents accidental SQL
+// injection if a non-constant expression is ever passed to diffHistoryAppendSQL.
+var safePassExprRE = regexp.MustCompile(`^[a-zA-Z0-9_():@, +]+$`)
 
 type SessionStore struct {
 	db DBTX
@@ -20,39 +27,103 @@ func NewSessionStore(db DBTX) *SessionStore {
 }
 
 type SessionFilters struct {
-	Status       models.SessionStatus
-	Limit        int
-	Cursor       string
-	AdHocOnly    bool      // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
-	RepositoryID uuid.UUID // When non-zero, filter sessions by repository via issues table.
+	Statuses           []models.SessionStatus // When non-empty, filter to sessions matching any of these statuses.
+	Limit              int
+	Cursor             string
+	AdHocOnly          bool      // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
+	RepositoryID       uuid.UUID // When non-zero, filter sessions by repository via issues table.
+	TriggeredByUserID  uuid.UUID // When non-zero, filter sessions to those triggered by this user.
 }
 
+// sessionSelectColumns is used for single-session queries where we want all fields.
 const sessionSelectColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-000000000000'::uuid) AS issue_id,
 	org_id, agent_type, status, autonomy_level, token_mode,
 	complexity_tier, confidence_score, confidence_reasoning, risk_factors,
 	container_id, started_at, completed_at, token_usage,
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
 	parent_session_id, revision_context, error, result_summary, diff,
-	pm_plan_id, pm_approach, pm_reasoning, project_task_id,
+	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
-	sandbox_state, snapshot_key, created_at`
+	sandbox_state, snapshot_key, target_branch, working_branch, repository_id, diff_stats, diff_history, created_at`
+
+// sessionListColumns excludes large JSONB blobs (diff_history) from list queries
+// to avoid returning multi-megabyte payloads when listing many sessions.
+const sessionListColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-000000000000'::uuid) AS issue_id,
+	org_id, agent_type, status, autonomy_level, token_mode,
+	complexity_tier, confidence_score, confidence_reasoning, risk_factors,
+	container_id, started_at, completed_at, token_usage,
+	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
+	parent_session_id, revision_context, error, result_summary, diff,
+	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
+	model_override, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
+	sandbox_state, snapshot_key, target_branch, working_branch, repository_id, diff_stats, NULL::jsonb AS diff_history, created_at`
+
+// maxDiffHistoryEntries caps the number of entries kept in diff_history.
+// Older entries beyond this limit are pruned when a new entry is appended.
+const maxDiffHistoryEntries = 20
+
+// diffHistoryAppendSQL returns the SQL fragment for appending to diff_history
+// with a cap of maxDiffHistoryEntries. The caller must supply @diff, @diff_stats,
+// and a pass-number expression (e.g. "@current_turn::int" or "COALESCE(current_turn, 0) + 1").
+//
+// IMPORTANT: passExpr is interpolated directly into SQL via fmt.Sprintf.
+// It MUST be a trusted constant expression — never pass user-controlled input.
+// The function panics if passExpr contains characters outside [a-zA-Z0-9_():@, +].
+func diffHistoryAppendSQL(passExpr string) string {
+	if !safePassExprRE.MatchString(passExpr) {
+		panic(fmt.Sprintf("diffHistoryAppendSQL: unsafe passExpr: %q", passExpr))
+	}
+	return fmt.Sprintf(`CASE WHEN @diff::text IS NOT NULL THEN
+	  (SELECT jsonb_agg(elem) FROM (
+	    SELECT elem FROM jsonb_array_elements(
+	      COALESCE(diff_history, '[]'::jsonb) || jsonb_build_array(jsonb_build_object(
+	        'pass', %s,
+	        'diff', @diff::text,
+	        'diff_stats', COALESCE(@diff_stats::jsonb, '{}'::jsonb),
+	        'created_at', now()
+	      ))
+	    ) WITH ORDINALITY AS t(elem, ord)
+	    ORDER BY ord DESC
+	    LIMIT %d
+	  ) AS trimmed)
+	ELSE diff_history END`, passExpr, maxDiffHistoryEntries)
+}
+
+// computeDiffStatsForResult computes diff stats from a SessionResult's diff.
+func computeDiffStatsForResult(result *models.SessionResult) json.RawMessage {
+	if result.Diff == nil {
+		return nil
+	}
+	return models.ComputeDiffStats(*result.Diff)
+}
 
 func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters SessionFilters) ([]models.Session, error) {
 	args := pgx.NamedArgs{"org_id": orgID}
 
 	query := `
-		SELECT ` + sessionSelectColumns + `
+		SELECT ` + sessionListColumns + `
 		FROM sessions
 		WHERE org_id = @org_id`
 
 	if filters.RepositoryID != uuid.Nil {
-		query += ` AND issue_id IN (SELECT id FROM issues WHERE repository_id = @repository_id AND org_id = @org_id)`
+		query += ` AND repository_id = @repository_id`
 		args["repository_id"] = filters.RepositoryID
 	}
 
-	if filters.Status != "" {
+	if len(filters.Statuses) == 1 {
 		query += ` AND status = @status`
-		args["status"] = string(filters.Status)
+		args["status"] = string(filters.Statuses[0])
+	} else if len(filters.Statuses) > 1 {
+		statusStrings := make([]string, len(filters.Statuses))
+		for i, s := range filters.Statuses {
+			statusStrings[i] = string(s)
+		}
+		query += ` AND status = ANY(@statuses)`
+		args["statuses"] = statusStrings
+	}
+	if filters.TriggeredByUserID != uuid.Nil {
+		query += ` AND triggered_by_user_id = @triggered_by_user_id`
+		args["triggered_by_user_id"] = filters.TriggeredByUserID
 	}
 	if filters.AdHocOnly {
 		query += ` AND pm_plan_id IS NULL`
@@ -100,13 +171,13 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 	query := `
 		INSERT INTO sessions (
 			issue_id, org_id, agent_type, status, autonomy_level, token_mode, complexity_tier,
-			parent_session_id, revision_context, pm_plan_id, pm_approach, pm_reasoning, project_task_id,
-			model_override, triggered_by_user_id
+			parent_session_id, revision_context, pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
+			model_override, triggered_by_user_id, target_branch, repository_id
 		)
 		VALUES (
 			@issue_id, @org_id, @agent_type, @status, @autonomy_level, @token_mode, @complexity_tier,
-			@parent_session_id, @revision_context, @pm_plan_id, @pm_approach, @pm_reasoning, @project_task_id,
-			@model_override, @triggered_by_user_id
+			@parent_session_id, @revision_context, @pm_plan_id, @title, @pm_approach, @pm_reasoning, @project_task_id,
+			@model_override, @triggered_by_user_id, @target_branch, @repository_id
 		)
 		RETURNING id, created_at`
 
@@ -126,11 +197,14 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 		"parent_session_id":     run.ParentSessionID,
 		"revision_context":      run.RevisionContext,
 		"pm_plan_id":            run.PMPlanID,
+		"title":                 run.Title,
 		"pm_approach":           run.PMApproach,
 		"pm_reasoning":          run.PMReasoning,
 		"project_task_id":       run.ProjectTaskID,
 		"model_override":        run.ModelOverride,
 		"triggered_by_user_id":  run.TriggeredByUserID,
+		"target_branch":         run.TargetBranch,
+		"repository_id":         run.RepositoryID,
 	}
 
 	row := s.db.QueryRow(ctx, query, args)
@@ -152,7 +226,19 @@ func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID,
 	return err
 }
 
+func (s *SessionStore) UpdatePMPlanID(ctx context.Context, orgID, runID, planID uuid.UUID) error {
+	query := `UPDATE sessions SET pm_plan_id = @pm_plan_id WHERE id = @id AND org_id = @org_id`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":         runID,
+		"org_id":     orgID,
+		"pm_plan_id": planID,
+	})
+	return err
+}
+
 func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.SessionResult) error {
+	diffStats := computeDiffStatsForResult(result)
+
 	query := `
 		UPDATE sessions
 		SET status = @status,
@@ -163,7 +249,9 @@ func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 		    END,
 		    confidence_score = @confidence_score, confidence_reasoning = @confidence_reasoning,
 		    risk_factors = @risk_factors, token_usage = @token_usage,
-		    result_summary = @result_summary, diff = @diff, error = @error
+		    result_summary = @result_summary, diff = @diff, error = @error,
+		    diff_stats = @diff_stats,
+		    diff_history = ` + diffHistoryAppendSQL("COALESCE(current_turn, 0) + 1") + `
 		WHERE id = @id AND org_id = @org_id`
 
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
@@ -177,6 +265,7 @@ func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 		"result_summary":       result.ResultSummary,
 		"diff":                 result.Diff,
 		"error":                result.Error,
+		"diff_stats":           diffStats,
 	})
 	return err
 }
@@ -184,11 +273,13 @@ func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 // ClaimIdle atomically transitions an idle session to running and returns the
 // claimed session row. Used when a user sends a follow-up message so only one
 // continuation can be queued at a time.
+// Sessions whose sandbox snapshot has been destroyed cannot be claimed.
 func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
 	query := `
 		UPDATE sessions
 		SET status = 'running'
 		WHERE id = @id AND org_id = @org_id AND status = 'idle'
+		  AND sandbox_state != 'destroyed'
 		RETURNING ` + sessionSelectColumns
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
@@ -197,6 +288,28 @@ func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID
 	})
 	if err != nil {
 		return models.Session{}, fmt.Errorf("claim idle session: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+}
+
+// ClaimForResume atomically transitions a terminal session to running so it
+// can be resumed with a follow-up message. Used when a user sends a message
+// to a completed/failed/cancelled/pr_created session.
+// Sessions whose sandbox snapshot has been destroyed cannot be resumed.
+func (s *SessionStore) ClaimForResume(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
+	query := `
+		UPDATE sessions
+		SET status = 'running', completed_at = NULL
+		WHERE id = @id AND org_id = @org_id AND status IN ('completed', 'pr_created', 'failed', 'cancelled')
+		  AND sandbox_state != 'destroyed'
+		RETURNING ` + sessionSelectColumns
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	})
+	if err != nil {
+		return models.Session{}, fmt.Errorf("claim terminal session for resume: %w", err)
 	}
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
 }
@@ -222,11 +335,11 @@ func (s *SessionStore) UpdateFailure(ctx context.Context, orgID, runID uuid.UUID
 }
 
 func (s *SessionStore) UpdateTitle(ctx context.Context, orgID, sessionID uuid.UUID, title string) error {
-	query := `UPDATE sessions SET pm_approach = @pm_approach WHERE id = @id AND org_id = @org_id`
+	query := `UPDATE sessions SET title = @title WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
-		"id":          sessionID,
-		"org_id":      orgID,
-		"pm_approach": title,
+		"id":     sessionID,
+		"org_id": orgID,
+		"title":  title,
 	})
 	return err
 }
@@ -239,7 +352,7 @@ func (s *SessionStore) CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (
 
 func (s *SessionStore) ListByIssue(ctx context.Context, orgID, issueID uuid.UUID) ([]models.Session, error) {
 	query := `
-		SELECT ` + sessionSelectColumns + `
+		SELECT ` + sessionListColumns + `
 		FROM sessions
 		WHERE org_id = @org_id AND issue_id = @issue_id
 		ORDER BY created_at DESC`
@@ -256,7 +369,7 @@ func (s *SessionStore) ListByIssue(ctx context.Context, orgID, issueID uuid.UUID
 
 func (s *SessionStore) ListRecentByOrg(ctx context.Context, orgID uuid.UUID, statuses []string, limit int) ([]models.Session, error) {
 	query := `
-		SELECT ` + sessionSelectColumns + `
+		SELECT ` + sessionListColumns + `
 		FROM sessions
 		WHERE org_id = @org_id AND status = ANY(@statuses)
 		ORDER BY created_at DESC`
@@ -282,7 +395,7 @@ func (s *SessionStore) ListByIDs(ctx context.Context, orgID uuid.UUID, ids []uui
 	}
 
 	query := `
-		SELECT ` + sessionSelectColumns + `
+		SELECT ` + sessionListColumns + `
 		FROM sessions
 		WHERE org_id = @org_id AND id = ANY(@ids)`
 
@@ -297,8 +410,11 @@ func (s *SessionStore) ListByIDs(ctx context.Context, orgID uuid.UUID, ids []uui
 }
 
 // UpdateTurnComplete sets the session to idle, persists the latest turn result,
-// and updates multi-turn metadata.
+// and updates multi-turn metadata. It also computes diff_stats and appends
+// a snapshot to diff_history for diff-between-passes review.
 func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string) error {
+	diffStats := computeDiffStatsForResult(result)
+
 	query := `
 		UPDATE sessions
 		SET status = 'idle', current_turn = @current_turn, last_activity_at = now(),
@@ -306,7 +422,9 @@ func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID 
 		    sandbox_state = 'snapshotted',
 		    confidence_score = @confidence_score, confidence_reasoning = @confidence_reasoning,
 		    risk_factors = @risk_factors, token_usage = @token_usage,
-		    result_summary = @result_summary, diff = @diff, error = @error
+		    result_summary = @result_summary, diff = @diff, error = @error,
+		    diff_stats = @diff_stats,
+		    diff_history = ` + diffHistoryAppendSQL("@current_turn::int") + `
 		WHERE id = @id AND org_id = @org_id`
 
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
@@ -322,6 +440,7 @@ func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID 
 		"result_summary":       result.ResultSummary,
 		"diff":                 result.Diff,
 		"error":                result.Error,
+		"diff_stats":           diffStats,
 	})
 	return err
 }
@@ -356,18 +475,26 @@ func (s *SessionStore) UpdateSandboxState(ctx context.Context, orgID, sessionID 
 	return err
 }
 
-// ListStaleSessions returns sessions whose snapshots should be cleaned up:
-// idle sessions that have been inactive too long, OR completed/failed sessions
-// that still have snapshots (e.g. after EndSession or normal completion).
-func (s *SessionStore) ListStaleSessions(ctx context.Context, olderThan time.Time) ([]models.Session, error) {
+// UpdateWorkingBranch sets the working branch name for a session.
+func (s *SessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessionID uuid.UUID, branch string) error {
+	query := `UPDATE sessions SET working_branch = @working_branch WHERE id = @id AND org_id = @org_id`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":              sessionID,
+		"org_id":          orgID,
+		"working_branch":  branch,
+	})
+	return err
+}
+
+// ListStaleIdleSessions returns idle sessions that have been inactive longer
+// than the idle timeout. These sessions should be transitioned to completed
+// but their snapshots are preserved for later resumption.
+func (s *SessionStore) ListStaleIdleSessions(ctx context.Context, olderThan time.Time) ([]models.Session, error) {
 	query := `
-		SELECT ` + sessionSelectColumns + `
+		SELECT ` + sessionListColumns + `
 		FROM sessions
-		WHERE sandbox_state = 'snapshotted'
-		  AND (
-		    (status = 'idle' AND last_activity_at < @older_than)
-		    OR status IN ('completed', 'failed', 'cancelled')
-		  )
+		WHERE status = 'idle'
+		  AND last_activity_at < @older_than
 		ORDER BY last_activity_at ASC NULLS FIRST
 		LIMIT 100`
 
@@ -375,7 +502,28 @@ func (s *SessionStore) ListStaleSessions(ctx context.Context, olderThan time.Tim
 		"older_than": olderThan,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("query stale sessions: %w", err)
+		return nil, fmt.Errorf("query stale idle sessions: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+}
+
+// ListExpiredSnapshots returns non-active sessions whose snapshots have
+// exceeded the maximum snapshot age and should be cleaned up from storage.
+func (s *SessionStore) ListExpiredSnapshots(ctx context.Context, olderThan time.Time) ([]models.Session, error) {
+	query := `
+		SELECT ` + sessionSelectColumns + `
+		FROM sessions
+		WHERE sandbox_state = 'snapshotted'
+		  AND last_activity_at < @older_than
+		  AND status NOT IN ('running', 'idle')
+		ORDER BY last_activity_at ASC NULLS FIRST
+		LIMIT 100`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"older_than": olderThan,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query expired snapshots: %w", err)
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
 }

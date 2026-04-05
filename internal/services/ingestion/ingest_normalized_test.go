@@ -40,7 +40,7 @@ func TestIngestNormalized(t *testing.T) {
 			ni: func(integrationID uuid.UUID, now time.Time) NormalizedIssue {
 				return NormalizedIssue{
 					ExternalID:            "EXT-123",
-					Source:                "sentry",
+					Source:                models.IssueSourceSentry,
 					SourceIntegrationID:   integrationID,
 					Title:                 "Test Issue",
 					Description:           "A test issue description",
@@ -72,7 +72,7 @@ func TestIngestNormalized(t *testing.T) {
 				t.Helper()
 				require.NotNil(t, issue, "ingested issue should not be nil")
 				require.Equal(t, issueID, issue.ID, "issue ID should match upserted value")
-				require.Equal(t, "sentry", issue.Source, "source should be sentry")
+				require.Equal(t, models.IssueSourceSentry, issue.Source, "source should be sentry")
 				require.Equal(t, "EXT-123", issue.ExternalID, "external ID should match input")
 				require.Equal(t, "Test Issue", issue.Title, "title should match input")
 				require.Equal(t, "high", issue.Severity, "error severity should normalize to high")
@@ -85,7 +85,7 @@ func TestIngestNormalized(t *testing.T) {
 			ni: func(integrationID uuid.UUID, now time.Time) NormalizedIssue {
 				return NormalizedIssue{
 					ExternalID:          "EXT-456",
-					Source:              "pagerduty",
+					Source:              models.IssueSource("pagerduty"),
 					SourceIntegrationID: integrationID,
 					Title:               "Failing Issue",
 					Severity:            "critical",
@@ -110,7 +110,7 @@ func TestIngestNormalized(t *testing.T) {
 			ni: func(integrationID uuid.UUID, now time.Time) NormalizedIssue {
 				return NormalizedIssue{
 					ExternalID:          "EXT-789",
-					Source:              "github",
+					Source:              models.IssueSource("github"),
 					SourceIntegrationID: integrationID,
 					Title:               "Another Issue",
 					Severity:            "warning",

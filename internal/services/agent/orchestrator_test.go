@@ -88,8 +88,10 @@ func (m *mockGitHubTokenProvider) GetInstallationToken(ctx context.Context, inst
 
 // mockCodexAuthProvider implements agent.CodexAuthProvider.
 type mockCodexAuthProvider struct {
-	cfg *models.OpenAIChatGPTConfig
-	err error
+	cfg        *models.OpenAIChatGPTConfig
+	err        error
+	refreshCfg *models.OpenAIChatGPTConfig
+	refreshErr error
 }
 
 func (m *mockCodexAuthProvider) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
@@ -97,6 +99,17 @@ func (m *mockCodexAuthProvider) GetValidToken(ctx context.Context, orgID uuid.UU
 		return nil, m.err
 	}
 	return m.cfg, nil
+}
+
+func (m *mockCodexAuthProvider) RefreshToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
+	if m.refreshErr != nil {
+		return nil, m.refreshErr
+	}
+	if m.refreshCfg != nil {
+		return m.refreshCfg, nil
+	}
+	// Default: delegate to the same config as GetValidToken.
+	return m.cfg, m.err
 }
 
 type mockCredentialProvider struct {
@@ -173,6 +186,10 @@ func (m *mockSessionStore) UpdateSnapshotInfo(ctx context.Context, orgID, sessio
 }
 
 func (m *mockSessionStore) UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state string) error {
+	return nil
+}
+
+func (m *mockSessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessionID uuid.UUID, branch string) error {
 	return nil
 }
 
@@ -435,7 +452,7 @@ func testIssue(orgID uuid.UUID) models.Issue {
 		ID:           uuid.MustParse("00000000-0000-0000-0000-000000000002"),
 		OrgID:        orgID,
 		ExternalID:   "SENTRY-123",
-		Source:       "sentry",
+		Source:       models.IssueSourceSentry,
 		RepositoryID: &repoID,
 		Title:        "NullPointerException in handler",
 		Description:  &desc,
@@ -460,13 +477,15 @@ func testRepo(orgID uuid.UUID) models.Repository {
 }
 
 func testRun(orgID, issueID uuid.UUID) *models.Session {
+	repoID := uuid.MustParse("00000000-0000-0000-0000-000000000099")
 	return &models.Session{
-		ID:        uuid.MustParse("00000000-0000-0000-0000-000000000003"),
-		IssueID:   issueID,
-		OrgID:     orgID,
-		AgentType: models.AgentTypeClaudeCode,
-		Status:    "pending",
-		TokenMode: "low",
+		ID:           uuid.MustParse("00000000-0000-0000-0000-000000000003"),
+		IssueID:      issueID,
+		OrgID:        orgID,
+		AgentType:    models.AgentTypeClaudeCode,
+		Status:       "pending",
+		TokenMode:    "low",
+		RepositoryID: &repoID,
 	}
 }
 
@@ -1046,13 +1065,16 @@ func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
 	err := orch.RunAgent(context.Background(), run)
 	require.NoError(t, err)
 
-	// Sandbox should have no agent-specific env vars since "claude_code" has no credential,
-	// but HOME is always injected as a fallback.
-	require.Equal(t, map[string]string{"HOME": "/workspace"}, capturedCfg.Env,
-		"sandbox config should only have HOME for unconfigured agent type")
+	// Sandbox should have no agent-specific env vars since "claude_code" has no credential.
+	// HOME is always injected as a fallback, and GitHub integration vars are injected
+	// when integration skills are available (independent of agent type).
+	require.NotContains(t, capturedCfg.Env, "ANTHROPIC_API_KEY",
+		"sandbox config should not have agent-specific env for unconfigured agent type")
+	require.Equal(t, "/workspace", capturedCfg.Env["HOME"],
+		"HOME should always be set")
 }
 
-func TestRunAgent_CodexUsesOpenAICredentialFallback(t *testing.T) {
+func TestRunAgent_CodexUsesAuthJsonNotEnvVar(t *testing.T) {
 	t.Parallel()
 
 	orgID := testOrg()
@@ -1062,26 +1084,63 @@ func TestRunAgent_CodexUsesOpenAICredentialFallback(t *testing.T) {
 
 	d := defaultDeps()
 	d.adapter.name = models.AgentTypeCodex
-	d.codexAuth = nil
-	d.creds = &mockCredentialProvider{
-		byProvider: map[models.ProviderName]*models.DecryptedCredential{
-			models.ProviderOpenAI: {
-				Provider: models.ProviderOpenAI,
-				Config:   models.OpenAIConfig{APIKey: "sk-openai-fallback", BaseURL: "https://api.openai.com/v1", APIType: "chat"},
-			},
+	d.codexAuth = &mockCodexAuthProvider{
+		cfg: &models.OpenAIChatGPTConfig{
+			AccessToken:  "chatgpt-access-token",
+			RefreshToken: "chatgpt-refresh-token",
+			ExpiresAt:    time.Now().Add(1 * time.Hour),
 		},
 	}
 
 	var capturedCfg agent.SandboxConfig
 	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
 		capturedCfg = cfg
-		return &agent.Sandbox{ID: "codex-fallback", Provider: "mock", WorkDir: "/workspace"}, nil
+		return &agent.Sandbox{ID: "codex-oauth", Provider: "mock", WorkDir: "/workspace"}, nil
 	}
 
 	orch := buildOrchestrator(d)
 	err := orch.RunAgent(context.Background(), run)
-	require.NoError(t, err, "run should succeed when openai credential exists")
-	require.Equal(t, "sk-openai-fallback", capturedCfg.Env["OPENAI_API_KEY"], "codex should receive OPENAI_API_KEY from org credentials")
+	require.NoError(t, err, "run should succeed when ChatGPT OAuth token exists")
+
+	// CODEX_API_KEY must NOT be set — it causes Codex CLI to call
+	// api.openai.com which requires api.responses.write scope.
+	require.Empty(t, capturedCfg.Env["CODEX_API_KEY"], "CODEX_API_KEY should not be set as env var")
+
+	// Instead, the token should be injected via auth.json.
+	authData, ok := d.provider.Files["/workspace/.codex/auth.json"]
+	require.True(t, ok, "auth.json should be written to sandbox")
+	var authJSON map[string]interface{}
+	require.NoError(t, json.Unmarshal(authData, &authJSON))
+	require.Equal(t, "chatgpt", authJSON["auth_mode"])
+	tokens, ok := authJSON["tokens"].(map[string]interface{})
+	require.True(t, ok, "auth.json should have tokens object")
+	require.Equal(t, "chatgpt-access-token", tokens["access_token"], "auth.json should contain the ChatGPT OAuth token")
+}
+
+func TestRunAgent_CodexOpenAIKeyAloneIsNotSufficient(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.AgentType = models.AgentTypeCodex
+
+	d := defaultDeps()
+	d.adapter.name = models.AgentTypeCodex
+	d.codexAuth = nil // no ChatGPT OAuth
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderOpenAI: {
+				Provider: models.ProviderOpenAI,
+				Config:   models.OpenAIConfig{APIKey: "sk-openai-key", BaseURL: "https://api.openai.com/v1", APIType: "chat"},
+			},
+		},
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.Error(t, err, "run should fail when only OpenAI API key exists (no ChatGPT OAuth)")
+	require.Contains(t, err.Error(), "no credentials", "error should mention missing credentials")
 }
 
 func TestRunAgent_CodexAuthWritesToSandboxWorkdir(t *testing.T) {
@@ -1116,11 +1175,15 @@ func TestRunAgent_CodexAuthWritesToSandboxWorkdir(t *testing.T) {
 	authData, ok := d.provider.Files["/workspace/.codex/auth.json"]
 	require.True(t, ok, "codex auth injection should write auth.json under /workspace/.codex")
 
-	var authJSON map[string]string
+	var authJSON map[string]interface{}
 	unmarshalErr := json.Unmarshal(authData, &authJSON)
 	require.NoError(t, unmarshalErr, "auth.json should contain valid JSON")
-	require.Equal(t, "test-access-token", authJSON["access_token"], "auth.json should include access token")
-	require.Equal(t, "test-refresh-token", authJSON["refresh_token"], "auth.json should include refresh token")
+	require.Equal(t, "chatgpt", authJSON["auth_mode"], "auth.json should set auth_mode to chatgpt")
+	tokens, ok := authJSON["tokens"].(map[string]interface{})
+	require.True(t, ok, "auth.json should have a tokens object")
+	require.Equal(t, "test-access-token", tokens["access_token"], "tokens should include access token")
+	require.Equal(t, "", tokens["refresh_token"], "refresh_token should be empty so the CLI cannot consume it")
+	require.NotEmpty(t, authJSON["last_refresh"], "auth.json should include last_refresh timestamp")
 }
 
 func TestRunAgent_CodexNoCredentialsFails(t *testing.T) {
@@ -1133,7 +1196,7 @@ func TestRunAgent_CodexNoCredentialsFails(t *testing.T) {
 
 	d := defaultDeps()
 	d.adapter.name = models.AgentTypeCodex
-	// No codexAuth provider and no OPENAI_API_KEY in env.
+	// No codexAuth provider and no CODEX_API_KEY in env.
 	d.codexAuth = nil
 
 	orch := buildOrchestrator(d)
@@ -1190,6 +1253,7 @@ func TestRunAgent_IssueWithoutRepository(t *testing.T) {
 	issue.RepositoryID = nil
 
 	run := testRun(orgID, issue.ID)
+	run.RepositoryID = nil // no repo on session either
 
 	d := defaultDeps()
 	d.issues.issue = issue
@@ -1209,7 +1273,7 @@ func TestRunAgent_ManualSessionTransitionsToIdle(t *testing.T) {
 
 	orgID := testOrg()
 	issue := testIssue(orgID)
-	issue.Source = "manual"
+	issue.Source = models.IssueSourceManual
 	run := testRun(orgID, issue.ID)
 
 	d := defaultDeps()
@@ -1254,7 +1318,7 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 
 	orgID := testOrg()
 	issue := testIssue(orgID)
-	issue.Source = "manual"
+	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
 	session.Status = string(models.SessionStatusIdle)
 	session.CurrentTurn = 1
@@ -1364,7 +1428,7 @@ func TestContinueSession_InjectsSandboxProviderIntoContext(t *testing.T) {
 
 	orgID := testOrg()
 	issue := testIssue(orgID)
-	issue.Source = "manual"
+	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
 	session.Status = string(models.SessionStatusIdle)
 	session.CurrentTurn = 1
@@ -1406,3 +1470,37 @@ func TestContinueSession_InjectsSandboxProviderIntoContext(t *testing.T) {
 	err := orch.ContinueSession(context.Background(), session)
 	require.NoError(t, err)
 }
+
+func TestRunAgent_CodexAuthRefreshFallsBackToGetValidToken(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.AgentType = models.AgentTypeCodex
+
+	d := defaultDeps()
+	d.adapter.name = models.AgentTypeCodex
+	d.codexAuth = &mockCodexAuthProvider{
+		cfg: &models.OpenAIChatGPTConfig{
+			AccessToken:  "fallback-access-token",
+			RefreshToken: "fallback-refresh-token",
+			ExpiresAt:    time.Now().Add(1 * time.Hour),
+		},
+		refreshErr: errors.New("refresh_token_reused"),
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.NoError(t, err, "run should succeed when RefreshToken fails but GetValidToken works")
+
+	// Verify auth.json was written with the fallback token.
+	authData, ok := d.provider.Files["/workspace/.codex/auth.json"]
+	require.True(t, ok, "auth.json should be written to sandbox")
+	var authJSON map[string]interface{}
+	require.NoError(t, json.Unmarshal(authData, &authJSON))
+	tokens, ok := authJSON["tokens"].(map[string]interface{})
+	require.True(t, ok, "auth.json should have tokens object")
+	require.Equal(t, "fallback-access-token", tokens["access_token"], "auth.json should contain the fallback token from GetValidToken")
+}
+

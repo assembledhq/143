@@ -23,12 +23,13 @@ func init() {
 }
 
 const (
-	ClaudeCodeModelOpus   = "claude-opus-4-6"
-	ClaudeCodeModelSonnet = "claude-sonnet-4-5"
-	ClaudeCodeModelHaiku  = "claude-haiku-4-5"
+	ClaudeCodeModelOpus      = "claude-opus-4-6"
+	ClaudeCodeModelSonnet46  = "claude-sonnet-4-6"
+	ClaudeCodeModelSonnet    = "claude-sonnet-4-5"
+	ClaudeCodeModelHaiku     = "claude-haiku-4-5"
 )
 
-var AvailableClaudeCodeModels = []string{ClaudeCodeModelOpus, ClaudeCodeModelSonnet, ClaudeCodeModelHaiku}
+var AvailableClaudeCodeModels = []string{ClaudeCodeModelOpus, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet, ClaudeCodeModelHaiku}
 
 const (
 	GeminiCLIModelGemini3ProPreview   = "gemini-3-pro-preview"
@@ -45,6 +46,8 @@ var AvailableGeminiCLIModels = []string{
 }
 
 const (
+	CodexModelGPT54           = "gpt-5.4"
+	CodexModelGPT54Mini       = "gpt-5.4-mini"
 	CodexModelGPT53Codex      = "gpt-5.3-codex"
 	CodexModelGPT52Codex      = "gpt-5.2-codex"
 	CodexModelGPT5Codex       = "gpt-5-codex"
@@ -52,6 +55,8 @@ const (
 )
 
 var AvailableCodexModels = []string{
+	CodexModelGPT54,
+	CodexModelGPT54Mini,
 	CodexModelGPT53Codex,
 	CodexModelGPT52Codex,
 	CodexModelGPT5Codex,
@@ -136,6 +141,15 @@ func ModelEnvVarForAgentType(agentType AgentType) string {
 	}
 }
 
+// ModelName is a user-facing model identifier (e.g., "claude-sonnet-4-5", "gpt-4o").
+// The LLM registry maps these to provider-specific model IDs.
+type ModelName string
+
+// DefaultLLMModel is the server-side default when no LLM_MODEL env var or
+// org setting is configured. Keep in sync with DEFAULT_LLM_MODEL in
+// frontend/src/lib/model-constants.ts.
+const DefaultLLMModel = "gpt-5.4-mini"
+
 // AvailableLLMModels lists all models supported by the general-purpose LLM system.
 // Keep in sync with frontend/src/lib/model-constants.ts (LLM_MODELS_BY_PROVIDER).
 var AvailableLLMModels = []string{
@@ -144,6 +158,8 @@ var AvailableLLMModels = []string{
 	"claude-haiku-4-5",
 	"gpt-4o",
 	"gpt-4o-mini",
+	"gpt-5.4-mini",
+	"gpt-5-nano",
 	"o3-mini",
 }
 
@@ -153,8 +169,8 @@ var AvailableLLMModels = []string{
 func LLMModelsByProvider() map[string][]string {
 	return map[string][]string{
 		"anthropic":  {"claude-opus-4-6", "claude-sonnet-4-5", "claude-haiku-4-5"},
-		"openai":     {"gpt-4o", "gpt-4o-mini", "o3-mini"},
-		"openrouter": {"claude-opus-4-6", "claude-sonnet-4-5", "claude-haiku-4-5", "gpt-4o", "gpt-4o-mini", "o3-mini"},
+		"openai":     {"gpt-4o", "gpt-4o-mini", "gpt-5.4-mini", "gpt-5-nano", "o3-mini"},
+		"openrouter": {"claude-opus-4-6", "claude-sonnet-4-5", "claude-haiku-4-5", "gpt-4o", "gpt-4o-mini", "gpt-5.4-mini", "gpt-5-nano", "o3-mini"},
 	}
 }
 
@@ -170,6 +186,9 @@ func IsSupportedLLMModel(model string) bool {
 func ValidateSettingsModels(settings OrgSettings) error {
 	if settings.LLMModel != "" && !IsSupportedLLMModel(settings.LLMModel) {
 		return fmt.Errorf("llm_model must be one of: %v", AvailableLLMModels)
+	}
+	if err := settings.LLMReasoningEffort.Validate(); err != nil {
+		return err
 	}
 	if settings.PMModel != "" && !IsSupportedPMModel(settings.PMModel) {
 		return fmt.Errorf("pm_model must be one of: %v", AvailablePMModels)

@@ -1,4 +1,5 @@
 import type { Session, SessionLog } from "./types";
+import { captureError } from "./errors";
 
 /**
  * SSE event types emitted by the session log stream.
@@ -32,16 +33,16 @@ export function addSSEListener<K extends keyof SSEEventPayloads>(
     source.onmessage = (e: MessageEvent) => {
       try {
         handler(JSON.parse(e.data));
-      } catch {
-        // ignore unparseable messages
+      } catch (err) {
+        captureError(err, { feature: "sse" });
       }
     };
   } else {
     source.addEventListener(event, ((e: MessageEvent) => {
       try {
         handler(JSON.parse(e.data));
-      } catch {
-        // ignore unparseable messages
+      } catch (err) {
+        captureError(err, { feature: "sse" });
       }
     }) as EventListener);
   }

@@ -15,5 +15,8 @@ export default defineConfig({
     setupFiles: ['./src/test/setup.ts'],
     include: ['src/**/*.test.{ts,tsx}'],
     css: false,
+    testTimeout: 5_000,
+    hookTimeout: 10_000,
+    reporters: process.env.CI ? ['dot'] : ['default'],
   },
 });

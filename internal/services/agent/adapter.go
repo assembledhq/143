@@ -40,6 +40,7 @@ type AgentInput struct {
 	PMContext          *PMTaskContext // PM guidance for coding agents
 	PMContextJSON      string         // serialized PM context for PM agent runs
 	IntegrationSkills  string         // auto-generated CLI skills doc for integration tools
+	ContextLimits      *models.ContextLimits // org-specific token limits (nil = use defaults)
 }
 
 // PMTaskContext carries the PM agent's analysis into the coding agent's prompt.
@@ -160,7 +161,7 @@ type SandboxConfig struct {
 // DefaultSandboxConfig returns a SandboxConfig populated with sensible defaults.
 func DefaultSandboxConfig() SandboxConfig {
 	return SandboxConfig{
-		Image:         "143-agent:latest",
+		Image:         "143-sandbox:latest",
 		CPULimit:      2,
 		MemoryLimitMB: 4096,
 		Timeout:       5 * time.Minute,

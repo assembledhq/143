@@ -1,12 +1,15 @@
 package config
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/assembledhq/143/internal/llm"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
+//nolint:paralleltest // uses t.Setenv
 func TestLoad_UsesDefaults(t *testing.T) {
 	// Unset all vars that have defaults so env.Parse falls back to envDefault tags.
 	// t.Setenv("FOO", "") sets the var to empty string. caarlos0/env treats empty
@@ -39,6 +42,7 @@ func TestLoad_UsesDefaults(t *testing.T) {
 	require.Equal(t, "143", cfg.OpenRouterAppName, "Load should default OpenRouter app name to 143")
 }
 
+//nolint:paralleltest // uses t.Setenv
 func TestLoad_UsesEnvironmentOverrides(t *testing.T) {
 	t.Setenv("PORT", "9090")
 	t.Setenv("DATABASE_URL", "postgres://custom")
@@ -61,6 +65,7 @@ func TestLoad_UsesEnvironmentOverrides(t *testing.T) {
 	require.Equal(t, "worker", cfg.Mode, "Load should read MODE from the environment")
 }
 
+//nolint:paralleltest // uses t.Setenv
 func TestLoad_LLMConfig(t *testing.T) {
 	t.Setenv("LLM_MODEL", "claude-sonnet-4-5")
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test")
@@ -69,12 +74,13 @@ func TestLoad_LLMConfig(t *testing.T) {
 	cfg := Load()
 	llmCfg := cfg.LLMConfig()
 
-	require.Equal(t, "claude-sonnet-4-5", llmCfg.Model)
+	require.Equal(t, llm.ModelName("claude-sonnet-4-5"), llmCfg.Model)
 	require.Equal(t, "sk-ant-test", llmCfg.AnthropicAPIKey)
 	require.Equal(t, "sk-or-test", llmCfg.OpenRouterAPIKey)
 	require.Equal(t, "chat", llmCfg.OpenAIAPIType, "OpenAI API type should default to chat")
 }
 
+//nolint:paralleltest // uses t.Setenv
 func TestAgentEnv_ClaudeCodeAndCodex(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-prod")
 	t.Setenv("ANTHROPIC_BASE_URL", "https://custom.anthropic.com")
@@ -99,6 +105,7 @@ func TestAgentEnv_ClaudeCodeAndCodex(t *testing.T) {
 	require.Equal(t, "gpt-5.3-codex", env["codex"]["OPENAI_MODEL"])
 }
 
+//nolint:paralleltest // uses t.Setenv
 func TestAgentEnv_NoKeysConfigured(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("OPENAI_API_KEY", "")
@@ -112,6 +119,7 @@ func TestAgentEnv_NoKeysConfigured(t *testing.T) {
 	require.NotContains(t, env, "gemini_cli", "gemini_cli should not be present without GEMINI_API_KEY")
 }
 
+//nolint:paralleltest // uses t.Setenv
 func TestAgentEnv_GeminiCLI(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("OPENAI_API_KEY", "")
@@ -128,6 +136,7 @@ func TestAgentEnv_GeminiCLI(t *testing.T) {
 	require.NotContains(t, env, "codex")
 }
 
+//nolint:paralleltest // uses t.Setenv
 func TestAgentEnv_ModelOmittedWhenEmpty(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test")
 	t.Setenv("ANTHROPIC_MODEL", "")
@@ -144,6 +153,7 @@ func TestAgentEnv_ModelOmittedWhenEmpty(t *testing.T) {
 	require.NotContains(t, env["gemini_cli"], "GEMINI_MODEL", "model should be omitted when empty")
 }
 
+//nolint:paralleltest // uses t.Setenv
 func TestSafeAgentEnv_MasksAPIKeys(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-api3-abcdef1234567890")
 	t.Setenv("ANTHROPIC_MODEL", "opus")
@@ -164,6 +174,7 @@ func TestSafeAgentEnv_MasksAPIKeys(t *testing.T) {
 	require.Equal(t, "opus", safe["claude_code"]["ANTHROPIC_MODEL"])
 }
 
+//nolint:paralleltest // uses t.Setenv
 func TestLogStatus_AllConfigured(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://test")
 	t.Setenv("GITHUB_OAUTH_CLIENT_ID", "gh-id")
@@ -184,6 +195,7 @@ func TestLogStatus_AllConfigured(t *testing.T) {
 	})
 }
 
+//nolint:paralleltest // uses t.Setenv
 func TestLogStatus_NothingConfigured(t *testing.T) {
 	t.Setenv("DATABASE_URL", "")
 	t.Setenv("GITHUB_OAUTH_CLIENT_ID", "")
@@ -203,6 +215,7 @@ func TestLogStatus_NothingConfigured(t *testing.T) {
 	})
 }
 
+//nolint:paralleltest // uses t.Setenv
 func TestLogStatus_LLMModelWithoutProviders(t *testing.T) {
 	t.Setenv("LLM_MODEL", "claude-sonnet-4-5")
 	t.Setenv("ANTHROPIC_API_KEY", "")
@@ -216,6 +229,7 @@ func TestLogStatus_LLMModelWithoutProviders(t *testing.T) {
 	})
 }
 
+//nolint:paralleltest // uses t.Setenv
 func TestSafeLLMEnv_MasksAPIKeys(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-api3-abcdef1234567890")
 	t.Setenv("OPENAI_API_KEY", "sk-proj-abcdefgh1234")
@@ -230,6 +244,7 @@ func TestSafeLLMEnv_MasksAPIKeys(t *testing.T) {
 	require.Equal(t, "sk-o••••5678", safe["openrouter"])
 }
 
+//nolint:paralleltest // uses t.Setenv
 func TestSafeLLMEnv_Empty(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("OPENAI_API_KEY", "")
@@ -241,6 +256,7 @@ func TestSafeLLMEnv_Empty(t *testing.T) {
 	require.Empty(t, safe, "should return empty map when no keys configured")
 }
 
+//nolint:paralleltest // uses t.Setenv
 func TestSafeLLMEnv_PartialKeys(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-api3-abcdef1234567890")
 	t.Setenv("OPENAI_API_KEY", "")
@@ -255,6 +271,7 @@ func TestSafeLLMEnv_PartialKeys(t *testing.T) {
 	require.NotContains(t, safe, "openrouter")
 }
 
+//nolint:paralleltest // uses t.Setenv
 func TestAgentEnv_OnlyAnthropicKey(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-only")
 	t.Setenv("ANTHROPIC_BASE_URL", "")
@@ -269,4 +286,116 @@ func TestAgentEnv_OnlyAnthropicKey(t *testing.T) {
 	require.NotContains(t, env["claude_code"], "ANTHROPIC_BASE_URL", "base URL should be omitted when empty")
 	require.NotContains(t, env["claude_code"], "ANTHROPIC_MODEL", "model should be omitted when empty")
 	require.NotContains(t, env, "codex")
+}
+
+func TestValidateSecrets_DevelopmentAllowsMissing(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{Env: "development"}
+	require.NoError(t, cfg.ValidateSecrets(), "development env should allow missing secrets")
+}
+
+func TestValidateSecrets_ProductionMissingSessionSecret(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{
+		Env:                 "production",
+		SessionSecret:       "",
+		EncryptionMasterKey: strings.Repeat("k", 32),
+	}
+	err := cfg.ValidateSecrets()
+	require.Error(t, err, "missing SessionSecret in production should error")
+	require.Contains(t, err.Error(), "SESSION_SECRET")
+}
+
+func TestValidateSecrets_ProductionWeakSessionSecret(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{
+		Env:                 "production",
+		SessionSecret:       "changeme",
+		EncryptionMasterKey: strings.Repeat("k", 32),
+	}
+	err := cfg.ValidateSecrets()
+	require.Error(t, err, "weak SessionSecret in production should error")
+	require.Contains(t, err.Error(), "SESSION_SECRET")
+}
+
+func TestValidateSecrets_ProductionShortSessionSecret(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{
+		Env:                 "production",
+		SessionSecret:       "short",
+		EncryptionMasterKey: strings.Repeat("k", 32),
+	}
+	err := cfg.ValidateSecrets()
+	require.Error(t, err, "short SessionSecret in production should error")
+	require.Contains(t, err.Error(), "SESSION_SECRET")
+}
+
+func TestValidateSecrets_ProductionMissingEncryptionKey(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{
+		Env:                 "production",
+		SessionSecret:       strings.Repeat("s", 32),
+		EncryptionMasterKey: "",
+		CSRFSigningKey:      strings.Repeat("c", 32),
+	}
+	err := cfg.ValidateSecrets()
+	require.Error(t, err, "missing EncryptionMasterKey in production should error")
+	require.Contains(t, err.Error(), "ENCRYPTION_MASTER_KEY")
+}
+
+func TestValidateSecrets_ProductionShortEncryptionKey(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{
+		Env:                 "production",
+		SessionSecret:       strings.Repeat("s", 32),
+		EncryptionMasterKey: "short",
+		CSRFSigningKey:      strings.Repeat("c", 32),
+	}
+	err := cfg.ValidateSecrets()
+	require.Error(t, err, "short EncryptionMasterKey in production should error")
+	require.Contains(t, err.Error(), "ENCRYPTION_MASTER_KEY")
+}
+
+func TestValidateSecrets_ProductionAllValid(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{
+		Env:                 "production",
+		SessionSecret:       strings.Repeat("s", 32),
+		EncryptionMasterKey: strings.Repeat("k", 32),
+		CSRFSigningKey:      strings.Repeat("c", 32),
+	}
+	require.NoError(t, cfg.ValidateSecrets(), "valid production config should not error")
+}
+
+func TestValidateSecrets_NegativeRetentionDays(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{
+		Env:                      "development",
+		DataRetentionWebhookDays: -1,
+	}
+	err := cfg.ValidateSecrets()
+	require.Error(t, err, "negative retention days should error")
+	require.Contains(t, err.Error(), "DATA_RETENTION")
+}
+
+func TestValidateSecrets_ProductionMissingCSRFKey(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{
+		Env:                 "production",
+		SessionSecret:       strings.Repeat("s", 32),
+		EncryptionMasterKey: strings.Repeat("k", 32),
+		CSRFSigningKey:      "",
+	}
+	err := cfg.ValidateSecrets()
+	require.Error(t, err, "missing CSRF_SIGNING_KEY in production should error")
+	require.Contains(t, err.Error(), "CSRF_SIGNING_KEY")
 }

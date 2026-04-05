@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -23,8 +24,15 @@ import (
 	"github.com/assembledhq/143/internal/services/validation"
 )
 
+// DataRetentionConfig holds retention periods for the data cleanup handler.
+type DataRetentionConfig struct {
+	WebhookDays int
+	LogsDays    int
+	JobsDays    int
+}
+
 // RegisterHandlers registers all job handlers on the worker.
-func RegisterHandlers(w *Worker, stores *Stores, services *Services, logger zerolog.Logger) {
+func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCfg DataRetentionConfig, logger zerolog.Logger) {
 	w.Register("ingest_webhook", newIngestWebhookHandler(stores, logger))
 	w.Register("sync_sentry", newSyncSentryHandler(stores, logger))
 	w.Register("sync_slack", newSyncSlackHandler(stores, services, logger))
@@ -32,8 +40,10 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, logger zero
 		w.Register("prioritize", newPrioritizeHandler(stores, services, logger))
 	}
 	if services != nil && services.PM != nil {
-		w.Register("pm_analyze", newPMAnalyzeHandler(stores, services, logger))
-		w.Register("project_cycle", newProjectCycleHandler(services, logger))
+		w.Register(models.JobTypePMAnalyze, newPMAnalyzeHandler(stores, services, logger))
+		w.Register(models.JobTypeProjectCycle, newProjectCycleHandler(services, logger))
+		w.Register(models.JobTypePMBootstrap, newOrgIDJobHandler("pm_bootstrap", services.PM.RunBootstrap, logger))
+		w.Register(models.JobTypePMContextRefresh, newOrgIDJobHandler("pm_context_refresh", services.PM.RunRefresh, logger))
 	}
 	if hasServiceHandlersDependencies(services) {
 		w.Register("run_agent", newRunAgentHandler(stores, services, logger))
@@ -52,6 +62,7 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, logger zero
 	if stores.AuditLogs != nil && stores.Organizations != nil {
 		w.Register("audit_retention_cleanup", newAuditRetentionCleanupHandler(stores, logger))
 	}
+	w.Register("data_retention_cleanup", newDataRetentionCleanupHandler(stores, retentionCfg, logger))
 }
 
 func hasServiceHandlersDependencies(services *Services) bool {
@@ -79,6 +90,7 @@ type Stores struct {
 	Credentials         *db.OrgCredentialStore // nil-safe: needed for sync_slack
 	AuditLogs           *db.AuditLogStore     // nil-safe: audit retention cleanup
 	Organizations       *db.OrganizationStore // nil-safe: needed for audit retention
+	SessionLogs         *db.SessionLogStore   // nil-safe: data retention cleanup
 }
 
 // MemoryReinforcer retrieves and reinforces memories for a repo.
@@ -104,6 +116,8 @@ type Services struct {
 type pmService interface {
 	Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID) (*pm.Plan, error)
 	AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID) error
+	RunBootstrap(ctx context.Context, orgID uuid.UUID) error
+	RunRefresh(ctx context.Context, orgID uuid.UUID) error
 }
 
 // ingest_webhook handler processes a webhook delivery asynchronously.
@@ -226,6 +240,27 @@ func newProjectCycleHandler(services *Services, logger zerolog.Logger) JobHandle
 
 		logger.Info().Str("org_id", orgID.String()).Str("project_id", projectID.String()).Msg("running project_cycle job")
 		return services.PM.AnalyzeProject(ctx, orgID, projectID)
+	}
+}
+
+// newOrgIDJobHandler creates a handler that unmarshals an org_id payload and
+// calls the given function. Used for simple jobs like pm_bootstrap and pm_context_refresh.
+func newOrgIDJobHandler(jobName string, fn func(ctx context.Context, orgID uuid.UUID) error, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID string `json:"org_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal %s payload: %w", jobName, err)
+		}
+
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+
+		logger.Info().Str("org_id", orgID.String()).Msgf("running %s job", jobName)
+		return fn(ctx, orgID)
 	}
 }
 
@@ -527,7 +562,13 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			Str("org_id", orgID.String()).
 			Msg("starting run_agent job")
 
-		return services.Orchestrator.RunAgent(ctx, &run)
+		if err := services.Orchestrator.RunAgent(ctx, &run); err != nil {
+			if errors.Is(err, agent.ErrConcurrencyLimit) {
+				return &RetryableError{Err: err}
+			}
+			return err
+		}
+		return nil
 	}
 }
 
@@ -871,6 +912,55 @@ func newAuditRetentionCleanupHandler(stores *Stores, logger zerolog.Logger) JobH
 			Int64("deleted", deleted).
 			Msg("audit retention cleanup complete")
 
+		return nil
+	}
+}
+
+// data_retention_cleanup handler deletes expired webhook deliveries, session logs,
+// and completed jobs based on configurable retention periods.
+func newDataRetentionCleanupHandler(stores *Stores, retentionCfg DataRetentionConfig, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var totalDeleted int64
+		var errs []error
+
+		if stores.Webhooks != nil && retentionCfg.WebhookDays > 0 {
+			deleted, err := stores.Webhooks.DeleteExpired(ctx, retentionCfg.WebhookDays)
+			if err != nil {
+				logger.Error().Err(err).Msg("failed to delete expired webhook deliveries")
+				errs = append(errs, fmt.Errorf("delete expired webhook deliveries: %w", err))
+			} else {
+				totalDeleted += deleted
+				logger.Info().Int64("deleted", deleted).Int("retention_days", retentionCfg.WebhookDays).Msg("webhook delivery cleanup complete")
+			}
+		}
+
+		if stores.SessionLogs != nil && retentionCfg.LogsDays > 0 {
+			deleted, err := stores.SessionLogs.DeleteExpired(ctx, retentionCfg.LogsDays)
+			if err != nil {
+				logger.Error().Err(err).Msg("failed to delete expired session logs")
+				errs = append(errs, fmt.Errorf("delete expired session logs: %w", err))
+			} else {
+				totalDeleted += deleted
+				logger.Info().Int64("deleted", deleted).Int("retention_days", retentionCfg.LogsDays).Msg("session log cleanup complete")
+			}
+		}
+
+		if stores.Jobs != nil && retentionCfg.JobsDays > 0 {
+			deleted, err := stores.Jobs.DeleteExpiredCompleted(ctx, retentionCfg.JobsDays)
+			if err != nil {
+				logger.Error().Err(err).Msg("failed to delete expired completed jobs")
+				errs = append(errs, fmt.Errorf("delete expired completed jobs: %w", err))
+			} else {
+				totalDeleted += deleted
+				logger.Info().Int64("deleted", deleted).Int("retention_days", retentionCfg.JobsDays).Msg("completed job cleanup complete")
+			}
+		}
+
+		logger.Info().Int64("total_deleted", totalDeleted).Msg("data retention cleanup complete")
+
+		if len(errs) > 0 {
+			return fmt.Errorf("data retention cleanup had %d error(s): %w", len(errs), errors.Join(errs...))
+		}
 		return nil
 	}
 }

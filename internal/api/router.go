@@ -1,6 +1,11 @@
 package api
 
 import (
+	"context"
+	"fmt"
+
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -14,11 +19,14 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/services/codexauth"
+	"github.com/assembledhq/143/internal/services/storage"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
+	"github.com/assembledhq/143/internal/services/sandbox"
+	threadservice "github.com/assembledhq/143/internal/services/thread"
 )
 
-func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, codexAuthSvc *codexauth.Service, llmClient llm.Client) (*chi.Mux, error) {
+func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, codexAuthSvc *codexauth.Service, llmClient llm.Client, fileReader sandbox.FileReader) (*chi.Mux, error) {
 	// Create stores
 	orgStore := db.NewOrganizationStore(pool)
 	userStore := db.NewUserStore(pool)
@@ -48,6 +56,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	projectAttachmentStore := db.NewProjectAttachmentStore(pool)
 	projectSpecStore := db.NewProjectSpecStore(pool)
 	pmDocumentStore := db.NewPMDocumentStore(pool)
+	sessionReviewCommentStore := db.NewSessionReviewCommentStore(pool)
 	auditLogStore := db.NewAuditLogStore(pool)
 	auditEmitter := db.NewAuditEmitter(auditLogStore, logger)
 
@@ -85,6 +94,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	healthHandler := handlers.NewHealthHandler(pool)
 	authHandler := handlers.NewAuthHandler(cfg, orgStore, userStore, authSessionStore, invitationStore)
 	repoHandler := handlers.NewRepositoryHandler(repoStore)
+	if prService != nil {
+		repoHandler.SetPRService(prService)
+	}
 	integrationOpts := []handlers.IntegrationHandlerOption{
 		handlers.WithSentryOAuth(cfg.SentryOAuthClientID, cfg.SentryOAuthClientSecret),
 		handlers.WithGitHubIntegrationOAuth(cfg.GitHubOAuthClientID, cfg.GitHubOAuthClientSecret),
@@ -99,6 +111,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			integrationOpts = append(integrationOpts, handlers.WithGitHubApp(ghSvc, repoStore))
 		}
 	}
+	integrationOpts = append(integrationOpts, handlers.WithPMContextAutoTrigger(jobStore, pmDocumentStore, logger))
 	integrationHandler := handlers.NewIntegrationHandler(
 		integrationStore,
 		credentialStore,
@@ -112,6 +125,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeAgentEnv(), cfg.SafeLLMEnv())
 	issueHandler := handlers.NewIssueHandler(issueStore)
 	sessionMessageStore := db.NewSessionMessageStore(pool)
+	sessionThreadStore := db.NewSessionThreadStore(pool)
 	sessionHandler := handlers.NewSessionHandler(
 		sessionStore,
 		sessionLogStore,
@@ -119,12 +133,23 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		validationStore,
 		pullRequestStore,
 		issueStore,
+		repoStore,
 		orgStore,
 		jobStore,
 		sessionMessageStore,
+		sessionThreadStore,
 		llmClient,
 		logger,
 	)
+	threadSvc := threadservice.NewService(
+		sessionThreadStore,
+		sessionStore,
+		sessionMessageStore,
+		sessionLogStore,
+		jobStore,
+		logger,
+	)
+	sessionThreadHandler := handlers.NewSessionThreadHandler(threadSvc)
 	pmHandler := handlers.NewPMHandler(pmPlanStore, pmDecisionLogStore, jobStore, orgStore)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
@@ -136,6 +161,25 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	projectHandler := handlers.NewProjectHandler(projectStore, projectTaskStore, projectCycleStore, projectAttachmentStore, projectSpecStore)
 	projectHandler.SetJobStore(jobStore)
 
+	prTemplateStore := db.NewPRTemplateStore(pool)
+	githubStatusHandler := handlers.NewGitHubStatusHandler(
+		userCredentialStore, orgStore,
+		cfg.GitHubOAuthClientID, cfg.GitHubOAuthClientSecret,
+		cfg.BaseURL, cfg.FrontendURL,
+	)
+
+	// Wire user credential store and LLM client into PR service.
+	if prService != nil {
+		prService.SetUserCredentialStore(userCredentialStore)
+		prService.SetUserStore(userStore)
+		prService.SetOrgStore(orgStore)
+		prService.SetLLMClient(llmClient)
+		prService.SetPRTemplateStore(prTemplateStore)
+	}
+
+	// Wire user credential store into auth handler for token storage on login.
+	authHandler.SetUserCredentialStore(userCredentialStore)
+
 	// Wire audit emitter into all handlers that perform state changes.
 	authHandler.SetAuditEmitter(auditEmitter)
 	sessionHandler.SetAuditEmitter(auditEmitter)
@@ -144,13 +188,41 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	credentialHandler.SetAuditEmitter(auditEmitter)
 	projectHandler.SetAuditEmitter(auditEmitter)
 	pmHandler.SetAuditEmitter(auditEmitter)
+	pmHandler.SetPMDocumentStore(pmDocumentStore)
 	projectAttachmentHandler := handlers.NewProjectAttachmentHandler(projectAttachmentStore, projectStore)
 	projectSpecHandler := handlers.NewProjectSpecHandler(projectSpecStore, projectStore)
 	projectAnalysisHandler := handlers.NewProjectAnalysisHandler(projectStore, projectSpecStore, projectAttachmentStore, projectTaskStore)
 	projectGenerateHandler := handlers.NewProjectGenerateHandler(llmClient)
 	codexAuthHandler := handlers.NewCodexAuthHandler(codexAuthSvc, logger)
-	pmDocumentHandler := handlers.NewPMDocumentHandler(pmDocumentStore)
+	pmDocumentHandler := handlers.NewPMDocumentHandler(pmDocumentStore, credentialStore)
 	auditLogHandler := handlers.NewAuditLogHandler(auditLogStore)
+	sessionReviewCommentHandler := handlers.NewSessionReviewCommentHandler(sessionReviewCommentStore, sessionStore, logger)
+	sessionReviewCommentHandler.SetAuditEmitter(auditEmitter)
+	sessionReviewCommentHandler.SetMessageAndJobStores(sessionMessageStore, jobStore)
+	sessionFileHandler := handlers.NewSessionFileHandler(sessionStore, fileReader, logger)
+
+	// Upload store: use S3 if configured, otherwise fall back to local filesystem.
+	var uploadStore storage.UploadStore
+	if cfg.UploadS3Bucket != "" {
+		awsCfg, awsErr := awsconfig.LoadDefaultConfig(context.Background(),
+			awsconfig.WithRegion(cfg.UploadS3Region),
+		)
+		if awsErr != nil {
+			logger.Warn().Err(awsErr).Msg("failed to load AWS config for upload S3 — falling back to file uploads")
+			uploadStore = storage.NewFileUploadStore(cfg.UploadStorageDir, "/api/v1/uploads/files")
+		} else {
+			s3Client := s3.NewFromConfig(awsCfg)
+			endpoint := cfg.UploadS3Endpoint
+			if endpoint == "" {
+				endpoint = fmt.Sprintf("https://%s.s3.%s.amazonaws.com", cfg.UploadS3Bucket, cfg.UploadS3Region)
+			}
+			uploadStore = storage.NewS3UploadStore(s3Client, cfg.UploadS3Bucket, cfg.UploadS3Prefix, endpoint)
+			logger.Info().Str("bucket", cfg.UploadS3Bucket).Str("prefix", cfg.UploadS3Prefix).Msg("upload S3 store configured")
+		}
+	} else {
+		uploadStore = storage.NewFileUploadStore(cfg.UploadStorageDir, "/api/v1/uploads/files")
+	}
+	uploadHandler := handlers.NewUploadHandler(uploadStore)
 
 	r := chi.NewRouter()
 
@@ -173,6 +245,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		r.Post("/github", webhookHandler.HandleGitHub)
 		r.Post("/sentry", ingestionWebhookHandler.HandleSentry)
 		r.Post("/linear", ingestionWebhookHandler.HandleLinear)
+	})
+
+	// Internal API routes (token-based auth — called by sandbox agents)
+	internalIssueHandler := handlers.NewInternalIssueHandler(issueStore, sessionStore, jobStore, orgStore, cfg.SessionSecret, logger)
+	internalProjectHandler := handlers.NewInternalProjectHandler(pool, projectStore, projectTaskStore, repoStore, cfg.SessionSecret, logger)
+	r.Route("/api/v1/internal", func(r chi.Router) {
+		r.Post("/issues", internalIssueHandler.Create)
+		r.Post("/projects/propose", internalProjectHandler.Propose)
 	})
 
 	// Public team routes (token-based, no auth)
@@ -201,6 +281,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.RequireRole("admin", "member", "viewer"))
 
+			// GitHub connection status for PR authorship
+			r.Get("/api/v1/users/me/github-status", githubStatusHandler.GetStatus)
+
 			// Personal and resolved credential views
 			r.Get("/api/v1/settings/credentials/personal", userCredentialHandler.ListPersonal)
 			r.Get("/api/v1/settings/credentials/resolved", userCredentialHandler.ListResolved)
@@ -209,6 +292,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/repositories", repoHandler.List)
 			r.Get("/api/v1/repositories/summary", repoHandler.Summary)
 			r.Get("/api/v1/repositories/{id}", repoHandler.Get)
+			r.Get("/api/v1/repositories/{id}/branches", repoHandler.ListBranches)
 			r.Get("/api/v1/integrations", integrationHandler.ListIntegrations)
 			r.Get("/api/v1/issues", issueHandler.List)
 			r.Get("/api/v1/issues/{id}", issueHandler.Get)
@@ -225,16 +309,27 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/sessions/{id}/pr", sessionHandler.GetPullRequest)
 			r.Get("/api/v1/sessions/{id}/questions", sessionHandler.ListQuestions)
 			r.Get("/api/v1/sessions/{id}/messages", sessionHandler.ListMessages)
+			r.Get("/api/v1/sessions/{id}/threads", sessionThreadHandler.ListThreads)
+			r.Get("/api/v1/sessions/{id}/threads/{tid}", sessionThreadHandler.GetThread)
+			r.Get("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.GetThreadMessages)
+			r.Get("/api/v1/sessions/{id}/threads/{tid}/logs", sessionThreadHandler.GetThreadLogs)
+			r.Get("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.List)
+			r.Get("/api/v1/uploads/files/*", uploadHandler.ServeUpload)
+			r.Get("/api/v1/sessions/{id}/files", sessionFileHandler.ListFiles)
+			r.Get("/api/v1/sessions/{id}/files/content", sessionFileHandler.GetFileContent)
+			r.Get("/api/v1/sessions/{id}/files/context", sessionFileHandler.GetFileContext)
 			r.Get("/api/v1/settings", settingsHandler.Get)
 			r.Get("/api/v1/settings/agent-defaults", settingsHandler.GetAgentDefaults)
 			r.Get("/api/v1/settings/llm-defaults", settingsHandler.GetLLMDefaults)
-		r.Get("/api/v1/settings/llm-models", settingsHandler.GetLLMModels)
+			r.Get("/api/v1/settings/llm-models", settingsHandler.GetLLMModels)
+			r.Get("/api/v1/pm/current", pmHandler.Current)
 			r.Get("/api/v1/pm/plans", pmHandler.List)
 			r.Get("/api/v1/pm/plans/{id}", pmHandler.Get)
 			r.Get("/api/v1/pm/plans/latest", pmHandler.Latest)
 			r.Get("/api/v1/pm/decisions", pmHandler.Decisions)
 			r.Get("/api/v1/pm/status", pmHandler.Status)
 			r.Get("/api/v1/projects", projectHandler.List)
+			r.Get("/api/v1/projects/proposals/summary", projectHandler.ProposalSummary)
 			r.Get("/api/v1/projects/{id}", projectHandler.Get)
 			r.Get("/api/v1/projects/{id}/cycles", projectHandler.ListCycles)
 			r.Get("/api/v1/projects/{id}/cycles/{cycleId}", projectHandler.GetCycle)
@@ -260,20 +355,43 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/integrations/github/callback", integrationHandler.HandleGitHubOAuthCallback)
 			r.Get("/api/v1/integrations/github/installed", integrationHandler.HandleGitHubAppInstalled)
 			r.Post("/api/v1/integrations/github/connect", integrationHandler.ConnectGitHub)
+			r.Post("/api/v1/integrations/github/sync", integrationHandler.SyncGitHubRepos)
 			r.Get("/api/v1/integrations/slack/login", integrationHandler.StartSlackOAuth)
 			r.Get("/api/v1/integrations/slack/callback", integrationHandler.HandleSlackOAuthCallback)
 			r.Post("/api/v1/integrations/slack/connect", integrationHandler.ConnectSlack)
 			r.Get("/api/v1/integrations/slack/channels", integrationHandler.ListSlackChannels)
 			r.Patch("/api/v1/integrations/slack/channels", integrationHandler.UpdateSlackChannels)
+			r.Delete("/api/v1/integrations/github/disconnect", integrationHandler.DisconnectIntegration)
+			r.Delete("/api/v1/integrations/sentry/disconnect", integrationHandler.DisconnectIntegration)
+			r.Delete("/api/v1/integrations/linear/disconnect", integrationHandler.DisconnectIntegration)
+			r.Delete("/api/v1/integrations/slack/disconnect", integrationHandler.DisconnectIntegration)
+			r.Post("/api/v1/integrations/notion/connect", integrationHandler.ConnectNotion)
+			r.Delete("/api/v1/integrations/notion/disconnect", integrationHandler.DisconnectIntegration)
 			// Personal credential management
 			r.Put("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.UpsertPersonal)
 			r.Delete("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.DeletePersonal)
 
+			// GitHub connection for user-authored PRs
+			r.Get("/api/v1/users/me/github/connect", githubStatusHandler.StartConnect)
+			r.Get("/api/v1/users/me/github/callback", githubStatusHandler.HandleConnectCallback)
+			r.Post("/api/v1/users/me/github/disconnect", githubStatusHandler.Disconnect)
+
 			r.Post("/api/v1/issues/{id}/fix", sessionHandler.TriggerFix)
+			// File upload (higher body-size limit for multipart uploads).
+			r.With(middleware.MaxBodySize(11<<20)).Post("/api/v1/uploads", uploadHandler.Upload)
+
 			r.Post("/api/v1/sessions/manual", sessionHandler.CreateManual)
 			r.Post("/api/v1/sessions/{id}/questions/{qid}/answer", sessionHandler.AnswerQuestion)
 			r.Post("/api/v1/sessions/{id}/messages", sessionHandler.SendMessage)
 			r.Post("/api/v1/sessions/{id}/end", sessionHandler.EndSession)
+			r.Post("/api/v1/sessions/{id}/pr", sessionHandler.CreatePR)
+			r.Post("/api/v1/sessions/{id}/threads", sessionThreadHandler.CreateThread)
+			r.Post("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.SendThreadMessage)
+			r.Post("/api/v1/sessions/{id}/threads/{tid}/end", sessionThreadHandler.EndThread)
+			r.Post("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.Create)
+			r.Post("/api/v1/sessions/{id}/review-comments/send", sessionReviewCommentHandler.SendToAgent)
+			r.Patch("/api/v1/sessions/{id}/review-comments/{commentId}", sessionReviewCommentHandler.Update)
+			r.Delete("/api/v1/sessions/{id}/review-comments/{commentId}", sessionReviewCommentHandler.Delete)
 			r.Post("/api/v1/projects", projectHandler.Create)
 			r.Patch("/api/v1/projects/{id}", projectHandler.Update)
 			r.Delete("/api/v1/projects/{id}", projectHandler.Delete)
@@ -296,8 +414,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Post("/api/v1/projects/ai/generate", projectGenerateHandler.Generate)
 			r.Post("/api/v1/projects/{id}/ai/improve", projectAnalysisHandler.Improve)
 			r.Post("/api/v1/pm/documents", pmDocumentHandler.Create)
+			r.Post("/api/v1/pm/documents/discover/notion", pmDocumentHandler.DiscoverNotion)
 			r.Patch("/api/v1/pm/documents/{docId}", pmDocumentHandler.Update)
 			r.Delete("/api/v1/pm/documents/{docId}", pmDocumentHandler.Delete)
+			r.Post("/api/v1/pm/documents/{docId}/sync", pmDocumentHandler.SyncFromNotion)
 		})
 
 		// Admin-only routes
@@ -307,6 +427,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Delete("/api/v1/repositories/{id}", repoHandler.Delete)
 			r.Post("/api/v1/issues/{id}/reprioritize", priorityHandler.Reprioritize)
 			r.Post("/api/v1/pm/analyze", pmHandler.Analyze)
+			r.Post("/api/v1/pm/bootstrap", pmHandler.Bootstrap)
+			r.Post("/api/v1/pm/refresh", pmHandler.Refresh)
+			r.Get("/api/v1/pm/context/pending", pmHandler.ListPendingRefreshes)
+			r.Post("/api/v1/pm/context/{id}/accept", pmHandler.AcceptRefresh)
+			r.Delete("/api/v1/pm/context/{id}/reject", pmHandler.RejectRefresh)
 			r.Patch("/api/v1/settings", settingsHandler.Update)
 			r.Post("/api/v1/memories", memoryHandler.Create)
 			r.Patch("/api/v1/memories/{id}", memoryHandler.UpdateStatus)

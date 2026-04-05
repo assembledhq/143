@@ -38,5 +38,40 @@ func BuildRegistryFromEnv(logger io.Writer) *integration.Registry {
 		fmt.Fprintln(logger, "143-tools: registered linear")
 	}
 
+	if token := os.Getenv("NOTION_ACCESS_TOKEN"); token != "" {
+		store := integration.NewNotionDocumentStore(integration.NotionDocumentStoreConfig{
+			AuthToken: token,
+		})
+		reg.RegisterDocumentStore(store)
+		fmt.Fprintln(logger, "143-tools: registered notion")
+	}
+
+	if token := os.Getenv("INTERNAL_API_TOKEN"); token != "" {
+		apiURL := os.Getenv("INTERNAL_API_URL")
+		if apiURL != "" {
+			creator := integration.NewInternalIssueCreator(token, apiURL)
+			reg.RegisterIssueCreator(creator)
+			fmt.Fprintln(logger, "143-tools: registered issue creator")
+
+			proposer := integration.NewInternalProjectProposer(token, apiURL)
+			reg.RegisterProjectProposer(proposer)
+			fmt.Fprintln(logger, "143-tools: registered project proposer")
+		}
+	}
+
+	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
+		owner := os.Getenv("GITHUB_REPO_OWNER")
+		repo := os.Getenv("GITHUB_REPO_NAME")
+		if owner != "" && repo != "" {
+			source := integration.NewGitHubCodeReviewSource(integration.GitHubCodeReviewConfig{
+				Token: token,
+				Owner: owner,
+				Repo:  repo,
+			})
+			reg.RegisterCodeReviewSource(source)
+			fmt.Fprintf(logger, "143-tools: registered github (%s/%s)\n", owner, repo)
+		}
+	}
+
 	return reg
 }

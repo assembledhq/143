@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api";
+import { captureError } from "@/lib/errors";
 import { useAuth, useAuthProviders } from "@/hooks/use-auth";
 import { useEffect } from "react";
 
@@ -43,7 +44,7 @@ function LoginPageContent() {
 
   useEffect(() => {
     if (!authLoading && isAuthenticated) {
-      router.replace("/overview");
+      router.replace("/autopilot");
     }
   }, [authLoading, isAuthenticated, router]);
 
@@ -60,8 +61,9 @@ function LoginPageContent() {
     setLoading(true);
     try {
       await api.auth.loginEmail(signInEmail, signInPassword);
-      window.location.href = "/overview";
+      window.location.href = "/autopilot";
     } catch (err: unknown) {
+      captureError(err, { feature: "auth-signin" });
       const message = err instanceof Error ? err.message : "Sign in failed";
       setError(message);
     } finally {
@@ -75,8 +77,9 @@ function LoginPageContent() {
     setLoading(true);
     try {
       await api.auth.register(signUpEmail, signUpPassword, signUpName, invitation);
-      window.location.href = "/overview";
+      window.location.href = "/autopilot";
     } catch (err: unknown) {
+      captureError(err, { feature: "auth-signup" });
       const message = err instanceof Error ? err.message : "Sign up failed";
       setError(message);
     } finally {

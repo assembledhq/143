@@ -1,5 +1,9 @@
 # 31 - Automations Tab (On-Demand Workflows)
 
+> **Status:** Partially Implemented | **Last reviewed:** 2026-03-25
+>
+> **Implementation notes:** Frontend page shell exists at `/automations`. Missing: no `automations` or `automation_runs` tables, no server-side persistence endpoints. MVP may be client-side only (localStorage).
+
 > Add an `Automations` surface that lets teams define reusable workflows and run them on command, while staying aligned with the existing PM + jobs architecture.
 
 ## Goal

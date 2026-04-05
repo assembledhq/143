@@ -27,15 +27,19 @@ type AuditAction string
 
 const (
 	// Session actions
-	AuditActionSessionCreated          AuditAction = "session.created"
-	AuditActionSessionStarted          AuditAction = "session.started"
-	AuditActionSessionCompleted        AuditAction = "session.completed"
-	AuditActionSessionFailed           AuditAction = "session.failed"
-	AuditActionSessionCancelled        AuditAction = "session.cancelled"
-	AuditActionSessionStatusChanged    AuditAction = "session.status_changed"
-	AuditActionSessionQuestionCreated  AuditAction = "session.question.created"
-	AuditActionSessionQuestionAnswered AuditAction = "session.question.answered"
-	AuditActionSessionResumedLocally   AuditAction = "session.resumed_locally"
+	AuditActionSessionCreated              AuditAction = "session.created"
+	AuditActionSessionStarted              AuditAction = "session.started"
+	AuditActionSessionCompleted            AuditAction = "session.completed"
+	AuditActionSessionFailed               AuditAction = "session.failed"
+	AuditActionSessionCancelled            AuditAction = "session.cancelled"
+	AuditActionSessionStatusChanged        AuditAction = "session.status_changed"
+	AuditActionSessionQuestionCreated      AuditAction = "session.question.created"
+	AuditActionSessionQuestionAnswered     AuditAction = "session.question.answered"
+	AuditActionSessionResumedLocally       AuditAction = "session.resumed_locally"
+	AuditActionSessionReviewCommentCreated AuditAction = "session.review_comment.created"
+	AuditActionSessionReviewCommentUpdated AuditAction = "session.review_comment.updated"
+	AuditActionSessionReviewCommentDeleted AuditAction = "session.review_comment.deleted"
+	AuditActionSessionPRRequested          AuditAction = "session.pr_requested"
 
 	// Project actions
 	AuditActionProjectCreated        AuditAction = "project.created"
@@ -59,9 +63,13 @@ const (
 	AuditActionIssueReprioritized AuditAction = "issue.reprioritized"
 
 	// PM actions
-	AuditActionPMAnalysisTriggered AuditAction = "pm.analysis_triggered"
-	AuditActionPMPlanCreated       AuditAction = "pm.plan_created"
-	AuditActionPMDecisionMade      AuditAction = "pm.decision_made"
+	AuditActionPMAnalysisTriggered  AuditAction = "pm.analysis_triggered"
+	AuditActionPMPlanCreated        AuditAction = "pm.plan_created"
+	AuditActionPMDecisionMade       AuditAction = "pm.decision_made"
+	AuditActionPMBootstrapTriggered AuditAction = "pm.bootstrap_triggered"
+	AuditActionPMRefreshTriggered   AuditAction = "pm.refresh_triggered"
+	AuditActionPMRefreshAccepted    AuditAction = "pm.refresh_accepted"
+	AuditActionPMRefreshRejected    AuditAction = "pm.refresh_rejected"
 
 	// Team & settings actions
 	AuditActionSettingsUpdated        AuditAction = "settings.updated"
@@ -73,8 +81,8 @@ const (
 
 	// Integration & credential actions
 	AuditActionIntegrationConnected AuditAction = "integration.connected"
-	AuditActionCredentialUpdated AuditAction = "credential.updated" // #nosec G101 -- not a credential
-	AuditActionCredentialDeleted AuditAction = "credential.deleted" // #nosec G101 -- not a credential
+	AuditActionCredentialUpdated    AuditAction = "credential.updated" // #nosec G101 -- not a credential
+	AuditActionCredentialDeleted    AuditAction = "credential.deleted" // #nosec G101 -- not a credential
 
 	// Auth actions
 	AuditActionAuthLogin    AuditAction = "auth.login"
@@ -88,6 +96,8 @@ func (a AuditAction) Validate() error {
 	case AuditActionSessionCreated, AuditActionSessionStarted, AuditActionSessionCompleted,
 		AuditActionSessionFailed, AuditActionSessionCancelled, AuditActionSessionStatusChanged,
 		AuditActionSessionQuestionCreated, AuditActionSessionQuestionAnswered, AuditActionSessionResumedLocally,
+		AuditActionSessionReviewCommentCreated, AuditActionSessionReviewCommentUpdated, AuditActionSessionReviewCommentDeleted,
+		AuditActionSessionPRRequested,
 		AuditActionProjectCreated, AuditActionProjectUpdated, AuditActionProjectDeleted,
 		AuditActionProjectStarted, AuditActionProjectPaused, AuditActionProjectResumed,
 		AuditActionProjectApproved, AuditActionProjectCompleted, AuditActionProjectDismissed, AuditActionProjectRunTriggered,
@@ -95,6 +105,8 @@ func (a AuditAction) Validate() error {
 		AuditActionProjectTaskDeleted, AuditActionProjectTaskRetried,
 		AuditActionIssueCreated, AuditActionIssueReprioritized,
 		AuditActionPMAnalysisTriggered, AuditActionPMPlanCreated, AuditActionPMDecisionMade,
+		AuditActionPMBootstrapTriggered, AuditActionPMRefreshTriggered,
+		AuditActionPMRefreshAccepted, AuditActionPMRefreshRejected,
 		AuditActionSettingsUpdated, AuditActionTeamMemberInvited, AuditActionTeamMemberRoleChanged,
 		AuditActionTeamMemberRemoved, AuditActionTeamInvitationRevoked, AuditActionTeamInvitationAccepted,
 		AuditActionIntegrationConnected, AuditActionCredentialUpdated, AuditActionCredentialDeleted,
@@ -109,18 +121,20 @@ func (a AuditAction) Validate() error {
 type AuditResourceType string
 
 const (
-	AuditResourceSession     AuditResourceType = "session"
-	AuditResourceProject     AuditResourceType = "project"
-	AuditResourceProjectTask AuditResourceType = "project_task"
-	AuditResourceIssue       AuditResourceType = "issue"
-	AuditResourcePMPlan      AuditResourceType = "pm_plan"
-	AuditResourcePMDecision  AuditResourceType = "pm_decision"
-	AuditResourceSettings    AuditResourceType = "settings"
-	AuditResourceTeamMember  AuditResourceType = "team_member"
-	AuditResourceInvitation  AuditResourceType = "invitation"
-	AuditResourceIntegration AuditResourceType = "integration"
-	AuditResourceCredential  AuditResourceType = "credential"
-	AuditResourceUser        AuditResourceType = "user"
+	AuditResourceSession              AuditResourceType = "session"
+	AuditResourceProject              AuditResourceType = "project"
+	AuditResourceProjectTask          AuditResourceType = "project_task"
+	AuditResourceIssue                AuditResourceType = "issue"
+	AuditResourcePMPlan               AuditResourceType = "pm_plan"
+	AuditResourcePMDecision           AuditResourceType = "pm_decision"
+	AuditResourceSettings             AuditResourceType = "settings"
+	AuditResourceTeamMember           AuditResourceType = "team_member"
+	AuditResourceInvitation           AuditResourceType = "invitation"
+	AuditResourceIntegration          AuditResourceType = "integration"
+	AuditResourceCredential           AuditResourceType = "credential"
+	AuditResourceUser                 AuditResourceType = "user"
+	AuditResourceSessionReviewComment AuditResourceType = "session_review_comment"
+	AuditResourcePMDocument           AuditResourceType = "pm_document"
 )
 
 func (t AuditResourceType) Validate() error {
@@ -128,7 +142,8 @@ func (t AuditResourceType) Validate() error {
 	case AuditResourceSession, AuditResourceProject, AuditResourceProjectTask,
 		AuditResourceIssue, AuditResourcePMPlan, AuditResourcePMDecision,
 		AuditResourceSettings, AuditResourceTeamMember, AuditResourceInvitation,
-		AuditResourceIntegration, AuditResourceCredential, AuditResourceUser:
+		AuditResourceIntegration, AuditResourceCredential, AuditResourceUser,
+		AuditResourceSessionReviewComment, AuditResourcePMDocument:
 		return nil
 	default:
 		return fmt.Errorf("invalid AuditResourceType: %q", t)

@@ -19,50 +19,76 @@ import (
 func TestFormatPRTitle(t *testing.T) {
 	t.Parallel()
 
+	sessionTitle := "Refactor auth middleware"
+	summaryText := "Updated the login flow\nwith multiple lines"
+
 	tests := []struct {
-		name   string
-		issue  models.Issue
-		expect string
+		name    string
+		session models.Session
+		issue   *models.Issue
+		expect  string
 	}{
 		{
-			name: "linear source uses external ID prefix",
-			issue: models.Issue{
-				Source:     "linear",
+			name:    "linear source uses external ID prefix",
+			session: models.Session{ID: uuid.New()},
+			issue: &models.Issue{
+				Source:     models.IssueSourceLinear,
 				ExternalID: "ENG-1234",
 				Title:      "Fix null pointer in user API",
 			},
 			expect: "ENG-1234: Fix null pointer in user API",
 		},
 		{
-			name: "sentry source uses fix prefix",
-			issue: models.Issue{
-				Source: "sentry",
+			name:    "sentry source uses fix prefix",
+			session: models.Session{ID: uuid.New()},
+			issue: &models.Issue{
+				Source: models.IssueSourceSentry,
 				Title:  "TypeError in payment handler",
 			},
 			expect: "fix: TypeError in payment handler",
 		},
 		{
-			name: "support source uses fix prefix",
-			issue: models.Issue{
-				Source: "support",
+			name:    "support source uses fix prefix",
+			session: models.Session{ID: uuid.New()},
+			issue: &models.Issue{
+				Source: models.IssueSource("support"),
 				Title:  "Login button not working",
 			},
 			expect: "fix: Login button not working",
 		},
 		{
-			name: "unknown source uses fix prefix",
-			issue: models.Issue{
-				Source: "other",
+			name:    "unknown source uses fix prefix",
+			session: models.Session{ID: uuid.New()},
+			issue: &models.Issue{
+				Source: models.IssueSource("other"),
 				Title:  "Some issue",
 			},
 			expect: "fix: Some issue",
+		},
+		{
+			name:    "nil issue uses session title",
+			session: models.Session{ID: uuid.New(), Title: &sessionTitle},
+			issue:   nil,
+			expect:  "Refactor auth middleware",
+		},
+		{
+			name:    "nil issue falls back to result summary first line",
+			session: models.Session{ID: uuid.New(), ResultSummary: &summaryText},
+			issue:   nil,
+			expect:  "Updated the login flow",
+		},
+		{
+			name:    "nil issue with no title or summary uses session ID",
+			session: models.Session{ID: uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789")},
+			issue:   nil,
+			expect:  "Session abcdef01",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			result := formatPRTitle(&tt.issue)
+			result := formatPRTitle(&tt.session, tt.issue)
 			require.Equal(t, tt.expect, result, "PR title should match expected format")
 		})
 	}
@@ -71,48 +97,64 @@ func TestFormatPRTitle(t *testing.T) {
 func TestFormatBranchName(t *testing.T) {
 	t.Parallel()
 
+	issueTitle := "Fix null pointer"
+	sessionTitle := "Refactor auth"
+	longTitle := "This is a very long issue title that should be truncated at some reasonable point to avoid creating overly long branch names"
+
 	tests := []struct {
-		name   string
-		runID  uuid.UUID
-		title  string
-		expect string
-		maxLen bool // if true, verify length constraints
+		name    string
+		session models.Session
+		issue   *models.Issue
+		expect  string
+		maxLen  bool // if true, verify length constraints
 	}{
 		{
-			name:   "basic branch name",
-			runID:  uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789"),
-			title:  "Fix null pointer",
-			expect: "143/fix/abcdef01/fix-null-pointer",
+			name:    "issue-based branch name",
+			session: models.Session{ID: uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789")},
+			issue:   &models.Issue{Title: "Fix null pointer"},
+			expect:  "143/abcdef01/fix-null-pointer",
 		},
 		{
-			name:   "special characters are slugified",
-			runID:  uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789"),
-			title:  "Fix: TypeError in payment_handler (v2)",
-			expect: "143/fix/abcdef01/fix-typeerror-in-payment-handler-v2",
+			name:    "special characters are slugified",
+			session: models.Session{ID: uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789")},
+			issue:   &models.Issue{Title: "Fix: TypeError in payment_handler (v2)"},
+			expect:  "143/abcdef01/fix-typeerror-in-payment-handler-v2",
 		},
 		{
-			name:   "long title is truncated",
-			runID:  uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789"),
-			title:  "This is a very long issue title that should be truncated at some reasonable point to avoid creating overly long branch names",
-			maxLen: true,
+			name:    "long title is truncated",
+			session: models.Session{ID: uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789")},
+			issue:   &models.Issue{Title: longTitle},
+			maxLen:  true,
 		},
 		{
-			name:   "empty title falls back to fix",
-			runID:  uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789"),
-			title:  "",
-			expect: "143/fix/abcdef01/fix",
+			name:    "nil issue uses session title",
+			session: models.Session{ID: uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789"), Title: &sessionTitle},
+			issue:   nil,
+			expect:  "143/abcdef01/refactor-auth",
+		},
+		{
+			name:    "nil issue with nil title uses session title from issue",
+			session: models.Session{ID: uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789"), Title: &issueTitle},
+			issue:   nil,
+			expect:  "143/abcdef01/fix-null-pointer",
+		},
+		{
+			name:    "nil issue with no title falls back to changes",
+			session: models.Session{ID: uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789")},
+			issue:   nil,
+			expect:  "143/abcdef01/changes",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			result := formatBranchName(tt.runID, tt.title)
+			result := formatBranchName(&tt.session, tt.issue)
 			if tt.maxLen {
-				// The slug portion (after "143/fix/{8chars}/") shouldn't exceed maxBranchSlugLen
-				parts := strings.SplitN(result, "/", 4)
-				require.Len(t, parts, 4, "branch name should have 4 path segments")
-				require.LessOrEqual(t, len(parts[3]), maxBranchSlugLen, "slug portion should not exceed max branch slug length")
+				// The slug portion (after "143/{8chars}/") shouldn't exceed maxBranchSlugLen
+				parts := strings.SplitN(result, "/", 3)
+				require.Len(t, parts, 3, "branch name should have 3 path segments")
+				require.LessOrEqual(t, len(parts[2]), maxBranchSlugLen, "slug portion should not exceed max branch slug length")
 			} else {
 				require.Equal(t, tt.expect, result, "branch name should match expected format")
 			}
@@ -125,43 +167,61 @@ func TestFormatBranchName(t *testing.T) {
 func TestFormatCommitMessage(t *testing.T) {
 	t.Parallel()
 
+	sessionTitle := "Refactor auth middleware"
+
 	tests := []struct {
-		name   string
-		issue  models.Issue
-		expect string
+		name    string
+		session models.Session
+		issue   *models.Issue
+		expect  string
 	}{
 		{
-			name: "linear issue includes Fixes reference",
-			issue: models.Issue{
-				Source:     "linear",
+			name:    "linear issue includes Fixes reference",
+			session: models.Session{ID: uuid.New()},
+			issue: &models.Issue{
+				Source:     models.IssueSourceLinear,
 				ExternalID: "ENG-1234",
 				Title:      "Fix null pointer",
 			},
 			expect: "fix: Fix null pointer\n\nFixes #ENG-1234",
 		},
 		{
-			name: "sentry issue includes Resolves reference",
-			issue: models.Issue{
-				Source:     "sentry",
+			name:    "sentry issue includes Resolves reference",
+			session: models.Session{ID: uuid.New()},
+			issue: &models.Issue{
+				Source:     models.IssueSourceSentry,
 				ExternalID: "SENTRY-5678",
 				Title:      "TypeError in handler",
 			},
 			expect: "fix: TypeError in handler\n\nResolves SENTRY-5678",
 		},
 		{
-			name: "support issue has no reference",
-			issue: models.Issue{
-				Source: "support",
+			name:    "support issue has no reference",
+			session: models.Session{ID: uuid.New()},
+			issue: &models.Issue{
+				Source: models.IssueSource("support"),
 				Title:  "Login broken",
 			},
 			expect: "fix: Login broken",
+		},
+		{
+			name:    "nil issue uses session title",
+			session: models.Session{ID: uuid.New(), Title: &sessionTitle},
+			issue:   nil,
+			expect:  "Refactor auth middleware",
+		},
+		{
+			name:    "nil issue with no title uses session ID",
+			session: models.Session{ID: uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789")},
+			issue:   nil,
+			expect:  "Session abcdef01",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			result := formatCommitMessage(&tt.issue)
+			result := formatCommitMessage(&tt.session, tt.issue)
 			require.Equal(t, tt.expect, result, "commit message should match expected format")
 		})
 	}
@@ -172,27 +232,32 @@ func TestBuildLabels(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		issue  models.Issue
+		issue  *models.Issue
 		expect []string
 	}{
 		{
 			name: "all labels",
-			issue: models.Issue{
+			issue: &models.Issue{
 				Severity: "high",
-				Source:   "sentry",
+				Source:   models.IssueSourceSentry,
 			},
 			expect: []string{"143-generated", "severity:high", "source:sentry"},
 		},
 		{
 			name: "no severity",
-			issue: models.Issue{
-				Source: "linear",
+			issue: &models.Issue{
+				Source: models.IssueSourceLinear,
 			},
 			expect: []string{"143-generated", "source:linear"},
 		},
 		{
-			name:   "minimal",
-			issue:  models.Issue{},
+			name:   "minimal issue",
+			issue:  &models.Issue{},
+			expect: []string{"143-generated"},
+		},
+		{
+			name:   "nil issue returns only base label",
+			issue:  nil,
 			expect: []string{"143-generated"},
 		},
 	}
@@ -200,7 +265,7 @@ func TestBuildLabels(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			result := buildLabels(&tt.issue)
+			result := buildLabels(tt.issue)
 			require.Equal(t, tt.expect, result, "labels should match expected set")
 		})
 	}
@@ -220,10 +285,11 @@ func TestFormatPRBody(t *testing.T) {
 		ResultSummary: &summary,
 	}
 	issue := &models.Issue{
-		Source:                "sentry",
+		Source:                models.IssueSourceSentry,
 		Severity:              "high",
 		AffectedCustomerCount: 42,
 		OccurrenceCount:       100,
+		Title:                 "Null pointer in user API",
 	}
 
 	body := svc.formatPRBody(context.Background(), run, issue)
@@ -232,9 +298,30 @@ func TestFormatPRBody(t *testing.T) {
 	require.Contains(t, body, summary, "PR body should contain the result summary text")
 	require.Contains(t, body, "sentry", "PR body should contain the issue source")
 	require.Contains(t, body, "high", "PR body should contain the severity level")
-	require.Contains(t, body, "42", "PR body should contain the affected customer count")
-	require.Contains(t, body, "100", "PR body should contain the occurrence count")
-	require.Contains(t, body, "claude-code", "PR body should contain the agent type")
+	require.Contains(t, body, "## Test plan", "PR body should contain Test plan heading")
+	require.Contains(t, body, "143.dev", "PR body should contain the 143.dev branding")
+}
+
+func TestFormatPRBody_NilIssue(t *testing.T) {
+	t.Parallel()
+
+	logger := zerolog.Nop()
+	svc := &PRService{logger: logger}
+
+	summary := "Refactored the auth middleware for clarity"
+	run := &models.Session{
+		ID:            uuid.New(),
+		OrgID:         uuid.New(),
+		AgentType:     "claude-code",
+		ResultSummary: &summary,
+	}
+
+	body := svc.formatPRBody(context.Background(), run, nil)
+
+	require.Contains(t, body, "## Summary", "PR body should contain Summary heading")
+	require.Contains(t, body, summary, "PR body should contain the result summary text")
+	require.NotContains(t, body, "**Issue**", "PR body should not contain Issue section when issue is nil")
+	require.Contains(t, body, "## Test plan", "PR body should contain Test plan heading")
 	require.Contains(t, body, "143.dev", "PR body should contain the 143.dev branding")
 }
 
@@ -554,16 +641,37 @@ func TestHandlePullRequestReviewEvent_ChangesRequested(t *testing.T) {
 	require.Equal(t, "changes_requested", decoded.Review.State, "decoded review state should be changes_requested")
 }
 
-func TestCheckEmoji(t *testing.T) {
+func TestFirstLine(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, "pass", checkEmoji("pass"), "checkEmoji should return pass for pass input")
-	require.Equal(t, "pass", checkEmoji("passed"), "checkEmoji should return pass for passed input")
-	require.Equal(t, "fail", checkEmoji("fail"), "checkEmoji should return fail for fail input")
-	require.Equal(t, "fail", checkEmoji("failed"), "checkEmoji should return fail for failed input")
-	require.Equal(t, "skip", checkEmoji("skip"), "checkEmoji should return skip for skip input")
-	require.Equal(t, "skip", checkEmoji("skipped"), "checkEmoji should return skip for skipped input")
-	require.Equal(t, "pending", checkEmoji("pending"), "checkEmoji should return pending for pending input")
+	require.Equal(t, "hello", firstLine("hello\nworld"), "firstLine should return first line")
+	require.Equal(t, "single", firstLine("single"), "firstLine should handle single line")
+	require.Equal(t, "", firstLine(""), "firstLine should handle empty string")
+	require.Equal(t, "trimmed", firstLine("  trimmed  \nsecond"), "firstLine should trim whitespace")
+}
+
+func TestHasRepoScope(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		scope  string
+		expect bool
+	}{
+		{"repo", true},
+		{"repo read:org", true},
+		{"read:user,repo,user:email", true},
+		{"repo,read:org", true},
+		{"read:user,user:email", false},
+		{"", false},
+		{"public_repo", false}, // public_repo is not the same as repo
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.scope, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expect, hasRepoScope(tt.scope), "hasRepoScope(%q)", tt.scope)
+		})
+	}
 }
 
 func TestDoGitHubRequest_ErrorResponse(t *testing.T) {
@@ -613,38 +721,32 @@ func TestDoGitHubRequest_SetsHeaders(t *testing.T) {
 	require.Equal(t, "application/vnd.github+json", capturedAccept, "Accept header should be set to GitHub JSON media type")
 }
 
-func TestFormatPRBody_WithValidation(t *testing.T) {
+func TestFormatPRBody_WithIssue(t *testing.T) {
 	t.Parallel()
 
 	logger := zerolog.Nop()
 	svc := &PRService{logger: logger}
 
-	now := time.Now()
-	started := now.Add(-5 * time.Minute)
 	summary := "Fixed the bug"
 	run := &models.Session{
 		ID:            uuid.New(),
 		OrgID:         uuid.New(),
 		AgentType:     "claude-code",
 		ResultSummary: &summary,
-		StartedAt:     &started,
-		CompletedAt:   &now,
 	}
 	issue := &models.Issue{
-		Source:                "linear",
-		Severity:              "critical",
-		AffectedCustomerCount: 10,
-		OccurrenceCount:       50,
+		Source:   models.IssueSourceLinear,
+		Severity: "critical",
+		Title:    "Null pointer in user handler",
 	}
 
 	body := svc.formatPRBody(context.Background(), run, issue)
 
 	require.Contains(t, body, "## Summary", "PR body should contain Summary heading")
 	require.Contains(t, body, "Fixed the bug", "PR body should contain the result summary")
-	require.Contains(t, body, "linear", "PR body should contain the issue source")
+	require.Contains(t, body, "**Issue**: linear", "PR body should contain issue source")
 	require.Contains(t, body, "critical", "PR body should contain the severity")
-	require.Contains(t, body, "## Agent Details", "PR body should contain Agent Details section")
-	require.Contains(t, body, "5m0s", "PR body should contain the elapsed duration")
+	require.Contains(t, body, "## Test plan", "PR body should contain Test plan heading")
 }
 
 func TestFormatPRBody_NilSummary(t *testing.T) {
@@ -658,11 +760,360 @@ func TestFormatPRBody_NilSummary(t *testing.T) {
 		OrgID:     uuid.New(),
 		AgentType: "claude-code",
 	}
+
+	body := svc.formatPRBody(context.Background(), run, nil)
+	require.Contains(t, body, "Automated changes generated by 143.dev", "PR body with nil summary should contain default text")
+}
+
+func TestDecodeBase64Content(t *testing.T) {
+	t.Parallel()
+
+	// Standard base64 encoding of "## PR Template\n\nDescribe your changes."
+	encoded := "IyMgUFIgVGVtcGxhdGUKCkRlc2NyaWJlIHlvdXIgY2hhbmdlcy4="
+	decoded, err := decodeBase64Content(encoded)
+	require.NoError(t, err, "should decode valid base64")
+	require.Equal(t, "## PR Template\n\nDescribe your changes.", decoded)
+
+	// With embedded newlines (GitHub-style).
+	withNewlines := "IyMgUFIg\nVGVtcGxhdGU="
+	decoded2, err := decodeBase64Content(withNewlines)
+	require.NoError(t, err, "should handle base64 with newlines")
+	require.Contains(t, decoded2, "PR")
+
+	// Invalid base64.
+	_, err = decodeBase64Content("not-valid-base64!!!")
+	require.Error(t, err, "should return error for invalid base64")
+}
+
+func TestFetchPRTemplate_NoTemplate(t *testing.T) {
+	t.Parallel()
+
+	// Server returns 404 for all paths.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+	}))
+	defer server.Close()
+
+	svc := &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		logger:     zerolog.Nop(),
+	}
+
+	content, path := svc.fetchPRTemplate(context.Background(), "token", "owner", "repo", "main")
+	require.Empty(t, content, "should return empty when no template found")
+	require.Empty(t, path, "should return empty path when no template found")
+}
+
+func TestFetchPRTemplate_FoundTemplate(t *testing.T) {
+	t.Parallel()
+
+	// Encode "## Description\n\nWhat changed?"
+	templateContent := "## Description\n\nWhat changed?"
+	encoded := "IyMgRGVzY3JpcHRpb24KCldoYXQgY2hhbmdlZD8="
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "pull_request_template") {
+			err := json.NewEncoder(w).Encode(map[string]string{
+				"content":  encoded,
+				"encoding": "base64",
+			})
+			require.NoError(t, err)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	svc := &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		logger:     zerolog.Nop(),
+	}
+
+	content, path := svc.fetchPRTemplate(context.Background(), "token", "owner", "repo", "main")
+	require.Equal(t, templateContent, content, "should return decoded template content")
+	require.NotEmpty(t, path, "should return the matched template path")
+}
+
+func TestGetOrFetchPRTemplate_NilCache(t *testing.T) {
+	t.Parallel()
+
+	// Server returns 404 — no template.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	svc := &PRService{
+		baseURL:     server.URL,
+		httpClient:  server.Client(),
+		prTemplates: nil, // no cache store
+		logger:      zerolog.Nop(),
+	}
+
+	content := svc.getOrFetchPRTemplate(context.Background(), "token", "owner", "repo", "main", uuid.New(), uuid.New())
+	require.Empty(t, content, "should return empty when no template and no cache")
+}
+
+func TestGeneratePRBody_FallsBackToDefault(t *testing.T) {
+	t.Parallel()
+
+	// Server returns 404 for template lookup.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	summary := "Fixed the auth bug"
+	run := &models.Session{
+		ID:            uuid.New(),
+		OrgID:         uuid.New(),
+		AgentType:     "claude-code",
+		ResultSummary: &summary,
+	}
+
+	svc := &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		logger:     zerolog.Nop(),
+	}
+
+	body := svc.generatePRBody(context.Background(), "token", "owner", "repo", "main", uuid.New(), uuid.New(), run, nil)
+	require.Contains(t, body, "## Summary", "should fall back to default body")
+	require.Contains(t, body, "Fixed the auth bug", "should contain session summary")
+}
+
+func TestResolveToken_AppOnly(t *testing.T) {
+	t.Parallel()
+
+	tokenSvc := &Service{cache: make(map[int64]*cachedToken)}
+	tokenSvc.cache[1] = &cachedToken{
+		Token:     "app-token-123",
+		ExpiresAt: time.Now().Add(30 * time.Minute),
+	}
+
+	svc := &PRService{
+		tokenProvider: tokenSvc,
+		logger:        zerolog.Nop(),
+	}
+
+	repo := &models.Repository{InstallationID: 1}
+	settings := models.OrgSettings{PRAuthorship: models.PRAuthorshipAppOnly}
+	run := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+
+	resolution, err := svc.resolveToken(context.Background(), run, repo, settings)
+	require.NoError(t, err)
+	require.Equal(t, "app-token-123", resolution.Token)
+	require.False(t, resolution.IsUserToken)
+}
+
+func TestResolveToken_UserPreferred_NoUser(t *testing.T) {
+	t.Parallel()
+
+	tokenSvc := &Service{cache: make(map[int64]*cachedToken)}
+	tokenSvc.cache[1] = &cachedToken{
+		Token:     "app-token-fallback",
+		ExpiresAt: time.Now().Add(30 * time.Minute),
+	}
+
+	svc := &PRService{
+		tokenProvider: tokenSvc,
+		logger:        zerolog.Nop(),
+	}
+
+	repo := &models.Repository{InstallationID: 1}
+	settings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
+	run := &models.Session{ID: uuid.New(), OrgID: uuid.New()} // no TriggeredByUserID
+
+	resolution, err := svc.resolveToken(context.Background(), run, repo, settings)
+	require.NoError(t, err)
+	require.Equal(t, "app-token-fallback", resolution.Token)
+	require.False(t, resolution.IsUserToken, "should fall back to app token when no user")
+}
+
+func TestResolveToken_UserRequired_NoUser(t *testing.T) {
+	t.Parallel()
+
+	svc := &PRService{logger: zerolog.Nop()}
+
+	repo := &models.Repository{InstallationID: 1}
+	settings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserRequired}
+	run := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+
+	_, err := svc.resolveToken(context.Background(), run, repo, settings)
+	require.Error(t, err, "should fail when user_required but no user token")
+	require.Contains(t, err.Error(), "org requires user GitHub auth")
+}
+
+func TestValidateUserToken_ValidToken(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/user", r.URL.Path)
+		_, _ = w.Write([]byte(`{"id": 1, "login": "testuser"}`))
+	}))
+	defer server.Close()
+
+	svc := &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		logger:     zerolog.Nop(),
+	}
+
+	require.True(t, svc.validateUserToken(context.Background(), "valid-token"))
+}
+
+func TestValidateUserToken_RevokedToken(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"message":"Bad credentials"}`))
+	}))
+	defer server.Close()
+
+	svc := &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		logger:     zerolog.Nop(),
+	}
+
+	require.False(t, svc.validateUserToken(context.Background(), "revoked-token"))
+}
+
+func TestFillRepoTemplate_NoLLMClient(t *testing.T) {
+	t.Parallel()
+
+	svc := &PRService{logger: zerolog.Nop()}
+	run := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+
+	_, err := svc.fillRepoTemplate(context.Background(), "## Template", run, nil)
+	require.Error(t, err, "should fail without LLM client")
+	require.Contains(t, err.Error(), "no LLM client")
+}
+
+func TestFormatPRBody_SessionLink(t *testing.T) {
+	t.Parallel()
+
+	svc := &PRService{logger: zerolog.Nop()}
+	summary := "Fixed a bug"
+	run := &models.Session{
+		ID:            uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789"),
+		OrgID:         uuid.New(),
+		ResultSummary: &summary,
+	}
+
+	body := svc.formatPRBody(context.Background(), run, nil)
+	require.Contains(t, body, "session abcdef01", "should contain short session ID in footer")
+	require.Contains(t, body, "app.143.dev/sessions/", "should contain session link")
+}
+
+func TestFormatPRBody_WithIssueContext(t *testing.T) {
+	t.Parallel()
+
+	svc := &PRService{logger: zerolog.Nop()}
+	summary := "Fixed null ptr"
+	run := &models.Session{
+		ID:            uuid.New(),
+		OrgID:         uuid.New(),
+		ResultSummary: &summary,
+	}
 	issue := &models.Issue{
-		Source:   "sentry",
-		Severity: "low",
+		Source:   models.IssueSourceSentry,
+		Title:    "NullPointerException in handler",
+		Severity: "critical",
 	}
 
 	body := svc.formatPRBody(context.Background(), run, issue)
-	require.Contains(t, body, "Automated fix generated by 143.dev", "PR body with nil summary should contain default branding text")
+	require.Contains(t, body, "**Issue**: sentry", "should contain issue source")
+	require.Contains(t, body, "NullPointerException in handler", "should contain issue title")
+	require.Contains(t, body, "(critical)", "should contain severity")
+}
+
+func TestCreateCommitWithAuthor(t *testing.T) {
+	t.Parallel()
+
+	var capturedPayload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		err := json.NewDecoder(r.Body).Decode(&capturedPayload)
+		require.NoError(t, err)
+		w.WriteHeader(http.StatusCreated)
+		err = json.NewEncoder(w).Encode(map[string]string{"sha": "commit123"})
+		require.NoError(t, err)
+	}))
+	defer server.Close()
+
+	svc := &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		logger:     zerolog.Nop(),
+	}
+
+	author := &commitAuthor{Name: "Test User", Email: "test@example.com", Date: "2024-01-01T00:00:00Z"}
+	sha, err := svc.createCommitWithAuthor(context.Background(), "token", "owner", "repo", "msg", "tree", "parent", author)
+	require.NoError(t, err)
+	require.Equal(t, "commit123", sha)
+	require.Contains(t, capturedPayload, "author", "should include author in commit payload")
+}
+
+func TestCreatePullRequest_WithDraft(t *testing.T) {
+	t.Parallel()
+
+	var capturedPayload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		err := json.NewDecoder(r.Body).Decode(&capturedPayload)
+		require.NoError(t, err)
+		w.WriteHeader(http.StatusCreated)
+		err = json.NewEncoder(w).Encode(map[string]any{
+			"number":   99,
+			"html_url": "https://github.com/owner/repo/pull/99",
+		})
+		require.NoError(t, err)
+	}))
+	defer server.Close()
+
+	svc := &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		logger:     zerolog.Nop(),
+	}
+
+	num, url, err := svc.createPullRequest(context.Background(), "token", "owner", "repo", "title", "body", "head", "main", withDraft(true))
+	require.NoError(t, err)
+	require.Equal(t, 99, num)
+	require.Equal(t, "https://github.com/owner/repo/pull/99", url)
+	require.Equal(t, true, capturedPayload["draft"], "should set draft=true in payload")
+}
+
+func TestPRTemplatePaths(t *testing.T) {
+	t.Parallel()
+
+	// Verify the template paths list contains the most common locations.
+	require.Contains(t, prTemplatePaths, ".github/pull_request_template.md")
+	require.Contains(t, prTemplatePaths, ".github/PULL_REQUEST_TEMPLATE.md")
+	require.GreaterOrEqual(t, len(prTemplatePaths), 5, "should check at least 5 conventional paths")
+}
+
+func TestFirstLine_LongLine(t *testing.T) {
+	t.Parallel()
+
+	long := strings.Repeat("a", 100)
+	result := firstLine(long)
+	require.Len(t, result, 72, "firstLine should truncate to 72 chars")
+}
+
+func TestFormatBranchName_ResultSummaryFallback(t *testing.T) {
+	t.Parallel()
+
+	summary := "Fixed the auth middleware"
+	session := &models.Session{
+		ID:            uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789"),
+		ResultSummary: &summary,
+	}
+	// When issue is nil and title is nil, branch name uses "changes" fallback
+	// because ResultSummary is not used for branch names.
+	result := formatBranchName(session, nil)
+	require.Equal(t, "143/abcdef01/changes", result)
 }

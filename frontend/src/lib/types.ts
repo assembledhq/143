@@ -100,6 +100,7 @@ export interface Session {
   failure_retry_advised?: boolean;
   parent_session_id?: string;
   pm_plan_id?: string;
+  title?: string;
   pm_approach?: string;
   pm_reasoning?: string;
   project_task_id?: string;
@@ -110,9 +111,12 @@ export interface Session {
   last_activity_at?: string;
   sandbox_state: string;
   snapshot_key?: string;
+  target_branch?: string;
   error?: string;
   result_summary?: string;
   diff?: string;
+  diff_stats?: { added: number; removed: number; files_changed: number };
+  diff_history?: Array<{ pass: number; diff: string; diff_stats: { added: number; removed: number; files_changed: number }; created_at: string }>;
   created_at: string;
 }
 
@@ -137,9 +141,39 @@ export interface Validation {
   updated_at: string;
 }
 
+export type ThreadStatus = 'pending' | 'running' | 'idle' | 'awaiting_input' | 'completed' | 'failed' | 'cancelled';
+
+export interface SessionThread {
+  id: string;
+  session_id: string;
+  org_id: string;
+  agent_type: string;
+  model_override?: string;
+  label: string;
+  instructions?: string;
+  file_scope?: string[];
+  status: ThreadStatus;
+  agent_session_id?: string;
+  current_turn: number;
+  last_activity_at?: string;
+  confidence_score?: number;
+  result_summary?: string;
+  diff?: string;
+  failure_explanation?: string;
+  failure_category?: string;
+  started_at?: string;
+  completed_at?: string;
+  created_at: string;
+}
+
+export interface SessionDetail extends Session {
+  threads: SessionThread[];
+}
+
 export interface SessionLog {
   id: number;
   session_id: string;
+  thread_id?: string;
   level: string;
   message: string;
   metadata: Record<string, unknown> | null;
@@ -151,6 +185,7 @@ export interface SessionMessage {
   id: number;
   session_id: string;
   org_id: string;
+  thread_id?: string;
   user_id?: string;
   turn_number: number;
   role: 'user' | 'assistant';
@@ -189,6 +224,23 @@ export interface PullRequest {
   review_status: string | null;
   merged_at: string | null;
   closed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SessionReviewComment {
+  id: string;
+  session_id: string;
+  org_id: string;
+  user_id: string;
+  file_path: string;
+  line_number: number;
+  diff_side: 'old' | 'new';
+  body: string;
+  resolved: boolean;
+  resolved_at?: string;
+  resolved_by_pass?: number;
+  pass_number: number;
   created_at: string;
   updated_at: string;
 }
@@ -247,6 +299,7 @@ export interface OrgSettings {
   product_direction?: string;
   product_context?: ProductContext;
   llm_model?: string;
+  llm_reasoning_effort?: 'low' | 'medium' | 'high' | '';
   agent_config?: Record<string, Record<string, string>>;
   default_agent_type?: 'codex' | 'claude_code' | 'gemini_cli';
 }
@@ -351,6 +404,29 @@ export interface PMDecisionsResponse {
   data: PMDecisionView[];
   summary: PMDecisionSummary;
   meta: { next_cursor?: string };
+}
+
+// Presentation-friendly recommendation from /api/v1/pm/current
+export interface PMCurrentRecommendation {
+  analysis: string;
+  tasks: PMTask[];
+  clusters: PMCluster[];
+  skipped_issues: PMSkipEntry[];
+  context_stats: PMContextStats;
+  decision_summary: PMDecisionSummary;
+  analyzed_at: string;
+  completed_at?: string;
+  status: string;
+  triggered_by: string;
+}
+
+export interface PMContextStats {
+  issues_reviewed: number;
+  in_flight_runs_checked: number;
+  past_outcomes_reviewed: number;
+  recent_prs_checked: number;
+  past_decisions_reviewed: number;
+  commits_analyzed: number;
 }
 
 export interface PMStatus {
@@ -519,6 +595,7 @@ export interface Project {
   proposed_by_pm: boolean;
   source_issue_ids?: string[];
   proposal_reasoning?: string;
+  similar_projects?: ProposalOverlap[];
   schedule_enabled: boolean;
   schedule_interval: number;
   schedule_unit: 'hours' | 'days' | 'weeks';
@@ -527,6 +604,18 @@ export interface Project {
   created_at: string;
   updated_at: string;
   completed_at?: string;
+}
+
+export interface ProposalOverlap {
+  project_id: string;
+  title: string;
+  overlap_score: number;
+  overlap_type: string;
+  explanation: string;
+}
+
+export interface ProposalSummary {
+  count: number;
 }
 
 export interface ProjectTask {
@@ -687,3 +776,27 @@ export const projectStatusDotColor: Record<string, string> = {
   completed: "bg-emerald-500",
   cancelled: "bg-red-500",
 };
+
+// --- Session file browsing types ---
+
+export interface FileEntry {
+  path: string;
+  type: 'file' | 'dir';
+  size: number;
+}
+
+export interface FileContent {
+  path: string;
+  content: string;
+  language: string;
+  truncated: boolean;
+}
+
+export interface FileLine {
+  number: number;
+  content: string;
+}
+
+export interface FileContextResponse {
+  lines: FileLine[];
+}

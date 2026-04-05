@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
-import { ArrowUp, Mic, Plus, X, ImagePlus, Paperclip } from "lucide-react";
-import { useRouter } from "next/navigation";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ArrowUp, Mic, Plus, X, ImagePlus, Paperclip, GitBranch, ChevronDown, Loader2 } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -17,16 +17,25 @@ import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
+import { isImageURL, fileNameFromURL } from "@/lib/utils";
+import { captureError } from "@/lib/errors";
 import { queryKeys } from "@/lib/query-keys";
-import { AGENT_TYPE_OPTIONS } from "@/lib/model-constants";
+import { AGENT_TYPE_OPTIONS, agentTypeForModel } from "@/lib/model-constants";
+import { NoReposWarning } from "@/components/no-repos-warning";
 import { useOptimisticSessions } from "@/contexts/optimistic-sessions";
-import type { OrgSettings, Organization, SingleResponse } from "@/lib/types";
+import type { OrgSettings, Organization, Repository, SingleResponse, ListResponse } from "@/lib/types";
+
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
+
+type BranchInfo = { name: string; protected: boolean };
 
 type DictationResult = {
   transcript: string;
@@ -49,28 +58,28 @@ type BrowserSpeechRecognition = {
 
 type SpeechRecognitionCtor = new () => BrowserSpeechRecognition;
 
-function readFileAsDataURL(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result ?? ""));
-    reader.onerror = () => reject(new Error("file read failed"));
-    reader.readAsDataURL(file);
-  });
-}
-
 export function ManualSessionCreatePageContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const queryClient = useQueryClient();
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const messageInputRef = useRef<HTMLTextAreaElement>(null);
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
 
+  // Read the currently selected repository from the URL query params
+  // (set by the RepoContextSwitcher) so we clone the codebase into the sandbox.
+  const repoId = searchParams.get("repo") ?? undefined;
+
   const [message, setMessage] = useState("");
   const [attachments, setAttachments] = useState<string[]>([]);
+  const [isUploading, setIsUploading] = useState(false);
   const [showImageInput, setShowImageInput] = useState(false);
   const [imageURL, setImageURL] = useState("");
   const [isDictating, setIsDictating] = useState(false);
   const [dictationError, setDictationError] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState("");
+  const [userSelectedRepoId, setUserSelectedRepoId] = useState<string | null>(repoId ?? null);
+  const [branchByRepoId, setBranchByRepoId] = useState<Record<string, string>>({});
   const [creationError, setCreationError] = useState<string | null>(null);
 
   const { addOptimisticSession, removeOptimisticSession } = useOptimisticSessions();
@@ -83,9 +92,52 @@ export function ManualSessionCreatePageContent() {
   const settings = settingsResponse?.data?.settings as OrgSettings | undefined;
   const defaultAgentType = settings?.default_agent_type ?? "codex";
 
-  const availableModels = useMemo(() => {
-    const agentType = AGENT_TYPE_OPTIONS.find((a) => a.key === defaultAgentType);
-    return agentType?.models ?? [];
+  const { data: reposResponse } = useQuery<ListResponse<Repository>>({
+    queryKey: queryKeys.repositories.all,
+    queryFn: () => api.repositories.list(),
+  });
+  const repositories = useMemo(() => reposResponse?.data ?? [], [reposResponse]);
+
+  // Auto-select the only repo for single-repo orgs; otherwise use user's choice.
+  const selectedRepoId = useMemo(() => {
+    if (userSelectedRepoId !== null) return userSelectedRepoId;
+    if (repositories.length === 1) return repositories[0].id;
+    return "";
+  }, [userSelectedRepoId, repositories]);
+
+  const selectedRepo = repositories.find((r) => r.id === selectedRepoId);
+
+  const { data: branchesResponse, isLoading: branchesLoading, isError: branchesFailed } = useQuery<ListResponse<BranchInfo>>({
+    queryKey: queryKeys.repositories.branches(selectedRepoId),
+    queryFn: () => api.repositories.branches(selectedRepoId),
+    enabled: !!selectedRepoId,
+    staleTime: 5 * 60 * 1000,
+  });
+  const branches = useMemo(() => branchesResponse?.data ?? [], [branchesResponse]);
+
+  // Derive branch: use user override if set, otherwise the repo's default.
+  const selectedBranch = useMemo(() => {
+    if (!selectedRepoId) return "";
+    if (branchByRepoId[selectedRepoId] !== undefined) return branchByRepoId[selectedRepoId];
+    return selectedRepo?.default_branch ?? "";
+  }, [selectedRepoId, branchByRepoId, selectedRepo]);
+
+  const setSelectedRepoId = (id: string) => {
+    setUserSelectedRepoId(id);
+  };
+
+  const setSelectedBranch = (branch: string) => {
+    if (!selectedRepoId) return;
+    setBranchByRepoId((prev) => ({ ...prev, [selectedRepoId]: branch }));
+  };
+
+  const modelGroups = useMemo(() => {
+    // Sort so the default agent type appears first, preserve original order otherwise.
+    return [...AGENT_TYPE_OPTIONS].sort((a, b) => {
+      if (a.key === defaultAgentType) return -1;
+      if (b.key === defaultAgentType) return 1;
+      return AGENT_TYPE_OPTIONS.indexOf(a) - AGENT_TYPE_OPTIONS.indexOf(b);
+    });
   }, [defaultAgentType]);
 
   const createManualSessionMutation = useMutation({
@@ -93,7 +145,9 @@ export function ManualSessionCreatePageContent() {
       api.sessions.createManual({
         message: message.trim(),
         images: attachments,
-        ...(selectedModel ? { model: selectedModel } : {}),
+        ...(selectedModel ? { model: selectedModel, agent_type: agentTypeForModel(selectedModel) } : {}),
+        ...(selectedRepoId ? { repository_id: selectedRepoId } : {}),
+        ...(selectedBranch ? { branch: selectedBranch } : {}),
       }),
     onMutate: () => {
       setCreationError(null);
@@ -102,11 +156,13 @@ export function ManualSessionCreatePageContent() {
         : message.trim();
       return { optimisticId: addOptimisticSession(title) };
     },
-    onSuccess: (response, _variables, context) => {
+    onSuccess: async (response, _variables, context) => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.sessions.all });
       removeOptimisticSession(context.optimisticId);
       router.push(`/sessions/${response.data.id}`);
     },
     onError: (error, _variables, context) => {
+      captureError(error, { feature: "session-create" });
       if (context?.optimisticId) {
         removeOptimisticSession(context.optimisticId);
       }
@@ -140,15 +196,26 @@ export function ManualSessionCreatePageContent() {
     }
 
     const files = Array.from(fileList);
-    const uploadedAttachments = await Promise.all(files.map(async (file) => {
-      if (file.type.startsWith("image/")) {
-        return readFileAsDataURL(file);
-      }
-      return `attachment:${file.name}`;
-    }));
+    const oversized = files.filter((f) => f.size > MAX_FILE_SIZE);
+    if (oversized.length > 0) {
+      setCreationError(`File${oversized.length > 1 ? "s" : ""} too large (max 10 MB): ${oversized.map((f) => f.name).join(", ")}`);
+      event.target.value = "";
+      return;
+    }
 
-    setAttachments((previous) => [...previous, ...uploadedAttachments]);
-    event.target.value = "";
+    setIsUploading(true);
+    setCreationError(null);
+    try {
+      const results = await Promise.all(
+        files.map((file) => api.uploads.upload(file))
+      );
+      setAttachments((previous) => [...previous, ...results.map((r) => r.url)]);
+    } catch (err) {
+      setCreationError(err instanceof Error ? err.message : "Upload failed");
+    } finally {
+      setIsUploading(false);
+      event.target.value = "";
+    }
   }
 
   function addImageURL() {
@@ -221,6 +288,15 @@ export function ManualSessionCreatePageContent() {
         </div>
       </div>
 
+      {/* No repos warning */}
+      {repositories.length === 0 && (
+        <div className="shrink-0 px-4">
+          <div className="w-full max-w-3xl mx-auto">
+            <NoReposWarning />
+          </div>
+        </div>
+      )}
+
       {/* Composer pinned to bottom */}
       <div className="shrink-0 px-4 pb-4">
         <Card className="w-full max-w-3xl mx-auto border-border/60 bg-card shadow-lg rounded-2xl dark:shadow-[0_0_20px_oklch(0.6_0.15_270_/_6%)]">
@@ -246,23 +322,40 @@ export function ManualSessionCreatePageContent() {
               aria-label="Manual session prompt"
             />
 
-            {attachments.length > 0 && (
+            {(attachments.length > 0 || isUploading) && (
               <div className="flex flex-wrap items-center gap-2 pb-3">
-                {attachments.map((attachment) => (
-                  <Badge key={attachment} variant="secondary" className="gap-1 text-xs">
-                    {attachment.startsWith("data:") ? "photo" : attachment}
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="h-4 w-4 p-0"
-                      onClick={() => removeAttachment(attachment)}
-                      aria-label={`Remove ${attachment}`}
-                    >
-                      <X className="h-3 w-3" />
-                    </Button>
-                  </Badge>
-                ))}
+                {attachments.map((url) => {
+                  const isImage = isImageURL(url);
+                  const fileName = url.startsWith("data:") ? "photo" : fileNameFromURL(url);
+                  return (
+                    <div key={url} className="relative group">
+                      {isImage ? (
+                        <img
+                          src={url}
+                          alt={fileName}
+                          className="h-16 w-16 rounded-md object-cover border border-border"
+                        />
+                      ) : (
+                        <Badge variant="secondary" className="gap-1 text-xs h-8">
+                          {fileName}
+                        </Badge>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => removeAttachment(url)}
+                        className="absolute -top-1.5 -right-1.5 h-5 w-5 rounded-full bg-background border border-border flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                        aria-label={`Remove ${fileName}`}
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  );
+                })}
+                {isUploading && (
+                  <div className="h-16 w-16 rounded-md border border-border bg-muted flex items-center justify-center">
+                    <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                  </div>
+                )}
               </div>
             )}
 
@@ -307,15 +400,103 @@ export function ManualSessionCreatePageContent() {
                 onChange={onUploadChange}
               />
 
-              <Select value={selectedModel} onValueChange={setSelectedModel}>
+              {repositories.length > 0 && (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-8 gap-1.5 rounded-full px-3 text-[13px] text-muted-foreground hover:text-foreground"
+                    >
+                      <GitBranch className="h-3.5 w-3.5" />
+                      <span>{selectedRepo ? selectedRepo.full_name.split("/").pop() : "Select repo"}</span>
+                      <ChevronDown className="h-3 w-3 opacity-50" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start" className="w-72">
+                    <DropdownMenuItem
+                      onClick={() => setSelectedRepoId("")}
+                      className={!selectedRepoId ? "font-medium" : ""}
+                    >
+                      No specific repo
+                    </DropdownMenuItem>
+                    {repositories.map((repo) => (
+                      <DropdownMenuItem
+                        key={repo.id}
+                        onClick={() => setSelectedRepoId(repo.id)}
+                        className={selectedRepoId === repo.id ? "font-medium" : ""}
+                      >
+                        <GitBranch className="mr-2 h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                        <span className="truncate">{repo.full_name}</span>
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              )}
+
+              {selectedRepo && (
+                branchesFailed ? (
+                  <div className="flex items-center gap-1">
+                    <GitBranch className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                    <Input
+                      value={selectedBranch}
+                      onChange={(e) => setSelectedBranch(e.target.value)}
+                      placeholder={selectedRepo.default_branch || "main"}
+                      className="h-7 w-36 text-[13px] px-2"
+                      aria-label="Target branch"
+                    />
+                  </div>
+                ) : (
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-8 gap-1.5 rounded-full px-3 text-[13px] text-muted-foreground hover:text-foreground"
+                        aria-label="Target branch"
+                      >
+                        <GitBranch className="h-3.5 w-3.5" />
+                        <span>{selectedBranch || selectedRepo.default_branch || "main"}</span>
+                        <ChevronDown className="h-3 w-3 opacity-50" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start" className="w-64 max-h-72 overflow-y-auto">
+                      {branchesLoading && (
+                        <DropdownMenuItem disabled>Loading branches…</DropdownMenuItem>
+                      )}
+                      {!branchesLoading && branches.length === 0 && (
+                        <DropdownMenuItem disabled>No branches found</DropdownMenuItem>
+                      )}
+                      {branches.map((branch) => (
+                        <DropdownMenuItem
+                          key={branch.name}
+                          onClick={() => setSelectedBranch(branch.name)}
+                          className={selectedBranch === branch.name ? "font-medium" : ""}
+                        >
+                          <GitBranch className="mr-2 h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                          <span className="truncate">{branch.name}</span>
+                        </DropdownMenuItem>
+                      ))}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                )
+              )}
+
+              <Select value={selectedModel} onValueChange={(v) => setSelectedModel(v === "__default__" ? "" : v)}>
                 <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-[13px] text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
                   <SelectValue placeholder="Default model" />
                 </SelectTrigger>
                 <SelectContent>
-                  {availableModels.map((model) => (
-                    <SelectItem key={model} value={model}>
-                      {model}
-                    </SelectItem>
+                  <SelectItem value="__default__">Default model</SelectItem>
+                  {modelGroups.map((group) => (
+                    <SelectGroup key={group.key}>
+                      <SelectLabel>{group.label}</SelectLabel>
+                      {group.models.map((model) => (
+                        <SelectItem key={model} value={model}>
+                          {model}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
                   ))}
                 </SelectContent>
               </Select>

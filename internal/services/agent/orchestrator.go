@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"regexp"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -19,8 +22,13 @@ import (
 )
 
 const (
-	defaultMaxConcurrent = 3
+	defaultMaxConcurrent = 10
 )
+
+// ErrConcurrencyLimit is returned when an org has reached its maximum
+// number of concurrent agent runs. Callers can check for this with
+// errors.Is to handle it as a transient/retryable condition.
+var ErrConcurrencyLimit = fmt.Errorf("concurrency limit reached")
 
 // GitHubTokenProvider abstracts retrieving a GitHub App installation token.
 type GitHubTokenProvider interface {
@@ -30,6 +38,7 @@ type GitHubTokenProvider interface {
 // CodexAuthProvider abstracts retrieving valid ChatGPT OAuth tokens for Codex.
 type CodexAuthProvider interface {
 	GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAIChatGPTConfig, error)
+	RefreshToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAIChatGPTConfig, error)
 }
 
 // CredentialProvider abstracts retrieving org-scoped provider credentials.
@@ -51,6 +60,7 @@ type SessionStore interface {
 	UpdateTurnComplete(ctx context.Context, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string) error
 	UpdateSnapshotInfo(ctx context.Context, orgID, sessionID uuid.UUID, agentSessionID, snapshotKey string) error
 	UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state string) error
+	UpdateWorkingBranch(ctx context.Context, orgID, sessionID uuid.UUID, branch string) error
 	GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 }
 
@@ -221,17 +231,29 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		return fmt.Errorf("update run status to running: %w", err)
 	}
 
-	// 3. Fetch the issue.
-	issue, err := o.issues.GetByID(ctx, run.OrgID, run.IssueID)
-	if err != nil {
-		o.failRun(ctx, run, fmt.Sprintf("fetch issue: %s", err))
-		return fmt.Errorf("fetch issue: %w", err)
+	// 3. Fetch the issue (non-fatal when IssueID is nil/zero for project-dispatched sessions).
+	var issue *models.Issue
+	if run.IssueID != uuid.Nil {
+		fetched, err := o.issues.GetByID(ctx, run.OrgID, run.IssueID)
+		if err != nil {
+			o.failRun(ctx, run, fmt.Sprintf("fetch issue: %s", err))
+			return fmt.Errorf("fetch issue: %w", err)
+		}
+		issue = &fetched
 	}
 
-	// 4. Look up the repository for clone URL and branch.
+	// 4. Resolve which repository to clone.
+	// Priority: session.RepositoryID → issue.RepositoryID (backwards compat).
+	var resolvedRepoID *uuid.UUID
+	if run.RepositoryID != nil {
+		resolvedRepoID = run.RepositoryID
+	} else if issue != nil && issue.RepositoryID != nil {
+		resolvedRepoID = issue.RepositoryID
+	}
+
 	var repoURL, branch, token, repoFullName string
-	if issue.RepositoryID != nil {
-		repo, err := o.repositories.GetByID(ctx, run.OrgID, *issue.RepositoryID)
+	if resolvedRepoID != nil {
+		repo, err := o.repositories.GetByID(ctx, run.OrgID, *resolvedRepoID)
 		if err != nil {
 			o.failRun(ctx, run, fmt.Sprintf("fetch repository: %s", err))
 			return fmt.Errorf("fetch repository: %w", err)
@@ -239,6 +261,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		repoURL = repo.CloneURL
 		branch = repo.DefaultBranch
 		repoFullName = repo.FullName
+
+		// Override with session-specific branch if set.
+		if run.TargetBranch != nil && *run.TargetBranch != "" {
+			branch = *run.TargetBranch
+		}
 
 		// Get GitHub installation token for cloning.
 		ghToken, err := o.github.GetInstallationToken(ctx, repo.InstallationID)
@@ -256,12 +283,23 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		return fmt.Errorf("unknown agent type: %s", run.AgentType)
 	}
 
+	// 5b. Resolve org-specific context limits for adaptive token budgets.
+	var contextLimits *models.ContextLimits
+	if o.orgs != nil {
+		if org, orgErr := o.orgs.GetByID(ctx, run.OrgID); orgErr == nil {
+			if orgSettings, parseErr := models.ParseOrgSettings(org.Settings); parseErr == nil {
+				contextLimits = &orgSettings.ContextLimits
+			}
+		}
+	}
+
 	// 6. Prepare the prompt.
 	input := &AgentInput{
-		Issue:      &issue,
-		RepoURL:    repoURL,
-		RepoBranch: branch,
-		TokenMode:  run.TokenMode,
+		Issue:         issue,
+		RepoURL:       repoURL,
+		RepoBranch:    branch,
+		TokenMode:     run.TokenMode,
+		ContextLimits: contextLimits,
 	}
 	if run.ComplexityTier != nil {
 		input.ComplexityEstimate = &ComplexityEstimate{
@@ -294,7 +332,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 	// 6b. Generate integration skills doc from org credentials.
 	// This tells the agent what CLI tools are available in the sandbox.
-	input.IntegrationSkills = o.buildIntegrationSkills(ctx, run.OrgID)
+	input.IntegrationSkills = o.BuildIntegrationSkills(ctx, run.OrgID)
 
 	prompt, err := adapter.PreparePrompt(ctx, input)
 	if err != nil {
@@ -310,6 +348,19 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// resolving ~/.codex/auth.json) find files written to the workdir.
 	if sandboxCfg.Env == nil {
 		sandboxCfg.Env = make(map[string]string)
+	}
+	// Inject GitHub token and repo info for 143-tools CLI only when the agent
+	// has integration skills (i.e. the prompt references CLI tools). This avoids
+	// giving every agent session GitHub write access unnecessarily.
+	if input.IntegrationSkills != "" && token != "" {
+		sandboxCfg.Env["GITHUB_TOKEN"] = token
+		if repoFullName != "" {
+			parts := strings.SplitN(repoFullName, "/", 2)
+			if len(parts) == 2 {
+				sandboxCfg.Env["GITHUB_REPO_OWNER"] = parts[0]
+				sandboxCfg.Env["GITHUB_REPO_NAME"] = parts[1]
+			}
+		}
 	}
 	// Apply per-run model override if set.
 	if run.ModelOverride != nil && *run.ModelOverride != "" {
@@ -331,32 +382,54 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 	}()
 
-	// 8. Inject Codex auth file if this is a codex agent run.
-	if run.AgentType == models.AgentTypeCodex {
-		injected, err := o.injectCodexAuth(ctx, run.OrgID, sandbox)
-		if err != nil {
-			log.Warn().Err(err).Msg("codex auth injection failed, falling back to API key")
-		}
-		// Fail early if neither OAuth token nor API key is available.
-		hasAPIKey := sandboxCfg.Env["OPENAI_API_KEY"] != ""
-		if !hasAPIKey && !injected {
-			o.failRun(ctx, run, "no credentials configured for codex: connect ChatGPT or set an OPENAI_API_KEY in Settings")
-			return fmt.Errorf("no credentials for codex agent")
-		}
-	}
-
-	// 8b. Integration tools (143-tools CLI) are pre-installed in the container
-	// image. Credentials are injected via env vars (resolveAgentEnv), and the
-	// skills doc is injected into the prompt (buildIntegrationSkills). No
-	// per-CLI config file injection needed — all agents can shell out directly.
-
-	// 9. Clone repo into sandbox.
+	// 8. Clone repo into sandbox. This must happen before auth injection
+	// so that /workspace is empty when git clone runs (git clone fails on
+	// non-empty directories).
 	if repoURL != "" {
 		if err := o.provider.CloneRepo(ctx, sandbox, repoURL, branch, token); err != nil {
 			o.failRun(ctx, run, fmt.Sprintf("clone repo: %s", err))
 			return fmt.Errorf("clone repo: %w", err)
 		}
+
+		// 8b. Create a working branch so the agent operates on a separate
+		// branch from the start, keeping the base branch clean.
+		workingBranch := formatWorkingBranch(run, issue)
+		checkoutCmd := fmt.Sprintf("git checkout -b '%s'", shellEscapeSingleQuote(workingBranch))
+		var checkoutOut, checkoutErr bytes.Buffer
+		exitCode, execErr := o.provider.Exec(ctx, sandbox, checkoutCmd, &checkoutOut, &checkoutErr)
+		if execErr != nil || exitCode != 0 {
+			log.Warn().
+				Err(execErr).
+				Int("exit_code", exitCode).
+				Str("stderr", checkoutErr.String()).
+				Msg("failed to create working branch, agent will work on base branch")
+		} else {
+			run.WorkingBranch = &workingBranch
+			if dbErr := o.sessions.UpdateWorkingBranch(ctx, run.OrgID, run.ID, workingBranch); dbErr != nil {
+				log.Warn().Err(dbErr).Str("branch", workingBranch).Msg("failed to persist working branch")
+			}
+		}
 	}
+
+	// 9. Inject Codex auth.json if this is a codex agent run.
+	//    auth.json is the primary auth mechanism (uses ChatGPT backend).
+	//    Done after clone so the workspace is available.
+	if run.AgentType == models.AgentTypeCodex {
+		injected, err := o.injectCodexAuth(ctx, run.OrgID, sandbox)
+		if err != nil {
+			o.failRun(ctx, run, fmt.Sprintf("codex auth injection failed: %s", err))
+			return fmt.Errorf("codex auth injection: %w", err)
+		}
+		if !injected {
+			o.failRun(ctx, run, "no credentials configured for codex: connect ChatGPT from the Overview page")
+			return fmt.Errorf("no credentials for codex agent")
+		}
+	}
+
+	// 9b. Integration tools (143-tools CLI) are pre-installed in the container
+	// image. Credentials are injected via env vars (resolveAgentEnv), and the
+	// skills doc is injected into the prompt (buildIntegrationSkills). No
+	// per-CLI config file injection needed — all agents can shell out directly.
 
 	// 10. Execute agent with log streaming.
 	logCh := make(chan LogEntry, 100)
@@ -404,7 +477,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// Store the successful result.
 	runResult := o.buildRunResult(result)
 	status := "completed"
-	isInteractive := o.isInteractiveSession(&issue) && snapshotKey != ""
+	isInteractive := o.isInteractiveSession(issue) && snapshotKey != ""
 
 	// 11. Confidence gating: use org-configured auto-proceed threshold.
 	if result.ConfidenceScore < confidenceThresholds.AutoProceed {
@@ -499,12 +572,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		Int("turn", session.CurrentTurn).
 		Logger()
 
-	if session.SnapshotKey == nil || *session.SnapshotKey == "" {
-		return fmt.Errorf("session has no snapshot to restore")
-	}
-	if o.snapshots == nil {
-		return fmt.Errorf("snapshot store not configured")
-	}
+	// Determine whether we can restore from a snapshot or need a fresh start.
+	hasSnapshot := session.SnapshotKey != nil && *session.SnapshotKey != "" &&
+		o.snapshots != nil &&
+		session.SandboxState != string(models.SandboxStateDestroyed)
 
 	// 1. Update status to running.
 	if err := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, "running"); err != nil {
@@ -529,6 +600,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 
 	var userMessage string
+	var planMode bool
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role == models.MessageRoleUser {
 			userMessage = messages[i].Content
@@ -540,7 +612,23 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		return fmt.Errorf("no user message found")
 	}
 
-	// 4. Create sandbox and restore snapshot.
+	// Detect plan mode prefix and strip it, wrapping with plan instructions.
+	const planModePrefix = "[PLAN_MODE]\n"
+	if strings.HasPrefix(userMessage, planModePrefix) {
+		planMode = true
+		originalMessage := strings.TrimPrefix(userMessage, planModePrefix)
+		userMessage = "You are in PLAN MODE. Instead of making changes directly, create a detailed implementation plan for the following request. Describe:\n" +
+			"1. What files need to be changed and why\n" +
+			"2. What specific changes are needed in each file\n" +
+			"3. The order of operations\n" +
+			"4. Any potential risks or considerations\n\n" +
+			"Do NOT make any file changes or use any tools that modify files. Only output the plan as a structured markdown response. " +
+			"The user will review the plan and either approve it or request adjustments before you proceed.\n\n" +
+			"User's request:\n" + originalMessage
+	}
+	_ = planMode // used by adapters that support explicit plan mode
+
+	// 4. Create sandbox.
 	sandboxCfg := DefaultSandboxConfig()
 	sandboxCfg.Env = o.resolveAgentEnv(ctx, session.OrgID, session.AgentType, session.TriggeredByUserID)
 	if sandboxCfg.Env == nil {
@@ -566,50 +654,101 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 	}()
 
-	// Restore snapshot from S3.
-	snapshotReader, snapshotWriter := io.Pipe()
-	var restoreErr error
-	var restoreWg sync.WaitGroup
-	restoreWg.Add(1)
-	go func() {
-		defer restoreWg.Done()
-		restoreErr = o.snapshots.Load(ctx, *session.SnapshotKey, snapshotWriter)
-		_ = snapshotWriter.Close()
-	}()
+	// 5. Set up the workspace — either restore snapshot or clone fresh.
+	var prompt *AgentPrompt
+	if hasSnapshot {
+		// Path A: Restore snapshot from storage — preserves all git changes.
+		snapshotReader, snapshotWriter := io.Pipe()
+		var restoreErr error
+		var restoreWg sync.WaitGroup
+		restoreWg.Add(1)
+		go func() {
+			defer restoreWg.Done()
+			restoreErr = o.snapshots.Load(ctx, *session.SnapshotKey, snapshotWriter)
+			_ = snapshotWriter.Close() // Intentionally ignored: pipe close error is not actionable here; restoreErr captures the real failure.
+		}()
 
-	if err := o.provider.Restore(ctx, sandbox, snapshotReader); err != nil {
-		// Close the reader to unblock the goroutine writing to the pipe.
-		_ = snapshotReader.Close()
-		restoreWg.Wait()
-		o.failRun(ctx, session, fmt.Sprintf("restore snapshot: %s", err))
-		return fmt.Errorf("restore snapshot: %w", err)
-	}
-	restoreWg.Wait()
-	if restoreErr != nil {
-		o.failRun(ctx, session, fmt.Sprintf("load snapshot from storage: %s", restoreErr))
-		return fmt.Errorf("load snapshot: %w", restoreErr)
-	}
-
-	// 5. Re-inject Codex auth if needed.
-	if session.AgentType == models.AgentTypeCodex {
-		if _, err := o.injectCodexAuth(ctx, session.OrgID, sandbox); err != nil {
-			log.Warn().Err(err).Msg("codex auth injection failed on continue")
+		if err := o.provider.Restore(ctx, sandbox, snapshotReader); err != nil {
+			_ = snapshotReader.Close() // Intentionally ignored: we already have the restore error.
+			restoreWg.Wait()
+			o.failRun(ctx, session, fmt.Sprintf("restore snapshot: %s", err))
+			return fmt.Errorf("restore snapshot: %w", err)
 		}
+		restoreWg.Wait()
+		if restoreErr != nil {
+			o.failRun(ctx, session, fmt.Sprintf("load snapshot from storage: %s", restoreErr))
+			return fmt.Errorf("load snapshot: %w", restoreErr)
+		}
+
+		// Re-inject Codex auth.json if needed.
+		if session.AgentType == models.AgentTypeCodex {
+			injected, err := o.injectCodexAuth(ctx, session.OrgID, sandbox)
+			if err != nil {
+				o.failRun(ctx, session, fmt.Sprintf("codex auth injection failed: %s", err))
+				return fmt.Errorf("codex auth injection: %w", err)
+			}
+			if !injected {
+				o.failRun(ctx, session, "no credentials configured for codex: connect ChatGPT from the Overview page")
+				return fmt.Errorf("no credentials for codex agent")
+			}
+		}
+
+		var resumeSessionID string
+		if session.AgentSessionID != nil {
+			resumeSessionID = *session.AgentSessionID
+		}
+		prompt = &AgentPrompt{
+			Continuation:    true,
+			ResumeSessionID: resumeSessionID,
+			UserMessage:     userMessage,
+			MaxTokens:       tokenLimitForMode(session.TokenMode),
+		}
+
+		log.Info().Msg("continuing session with snapshot restore")
+	} else {
+		// Path B: No snapshot available — clone repo fresh and provide
+		// conversation history + stored diff as context so the agent can
+		// reconstruct the prior state.
+		log.Info().Msg("continuing session without snapshot, starting fresh")
+
+		issue, repoFullName, err := o.setupFreshSandbox(ctx, session, sandbox)
+		if err != nil {
+			o.failRun(ctx, session, fmt.Sprintf("setup fresh sandbox: %s", err))
+			return fmt.Errorf("setup fresh sandbox: %w", err)
+		}
+
+		// Build a full prompt via PreparePrompt so the agent gets the system
+		// prompt with integration skills, memory, and repo conventions.
+		input := &AgentInput{
+			Issue:     &issue,
+			TokenMode: session.TokenMode,
+		}
+		input.IntegrationSkills = o.BuildIntegrationSkills(ctx, session.OrgID)
+		if o.memory != nil && repoFullName != "" {
+			memResult, memErr := o.memory.GetContextMemories(ctx, MemoryContextRequest{
+				OrgID: session.OrgID,
+				Repo:  repoFullName,
+			})
+			if memErr != nil {
+				log.Warn().Err(memErr).Str("repo", repoFullName).Msg("failed to retrieve memories for resume context")
+			} else if memResult != nil && memResult.Formatted != "" {
+				input.ContextDocs = append(input.ContextDocs, memResult.Formatted)
+			}
+		}
+
+		basePrompt, err := adapter.PreparePrompt(ctx, input)
+		if err != nil {
+			o.failRun(ctx, session, fmt.Sprintf("prepare prompt for resume: %s", err))
+			return fmt.Errorf("prepare prompt for resume: %w", err)
+		}
+
+		// Override UserPrompt with resume context (conversation history + diff).
+		basePrompt.UserPrompt = o.buildResumeContext(session, &issue, messages, userMessage)
+		basePrompt.Continuation = false
+		prompt = basePrompt
 	}
 
-	// 6. Build the resume prompt.
-	var resumeSessionID string
-	if session.AgentSessionID != nil {
-		resumeSessionID = *session.AgentSessionID
-	}
-	prompt := &AgentPrompt{
-		Continuation:    true,
-		ResumeSessionID: resumeSessionID,
-		UserMessage:     userMessage,
-		MaxTokens:       tokenLimitForMode(session.TokenMode),
-	}
-
-	// 7. Execute agent with log streaming.
+	// 6. Execute agent with log streaming.
 	turnNumber := session.CurrentTurn + 1
 	logCh := make(chan LogEntry, 100)
 	var logWg sync.WaitGroup
@@ -629,18 +768,18 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		return fmt.Errorf("execute agent on continue: %w", err)
 	}
 
-	// 8. Create assistant message with result summary.
+	// 7. Create assistant message with result summary.
 	if err := o.createAssistantMessage(ctx, session.ID, session.OrgID, turnNumber, result); err != nil {
 		log.Warn().Err(err).Msg("failed to create assistant message")
 	}
 
-	// 9. Snapshot again.
+	// 8. Snapshot again.
 	newSnapshotKey, snapshotErr := o.snapshotSession(ctx, session, sandbox, result)
 	if snapshotErr != nil {
 		log.Warn().Err(snapshotErr).Msg("failed to snapshot session after continue")
 	}
 
-	// 10. Update turn complete — sets status to idle.
+	// 9. Update turn complete — sets status to idle.
 	agentSessionID := result.AgentSessionID
 	if agentSessionID == "" && session.AgentSessionID != nil {
 		agentSessionID = *session.AgentSessionID
@@ -655,6 +794,117 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 
 	log.Info().Int("turn", turnNumber).Msg("session turn completed, now idle")
 	return nil
+}
+
+// setupFreshSandbox clones the session's repository into the sandbox when no
+// snapshot is available. Returns the issue (for prompt building) and the repo
+// full name (for memory lookup). Handles sessions with or without a repository.
+func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Session, sandbox *Sandbox) (models.Issue, string, error) {
+	// Fetch the issue to get repository info.
+	issue, err := o.issues.GetByID(ctx, session.OrgID, session.IssueID)
+	if err != nil {
+		return models.Issue{}, "", fmt.Errorf("fetch issue: %w", err)
+	}
+
+	// Clone repo if the session has one.
+	var repoFullName string
+	if issue.RepositoryID != nil {
+		repo, err := o.repositories.GetByID(ctx, session.OrgID, *issue.RepositoryID)
+		if err != nil {
+			return models.Issue{}, "", fmt.Errorf("fetch repository: %w", err)
+		}
+		repoFullName = repo.FullName
+		branch := repo.DefaultBranch
+		if session.TargetBranch != nil && *session.TargetBranch != "" {
+			branch = *session.TargetBranch
+		}
+		token, err := o.github.GetInstallationToken(ctx, repo.InstallationID)
+		if err != nil {
+			return models.Issue{}, "", fmt.Errorf("get installation token: %w", err)
+		}
+		if err := o.provider.CloneRepo(ctx, sandbox, repo.CloneURL, branch, token); err != nil {
+			return models.Issue{}, "", fmt.Errorf("clone repo: %w", err)
+		}
+	}
+
+	// Inject Codex auth if needed.
+	if session.AgentType == models.AgentTypeCodex {
+		injected, err := o.injectCodexAuth(ctx, session.OrgID, sandbox)
+		if err != nil {
+			return models.Issue{}, "", fmt.Errorf("codex auth injection: %w", err)
+		}
+		if !injected {
+			return models.Issue{}, "", fmt.Errorf("no credentials for codex agent")
+		}
+	}
+
+	return issue, repoFullName, nil
+}
+
+// maxDiffCharsInPrompt is the maximum number of characters from a stored diff
+// to include in a resume prompt. Larger diffs are truncated to avoid blowing
+// up the agent's token budget.
+const maxDiffCharsInPrompt = 50000
+
+// buildResumeContext constructs the user prompt for a resumed session that has
+// no snapshot. It includes the issue description, conversation history, and
+// the stored diff so the agent understands the prior state and can re-apply
+// changes.
+func (o *Orchestrator) buildResumeContext(session *models.Session, issue *models.Issue, messages []models.SessionMessage, latestUserMessage string) string {
+	var b bytes.Buffer
+
+	b.WriteString("This is a continuation of a previous session. The previous workspace state is not available, so you are starting from a fresh clone.\n\n")
+
+	// Include the original issue description for context (especially
+	// important for non-manual sessions that may have no prior messages).
+	if issue != nil && issue.Description != nil && *issue.Description != "" {
+		b.WriteString("## Original issue\n\n**")
+		b.WriteString(issue.Title)
+		b.WriteString("**\n\n")
+		b.WriteString(*issue.Description)
+		b.WriteString("\n\n")
+	}
+
+	// Include conversation history if available.
+	if len(messages) > 1 { // >1 because the latest user message is always present
+		b.WriteString("## Previous conversation history\n\n")
+		for _, msg := range messages[:len(messages)-1] {
+			role := "User"
+			if msg.Role == models.MessageRoleAssistant {
+				role = "Assistant"
+			}
+			b.WriteString(fmt.Sprintf("**%s:** %s\n\n", role, msg.Content))
+		}
+	}
+
+	// Include the stored diff if available, truncating if very large.
+	if session.Diff != nil && *session.Diff != "" {
+		diff := *session.Diff
+		truncated := false
+		if len(diff) > maxDiffCharsInPrompt {
+			diff = diff[:maxDiffCharsInPrompt]
+			truncated = true
+		}
+		b.WriteString("## Previous code changes (git diff)\n\nThe following diff was produced in the previous session. Please re-apply these changes as needed:\n\n```diff\n")
+		b.WriteString(diff)
+		b.WriteString("\n```\n")
+		if truncated {
+			b.WriteString("\n**Note:** The diff was truncated due to size. The full diff had additional changes not shown above.\n")
+		}
+		b.WriteString("\n")
+	}
+
+	// Include the result summary if available.
+	if session.ResultSummary != nil && *session.ResultSummary != "" {
+		b.WriteString("## Previous session summary\n\n")
+		b.WriteString(*session.ResultSummary)
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString("## New message\n\n")
+	b.WriteString(latestUserMessage)
+
+	return b.String()
 }
 
 func outcomeFromRunStatus(status string) models.PMDecisionOutcome {
@@ -677,7 +927,7 @@ func (o *Orchestrator) checkConcurrency(ctx context.Context, orgID uuid.UUID) er
 		return fmt.Errorf("count running runs: %w", err)
 	}
 	if count >= o.maxConcurrent {
-		return fmt.Errorf("concurrency limit reached: %d/%d runs active", count, o.maxConcurrent)
+		return fmt.Errorf("%w: %d/%d runs active", ErrConcurrencyLimit, count, o.maxConcurrent)
 	}
 	return nil
 }
@@ -794,14 +1044,15 @@ func (o *Orchestrator) enqueueJob(ctx context.Context, orgID uuid.UUID, queue, j
 	}
 }
 
-// integrationCredentials holds the resolved Sentry and Linear configs for an org.
+// integrationCredentials holds the resolved Sentry, Linear, and Notion configs for an org.
 type integrationCredentials struct {
 	Sentry *models.SentryConfig
 	Linear *models.LinearConfig
+	Notion *models.NotionConfig
 }
 
-// fetchIntegrationCredentials retrieves the Sentry and Linear configs for
-// an org from the credential provider. Returns nil configs if unavailable.
+// fetchIntegrationCredentials retrieves the Sentry, Linear, and Notion configs
+// for an org from the credential provider. Returns nil configs if unavailable.
 func (o *Orchestrator) fetchIntegrationCredentials(ctx context.Context, orgID uuid.UUID) integrationCredentials {
 	var ic integrationCredentials
 	if o.credentials == nil {
@@ -818,16 +1069,18 @@ func (o *Orchestrator) fetchIntegrationCredentials(ctx context.Context, orgID uu
 			ic.Linear = &cfg
 		}
 	}
+	if cred, err := o.credentials.Get(ctx, orgID, models.ProviderNotion); err == nil && cred != nil {
+		if cfg, ok := cred.Config.(models.NotionConfig); ok {
+			ic.Notion = &cfg
+		}
+	}
 	return ic
 }
 
 // resolveAgentEnv builds the sandbox env vars for the given agent type.
 // It checks credentials in order: user personal → team default → org credential.
+// Codex CLI auth is handled via auth.json injection (injectCodexAuth), not env vars.
 func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, userID *uuid.UUID) map[string]string {
-	if o.credentials == nil {
-		return nil
-	}
-
 	merged := make(map[string]string)
 
 	switch agentType {
@@ -842,6 +1095,15 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 			}
 		}
 	case models.AgentTypeCodex:
+		// Codex CLI authenticates via ~/.codex/auth.json (injected by
+		// injectCodexAuth), NOT via the CODEX_API_KEY env var. The env
+		// var makes Codex call api.openai.com/v1/responses which requires
+		// the api.responses.write scope — a scope the ChatGPT OAuth token
+		// does not carry. The auth.json path uses the ChatGPT backend
+		// instead, which accepts the OAuth token as-is.
+		//
+		// Inject the general OpenAI API key as OPENAI_API_KEY for other
+		// tools in the sandbox (not used by Codex CLI itself).
 		cfg := o.resolveProviderConfig(ctx, orgID, userID, models.ProviderOpenAI)
 		if oc, ok := cfg.(models.OpenAIConfig); ok {
 			if oc.APIKey != "" {
@@ -851,6 +1113,12 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 				merged["OPENAI_BASE_URL"] = oc.BaseURL
 			}
 		}
+		// Skip Codex CLI's internal bwrap (bubblewrap) sandboxing. The
+		// container is already isolated by Docker + gVisor (dropped caps,
+		// read-only rootfs, non-root user, PID limits), so bwrap is
+		// redundant and fails because gVisor doesn't support the
+		// unprivileged user namespaces that bwrap requires.
+		merged["CODEX_UNSAFE_ALLOW_NO_SANDBOX"] = "1"
 	case models.AgentTypeGeminiCLI:
 		cfg := o.resolveProviderConfig(ctx, orgID, userID, models.ProviderGemini)
 		if gc, ok := cfg.(models.GeminiConfig); ok {
@@ -863,8 +1131,9 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 		}
 	}
 
-	// Integration credentials — consumed by the 143-mcp binary inside the sandbox.
-	// These are injected for all agent types since the MCP server is agent-agnostic.
+	// Integration credentials — consumed by the 143-tools CLI (preferred) and
+	// 143-mcp binary inside the sandbox. Agents use the CLI via shell commands;
+	// the MCP server is only for IDE integrations. See internal/services/mcp/AGENTS.md.
 	ic := o.fetchIntegrationCredentials(ctx, orgID)
 	if ic.Sentry != nil {
 		if ic.Sentry.AccessToken != "" {
@@ -877,6 +1146,11 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 	if ic.Linear != nil {
 		if ic.Linear.AccessToken != "" {
 			merged["LINEAR_ACCESS_TOKEN"] = ic.Linear.AccessToken
+		}
+	}
+	if ic.Notion != nil {
+		if ic.Notion.AccessToken != "" {
+			merged["NOTION_ACCESS_TOKEN"] = ic.Notion.AccessToken
 		}
 	}
 
@@ -915,27 +1189,51 @@ func (o *Orchestrator) resolveProviderConfig(ctx context.Context, orgID uuid.UUI
 }
 
 // injectCodexAuth writes a ~/.codex/auth.json file into the sandbox if
-// a ChatGPT OAuth token exists for this org. Returns (true, nil) if auth
-// was injected, (false, nil) if no OAuth token is available (allowing
-// fallback to OPENAI_API_KEY env var), or (false, err) on failure.
+// a ChatGPT OAuth token exists for this org. This is the primary Codex
+// auth mechanism — auth.json tells the CLI to use the ChatGPT backend
+// which accepts the OAuth token without needing api.responses.write scope.
+// Returns (true, nil) if auth was injected, (false, nil) if no OAuth
+// token is available, or (false, err) on failure.
 func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox) (bool, error) {
 	if o.codexAuth == nil {
 		return false, nil
 	}
 
-	cfg, err := o.codexAuth.GetValidToken(ctx, orgID)
-	if err != nil {
-		return false, fmt.Errorf("get codex auth token: %w", err)
+	// Force-refresh the token to ensure a fresh access_token is injected
+	// into the sandbox. If the refresh fails (e.g. token already consumed),
+	// fall back to GetValidToken which returns any cached valid token.
+	cfg, err := o.codexAuth.RefreshToken(ctx, orgID)
+	if err != nil || cfg == nil {
+		if err != nil {
+			o.logger.Debug().Err(err).Str("org_id", orgID.String()).Msg("forced token refresh failed, falling back to GetValidToken")
+		}
+		cfg, err = o.codexAuth.GetValidToken(ctx, orgID)
+		if err != nil {
+			return false, fmt.Errorf("get codex auth token: %w", err)
+		}
 	}
 	if cfg == nil {
 		// No OAuth token — not an error, agent will use API key.
 		return false, nil
 	}
 
+	// Omit the refresh_token from auth.json so the Codex CLI never
+	// attempts to refresh the token itself. If the CLI refreshes the
+	// token inside the sandbox, it consumes the refresh_token on
+	// OpenAI's servers, but the sandbox-side token is lost when the
+	// container is destroyed. Our DB then holds a stale refresh_token,
+	// and the next turn's RefreshToken() call gets refresh_token_reused.
+	// By omitting refresh_token, the CLI uses the fresh access_token
+	// (15-min TTL) as-is, and our server retains sole ownership of
+	// the refresh_token for future turns.
 	authJSON, err := json.Marshal(map[string]interface{}{
-		"access_token":  cfg.AccessToken,
-		"refresh_token": cfg.RefreshToken,
-		"expires_at":    cfg.ExpiresAt.Format("2006-01-02T15:04:05Z"),
+		"auth_mode": "chatgpt",
+		"tokens": map[string]string{
+			"access_token":  cfg.AccessToken,
+			"refresh_token": "",
+			"id_token":      cfg.IDToken,
+		},
+		"last_refresh": time.Now().Format(time.RFC3339),
 	})
 	if err != nil {
 		return false, fmt.Errorf("marshal auth.json: %w", err)
@@ -961,17 +1259,27 @@ func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, san
 		return false, fmt.Errorf("write auth.json: %w", err)
 	}
 
+	// Write config.toml to disable Codex's internal bwrap sandboxing.
+	// The container is already isolated by Docker + gVisor so bwrap is
+	// redundant and fails because gVisor doesn't support the unprivileged
+	// user namespaces that bwrap requires.
+	configTOML := []byte("sandbox_mode = \"danger-full-access\"\n")
+	configPath := authDir + "/config.toml"
+	if err := o.provider.WriteFile(ctx, sandbox, configPath, configTOML); err != nil {
+		return false, fmt.Errorf("write config.toml: %w", err)
+	}
+
 	o.logger.Debug().
 		Str("org_id", orgID.String()).
-		Msg("injected codex auth.json into sandbox")
+		Msg("injected codex auth.json and config.toml into sandbox")
 
 	return true, nil
 }
 
-// buildIntegrationSkills generates a CLI skills doc from the org's integration
+// BuildIntegrationSkills generates a CLI skills doc from the org's integration
 // credentials. The doc is injected into the agent's system prompt so it knows
 // what 143-tools commands are available in the sandbox.
-func (o *Orchestrator) buildIntegrationSkills(ctx context.Context, orgID uuid.UUID) string {
+func (o *Orchestrator) BuildIntegrationSkills(ctx context.Context, orgID uuid.UUID) string {
 	if o.credentials == nil {
 		return ""
 	}
@@ -992,6 +1300,19 @@ func (o *Orchestrator) buildIntegrationSkills(ctx context.Context, orgID uuid.UU
 			AuthToken: ic.Linear.AccessToken,
 		})
 		reg.RegisterTaskManager(manager)
+	}
+	if ic.Notion != nil && ic.Notion.AccessToken != "" {
+		store := integration.NewNotionDocumentStore(integration.NotionDocumentStoreConfig{
+			AuthToken: ic.Notion.AccessToken,
+		})
+		reg.RegisterDocumentStore(store)
+	}
+
+	// Register a stub GitHub code review source for skills doc generation.
+	// This only describes available tools — actual API calls use real credentials
+	// injected via sandbox env vars. The stub never makes HTTP requests.
+	if o.github != nil {
+		reg.RegisterCodeReviewSource(&integration.StubCodeReviewSource{ProviderName: "github"})
 	}
 
 	if !reg.HasAny() {
@@ -1029,7 +1350,7 @@ func (o *Orchestrator) snapshotSession(ctx context.Context, session *models.Sess
 }
 
 func (o *Orchestrator) isInteractiveSession(issue *models.Issue) bool {
-	return issue != nil && issue.Source == "manual" && o.sessionMessages != nil && o.snapshots != nil
+	return issue != nil && issue.Source == models.IssueSourceManual && o.sessionMessages != nil && o.snapshots != nil
 }
 
 func (o *Orchestrator) createAssistantMessage(ctx context.Context, sessionID, orgID uuid.UUID, turnNumber int, result *AgentResult) error {
@@ -1055,12 +1376,25 @@ func (o *Orchestrator) createAssistantMessage(ctx context.Context, sessionID, or
 }
 
 // tokenLimitForMode returns the max token limit based on the session's token mode.
-func tokenLimitForMode(mode string) int {
+// Optional context limits from org settings override the defaults when provided.
+func tokenLimitForMode(mode string, limits ...models.ContextLimits) int {
+	var lowMax, highMax int
+	if len(limits) > 0 && limits[0].AgentLowTokenMax > 0 {
+		lowMax = limits[0].AgentLowTokenMax
+	} else {
+		lowMax = 50000
+	}
+	if len(limits) > 0 && limits[0].AgentHighTokenMax > 0 {
+		highMax = limits[0].AgentHighTokenMax
+	} else {
+		highMax = 200000
+	}
+
 	switch mode {
 	case "high":
-		return 200000
+		return highMax
 	default:
-		return 50000
+		return lowMax
 	}
 }
 
@@ -1069,4 +1403,47 @@ func strPtr(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+const maxBranchSlugLen = 60
+
+var nonAlphanumRegexp = regexp.MustCompile(`[^a-z0-9]+`)
+
+// slugifyForBranch converts a title into a lowercase, hyphen-separated slug
+// suitable for use in a git branch name.
+func slugifyForBranch(s string) string {
+	s = strings.ToLower(s)
+	s = nonAlphanumRegexp.ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-")
+	if len(s) > maxBranchSlugLen {
+		s = s[:maxBranchSlugLen]
+		if i := strings.LastIndex(s, "-"); i > 0 {
+			s = s[:i]
+		}
+	}
+	return s
+}
+
+// formatWorkingBranch generates a branch name for an agent session.
+// Format: 143-<short-id>-<slug> — short, flat, and descriptive.
+func formatWorkingBranch(run *models.Session, issue *models.Issue) string {
+	short := run.ID.String()[:8]
+
+	// Prefer the session title (set for manual sessions) over the issue title.
+	title := issue.Title
+	if run.Title != nil && *run.Title != "" {
+		title = *run.Title
+	}
+
+	slug := slugifyForBranch(title)
+	if slug == "" {
+		slug = "session"
+	}
+
+	return fmt.Sprintf("143-%s-%s", short, slug)
+}
+
+// shellEscapeSingleQuote escapes single quotes for safe use in shell commands.
+func shellEscapeSingleQuote(s string) string {
+	return strings.ReplaceAll(s, "'", "'\\''")
 }

@@ -1,7 +1,7 @@
 "use client";
 
 import {
-  LayoutDashboard,
+  Zap,
   Play,
   FolderKanban,
   Settings,
@@ -10,13 +10,12 @@ import {
   ChevronsUpDown,
   Plug,
   Bot,
-  Target,
   Sparkles,
   ScrollText,
+  Target,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useQuery } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
 import {
   DropdownMenu,
@@ -26,15 +25,17 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/hooks/use-auth";
-import { api } from "@/lib/api";
 import { useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "@/lib/api";
 import { RepoContextSwitcher } from "@/components/repo-context-switcher";
 
 const navItems = [
-  { label: "Overview", icon: LayoutDashboard, href: "/overview" },
-  { label: "Sessions", icon: Play, href: "/sessions", showStatusDot: true },
-  { label: "Projects", icon: FolderKanban, href: "/projects" },
+  { label: "Autopilot", icon: Zap, href: "/autopilot", showProposalBadge: false },
+  { label: "Sessions", icon: Play, href: "/sessions", showProposalBadge: false },
+  { label: "Projects", icon: FolderKanban, href: "/projects", showProposalBadge: true },
 ];
 
 export function AuthenticatedLayout({ children }: { children: React.ReactNode }) {
@@ -42,18 +43,13 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
   const router = useRouter();
   const { user, isLoading, isAuthenticated, logout } = useAuth();
 
-  const { data: pmStatusData } = useQuery({
-    queryKey: ["pm", "status"],
-    queryFn: () => api.pm.status(),
+  const { data: proposalSummary } = useQuery({
+    queryKey: ["proposalSummary"],
+    queryFn: () => api.projects.proposalSummary(),
     refetchInterval: 30000,
     enabled: isAuthenticated,
   });
-  const pmStatus = pmStatusData?.data;
-  const pmDotColor = pmStatus?.is_running
-    ? "running" as const
-    : pmStatus?.last_run_status === "completed" || pmStatus?.last_run_status === "executing"
-      ? "completed" as const
-      : null;
+  const proposalCount = proposalSummary?.data?.count ?? 0;
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated) {
@@ -110,17 +106,14 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
       <aside className="w-64 border-r border-border bg-sidebar flex flex-col relative">
         <div className="absolute inset-0 bg-gradient-to-b from-primary/[0.03] to-transparent pointer-events-none" />
         <div className="relative px-5 py-5 flex items-center gap-2">
-          <Link href="/overview" className="text-base font-bold tracking-tight text-sidebar-foreground">
+          <Link href="/autopilot" className="text-base font-bold tracking-tight text-sidebar-foreground">
             143.dev
           </Link>
           <RepoContextSwitcher />
         </div>
         <nav className="relative flex-1 px-2.5 space-y-0.5">
           {navItems.map((item) => {
-            const isActive =
-              item.href === "/overview"
-                ? pathname === "/overview"
-                : pathname.startsWith(item.href);
+            const isActive = pathname === item.href || pathname.startsWith(item.href + "/");
             return (
               <Link
                 key={item.href}
@@ -134,14 +127,10 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
               >
                 <item.icon className="h-4 w-4" />
                 {item.label}
-                {item.showStatusDot && pmDotColor === "running" && (
-                  <span className="relative flex h-2 w-2 ml-auto">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                    <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
-                  </span>
-                )}
-                {item.showStatusDot && pmDotColor === "completed" && (
-                  <span className="inline-flex rounded-full h-2 w-2 bg-green-500 ml-auto" />
+                {item.showProposalBadge && proposalCount > 0 && (
+                  <Badge variant="secondary" className="ml-auto text-xs px-1.5 py-0 bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300">
+                    {proposalCount}
+                  </Badge>
                 )}
               </Link>
             );
@@ -160,7 +149,6 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                     pathname.startsWith("/team") ||
                     pathname.startsWith("/integrations") ||
                     pathname.startsWith("/agent") ||
-                    pathname.startsWith("/prioritization") ||
                     pathname.startsWith("/llm")
                       ? "bg-sidebar-accent text-sidebar-accent-foreground"
                       : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
@@ -199,9 +187,9 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                   <Sparkles className="h-4 w-4" />
                   LLM
                 </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => router.push("/prioritization")}>
+                <DropdownMenuItem onClick={() => router.push("/settings/autopilot")}>
                   <Target className="h-4 w-4" />
-                  Prioritization
+                  Autopilot settings
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => router.push("/team")}>
                   <Users className="h-4 w-4" />
@@ -223,9 +211,9 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
           )}
         </div>
       </aside>
-      <main className="flex-1 overflow-auto bg-background relative">
+      <main className="flex-1 overflow-auto bg-background relative flex flex-col">
         <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(ellipse_at_top_right,oklch(0.6_0.1_270_/_3%)_0%,transparent_50%)]" />
-        <div className="relative max-w-none px-8 py-6 lg:px-10">
+        <div className="relative max-w-none px-8 py-6 lg:px-10 flex-1 min-h-0">
           {children}
         </div>
       </main>

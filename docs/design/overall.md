@@ -8,12 +8,14 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
 
 # Overall flow
 
-## Onboarding dashboard UX
+## Autopilot workspace UX
 
-- The Overview page uses a progressive, low-friction setup sequence: (1) choose coding agent, (2) connect GitHub, (3) add optional integrations.
+- `Autopilot` is the primary operating surface. It leads with one recommendation hero, a compact evidence row, and a summary-first `Your Direction` section so users can understand what the system sees and what it wants to do next without reading a dense settings form.
+- When prerequisites are missing, `Autopilot` falls back to a progressive, low-friction setup sequence: (1) choose coding agent, (2) connect GitHub, (3) add optional integrations.
 - Coding agent selection uses a **single card with an agent dropdown** (default `Codex`) instead of multiple parallel agent cards. This reduces first-run decision fatigue and keeps focus on the primary onboarding path.
 - The selected agent card always presents one clear next action: sign in (Codex) or configure credentials (Claude/Gemini), with a persistent settings entrypoint.
 - Codex remains visually recommended to guide most users toward the quickest "time to first fix" path while preserving flexibility for teams with existing Anthropic/Google setups.
+- Contextual PM steering lives on `Autopilot` as compact summaries edited in side sheets, while low-frequency PM admin controls like model selection and cadence live in `Autopilot settings`.
 
 - Step 0: Connect repositories and build codebase context
     - Users sign in with GitHub OAuth and install the 143.dev GitHub App on their organization/repos. The GitHub App (same auth model used by Codex web, Claude Code web, and other modern AI coding platforms) provides fine-grained, short-lived installation tokens for repo access — no personal access tokens needed.
@@ -24,12 +26,12 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
     - Support tickets
     - Sentry errors
     - Linear issues
-    - Integration setup is initiated from dashboard integration cards (Overview + Integrations pages). "Connect Linear" starts OAuth at `/api/v1/integrations/linear/login`, exchanges the callback code at `/api/v1/integrations/linear/callback`, stores the org-scoped Linear access token in `org_credentials` (`provider = linear`), and creates/reuses an active org-scoped Linear integration record for ingestion.
+    - Integration setup is initiated from dashboard integration cards (`Autopilot` + `Integrations` pages). "Connect Linear" starts OAuth at `/api/v1/integrations/linear/login`, exchanges the callback code at `/api/v1/integrations/linear/callback`, stores the org-scoped Linear access token in `org_credentials` (`provider = linear`), and creates/reuses an active org-scoped Linear integration record for ingestion.
 - Step 2: Prioritize and identify top issues based on business impact
     - The system determines how many customers were affected, regression severity, and optionally (if you integrate Salesforce or some other CRM) the revenue risk.
     - The admins can specify product context (philosophy + direction + focus/avoid areas) to steer prioritization.
-    - A **PM agent** now runs on a batch cadence, clusters related issues, and produces a prioritized plan that delegates work to coding agents (replacing per-issue auto-triggering for automation).
-    - **Projects** are the primary long-term control surface. Each project can be `finite` (completes) or `evergreen` (continuous maintenance) with optional cadence-based execution and project-scoped quick actions.
+    - A **PM agent** now runs on a batch cadence, clusters related issues, produces a prioritized plan, and can propose new **repo-scoped projects** for human review when it finds a strategic opportunity (replacing per-issue auto-triggering for automation).
+    - **Projects** are the primary long-term control surface. The canonical review surface for PM-proposed projects lives in `Projects`, while `Autopilot` shows lightweight PM proposal summaries and links users into that review flow. Each project can be `finite` (completes) or `evergreen` (continuous maintenance) with optional cadence-based execution and project-scoped quick actions.
 - Step 3: Execute a coding agent
     - Admins set a **confidence threshold** that controls which issues the system will auto-attempt. Issues below the threshold require manual triggering.
     - The Sessions area supports **one-off manual sessions** through a dedicated `/sessions/new` creation page with a chat-style composer. Users can start a manual run from free-form instructions, file/photo attachments, optional image URLs, and voice dictation without waiting for PM planning cadence.

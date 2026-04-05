@@ -16,6 +16,10 @@ type mockIssueStore struct {
 	updated []uuid.UUID
 }
 
+func (m *mockIssueStore) GetByID(ctx context.Context, orgID, issueID uuid.UUID) (models.Issue, error) {
+	return models.Issue{}, nil
+}
+
 func (m *mockIssueStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters db.IssueFilters) ([]models.Issue, error) {
 	return nil, nil
 }
@@ -45,6 +49,14 @@ func (m *mockSessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filte
 
 func (m *mockSessionStore) ListRecentByOrg(ctx context.Context, orgID uuid.UUID, statuses []string, limit int) ([]models.Session, error) {
 	return nil, nil
+}
+
+func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string) error {
+	return nil
+}
+
+func (m *mockSessionStore) UpdatePMPlanID(ctx context.Context, orgID, runID, planID uuid.UUID) error {
+	return nil
 }
 
 type mockOrgStore struct {
@@ -134,6 +146,7 @@ func TestExecutePlan_DelegatesWithinCapacity(t *testing.T) {
 	require.Len(t, runStore.created, 1, "should create one agent run")
 	require.NotNil(t, runStore.created[0].PMPlanID, "created run should link to PM plan")
 	require.Equal(t, planID, *runStore.created[0].PMPlanID, "PM plan ID should be set")
+	require.NotNil(t, runStore.created[0].Title, "session title should be set")
 	require.NotNil(t, runStore.created[0].PMApproach, "PM approach should be set")
 	require.NotNil(t, runStore.created[0].PMReasoning, "PM reasoning should be set")
 }

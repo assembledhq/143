@@ -179,10 +179,13 @@ func (s *Service) dispatchProjectTasks(ctx context.Context, orgID uuid.UUID, pro
 			AutonomyLevel: string(settings.AutonomyLevel),
 			TokenMode:     tokenModeFromTaskComplexity(task.Complexity),
 			PMPlanID:      &planID,
+			Title:         &task.Title,
 			PMApproach:    &approach,
 			PMReasoning:   &reasoning,
 			ProjectTaskID: &task.ID,
 			ModelOverride: project.ModelOverride,
+			RepositoryID:  &project.RepositoryID,
+			TargetBranch:  &branchName,
 		}
 		if err := s.sessions.Create(ctx, run); err != nil {
 			s.logger.Error().Err(err).Str("task_id", task.ID.String()).Msg("failed to create agent run for project task")

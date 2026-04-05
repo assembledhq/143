@@ -6,11 +6,13 @@ export const PM_MODEL_HAIKU = "haiku";
 export const LEGACY_PM_ALIASES = [PM_MODEL_OPUS, PM_MODEL_SONNET, PM_MODEL_HAIKU] as const;
 
 export const CLAUDE_CODE_MODEL_OPUS = "claude-opus-4-6";
+export const CLAUDE_CODE_MODEL_SONNET_46 = "claude-sonnet-4-6";
 export const CLAUDE_CODE_MODEL_SONNET = "claude-sonnet-4-5";
 export const CLAUDE_CODE_MODEL_HAIKU = "claude-haiku-4-5";
 
 export const AVAILABLE_CLAUDE_CODE_MODELS = [
   CLAUDE_CODE_MODEL_OPUS,
+  CLAUDE_CODE_MODEL_SONNET_46,
   CLAUDE_CODE_MODEL_SONNET,
   CLAUDE_CODE_MODEL_HAIKU,
 ] as const;
@@ -27,12 +29,16 @@ export const AVAILABLE_GEMINI_CLI_MODELS = [
   GEMINI_CLI_MODEL_GEMINI_2_5_FLASH,
 ] as const;
 
+export const CODEX_MODEL_GPT_5_4 = "gpt-5.4";
+export const CODEX_MODEL_GPT_5_4_MINI = "gpt-5.4-mini";
 export const CODEX_MODEL_GPT_5_3_CODEX = "gpt-5.3-codex";
 export const CODEX_MODEL_GPT_5_2_CODEX = "gpt-5.2-codex";
 export const CODEX_MODEL_GPT_5_CODEX = "gpt-5-codex";
 export const CODEX_MODEL_GPT_5_3_CODEX_SPARK = "gpt-5.3-codex-spark";
 
 export const AVAILABLE_CODEX_MODELS = [
+  CODEX_MODEL_GPT_5_4,
+  CODEX_MODEL_GPT_5_4_MINI,
   CODEX_MODEL_GPT_5_3_CODEX,
   CODEX_MODEL_GPT_5_2_CODEX,
   CODEX_MODEL_GPT_5_CODEX,
@@ -55,6 +61,11 @@ export const AGENT_TYPE_OPTIONS: { key: string; label: string; models: readonly 
   { key: "gemini_cli", label: "Gemini CLI", models: AVAILABLE_GEMINI_CLI_MODELS },
 ];
 
+// Resolve the agent type key for a given model string.
+export function agentTypeForModel(model: string): string | undefined {
+  return AGENT_TYPE_OPTIONS.find((a) => (a.models as readonly string[]).includes(model))?.key;
+}
+
 // All PM models across every provider (for validation / backward compat).
 export const AVAILABLE_PM_MODELS = [
   ...LEGACY_PM_ALIASES,
@@ -69,11 +80,11 @@ export const AVAILABLE_PM_MODELS = [
 // in internal/models/agent_model_constants.go). Keep both in sync.
 export const LLM_MODELS_BY_PROVIDER: Record<string, { label: string; models: readonly string[] }> = {
   anthropic: { label: "Anthropic", models: ["claude-opus-4-6", "claude-sonnet-4-5", "claude-haiku-4-5"] },
-  openai: { label: "OpenAI", models: ["gpt-4o", "gpt-4o-mini", "o3-mini"] },
-  openrouter: { label: "OpenRouter", models: ["claude-opus-4-6", "claude-sonnet-4-5", "claude-haiku-4-5", "gpt-4o", "gpt-4o-mini", "o3-mini"] },
+  openai: { label: "OpenAI", models: ["gpt-4o", "gpt-4o-mini", "gpt-5.4-mini", "gpt-5-nano", "o3-mini"] },
+  openrouter: { label: "OpenRouter", models: ["claude-opus-4-6", "claude-sonnet-4-5", "claude-haiku-4-5", "gpt-4o", "gpt-4o-mini", "gpt-5.4-mini", "gpt-5-nano", "o3-mini"] },
 };
 
-export const DEFAULT_LLM_MODEL = "claude-sonnet-4-5";
+export const DEFAULT_LLM_MODEL = "gpt-5.4-mini";
 
 // OpenAI credential api_type value.
 export const OPENAI_API_TYPE_CHAT = "chat";

@@ -967,6 +967,50 @@ func TestIntegrationHandler_HandleGitHubOAuthCallback_TokenExchangeFails(t *test
 	require.Contains(t, w.Body.String(), "TOKEN_EXCHANGE_FAILED")
 }
 
+func TestIntegrationHandler_HandleGitHubOAuthCallback_DelegatesToAppInstalled(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now().UTC()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	handler := NewIntegrationHandler(
+		store, nil, "", "", "http://localhost:8080", "http://localhost:3000",
+		WithGitHubIntegrationOAuth("gh-id", "gh-secret"),
+	)
+
+	// When installation_id and setup_action=install are present, the callback
+	// handler should delegate to HandleGitHubAppInstalled instead of trying
+	// to exchange a code. Expect the ensureIntegration + UpdateConfig queries.
+	mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status = 'active'").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}))
+
+	mock.ExpectQuery("INSERT INTO integrations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
+
+	mock.ExpectExec("UPDATE integrations SET config").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/integrations/github/callback?code=some-code&installation_id=12345&setup_action=install&state=test-state", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.HandleGitHubOAuthCallback(w, req)
+
+	require.Equal(t, http.StatusTemporaryRedirect, w.Code)
+	require.Equal(t, "http://localhost:3000/integrations?github=connected", w.Header().Get("Location"))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestIntegrationHandler_ConnectGitHub_CreatesIntegration(t *testing.T) {
 	t.Parallel()
 
@@ -1228,4 +1272,144 @@ func TestValidateOAuthCallback(t *testing.T) {
 		require.Equal(t, http.StatusBadRequest, w.Code)
 		require.Contains(t, w.Body.String(), "MISSING_CODE")
 	})
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Notion connect (token-based)
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestIntegrationHandler_ConnectNotion_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now()
+
+	store := db.NewIntegrationStore(mock)
+	credentialStore := db.NewOrgCredentialStore(mock, nil)
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		require.Equal(t, "https://api.notion.com/v1/users/me", req.URL.String())
+		require.Equal(t, "Bearer ntn_test_token", req.Header.Get("Authorization"))
+		require.Equal(t, "2022-06-28", req.Header.Get("Notion-Version"))
+
+		respBody := `{"bot":{"workspace_name":"Test Workspace"}}`
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(bytes.NewBufferString(respBody)),
+		}, nil
+	})
+
+	handler := NewIntegrationHandler(
+		store, credentialStore, "", "", "http://localhost:8080", "http://localhost:3000",
+	)
+	handler.client = &http.Client{Transport: transport}
+
+	// Expect credential upsert.
+	mock.ExpectQuery("INSERT INTO org_credentials").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
+
+	// Expect integration check (none exists).
+	mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status = 'active'").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}))
+
+	// Expect integration creation.
+	mock.ExpectQuery("INSERT INTO integrations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
+
+	body := `{"access_token":"ntn_test_token"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/notion/connect", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.ConnectNotion(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code)
+	require.Contains(t, w.Body.String(), `"provider":"notion"`)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestIntegrationHandler_ConnectNotion_MissingToken(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+
+	body := `{"access_token":""}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/notion/connect", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.ConnectNotion(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "MISSING_TOKEN")
+}
+
+func TestIntegrationHandler_ConnectNotion_InvalidToken(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusUnauthorized,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(bytes.NewBufferString(`{"status":401,"code":"unauthorized"}`)),
+		}, nil
+	})
+
+	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+	handler.client = &http.Client{Transport: transport}
+
+	body := `{"access_token":"bad_token"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/notion/connect", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.ConnectNotion(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "INVALID_TOKEN")
+	require.Contains(t, w.Body.String(), "invalid or expired token")
+}
+
+func TestIntegrationHandler_ConnectNotion_InvalidJSON(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/notion/connect", bytes.NewBufferString("not json"))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.ConnectNotion(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "INVALID_JSON")
 }

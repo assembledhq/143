@@ -3,28 +3,34 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	"github.com/rs/zerolog"
 )
 
 type RepositoryHandler struct {
 	repoStore *db.RepositoryStore
+	prService *ghservice.PRService
 }
 
 func NewRepositoryHandler(repoStore *db.RepositoryStore) *RepositoryHandler {
 	return &RepositoryHandler{repoStore: repoStore}
 }
 
+func (h *RepositoryHandler) SetPRService(svc *ghservice.PRService) {
+	h.prService = svc
+}
+
 func (h *RepositoryHandler) List(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	repos, err := h.repoStore.ListByOrg(r.Context(), orgID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "failed to list repositories")
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list repositories", err)
 		return
 	}
 	if repos == nil {
@@ -37,13 +43,13 @@ func (h *RepositoryHandler) Get(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	repoID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid repository ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid repository ID")
 		return
 	}
 
 	repo, err := h.repoStore.GetByID(r.Context(), orgID, repoID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "repository not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "repository not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Repository]{Data: repo})
@@ -53,8 +59,7 @@ func (h *RepositoryHandler) Summary(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	dbSummaries, err := h.repoStore.GetSummary(r.Context(), orgID)
 	if err != nil {
-		zerolog.Ctx(r.Context()).Error().Err(err).Msg("failed to get repository summary")
-		writeError(w, http.StatusInternalServerError, "SUMMARY_FAILED", "failed to get repository summary")
+		writeError(w, r, http.StatusInternalServerError, "SUMMARY_FAILED", "failed to get repository summary", err)
 		return
 	}
 	summaries := make([]models.RepoSummary, len(dbSummaries))
@@ -74,7 +79,7 @@ func (h *RepositoryHandler) Update(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	repoID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid repository ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid repository ID")
 		return
 	}
 
@@ -83,13 +88,13 @@ func (h *RepositoryHandler) Update(w http.ResponseWriter, r *http.Request) {
 		Settings *json.RawMessage `json:"settings"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
 
 	repo, err := h.repoStore.GetByID(r.Context(), orgID, repoID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "repository not found")
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "repository not found")
 		return
 	}
 
@@ -100,12 +105,12 @@ func (h *RepositoryHandler) Update(w http.ResponseWriter, r *http.Request) {
 		// Validate PM settings if present.
 		repoSettings, parseErr := models.ParseRepoSettings(*req.Settings)
 		if parseErr != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_SETTINGS", "invalid settings JSON")
+			writeError(w, r, http.StatusBadRequest, "INVALID_SETTINGS", "invalid settings JSON")
 			return
 		}
 		if repoSettings.PM != nil {
 			if err := models.ValidateRepoPMSettings(*repoSettings.PM); err != nil {
-				writeError(w, http.StatusBadRequest, "INVALID_SETTINGS", err.Error())
+				writeError(w, r, http.StatusBadRequest, "INVALID_SETTINGS", err.Error())
 				return
 			}
 		}
@@ -113,7 +118,7 @@ func (h *RepositoryHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.repoStore.Update(r.Context(), &repo); err != nil {
-		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update repository")
+		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update repository", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Repository]{Data: repo})
@@ -123,13 +128,62 @@ func (h *RepositoryHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	repoID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid repository ID")
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid repository ID")
 		return
 	}
 
 	if err := h.repoStore.Delete(r.Context(), orgID, repoID); err != nil {
-		writeError(w, http.StatusInternalServerError, "DELETE_FAILED", "failed to delete repository")
+		writeError(w, r, http.StatusInternalServerError, "DELETE_FAILED", "failed to delete repository", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type branchResponse struct {
+	Name      string `json:"name"`
+	Protected bool   `json:"protected"`
+}
+
+func (h *RepositoryHandler) ListBranches(w http.ResponseWriter, r *http.Request) {
+	if h.prService == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "GITHUB_NOT_CONFIGURED", "GitHub App is not configured")
+		return
+	}
+
+	orgID := middleware.OrgIDFromContext(r.Context())
+	repoID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid repository ID")
+		return
+	}
+
+	repo, err := h.repoStore.GetByID(r.Context(), orgID, repoID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "repository not found")
+		return
+	}
+
+	parts := strings.SplitN(repo.FullName, "/", 2)
+	if len(parts) != 2 {
+		writeError(w, r, http.StatusInternalServerError, "INVALID_REPO", "invalid repository full name")
+		return
+	}
+
+	token, err := h.prService.GetInstallationToken(r.Context(), repo.InstallationID)
+	if err != nil {
+		writeError(w, r, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "failed to get GitHub token")
+		return
+	}
+
+	ghBranches, err := h.prService.ListBranches(r.Context(), token, parts[0], parts[1])
+	if err != nil {
+		writeError(w, r, http.StatusBadGateway, "GITHUB_API_FAILED", "failed to list branches from GitHub")
+		return
+	}
+
+	branches := make([]branchResponse, len(ghBranches))
+	for i, b := range ghBranches {
+		branches[i] = branchResponse{Name: b.Name, Protected: b.Protected}
+	}
+	writeJSON(w, http.StatusOK, models.ListResponse[branchResponse]{Data: branches})
 }

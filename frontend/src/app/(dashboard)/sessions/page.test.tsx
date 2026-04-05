@@ -1,10 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { renderWithProviders, screen } from '@/test/test-utils';
+
 import { server } from '@/test/mocks/server';
-import { mockSessions, mockMembers } from '@/test/mocks/handlers';
 import { SessionSidebar } from './session-sidebar';
-import type { Session, User, ListResponse } from '@/lib/types';
 
 // Mock next/link to render a plain anchor
 vi.mock('next/link', () => ({
@@ -65,10 +64,10 @@ describe('SessionSidebar', () => {
 
     await screen.findByText('Fixed TypeError by adding null check');
 
-    expect(screen.getByRole('button', { name: 'All' })).toBeInTheDocument();
-    expect(screen.getAllByText('Active').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByRole('tab', { name: 'All' })).toBeInTheDocument();
+    expect(screen.getAllByText('Needs attention').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('Working').length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText('Done').length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText('Failed').length).toBeGreaterThanOrEqual(1);
   });
 
   it('shows status indicators for sessions', async () => {
@@ -86,6 +85,7 @@ describe('SessionSidebar', () => {
 
     await screen.findByText('Fixed TypeError by adding null check');
 
+    // Search input is always visible
     expect(screen.getByPlaceholderText('Search sessions...')).toBeInTheDocument();
   });
 

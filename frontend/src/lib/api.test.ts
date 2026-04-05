@@ -718,6 +718,36 @@ describe('api client', () => {
     });
   });
 
+  describe('sessions - createPR', () => {
+    it('creates PR and returns queued status', async () => {
+      let capturedUrl: string | undefined;
+
+      server.use(
+        http.post('/api/v1/sessions/:id/pr', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ status: 'queued' }, { status: 202 });
+        }),
+      );
+
+      const result = await api.sessions.createPR('session-abc');
+      expect(result.status).toBe('queued');
+      expect(capturedUrl).toContain('/api/v1/sessions/session-abc/pr');
+    });
+
+    it('throws on conflict when PR already exists', async () => {
+      server.use(
+        http.post('/api/v1/sessions/:id/pr', () => {
+          return HttpResponse.json(
+            { error: { code: 'PR_EXISTS', message: 'a pull request already exists for this session' } },
+            { status: 409 },
+          );
+        }),
+      );
+
+      await expect(api.sessions.createPR('session-abc')).rejects.toThrow('a pull request already exists for this session');
+    });
+  });
+
   describe('issues - triggerFix', () => {
     it('triggers fix for an issue', async () => {
       let capturedBody: unknown;

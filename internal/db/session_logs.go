@@ -20,12 +20,13 @@ func NewSessionLogStore(db DBTX) *SessionLogStore {
 
 func (s *SessionLogStore) Create(ctx context.Context, log *models.SessionLog) error {
 	query := `
-		INSERT INTO session_logs (session_id, level, message, metadata, turn_number)
-		VALUES (@session_id, @level, @message, @metadata, @turn_number)
+		INSERT INTO session_logs (session_id, thread_id, level, message, metadata, turn_number)
+		VALUES (@session_id, @thread_id, @level, @message, @metadata, @turn_number)
 		RETURNING id, timestamp`
 
 	args := pgx.NamedArgs{
 		"session_id":  log.SessionID,
+		"thread_id":   log.ThreadID,
 		"level":       log.Level,
 		"message":     log.Message,
 		"metadata":    log.Metadata,
@@ -38,7 +39,7 @@ func (s *SessionLogStore) Create(ctx context.Context, log *models.SessionLog) er
 
 func (s *SessionLogStore) ListByRunID(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionLog, error) {
 	query := `
-		SELECT sl.id, sl.session_id, sl.timestamp, sl.level, sl.message, sl.metadata, sl.turn_number
+		SELECT sl.id, sl.session_id, sl.thread_id, sl.timestamp, sl.level, sl.message, sl.metadata, sl.turn_number
 		FROM session_logs sl
 		JOIN sessions s ON s.id = sl.session_id AND s.org_id = @org_id
 		WHERE sl.session_id = @session_id
@@ -56,7 +57,7 @@ func (s *SessionLogStore) ListByRunID(ctx context.Context, orgID, sessionID uuid
 
 func (s *SessionLogStore) ListByRunIDSince(ctx context.Context, orgID, sessionID uuid.UUID, sinceID int64) ([]models.SessionLog, error) {
 	query := `
-		SELECT sl.id, sl.session_id, sl.timestamp, sl.level, sl.message, sl.metadata, sl.turn_number
+		SELECT sl.id, sl.session_id, sl.thread_id, sl.timestamp, sl.level, sl.message, sl.metadata, sl.turn_number
 		FROM session_logs sl
 		JOIN sessions s ON s.id = sl.session_id AND s.org_id = @org_id
 		WHERE sl.session_id = @session_id AND sl.id > @since_id
@@ -71,4 +72,31 @@ func (s *SessionLogStore) ListByRunIDSince(ctx context.Context, orgID, sessionID
 		return nil, fmt.Errorf("query session logs since: %w", err)
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionLog])
+}
+
+func (s *SessionLogStore) ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error) {
+	query := `
+		SELECT sl.id, sl.session_id, sl.thread_id, sl.timestamp, sl.level, sl.message, sl.metadata, sl.turn_number
+		FROM session_logs sl
+		JOIN session_threads st ON st.id = sl.thread_id AND st.org_id = @org_id
+		WHERE sl.thread_id = @thread_id
+		ORDER BY sl.id ASC`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"thread_id": threadID,
+		"org_id":    orgID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query thread logs: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionLog])
+}
+
+// DeleteExpired removes session logs older than the given number of days.
+func (s *SessionLogStore) DeleteExpired(ctx context.Context, retentionDays int) (int64, error) {
+	var deleted int64
+	err := s.db.QueryRow(ctx,
+		"SELECT delete_expired_session_logs($1)", retentionDays,
+	).Scan(&deleted)
+	return deleted, err
 }
