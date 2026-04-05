@@ -245,6 +245,118 @@ func TestEvalTaskStore_Archive(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestEvalTaskStore_CountByIDs(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	taskIDs := []uuid.UUID{uuid.New(), uuid.New()}
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(2))
+
+	store := NewEvalTaskStore(mock)
+	count, err := store.CountByIDs(context.Background(), orgID, taskIDs)
+	require.NoError(t, err)
+	require.Equal(t, 2, count)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestEvalTaskStore_CountByOrg(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(7))
+
+	store := NewEvalTaskStore(mock)
+	count, err := store.CountByOrg(context.Background(), orgID)
+	require.NoError(t, err)
+	require.Equal(t, 7, count)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestEvalTaskStore_LatestRunScores(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns scores for tasks", func(t *testing.T) {
+		t.Parallel()
+
+		orgID := uuid.New()
+		taskID := uuid.New()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		score := 0.85
+		mock.ExpectQuery("SELECT DISTINCT ON").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"task_id", "final_score"}).AddRow(taskID, &score))
+
+		store := NewEvalTaskStore(mock)
+		scores, err := store.LatestRunScores(context.Background(), orgID, []uuid.UUID{taskID})
+		require.NoError(t, err)
+		require.Len(t, scores, 1)
+		require.NotNil(t, scores[taskID])
+		require.Equal(t, 0.85, *scores[taskID])
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns empty map for no task IDs", func(t *testing.T) {
+		t.Parallel()
+
+		store := NewEvalTaskStore(nil)
+		scores, err := store.LatestRunScores(context.Background(), uuid.New(), nil)
+		require.NoError(t, err)
+		require.Empty(t, scores)
+	})
+}
+
+func TestEvalTaskStore_RunCountByTask(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns counts", func(t *testing.T) {
+		t.Parallel()
+
+		orgID := uuid.New()
+		taskID := uuid.New()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		mock.ExpectQuery("SELECT task_id, COUNT").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"task_id", "count"}).AddRow(taskID, 3))
+
+		store := NewEvalTaskStore(mock)
+		counts, err := store.RunCountByTask(context.Background(), orgID, []uuid.UUID{taskID})
+		require.NoError(t, err)
+		require.Equal(t, 3, counts[taskID])
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns empty map for no task IDs", func(t *testing.T) {
+		t.Parallel()
+
+		store := NewEvalTaskStore(nil)
+		counts, err := store.RunCountByTask(context.Background(), uuid.New(), nil)
+		require.NoError(t, err)
+		require.Empty(t, counts)
+	})
+}
+
 func ptrTo[T any](v T) *T {
 	return &v
 }

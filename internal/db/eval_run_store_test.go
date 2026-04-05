@@ -190,6 +190,51 @@ func TestEvalRunStore_UpdateResult(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestEvalRunStore_ListByBatch(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	batchID := uuid.New()
+	runID := uuid.New()
+	taskID := uuid.New()
+	now := time.Now()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectQuery("SELECT .+ FROM eval_runs WHERE org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(evalRunTestColumns).AddRow(newEvalRunRow(runID, taskID, orgID, now)...))
+
+	store := NewEvalRunStore(mock)
+	runs, err := store.ListByBatch(context.Background(), orgID, batchID)
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+	require.Equal(t, runID, runs[0].ID)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestEvalRunStore_UpdateStatus(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectExec("UPDATE eval_runs SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	store := NewEvalRunStore(mock)
+	err = store.UpdateStatus(context.Background(), orgID, runID, models.EvalRunStatusRunning)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestEvalBatchStore_Create(t *testing.T) {
 	t.Parallel()
 
@@ -221,4 +266,96 @@ func TestEvalBatchStore_Create(t *testing.T) {
 	require.NoError(t, err, "Create should not return an error")
 	require.Equal(t, batchID, batch.ID, "Create should set the batch ID")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestEvalBatchStore_GetByID(t *testing.T) {
+	t.Parallel()
+
+	batchID := uuid.New()
+	orgID := uuid.New()
+	now := time.Now()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	batchColumns := []string{"id", "org_id", "name", "status", "task_count", "run_count", "created_by", "created_at", "completed_at"}
+	mock.ExpectQuery("SELECT .+ FROM eval_batches WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(batchColumns).AddRow(
+			batchID, orgID, "Test Batch", "pending", 2, 4, nil, now, nil,
+		))
+
+	store := NewEvalBatchStore(mock)
+	batch, err := store.GetByID(context.Background(), orgID, batchID)
+	require.NoError(t, err)
+	require.Equal(t, batchID, batch.ID)
+	require.Equal(t, "Test Batch", batch.Name)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestEvalBatchStore_ListByOrg(t *testing.T) {
+	t.Parallel()
+
+	batchID := uuid.New()
+	orgID := uuid.New()
+	now := time.Now()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	batchColumns := []string{"id", "org_id", "name", "status", "task_count", "run_count", "created_by", "created_at", "completed_at"}
+	mock.ExpectQuery("SELECT .+ FROM eval_batches WHERE org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(batchColumns).AddRow(
+			batchID, orgID, "Batch 1", "completed", 3, 6, nil, now, &now,
+		))
+
+	store := NewEvalBatchStore(mock)
+	batches, err := store.ListByOrg(context.Background(), orgID, 20)
+	require.NoError(t, err)
+	require.Len(t, batches, 1)
+	require.Equal(t, batchID, batches[0].ID)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestEvalBatchStore_CompleteBatchIfDone(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	batchID := uuid.New()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectExec("UPDATE eval_batches SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	store := NewEvalBatchStore(mock)
+	err = store.CompleteBatchIfDone(context.Background(), orgID, batchID)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestEvalBatchStore_UpdateStatus(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	batchID := uuid.New()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectExec("UPDATE eval_batches SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	store := NewEvalBatchStore(mock)
+	err = store.UpdateStatus(context.Background(), orgID, batchID, models.EvalBatchStatusRunning)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
 }
