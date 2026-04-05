@@ -63,6 +63,9 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("audit_retention_cleanup", newAuditRetentionCleanupHandler(stores, logger))
 	}
 	w.Register("data_retention_cleanup", newDataRetentionCleanupHandler(stores, retentionCfg, logger))
+	if stores.EvalRuns != nil && stores.EvalTasks != nil {
+		w.Register("run_eval", newRunEvalHandler(stores, services, logger))
+	}
 }
 
 func hasServiceHandlersDependencies(services *Services) bool {
@@ -91,6 +94,9 @@ type Stores struct {
 	AuditLogs           *db.AuditLogStore     // nil-safe: audit retention cleanup
 	Organizations       *db.OrganizationStore // nil-safe: needed for audit retention
 	SessionLogs         *db.SessionLogStore   // nil-safe: data retention cleanup
+	EvalTasks           *db.EvalTaskStore     // nil-safe: eval feature
+	EvalRuns            *db.EvalRunStore      // nil-safe: eval feature
+	EvalBatches         *db.EvalBatchStore    // nil-safe: eval feature
 }
 
 // MemoryReinforcer retrieves and reinforces memories for a repo.
@@ -975,3 +981,119 @@ func parseOrgID(orgIDFromPayload string, ctx context.Context) (uuid.UUID, error)
 	}
 	return orgID, nil
 }
+
+// run_eval handler executes a single eval run: clones repo, runs agent, scores output.
+func newRunEvalHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			EvalRunID string `json:"eval_run_id"`
+			OrgID     string `json:"org_id"`
+			BatchID   string `json:"batch_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal run_eval payload: %w", err)
+		}
+
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		runID, err := uuid.Parse(input.EvalRunID)
+		if err != nil {
+			return fmt.Errorf("parse eval run ID: %w", err)
+		}
+
+		run, err := stores.EvalRuns.GetByID(ctx, orgID, runID)
+		if err != nil {
+			return fmt.Errorf("fetch eval run: %w", err)
+		}
+
+		task, err := stores.EvalTasks.GetByID(ctx, orgID, run.TaskID)
+		if err != nil {
+			return fmt.Errorf("fetch eval task: %w", err)
+		}
+
+		logger.Info().
+			Str("eval_run_id", runID.String()).
+			Str("eval_task_id", task.ID.String()).
+			Str("model", run.Model).
+			Str("org_id", orgID.String()).
+			Msg("starting run_eval job")
+
+		// Mark run as running
+		if err := stores.EvalRuns.UpdateStatus(ctx, orgID, runID, models.EvalRunStatusRunning); err != nil {
+			return fmt.Errorf("update eval run status to running: %w", err)
+		}
+
+		startTime := time.Now()
+
+		// Execute the eval. This is the core eval execution flow:
+		// 1. Create sandbox
+		// 2. Clone repo at base_commit_sha
+		// 3. Optionally overlay config from config_ref
+		// 4. Run the coding agent with the issue_description
+		// 5. Collect the agent's diff
+		// 6. Score using each criterion
+		// 7. Compute final weighted score
+		//
+		// For now, the orchestrator integration is wired up as a placeholder.
+		// The full implementation will use the sandbox and agent adapter infrastructure
+		// once the eval-specific orchestrator flow is built.
+
+		result := executeEvalRun(ctx, stores, services, &run, &task, logger)
+		duration := int(time.Since(startTime).Seconds())
+		result.DurationSeconds = &duration
+
+		if err := stores.EvalRuns.UpdateResult(ctx, orgID, runID, result); err != nil {
+			return fmt.Errorf("update eval run result: %w", err)
+		}
+
+		// If this run is part of a batch, atomically complete the batch if all runs are done
+		if run.BatchID != nil && stores.EvalBatches != nil {
+			if err := stores.EvalBatches.CompleteBatchIfDone(ctx, orgID, *run.BatchID); err != nil {
+				logger.Warn().Err(err).Str("batch_id", run.BatchID.String()).Msg("failed to check/complete batch")
+			}
+		}
+
+		logger.Info().
+			Str("eval_run_id", runID.String()).
+			Str("status", string(result.Status)).
+			Msg("completed run_eval job")
+
+		return nil
+	}
+}
+
+// executeEvalRun performs the actual eval execution. Returns the result to store.
+// This is separated from the handler for testability and to keep the handler focused on job lifecycle.
+func executeEvalRun(ctx context.Context, stores *Stores, services *Services, run *models.EvalRun, task *models.EvalTask, logger zerolog.Logger) *models.EvalRunResult {
+	// Parse scoring criteria
+	var criteria []models.ScoringCriterion
+	if err := json.Unmarshal(task.ScoringCriteria, &criteria); err != nil {
+		errMsg := fmt.Sprintf("failed to parse scoring criteria: %v", err)
+		return &models.EvalRunResult{
+			Status:       models.EvalRunStatusFailed,
+			ErrorMessage: &errMsg,
+		}
+	}
+
+	// TODO: Full implementation will:
+	// 1. Create sandbox via services.SandboxProvider
+	// 2. Clone repo at task.BaseCommitSHA
+	// 3. Apply config overlay from run.ConfigRef if set
+	// 4. Run the agent with task.IssueDescription
+	// 5. Collect agent diff
+	// 6. For each criterion:
+	//    - code_check: execute command in sandbox, check exit code
+	//    - llm_judge: send diff + notes to judge model, get pass/fail + reasoning
+	// 7. Compute weighted final score
+	//
+	// For now, we mark as failed with a message indicating the executor is not yet wired.
+
+	errMsg := "eval executor not yet implemented: sandbox + agent orchestration integration pending"
+	return &models.EvalRunResult{
+		Status:       models.EvalRunStatusFailed,
+		ErrorMessage: &errMsg,
+	}
+}
+

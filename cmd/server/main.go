@@ -136,6 +136,9 @@ func main() {
 			AuditLogs:           auditLogStore,
 			Organizations:       orgStore,
 			SessionLogs:         sessionLogStore,
+			EvalTasks:           db.NewEvalTaskStore(pool),
+			EvalRuns:            db.NewEvalRunStore(pool),
+			EvalBatches:         db.NewEvalBatchStore(pool),
 		}
 
 		// Build Phase 3+ services if runtime dependencies are available.

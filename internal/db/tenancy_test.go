@@ -37,6 +37,9 @@ func TestMultiTenancyAudit(t *testing.T) {
 		"priority_scores",
 		"complexity_estimates",
 		"deploys",
+		"eval_tasks",
+		"eval_runs",
+		"eval_batches",
 	}
 
 	// Tables exempt from org_id requirement (global or no org_id column)
