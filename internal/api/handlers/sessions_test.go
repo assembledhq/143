@@ -815,7 +815,7 @@ func TestSessionHandler_GetPullRequest_Success(t *testing.T) {
 				"github_repo", "title", "body", "status", "review_status",
 				"merged_at", "created_at", "updated_at",
 			}).AddRow(
-				prID, runID, orgID, 42, "https://github.com/org/repo/pull/42",
+				prID, &runID, orgID, 42, "https://github.com/org/repo/pull/42",
 				"org/repo", "Fix bug", nil, "open", "pending",
 				nil, now, now,
 			),
@@ -1045,9 +1045,9 @@ func TestSessionHandler_GetLogs_Success(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM session_logs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "session_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}).
-				AddRow(int64(1), runID, nil, now, "info", "Starting agent", nil, nil).
-				AddRow(int64(2), runID, nil, now, "info", "Agent completed", nil, nil),
+			pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}).
+				AddRow(int64(1), runID, orgID, nil, now, "info", "Starting agent", nil, nil).
+				AddRow(int64(2), runID, orgID, nil, now, "info", "Agent completed", nil, nil),
 		)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+runID.String()+"/logs", nil)
@@ -1218,8 +1218,8 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM session_logs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "session_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}).
-				AddRow(int64(1), runID, nil, now, "info", "Done", nil, nil),
+			pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}).
+				AddRow(int64(1), runID, orgID, nil, now, "info", "Done", nil, nil),
 		)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+runID.String()+"/logs/stream", nil)
@@ -2557,7 +2557,7 @@ func TestSessionHandler_CreatePR_AlreadyExists(t *testing.T) {
 				"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
 				"title", "body", "status", "review_status", "merged_at", "created_at", "updated_at",
 			}).AddRow(
-				prID, sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "org/repo",
+				prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "org/repo",
 				"Fix bug", (*string)(nil), "open", "pending", (*time.Time)(nil), now, now,
 			),
 		)
