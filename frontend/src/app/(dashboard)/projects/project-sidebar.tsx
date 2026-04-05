@@ -9,9 +9,11 @@ import { useQueryState, parseAsString } from "nuqs";
 import { cn, formatTimeAgo } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Separator } from "@/components/ui/separator";
 import { api } from "@/lib/api";
 import { projectStatusConfig, projectStatusDotColor } from "@/lib/types";
 import type { Project } from "@/lib/types";
+import { ProposalInbox } from "@/components/proposal-inbox";
 
 const filterTabs = [
   { value: "all", label: "All" },
@@ -52,7 +54,15 @@ export function ProjectSidebar() {
     refetchInterval: 10000,
   });
 
-  const allProjects = useMemo(() => data?.data ?? [], [data?.data]);
+  const { proposals, allProjects } = useMemo(() => {
+    const raw = data?.data ?? [];
+    const props: Project[] = [];
+    const rest: Project[] = [];
+    for (const p of raw) {
+      (p.status === "proposed" ? props : rest).push(p);
+    }
+    return { proposals: props, allProjects: rest };
+  }, [data?.data]);
   const currentFilter = activeFilter ?? "all";
 
   const activeCount = allProjects.filter(isActive).length;
@@ -136,6 +146,16 @@ export function ProjectSidebar() {
 
       {/* Project list */}
       <div className="flex-1 overflow-y-auto px-2 pb-2">
+        {/* Proposal inbox */}
+        {proposals.length > 0 && (
+          <>
+            <div className="px-1 py-2">
+              <ProposalInbox proposals={proposals} />
+            </div>
+            <Separator className="my-2" />
+          </>
+        )}
+
         {/* Ghost "New project" entry when creating */}
         {isNewProject && (
           <Link

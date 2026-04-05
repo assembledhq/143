@@ -401,7 +401,9 @@ export const api = {
     pause: (id: string) => post(`/api/v1/projects/${id}/pause`),
     resume: (id: string) => post(`/api/v1/projects/${id}/resume`),
     approve: (id: string) => post(`/api/v1/projects/${id}/approve`),
-    dismiss: (id: string) => post(`/api/v1/projects/${id}/dismiss`),
+    dismiss: (id: string, reason?: string) => post(`/api/v1/projects/${id}/dismiss`, reason ? { reason } : undefined),
+    proposalSummary: () =>
+      get<import('./types').SingleResponse<import('./types').ProposalSummary>>('/api/v1/projects/proposals/summary'),
     runNow: (id: string) => post<import('./types').SingleResponse<{ job_id: string }>>(`/api/v1/projects/${id}/run`),
     createTask: (projectId: string, body: { title: string; description?: string; approach?: string }) =>
       post<import('./types').SingleResponse<import('./types').ProjectTask>>(`/api/v1/projects/${projectId}/tasks`, body),

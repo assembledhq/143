@@ -481,7 +481,50 @@ func (h *ProjectHandler) Approve(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *ProjectHandler) Dismiss(w http.ResponseWriter, r *http.Request) {
-	h.transitionStatus(w, r, models.ProjectStatusCancelled)
+	orgID := middleware.OrgIDFromContext(r.Context())
+	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		return
+	}
+
+	project, err := h.projectStore.GetByID(r.Context(), orgID, projectID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "project not found")
+		return
+	}
+
+	if !validStatusTransition(project.Status, models.ProjectStatusCancelled) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_TRANSITION", "invalid status transition")
+		return
+	}
+
+	// Parse optional reason from body.
+	var req struct {
+		Reason *string `json:"reason,omitempty"`
+	}
+	// Body is optional, but if present it must be valid JSON.
+	if r.ContentLength > 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+			return
+		}
+	}
+
+	if err := h.projectStore.UpdateStatus(r.Context(), orgID, projectID, string(models.ProjectStatusCancelled)); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update project status", err)
+		return
+	}
+
+	dismissProjIDStr := projectID.String()
+	var details json.RawMessage
+	if req.Reason != nil && *req.Reason != "" {
+		details, _ = json.Marshal(map[string]any{"reason": *req.Reason})
+	}
+	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectDismissed, models.AuditResourceProject, &dismissProjIDStr, nil, &projectID, details)
+
+	project.Status = models.ProjectStatusCancelled
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.Project]{Data: project})
 }
 
 // RunNow enqueues an immediate project_cycle job for the project.
@@ -670,11 +713,30 @@ func (h *ProjectHandler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		Approach     *string `json:"approach"`
 		Status       *string `json:"status"`
 		OutcomeNotes *string `json:"outcome_notes"`
+		Complexity   *string `json:"complexity"`
+		Confidence   *string `json:"confidence"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
+	}
+
+	// Seed-task metadata (title, description, approach, complexity, confidence)
+	// can only be edited while the parent project is proposed or draft.
+	// Only fetch the parent project when seed fields are actually being modified.
+	seedFieldsModified := req.Title != nil || req.Description != nil || req.Approach != nil || req.Complexity != nil || req.Confidence != nil
+	if seedFieldsModified {
+		project, err := h.projectStore.GetByID(r.Context(), orgID, projectID)
+		if err != nil {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "project not found")
+			return
+		}
+		if project.Status != models.ProjectStatusProposed && project.Status != models.ProjectStatusDraft {
+			writeError(w, r, http.StatusConflict, "PROJECT_NOT_EDITABLE",
+				"task metadata can only be edited while the project is in proposed or draft status")
+			return
+		}
 	}
 
 	if req.Title != nil {
@@ -685,6 +747,12 @@ func (h *ProjectHandler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Approach != nil {
 		task.Approach = req.Approach
+	}
+	if req.Complexity != nil {
+		task.Complexity = req.Complexity
+	}
+	if req.Confidence != nil {
+		task.Confidence = req.Confidence
 	}
 	if req.Status != nil {
 		newStatus := models.ProjectTaskStatus(*req.Status)
@@ -839,4 +907,22 @@ func (h *ProjectHandler) GetCycle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.ProjectCycle]{Data: cycle})
+}
+
+// ProposalSummary returns a count of open project proposals for the org.
+// GET /api/v1/projects/proposals/summary
+func (h *ProjectHandler) ProposalSummary(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+
+	count, err := h.projectStore.CountByOrgStatus(r.Context(), orgID, []string{"proposed"})
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "COUNT_FAILED", "failed to count proposals", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": map[string]int{
+			"count": count,
+		},
+	})
 }

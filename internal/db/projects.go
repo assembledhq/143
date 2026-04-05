@@ -32,7 +32,7 @@ const projectColumns = `id, org_id, repository_id, title, goal, scope, completio
 	status, priority, execution_mode, max_concurrent, auto_merge, base_branch,
 	current_phase, lessons_learned, approach_history,
 	total_tasks, completed_tasks, failed_tasks,
-	proposed_by_pm, source_issue_ids, proposal_reasoning,
+	proposed_by_pm, source_issue_ids, proposal_reasoning, similar_projects,
 	agent_type, model_override,
 	schedule_enabled, schedule_interval, schedule_unit, next_run_at,
 	created_by, created_at, updated_at, completed_at`
@@ -47,7 +47,7 @@ func scanProject(row pgx.Row) (models.Project, error) {
 		&p.Status, &p.Priority, &p.ExecutionMode, &p.MaxConcurrent, &p.AutoMerge, &p.BaseBranch,
 		&p.CurrentPhase, &lessonsRaw, &approachRaw,
 		&p.TotalTasks, &p.CompletedTasks, &p.FailedTasks,
-		&p.ProposedByPM, &sourceIssueIDs, &p.ProposalReasoning,
+		&p.ProposedByPM, &sourceIssueIDs, &p.ProposalReasoning, &p.SimilarProjects,
 		&p.AgentType, &p.ModelOverride,
 		&p.ScheduleEnabled, &p.ScheduleInterval, &p.ScheduleUnit, &p.NextRunAt,
 		&p.CreatedBy, &p.CreatedAt, &p.UpdatedAt, &p.CompletedAt,
@@ -83,7 +83,7 @@ func scanProjects(rows pgx.Rows) ([]models.Project, error) {
 			&p.Status, &p.Priority, &p.ExecutionMode, &p.MaxConcurrent, &p.AutoMerge, &p.BaseBranch,
 			&p.CurrentPhase, &lessonsRaw, &approachRaw,
 			&p.TotalTasks, &p.CompletedTasks, &p.FailedTasks,
-			&p.ProposedByPM, &sourceIssueIDs, &p.ProposalReasoning,
+			&p.ProposedByPM, &sourceIssueIDs, &p.ProposalReasoning, &p.SimilarProjects,
 			&p.AgentType, &p.ModelOverride,
 			&p.ScheduleEnabled, &p.ScheduleInterval, &p.ScheduleUnit, &p.NextRunAt,
 			&p.CreatedBy, &p.CreatedAt, &p.UpdatedAt, &p.CompletedAt,
@@ -121,13 +121,17 @@ func (s *ProjectStore) Create(ctx context.Context, p *models.Project) error {
 	if err != nil || p.ApproachHistory == nil {
 		approachJSON = []byte("[]")
 	}
+	similarJSON := p.SimilarProjects
+	if len(similarJSON) == 0 {
+		similarJSON = []byte("[]")
+	}
 
 	query := `
 		INSERT INTO projects (
 			org_id, repository_id, title, goal, scope, completion_criteria,
 			status, priority, execution_mode, max_concurrent, auto_merge, base_branch,
 			current_phase, lessons_learned, approach_history,
-			proposed_by_pm, source_issue_ids, proposal_reasoning, created_by,
+			proposed_by_pm, source_issue_ids, proposal_reasoning, similar_projects, created_by,
 			agent_type, model_override,
 			schedule_enabled, schedule_interval, schedule_unit, next_run_at
 		)
@@ -135,7 +139,7 @@ func (s *ProjectStore) Create(ctx context.Context, p *models.Project) error {
 			@org_id, @repository_id, @title, @goal, @scope, @completion_criteria,
 			@status, @priority, @execution_mode, @max_concurrent, @auto_merge, @base_branch,
 			@current_phase, @lessons_learned, @approach_history,
-			@proposed_by_pm, @source_issue_ids, @proposal_reasoning, @created_by,
+			@proposed_by_pm, @source_issue_ids, @proposal_reasoning, @similar_projects, @created_by,
 			@agent_type, @model_override,
 			@schedule_enabled, @schedule_interval, @schedule_unit, @next_run_at
 		)
@@ -160,6 +164,7 @@ func (s *ProjectStore) Create(ctx context.Context, p *models.Project) error {
 		"proposed_by_pm":      p.ProposedByPM,
 		"source_issue_ids":    p.SourceIssueIDs,
 		"proposal_reasoning":  p.ProposalReasoning,
+		"similar_projects":    similarJSON,
 		"created_by":          p.CreatedBy,
 		"agent_type":          p.AgentType,
 		"model_override":      p.ModelOverride,
@@ -239,6 +244,10 @@ func (s *ProjectStore) Update(ctx context.Context, p *models.Project) error {
 	if err != nil || p.ApproachHistory == nil {
 		approachJSON = []byte("[]")
 	}
+	similarJSON := p.SimilarProjects
+	if len(similarJSON) == 0 {
+		similarJSON = []byte("[]")
+	}
 
 	query := `
 		UPDATE projects SET
@@ -247,6 +256,7 @@ func (s *ProjectStore) Update(ctx context.Context, p *models.Project) error {
 			max_concurrent = @max_concurrent, auto_merge = @auto_merge, base_branch = @base_branch,
 			current_phase = @current_phase, lessons_learned = @lessons_learned,
 			approach_history = @approach_history,
+			similar_projects = @similar_projects,
 			total_tasks = @total_tasks, completed_tasks = @completed_tasks, failed_tasks = @failed_tasks,
 			schedule_enabled = @schedule_enabled, schedule_interval = @schedule_interval,
 			schedule_unit = @schedule_unit, next_run_at = @next_run_at,
@@ -269,6 +279,7 @@ func (s *ProjectStore) Update(ctx context.Context, p *models.Project) error {
 		"current_phase":       p.CurrentPhase,
 		"lessons_learned":     lessonsJSON,
 		"approach_history":    approachJSON,
+		"similar_projects":    similarJSON,
 		"total_tasks":         p.TotalTasks,
 		"completed_tasks":     p.CompletedTasks,
 		"failed_tasks":        p.FailedTasks,
@@ -336,4 +347,42 @@ func (s *ProjectStore) UpdateStatus(ctx context.Context, orgID, projectID uuid.U
 		"status": status,
 	})
 	return err
+}
+
+// CountByOrgStatus counts projects matching the given org and statuses (across all repos).
+func (s *ProjectStore) CountByOrgStatus(ctx context.Context, orgID uuid.UUID, statuses []string) (int, error) {
+	query := `SELECT count(*) FROM projects WHERE org_id = @org_id AND status = ANY(@statuses)`
+	var count int
+	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"org_id":   orgID,
+		"statuses": statuses,
+	}).Scan(&count)
+	return count, err
+}
+
+// CountByOrgRepoStatus counts projects matching the given org, repo, and statuses.
+func (s *ProjectStore) CountByOrgRepoStatus(ctx context.Context, orgID, repoID uuid.UUID, statuses []string) (int, error) {
+	query := `SELECT count(*) FROM projects WHERE org_id = @org_id AND repository_id = @repo_id AND status = ANY(@statuses)`
+	var count int
+	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"org_id":   orgID,
+		"repo_id":  repoID,
+		"statuses": statuses,
+	}).Scan(&count)
+	return count, err
+}
+
+// ListByOrgRepoStatuses returns projects matching the given org, repo, and statuses.
+func (s *ProjectStore) ListByOrgRepoStatuses(ctx context.Context, orgID, repoID uuid.UUID, statuses []string) ([]models.Project, error) {
+	query := fmt.Sprintf(`SELECT %s FROM projects WHERE org_id = @org_id AND repository_id = @repo_id AND status = ANY(@statuses) ORDER BY priority ASC, created_at DESC`, projectColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":   orgID,
+		"repo_id":  repoID,
+		"statuses": statuses,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query projects by repo/statuses: %w", err)
+	}
+	defer rows.Close()
+	return scanProjects(rows)
 }

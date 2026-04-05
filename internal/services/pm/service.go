@@ -288,7 +288,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	if s.internalAPIURL != "" && s.internalAPISecret != "" {
 		// Token TTL extends past sandbox timeout to avoid mid-execution expiry.
 		tokenTTL := sbCfg.Timeout + 5*time.Minute
-		internalToken, tokenErr := auth.GenerateInternalToken(s.internalAPISecret, orgID, tokenTTL)
+		internalToken, tokenErr := auth.GenerateInternalToken(s.internalAPISecret, orgID, repo.ID, tokenTTL)
 		if tokenErr != nil {
 			s.logger.Warn().Err(tokenErr).Msg("failed to generate internal API token — issue creation will be unavailable")
 		} else {

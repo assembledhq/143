@@ -27,7 +27,7 @@ func projectColumns() []string {
 		"status", "priority", "execution_mode", "max_concurrent", "auto_merge", "base_branch",
 		"current_phase", "lessons_learned", "approach_history",
 		"total_tasks", "completed_tasks", "failed_tasks",
-		"proposed_by_pm", "source_issue_ids", "proposal_reasoning",
+		"proposed_by_pm", "source_issue_ids", "proposal_reasoning", "similar_projects",
 		"agent_type", "model_override",
 		"schedule_enabled", "schedule_interval", "schedule_unit", "next_run_at",
 		"created_by", "created_at", "updated_at", "completed_at",
@@ -41,7 +41,7 @@ func newProjectRow(id, orgID, repoID uuid.UUID, status models.ProjectStatus, now
 		status, 50, models.ProjectExecModeSequential, 1, false, "main",
 		nil, []byte("[]"), []byte("[]"),
 		0, 0, 0,
-		false, []uuid.UUID{}, nil,
+		false, []uuid.UUID{}, nil, json.RawMessage("[]"),
 		nil, nil, // agent_type, model_override
 		false, 1, "days", nil, // schedule_enabled, schedule_interval, schedule_unit, next_run_at
 		&createdBy, now, now, nil,
@@ -213,14 +213,14 @@ func TestProjectHandler_Update(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, repoID, models.ProjectStatusDraft, now)...))
 
-	// Update (23 named args: 19 original + 4 schedule fields)
+	// Update (24 named args: 19 original + 4 schedule fields + similar_projects)
 	mock.ExpectExec("UPDATE projects SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	body, _ := json.Marshal(map[string]string{"title": "Updated Title"})
@@ -441,6 +441,11 @@ func TestProjectHandler_UpdateTask_Success(t *testing.T) {
 				AddRow(newProjectTaskHandlerRow(taskID, projectID, orgID, models.ProjectTaskStatusPending, now)...),
 		)
 
+	// GetByID for parent project (seed field guard: title is a seed field)
+	mock.ExpectQuery("SELECT .+ FROM projects WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, uuid.New(), models.ProjectStatusDraft, now)...))
+
 	// Update task
 	mock.ExpectExec("UPDATE project_tasks SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -554,7 +559,7 @@ func TestProjectHandler_Create(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
 
 	body, _ := json.Marshal(map[string]string{

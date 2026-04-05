@@ -201,7 +201,7 @@ func TestCreateIssueResponse_JSON(t *testing.T) {
 
 func validToken(t *testing.T, secret string) string {
 	t.Helper()
-	token, err := auth.GenerateInternalToken(secret, uuid.New(), 5*time.Minute)
+	token, err := auth.GenerateInternalToken(secret, uuid.New(), uuid.New(), 5*time.Minute)
 	require.NoError(t, err)
 	return token
 }
