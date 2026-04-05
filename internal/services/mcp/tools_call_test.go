@@ -112,6 +112,7 @@ func buildFullTestRegistry() *integration.Registry {
 	reg.RegisterDocumentStore(&mockDocumentStore{name: "notion"})
 	reg.RegisterMessageSource(&mockMessageSource{name: "slack"})
 	reg.RegisterIssueCreator(&mockIssueCreator{name: "issue"})
+	reg.RegisterProjectProposer(&mockProjectProposer{name: "project"})
 	return reg
 }
 
@@ -401,13 +402,13 @@ func TestListToolsAllIntegrations(t *testing.T) {
 	tr := NewToolRegistry(buildFullTestRegistry())
 	tools := tr.ListTools()
 
-	// 4 error tracker + 5 task manager + 2 document store + 2 code review + 2 message source + 1 issue creator = 16
-	if len(tools) != 16 {
+	// 4 error tracker + 5 task manager + 2 document store + 2 code review + 2 message source + 1 issue creator + 1 project proposer = 17
+	if len(tools) != 17 {
 		names := make([]string, len(tools))
 		for i, tool := range tools {
 			names[i] = tool.Name
 		}
-		t.Fatalf("expected 16 tools, got %d: %v", len(tools), names)
+		t.Fatalf("expected 17 tools, got %d: %v", len(tools), names)
 	}
 
 	expected := map[string]bool{
@@ -418,6 +419,7 @@ func TestListToolsAllIntegrations(t *testing.T) {
 		"slack_search_messages":   false,
 		"slack_get_thread":        false,
 		"issue_create":            false,
+		"project_propose":         false,
 	}
 	for _, tool := range tools {
 		if _, ok := expected[tool.Name]; ok {
@@ -530,19 +532,13 @@ func (m *mockProjectProposer) ProposeProject(_ context.Context, params integrati
 	}, nil
 }
 
-func buildFullTestRegistryWithProposer() *integration.Registry {
-	reg := buildFullTestRegistry()
-	reg.RegisterProjectProposer(&mockProjectProposer{name: "project"})
-	return reg
-}
-
 // --------------------------------------------------------------------------
 // Tests: ProjectProposer dispatch (callProjectProposer)
 // --------------------------------------------------------------------------
 
 func TestCallToolProjectProposerPropose(t *testing.T) {
 	t.Parallel()
-	tr := NewToolRegistry(buildFullTestRegistryWithProposer())
+	tr := NewToolRegistry(buildFullTestRegistry())
 	args := `{"repository_id":"repo-1","title":"New feature","goal":"Ship it","reasoning":"Users want it"}`
 	result := tr.CallTool(context.Background(), "project_propose", json.RawMessage(args))
 
@@ -561,7 +557,7 @@ func TestCallToolProjectProposerPropose(t *testing.T) {
 
 func TestCallToolProjectProposerPropose_WithOptionalFields(t *testing.T) {
 	t.Parallel()
-	tr := NewToolRegistry(buildFullTestRegistryWithProposer())
+	tr := NewToolRegistry(buildFullTestRegistry())
 	args := `{
 		"repository_id":"repo-1",
 		"title":"New feature",
@@ -589,7 +585,7 @@ func TestCallToolProjectProposerPropose_WithOptionalFields(t *testing.T) {
 
 func TestCallToolProjectProposerPropose_MissingRequired(t *testing.T) {
 	t.Parallel()
-	tr := NewToolRegistry(buildFullTestRegistryWithProposer())
+	tr := NewToolRegistry(buildFullTestRegistry())
 
 	tests := []struct {
 		name string
@@ -618,7 +614,7 @@ func TestCallToolProjectProposerPropose_MissingRequired(t *testing.T) {
 
 func TestCallToolProjectProposerPropose_BadJSON(t *testing.T) {
 	t.Parallel()
-	tr := NewToolRegistry(buildFullTestRegistryWithProposer())
+	tr := NewToolRegistry(buildFullTestRegistry())
 	result := tr.CallTool(context.Background(), "project_propose", json.RawMessage(`{bad`))
 
 	if !result.IsError {
@@ -628,7 +624,7 @@ func TestCallToolProjectProposerPropose_BadJSON(t *testing.T) {
 
 func TestCallToolProjectProposerPropose_BadTasksJSON(t *testing.T) {
 	t.Parallel()
-	tr := NewToolRegistry(buildFullTestRegistryWithProposer())
+	tr := NewToolRegistry(buildFullTestRegistry())
 	args := `{"repository_id":"r","title":"t","goal":"g","reasoning":"r","tasks":"not-json"}`
 	result := tr.CallTool(context.Background(), "project_propose", json.RawMessage(args))
 
@@ -642,7 +638,7 @@ func TestCallToolProjectProposerPropose_BadTasksJSON(t *testing.T) {
 
 func TestCallToolProjectProposerUnknownMethod(t *testing.T) {
 	t.Parallel()
-	tr := NewToolRegistry(buildFullTestRegistryWithProposer())
+	tr := NewToolRegistry(buildFullTestRegistry())
 	result := tr.CallTool(context.Background(), "project_unknown", json.RawMessage(`{}`))
 
 	if !result.IsError {
@@ -655,7 +651,7 @@ func TestCallToolProjectProposerUnknownMethod(t *testing.T) {
 
 func TestListToolsIncludesProjectProposer(t *testing.T) {
 	t.Parallel()
-	tr := NewToolRegistry(buildFullTestRegistryWithProposer())
+	tr := NewToolRegistry(buildFullTestRegistry())
 	tools := tr.ListTools()
 
 	found := false

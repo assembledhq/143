@@ -5,6 +5,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
+
+	"github.com/assembledhq/143/internal/version"
 )
 
 type HealthHandler struct {
@@ -18,6 +20,13 @@ func NewHealthHandler(pool *pgxpool.Pool) *HealthHandler {
 func (h *HealthHandler) Healthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
+
+// Version returns the server deploy SHA and build metadata.
+func (h *HealthHandler) Version(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{
+		"deploy_sha": version.BuildSHA,
+	})
 }
 
 func (h *HealthHandler) Readyz(w http.ResponseWriter, r *http.Request) {

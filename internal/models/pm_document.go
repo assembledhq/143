@@ -28,9 +28,28 @@ type PMDocument struct {
 	SourceMeta   json.RawMessage `db:"source_meta" json:"source_meta,omitempty"`
 	LastSyncedAt *time.Time      `db:"last_synced_at" json:"last_synced_at,omitempty"`
 
+	// Insert-only versioning fields (same pattern as memories).
+	Active      bool      `db:"active" json:"active"`
+	LogicalID   uuid.UUID `db:"logical_id" json:"logical_id"`
+	ContentHash string    `db:"content_hash" json:"content_hash"`
+
 	CreatedBy *uuid.UUID `db:"created_by" json:"created_by,omitempty"`
 	CreatedAt time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt time.Time  `db:"updated_at" json:"updated_at"`
+}
+
+// PMDocumentSetPin is a lightweight snapshot of which document versions were
+// active at a point in time. Referenced by pm_plans and eval_tasks.
+type PMDocumentSetPin struct {
+	ID        uuid.UUID `db:"id" json:"id"`
+	OrgID     uuid.UUID `db:"org_id" json:"org_id"`
+	CreatedAt time.Time `db:"created_at" json:"created_at"`
+}
+
+// PMDocumentSetPinMember links a pin to a specific document version row.
+type PMDocumentSetPinMember struct {
+	PinID      uuid.UUID `db:"pin_id" json:"pin_id"`
+	DocumentID uuid.UUID `db:"document_id" json:"document_id"`
 }
 
 // Common doc types for PM documents.

@@ -239,9 +239,14 @@ func (h *InternalProjectHandler) Propose(w http.ResponseWriter, r *http.Request)
 	}
 
 	// 8. Marshal similar projects metadata.
-	similarJSON, err := json.Marshal(dedupResult.SimilarProjects)
-	if err != nil || dedupResult.SimilarProjects == nil {
-		similarJSON = []byte("[]")
+	similarProjects := dedupResult.SimilarProjects
+	if similarProjects == nil {
+		similarProjects = []pm.SimilarProject{}
+	}
+	similarJSON, err := json.Marshal(similarProjects)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "MARSHAL_FAILED", "failed to marshal similar projects", err)
+		return
 	}
 
 	// 9. Set priority default.
@@ -347,8 +352,9 @@ func hashTokenForProjects(token string) string {
 }
 
 // repoAdvisoryLockKey derives a stable int64 advisory lock key from a repo UUID.
-// We use the first 8 bytes of the UUID interpreted as int64.
-// The overflow is intentional — we only need a deterministic key, not a meaningful number.
+// We use the first 8 bytes of the UUID interpreted as int64. The uint64→int64
+// cast may overflow, which is acceptable — we only need a deterministic key,
+// not a semantically meaningful number.
 func repoAdvisoryLockKey(repoID uuid.UUID) int64 {
 	return int64(binary.BigEndian.Uint64(repoID[:8])) // #nosec G115
 }

@@ -145,8 +145,9 @@ type Session struct {
 	// DiffHistory is only populated on single-session fetches (GetByID, ClaimIdle, etc.).
 	// List queries return NULL to avoid multi-megabyte payloads — do not rely on this
 	// field being non-nil unless the session was fetched individually.
-	DiffHistory json.RawMessage `db:"diff_history" json:"diff_history,omitempty"`
-	CreatedAt            time.Time       `db:"created_at" json:"created_at"`
+	DiffHistory   json.RawMessage `db:"diff_history" json:"diff_history,omitempty"`
+	InputManifest json.RawMessage `db:"input_manifest" json:"input_manifest,omitempty"`
+	CreatedAt     time.Time       `db:"created_at" json:"created_at"`
 }
 
 // SessionDetail is the API response for a single session, enriched with threads.
