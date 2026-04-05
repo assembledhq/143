@@ -290,6 +290,186 @@ func TestSplitCommaSeparated(t *testing.T) {
 	}
 }
 
+// --------------------------------------------------------------------------
+// Additional error tracker dispatch tests
+// --------------------------------------------------------------------------
+
+func TestCallToolErrorTrackerFindRelated(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildTestRegistry())
+	args := `{"error_id":"789"}`
+	result := tr.CallTool(context.Background(), "sentry_find_related_errors", json.RawMessage(args))
+
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+
+	var related []integration.ErrorSummary
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &related); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if len(related) != 1 {
+		t.Fatalf("expected 1 related error, got %d", len(related))
+	}
+}
+
+func TestCallToolErrorTrackerFindRelated_BadJSON(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildTestRegistry())
+	result := tr.CallTool(context.Background(), "sentry_find_related_errors", json.RawMessage(`bad`))
+	if !result.IsError {
+		t.Fatal("expected error for bad JSON")
+	}
+}
+
+func TestCallToolErrorTrackerGetError_BadJSON(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildTestRegistry())
+	result := tr.CallTool(context.Background(), "sentry_get_error", json.RawMessage(`bad`))
+	if !result.IsError {
+		t.Fatal("expected error for bad JSON")
+	}
+}
+
+func TestCallToolErrorTrackerGetTrend_BadJSON(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildTestRegistry())
+	result := tr.CallTool(context.Background(), "sentry_get_error_trend", json.RawMessage(`bad`))
+	if !result.IsError {
+		t.Fatal("expected error for bad JSON")
+	}
+}
+
+func TestCallToolErrorTrackerListErrors_BadJSON(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildTestRegistry())
+	result := tr.CallTool(context.Background(), "sentry_list_errors", json.RawMessage(`bad`))
+	if !result.IsError {
+		t.Fatal("expected error for bad JSON")
+	}
+}
+
+func TestCallToolErrorTrackerUnknownMethod(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildTestRegistry())
+	result := tr.CallTool(context.Background(), "sentry_unknown_method", json.RawMessage(`{}`))
+	if !result.IsError {
+		t.Fatal("expected error for unknown method")
+	}
+	if !strings.Contains(result.Content[0].Text, "unknown error tracker method") {
+		t.Errorf("expected 'unknown error tracker method', got: %s", result.Content[0].Text)
+	}
+}
+
+// --------------------------------------------------------------------------
+// Additional task manager dispatch tests
+// --------------------------------------------------------------------------
+
+func TestCallToolTaskManagerListTasks(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildTestRegistry())
+	args := `{"team":"ENG","states":["backlog"],"limit":5}`
+	result := tr.CallTool(context.Background(), "linear_list_tasks", json.RawMessage(args))
+
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+
+	var tasks []integration.TaskSummary
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &tasks); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(tasks))
+	}
+}
+
+func TestCallToolTaskManagerListTasks_BadJSON(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildTestRegistry())
+	result := tr.CallTool(context.Background(), "linear_list_tasks", json.RawMessage(`bad`))
+	if !result.IsError {
+		t.Fatal("expected error for bad JSON")
+	}
+}
+
+func TestCallToolTaskManagerGetTask(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildTestRegistry())
+	args := `{"task_id":"t1"}`
+	result := tr.CallTool(context.Background(), "linear_get_task", json.RawMessage(args))
+
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+
+	var task integration.TaskDetail
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &task); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if task.ID != "t1" {
+		t.Errorf("id = %q, want %q", task.ID, "t1")
+	}
+}
+
+func TestCallToolTaskManagerGetTask_BadJSON(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildTestRegistry())
+	result := tr.CallTool(context.Background(), "linear_get_task", json.RawMessage(`bad`))
+	if !result.IsError {
+		t.Fatal("expected error for bad JSON")
+	}
+}
+
+func TestCallToolTaskManagerFindRelated(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildTestRegistry())
+	args := `{"task_id":"t1"}`
+	result := tr.CallTool(context.Background(), "linear_find_related_tasks", json.RawMessage(args))
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+}
+
+func TestCallToolTaskManagerFindRelated_BadJSON(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildTestRegistry())
+	result := tr.CallTool(context.Background(), "linear_find_related_tasks", json.RawMessage(`bad`))
+	if !result.IsError {
+		t.Fatal("expected error for bad JSON")
+	}
+}
+
+func TestCallToolTaskManagerUpdateTask_BadJSON(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildTestRegistry())
+	result := tr.CallTool(context.Background(), "linear_update_task", json.RawMessage(`bad`))
+	if !result.IsError {
+		t.Fatal("expected error for bad JSON")
+	}
+}
+
+func TestCallToolTaskManagerCreateTask_BadJSON(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildTestRegistry())
+	result := tr.CallTool(context.Background(), "linear_create_task", json.RawMessage(`bad`))
+	if !result.IsError {
+		t.Fatal("expected error for bad JSON")
+	}
+}
+
+func TestCallToolTaskManagerUnknownMethod(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildTestRegistry())
+	result := tr.CallTool(context.Background(), "linear_unknown_method", json.RawMessage(`{}`))
+	if !result.IsError {
+		t.Fatal("expected error for unknown method")
+	}
+	if !strings.Contains(result.Content[0].Text, "unknown task manager method") {
+		t.Errorf("expected 'unknown task manager method', got: %s", result.Content[0].Text)
+	}
+}
+
 func TestToolSchemaHasRequiredFields(t *testing.T) {
 	t.Parallel()
 	tr := NewToolRegistry(buildTestRegistry())
