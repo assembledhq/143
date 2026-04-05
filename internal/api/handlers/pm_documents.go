@@ -224,7 +224,9 @@ func (h *PMDocumentHandler) ListVersions(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	versions, err := h.store.ListVersions(r.Context(), orgID, docID, 0)
+	limit := queryInt(r, "limit", 100)
+
+	versions, err := h.store.ListVersions(r.Context(), orgID, docID, limit)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "LIST_VERSIONS_FAILED", "failed to list document versions", err)
 		return
@@ -269,6 +271,17 @@ func (h *PMDocumentHandler) RestoreVersion(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Validate that restore_from_id belongs to the same logical document.
+	restoreSource, err := h.store.GetByID(r.Context(), orgID, req.RestoreFromID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "restore source document not found")
+		return
+	}
+	if restoreSource.LogicalID != doc.LogicalID {
+		writeError(w, r, http.StatusBadRequest, "LOGICAL_ID_MISMATCH", "restore_from_id must belong to the same logical document")
+		return
+	}
+
 	activeDoc, err := h.store.GetActiveByLogicalID(r.Context(), orgID, doc.LogicalID)
 	if err != nil {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "no active version found for this document")
@@ -291,7 +304,9 @@ func (h *PMDocumentHandler) RestoreVersion(w http.ResponseWriter, r *http.Reques
 func (h *PMDocumentHandler) ListDocumentSetPins(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
-	pins, err := h.store.ListDocumentSetPins(r.Context(), orgID)
+	limit := queryInt(r, "limit", 100)
+
+	pins, err := h.store.ListDocumentSetPins(r.Context(), orgID, limit)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "LIST_PINS_FAILED", "failed to list document set pins", err)
 		return

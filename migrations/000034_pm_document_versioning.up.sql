@@ -12,7 +12,7 @@ ALTER TABLE pm_documents
 
 -- Backfill: each existing row becomes its own first version.
 -- logical_id = id (the row is the first version of itself).
-UPDATE pm_documents SET logical_id = id, content_hash = encode(sha256(content::bytea), 'hex');
+UPDATE pm_documents SET logical_id = id, content_hash = encode(digest(content::bytea, 'sha256'), 'hex');
 
 -- Ensure only one active version per logical document within an org.
 CREATE UNIQUE INDEX idx_pm_documents_active_logical
