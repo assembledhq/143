@@ -1,43 +1,76 @@
-# Design Doc 36: Docker Agent Nodes — Render → Hetzner Migration
+# Design Doc 36: Self-Hosted Docker Infrastructure
+
+> **Status:** Proposed | **Last reviewed:** 2026-04-04
 
 ## Context
 
 143.dev currently runs on **Render** (Go API + Next.js frontend + Render Managed
 Postgres). Render does not support Docker-in-Docker or privileged containers, so
-agent sandboxes cannot run on Render. To run Docker-based agent sandboxes, we
-need to migrate to infrastructure where we control the Docker daemon.
+agent sandboxes cannot run there. We need infrastructure where we control the
+Docker daemon.
 
-**Hetzner VPS** is the target — dramatically cheaper than Render, full Docker
-access, and scales naturally from a single node to a multi-node cluster.
+This document describes how to migrate off Render to a self-hosted VPS and then
+scale incrementally. It is organized into four phases, each with a clear list of
+what changes in our code, what infrastructure to provision, and what is
+provider-specific.
 
-This document covers two phases:
-1. **Phase 1: Migrate from Render to Hetzner** — Get everything running on a single Hetzner VPS
-2. **Phase 2: Scale on Hetzner** — Add worker nodes, auto-scaling, HA Postgres as needed
+### Design Principles
 
----
+1. **Cloud-agnostic** — everything runs on any Linux VPS with Docker. No
+   proprietary cloud services required. Provider-specific details are called out
+   in `[PROVIDER-SPECIFIC]` blocks so you can swap them.
+2. **Docker Compose everywhere** — the same orchestration tool from dev laptop to
+   production cluster. No Kubernetes, no Nomad, no proprietary container
+   services.
+3. **Postgres is the only state** — the server, frontend, and sandboxes are
+   stateless. If anything other than Postgres dies, restart it.
+4. **Incremental complexity** — each phase is independently valuable. Don't skip
+   ahead. Move to the next phase only when you hit the limits of the current one.
+5. **Standard tooling** — Caddy (TLS), gVisor (sandbox isolation), cloud-init
+   (node provisioning), S3-compatible storage (backups). All open source, all
+   work on every provider.
 
-## Phase 1: Migrate from Render to Hetzner (Single VPS)
-
-### What's on Render Today
+### What Exists Today (on Render)
 
 | Component | Render Service | Notes |
 |---|---|---|
-| Go API | Render Docker service | Runs the API + worker + scheduler |
+| Go API | Render Docker service | Runs API + worker + scheduler in `mode=all` |
 | Next.js frontend | Render Node service | Served separately |
 | PostgreSQL | Render Managed DB | Automated backups, managed TLS |
-| TLS | Render auto-TLS | Automatic certificate management |
+| TLS | Render auto-TLS | Automatic cert management |
 | DNS | External (Cloudflare) | Points to Render |
 | CI/CD | `git push` → Render auto-builds | Zero-config deploys |
 | Agent sandboxes | **Cannot run** | No Docker socket access |
 
-### Target: Single Hetzner VPS
+### What Exists in Our Codebase Today
 
-Everything on one machine. The existing Docker provider works as-is — no remote
-provider or cross-cloud networking needed.
+| Artifact | Path | Notes |
+|---|---|---|
+| Server Dockerfile | `Dockerfile` | Multi-stage Go build, runs as non-root, includes `sops`/`age` |
+| Dev docker-compose | `docker-compose.yml` | Postgres + server (with `air` live reload) + frontend |
+| CI pipeline | `.github/workflows/ci.yml` | Lint, test, build, security scan, Docker image build |
+| Docker sandbox provider | `internal/services/agent/providers/docker.go` | Uses Docker API, supports gVisor (`runsc`) runtime |
+| Environment config | `.env.example` | All env vars documented |
+| Sandbox Dockerfile | **Does not exist** | Needs to be created |
+| Production compose | **Does not exist** | Needs to be created |
+| Deploy workflow | **Does not exist** | Needs to be created |
+| Caddy config | **Does not exist** | Needs to be created |
+| Backup scripts | **Does not exist** | Needs to be created |
+
+---
+
+## Phase 1: Single-Node Production (Migrate Off Render)
+
+**Goal:** Everything on one VPS. Agent sandboxes work. Zero application code
+changes.
+
+**When to do this:** Now. This is the prerequisite for running agent sandboxes.
+
+### What This Looks Like
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  HETZNER VPS (CX42 — 8 vCPU, 16GB RAM, 160GB SSD, €14/mo)          │
+│  VPS (8 vCPU, 16GB RAM, 160GB SSD)                                   │
 │                                                                      │
 │  ┌────────────────────────────────────────────────────────────────┐  │
 │  │  Docker Compose                                                │  │
@@ -58,7 +91,49 @@ provider or cross-cloud networking needed.
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-### docker-compose.yml (Hetzner Production)
+### Infrastructure to Provision
+
+**VPS requirements (provider-agnostic):**
+
+| Resource | Minimum | Recommended | Why |
+|----------|---------|-------------|-----|
+| vCPUs | 4 | 8 | Sandboxes get 2 CPUs each; need headroom for API + Postgres |
+| RAM | 8 GB | 16 GB | Sandboxes get 4 GB each; Postgres wants ~2 GB `shared_buffers` |
+| Disk | 80 GB SSD | 160 GB SSD | Postgres data + Docker images + sandbox workspace volumes |
+| OS | Ubuntu 24.04 | Ubuntu 24.04 | gVisor packages target Debian/Ubuntu |
+
+> **`[PROVIDER-SPECIFIC]` VPS sizing:**
+>
+> | Provider | Instance Type | Monthly Cost | Notes |
+> |----------|--------------|-------------|-------|
+> | Hetzner | CX42 (8 vCPU / 16 GB) | ~€14 (~$16) | Best price/performance for EU |
+> | AWS | t3.xlarge (4 vCPU / 16 GB) | ~$120 | Use spot instances for workers to reduce cost |
+> | GCP | e2-standard-4 (4 vCPU / 16 GB) | ~$100 | Sustained use discount applies automatically |
+> | DigitalOcean | s-8vcpu-16gb | ~$96 | Simple, good for small teams |
+
+**On the VPS, install:**
+
+```bash
+# Docker
+curl -fsSL https://get.docker.com | sh
+
+# gVisor (sandbox isolation)
+curl -fsSL https://gvisor.dev/archive.key | gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" \
+  > /etc/apt/sources.list.d/gvisor.list
+apt-get update && apt-get install -y runsc
+runsc install
+systemctl restart docker
+```
+
+These commands work on any Ubuntu VPS regardless of provider.
+
+### New Files to Create in the Repo
+
+#### 1. `docker-compose.prod.yml`
+
+This is the single-node production stack. It replaces the dev `docker-compose.yml`
+(which uses `air` live reload and mounts source code).
 
 ```yaml
 services:
@@ -68,26 +143,26 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
     restart: unless-stopped
 
   api:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/assembledhq/143-server:latest
     environment:
       DATABASE_URL: postgres://onefortythree:${DB_PASSWORD}@postgres:5432/onefortythree?sslmode=disable
       PORT: "8080"
       MODE: all
-      BASE_URL: https://143.dev
-      FRONTEND_URL: https://143.dev
-      # ... all other env vars from .env
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      NODE_ID: ${HOSTNAME:-node-1}
+      BASE_URL: ${BASE_URL:-https://143.dev}
+      FRONTEND_URL: ${FRONTEND_URL:-https://143.dev}
+    env_file:
+      - .env
     depends_on:
       postgres:
         condition: service_healthy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
     deploy:
       resources:
@@ -96,9 +171,7 @@ services:
           cpus: "4.0"
 
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
+    image: ghcr.io/assembledhq/143-frontend:latest
     environment:
       API_PROXY_TARGET: http://api:8080
       NODE_ENV: production
@@ -119,10 +192,9 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./deploy/postgres/postgresql.conf:/etc/postgresql/conf.d/custom.conf:ro
-      - ./backups:/backups
     command: postgres -c config_file=/etc/postgresql/conf.d/custom.conf
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:5432:5432"   # localhost only — no external access
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U onefortythree"]
       interval: 10s
@@ -140,10 +212,10 @@ volumes:
   caddy_data:
 ```
 
-### Caddyfile
+#### 2. `deploy/Caddyfile`
 
 ```
-143.dev {
+{$BASE_URL:143.dev} {
     handle /api/* {
         reverse_proxy api:8080
     }
@@ -153,687 +225,58 @@ volumes:
 }
 ```
 
-### CI/CD: GitHub Actions
+Caddy automatically provisions TLS via Let's Encrypt. No cert management needed.
 
-Replace Render's auto-deploy:
+#### 3. `deploy/postgres/postgresql.conf`
 
-```yaml
-# .github/workflows/deploy.yml
-name: Deploy to Hetzner
-on:
-  push:
-    branches: [main]
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build and push images
-        run: |
-          docker build -t ghcr.io/assembledhq/143-api:${{ github.sha }} .
-          docker push ghcr.io/assembledhq/143-api:${{ github.sha }}
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.HETZNER_IP }}
-          username: deploy
-          key: ${{ secrets.HETZNER_SSH_KEY }}
-          script: |
-            cd /opt/143
-            docker compose pull
-            docker compose up -d --remove-orphans
-            docker compose exec api /bin/migrate up
-```
+Production-tuned Postgres configuration. See the [PostgreSQL Configuration](#production-postgres-configuration) section below.
 
-### Database Migration from Render
+#### 4. `Dockerfile.sandbox` (if sandbox image is separate from server)
 
-```bash
-# 1. Export from Render
-# Use Render's external connection string or pg_dump from within the service
-pg_dump -h <render-db-host> -U <render-db-user> -Fc <render-db-name> > render.dump
+This does not exist yet. If sandboxes use a separate image (tools, languages,
+etc.), this Dockerfile needs to be created. If sandboxes just use a stock image
+with the workspace mounted, no Dockerfile is needed — configure via
+`SANDBOX_IMAGE` env var.
 
-# 2. Copy dump to Hetzner VPS
-scp render.dump deploy@<hetzner-ip>:/tmp/render.dump
+### Code Changes Required
 
-# 3. Start Postgres on Hetzner
-docker compose up -d postgres
+**None for Phase 1.** The existing `Dockerfile`, `docker.go` sandbox provider,
+and server binary all work as-is on any VPS with Docker. The only changes are
+new config files checked into the repo (`docker-compose.prod.yml`, `Caddyfile`,
+`postgresql.conf`).
 
-# 4. Restore
-docker exec -i 143-postgres-1 pg_restore -U onefortythree -d onefortythree --clean --if-exists < /tmp/render.dump
+### CI/CD: GitHub Actions Deploy Workflow
 
-# 5. Verify
-docker exec 143-postgres-1 psql -U onefortythree -c "SELECT count(*) FROM organizations;"
-```
+Replace Render's auto-deploy with SSH-based deployment.
 
-### Impact Assessment
-
-| Area | Impact | Notes |
-|---|---|---|
-| Code changes | **None** | No application code changes needed |
-| Dockerfile | **None** | Same multi-stage Dockerfile works on Hetzner |
-| Database migration | **Low** | `pg_dump` from Render → `pg_restore` on Hetzner. ~30 min downtime. |
-| DNS cutover | **Low** | Update A records. Use Cloudflare for zero-downtime. |
-| TLS | **Low** | Caddy handles Let's Encrypt automatically |
-| CI/CD | **Medium** | Replace Render auto-deploy with GitHub Actions SSH deploy |
-| Secrets management | **None** | SOPS + age works identically |
-| Monitoring | **Medium** | Replace Render's dashboard with Prometheus/Grafana or keep Datadog |
-| Backups | **Medium** | Set up pg_dump cron + Hetzner volume snapshots |
-| Agent sandboxes | **Huge win** | Docker socket access works natively — no remote provider needed |
-
-### Cost Comparison
-
-| Setup | Cost | Docker Support |
-|---|---|---|
-| Render (Starter API + Web + DB) | ~$21/mo minimum | No |
-| Hetzner CX42 (8 vCPU, 16GB, 160GB SSD) | ~€14/mo (~$16/mo) | Full Docker access |
-
-### Migration Checklist
-
-- [ ] Provision Hetzner CX42
-- [ ] Install Docker + Docker Compose
-- [ ] Install gVisor for sandbox isolation
-- [ ] Copy docker-compose.yml + Caddyfile to `/opt/143`
-- [ ] Set up GitHub Actions deploy workflow
-- [ ] `pg_dump` Render DB → `pg_restore` on Hetzner
-- [ ] Copy environment variables / SOPS-encrypted secrets
-- [ ] Update DNS to point to Hetzner IP
-- [ ] Set up pg_dump cron for backups (see PostgreSQL Operations & Data Protection section below)
-- [ ] Verify health checks and monitoring
-- [ ] Decommission Render services
-
----
-
-## Phase 2: Scale on Hetzner
-
-Phase 1 gives you a single VPS running everything. Phase 2 is the step-by-step
-path to a multi-node cluster. Each stage builds on the previous one — don't skip
-ahead. Move to the next stage only when you hit the limits of the current one.
-
-For background on node modes (`all`, `api`, `worker`), scheduler leader election,
-job queue distribution, and other architectural patterns, see
-[10-infrastructure.md](10-infrastructure.md) (the general infrastructure design doc).
-
-### Stage 1: Single VPS (where Phase 1 leaves you)
-
-Everything runs on one machine via docker compose. A CX42 (8 vCPU, 16GB) handles
-the API, frontend, Postgres, and 3-5 concurrent agent sandboxes comfortably.
-
-```
-┌─────────────────────────────────────────┐
-│  VPS-1 (8 CPU / 16 GB)                 │
-│                                         │
-│  ┌──────────┐  ┌──────────┐            │
-│  │ Postgres │  │  Server  │            │
-│  │          │  │ mode=all │            │
-│  └──────────┘  └──────────┘            │
-│                ┌──────────┐            │
-│                │  Caddy   │            │
-│                └──────────┘            │
-└─────────────────────────────────────────┘
-```
-
-**Move to Stage 2 when:** agent runs are queuing up (check `jobs.queue.depth` metric), or you need the API to stay responsive while heavy agent runs consume CPU/memory.
-
-### Stage 2: Split Postgres to Its Own VPS
-
-The single most impactful scaling move:
-
-1. **Resource isolation** — sandbox spikes won't starve Postgres
-2. **Independent backups** — backup scripts don't compete with the app for I/O
-3. **Independent upgrades** — restart Docker without touching the database
-4. **Foundation for everything after** — every subsequent stage assumes Postgres is separate
-
-```
-┌──────────────────────┐     ┌──────────────────────┐
-│  VPS-1 (DB)          │     │  VPS-2 (App)         │
-│  4 CPU / 8 GB        │     │  8 CPU / 16 GB       │
-│                      │     │                      │
-│  ┌──────────┐        │     │  ┌──────────┐        │
-│  │ Postgres │◄───────┼─────┼──│  Server  │        │
-│  │          │        │     │  │ mode=all │        │
-│  └──────────┘        │     │  └──────────┘        │
-│                      │     │  ┌──────────┐        │
-│  pg_dump cron        │     │  │  Caddy   │        │
-│  WAL-G archiving     │     │  └──────────┘        │
-└──────────────────────┘     └──────────────────────┘
-```
-
-**How to do it:**
-
-```bash
-# === On the NEW database VPS (VPS-1) ===
-
-# 1. Set up Postgres
-mkdir -p /opt/143 && cd /opt/143
-```
-
-```yaml
-# /opt/143/docker-compose.db.yml
-services:
-  postgres:
-    image: postgres:17
-    environment:
-      POSTGRES_DB: onefortythree
-      POSTGRES_USER: onefortythree
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-      POSTGRES_INITDB_ARGS: "--data-checksums"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-      - ./deploy/postgres/postgresql.conf:/etc/postgresql/conf.d/custom.conf:ro
-    command: postgres -c config_file=/etc/postgresql/conf.d/custom.conf
-    ports:
-      - "0.0.0.0:5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U onefortythree"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          memory: 4G
-          cpus: "3.0"
-
-volumes:
-  pgdata:
-```
-
-```bash
-# 2. Migrate data from the Phase 1 VPS
-# On the old VPS:
-docker exec 143-postgres-1 pg_dump -U onefortythree -Fc onefortythree > /tmp/143.dump
-
-# Copy to the new VPS:
-scp /tmp/143.dump db-vps:/tmp/143.dump
-
-# On the new VPS — start Postgres and restore:
-docker compose -f docker-compose.db.yml up -d
-docker exec -i 143-postgres-1 pg_restore -U onefortythree -d onefortythree --clean --if-exists < /tmp/143.dump
-
-# 3. Secure the connection
-# Put both VPSs on the same Hetzner private network (free, ~2Gbps, no encryption needed).
-# See: https://docs.hetzner.com/cloud/networks/getting-started/creating-a-network/
-# Postgres listens on the private IP. Firewall blocks port 5432 on the public interface.
-
-# === On the APP VPS (VPS-2) ===
-
-# 4. Update DATABASE_URL to point at the DB VPS private IP
-DATABASE_URL=postgres://onefortythree:${DB_PASSWORD}@10.0.0.2:5432/onefortythree?sslmode=disable
-
-# 5. Remove Postgres from the app compose file and restart
-docker compose up -d
-```
-
-**Move to Stage 3 when:** you need more concurrent agent runs than one VPS can handle (typically > 3-5 concurrent sandboxes).
-
-### Stage 3: Add Dedicated Worker Nodes
-
-Worker nodes run agent sandboxes — the most resource-intensive part. Each worker
-runs `MAX_CONCURRENT_RUNS` sandboxes in parallel. Adding a worker is a 5-minute
-operation.
-
-```
-┌───────────────┐     ┌───────────────┐
-│  VPS-1 (DB)   │     │  VPS-2 (App)  │
-│               │     │  mode=all     │
-│  Postgres  ◄──┼─────┤  Caddy        │
-│               │  ┌──┤               │
-└───────────────┘  │  └───────────────┘
-                   │
-        ┌──────────┼──────────┐
-        │          │          │
-   ┌────▼────┐ ┌──▼──────┐ ┌─▼───────┐
-   │ VPS-3   │ │ VPS-4   │ │ VPS-5   │
-   │ worker  │ │ worker  │ │ worker  │
-   │ 5 runs  │ │ 5 runs  │ │ 5 runs  │
-   └─────────┘ └─────────┘ └─────────┘
-```
-
-**On each new worker VPS:**
-
-```bash
-# 1. Install Docker + gVisor
-curl -fsSL https://get.docker.com | sh
-# Install gVisor (see 10-infrastructure.md for gVisor setup)
-
-# 2. Pull the images
-docker pull ghcr.io/assembledhq/143-server:latest
-docker pull ghcr.io/assembledhq/143-sandbox:latest
-
-# 3. Create the compose file
-```
-
-```yaml
-# /opt/143/docker-compose.worker.yml
-services:
-  worker:
-    image: ghcr.io/assembledhq/143-server:latest
-    environment:
-      DATABASE_URL: postgres://onefortythree:${DB_PASSWORD}@10.0.0.2:5432/onefortythree?sslmode=disable
-      MODE: worker
-      NODE_ID: ${HOSTNAME}
-      MAX_CONCURRENT_RUNS: 5
-      SANDBOX_IMAGE: ghcr.io/assembledhq/143-sandbox:latest
-      SANDBOX_RUNTIME: runsc
-    env_file:
-      - .env
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          memory: 2G
-          cpus: "1.0"
-```
-
-```bash
-# 4. Start it
-docker compose -f docker-compose.worker.yml up -d
-
-# That's it. The worker registers itself in the nodes table,
-# starts polling for jobs, and picks up work immediately.
-```
-
-**Sizing worker VPSs:** Each sandbox gets `SANDBOX_CPU_LIMIT` (default 2) cores and `SANDBOX_MEMORY_LIMIT` (default 4GB) memory. For 5 concurrent runs, you want at least 12 CPU / 24 GB RAM on the worker VPS (headroom for the worker process and OS).
-
-| Worker VPS size | `MAX_CONCURRENT_RUNS` | Good for |
-|----------------|----------------------|----------|
-| 4 CPU / 8 GB | 1-2 | Small/test |
-| 8 CPU / 16 GB | 3 | Medium |
-| 16 CPU / 32 GB | 5-7 | Production sweet spot |
-| 32 CPU / 64 GB | 10-15 | Heavy workloads |
-
-**Move to Stage 4 when:** you need API redundancy (uptime SLA), or a single API node can't keep up with webhook volume.
-
-### Stage 4: Multiple API Nodes Behind a Load Balancer
-
-API nodes are stateless — sessions live in Postgres. Add as many as you need
-behind Caddy, nginx, or a Hetzner Load Balancer (€6/mo).
-
-```
-                 ┌──────────────────┐
-                 │   Caddy / LB     │
-                 │   (VPS-6 or      │
-                 │    cloud LB)     │
-                 └──┬──────────┬────┘
-                    │          │
-              ┌─────▼──┐  ┌───▼────┐
-              │ VPS-2  │  │ VPS-7  │
-              │ all    │  │ api    │
-              └────┬───┘  └───┬────┘
-                   │          │
-┌──────────────────▼──────────▼───────────────┐
-│                 VPS-1 (DB)                   │
-│                 Postgres                     │
-└──────────────────────────────────────────────┘
-```
-
-Keep at least one node as `mode=all` so the scheduler runs. All `api` and `all` nodes serve the same traffic.
-
-```
-# Caddyfile for multi-node
-app.143.dev {
-    reverse_proxy vps-2:8080 vps-7:8080 {
-        health_uri /healthz
-        health_interval 10s
-        lb_policy round_robin
-    }
-}
-```
-
-### Stage 5: Managed Postgres (Optional)
-
-When operational overhead of self-hosted Postgres outweighs cost savings:
-
-```bash
-# 1. Take a final backup
-docker exec 143-postgres-1 pg_dump -U onefortythree -Fc onefortythree > final.dump
-
-# 2. Restore to managed service
-pg_restore -h managed-db.provider.com -U onefortythree -d onefortythree final.dump
-
-# 3. Update DATABASE_URL on all nodes and restart
-```
-
-No application code changes. The app only sees `DATABASE_URL`.
-
-| Provider | HA Setup | Cost (4GB RAM) | Notes |
-|----------|----------|----------------|-------|
-| Supabase | Auto-failover | ~$25/mo | Managed Postgres, easy setup |
-| Neon | Serverless, auto-scale | Pay-per-query | Good for variable workloads |
-| Ubicloud | Open-source managed | ~$40/mo | Runs on Hetzner hardware |
-| AWS RDS | Multi-AZ | ~$70/mo | Battle-tested |
-
-### Stage 6: Automated Fleet Provisioning
-
-Manual SSH + docker compose works for 3-5 nodes. Beyond that, automate with
-cloud-init and the Hetzner API.
-
-**cloud-init (Hetzner native, no dependencies):**
-
-Every Hetzner VPS accepts a cloud-init user-data script at creation time. This
-runs once on first boot and fully provisions the node.
-
-```yaml
-# deploy/cloud-init/worker.yml
-#cloud-config
-
-packages:
-  - docker.io
-  - docker-compose-plugin
-
-runcmd:
-  # Install gVisor
-  - curl -fsSL https://gvisor.dev/archive.key | gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
-  - echo "deb [arch=amd64 signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" > /etc/apt/sources.list.d/gvisor.list
-  - apt-get update && apt-get install -y runsc
-  - runsc install
-  - systemctl restart docker
-
-  # Pull images from your registry
-  - docker login ghcr.io -u deploy -p ${REGISTRY_TOKEN}
-  - docker pull ghcr.io/assembledhq/143-server:latest
-  - docker pull ghcr.io/assembledhq/143-sandbox:latest
-
-  # Write the compose file
-  - mkdir -p /opt/143
-  - |
-    cat > /opt/143/docker-compose.yml << 'COMPOSE'
-    services:
-      worker:
-        image: ghcr.io/assembledhq/143-server:latest
-        environment:
-          DATABASE_URL: ${DATABASE_URL}
-          MODE: worker
-          NODE_ID: ${HOSTNAME}
-          MAX_CONCURRENT_RUNS: ${MAX_CONCURRENT_RUNS}
-          SANDBOX_IMAGE: ghcr.io/assembledhq/143-sandbox:latest
-          SANDBOX_RUNTIME: runsc
-          MEZMO_INGESTION_KEY: ${MEZMO_INGESTION_KEY}
-          DD_API_KEY: ${DD_API_KEY}
-        volumes:
-          - /var/run/docker.sock:/var/run/docker.sock
-        restart: unless-stopped
-    COMPOSE
-
-  # Start
-  - cd /opt/143 && docker compose up -d
-
-write_files:
-  - path: /opt/143/.env
-    content: |
-      DATABASE_URL=${DATABASE_URL}
-      MEZMO_INGESTION_KEY=${MEZMO_INGESTION_KEY}
-      DD_API_KEY=${DD_API_KEY}
-    permissions: '0600'
-```
-
-**Provisioning script** (`deploy/scripts/provision-worker.sh`):
+#### `deploy/scripts/deploy.sh`
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Provision a new worker node via Hetzner Cloud API
-# Usage: ./provision-worker.sh [server-type] [location]
+# Deploy to a single node via SSH.
+# Usage: ./deploy.sh <host> <ssh-key-path> [image-tag]
+#
+# This script is provider-agnostic — it just needs SSH access to the target.
 
-SERVER_TYPE="${1:-cx42}"
-LOCATION="${2:-fsn1}"
-WORKER_NAME="143-worker-$(date +%s)"
+HOST="$1"
+SSH_KEY="$2"
+TAG="${3:-latest}"
 
-source /opt/143/.env.provisioning
-
-USERDATA=$(envsubst < deploy/cloud-init/worker.yml)
-
-RESPONSE=$(hcloud server create \
-  --name "$WORKER_NAME" \
-  --type "$SERVER_TYPE" \
-  --image ubuntu-24.04 \
-  --location "$LOCATION" \
-  --network 143-private \
-  --ssh-key deploy-key \
-  --user-data "$USERDATA" \
-  --label env=production \
-  --label role=worker \
-  --output json)
-
-SERVER_ID=$(echo "$RESPONSE" | jq -r '.server.id')
-SERVER_IP=$(echo "$RESPONSE" | jq -r '.server.public_net.ipv4.ip')
-PRIVATE_IP=$(echo "$RESPONSE" | jq -r '.server.private_net[0].ip')
-
-echo "Created $WORKER_NAME (ID: $SERVER_ID)"
-echo "  Public IP:  $SERVER_IP"
-echo "  Private IP: $PRIVATE_IP"
-echo "Node will register itself in ~90 seconds."
+ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no deploy@"$HOST" << REMOTE
+  cd /opt/143
+  docker compose -f docker-compose.prod.yml pull
+  docker compose -f docker-compose.prod.yml up -d --remove-orphans
+  docker compose -f docker-compose.prod.yml exec -T api /bin/migrate up
+  echo "Deploy complete."
+REMOTE
 ```
 
-**Decommission script** (`deploy/scripts/decommission-worker.sh`):
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-SERVER="$1"
-
-# 1. Drain the node
-SERVER_IP=$(hcloud server ip "$SERVER" --output noheader)
-ssh deploy@"$SERVER_IP" "docker compose -f /opt/143/docker-compose.yml exec worker kill -SIGTERM 1"
-
-echo "Draining $SERVER... waiting for in-progress jobs to complete."
-
-# 2. Wait for the node to show as 'dead'
-for i in $(seq 1 60); do
-  STATUS=$(psql "$DATABASE_URL" -t -c "SELECT status FROM nodes WHERE host LIKE '%${SERVER}%'" | xargs)
-  if [ "$STATUS" = "dead" ]; then
-    echo "Node drained and marked dead."
-    break
-  fi
-  sleep 5
-done
-
-# 3. Delete the VPS
-hcloud server delete "$SERVER"
-echo "Server $SERVER deleted."
-```
-
-Hetzner servers boot in ~20s, cloud-init completes in ~60s, worker accepts jobs within 90s.
-
-**Move to Stage 7 when:** you're provisioning/decommissioning frequently enough that it's a chore.
-
-### Stage 7: Auto-Scaling Workers
-
-When queue depth exceeds capacity, automatically spin up more workers. The Go
-server does this — no external orchestrator needed.
-
-```go
-// internal/autoscaler/autoscaler.go
-//
-// Runs as part of the scheduler (on whichever node holds the advisory lock).
-// Checks queue depth every 60 seconds and adjusts the fleet.
-
-type AutoScaler struct {
-    db          *pgxpool.Pool
-    hetzner     *hcloud.Client
-    config      AutoScaleConfig
-    logger      zerolog.Logger
-}
-
-type AutoScaleConfig struct {
-    Enabled          bool          `env:"AUTOSCALE_ENABLED" envDefault:"false"`
-    MinWorkers       int           `env:"AUTOSCALE_MIN_WORKERS" envDefault:"1"`
-    MaxWorkers       int           `env:"AUTOSCALE_MAX_WORKERS" envDefault:"10"`
-    ServerType       string        `env:"AUTOSCALE_SERVER_TYPE" envDefault:"cx42"`
-    Location         string        `env:"AUTOSCALE_LOCATION" envDefault:"fsn1"`
-    ScaleUpThreshold int           `env:"AUTOSCALE_SCALE_UP_THRESHOLD" envDefault:"5"`
-    ScaleDownAfter   time.Duration `env:"AUTOSCALE_SCALE_DOWN_AFTER" envDefault:"15m"`
-    CooldownPeriod   time.Duration `env:"AUTOSCALE_COOLDOWN" envDefault:"5m"`
-    NetworkID        string        `env:"AUTOSCALE_NETWORK_ID"`
-    RunsPerWorker    int           `env:"AUTOSCALE_RUNS_PER_WORKER" envDefault:"5"`
-}
-
-func (a *AutoScaler) Tick(ctx context.Context) {
-    // 1. Count pending sandbox jobs
-    var pendingJobs int
-    a.db.QueryRow(ctx,
-        "SELECT count(*) FROM jobs WHERE status = 'pending' AND job_type = 'agent_run'",
-    ).Scan(&pendingJobs)
-
-    // 2. Count active workers
-    var activeWorkers int
-    a.db.QueryRow(ctx,
-        "SELECT count(*) FROM nodes WHERE mode = 'worker' AND status = 'active'",
-    ).Scan(&activeWorkers)
-
-    totalCapacity := activeWorkers * a.config.RunsPerWorker
-
-    // 3. Scale up: more pending jobs than capacity
-    if pendingJobs > a.config.ScaleUpThreshold && activeWorkers < a.config.MaxWorkers {
-        needed := (pendingJobs / a.config.RunsPerWorker) + 1 - activeWorkers
-        needed = min(needed, a.config.MaxWorkers-activeWorkers)
-        for i := 0; i < needed; i++ {
-            a.provisionWorker(ctx)
-        }
-        return
-    }
-
-    // 4. Scale down: idle workers
-    if activeWorkers > a.config.MinWorkers {
-        a.drainIdleWorkers(ctx)
-    }
-}
-```
-
-**Scale-up:** When pending `agent_run` jobs exceed threshold and worker count is below max.
-
-**Scale-down:** Workers idle for > `AUTOSCALE_SCALE_DOWN_AFTER` get drained and destroyed. Never below `AUTOSCALE_MIN_WORKERS`.
-
-**Cost control:** At €14/mo per CX42 (billed hourly at ~€0.02/hr), a worker that runs for 2 hours costs €0.04. Auto-scaling is effectively free compared to LLM API costs.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `AUTOSCALE_ENABLED` | `false` | Enable auto-scaling |
-| `AUTOSCALE_MIN_WORKERS` | `1` | Minimum worker count |
-| `AUTOSCALE_MAX_WORKERS` | `10` | Maximum worker count (hard cap) |
-| `AUTOSCALE_SERVER_TYPE` | `cx42` | Hetzner server type |
-| `AUTOSCALE_LOCATION` | `fsn1` | Hetzner datacenter |
-| `AUTOSCALE_SCALE_UP_THRESHOLD` | `5` | Pending jobs that trigger scale-up |
-| `AUTOSCALE_SCALE_DOWN_AFTER` | `15m` | Idle time before drain |
-| `AUTOSCALE_COOLDOWN` | `5m` | Min time between scale events |
-| `AUTOSCALE_RUNS_PER_WORKER` | `5` | Concurrent runs per worker |
-| `HCLOUD_TOKEN` | - | Hetzner Cloud API token |
-
-### Stage 8: Postgres High Availability
-
-At this scale, Postgres is the only single point of failure. If the DB VPS dies, everything stops. Two options:
-
-**Option A: Streaming Replication (self-managed)**
-
-```
-┌──────────────────┐     ┌──────────────────┐
-│  VPS-DB-1        │     │  VPS-DB-2        │
-│  (Primary)       │────▶│  (Replica)       │
-│                  │ WAL │                  │
-│  Postgres        │     │  Postgres        │
-│  PgBouncer       │     │  (read-only)     │
-└──────────────────┘     └──────────────────┘
-         ▲                        ▲
-         │ writes                 │ reads
-         │                        │
-    ┌────┴────────────────────────┴────┐
-    │          App / Worker nodes       │
-    └──────────────────────────────────┘
-```
-
-- Primary handles all writes (job queue, agent run logs, webhooks)
-- Replica handles read-heavy queries (dashboard, experiment evaluation, audit log queries)
-- If Primary dies, promote Replica to Primary (manual or via [Patroni](https://github.com/patroni/patroni) for automatic failover)
-- App uses two `DATABASE_URL`s: one for writes, one for reads
-
-**Splitting reads and writes in the app:**
-
-```go
-type DBPool struct {
-    Primary *pgxpool.Pool  // DATABASE_URL — all writes
-    Replica *pgxpool.Pool  // DATABASE_REPLICA_URL — read-heavy queries
-}
-
-func (db *DBPool) ReadPool() *pgxpool.Pool {
-    if db.Replica != nil {
-        return db.Replica
-    }
-    return db.Primary
-}
-```
-
-Dashboard queries, experiment reads, and audit log queries use `ReadPool()`. Job queue operations, writes, and anything requiring strong consistency use `Primary` directly.
-
-**Option B: Managed Postgres with HA (simplest)**
-
-Hetzner doesn't offer managed Postgres, but several providers do:
-
-| Provider | HA Setup | Cost (4GB RAM) | Notes |
-|----------|----------|----------------|-------|
-| Supabase | Auto-failover | ~$25/mo | Managed Postgres, easy setup |
-| Neon | Serverless, auto-scale | Pay-per-query | Good for variable workloads |
-| Ubicloud | Open-source managed | ~$40/mo | Runs on Hetzner hardware |
-| AWS RDS | Multi-AZ | ~$70/mo | Battle-tested |
-| Crunchy Bridge | Managed HA | ~$50/mo | Postgres-focused, excellent support |
-
-For this project, **self-managed streaming replication** (Option A) is the right fit until operational burden outweighs cost savings. The app code change (read/write splitting) is worth doing regardless — it's a one-time investment that works with any Postgres setup.
-
-### When to Split What
-
-| Signal | Action |
-|--------|--------|
-| Agent runs queuing for > 5 min | Add worker nodes (Stage 3) |
-| Postgres CPU > 70% sustained | Move Postgres to its own VPS (Stage 2) |
-| API p95 latency > 500ms under load | Add API nodes (Stage 4) |
-| Disk I/O wait > 20% on shared VPS | Separate Postgres (Stage 2) |
-| Spending > 2 hrs/month on Postgres ops | Consider managed Postgres (Stage 5) |
-| Need 99.9%+ uptime SLA | Multiple API nodes + Postgres HA (Stage 4+8) |
-
-### Connection Pooling (PgBouncer)
-
-When you have many app/worker nodes, each opens a pool of connections to Postgres. At scale (10+ nodes), this can exhaust `max_connections`.
-
-**When to add PgBouncer:** When total connections across all nodes approach 80% of `max_connections` (default 100). Each node's pgx pool defaults to ~10 connections, so with 8+ nodes you're getting close.
+#### `.github/workflows/deploy.yml`
 
 ```yaml
-# Add to docker-compose.db.yml on the Postgres VPS
-services:
-  pgbouncer:
-    image: edoburu/pgbouncer:1.23.1
-    environment:
-      DATABASE_URL: postgres://onefortythree:${DB_PASSWORD}@postgres:5432/onefortythree
-      POOL_MODE: transaction    # required for SKIP LOCKED and advisory locks
-      MAX_CLIENT_CONN: 500
-      DEFAULT_POOL_SIZE: 30
-      RESERVE_POOL_SIZE: 5
-    ports:
-      - "0.0.0.0:6432:6432"
-    depends_on:
-      - postgres
-    restart: unless-stopped
-```
-
-All app/worker nodes change their `DATABASE_URL` to point at PgBouncer (port 6432) instead of Postgres directly. PgBouncer multiplexes hundreds of client connections into 30 actual Postgres connections.
-
-**Important:** Use `POOL_MODE=transaction` (not `session`). Session mode breaks `FOR UPDATE SKIP LOCKED` across transaction boundaries.
-
----
-
-### Container Registry & CI/CD for Multi-Node
-
-Once you have more than one node, you need a container registry and a fleet
-deployment pipeline.
-
-**Registry: GitHub Container Registry (ghcr.io)**
-
-```yaml
-# .github/workflows/build-and-push.yml
-name: Build & Push Images
+name: Build & Deploy
 on:
   push:
     branches: [main]
@@ -841,7 +284,7 @@ on:
 env:
   REGISTRY: ghcr.io
   SERVER_IMAGE: ghcr.io/assembledhq/143-server
-  SANDBOX_IMAGE: ghcr.io/assembledhq/143-sandbox
+  FRONTEND_IMAGE: ghcr.io/assembledhq/143-frontend
 
 jobs:
   build:
@@ -868,272 +311,94 @@ jobs:
             ${{ env.SERVER_IMAGE }}:latest
             ${{ env.SERVER_IMAGE }}:${{ github.sha }}
 
-      - name: Build & push sandbox image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.sandbox
-          push: true
-          tags: |
-            ${{ env.SANDBOX_IMAGE }}:latest
-            ${{ env.SANDBOX_IMAGE }}:${{ github.sha }}
-```
+      # Add frontend build once Dockerfile.frontend exists
 
-**Fleet deployment** (`deploy/scripts/deploy-fleet.sh`):
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-TAG="${1:-latest}"
-SERVER_IMAGE="ghcr.io/assembledhq/143-server:$TAG"
-SANDBOX_IMAGE="ghcr.io/assembledhq/143-sandbox:$TAG"
-
-echo "Deploying $TAG to fleet..."
-
-NODES=$(hcloud server list --selector env=production -o columns=name,ipv4 -o noheader)
-
-while IFS=$'\t' read -r NAME IP; do
-  echo "--- Deploying to $NAME ($IP) ---"
-
-  ssh -o StrictHostKeyChecking=no deploy@"$IP" << REMOTE
-    docker pull $SERVER_IMAGE
-    docker pull $SANDBOX_IMAGE
-    docker tag $SERVER_IMAGE ghcr.io/assembledhq/143-server:latest
-    docker tag $SANDBOX_IMAGE ghcr.io/assembledhq/143-sandbox:latest
-    cd /opt/143
-    docker compose up -d --remove-orphans
-
-    for i in \$(seq 1 30); do
-      if docker compose exec -T worker wget -q -O /dev/null http://localhost:8080/healthz 2>/dev/null || \
-         docker compose exec -T api wget -q -O /dev/null http://localhost:8080/healthz 2>/dev/null; then
-        echo "Health check passed."
-        break
-      fi
-      sleep 2
-    done
-REMOTE
-
-  echo "$NAME deployed."
-done <<< "$NODES"
-
-echo "Fleet deployment complete."
-```
-
-**GitHub Actions deployment workflow:**
-
-```yaml
-# .github/workflows/deploy.yml
-name: Deploy to Fleet
-on:
-  workflow_run:
-    workflows: ["Build & Push Images"]
-    types: [completed]
-    branches: [main]
-
-jobs:
   deploy:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install hcloud CLI
+      - name: Deploy via SSH
         run: |
-          curl -sL https://github.com/hetznercloud/cli/releases/latest/download/hcloud-linux-amd64.tar.gz | tar xz
-          sudo mv hcloud /usr/local/bin/
-
-      - name: Deploy fleet
-        env:
-          HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
-        run: |
-          chmod +x deploy/scripts/deploy-fleet.sh
-          ./deploy/scripts/deploy-fleet.sh ${{ github.event.workflow_run.head_sha }}
-
-      - name: Run migrations (on one API node)
-        run: |
-          API_IP=$(hcloud server list --selector role=api -o columns=ipv4 -o noheader | head -1)
-          ssh deploy@"$API_IP" "cd /opt/143 && docker compose exec -T api ./server migrate up"
+          chmod +x deploy/scripts/deploy.sh
+          ./deploy/scripts/deploy.sh "${{ secrets.DEPLOY_HOST }}" "${{ secrets.DEPLOY_SSH_KEY }}"
 ```
 
-**Deployment strategy:**
-- **Rolling deploy** — one node at a time, health check before moving on
-- **Migrations run once** — on a single API node after all nodes are updated
-- **Rollback** — re-deploy the previous git SHA: `./deploy-fleet.sh <previous-sha>`. Images are tagged by SHA so every version is available.
+Note: `DEPLOY_HOST` and `DEPLOY_SSH_KEY` are generic — they work regardless of
+whether the VPS is on Hetzner, AWS, GCP, or anywhere else with SSH access.
+
+### Database Migration from Render
+
+```bash
+# 1. Export from Render (use Render's external connection string)
+pg_dump -h <render-db-host> -U <render-db-user> -Fc <render-db-name> > render.dump
+
+# 2. Copy dump to VPS
+scp render.dump deploy@<vps-ip>:/tmp/render.dump
+
+# 3. Start Postgres on the VPS
+docker compose -f docker-compose.prod.yml up -d postgres
+
+# 4. Restore
+docker exec -i 143-postgres-1 \
+  pg_restore -U onefortythree -d onefortythree --clean --if-exists < /tmp/render.dump
+
+# 5. Verify
+docker exec 143-postgres-1 \
+  psql -U onefortythree -c "SELECT count(*) FROM organizations;"
+```
+
+### Migration Checklist
+
+- [ ] Provision VPS (any provider — see sizing table above)
+- [ ] Install Docker + gVisor
+- [ ] Create `deploy/` directory with config files (Caddyfile, postgresql.conf)
+- [ ] Create `docker-compose.prod.yml`
+- [ ] Create GitHub Actions deploy workflow
+- [ ] Push images to GHCR
+- [ ] `pg_dump` Render DB → `pg_restore` on VPS
+- [ ] Copy `.env` to VPS (or use SOPS-encrypted secrets)
+- [ ] Update DNS (Cloudflare A record → VPS IP)
+- [ ] Verify health checks (`/healthz`, `/readyz`)
+- [ ] Decommission Render services
+
+### Impact Assessment
+
+| Area | Impact | Notes |
+|---|---|---|
+| Application code | **None** | Zero changes to Go or frontend code |
+| Dockerfile | **None** | Existing multi-stage build works as-is |
+| Database | **Low** | `pg_dump`/`pg_restore`. ~30 min downtime for the cutover. |
+| DNS | **Low** | Update A records. Cloudflare can proxy during transition. |
+| TLS | **None** | Caddy handles Let's Encrypt automatically |
+| CI/CD | **Medium** | New GitHub Actions workflow replaces Render auto-deploy |
+| Secrets | **None** | SOPS + age works identically anywhere |
+| Agent sandboxes | **Huge win** | Docker socket access — sandboxes work natively |
 
 ---
 
-### Full Architecture at Scale
+## Phase 2: Production Hardening (Backups, Monitoring, CI/CD)
 
-```
-                    ┌─────────────────────────────────────┐
-                    │       GitHub (source of truth)       │
-                    │                                     │
-                    │  push to main → build images →      │
-                    │  push to GHCR → deploy to fleet     │
-                    └──────────────┬──────────────────────┘
-                                   │
-                    ┌──────────────▼──────────────────────┐
-                    │       Hetzner Load Balancer          │
-                    │       (€6/mo, health-checked)        │
-                    └──┬───────────┬───────────┬──────────┘
-                       │           │           │
-              ┌────────▼──┐ ┌─────▼─────┐ ┌───▼───────┐
-              │  API-1    │ │  API-2    │ │  API-3    │
-              │  mode=all │ │  mode=api │ │  mode=api │
-              └─────┬─────┘ └─────┬─────┘ └─────┬────┘
-                    │             │             │
-       ┌────────────▼─────────────▼─────────────▼──────────┐
-       │                   PgBouncer                        │
-       │              (on DB VPS, port 6432)                │
-       └────────────────────────┬───────────────────────────┘
-                                │
-                ┌───────────────▼───────────────┐
-                │     Postgres Primary          │───── WAL ─────▶ Replica
-                │     (dedicated VPS, 8GB+)     │───── WAL ─────▶ S3 (WAL-G)
-                └───────────────────────────────┘
-                                ▲
-                                │
-       ┌────────────────────────┼────────────────────────┐
-       │                        │                        │
-  ┌────▼────┐  ┌────────┐  ┌───▼────┐  ┌────────┐  ┌───▼────┐
-  │Worker-1 │  │Worker-2│  │Worker-3│  │Worker-4│  │Worker-N│
-  │ 5 runs  │  │ 5 runs │  │ 5 runs │  │ 5 runs │  │ auto   │
-  │ (fixed) │  │ (fixed)│  │ (fixed)│  │ (fixed)│  │ scaled │
-  └─────────┘  └────────┘  └────────┘  └────────┘  └────────┘
+**Goal:** Make the single-node deployment production-ready. Automated backups,
+health monitoring, and a tested restore procedure.
 
-  ┌──────────────────────────────────────────────────────────┐
-  │  Observability                                           │
-  │  Datadog: metrics, APM traces, dashboards, alerts        │
-  │  Mezmo: structured logs, log-based alerts                │
-  │  S3: WAL archives, pg_dump backups, audit logs           │
-  └──────────────────────────────────────────────────────────┘
-```
+**When to do this:** Immediately after Phase 1, before accepting real users.
 
-### Capacity Planning
+### Code Changes Required
 
-| Scale | VPSes | Monthly Cost (Hetzner) | Concurrent Agents | Repos | Stage |
-|-------|-------|----------------------|-------------------|-------|-------|
-| **Solo** | 1x CX42 (8CPU/16GB) | ~€14 | 3-5 | 1-10 | 1 |
-| **Small team** | 2 VPSes (DB + App) | ~€22 | 3-5 | 5-15 | 2 |
-| **Growing** | 4 VPSes (DB + App + 2 Workers) | ~€50 | 10-15 | 15-40 | 3 |
-| **Busy** | 7 VPSes (DB + 2 API + 4 Workers) | ~€110 | 20-30 | 40-100 | 3-4 |
-| **Large** | 12 VPSes (DB HA + 2 API + LB + 8 Workers) | ~€200 | 40-60 | 100-300 | 4+ |
-| **Auto-scaled** | 2-20 VPSes (dynamic) | ~€30-400 | 5-100 (elastic) | 100+ | 7 |
+**None.** Phase 2 is entirely new deploy scripts and config files checked into
+the repo. No Go or frontend code changes.
 
-**The dominant cost is LLM API, not infrastructure.** A single agent run costs $0.50-5.00 in Claude API tokens. The VPS to run it costs ~$0.02/hr. Don't under-provision to save $10/month.
+### New Files to Create
 
-| Category | % of Total Cost | Example (100 repos) |
-|----------|----------------|---------------------|
-| LLM API (Claude/GPT) | 80-90% | $2,000-10,000/mo |
-| Infrastructure (Hetzner) | 5-10% | $100-200/mo |
-| Observability (Datadog/Mezmo) | 3-5% | $50-100/mo |
-| Backups (S3 storage) | < 1% | $5-10/mo |
+#### 1. `deploy/scripts/pg-backup.sh`
 
----
-
-## Appendix: Hybrid Architecture (Render + Hetzner)
-
-If for any reason full migration is not feasible, a hybrid approach keeps the web
-stack on Render and runs only agent nodes on Hetzner. This requires a
-`RemoteDockerProvider` and cross-cloud networking (WireGuard or mTLS).
-
-This is **not recommended** for initial deployment — it adds complexity with no
-benefit over full migration. However, if you migrate to Hetzner (Phase 1) and
-later want to move the web layer back to a PaaS, this architecture shows how to
-keep agent nodes on Hetzner while running the API elsewhere.
-
-### Cross-Cloud Connectivity
-
-#### WireGuard Tunnel (Recommended)
-
-WireGuard creates a point-to-point encrypted tunnel at the kernel level.
-
-- Each peer gets a private IP on a shared subnet (e.g., `10.143.0.0/24`)
-- Only one UDP port (51820) needs to be open on Hetzner's firewall
-- ~3ms overhead, essentially line-speed
-- Handles NAT traversal automatically
-
-#### mTLS Over Public Internet (Simpler)
-
-Agent API on Hetzner listens on port 443 with mutual TLS. Simpler but requires
-firewall updates if the PaaS egress IPs change.
-
-#### Tailscale (Zero-Config WireGuard)
-
-Tailscale wraps WireGuard with identity-based access. Zero firewall config, ACLs
-in a central dashboard. Adds a SaaS dependency.
-
-### Remote Sandbox Provider
-
-```go
-// internal/services/agent/providers/remote.go
-type RemoteDockerProvider struct {
-    nodes      []NodeConfig
-    httpClient *http.Client
-    selector   NodeSelector      // round-robin, least-loaded, etc.
-    logger     zerolog.Logger
-}
-
-type NodeConfig struct {
-    ID       string // "hetzner-fsn1-01"
-    Endpoint string // "https://10.143.0.2:9090"
-    Capacity int    // max concurrent sandboxes
-}
-```
-
-### Agent API (Runs on Hetzner Node)
-
-A thin HTTP server (~500 lines) that wraps the Docker client:
-
-```
-POST   /v1/sandboxes              → Create
-DELETE /v1/sandboxes/:id          → Destroy
-POST   /v1/sandboxes/:id/exec    → Exec
-POST   /v1/sandboxes/:id/stream  → ExecStream (SSE/WebSocket)
-POST   /v1/sandboxes/:id/clone   → CloneRepo
-GET    /v1/sandboxes/:id/files   → ReadFile
-PUT    /v1/sandboxes/:id/files   → WriteFile
-POST   /v1/sandboxes/:id/snapshot → Snapshot
-POST   /v1/sandboxes/:id/restore  → Restore
-GET    /v1/health                 → Health + capacity
-```
-
----
-
-## PostgreSQL Operations & Data Protection
-
-Postgres is the **only stateful component** in the entire system. The server, frontend, and sandboxes are all stateless — if any of them die, you just restart them. Losing Postgres means losing everything. This section describes how to make that effectively impossible.
-
-### Data Protection Layers
-
-There are three independent layers of protection. Each layer covers failures the previous one doesn't.
-
-#### Layer 1: Docker Volume Persistence
-
-The `pgdata` named volume ensures data survives container restarts, upgrades, and `docker compose down` (without `-v`).
-
-```yaml
-# Already configured in docker-compose
-volumes:
-  pgdata:/var/lib/postgresql/data
-```
-
-**Protects against:** container crashes, restarts, image upgrades, `docker compose down`.
-
-**Does NOT protect against:** disk failure, accidental `DROP TABLE`, VPS deletion, data corruption.
-
-#### Layer 2: Automated pg_dump Backups
-
-Scheduled logical backups via `pg_dump`, uploaded offsite. This is the **minimum viable backup strategy** and must be configured before accepting customers.
-
-**Backup script** (`deploy/scripts/pg-backup.sh`):
+Automated `pg_dump` backups with verification and retention.
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Configuration
 BACKUP_DIR="${BACKUP_DIR:-/backups/postgres}"
 RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-30}"
 CONTAINER_NAME="${POSTGRES_CONTAINER:-143-postgres-1}"
@@ -1164,181 +429,726 @@ find "$BACKUP_DIR" -name "*.dump" -mtime +$RETENTION_DAYS -delete
 echo "Cleaned backups older than $RETENTION_DAYS days"
 ```
 
-**Cron schedule** (add to host crontab or a dedicated backup container):
+**Cron schedule** (add to host crontab):
 
 ```cron
 # Every 6 hours: dump the database
 0 */6 * * * /opt/143/deploy/scripts/pg-backup.sh >> /var/log/pg-backup.log 2>&1
 
-# Daily: sync backups offsite to S3-compatible storage (Hetzner Object Storage, AWS S3, etc.)
+# Daily: sync backups offsite to S3-compatible storage
 30 2 * * * rclone sync /backups/postgres s3:143-backups/postgres/ --log-file=/var/log/pg-backup-sync.log
 ```
 
-**Protects against:** disk failure, VPS deletion, accidental data deletion (up to 6 hours of data loss).
+> **`[PROVIDER-SPECIFIC]` Offsite backup target:**
+>
+> | Provider | S3-Compatible Storage | Notes |
+> |----------|----------------------|-------|
+> | Hetzner | Hetzner Object Storage | Cheapest if VPS is also Hetzner |
+> | AWS | S3 | Native; use `aws s3 sync` instead of `rclone` if preferred |
+> | GCP | Cloud Storage | Use `gsutil rsync` or `rclone` with GCS backend |
+> | Any | MinIO (self-hosted) | If you want to avoid cloud storage entirely |
+>
+> `rclone` works with all of the above — configure the remote once, the backup
+> script doesn't change.
 
-**Does NOT protect against:** data written in the last 6 hours before a failure.
+**RPO:** 6 hours worst case. **RTO:** 15-30 minutes (spin up new VPS, restore from dump).
 
-**RPO (Recovery Point Objective):** 6 hours worst case. Reduce by increasing dump frequency.
+#### 2. WAL Archiving (Optional — for Near-Zero Data Loss)
 
-**RTO (Recovery Time Objective):** 15-30 minutes (spin up new VPS, restore from dump).
+Add WAL-G when 6 hours of potential data loss is unacceptable (typically once you
+have paying customers).
 
-#### Layer 3: WAL Archiving & Point-in-Time Recovery (PITR)
-
-For zero data loss tolerance. Postgres continuously streams its write-ahead log (WAL) to object storage. You can restore to any point in time, down to the second.
-
-**When to add this:** When 6 hours of potential data loss is unacceptable — typically when you have paying customers generating high-value data (agent runs, validated PRs, production learnings).
-
-**WAL-G setup** (recommended tool for WAL archiving):
-
-```yaml
-# docker-compose.prod.yml — postgres service with WAL archiving
-services:
-  postgres:
-    image: postgres:18
-    environment:
-      POSTGRES_DB: onefortythree
-      POSTGRES_USER: onefortythree
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-      # WAL archiving config
-      POSTGRES_INITDB_ARGS: "--wal-segsize=16"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-      - ./deploy/postgres/postgresql.conf:/etc/postgresql/conf.d/custom.conf:ro
-    command: postgres -c config_file=/etc/postgresql/conf.d/custom.conf
-```
-
-**Postgres config for WAL archiving** (`deploy/postgres/postgresql.conf`):
+**Changes to `deploy/postgres/postgresql.conf`** (append):
 
 ```ini
-# Include defaults
-listen_addresses = '*'
-max_connections = 100
-
-# WAL archiving
+# WAL archiving (enable when Layer 3 backups are needed)
 wal_level = replica
 archive_mode = on
 archive_command = 'wal-g wal-push %p'
-archive_timeout = 60    # force archive every 60s even if WAL segment isn't full
-
-# Checksums (detect silent corruption)
-# Note: must be enabled at initdb time with --data-checksums
+archive_timeout = 60   # force archive every 60s even if segment isn't full
 ```
 
-**WAL-G environment** (configure in the postgres container or a sidecar):
+**WAL-G environment** (add to Postgres container or sidecar):
 
 ```bash
-# S3-compatible storage (Hetzner Object Storage, MinIO, AWS S3)
+# These use the S3 API — works with any S3-compatible provider
 export WALG_S3_PREFIX=s3://143-backups/wal-g
 export AWS_ACCESS_KEY_ID=your-key
 export AWS_SECRET_ACCESS_KEY=your-secret
-export AWS_ENDPOINT=https://fsn1.your-objectstorage.com  # Hetzner example
-export AWS_REGION=fsn1
-
-# Full backup: run weekly via cron
-wal-g backup-push /var/lib/postgresql/data
-
-# WAL segments: archived automatically every 60 seconds by archive_command
+export AWS_ENDPOINT=https://your-s3-endpoint.com   # omit for real AWS S3
+export AWS_REGION=us-east-1
 ```
 
 **Point-in-time restore:**
 
 ```bash
-# Restore to a specific timestamp
-export WALG_S3_PREFIX=s3://143-backups/wal-g
+# Fetch latest base backup
 wal-g backup-fetch /var/lib/postgresql/data LATEST
 
-# Create recovery.signal and set target time
+# Set recovery target
 cat > /var/lib/postgresql/data/recovery.signal <<EOF
 EOF
-
 cat >> /var/lib/postgresql/data/postgresql.conf <<EOF
 restore_command = 'wal-g wal-fetch %f %p'
 recovery_target_time = '2025-07-15 14:47:00 UTC'
 recovery_target_action = 'promote'
 EOF
 
-# Start postgres — it replays WAL up to the target time
+# Start Postgres — it replays WAL up to the target time
 pg_ctl start -D /var/lib/postgresql/data
 ```
 
-**Protects against:** everything — disk failure, data corruption, accidental deletion, VPS destruction.
+**RPO:** ~60 seconds. **RTO:** 15-30 minutes.
 
-**RPO:** seconds (WAL segments archive every 60s).
+### Backup Layers Summary
 
-**RTO:** 15-30 minutes (fetch base backup + replay WAL).
+| Layer | What | Protects Against | Does NOT Protect Against |
+|-------|------|-----------------|------------------------|
+| 1. Docker volume (`pgdata`) | Data persists across container restarts | Container crashes, restarts, upgrades, `docker compose down` | Disk failure, `DROP TABLE`, VPS deletion |
+| 2. Scheduled `pg_dump` | Offsite logical backups every 6 hours | Disk failure, VPS deletion, accidental data deletion | Last 6 hours of data |
+| 3. WAL-G archiving | Continuous WAL streaming to object storage | Everything — restore to any second | Nothing (this is the comprehensive layer) |
 
 ### Restore Procedures
 
-**Restore from pg_dump** (Layer 2):
+**From pg_dump** (Layer 2):
 
 ```bash
-# 1. Create a fresh postgres instance
-docker compose up -d postgres
-
-# 2. Restore from the most recent dump
+docker compose -f docker-compose.prod.yml up -d postgres
 docker exec -i 143-postgres-1 \
   pg_restore -U onefortythree -d onefortythree --clean --if-exists \
-  < /backups/postgres/onefortythree-20250715-020000.dump
-
-# 3. Verify
-docker exec 143-postgres-1 \
-  psql -U onefortythree -c "SELECT count(*) FROM organizations;"
+  < /backups/postgres/onefortythree-YYYYMMDD-HHMMSS.dump
 ```
 
-**Restore from WAL-G** (Layer 3): See the point-in-time restore procedure above.
+**From WAL-G** (Layer 3): See point-in-time restore procedure above.
 
-**Test your restore procedure.** Run a restore drill at least once before going to production, and monthly afterward. An untested backup is not a backup.
+**Test your restore procedure.** Run a restore drill before going to production,
+and monthly afterward. An untested backup is not a backup.
 
 ### Postgres Health Monitoring
 
-Add these checks to your Datadog or Prometheus monitoring:
+These checks are provider-agnostic — they query Postgres directly.
 
 | Check | Query / Method | Alert Threshold |
 |-------|---------------|-----------------|
-| **Connection count** | `SELECT count(*) FROM pg_stat_activity` | > 80% of `max_connections` |
-| **Disk usage** | `SELECT pg_database_size('onefortythree')` | > 80% of available disk |
-| **Replication lag** (if using replicas) | `SELECT extract(epoch FROM replay_lag) FROM pg_stat_replication` | > 30 seconds |
-| **Long-running queries** | `SELECT * FROM pg_stat_activity WHERE state = 'active' AND now() - query_start > interval '5 minutes'` | Any |
-| **Dead tuples** (needs VACUUM) | `SELECT relname, n_dead_tup FROM pg_stat_user_tables ORDER BY n_dead_tup DESC` | > 100K dead tuples |
-| **Backup freshness** | Check latest `.dump` file mtime | > 12 hours old |
-| **WAL archiving status** | `SELECT last_archived_wal, last_failed_wal FROM pg_stat_archiver` | Any failed WAL |
+| Connection count | `SELECT count(*) FROM pg_stat_activity` | > 80% of `max_connections` |
+| Disk usage | `SELECT pg_database_size('onefortythree')` | > 80% of available disk |
+| Long-running queries | `pg_stat_activity WHERE state = 'active' AND now() - query_start > interval '5 min'` | Any |
+| Dead tuples | `pg_stat_user_tables ORDER BY n_dead_tup DESC` | > 100K dead tuples |
+| Backup freshness | Check latest `.dump` file mtime | > 12 hours old |
+| WAL archiving status | `pg_stat_archiver` — check `last_failed_wal` | Any failed WAL |
 
-**Recommended Datadog monitors** (add to existing alert set):
+### Phase 2 Checklist
 
-| Alert | Condition |
-|-------|-----------|
-| Postgres down | `pg_isready` fails for 30 seconds |
-| Disk usage critical | Postgres data directory > 85% of disk |
-| Backup stale | No new backup file in 12 hours |
-| Connection pool exhaustion | Active connections > 80 |
-| Long-running transaction | Any transaction open > 10 minutes |
+- [ ] Set up `pg-backup.sh` cron (Layer 2 — **required before accepting users**)
+- [ ] Configure offsite backup sync (`rclone` to S3-compatible storage)
+- [ ] Run a restore drill — verify the backup actually works
+- [ ] Set up monitoring (Datadog, Prometheus, or even just cron + email alerts)
+- [ ] (Optional) Enable WAL-G archiving (Layer 3) for near-zero RPO
 
-### Production Postgres Configuration
+### Environment Variables (Backup & Recovery)
 
-For a single-VPS deployment (4-16GB RAM), these settings improve on the defaults without requiring tuning expertise:
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `BACKUP_DIR` | No | `/backups/postgres` | Directory for pg_dump files |
+| `BACKUP_RETENTION_DAYS` | No | `30` | Days to retain local backups |
+| `WALG_S3_PREFIX` | No (Layer 3) | - | S3 path for WAL-G archives |
+| `AWS_ACCESS_KEY_ID` | No (Layer 3) | - | S3 credentials for WAL-G |
+| `AWS_SECRET_ACCESS_KEY` | No (Layer 3) | - | S3 credentials for WAL-G |
+| `AWS_ENDPOINT` | No (Layer 3) | - | S3-compatible endpoint (omit for real AWS) |
+
+---
+
+## Phase 3: Multi-Node Scaling
+
+**Goal:** Separate concerns across multiple VPSes for performance and
+reliability. Add dedicated worker nodes for agent sandboxes.
+
+**When to do this:** When agent runs are queuing up, or when you need the API to
+stay responsive while heavy sandbox runs consume CPU/memory.
+
+For background on node modes (`all`, `api`, `worker`), scheduler leader election,
+and job queue distribution, see [10-infrastructure.md](10-infrastructure.md).
+
+### What Changes in Our Code
+
+Phase 3 is the first phase that requires application code changes.
+
+#### 1. Container Registry Images (CI/CD change)
+
+Multi-node means you can't `docker build` on each node — you need pre-built
+images in a registry. The CI workflow from Phase 1 already pushes to GHCR.
+Each node pulls from `ghcr.io/assembledhq/143-server:latest`.
+
+#### 2. Read/Write Splitting (Go code change — optional, for Phase 3c)
+
+If you add a Postgres read replica, the app needs to route read-heavy queries
+(dashboard, audit log, experiment reads) to the replica:
+
+```go
+// internal/database/pool.go
+type DBPool struct {
+    Primary *pgxpool.Pool  // DATABASE_URL — all writes
+    Replica *pgxpool.Pool  // DATABASE_REPLICA_URL — read-heavy queries (nil if no replica)
+}
+
+func (db *DBPool) ReadPool() *pgxpool.Pool {
+    if db.Replica != nil {
+        return db.Replica
+    }
+    return db.Primary  // falls back to primary if no replica configured
+}
+```
+
+This is a small change. Job queue operations, writes, and anything requiring
+strong consistency always use `Primary`. Dashboard queries, experiment reads, and
+audit log queries use `ReadPool()`.
+
+### Scaling Steps
+
+Phase 3 is broken into independent steps. Do them in order, but each step is
+self-contained.
+
+#### Step 3a: Separate Postgres to Its Own VPS
+
+The single most impactful scaling move. Isolates the database from sandbox
+CPU/memory spikes.
+
+```
+┌──────────────────────┐     ┌──────────────────────┐
+│  VPS-1 (DB)          │     │  VPS-2 (App)         │
+│  4 CPU / 8 GB        │     │  8 CPU / 16 GB       │
+│                      │     │                      │
+│  ┌──────────┐        │     │  ┌──────────┐        │
+│  │ Postgres │◄───────┼─────┼──│  Server  │        │
+│  │          │        │     │  │ mode=all │        │
+│  └──────────┘        │     │  └──────────┘        │
+│                      │     │  ┌──────────┐        │
+│  pg_dump cron        │     │  │  Caddy   │        │
+│  WAL-G archiving     │     │  └──────────┘        │
+└──────────────────────┘     └──────────────────────┘
+        private network (10.x.x.x)
+```
+
+**Infrastructure changes:**
+1. Provision a second VPS for the database
+2. Put both VPSes on a private network (see provider-specific note below)
+3. Postgres listens on the private IP; firewall blocks port 5432 on public
+
+**Config changes:**
+- `DATABASE_URL` on VPS-2 points to VPS-1's private IP
+- Remove Postgres from the app compose file
+
+> **`[PROVIDER-SPECIFIC]` Private networking:**
+>
+> | Provider | Feature | Notes |
+> |----------|---------|-------|
+> | Hetzner | Cloud Networks (vSwitch) | Free, ~2 Gbps, no encryption needed |
+> | AWS | VPC + private subnets | Default VPC works; use security groups for access control |
+> | GCP | VPC network | Automatic; instances in the same VPC see each other |
+> | DigitalOcean | VPC | Free, auto-assigned private IPs |
+>
+> The concept is identical everywhere: instances on the same private network
+> communicate over private IPs without traversing the public internet.
+
+**New file: `docker-compose.db.yml`** (runs on the DB VPS):
+
+```yaml
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: onefortythree
+      POSTGRES_USER: onefortythree
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres/postgresql.conf:/etc/postgresql/conf.d/custom.conf:ro
+    command: postgres -c config_file=/etc/postgresql/conf.d/custom.conf
+    ports:
+      - "0.0.0.0:5432:5432"   # accessible from private network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U onefortythree"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "3.0"
+
+volumes:
+  pgdata:
+```
+
+**Data migration from single-node:**
+
+```bash
+# On the old VPS:
+docker exec 143-postgres-1 pg_dump -U onefortythree -Fc onefortythree > /tmp/143.dump
+scp /tmp/143.dump db-vps:/tmp/143.dump
+
+# On the new DB VPS:
+docker compose -f docker-compose.db.yml up -d
+docker exec -i 143-postgres-1 \
+  pg_restore -U onefortythree -d onefortythree --clean --if-exists < /tmp/143.dump
+
+# On the app VPS — update DATABASE_URL to point at DB VPS private IP:
+DATABASE_URL=postgres://onefortythree:${DB_PASSWORD}@10.0.0.2:5432/onefortythree?sslmode=disable
+docker compose -f docker-compose.prod.yml up -d
+```
+
+**Move to Step 3b when:** you need more concurrent agent runs than one VPS can
+handle (typically >3-5 concurrent sandboxes).
+
+#### Step 3b: Add Dedicated Worker Nodes
+
+Workers run agent sandboxes — the most resource-intensive part. Each worker runs
+`MAX_CONCURRENT_RUNS` sandboxes in parallel.
+
+```
+┌───────────────┐     ┌───────────────┐
+│  VPS-1 (DB)   │     │  VPS-2 (App)  │
+│               │     │  mode=all     │
+│  Postgres  ◄──┼─────┤  Caddy        │
+│               │  ┌──┤               │
+└───────────────┘  │  └───────────────┘
+                   │
+        ┌──────────┼──────────┐
+        │          │          │
+   ┌────▼────┐ ┌──▼──────┐ ┌─▼───────┐
+   │ VPS-3   │ │ VPS-4   │ │ VPS-5   │
+   │ worker  │ │ worker  │ │ worker  │
+   │ 5 runs  │ │ 5 runs  │ │ 5 runs  │
+   └─────────┘ └─────────┘ └─────────┘
+```
+
+**New file: `docker-compose.worker.yml`** (runs on each worker VPS):
+
+```yaml
+services:
+  worker:
+    image: ghcr.io/assembledhq/143-server:latest
+    environment:
+      DATABASE_URL: postgres://onefortythree:${DB_PASSWORD}@${DB_HOST}:5432/onefortythree?sslmode=disable
+      MODE: worker
+      NODE_ID: ${HOSTNAME}
+      MAX_CONCURRENT_RUNS: ${MAX_CONCURRENT_RUNS:-5}
+      SANDBOX_IMAGE: ghcr.io/assembledhq/143-sandbox:latest
+      SANDBOX_RUNTIME: runsc
+    env_file:
+      - .env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "1.0"
+```
+
+**Adding a new worker (5-minute operation on any provider):**
+
+```bash
+# 1. Provision VPS, install Docker + gVisor (same as Phase 1)
+# 2. Copy docker-compose.worker.yml and .env to /opt/143
+# 3. Start it:
+docker compose -f docker-compose.worker.yml up -d
+
+# The worker registers itself in the nodes table,
+# starts polling for jobs, and picks up work immediately.
+```
+
+**Worker VPS sizing:**
+
+| VPS Size | `MAX_CONCURRENT_RUNS` | Good for |
+|----------|----------------------|----------|
+| 4 CPU / 8 GB | 1-2 | Small / test |
+| 8 CPU / 16 GB | 3 | Medium |
+| 16 CPU / 32 GB | 5-7 | Production sweet spot |
+| 32 CPU / 64 GB | 10-15 | Heavy workloads |
+
+Each sandbox gets `SANDBOX_CPU_LIMIT` (default 2) cores and
+`SANDBOX_MEMORY_LIMIT` (default 4 GB). Size the VPS to fit the desired
+concurrency plus headroom for the worker process and OS.
+
+**Move to Step 3c when:** you need API redundancy (uptime SLA), or a single API
+node can't keep up with webhook volume.
+
+#### Step 3c: Multiple API Nodes + Load Balancer
+
+API nodes are stateless — sessions live in Postgres. Add as many as needed behind
+a load balancer.
+
+```
+              ┌──────────────────┐
+              │   Load Balancer  │
+              └──┬──────────┬────┘
+                 │          │
+           ┌─────▼──┐  ┌───▼────┐
+           │ VPS-2  │  │ VPS-6  │
+           │ all    │  │ api    │
+           └────┬───┘  └───┬────┘
+                │          │
+┌───────────────▼──────────▼──────────────┐
+│              VPS-1 (DB)                  │
+│              Postgres                    │
+└──────────────────────────────────────────┘
+```
+
+Keep at least one node as `mode=all` so the scheduler runs. All `api` and `all`
+nodes serve the same traffic.
+
+**Load balancer options (all provider-agnostic except managed LBs):**
+
+| Option | Provider-Agnostic? | Notes |
+|--------|-------------------|-------|
+| Caddy as reverse proxy on a VPS | Yes | Cheapest; add `reverse_proxy` upstream block |
+| nginx as reverse proxy on a VPS | Yes | More config, same result |
+| HAProxy on a VPS | Yes | Best for high-throughput |
+| Managed LB (cloud provider) | No | Simplest ops-wise |
+
+> **`[PROVIDER-SPECIFIC]` Managed load balancers:**
+>
+> | Provider | Service | Cost |
+> |----------|---------|------|
+> | Hetzner | Hetzner Load Balancer | ~€6/mo |
+> | AWS | ALB | ~$16/mo + per-request |
+> | GCP | Cloud Load Balancing | ~$18/mo + per-request |
+
+**Caddy config for multi-node** (provider-agnostic):
+
+```
+app.143.dev {
+    reverse_proxy vps-2:8080 vps-6:8080 {
+        health_uri /healthz
+        health_interval 10s
+        lb_policy round_robin
+    }
+}
+```
+
+#### Connection Pooling (PgBouncer) — When You Need It
+
+When total connections across all nodes approach 80% of `max_connections` (default
+100). Each node's pgx pool defaults to ~10 connections, so with 8+ nodes you're
+getting close.
+
+Add to `docker-compose.db.yml`:
+
+```yaml
+  pgbouncer:
+    image: edoburu/pgbouncer:1.23.1
+    environment:
+      DATABASE_URL: postgres://onefortythree:${DB_PASSWORD}@postgres:5432/onefortythree
+      POOL_MODE: transaction   # MUST be transaction — session mode breaks SKIP LOCKED
+      MAX_CLIENT_CONN: 500
+      DEFAULT_POOL_SIZE: 30
+      RESERVE_POOL_SIZE: 5
+    ports:
+      - "0.0.0.0:6432:6432"
+    depends_on:
+      - postgres
+    restart: unless-stopped
+```
+
+All app/worker nodes change `DATABASE_URL` to point at PgBouncer (port 6432)
+instead of Postgres directly.
+
+### Fleet Deployment
+
+Once you have multiple nodes, the Phase 1 single-node deploy script doesn't
+scale. Here's a fleet deployment script that works with any provider.
+
+#### `deploy/scripts/deploy-fleet.sh`
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Deploy to all nodes listed in a hosts file.
+# Usage: ./deploy-fleet.sh [image-tag]
+#
+# Reads node IPs from /opt/143/fleet-hosts.txt (one IP per line).
+# Provider-agnostic — just needs SSH access.
+
+TAG="${1:-latest}"
+HOSTS_FILE="${FLEET_HOSTS:-/opt/143/fleet-hosts.txt}"
+SERVER_IMAGE="ghcr.io/assembledhq/143-server:$TAG"
+
+echo "Deploying $TAG to fleet..."
+
+while IFS= read -r IP; do
+  [[ -z "$IP" || "$IP" == \#* ]] && continue
+  echo "--- Deploying to $IP ---"
+
+  ssh -o StrictHostKeyChecking=no deploy@"$IP" << REMOTE
+    docker pull $SERVER_IMAGE
+    cd /opt/143
+    docker compose -f docker-compose.*.yml up -d --remove-orphans
+
+    # Wait for health check
+    for i in \$(seq 1 30); do
+      if curl -sf http://localhost:8080/healthz > /dev/null 2>&1; then
+        echo "Health check passed."
+        break
+      fi
+      sleep 2
+    done
+REMOTE
+
+  echo "$IP deployed."
+done < "$HOSTS_FILE"
+
+echo "Fleet deployment complete."
+```
+
+This reads from a plain text hosts file. No cloud API dependency. You can also
+generate the hosts file from your provider's CLI or API if you prefer.
+
+### When to Scale What
+
+| Signal | Action |
+|--------|--------|
+| Agent runs queuing for > 5 min | Add worker nodes (Step 3b) |
+| Postgres CPU > 70% sustained | Separate Postgres to its own VPS (Step 3a) |
+| API p95 latency > 500ms under load | Add API nodes (Step 3c) |
+| Disk I/O wait > 20% on shared VPS | Separate Postgres (Step 3a) |
+| Need 99.9%+ uptime | Multiple API nodes + Postgres HA (Step 3c + Phase 4) |
+
+---
+
+## Phase 4: Fleet Automation and High Availability (Future)
+
+**Goal:** Automated node provisioning, auto-scaling workers based on queue depth,
+and Postgres high availability.
+
+**When to do this:** When you're managing 5+ nodes and
+provisioning/decommissioning frequently enough that it's a chore.
+
+### Node Provisioning with cloud-init
+
+cloud-init is a standard supported by **every major cloud provider** (AWS, GCP,
+Azure, Hetzner, DigitalOcean, Oracle Cloud, Vultr). You write a user-data script
+once; it runs on first boot regardless of provider.
+
+#### `deploy/cloud-init/worker.yml`
+
+```yaml
+#cloud-config
+
+packages:
+  - docker.io
+  - docker-compose-plugin
+
+runcmd:
+  # Install gVisor
+  - curl -fsSL https://gvisor.dev/archive.key | gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+  - echo "deb [arch=amd64 signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" > /etc/apt/sources.list.d/gvisor.list
+  - apt-get update && apt-get install -y runsc
+  - runsc install
+  - systemctl restart docker
+
+  # Pull images
+  - docker login ghcr.io -u deploy -p ${REGISTRY_TOKEN}
+  - docker pull ghcr.io/assembledhq/143-server:latest
+  - docker pull ghcr.io/assembledhq/143-sandbox:latest
+
+  # Write compose file and start
+  - mkdir -p /opt/143
+  - cp /opt/143/docker-compose.worker.yml /opt/143/docker-compose.yml
+  - cd /opt/143 && docker compose up -d
+
+write_files:
+  - path: /opt/143/.env
+    content: |
+      DATABASE_URL=${DATABASE_URL}
+      MEZMO_INGESTION_KEY=${MEZMO_INGESTION_KEY}
+      DD_API_KEY=${DD_API_KEY}
+    permissions: '0600'
+```
+
+> **`[PROVIDER-SPECIFIC]` How to pass user-data at instance creation:**
+>
+> | Provider | Method |
+> |----------|--------|
+> | Hetzner | `hcloud server create --user-data "$(cat worker.yml)"` |
+> | AWS | `aws ec2 run-instances --user-data file://worker.yml` |
+> | GCP | `gcloud compute instances create --metadata-from-file user-data=worker.yml` |
+> | DigitalOcean | `doctl compute droplet create --user-data "$(cat worker.yml)"` |
+
+### Auto-Scaling Workers (Go Code Change)
+
+The auto-scaler runs as part of the scheduler (on whichever node holds the
+advisory lock). It checks queue depth and adjusts the fleet.
+
+**Important:** The auto-scaler uses a `CloudProvider` interface so it's not
+locked to any vendor:
+
+```go
+// internal/autoscaler/provider.go
+
+// CloudProvider abstracts VM lifecycle operations.
+// Implement this interface for each cloud provider you want to support.
+type CloudProvider interface {
+    // CreateInstance provisions a new VM with the given cloud-init user-data.
+    // Returns the instance ID and private IP.
+    CreateInstance(ctx context.Context, opts CreateOpts) (instanceID string, privateIP string, err error)
+
+    // DeleteInstance terminates a VM by ID.
+    DeleteInstance(ctx context.Context, instanceID string) error
+
+    // ListInstances returns all VMs matching the given labels/tags.
+    ListInstances(ctx context.Context, labels map[string]string) ([]Instance, error)
+}
+
+type CreateOpts struct {
+    Name       string            // e.g., "143-worker-1712345678"
+    Size       string            // provider-specific instance type (e.g., "cx42", "t3.xlarge")
+    Region     string            // provider-specific region/location
+    Image      string            // OS image (e.g., "ubuntu-24.04")
+    UserData   string            // cloud-init script
+    Labels     map[string]string // for fleet management
+    NetworkID  string            // private network to attach to
+    SSHKeyName string            // for SSH access
+}
+
+type Instance struct {
+    ID        string
+    Name      string
+    PrivateIP string
+    Labels    map[string]string
+}
+```
+
+```go
+// internal/autoscaler/autoscaler.go
+
+type AutoScaler struct {
+    db       *pgxpool.Pool
+    cloud    CloudProvider   // NOT a specific vendor client
+    config   AutoScaleConfig
+    logger   zerolog.Logger
+}
+
+type AutoScaleConfig struct {
+    Enabled          bool          `env:"AUTOSCALE_ENABLED" envDefault:"false"`
+    MinWorkers       int           `env:"AUTOSCALE_MIN_WORKERS" envDefault:"1"`
+    MaxWorkers       int           `env:"AUTOSCALE_MAX_WORKERS" envDefault:"10"`
+    InstanceSize     string        `env:"AUTOSCALE_INSTANCE_SIZE"`     // provider-specific
+    Region           string        `env:"AUTOSCALE_REGION"`            // provider-specific
+    ScaleUpThreshold int           `env:"AUTOSCALE_SCALE_UP_THRESHOLD" envDefault:"5"`
+    ScaleDownAfter   time.Duration `env:"AUTOSCALE_SCALE_DOWN_AFTER" envDefault:"15m"`
+    CooldownPeriod   time.Duration `env:"AUTOSCALE_COOLDOWN" envDefault:"5m"`
+    RunsPerWorker    int           `env:"AUTOSCALE_RUNS_PER_WORKER" envDefault:"5"`
+    NetworkID        string        `env:"AUTOSCALE_NETWORK_ID"`
+}
+
+func (a *AutoScaler) Tick(ctx context.Context) {
+    var pendingJobs int
+    a.db.QueryRow(ctx,
+        "SELECT count(*) FROM jobs WHERE status = 'pending' AND job_type = 'agent_run'",
+    ).Scan(&pendingJobs)
+
+    var activeWorkers int
+    a.db.QueryRow(ctx,
+        "SELECT count(*) FROM nodes WHERE mode = 'worker' AND status = 'active'",
+    ).Scan(&activeWorkers)
+
+    // Scale up: more pending jobs than capacity
+    if pendingJobs > a.config.ScaleUpThreshold && activeWorkers < a.config.MaxWorkers {
+        needed := (pendingJobs / a.config.RunsPerWorker) + 1 - activeWorkers
+        needed = min(needed, a.config.MaxWorkers-activeWorkers)
+        for i := 0; i < needed; i++ {
+            a.provisionWorker(ctx)
+        }
+        return
+    }
+
+    // Scale down: idle workers
+    if activeWorkers > a.config.MinWorkers {
+        a.drainIdleWorkers(ctx)
+    }
+}
+```
+
+**Provider implementations** would live in:
+- `internal/autoscaler/hetzner.go` — wraps `hcloud-go`
+- `internal/autoscaler/aws.go` — wraps AWS EC2 SDK
+- `internal/autoscaler/gcp.go` — wraps GCP Compute SDK
+
+Selected by env var: `AUTOSCALE_PROVIDER=hetzner|aws|gcp`
+
+### Auto-Scale Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTOSCALE_ENABLED` | `false` | Enable auto-scaling |
+| `AUTOSCALE_PROVIDER` | - | Cloud provider: `hetzner`, `aws`, `gcp` |
+| `AUTOSCALE_MIN_WORKERS` | `1` | Minimum worker count (never scale below) |
+| `AUTOSCALE_MAX_WORKERS` | `10` | Maximum worker count (hard cap) |
+| `AUTOSCALE_INSTANCE_SIZE` | - | Provider-specific instance type |
+| `AUTOSCALE_REGION` | - | Provider-specific region/location |
+| `AUTOSCALE_SCALE_UP_THRESHOLD` | `5` | Pending jobs that trigger scale-up |
+| `AUTOSCALE_SCALE_DOWN_AFTER` | `15m` | Idle time before drain |
+| `AUTOSCALE_COOLDOWN` | `5m` | Min time between scale events |
+| `AUTOSCALE_RUNS_PER_WORKER` | `5` | Target concurrent runs per worker |
+
+### Postgres High Availability
+
+Two options:
+
+**Option A: Streaming Replication (self-managed)**
+
+- Primary handles all writes; replica handles read-heavy queries
+- Failover: manual or via [Patroni](https://github.com/patroni/patroni)
+- Requires the read/write splitting code change from Step 3c
+
+**Option B: Managed Postgres**
+
+When operational overhead outweighs cost savings, move to managed Postgres. The
+migration is a single `pg_dump`/`pg_restore` with no application code changes —
+the app only sees `DATABASE_URL`.
+
+| Provider | HA Setup | Cost (4GB RAM) | Notes |
+|----------|----------|----------------|-------|
+| Supabase | Auto-failover | ~$25/mo | Easy setup |
+| Neon | Serverless | Pay-per-query | Good for variable workloads |
+| AWS RDS | Multi-AZ | ~$70/mo | Battle-tested |
+| GCP Cloud SQL | HA with failover | ~$80/mo | Native GCP integration |
+| Crunchy Bridge | Managed HA | ~$50/mo | Postgres-focused |
+
+---
+
+## Production Postgres Configuration
+
+For a single-VPS deployment (4-16GB RAM). This file is used across all phases.
 
 ```ini
 # deploy/postgres/postgresql.conf
 
 # Connection limits
-max_connections = 100           # plenty for pgx pool + direct connections
-shared_buffers = 256MB          # 25% of RAM on a 1GB instance, scale up with RAM
-effective_cache_size = 768MB    # 75% of RAM — tells planner how much OS cache to expect
-work_mem = 4MB                  # per-sort/hash operation — keep conservative
+max_connections = 100
+shared_buffers = 256MB          # 25% of RAM; scale with VPS size (see table)
+effective_cache_size = 768MB    # 75% of RAM; tells planner about OS cache
+work_mem = 4MB                  # per-sort/hash — keep conservative
 maintenance_work_mem = 64MB     # for VACUUM, CREATE INDEX
 
 # Write performance
 wal_buffers = 16MB
 checkpoint_completion_target = 0.9
-random_page_cost = 1.1          # for SSD storage (Hetzner uses SSDs)
+random_page_cost = 1.1          # for SSD storage (all modern VPS providers use SSDs)
 
-# Autovacuum (keep defaults, but ensure it runs aggressively enough)
+# Autovacuum
 autovacuum = on
 autovacuum_max_workers = 3
-autovacuum_naptime = 60         # check every 60s instead of default 1min (same, but explicit)
+autovacuum_naptime = 60
 
-# Logging (useful for debugging slow queries)
-log_min_duration_statement = 1000  # log queries taking > 1 second
+# Logging
+log_min_duration_statement = 1000  # log queries > 1 second
 log_checkpoints = on
 log_connections = on
 log_disconnections = on
@@ -1346,10 +1156,10 @@ log_lock_waits = on
 
 # Data integrity
 fsync = on                      # NEVER turn this off in production
-full_page_writes = on           # protects against partial page writes on crash
+full_page_writes = on
 ```
 
-Scale `shared_buffers` and `effective_cache_size` with your VPS RAM:
+**Scale with VPS RAM:**
 
 | VPS RAM | `shared_buffers` | `effective_cache_size` |
 |---------|------------------|----------------------|
@@ -1360,33 +1170,78 @@ Scale `shared_buffers` and `effective_cache_size` with your VPS RAM:
 
 ### Data Integrity Safeguards
 
-These are already built into the schema and application, but worth calling out:
+Built into the schema and application:
 
-1. **Data checksums** — Enable at `initdb` time (`--data-checksums`). Detects silent disk corruption. Add `POSTGRES_INITDB_ARGS: "--data-checksums"` to docker-compose.
-2. **Audit log immutability** — The `audit_log` table has a trigger that prevents `UPDATE` and `DELETE` operations (see migration `000001`).
-3. **Foreign key constraints** — All cross-table references use `ON DELETE CASCADE` or `ON DELETE RESTRICT` to prevent orphaned records.
-4. **`timestamptz` everywhere** — All timestamps are timezone-aware (UTC), preventing timezone-related data corruption.
-5. **UUID primary keys** — No auto-increment collisions across nodes in a multi-node deployment.
-6. **Transaction isolation** — The job queue uses `FOR UPDATE SKIP LOCKED` which operates correctly under Postgres's default `READ COMMITTED` isolation level.
+1. **Data checksums** — enabled at `initdb` time (`--data-checksums`). Detects silent disk corruption.
+2. **Audit log immutability** — trigger prevents `UPDATE`/`DELETE` on `audit_log` (see migration `000001`).
+3. **Foreign key constraints** — `ON DELETE CASCADE` or `ON DELETE RESTRICT` everywhere.
+4. **`timestamptz` everywhere** — all timestamps are timezone-aware (UTC).
+5. **UUID primary keys** — no auto-increment collisions across nodes.
+6. **Transaction isolation** — job queue uses `FOR UPDATE SKIP LOCKED` under `READ COMMITTED`.
 
 ### Postgres Scaling Path
 
-| Scale | Database size | Setup | Action needed |
-|-------|--------------|-------|---------------|
-| **Launch** | < 1 GB | Single VPS, Postgres in Docker | Layer 1 + Layer 2 backups |
-| **Growing** | 1-50 GB | Single VPS, Postgres in Docker | Add Layer 3 (WAL archiving), tune `shared_buffers` |
-| **Busy** | 50-500 GB | Dedicated Postgres VPS (Hetzner CX22-CX42) | Separate DB from app server, add read replica for dashboard queries |
-| **Large** | 500 GB+ | Managed Postgres (RDS, Cloud SQL, Ubicloud) or Citus | Connection pooling (PgBouncer), table partitioning for `agent_run_logs` and `audit_log` |
+| Scale | DB Size | Setup | Action |
+|-------|---------|-------|--------|
+| Launch | < 1 GB | Single VPS, Postgres in Docker | Layer 1 + Layer 2 backups |
+| Growing | 1-50 GB | Single VPS | Add Layer 3 (WAL-G), tune `shared_buffers` |
+| Busy | 50-500 GB | Dedicated DB VPS | Separate DB (Step 3a), add read replica |
+| Large | 500 GB+ | Managed Postgres | PgBouncer, table partitioning for `agent_run_logs` and `audit_log` |
 
-**Migration from self-hosted to managed is a single pg_dump/pg_restore.** No application code changes — the app only sees `DATABASE_URL`.
+---
 
-### Environment Variables (Backup & Recovery)
+## Capacity Planning
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `BACKUP_DIR` | No | `/backups/postgres` | Directory for pg_dump backup files |
-| `BACKUP_RETENTION_DAYS` | No | `30` | Days to retain local backup files |
-| `WALG_S3_PREFIX` | No (Layer 3) | - | S3 path for WAL-G archives |
-| `AWS_ACCESS_KEY_ID` | No (Layer 3) | - | S3 credentials for WAL-G |
-| `AWS_SECRET_ACCESS_KEY` | No (Layer 3) | - | S3 credentials for WAL-G |
-| `AWS_ENDPOINT` | No (Layer 3) | - | S3-compatible endpoint (Hetzner, MinIO) |
+| Scale | Nodes | Monthly Cost (approx) | Concurrent Agents | Phase |
+|-------|-------|----------------------|-------------------|-------|
+| **Solo** | 1 (8 CPU / 16 GB) | $16-120 | 3-5 | 1 |
+| **Small team** | 2 (DB + App) | $30-200 | 3-5 | 3a |
+| **Growing** | 4 (DB + App + 2 Workers) | $60-400 | 10-15 | 3b |
+| **Busy** | 7 (DB + 2 API + 4 Workers) | $120-800 | 20-30 | 3c |
+| **Auto-scaled** | 2-20 (dynamic) | $30-2000 | 5-100 (elastic) | 4 |
+
+Cost ranges reflect the difference between budget providers (Hetzner/DigitalOcean)
+and premium providers (AWS/GCP). The wide range is intentional — choose based on
+your existing cloud relationships, compliance requirements, and team familiarity.
+
+**The dominant cost is LLM API, not infrastructure.** A single agent run costs
+$0.50-5.00 in Claude API tokens. The VPS to run it costs ~$0.02-0.15/hr. Don't
+under-provision to save $10/month.
+
+| Category | % of Total Cost | Example (100 repos) |
+|----------|----------------|---------------------|
+| LLM API (Claude/GPT) | 80-90% | $2,000-10,000/mo |
+| Infrastructure | 5-10% | $100-800/mo |
+| Observability | 3-5% | $50-100/mo |
+| Backups (S3 storage) | < 1% | $5-10/mo |
+
+---
+
+## Cloud Provider Portability Summary
+
+Everything in this design uses standard, portable technology:
+
+| Component | Technology | Provider-Agnostic? | Notes |
+|-----------|-----------|-------------------|-------|
+| Container orchestration | Docker Compose | Yes | Works on any Linux host |
+| Container registry | GHCR | Yes | Could also use Docker Hub, ECR, GCR, etc. |
+| TLS termination | Caddy | Yes | Auto Let's Encrypt on any public IP |
+| Sandbox isolation | gVisor (runsc) | Yes | Works on any Linux kernel 4.4+ |
+| Database | Postgres 17 in Docker | Yes | Or any managed Postgres service |
+| Backup storage | S3-compatible via rclone | Yes | AWS S3, GCS, Hetzner Object Storage, MinIO |
+| WAL archiving | WAL-G | Yes | Supports S3, GCS, Azure Blob, local filesystem |
+| Node provisioning | cloud-init | Yes | Supported by every major cloud provider |
+| CI/CD | GitHub Actions + SSH | Yes | Just needs SSH access to the target VPS |
+| Private networking | Provider VPC/vNetwork | **Provider-specific** | Concept is universal; API/config differs |
+| Auto-scaling | `CloudProvider` interface | **Provider-specific impl** | Interface is ours; implementations wrap vendor SDKs |
+| Managed load balancer | Provider LB | **Provider-specific** | Or use Caddy/nginx/HAProxy on a VPS instead |
+
+**What you'd need to change to switch providers:**
+1. Provision new VPSes on the new provider (same specs)
+2. Set up a private network (different API, same concept)
+3. Update `DEPLOY_HOST` in GitHub Actions secrets
+4. Update `rclone` config if backup storage endpoint changes
+5. (Phase 4 only) Implement the `CloudProvider` interface for the new provider
+
+Application code, Docker Compose files, Caddy config, Postgres config, backup
+scripts, and CI/CD workflows all stay identical.
