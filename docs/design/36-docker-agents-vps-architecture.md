@@ -60,7 +60,7 @@ changes.
 │  │  Docker Compose                                                │  │
 │  │                                                                │  │
 │  │  ┌──────────┐  ┌─────────┐  ┌──────────┐  ┌──────────────┐   │  │
-│  │  │ Caddy    │  │ Go API  │  │ Next.js  │  │  Postgres 17 │   │  │
+│  │  │ Caddy    │  │ Go API  │  │ Next.js  │  │  Postgres 18 │   │  │
 │  │  │ :443     │─▶│ :8080   │  │ :3000    │  │  :5432       │   │  │
 │  │  │ (TLS)    │  │         │  │          │  │              │   │  │
 │  │  └──────────┘  └────┬────┘  └──────────┘  └──────────────┘   │  │
@@ -436,7 +436,8 @@ services:
           cpus: "2.0"
 
   postgres:
-    image: postgres:17
+    image: postgres:18.0            # pin minor version to avoid surprise upgrades
+    shm_size: 2g                    # must match or exceed shared_buffers; default 64MB will crash under load
     environment:
       POSTGRES_USER: onefortythree
       POSTGRES_PASSWORD: ${DB_PASSWORD}
@@ -445,7 +446,8 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./deploy/postgres/postgresql.conf:/etc/postgresql/conf.d/custom.conf:ro
-    command: postgres -c config_file=/etc/postgresql/conf.d/custom.conf
+      - ./deploy/postgres/pg_hba.conf:/etc/postgresql/conf.d/pg_hba.conf:ro
+    command: postgres -c config_file=/etc/postgresql/conf.d/custom.conf -c hba_file=/etc/postgresql/conf.d/pg_hba.conf
     ports:
       - "127.0.0.1:5432:5432"   # localhost only — no external access
     healthcheck:
@@ -457,7 +459,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: 4G              # give Postgres room for shared_buffers + connections + OS cache
           cpus: "2.0"
 
 volumes:
@@ -971,7 +973,8 @@ CPU/memory spikes.
 ```yaml
 services:
   postgres:
-    image: postgres:17
+    image: postgres:18.0
+    shm_size: 4g
     environment:
       POSTGRES_DB: onefortythree
       POSTGRES_USER: onefortythree
@@ -980,7 +983,9 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./deploy/postgres/postgresql.conf:/etc/postgresql/conf.d/custom.conf:ro
-    command: postgres -c config_file=/etc/postgresql/conf.d/custom.conf
+      - ./deploy/postgres/pg_hba.conf:/etc/postgresql/conf.d/pg_hba.conf:ro
+      - ./deploy/postgres/certs:/var/lib/postgresql/certs:ro
+    command: postgres -c config_file=/etc/postgresql/conf.d/custom.conf -c hba_file=/etc/postgresql/conf.d/pg_hba.conf
     ports:
       - "0.0.0.0:5432:5432"   # accessible from private network
     healthcheck:
@@ -992,7 +997,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 4G
+          memory: 8G
           cpus: "3.0"
 
 volumes:
@@ -1425,27 +1430,23 @@ Selected by env var: `AUTOSCALE_PROVIDER=hetzner|aws|gcp`
 
 ### Postgres High Availability
 
-Two options:
+Self-hosted streaming replication with automatic failover via
+[Patroni](https://github.com/patroni/patroni). This builds on the read replica
+setup from the [Streaming Replication](#streaming-replication-phase-3) section.
 
-**Option A: Streaming Replication (self-managed)**
-
-- Primary handles all writes; replica handles read-heavy queries
-- Failover: manual or via [Patroni](https://github.com/patroni/patroni)
+- Primary handles all writes (job queue, agent runs, webhooks)
+- Replica handles read-heavy queries (dashboard, audit log, experiments)
+- Patroni manages automatic failover (< 30 seconds) using etcd for consensus
 - Requires the read/write splitting code change from Step 3c
 
-**Option B: Managed Postgres**
+**When to add Patroni:** When you have paying customers and can't tolerate manual
+failover (5-30 minutes). Until then, the manual failover runbook in the
+Streaming Replication section is sufficient.
 
-When operational overhead outweighs cost savings, move to managed Postgres. The
-migration is a single `pg_dump`/`pg_restore` with no application code changes —
-the app only sees `DATABASE_URL`.
-
-| Provider | HA Setup | Cost (4GB RAM) | Notes |
-|----------|----------|----------------|-------|
-| Supabase | Auto-failover | ~$25/mo | Easy setup |
-| Neon | Serverless | Pay-per-query | Good for variable workloads |
-| AWS RDS | Multi-AZ | ~$70/mo | Battle-tested |
-| GCP Cloud SQL | HA with failover | ~$80/mo | Native GCP integration |
-| Crunchy Bridge | Managed HA | ~$50/mo | Postgres-focused |
+**Patroni adds:** 3-node etcd cluster (can run on existing VPSes) + Patroni
+sidecar container on each Postgres VPS. This is operational complexity but gives
+you sub-minute automatic failover without depending on a third-party managed
+database service.
 
 ---
 
@@ -1803,7 +1804,7 @@ correlate a job back to the webhook that triggered it.
 |---------|--------------|-------------|
 | SOC2 Type II | Not started | Audit log table exists; need access controls, change management |
 | Data encryption at rest | Postgres data checksums only | Enable Postgres TDE or use encrypted volumes (LUKS, cloud-managed) |
-| Data encryption in transit | Caddy TLS for external; internal is plaintext | Add mTLS between nodes, or use `sslmode=verify-full` for Postgres |
+| Data encryption in transit | Caddy TLS for external; Postgres SSL for DB connections | Already configured — see `pg_hba.conf` and SSL settings above |
 | Secret rotation | SOPS + age, manual rotation | Add rotation scripts, integrate with cloud secret managers |
 | Access control audit trail | `audit_log` table exists | Ensure all admin actions are logged, add `actor_id` to sensitive queries |
 | Data residency | Single region | Multi-region (see above) |
@@ -1876,50 +1877,359 @@ workflow alongside the server and agent images.
 
 ---
 
-## Production Postgres Configuration
+## Self-Hosted PostgreSQL Operations
 
-For a single-VPS deployment (4-16GB RAM). This file is used across all phases.
+This section covers everything needed to run Postgres in Docker on a VPS at
+production quality. Postgres is the only stateful component — getting this right
+is critical.
+
+### Production Configuration (`deploy/postgres/postgresql.conf`)
+
+Tuned for a write-heavy SaaS workload (job queues, append-only logs, agent runs)
+on VPS with NVMe SSDs. Scale the memory settings with VPS RAM.
 
 ```ini
 # deploy/postgres/postgresql.conf
 
-# Connection limits
+# ── Connections ──────────────────────────────────────────────────────
 max_connections = 100
-shared_buffers = 256MB          # 25% of RAM; scale with VPS size (see table)
-effective_cache_size = 768MB    # 75% of RAM; tells planner about OS cache
-work_mem = 4MB                  # per-sort/hash — keep conservative
-maintenance_work_mem = 64MB     # for VACUUM, CREATE INDEX
+listen_addresses = '*'
 
-# Write performance
-wal_buffers = 16MB
-checkpoint_completion_target = 0.9
-random_page_cost = 1.1          # for SSD storage (all modern VPS providers use SSDs)
+# ── Memory ───────────────────────────────────────────────────────────
+# Scale these with VPS RAM (see table below).
+shared_buffers = 4GB                # 25% of RAM
+effective_cache_size = 12GB         # 75% of RAM — tells planner about OS cache
+work_mem = 16MB                     # per-sort/hash; conservative for OLTP
+maintenance_work_mem = 1GB          # speeds up VACUUM and CREATE INDEX
+huge_pages = try                    # use if kernel supports it (see host setup below)
 
-# Autovacuum
+# ── SSD-Specific Planner Settings ────────────────────────────────────
+random_page_cost = 1.1              # default 4.0; critical for SSD (sequential ≈ random)
+seq_page_cost = 1.0
+effective_io_concurrency = 200      # NVMe can handle 200+ concurrent reads
+maintenance_io_concurrency = 200    # for VACUUM I/O on SSDs
+
+# ── WAL (Write-Ahead Log) ───────────────────────────────────────────
+wal_level = replica                 # required for replication + WAL-G
+wal_buffers = 64MB                  # default 16MB; increase for write-heavy
+wal_compression = on                # reduces I/O at slight CPU cost (good tradeoff)
+min_wal_size = 2GB                  # preallocate WAL to reduce I/O spikes
+max_wal_size = 8GB                  # allow longer checkpoint intervals
+max_wal_senders = 5                 # for replication + WAL-G
+max_replication_slots = 5           # prevent WAL removal before replica catches up
+wal_keep_size = 2GB                 # safety net for replication
+archive_mode = on                   # required for WAL-G
+archive_command = 'wal-g wal-push %p'
+archive_timeout = 60                # force archive every 60s
+
+# VM-specific optimizations (faster WAL handling on virtualized storage)
+wal_recycle = off
+wal_init_zero = off
+
+# ── Checkpoints ──────────────────────────────────────────────────────
+checkpoint_timeout = 15min          # default 5min; reduces checkpoint frequency
+checkpoint_completion_target = 0.9  # spread checkpoint I/O evenly
+
+# ── Parallelism ──────────────────────────────────────────────────────
+max_worker_processes = 8
+max_parallel_workers = 6
+max_parallel_workers_per_gather = 4
+max_parallel_maintenance_workers = 4
+
+# ── Autovacuum (tuned for write-heavy workloads) ─────────────────────
 autovacuum = on
-autovacuum_max_workers = 3
-autovacuum_naptime = 60
+autovacuum_max_workers = 4          # default 3; increase for many tables
+autovacuum_naptime = 15s            # default 60s; check more frequently
+autovacuum_vacuum_cost_limit = 1000 # default 200; let vacuum work harder on SSDs
+autovacuum_vacuum_cost_delay = 2ms  # fine for SSDs
+autovacuum_vacuum_insert_threshold = 1000
+autovacuum_vacuum_insert_scale_factor = 0.1  # default 0.2; vacuum sooner on insert-only tables
 
-# Logging
-log_min_duration_statement = 1000  # log queries > 1 second
+# ── SSL/TLS ──────────────────────────────────────────────────────────
+ssl = on
+ssl_cert_file = '/var/lib/postgresql/certs/server.crt'
+ssl_key_file = '/var/lib/postgresql/certs/server.key'
+ssl_ca_file = '/var/lib/postgresql/certs/ca.crt'
+ssl_min_protocol_version = 'TLSv1.2'
+
+# ── Logging ──────────────────────────────────────────────────────────
+log_min_duration_statement = 500    # log queries > 500ms
 log_checkpoints = on
 log_connections = on
 log_disconnections = on
 log_lock_waits = on
+log_replication_commands = on
 
-# Data integrity
-fsync = on                      # NEVER turn this off in production
-full_page_writes = on
+# ── Data integrity ───────────────────────────────────────────────────
+fsync = on                          # NEVER turn this off in production
+full_page_writes = on               # protects against partial page writes on crash
+# Data checksums enabled at initdb time (--data-checksums)
 ```
 
 **Scale with VPS RAM:**
 
-| VPS RAM | `shared_buffers` | `effective_cache_size` |
-|---------|------------------|----------------------|
-| 2 GB | 512 MB | 1.5 GB |
-| 4 GB | 1 GB | 3 GB |
-| 8 GB | 2 GB | 6 GB |
-| 16 GB | 4 GB | 12 GB |
+| VPS RAM | `shared_buffers` | `effective_cache_size` | `shm_size` (docker-compose) |
+|---------|------------------|----------------------|-----------------------------|
+| 4 GB | 1 GB | 3 GB | 2g |
+| 8 GB | 2 GB | 6 GB | 3g |
+| 16 GB | 4 GB | 12 GB | 4g (or `5g` for headroom) |
+| 32 GB | 8 GB | 24 GB | 10g |
+
+### Connection Security (`deploy/postgres/pg_hba.conf`)
+
+Use TLS even on private networks (defense in depth + compliance).
+
+```
+# TYPE    DATABASE        USER            ADDRESS           METHOD
+
+# Local connections (inside container) — no SSL needed
+local     all             all                               scram-sha-256
+
+# Same-host Docker network — require SSL
+hostssl   all             onefortythree   172.18.0.0/16     scram-sha-256
+
+# Cross-VPS private network (Phase 3+) — require SSL
+hostssl   all             onefortythree   10.0.0.0/24       scram-sha-256
+
+# Replication connections — require SSL
+hostssl   replication     replicator      10.0.0.0/24       scram-sha-256
+
+# Deny everything else
+host      all             all             0.0.0.0/0         reject
+```
+
+**Generate TLS certificates** (self-signed is fine for inter-VPS communication):
+
+```bash
+# Generate CA
+openssl req -new -x509 -days 3650 -nodes -out ca.crt -keyout ca.key -subj "/CN=143-pg-ca"
+
+# Generate server cert
+openssl req -new -nodes -out server.csr -keyout server.key -subj "/CN=postgres"
+openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt -days 365
+
+# Fix permissions (Postgres requires strict ownership)
+chmod 600 server.key
+chown 999:999 server.key server.crt   # UID 999 = postgres user in Docker image
+
+# Place in deploy/postgres/certs/
+mkdir -p deploy/postgres/certs
+mv ca.crt ca.key server.crt server.key deploy/postgres/certs/
+```
+
+The app connection string becomes:
+```
+postgres://onefortythree:xxx@postgres:5432/onefortythree?sslmode=verify-ca&sslrootcert=/path/to/ca.crt
+```
+
+### Per-Table Vacuum Overrides
+
+High-write tables need more aggressive vacuum settings than the globals above.
+Apply these after migrations create the tables:
+
+```sql
+-- Job queue: constant INSERT/UPDATE/DELETE cycling
+ALTER TABLE jobs SET (
+  autovacuum_vacuum_scale_factor = 0.01,       -- vacuum at 1% dead rows (not 20%)
+  autovacuum_vacuum_threshold = 100,
+  autovacuum_analyze_scale_factor = 0.02,
+  autovacuum_vacuum_cost_limit = 2000
+);
+
+-- Session logs: append-only, grows fast
+ALTER TABLE session_logs SET (
+  autovacuum_vacuum_insert_scale_factor = 0.05,
+  autovacuum_freeze_max_age = 200000000
+);
+
+-- Audit log: append-only, immutable
+ALTER TABLE audit_log SET (
+  autovacuum_vacuum_insert_scale_factor = 0.05,
+  autovacuum_freeze_max_age = 200000000
+);
+```
+
+### Host Kernel Tuning
+
+Apply on the VPS host (add to `/etc/sysctl.conf`):
+
+```bash
+# Prevent OOM killer from targeting Postgres
+vm.overcommit_memory = 2
+vm.overcommit_ratio = 80
+
+# Prefer dropping cache over swapping
+vm.swappiness = 1
+
+# Huge pages (optional but recommended for shared_buffers > 2GB)
+# Calculate: shared_buffers / 2MB + 10% overhead
+# For 4GB shared_buffers: 4096/2 * 1.1 = 2250
+vm.nr_hugepages = 2250
+```
+
+Then set `huge_pages = on` (not `try`) in postgresql.conf and restart Postgres.
+
+### Streaming Replication (Phase 3+)
+
+When you separate Postgres to its own VPS (Step 3a), set up a read replica.
+
+**On the primary — create replication user and slot:**
+
+```sql
+CREATE ROLE replicator WITH REPLICATION LOGIN PASSWORD 'secure_replication_password';
+SELECT pg_create_physical_replication_slot('replica1_slot');
+```
+
+**On the replica VPS — take base backup and start:**
+
+```bash
+# Clear data directory and take base backup from primary
+docker run --rm \
+  -v pgdata:/var/lib/postgresql/data \
+  postgres:18.0 \
+  pg_basebackup \
+    -h 10.0.0.1 \
+    -U replicator \
+    -D /var/lib/postgresql/data \
+    -Fp -Xs -P -R \
+    -S replica1_slot
+
+# -R auto-creates standby.signal and writes connection info
+```
+
+**Replica `postgresql.conf` additions** (append to the standard config):
+
+```ini
+hot_standby = on
+hot_standby_feedback = on
+max_standby_streaming_delay = 30s
+primary_conninfo = 'host=10.0.0.1 port=5432 user=replicator password=xxx sslmode=verify-ca'
+primary_slot_name = 'replica1_slot'
+```
+
+**Failover runbook** (manual — add Patroni for automatic failover when you need
+sub-minute recovery):
+
+```bash
+# 1. Promote replica to primary
+docker exec 143-postgres-replica-1 pg_ctl promote -D /var/lib/postgresql/data
+
+# 2. Update DATABASE_URL on all app/worker nodes to point to new primary
+
+# 3. Rebuild old primary as a replica (pg_basebackup from new primary)
+```
+
+### PgBouncer Configuration
+
+When running PgBouncer (Phase 3c), use this config:
+
+```ini
+# pgbouncer.ini
+[databases]
+onefortythree = host=postgres port=5432 dbname=onefortythree
+
+[pgbouncer]
+pool_mode = transaction
+max_client_conn = 500
+default_pool_size = 30
+reserve_pool_size = 5
+max_prepared_statements = 100   # enables prepared statements in transaction mode (PgBouncer 1.21+)
+server_reset_query = DISCARD ALL
+server_check_query = SELECT 1
+server_check_delay = 30
+```
+
+**What breaks in transaction mode** (and workarounds):
+
+| Feature | Status | Workaround |
+|---------|--------|------------|
+| Prepared statements (protocol-level) | Works (PgBouncer 1.21+) | Set `max_prepared_statements = 100` |
+| `LISTEN/NOTIFY` | Broken | Use direct Postgres connection (see Enterprise section) |
+| Session-level advisory locks | Broken | Use `pg_advisory_xact_lock()` (transaction-scoped) |
+| Temporary tables | Broken | Use `ON COMMIT DROP` within same transaction |
+| `SET` commands | Lost after transaction | Use `SET LOCAL` within transaction |
+
+### Backup Verification
+
+Beyond the `pg_restore --list` check in the backup script, run automated restore
+tests weekly:
+
+```bash
+#!/usr/bin/env bash
+# deploy/scripts/restore-test.sh
+set -euo pipefail
+
+BACKUP=$(ls -t /backups/postgres/*.dump | head -1)
+TEST_CONTAINER="143-restore-test-$(date +%s)"
+
+# Start a temporary Postgres for the test
+docker run -d --name "$TEST_CONTAINER" \
+  -e POSTGRES_USER=onefortythree \
+  -e POSTGRES_PASSWORD=test \
+  -e POSTGRES_DB=onefortythree \
+  postgres:18.0
+
+sleep 5  # wait for startup
+
+# Restore
+docker exec -i "$TEST_CONTAINER" \
+  pg_restore -U onefortythree -d onefortythree --clean --if-exists < "$BACKUP"
+
+# Verify critical tables have data
+for TABLE in organizations users projects sessions jobs; do
+  COUNT=$(docker exec "$TEST_CONTAINER" \
+    psql -U onefortythree -tAc "SELECT count(*) FROM $TABLE" 2>/dev/null)
+  if [ -z "$COUNT" ] || [ "$COUNT" -eq 0 ]; then
+    echo "FAIL: $TABLE is empty after restore"
+    docker rm -f "$TEST_CONTAINER"
+    exit 1
+  fi
+  echo "OK: $TABLE has $COUNT rows"
+done
+
+echo "Restore test PASSED"
+docker rm -f "$TEST_CONTAINER"
+```
+
+**Schedule:** Weekly via cron. Alert if it fails.
+
+```cron
+0 4 * * 0 /opt/143/deploy/scripts/restore-test.sh >> /var/log/restore-test.log 2>&1
+```
+
+### Upgrade Strategy (Postgres 18 → 19+)
+
+Use `pg_upgrade --link` for near-zero-downtime upgrades. The `--link` flag
+creates hard links instead of copying data files — the upgrade itself takes
+seconds regardless of database size.
+
+```bash
+# 1. Stop the application (keep Postgres running)
+docker compose stop api frontend
+
+# 2. Stop Postgres
+docker compose stop postgres
+
+# 3. Run pg_upgrade with both versions
+docker run --rm \
+  -v pgdata:/var/lib/postgresql \
+  pgautoupgrade/pgautoupgrade:18-to-19 \
+  pg_upgrade \
+    --old-datadir /var/lib/postgresql/18/data \
+    --new-datadir /var/lib/postgresql/19/data \
+    --old-bindir /usr/lib/postgresql/18/bin \
+    --new-bindir /usr/lib/postgresql/19/bin \
+    --link
+
+# 4. Update docker-compose to postgres:19.x, then start everything
+docker compose up -d
+
+# 5. CRITICAL: rebuild planner statistics (pg_upgrade doesn't transfer them)
+docker exec 143-postgres-1 vacuumdb --all --analyze-in-stages -U onefortythree
+```
+
+Total downtime: the time to stop containers + run pg_upgrade (seconds) + restart.
+Typically under 5 minutes regardless of database size.
 
 ### Data Integrity Safeguards
 
@@ -1939,7 +2249,7 @@ Built into the schema and application:
 | Launch | < 1 GB | Single VPS, Postgres in Docker | Layer 1 + Layer 2 backups |
 | Growing | 1-50 GB | Single VPS | Add Layer 3 (WAL-G), tune `shared_buffers` |
 | Busy | 50-500 GB | Dedicated DB VPS | Separate DB (Step 3a), add read replica |
-| Large | 500 GB+ | Managed Postgres | PgBouncer, table partitioning for `agent_run_logs` and `audit_log` |
+| Large | 500 GB+ | Dedicated high-memory VPS + Patroni HA | PgBouncer, table partitioning for `agent_run_logs` and `audit_log` |
 
 ---
 
@@ -1980,7 +2290,7 @@ Everything in this design uses standard, portable technology:
 | Container registry | GHCR | Yes | Could also use Docker Hub, ECR, GCR, etc. |
 | TLS termination | Caddy | Yes | Auto Let's Encrypt on any public IP |
 | Sandbox isolation | gVisor (runsc) | Yes | Works on any Linux kernel 4.4+ |
-| Database | Postgres 17 in Docker | Yes | Or any managed Postgres service |
+| Database | Postgres 18 in Docker (self-hosted) | Yes | Same Docker image works on any VPS provider |
 | Backup storage | S3-compatible via rclone | Yes | AWS S3, GCS, Hetzner Object Storage, MinIO |
 | WAL archiving | WAL-G | Yes | Supports S3, GCS, Azure Blob, local filesystem |
 | Node provisioning | cloud-init | Yes | Supported by every major cloud provider |
