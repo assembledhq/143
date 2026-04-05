@@ -69,12 +69,6 @@ func scanProjectTasks(rows pgx.Rows) ([]models.ProjectTask, error) {
 }
 
 func (s *ProjectTaskStore) Create(ctx context.Context, t *models.ProjectTask) error {
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck
-
 	query := `
 		INSERT INTO project_tasks (
 			project_id, org_id, title, description, approach, reasoning,
@@ -88,7 +82,7 @@ func (s *ProjectTaskStore) Create(ctx context.Context, t *models.ProjectTask) er
 		)
 		RETURNING id, created_at, updated_at`
 
-	row := tx.QueryRow(ctx, query, pgx.NamedArgs{
+	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
 		"project_id":   t.ProjectID,
 		"org_id":       t.OrgID,
 		"title":        t.Title,
@@ -111,11 +105,11 @@ func (s *ProjectTaskStore) Create(ctx context.Context, t *models.ProjectTask) er
 	}
 
 	// Dual-write: also populate the join table for referential integrity.
-	if err := syncTaskDependencies(ctx, tx, t.ID, t.DependsOn); err != nil {
+	if err := syncTaskDependencies(ctx, s.db, t.ID, t.DependsOn); err != nil {
 		return fmt.Errorf("sync task dependencies: %w", err)
 	}
 
-	return tx.Commit(ctx)
+	return nil
 }
 
 func (s *ProjectTaskStore) GetByID(ctx context.Context, orgID, taskID uuid.UUID) (models.ProjectTask, error) {
@@ -152,12 +146,6 @@ func (s *ProjectTaskStore) ListByProject(ctx context.Context, orgID, projectID u
 }
 
 func (s *ProjectTaskStore) Update(ctx context.Context, t *models.ProjectTask) error {
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck
-
 	query := `
 		UPDATE project_tasks SET
 			title = @title, description = @description, approach = @approach, reasoning = @reasoning,
@@ -169,7 +157,7 @@ func (s *ProjectTaskStore) Update(ctx context.Context, t *models.ProjectTask) er
 			completed_at = @completed_at, updated_at = now()
 		WHERE id = @id AND org_id = @org_id`
 
-	_, err = tx.Exec(ctx, query, pgx.NamedArgs{
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":            t.ID,
 		"org_id":        t.OrgID,
 		"title":         t.Title,
@@ -194,24 +182,24 @@ func (s *ProjectTaskStore) Update(ctx context.Context, t *models.ProjectTask) er
 	}
 
 	// Dual-write: sync the join table to match the updated depends_on array.
-	if err := syncTaskDependencies(ctx, tx, t.ID, t.DependsOn); err != nil {
+	if err := syncTaskDependencies(ctx, s.db, t.ID, t.DependsOn); err != nil {
 		return fmt.Errorf("sync task dependencies: %w", err)
 	}
 
-	return tx.Commit(ctx)
+	return nil
 }
 
 // syncTaskDependencies replaces the join table rows for a task's dependencies.
-func syncTaskDependencies(ctx context.Context, tx pgx.Tx, taskID uuid.UUID, dependsOn []uuid.UUID) error {
+func syncTaskDependencies(ctx context.Context, db DBTX, taskID uuid.UUID, dependsOn []uuid.UUID) error {
 	// Clear existing dependencies.
-	if _, err := tx.Exec(ctx, `DELETE FROM project_task_dependencies WHERE task_id = @task_id`,
+	if _, err := db.Exec(ctx, `DELETE FROM project_task_dependencies WHERE task_id = @task_id`,
 		pgx.NamedArgs{"task_id": taskID}); err != nil {
 		return err
 	}
 
 	// Insert new dependencies.
 	for _, depID := range dependsOn {
-		if _, err := tx.Exec(ctx,
+		if _, err := db.Exec(ctx,
 			`INSERT INTO project_task_dependencies (task_id, depends_on_id) VALUES (@task_id, @depends_on_id)`,
 			pgx.NamedArgs{"task_id": taskID, "depends_on_id": depID}); err != nil {
 			return err

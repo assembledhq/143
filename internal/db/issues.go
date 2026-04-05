@@ -176,7 +176,7 @@ func (s *IssueStore) Upsert(ctx context.Context, issue *models.Issue) error {
 }
 
 func (s *IssueStore) UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status string) error {
-	query := `UPDATE issues SET status = @status, updated_at = now() WHERE id = @id AND org_id = @org_id`
+	query := `UPDATE issues SET status = @status, updated_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     issueID,
 		"org_id": orgID,

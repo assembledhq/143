@@ -11,6 +11,13 @@ CREATE INDEX idx_webhook_deliveries_received_brin
 --    This gives an ordered insert path for future queries that need
 --    sequential scan efficiency without changing the PK.
 ALTER TABLE webhook_deliveries ADD COLUMN seq bigserial;
+
+-- Backfill existing rows with monotonic seq values ordered by received_at.
+-- This ensures all rows have a non-null seq for consistent ordering.
+UPDATE webhook_deliveries SET seq = sub.rn
+FROM (SELECT id, row_number() OVER (ORDER BY received_at, id) AS rn FROM webhook_deliveries) sub
+WHERE webhook_deliveries.id = sub.id;
+
 CREATE INDEX idx_webhook_deliveries_seq ON webhook_deliveries (seq);
 
 -- 3. Add missing index for retry/replay workers (documented in schema but never created).

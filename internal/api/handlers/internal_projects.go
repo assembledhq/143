@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -106,7 +107,7 @@ func (h *InternalProjectHandler) Propose(w http.ResponseWriter, r *http.Request)
 	}
 
 	var req proposeProjectRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
 		return
 	}
@@ -334,9 +335,17 @@ func (h *InternalProjectHandler) Propose(w http.ResponseWriter, r *http.Request)
 
 // incrementAndCheckProposal atomically increments the per-token-repo proposal count
 // and returns true if the count is within the allowed limit.
+// maxRateLimiterEntries caps the in-memory rate limiter map size.
+// When exceeded, the map is cleared. This is safe because the durable cap
+// (maxOpenProposalsPerRepo) is enforced via DB query inside the transaction.
+const maxRateLimiterEntries = 10000
+
 func (h *InternalProjectHandler) incrementAndCheckProposal(key string) bool {
 	h.perTokenMu.Lock()
 	defer h.perTokenMu.Unlock()
+	if len(h.perTokenRepoCount) >= maxRateLimiterEntries {
+		h.perTokenRepoCount = make(map[string]int)
+	}
 	count := h.perTokenRepoCount[key]
 	if count >= maxProposalsPerRepoPerRun {
 		return false

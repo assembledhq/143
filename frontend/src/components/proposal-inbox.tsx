@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent } from "@/components/ui/card";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
@@ -21,6 +21,11 @@ export function ProposalInbox({ proposals, onNavigateToProject }: ProposalInboxP
   const [dismissReason, setDismissReason] = useState("");
   const queryClient = useQueryClient();
 
+  // Reset dismiss reason when switching proposals to avoid stale state.
+  useEffect(() => {
+    setDismissReason("");
+  }, [selectedProposal]);
+
   // Fetch full project detail (including tasks) when a proposal is selected
   const { data: detailData, isLoading: detailLoading } = useQuery({
     queryKey: ["projects", selectedProposal?.id],
@@ -37,6 +42,9 @@ export function ProposalInbox({ proposals, onNavigateToProject }: ProposalInboxP
       queryClient.invalidateQueries({ queryKey: ["proposalSummary"] });
       setSelectedProposal(null);
     },
+    onError: () => {
+      console.error("Failed to approve proposal");
+    },
   });
 
   const dismissMutation = useMutation({
@@ -47,6 +55,9 @@ export function ProposalInbox({ proposals, onNavigateToProject }: ProposalInboxP
       queryClient.invalidateQueries({ queryKey: ["proposalSummary"] });
       setSelectedProposal(null);
       setDismissReason("");
+    },
+    onError: () => {
+      console.error("Failed to dismiss proposal");
     },
   });
 

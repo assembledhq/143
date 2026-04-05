@@ -212,11 +212,11 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 }
 
 func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string) error {
-	query := `UPDATE sessions SET status = @status WHERE id = @id AND org_id = @org_id`
+	query := `UPDATE sessions SET status = @status WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	if status == "running" {
-		query = `UPDATE sessions SET status = @status, started_at = now() WHERE id = @id AND org_id = @org_id`
+		query = `UPDATE sessions SET status = @status, started_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	} else if status == "completed" || status == "failed" || status == "cancelled" {
-		query = `UPDATE sessions SET status = @status, completed_at = now() WHERE id = @id AND org_id = @org_id`
+		query = `UPDATE sessions SET status = @status, completed_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	}
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     runID,
@@ -252,7 +252,7 @@ func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 		    result_summary = @result_summary, diff = @diff, error = @error,
 		    diff_stats = @diff_stats,
 		    diff_history = ` + diffHistoryAppendSQL("COALESCE(current_turn, 0) + 1") + `
-		WHERE id = @id AND org_id = @org_id`
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":                   runID,
@@ -321,7 +321,7 @@ func (s *SessionStore) UpdateFailure(ctx context.Context, orgID, runID uuid.UUID
 		    failure_category = @failure_category,
 		    failure_next_steps = @failure_next_steps,
 		    failure_retry_advised = @failure_retry_advised
-		WHERE id = @id AND org_id = @org_id`
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":                    runID,
@@ -494,6 +494,7 @@ func (s *SessionStore) ListStaleIdleSessions(ctx context.Context, olderThan time
 		SELECT ` + sessionListColumns + `
 		FROM sessions
 		WHERE status = 'idle'
+		  AND deleted_at IS NULL
 		  AND last_activity_at < @older_than
 		ORDER BY last_activity_at ASC NULLS FIRST
 		LIMIT 100`

@@ -145,13 +145,7 @@ func (s *ProjectStore) Create(ctx context.Context, p *models.Project) error {
 		)
 		RETURNING id, created_at, updated_at`
 
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck
-
-	row := tx.QueryRow(ctx, query, pgx.NamedArgs{
+	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
 		"org_id":              p.OrgID,
 		"repository_id":       p.RepositoryID,
 		"title":               p.Title,
@@ -185,14 +179,14 @@ func (s *ProjectStore) Create(ctx context.Context, p *models.Project) error {
 
 	// Dual-write: populate the join table for source issue references.
 	for _, issueID := range p.SourceIssueIDs {
-		if _, err := tx.Exec(ctx,
+		if _, err := s.db.Exec(ctx,
 			`INSERT INTO project_source_issues (project_id, issue_id) VALUES (@project_id, @issue_id) ON CONFLICT DO NOTHING`,
 			pgx.NamedArgs{"project_id": p.ID, "issue_id": issueID}); err != nil {
 			return fmt.Errorf("sync source issue: %w", err)
 		}
 	}
 
-	return tx.Commit(ctx)
+	return nil
 }
 
 func (s *ProjectStore) GetByID(ctx context.Context, orgID, projectID uuid.UUID) (models.Project, error) {
@@ -280,7 +274,7 @@ func (s *ProjectStore) Update(ctx context.Context, p *models.Project) error {
 			schedule_enabled = @schedule_enabled, schedule_interval = @schedule_interval,
 			schedule_unit = @schedule_unit, next_run_at = @next_run_at,
 			completed_at = @completed_at, updated_at = now()
-		WHERE id = @id AND org_id = @org_id`
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
 	_, err = s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":                  p.ID,
@@ -355,9 +349,9 @@ func (s *ProjectStore) UpdateNextRunAt(ctx context.Context, orgID, projectID uui
 }
 
 func (s *ProjectStore) UpdateStatus(ctx context.Context, orgID, projectID uuid.UUID, status string) error {
-	query := `UPDATE projects SET status = @status, updated_at = now() WHERE id = @id AND org_id = @org_id`
+	query := `UPDATE projects SET status = @status, updated_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	if status == "completed" || status == "cancelled" {
-		query = `UPDATE projects SET status = @status, completed_at = now(), updated_at = now() WHERE id = @id AND org_id = @org_id`
+		query = `UPDATE projects SET status = @status, completed_at = now(), updated_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	}
 
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
