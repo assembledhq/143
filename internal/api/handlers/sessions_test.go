@@ -41,6 +41,8 @@ func newSessionHandler(t *testing.T, mock pgxmock.PgxPoolIface) *SessionHandler 
 }
 
 // sessionColumns is the standard column set for sessions queries.
+// Must match sessionSelectColumns in session_store.go. Update all inline
+// AddRow calls in this file when adding/removing/reordering columns.
 var sessionColumns = []string{
 	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",

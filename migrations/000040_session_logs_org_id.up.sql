@@ -2,6 +2,9 @@
 -- session_logs was the remaining high-volume table without direct org_id,
 -- requiring an expensive join through sessions for tenant-scoped queries.
 -- This follows the same fix pattern as migration 35 (issue_events).
+--
+-- DEPENDS ON: Migration 000037 (partitioning_prep) which recreates session_logs
+-- as a partitioned table. This migration adds a column to that partitioned table.
 
 ALTER TABLE session_logs
     ADD COLUMN org_id uuid REFERENCES organizations(id);

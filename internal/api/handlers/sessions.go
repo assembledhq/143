@@ -219,6 +219,7 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 	if autonomyLevel == "" {
 		autonomyLevel = "semi"
 	}
+	// These values are enforced by chk_sessions_autonomy_level CHECK constraint.
 	validAutonomyLevels := map[string]bool{"full": true, "semi": true, "supervised": true}
 	if !validAutonomyLevels[autonomyLevel] {
 		writeError(w, r, http.StatusBadRequest, "INVALID_AUTONOMY_LEVEL", "autonomy_level must be one of: full, semi, supervised")
@@ -854,6 +855,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	if autonomyLevel == "" {
 		autonomyLevel = "semi"
 	}
+	// These values are enforced by chk_sessions_autonomy_level CHECK constraint.
 	validAutonomyLevels := map[string]bool{"full": true, "semi": true, "supervised": true}
 	if !validAutonomyLevels[autonomyLevel] {
 		writeError(w, r, http.StatusBadRequest, "INVALID_AUTONOMY_LEVEL", "autonomy_level must be one of: full, semi, supervised")

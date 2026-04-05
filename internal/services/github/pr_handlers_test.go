@@ -948,7 +948,7 @@ var handlerIssueColumns = []string{
 	"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
 	"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
 	"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
-	"deleted_at", "created_at", "updated_at",
+	"created_at", "updated_at", "deleted_at",
 }
 
 // repoColumns for mock repository queries.
@@ -1059,7 +1059,7 @@ func TestCreatePR_Success(t *testing.T) {
 				AddRow(issueID, orgID, "ENG-123", "linear", nil, &repoID,
 					"Fix null pointer", nil, json.RawMessage(`{}`), "open", now, now,
 					5, 2, "high", []string{"bug"}, "fp-1",
-					(*time.Time)(nil), now, now),
+					now, now, (*time.Time)(nil)),
 		)
 
 	// Mock: repo GetByID.
@@ -1162,7 +1162,7 @@ func TestCreatePR_NoRepositoryOnIssue(t *testing.T) {
 				AddRow(issueID, orgID, "ENG-123", "linear", nil, nil, // nil repository_id
 					"Fix null pointer", nil, json.RawMessage(`{}`), "open", now, now,
 					5, 2, "high", []string{}, "fp-1",
-					(*time.Time)(nil), now, now),
+					now, now, (*time.Time)(nil)),
 		)
 
 	diff := "diff --git a/main.go b/main.go\n+++ b/main.go\n+package main\n"
@@ -1273,7 +1273,7 @@ func TestPushRevision_Success(t *testing.T) {
 				AddRow(issueID, orgID, "ENG-123", "linear", nil, &repoID,
 					"Fix null pointer", nil, json.RawMessage(`{}`), "open", now, now,
 					5, 2, "high", []string{"bug"}, "fp-1",
-					(*time.Time)(nil), now, now),
+					now, now, (*time.Time)(nil)),
 		)
 
 	// Mock: repo GetByID.
@@ -1406,7 +1406,7 @@ func TestPushRevision_WithParentSessionID(t *testing.T) {
 				AddRow(issueID, orgID, "ENG-123", "linear", nil, &repoID,
 					"Fix null pointer", nil, json.RawMessage(`{}`), "open", now, now,
 					5, 2, "high", []string{}, "fp-1",
-					(*time.Time)(nil), now, now),
+					now, now, (*time.Time)(nil)),
 		)
 	repoMock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).

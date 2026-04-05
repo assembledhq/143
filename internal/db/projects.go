@@ -196,7 +196,7 @@ func (s *ProjectStore) Create(ctx context.Context, p *models.Project) error {
 }
 
 func (s *ProjectStore) GetByID(ctx context.Context, orgID, projectID uuid.UUID) (models.Project, error) {
-	query := fmt.Sprintf(`SELECT %s FROM projects WHERE id = @id AND org_id = @org_id`, projectColumns)
+	query := fmt.Sprintf(`SELECT %s FROM projects WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`, projectColumns)
 
 	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
 		"id":     projectID,
@@ -370,7 +370,7 @@ func (s *ProjectStore) UpdateStatus(ctx context.Context, orgID, projectID uuid.U
 
 // CountByOrgStatus counts projects matching the given org and statuses (across all repos).
 func (s *ProjectStore) CountByOrgStatus(ctx context.Context, orgID uuid.UUID, statuses []string) (int, error) {
-	query := `SELECT count(*) FROM projects WHERE org_id = @org_id AND status = ANY(@statuses)`
+	query := `SELECT count(*) FROM projects WHERE org_id = @org_id AND status = ANY(@statuses) AND deleted_at IS NULL`
 	var count int
 	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
 		"org_id":   orgID,
@@ -381,7 +381,7 @@ func (s *ProjectStore) CountByOrgStatus(ctx context.Context, orgID uuid.UUID, st
 
 // CountByOrgRepoStatus counts projects matching the given org, repo, and statuses.
 func (s *ProjectStore) CountByOrgRepoStatus(ctx context.Context, orgID, repoID uuid.UUID, statuses []string) (int, error) {
-	query := `SELECT count(*) FROM projects WHERE org_id = @org_id AND repository_id = @repo_id AND status = ANY(@statuses)`
+	query := `SELECT count(*) FROM projects WHERE org_id = @org_id AND repository_id = @repo_id AND status = ANY(@statuses) AND deleted_at IS NULL`
 	var count int
 	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
 		"org_id":   orgID,
@@ -393,7 +393,7 @@ func (s *ProjectStore) CountByOrgRepoStatus(ctx context.Context, orgID, repoID u
 
 // ListByOrgRepoStatuses returns projects matching the given org, repo, and statuses.
 func (s *ProjectStore) ListByOrgRepoStatuses(ctx context.Context, orgID, repoID uuid.UUID, statuses []string) ([]models.Project, error) {
-	query := fmt.Sprintf(`SELECT %s FROM projects WHERE org_id = @org_id AND repository_id = @repo_id AND status = ANY(@statuses) ORDER BY priority ASC, created_at DESC`, projectColumns)
+	query := fmt.Sprintf(`SELECT %s FROM projects WHERE org_id = @org_id AND repository_id = @repo_id AND status = ANY(@statuses) AND deleted_at IS NULL ORDER BY priority ASC, created_at DESC`, projectColumns)
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"org_id":   orgID,
 		"repo_id":  repoID,

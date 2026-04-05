@@ -131,6 +131,6 @@ DROP TABLE session_logs_backup;
 -- =============================================================================
 -- Drop helper functions
 -- =============================================================================
-DROP FUNCTION IF EXISTS drop_expired_audit_log_partitions(uuid, int);
+DROP FUNCTION IF EXISTS drop_expired_audit_log_partitions(int);
 DROP FUNCTION IF EXISTS ensure_future_partitions(text, int);
 DROP FUNCTION IF EXISTS create_monthly_partitions(text, date, date);

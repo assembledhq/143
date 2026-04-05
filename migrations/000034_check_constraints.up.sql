@@ -1,6 +1,10 @@
 -- Add CHECK constraints to all text-based enum columns.
 -- These enforce valid values at the database level, preventing garbage data
 -- from application bugs.
+--
+-- NOTE: Adding a new enum value to any column protected by a CHECK constraint
+-- requires a new migration to ALTER the constraint (DROP + re-ADD). Plan for
+-- this when extending status/type enums in application code.
 
 -- =============================================================================
 -- users
@@ -20,7 +24,7 @@ ALTER TABLE sessions
         'none', 'running', 'snapshotted', 'destroyed'
     )),
     ADD CONSTRAINT chk_sessions_autonomy_level CHECK (autonomy_level IN (
-        'manual', 'auto_simple', 'auto_all'
+        'full', 'semi', 'supervised'
     )),
     ADD CONSTRAINT chk_sessions_token_mode CHECK (token_mode IN (
         'low', 'high'

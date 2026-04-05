@@ -10,6 +10,14 @@
 -- IMPORTANT: This migration should be run during a maintenance window as it
 -- copies data and swaps tables. For large datasets, consider running the
 -- data copy steps manually in batches before deploying this migration.
+--
+-- FK NOTE: Partitioned tables retain FKs on session_id and thread_id for
+-- session_logs and session_messages. For audit_logs, session_id and project_id
+-- FKs are intentionally omitted so audit entries survive if the referenced
+-- session or project is deleted (audit_logs comments explain further).
+--
+-- DEPENDENCY: Migration 000040 adds org_id to the partitioned session_logs
+-- table created here. If consolidating migrations, preserve that ordering.
 
 -- =============================================================================
 -- Helper: create monthly partitions for a given table.
@@ -254,7 +262,7 @@ CREATE TRIGGER audit_logs_immutable
 -- row-level deletes. This function drops partitions whose entire range
 -- falls before the retention cutoff.
 -- =============================================================================
-CREATE OR REPLACE FUNCTION drop_expired_audit_log_partitions(target_org_id uuid, retention_days int)
+CREATE OR REPLACE FUNCTION drop_expired_audit_log_partitions(retention_days int)
 RETURNS int
 LANGUAGE plpgsql
 SECURITY DEFINER
