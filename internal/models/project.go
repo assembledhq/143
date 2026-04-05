@@ -31,6 +31,7 @@ type Project struct {
 	ProposedByPM       bool             `db:"proposed_by_pm" json:"proposed_by_pm"`
 	SourceIssueIDs     []uuid.UUID      `json:"source_issue_ids,omitempty"`
 	ProposalReasoning  *string          `db:"proposal_reasoning" json:"proposal_reasoning,omitempty"`
+	SimilarProjects    json.RawMessage  `db:"similar_projects" json:"similar_projects,omitempty"`
 	AgentType          *string          `db:"agent_type" json:"agent_type,omitempty"`
 	ModelOverride      *string          `db:"model_override" json:"model_override,omitempty"`
 	ScheduleEnabled    bool             `db:"schedule_enabled" json:"schedule_enabled"`
@@ -45,6 +46,15 @@ type Project struct {
 	// Raw JSONB for store-layer scanning.
 	LessonsLearnedRaw  json.RawMessage `db:"lessons_learned" json:"-"`
 	ApproachHistoryRaw json.RawMessage `db:"approach_history" json:"-"`
+}
+
+// ProposalOverlap describes how a proposed project overlaps with an existing one.
+type ProposalOverlap struct {
+	ProjectID    uuid.UUID `json:"project_id"`
+	Title        string    `json:"title"`
+	OverlapScore float64   `json:"overlap_score"`
+	OverlapType  string    `json:"overlap_type"`
+	Explanation  string    `json:"explanation"`
 }
 
 // ProjectTask is a single work item within a project, created by the PM each cycle.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/assembledhq/143/internal/services/integration"
@@ -216,6 +217,32 @@ func (tr *ToolRegistry) ListTools() []Tool {
 		)
 	}
 
+	for _, pp := range tr.integrations.ProjectProposers() {
+		prefix := pp.Name()
+		tools = append(tools,
+			Tool{
+				Name:        prefix + "_propose",
+				Description: "Propose a new repo-scoped project for human review. Creates a project with status 'proposed' that requires human approval before execution begins.",
+				InputSchema: ToolSchema{
+					Type: "object",
+					Properties: map[string]SchemaProperty{
+						"repository_id":       {Type: "string", Description: "Target repository UUID (required)"},
+						"title":               {Type: "string", Description: "Project title (required)"},
+						"goal":                {Type: "string", Description: "What success looks like (required)"},
+						"scope":               {Type: "string", Description: "What is in and out of bounds (optional)"},
+						"completion_criteria":  {Type: "string", Description: "How to know when done (optional)"},
+						"reasoning":           {Type: "string", Description: "Why this project should exist (required)"},
+						"source_issue_ids":    {Type: "string", Description: "Comma-separated motivating issue UUIDs (optional)"},
+						"priority":            {Type: "number", Description: "Priority 0-100, default 50 (optional)", Default: 50},
+						"tasks":               {Type: "string", Description: "JSON array of seed task specs [{title, description, approach, complexity, confidence}] (optional)"},
+						"similar_project_ids": {Type: "string", Description: "Comma-separated existing same-repo project UUIDs considered and judged non-duplicate (optional)"},
+					},
+					Required: []string{"repository_id", "title", "goal", "reasoning"},
+				},
+			},
+		)
+	}
+
 	for _, ms := range tr.integrations.MessageSources() {
 		prefix := ms.Name()
 		tools = append(tools,
@@ -303,6 +330,15 @@ func (tr *ToolRegistry) CallTool(ctx context.Context, name string, args json.Raw
 		}
 		method := name[len(prefix):]
 		return tr.callIssueCreator(ctx, ic, method, args)
+	}
+
+	for _, pp := range tr.integrations.ProjectProposers() {
+		prefix := pp.Name() + "_"
+		if len(name) <= len(prefix) || name[:len(prefix)] != prefix {
+			continue
+		}
+		method := name[len(prefix):]
+		return tr.callProjectProposer(ctx, pp, method, args)
 	}
 
 	return ErrorResult(fmt.Sprintf("unknown tool: %s", name))
@@ -661,6 +697,80 @@ func (tr *ToolRegistry) callIssueCreator(ctx context.Context, ic integration.Iss
 }
 
 // --------------------------------------------------------------------------
+// Project proposer dispatch
+// --------------------------------------------------------------------------
+
+func (tr *ToolRegistry) callProjectProposer(ctx context.Context, pp integration.ProjectProposer, method string, args json.RawMessage) *ToolCallResult {
+	switch method {
+	case "propose":
+		var p struct {
+			RepositoryID      string  `json:"repository_id"`
+			Title             string  `json:"title"`
+			Goal              string  `json:"goal"`
+			Scope             *string `json:"scope"`
+			CompletionCriteria *string `json:"completion_criteria"`
+			Reasoning         string  `json:"reasoning"`
+			SourceIssueIDs    string  `json:"source_issue_ids"`
+			Priority          int     `json:"priority"`
+			Tasks             string  `json:"tasks"`
+			SimilarProjectIDs string  `json:"similar_project_ids"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		if p.RepositoryID == "" {
+			return ErrorResult("repository_id is required")
+		}
+		if p.Title == "" {
+			return ErrorResult("title is required")
+		}
+		if p.Goal == "" {
+			return ErrorResult("goal is required")
+		}
+		if p.Reasoning == "" {
+			return ErrorResult("reasoning is required")
+		}
+
+		sourceIssueIDs := splitCommaSeparated(p.SourceIssueIDs)
+		similarProjectIDs := splitCommaSeparated(p.SimilarProjectIDs)
+
+		// Parse tasks JSON array.
+		var tasks []integration.ProposeProjectTask
+		if p.Tasks != "" {
+			if err := json.Unmarshal([]byte(p.Tasks), &tasks); err != nil {
+				return ErrorResult(fmt.Sprintf("invalid tasks JSON: %s", err))
+			}
+		}
+
+		priority := p.Priority
+		if priority <= 0 {
+			priority = 50
+		}
+
+		params := integration.ProposeProjectParams{
+			RepositoryID:      p.RepositoryID,
+			Title:             p.Title,
+			Goal:              p.Goal,
+			Scope:             p.Scope,
+			CompletionCriteria: p.CompletionCriteria,
+			Reasoning:         p.Reasoning,
+			SourceIssueIDs:    sourceIssueIDs,
+			Priority:          priority,
+			Tasks:             tasks,
+			SimilarProjectIDs: similarProjectIDs,
+		}
+		result, err := pp.ProposeProject(ctx, params)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("propose project failed: %s", err))
+		}
+		return jsonResult(result)
+
+	default:
+		return ErrorResult(fmt.Sprintf("unknown project proposer method: %s", method))
+	}
+}
+
+// --------------------------------------------------------------------------
 // Helpers
 // --------------------------------------------------------------------------
 
@@ -671,6 +781,21 @@ func jsonResult(v any) *ToolCallResult {
 		return ErrorResult(fmt.Sprintf("failed to marshal result: %s", err))
 	}
 	return TextResult(string(data))
+}
+
+// splitCommaSeparated splits a comma-separated string into trimmed, non-empty parts.
+func splitCommaSeparated(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var result []string
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			result = append(result, part)
+		}
+	}
+	return result
 }
 
 // parseDuration parses human-friendly durations like "24h", "7d", "14d".

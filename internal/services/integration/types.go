@@ -413,3 +413,45 @@ type CreateIssueResult struct {
 	Title     string  `json:"title"`
 	SessionID *string `json:"session_id,omitempty"`
 }
+
+// --------------------------------------------------------------------------
+// ProjectProposer — internal 143 project proposal creation
+// --------------------------------------------------------------------------
+
+// ProjectProposer allows the PM agent to propose new projects.
+type ProjectProposer interface {
+	// Name returns the provider identifier.
+	Name() string
+
+	// ProposeProject creates a new project proposal and returns the result.
+	ProposeProject(ctx context.Context, params ProposeProjectParams) (*ProposeProjectResult, error)
+}
+
+// ProposeProjectParams describes a new project proposal.
+type ProposeProjectParams struct {
+	RepositoryID       string               `json:"repository_id"`
+	Title              string               `json:"title"`
+	Goal               string               `json:"goal"`
+	Scope              *string              `json:"scope,omitempty"`
+	CompletionCriteria *string              `json:"completion_criteria,omitempty"`
+	Reasoning          string               `json:"reasoning"`
+	SourceIssueIDs     []string             `json:"source_issue_ids,omitempty"`
+	Priority           int                  `json:"priority"`
+	Tasks              []ProposeProjectTask `json:"tasks,omitempty"`
+	SimilarProjectIDs  []string             `json:"similar_project_ids,omitempty"`
+}
+
+// ProposeProjectTask is a seed task included in a proposal.
+type ProposeProjectTask struct {
+	Title       string  `json:"title"`
+	Description *string `json:"description,omitempty"`
+	Approach    *string `json:"approach,omitempty"`
+	Complexity  *string `json:"complexity,omitempty"`
+	Confidence  *string `json:"confidence,omitempty"`
+}
+
+// ProposeProjectResult is returned after successfully creating a proposal.
+type ProposeProjectResult struct {
+	ID               string  `json:"id"`
+	DuplicateWarning *string `json:"duplicate_warning,omitempty"`
+}

@@ -248,6 +248,45 @@ Use this when:
 
 Do NOT use this to duplicate issues that already exist in .pm-context.json.
 
+## Proposing New Projects
+
+When your analysis reveals a group of related issues that represent a larger
+initiative — not just a one-off fix — you can propose a new project using
+the 143-tools CLI:
+
+    143-tools project_propose \
+      --repository-id "<repo-uuid>" \
+      --title "Standardize payment error handling" \
+      --goal "All payment handlers use shared error types..." \
+      --reasoning "3 related Sentry errors share a root cause in payment handlers..." \
+      --source-issue-ids "<uuid1>,<uuid2>" \
+      --priority 30 \
+      --tasks '[{"title":"Normalize error types","description":"...","complexity":"moderate","confidence":"high"}]'
+
+The tool creates a project with status "proposed". A human must approve it
+before any execution begins. The tool returns the created project's UUID
+and any duplicate warnings.
+
+## Before Proposing a New Project
+
+You may only propose a project for the current repository.
+
+Before proposing, review existing same-repo projects and ask:
+
+1. Goal overlap: does another project already subsume this outcome?
+2. Scope overlap: would the same code areas be touched?
+3. Issue overlap: are the motivating issues already covered by project tasks?
+
+If overlap is strong:
+- do NOT propose a new project
+- or explicitly explain why the new project is distinct using --similar-project-ids
+
+Be conservative. Proposal quality matters more than proposal volume. You may
+create at most 1 proposal per repository per planning cycle.
+
+If the tool rejects your proposal due to caps or duplication, do NOT retry.
+Record the opportunity in your analysis text and move on.
+
 ## IMPORTANT: Do NOT modify any code
 
 You are analyzing and planning only. Do not write code, create branches, or
