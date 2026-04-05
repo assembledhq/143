@@ -13,8 +13,9 @@ func TestGenerateAndValidateInternalToken(t *testing.T) {
 
 	secret := "test-secret-key-for-hmac-signing"
 	orgID := uuid.New()
+	repoID := uuid.New()
 
-	token, err := GenerateInternalToken(secret, orgID, 5*time.Minute)
+	token, err := GenerateInternalToken(secret, orgID, repoID, 5*time.Minute)
 	require.NoError(t, err)
 	require.NotEmpty(t, token)
 	require.Contains(t, token, ".")
@@ -22,6 +23,7 @@ func TestGenerateAndValidateInternalToken(t *testing.T) {
 	claims, err := ValidateInternalToken(secret, token)
 	require.NoError(t, err)
 	require.Equal(t, orgID, claims.OrgID)
+	require.Equal(t, repoID, claims.RepoID)
 	require.True(t, claims.ExpiresAt.After(time.Now()))
 }
 
@@ -30,7 +32,7 @@ func TestValidateInternalToken_InvalidSignature(t *testing.T) {
 
 	orgID := uuid.New()
 
-	token, err := GenerateInternalToken("secret-one", orgID, 5*time.Minute)
+	token, err := GenerateInternalToken("secret-one", orgID, uuid.New(), 5*time.Minute)
 	require.NoError(t, err)
 
 	_, err = ValidateInternalToken("secret-two", token)
@@ -44,7 +46,7 @@ func TestValidateInternalToken_Expired(t *testing.T) {
 	secret := "test-secret"
 	orgID := uuid.New()
 
-	token, err := GenerateInternalToken(secret, orgID, -1*time.Minute)
+	token, err := GenerateInternalToken(secret, orgID, uuid.New(), -1*time.Minute)
 	require.NoError(t, err)
 
 	_, err = ValidateInternalToken(secret, token)
@@ -74,10 +76,10 @@ func TestGenerateInternalToken_DifferentOrgs(t *testing.T) {
 	org1 := uuid.New()
 	org2 := uuid.New()
 
-	token1, err := GenerateInternalToken(secret, org1, 5*time.Minute)
+	token1, err := GenerateInternalToken(secret, org1, uuid.New(), 5*time.Minute)
 	require.NoError(t, err)
 
-	token2, err := GenerateInternalToken(secret, org2, 5*time.Minute)
+	token2, err := GenerateInternalToken(secret, org2, uuid.New(), 5*time.Minute)
 	require.NoError(t, err)
 
 	require.NotEqual(t, token1, token2)

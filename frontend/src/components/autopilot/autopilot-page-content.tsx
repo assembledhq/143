@@ -15,6 +15,7 @@ import { useAnalyze } from "@/hooks/use-analyze";
 import { AutopilotSteeringSheet } from "./autopilot-steering-sheet";
 import { AutopilotWeightsSheet } from "./autopilot-weights-sheet";
 import { AutopilotDocumentsSheet } from "./autopilot-documents-sheet";
+import { AutopilotProposalCard } from "@/components/autopilot-proposal-card";
 
 export function AutopilotPageContent() {
   const router = useRouter();
@@ -56,6 +57,8 @@ export function AutopilotPageContent() {
               primaryActionLabel={isAnalyzing || isPending ? "Running..." : viewModel.primaryActionLabel}
               onPrimaryAction={handlePrimaryAction}
             />
+
+            <AutopilotProposalCard />
 
             <AutopilotHero title={viewModel.heroTitle} body={viewModel.heroBody} />
             <AutopilotEvidenceRow evidence={viewModel.evidence} />

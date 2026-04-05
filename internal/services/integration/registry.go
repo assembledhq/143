@@ -21,6 +21,7 @@ type Registry struct {
 	messageSources    map[string]MessageSource
 	codeReviewSources map[string]CodeReviewSource
 	issueCreators     map[string]IssueCreator
+	projectProposers  map[string]ProjectProposer
 }
 
 // NewRegistry creates an empty integration registry.
@@ -32,6 +33,7 @@ func NewRegistry() *Registry {
 		messageSources:    make(map[string]MessageSource),
 		codeReviewSources: make(map[string]CodeReviewSource),
 		issueCreators:     make(map[string]IssueCreator),
+		projectProposers:  make(map[string]ProjectProposer),
 	}
 }
 
@@ -209,6 +211,35 @@ func (r *Registry) IssueCreator(name string) (IssueCreator, error) {
 	return ic, nil
 }
 
+// RegisterProjectProposer adds a project proposer (e.g. internal 143 API).
+func (r *Registry) RegisterProjectProposer(provider ProjectProposer) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.projectProposers[provider.Name()] = provider
+}
+
+// ProjectProposers returns all registered project proposers.
+func (r *Registry) ProjectProposers() []ProjectProposer {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result := make([]ProjectProposer, 0, len(r.projectProposers))
+	for _, pp := range r.projectProposers {
+		result = append(result, pp)
+	}
+	return result
+}
+
+// ProjectProposer returns a specific project proposer by name, or an error if not found.
+func (r *Registry) ProjectProposer(name string) (ProjectProposer, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	pp, ok := r.projectProposers[name]
+	if !ok {
+		return nil, fmt.Errorf("project proposer %q not registered", name)
+	}
+	return pp, nil
+}
+
 // HasAny returns true if at least one provider is registered.
 func (r *Registry) HasAny() bool {
 	r.mu.RLock()
@@ -218,7 +249,8 @@ func (r *Registry) HasAny() bool {
 		len(r.documentStores) > 0 ||
 		len(r.messageSources) > 0 ||
 		len(r.codeReviewSources) > 0 ||
-		len(r.issueCreators) > 0
+		len(r.issueCreators) > 0 ||
+		len(r.projectProposers) > 0
 }
 
 // Summary returns a human-readable summary of registered providers.
@@ -243,6 +275,9 @@ func (r *Registry) Summary() map[string][]string {
 	}
 	for name := range r.issueCreators {
 		m["issue_creators"] = append(m["issue_creators"], name)
+	}
+	for name := range r.projectProposers {
+		m["project_proposers"] = append(m["project_proposers"], name)
 	}
 	return m
 }

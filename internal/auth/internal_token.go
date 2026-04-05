@@ -16,13 +16,15 @@ import (
 // InternalTokenClaims are the claims embedded in an internal API token.
 type InternalTokenClaims struct {
 	OrgID     uuid.UUID `json:"org_id"`
+	RepoID    uuid.UUID `json:"repo_id"`
 	ExpiresAt time.Time `json:"exp"`
 }
 
-// GenerateInternalToken creates a short-lived HMAC-signed token scoped to an org.
-func GenerateInternalToken(secret string, orgID uuid.UUID, ttl time.Duration) (string, error) {
+// GenerateInternalToken creates a short-lived HMAC-signed token scoped to an org and repo.
+func GenerateInternalToken(secret string, orgID uuid.UUID, repoID uuid.UUID, ttl time.Duration) (string, error) {
 	claims := InternalTokenClaims{
 		OrgID:     orgID,
+		RepoID:    repoID,
 		ExpiresAt: time.Now().Add(ttl),
 	}
 	payload, err := json.Marshal(claims)
