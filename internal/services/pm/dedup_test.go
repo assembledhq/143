@@ -213,11 +213,11 @@ func TestDeduplicateProposal_ScopeOverlap(t *testing.T) {
 	scope1 := "refactor authentication middleware and session handling"
 	scope2 := "refactor authentication middleware and token validation"
 	result := DeduplicateProposal(
-		"Unrelated title A",
+		"Migrate database schema",
 		nil,
 		&scope1,
 		[]models.Project{
-			{ID: uuid.New(), Title: "Unrelated title B", Scope: &scope2, Status: models.ProjectStatusActive},
+			{ID: uuid.New(), Title: "Upgrade frontend build pipeline", Scope: &scope2, Status: models.ProjectStatusActive},
 		},
 	)
 
