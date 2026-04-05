@@ -60,7 +60,7 @@ For MVP, the non-target repos are:
 
 To make the feature understandable to non-engineers, preview support should be presented as a repo readiness state rather than a binary success/failure:
 
-- `ready` - the repo can preview with the default `bootstrap` profile (including any platform infrastructure declared in the profile)
+- `ready` - the repo can preview with the default `bootstrap` config (including any platform infrastructure declared in the config)
 - `admin_setup_required` - the repo can preview after an admin attaches managed credentials or managed destinations
 - `not_supported` - the repo is not a fit for preview MVP (e.g., requires unsupported infrastructure templates or custom containers)
 
@@ -120,8 +120,8 @@ Instead:
 
 1. A user opens a session on `app.143.dev` and clicks `Start Preview` (or arrives via the "Launch Preview" link on a PR comment, which deep-links to the session with `?preview=1` to auto-trigger start).
 2. The API server validates org access and reads the repo preview config.
-3. The owning worker node starts preview services inside the sandbox. For multi-service profiles, services are started in dependency order (support services first, then primary). `HOST=0.0.0.0` is injected into each service's environment by default.
-4. The API server stores a `preview_instance` record with associated `preview_services` rows. The frontend streams startup progress (Build → Init → Start) via the session WebSocket channel, showing per-service status for multi-service profiles.
+3. The owning worker node starts preview services inside the sandbox. For multi-service configs, services are started in dependency order (support services first, then primary). `HOST=0.0.0.0` is injected into each service's environment by default.
+4. The API server stores a `preview_instance` record with associated `preview_services` rows. The frontend streams startup progress (Build → Init → Start) via the session WebSocket channel, showing per-service status for multi-service configs.
 5. Once the preview is ready, the frontend mints a bootstrap token via `POST /api/v1/sessions/{id}/preview/bootstrap`.
 6. The frontend sets the iframe `src` to `https://<preview-id>.preview.143.dev/bootstrap` (a static bootstrap page, no token in URL).
 7. The bootstrap page signals readiness via `postMessage`. The app origin sends the token to the iframe via `postMessage` with origin validation.
@@ -135,7 +135,7 @@ Per-preview hostnames require wildcard DNS and TLS for the preview zone, but the
 
 ## Preview Configuration
 
-Each session supports **one selected preview profile** which may contain **one or more services**. One service is designated as the `primary` — this is the service the preview gateway proxies browser traffic to. All other services are **support services** that run alongside the primary inside the same sandbox, reachable via `localhost`.
+Each preview configuration may contain **one or more services**. One service is designated as the `primary` — this is the service the preview gateway proxies browser traffic to. All other services are **support services** that run alongside the primary inside the same sandbox, reachable via `localhost`.
 
 Repo config lives in `.143/preview.json`:
 
@@ -144,84 +144,74 @@ Repo config lives in `.143/preview.json`:
 ```json
 {
   "version": "3",
-  "default_profile": "bootstrap",
-  "profiles": {
-    "bootstrap": {
-      "name": "frontend",
-      "command": ["npm", "run", "dev"],
-      "cwd": "frontend",
-      "port": 3000,
-      "env": {
-        "NODE_ENV": "development"
-      },
-      "ready": {
-        "http_path": "/",
-        "timeout_seconds": 90
-      },
-      "credentials": {
-        "mode": "none"
-      },
-      "network": {
-        "mode": "managed",
-        "destinations": []
-      }
-    }
+  "name": "frontend",
+  "command": ["npm", "run", "dev"],
+  "cwd": "frontend",
+  "port": 3000,
+  "env": {
+    "NODE_ENV": "development"
+  },
+  "ready": {
+    "http_path": "/",
+    "timeout_seconds": 90
+  },
+  "credentials": {
+    "mode": "none"
+  },
+  "network": {
+    "mode": "managed",
+    "destinations": []
   }
 }
 ```
 
-The single-service format uses `command`, `port`, `cwd`, `env`, and `ready` directly on the profile. This is sugar for a profile with one service. The preview manager normalizes it internally to the multi-service format with a single entry designated as `primary`.
+The single-service format uses `command`, `port`, `cwd`, `env`, and `ready` at the top level. The preview manager normalizes it internally to the multi-service format with a single entry designated as `primary`.
 
 ### Multi-Service Example (Frontend + Backend + Staging DB)
 
 ```json
 {
   "version": "3",
-  "default_profile": "fullstack",
-  "profiles": {
-    "fullstack": {
-      "name": "Full Stack Preview",
-      "primary": "frontend",
-      "services": {
-        "frontend": {
-          "command": ["npm", "run", "dev"],
-          "cwd": "frontend",
-          "port": 3000,
-          "env": {
-            "NODE_ENV": "development",
-            "REACT_APP_API_URL": "http://localhost:4000"
-          },
-          "ready": {
-            "http_path": "/",
-            "timeout_seconds": 90
-          }
-        },
-        "backend": {
-          "command": ["python", "manage.py", "runserver", "0.0.0.0:4000"],
-          "cwd": "backend",
-          "port": 4000,
-          "env": {
-            "DJANGO_SETTINGS_MODULE": "config.settings.preview"
-          },
-          "ready": {
-            "http_path": "/health",
-            "timeout_seconds": 60
-          }
-        }
+  "name": "Full Stack Preview",
+  "primary": "frontend",
+  "services": {
+    "frontend": {
+      "command": ["npm", "run", "dev"],
+      "cwd": "frontend",
+      "port": 3000,
+      "env": {
+        "NODE_ENV": "development",
+        "REACT_APP_API_URL": "http://localhost:4000"
       },
-      "credentials": {
-        "mode": "managed_env",
-        "credential_set": "repo-main-preview",
-        "env": ["DATABASE_URL"],
-        "inject_into": ["backend"]
+      "ready": {
+        "http_path": "/",
+        "timeout_seconds": 90
+      }
+    },
+    "backend": {
+      "command": ["python", "manage.py", "runserver", "0.0.0.0:4000"],
+      "cwd": "backend",
+      "port": 4000,
+      "env": {
+        "DJANGO_SETTINGS_MODULE": "config.settings.preview"
       },
-      "network": {
-        "mode": "managed",
-        "destinations": [
-          "preview_db"
-        ]
+      "ready": {
+        "http_path": "/health",
+        "timeout_seconds": 60
       }
     }
+  },
+  "credentials": {
+    "mode": "managed_env",
+    "credential_set": "repo-main-preview",
+    "env": ["DATABASE_URL"],
+    "inject_into": ["backend"]
+  },
+  "network": {
+    "mode": "managed",
+    "destinations": [
+      "preview_db"
+    ]
   }
 }
 ```
@@ -236,61 +226,56 @@ In this example:
 
 ### Multi-Service Example With Platform Infrastructure (Frontend + Backend + Local PostgreSQL)
 
-For repos that don't have a staging database available, the profile can request platform-provided infrastructure instead of a managed destination:
+For repos that don't have a staging database available, the config can request platform-provided infrastructure instead of a managed destination:
 
 ```json
 {
   "version": "3",
-  "default_profile": "fullstack_local",
-  "profiles": {
-    "fullstack_local": {
-      "name": "Full Stack (Local DB)",
-      "primary": "frontend",
-      "services": {
-        "frontend": {
-          "command": ["npm", "run", "dev"],
-          "cwd": "frontend",
-          "port": 3000,
-          "env": {
-            "NODE_ENV": "development",
-            "REACT_APP_API_URL": "http://localhost:4000"
-          },
-          "ready": {
-            "http_path": "/",
-            "timeout_seconds": 90
-          }
-        },
-        "backend": {
-          "command": ["python", "manage.py", "runserver", "0.0.0.0:4000"],
-          "cwd": "backend",
-          "port": 4000,
-          "env": {
-            "DJANGO_SETTINGS_MODULE": "config.settings.preview"
-          },
-          "ready": {
-            "http_path": "/health",
-            "timeout_seconds": 60
-          }
-        }
+  "name": "Full Stack (Local DB)",
+  "primary": "frontend",
+  "services": {
+    "frontend": {
+      "command": ["npm", "run", "dev"],
+      "cwd": "frontend",
+      "port": 3000,
+      "env": {
+        "NODE_ENV": "development",
+        "REACT_APP_API_URL": "http://localhost:4000"
       },
-      "infrastructure": {
-        "db": {
-          "template": "postgres-16",
-          "init_script": "db/seed.sql",
-          "inject_env": {
-            "DATABASE_URL": "postgres://{user}:{password}@{host}:{port}/{database}"
-          },
-          "inject_into": ["backend"]
-        }
+      "ready": {
+        "http_path": "/",
+        "timeout_seconds": 90
+      }
+    },
+    "backend": {
+      "command": ["python", "manage.py", "runserver", "0.0.0.0:4000"],
+      "cwd": "backend",
+      "port": 4000,
+      "env": {
+        "DJANGO_SETTINGS_MODULE": "config.settings.preview"
       },
-      "credentials": {
-        "mode": "none"
-      },
-      "network": {
-        "mode": "managed",
-        "destinations": []
+      "ready": {
+        "http_path": "/health",
+        "timeout_seconds": 60
       }
     }
+  },
+  "infrastructure": {
+    "db": {
+      "template": "postgres-16",
+      "init_script": "db/seed.sql",
+      "inject_env": {
+        "DATABASE_URL": "postgres://{user}:{password}@{host}:{port}/{database}"
+      },
+      "inject_into": ["backend"]
+    }
+  },
+  "credentials": {
+    "mode": "none"
+  },
+  "network": {
+    "mode": "managed",
+    "destinations": []
   }
 }
 ```
@@ -303,33 +288,32 @@ In this example:
 - No managed destination or external staging database is needed — the preview is fully self-contained
 - The `credentials.mode` is `none` because all credentials are auto-generated by the platform infrastructure, not admin-managed secrets
 
-A profile can use both `infrastructure` and `network.destinations` simultaneously. For example, a profile might use a platform-provided PostgreSQL but connect to an external staging Stripe API via a managed destination.
+A config can use both `infrastructure` and `network.destinations` simultaneously. For example, a config might use a platform-provided PostgreSQL but connect to an external staging Stripe API via a managed destination.
 
 ### Config Rules
 
 | Field | Type | Notes |
 |------|------|-------|
-| `default_profile` | string | Which profile the UI uses by default |
-| `profiles.<name>.name` | string | Human label for the preview |
-| `profiles.<name>.primary` | string | Key into `services` map designating which service the gateway proxies to. Required when `services` is present. |
-| `profiles.<name>.services` | object | Map of service name → service config. Optional — if absent, the profile is a single-service profile using top-level `command`/`port`/etc. |
-| `profiles.<name>.services.<svc>.command` | string[] | Executed as argv, not shell-interpolated |
-| `profiles.<name>.services.<svc>.cwd` | string | Relative to `/workspace`; must stay within repo root |
-| `profiles.<name>.services.<svc>.port` | int | Port the service binds to inside the sandbox |
-| `profiles.<name>.services.<svc>.env` | object | Non-secret literal env values for this service |
-| `profiles.<name>.services.<svc>.ready` | object | Per-service readiness probe config |
-| `profiles.<name>.infrastructure` | object | Map of infra name → platform infrastructure config. Optional. |
-| `profiles.<name>.infrastructure.<name>.template` | string | Platform-provided template name (e.g., `postgres-16`, `redis-7`, `mysql-8`) |
-| `profiles.<name>.infrastructure.<name>.init_script` | string | Path to a SQL or setup script, relative to repo root. Optional. |
-| `profiles.<name>.infrastructure.<name>.inject_env` | object | Env var templates using `{host}`, `{port}`, `{user}`, `{password}`, `{database}` placeholders |
-| `profiles.<name>.infrastructure.<name>.inject_into` | string[] | Which services receive the injected env vars. Defaults to all services if omitted. |
-| `profiles.<name>.credentials` | object | Managed credential reference or `none` — shared across the profile |
-| `profiles.<name>.credentials.inject_into` | string[] | Which services receive credential env vars. Defaults to all services if omitted. |
-| `profiles.<name>.network` | object | Named managed destinations — shared across the profile |
+| `name` | string | Human label for the preview |
+| `primary` | string | Key into `services` map designating which service the gateway proxies to. Required when `services` is present. |
+| `services` | object | Map of service name → service config. Optional — if absent, the config is a single-service preview using top-level `command`/`port`/etc. |
+| `services.<svc>.command` | string[] | Executed as argv, not shell-interpolated |
+| `services.<svc>.cwd` | string | Relative to `/workspace`; must stay within repo root |
+| `services.<svc>.port` | int | Port the service binds to inside the sandbox |
+| `services.<svc>.env` | object | Non-secret literal env values for this service |
+| `services.<svc>.ready` | object | Per-service readiness probe config |
+| `infrastructure` | object | Map of infra name → platform infrastructure config. Optional. |
+| `infrastructure.<name>.template` | string | Platform-provided template name (e.g., `postgres-16`, `redis-7`, `mysql-8`) |
+| `infrastructure.<name>.init_script` | string | Path to a SQL or setup script, relative to repo root. Optional. |
+| `infrastructure.<name>.inject_env` | object | Env var templates using `{host}`, `{port}`, `{user}`, `{password}`, `{database}` placeholders |
+| `infrastructure.<name>.inject_into` | string[] | Which services receive the injected env vars. Defaults to all services if omitted. |
+| `credentials` | object | Managed credential reference or `none` |
+| `credentials.inject_into` | string[] | Which services receive credential env vars. Defaults to all services if omitted. |
+| `network` | object | Named managed destinations |
 
 ### Multi-Service Process Model
 
-All services in a profile run as separate OS processes inside the **same sandbox container**. They share:
+All services in a config run as separate OS processes inside the **same sandbox container**. They share:
 
 - The same filesystem (repo checkout + agent changes)
 - The same `localhost` network namespace — services reach each other via `localhost:<port>`
@@ -348,7 +332,7 @@ If any service fails to become ready within its timeout, the entire preview tran
 
 Service limits:
 
-- Maximum **4 services** per profile in MVP (1 primary + 3 support)
+- Maximum **4 services** per config in MVP (1 primary + 3 support)
 - Each service gets its own readiness probe and health check
 - All services share the preview-level resource limits (memory, CPU) — there are no per-service cgroup splits in MVP
 
@@ -402,7 +386,7 @@ The choice between infrastructure and managed destinations is context-dependent:
 | **Cost** | Additional memory/CPU per preview (see resource limits) | No additional per-preview resource cost |
 | **Isolation** | Full isolation — each preview gets its own database instance | Shared — multiple previews may hit the same DB |
 
-A profile can use **both** simultaneously. For example, a profile might use platform-provided PostgreSQL for data isolation while connecting to an external staging Stripe API via a managed destination.
+A config can use **both** simultaneously. For example, a config might use platform-provided PostgreSQL for data isolation while connecting to an external staging Stripe API via a managed destination.
 
 #### Infrastructure Startup And Lifecycle
 
@@ -433,7 +417,7 @@ Infrastructure containers have their own resource limits, separate from the appl
 
 These limits are not configurable by users in MVP — they are set by the platform based on the template. Infrastructure resource consumption counts toward the node-level capacity, which affects the effective concurrency cap.
 
-Maximum **2 infrastructure services** per profile in MVP. Combined with the 4-service limit for application services, a preview can run up to 6 total processes/containers.
+Maximum **2 infrastructure services** per config in MVP. Combined with the 4-service limit for application services, a preview can run up to 6 total processes/containers.
 
 #### Security Model For Infrastructure
 
@@ -457,21 +441,21 @@ Infrastructure config follows the same trust split as the rest of the preview co
 
 A diff cannot add or remove infrastructure services, change templates, or modify injection targets. It can only change which init script runs.
 
-For profiles with `credentials.mode != none` (connected previews), `init_script` is also pinned to the base branch — the same "pin everything for connected previews" rule applies.
+For configs with `credentials.mode != none` (connected previews), `init_script` is also pinned to the base branch — the same "pin everything for connected previews" rule applies.
 
 ### Design Constraints
 
 - `command` is an argv array, not a shell string
 - readiness is HTTP-based, not stdout-regex-based
 - secrets are not committed in the repo config
-- `credentials` and `network` are profile-level, not per-service, to keep the trust model simple
+- `credentials` and `network` are config-level, not per-service, to keep the trust model simple
 - `inject_into` is the only per-service credential scoping mechanism
 
-The profile model gives us a controlled way to support:
+The config model gives us a controlled way to support:
 
 - `bootstrap` previews with no third-party credentials (single or multi-service)
 - `staging_like` previews with managed non-production credentials scoped to specific services
-- optional faster `lightweight` profiles later
+- optional faster `lightweight` configs later
 
 ### Managed Credentials And Managed Destinations
 
@@ -479,7 +463,7 @@ Managed mode is the default.
 
 - Repo config references a credential set name; it does not contain secrets
 - Repo config references named destinations such as `preview_db` or `stripe_test`; it does not define raw egress rules in the common path
-- Repo/profile-scoped credentials are attached in the 143 UI by org admins
+- Repo-scoped credentials are attached in the 143 UI by org admins
 - Raw host allowlists or custom secret-fetch flows are an advanced fallback, not the default setup path
 
 ### Trust Split For Preview Config
@@ -508,14 +492,14 @@ This prevents a malicious or buggy diff from weakening egress or swapping in a m
 
 ### Preventing Diff-Controlled Launch In Connected Previews
 
-The remaining risk is that a diff can still change the process that receives preview credentials if the selected profile allows connected access.
+The remaining risk is that a diff can still change the process that receives preview credentials if the preview config allows connected access.
 
-**Hard requirement for MVP**: for any profile with `credentials.mode != none` or non-empty managed destinations, all launch fields for **all services** (`command`, `cwd`, `port`, `env`, and `ready`) MUST be read from the **base branch** instead of the session diff. Only `restricted` / `bootstrap` previews may use diff-defined launch behavior. This is enforced in code with no admin override.
+**Hard requirement for MVP**: for any config with `credentials.mode != none` or non-empty managed destinations, all launch fields for **all services** (`command`, `cwd`, `port`, `env`, and `ready`) MUST be read from the **base branch** instead of the session diff. Only `restricted` / `bootstrap` previews may use diff-defined launch behavior. This is enforced in code with no admin override.
 
 - `bootstrap` / `restricted`: allow diff-defined per-service `command`, `cwd`, `port`, `env`, and `ready`
-- `staging_like` / any connected profile: pin all launch fields for all services to base branch or an admin-approved template
+- `staging_like` / any connected config: pin all launch fields for all services to base branch or an admin-approved template
 
-This applies to **all services in the profile**, not just the ones receiving credentials. Even though `inject_into` may scope credentials to the backend, a malicious diff could change the frontend's `command` to a process that reads the backend's environment from `/proc`. Since all services share a sandbox, the trust boundary is the profile, not the individual service.
+This applies to **all services in the config**, not just the ones receiving credentials. Even though `inject_into` may scope credentials to the backend, a malicious diff could change the frontend's `command` to a process that reads the backend's environment from `/proc`. Since all services share a sandbox, the trust boundary is the config, not the individual service.
 
 This is a hard rule, not a recommendation, because the alternative — allowing a diff to control any process in a sandbox that receives credentials — is a class of vulnerability, not a configuration choice. The preview manager must reject any attempt to start a connected preview where launch fields differ between the diff and base branch versions of the config.
 
@@ -526,7 +510,7 @@ This is a hard rule, not a recommendation, because the alternative — allowing 
 A new service owns preview lifecycle:
 
 - start preview (including multi-service startup orchestration)
-- stop preview (all services in the profile)
+- stop preview (all services in the config)
 - report status (aggregate and per-service)
 - mint bootstrap tokens
 - enforce TTLs and concurrency caps
@@ -535,16 +519,16 @@ This is separate from HTTP handlers so the lifecycle logic does not leak into ro
 
 It is also responsible for:
 
-- resolving the selected preview profile and normalizing single-service profiles to the multi-service format
+- resolving the selected preview config and normalizing single-service configs to the multi-service format
 - provisioning and tearing down platform infrastructure containers (PostgreSQL, Redis, etc.)
 - generating ephemeral credentials for infrastructure services and constructing connection strings
 - running init scripts against infrastructure containers
-- managing the process group for all services in a profile (start, stop, health check, restart)
+- managing the process group for all services in a config (start, stop, health check, restart)
 - routing credentials (both managed and infrastructure-generated) to the correct services based on `inject_into`
 - enforcing repo/org preview quotas
 - recording node ownership even in single-node mode
 
-For multi-service profiles, the preview manager acts as a lightweight process supervisor. It holds references to all child processes, monitors their exit status, and coordinates ordered startup and shutdown. If a support service crashes, the preview manager should:
+For multi-service configs, the preview manager acts as a lightweight process supervisor. It holds references to all child processes, monitors their exit status, and coordinates ordered startup and shutdown. If a support service crashes, the preview manager should:
 
 1. Transition the preview to `unhealthy` status
 2. Surface which service failed in the UI
@@ -877,7 +861,7 @@ Even in MVP, preview startup should be modeled as three phases:
 
 The Init phase is where infrastructure and credential setup happens. This ensures that by the time application services start, all databases are populated and all connection strings are injected.
 
-For multi-service profiles, the Start phase emits per-service status events so the frontend can show which services are ready and which are still starting. The preview transitions to `ready` only when all services and infrastructure pass their readiness/health checks. If any service or infrastructure container fails, the preview transitions to `failed` with a diagnostic identifying the failing component.
+For multi-service configs, the Start phase emits per-service status events so the frontend can show which services are ready and which are still starting. The preview transitions to `ready` only when all services and infrastructure pass their readiness/health checks. If any service or infrastructure container fails, the preview transitions to `failed` with a diagnostic identifying the failing component.
 
 Phase 1 does not need the full immutable image cache pipeline yet, but the lifecycle should already distinguish these phases so later caching and diagnostics do not require redesigning the contract.
 
@@ -905,20 +889,20 @@ Snapshots are stored on the worker's local disk (SSD) with an LRU eviction polic
 **Invalidation**: snapshots are invalidated when:
 - The lockfile changes (new dependencies)
 - The base commit changes (new code) — but see "partial invalidation" below
-- The preview config changes (different profile or services)
+- The preview config changes (different services or settings)
 
 **Partial invalidation**: when only the base commit changes but the lockfile is the same, the system can restore the snapshot and apply only the new file changes (git diff) on top. This handles the common case where a PR is rebased or new commits are pushed without changing dependencies.
 
 #### Progressive Preview
 
-For multi-service profiles, the frontend service often starts faster than the backend. Rather than waiting for all services to be ready, the system supports **progressive preview**:
+For multi-service configs, the frontend service often starts faster than the backend. Rather than waiting for all services to be ready, the system supports **progressive preview**:
 
 1. As soon as the primary service (frontend) passes its readiness probe, the preview transitions to `partially_ready` and the frontend displays the preview iframe
 2. The UI shows a toast overlay: "Backend starting... (API calls may fail until ready)"
 3. When all services pass readiness, the preview transitions to `ready` and the toast disappears
 4. If the frontend depends on backend data, it will show its own loading/error states naturally — this is actually useful for the agent to see, as it reveals how the app handles backend unavailability
 
-Progressive preview is opt-in per profile via a `progressive: true` flag. It is most useful for SPAs with client-side routing that can render a shell before API data is available.
+Progressive preview is opt-in per config via a `progressive: true` flag. It is most useful for SPAs with client-side routing that can render a shell before API data is available.
 
 #### Startup Time Targets
 
@@ -948,7 +932,7 @@ Suggested fields:
 | `preview_handle` | text | provider-specific opaque handle |
 | `primary_service` | text | name of the primary service the gateway proxies to |
 | `port` | int | primary service's container-local port snapshot |
-| `config_digest` | text | snapshot of the resolved preview config/profile |
+| `config_digest` | text | snapshot of the resolved preview config |
 | `base_commit_sha` | text | exact base commit for the session |
 | `last_accessed_at` | timestamptz | idle timeout enforcement |
 | `expires_at` | timestamptz | hard TTL |
@@ -969,7 +953,7 @@ This keeps preview lifecycle state out of the main `sessions` table.
 
 ### Preview Services
 
-For multi-service profiles, use a `preview_services` table to track per-service state:
+For multi-service configs, use a `preview_services` table to track per-service state:
 
 | Column | Type | Notes |
 |-------|------|-------|
@@ -987,13 +971,13 @@ For multi-service profiles, use a `preview_services` table to track per-service 
 
 Index: `(preview_instance_id, service_name)` unique.
 
-For single-service profiles (normalized internally), this table contains one row. The preview manager uses this table to track which services are running, which have failed, and to produce per-service diagnostics in the UI.
+For single-service configs (normalized internally), this table contains one row. The preview manager uses this table to track which services are running, which have failed, and to produce per-service diagnostics in the UI.
 
 The `preview_instances.status` field reflects the **aggregate** state: `ready` only when all services and infrastructure are ready, `failed` if any service or infrastructure fails, `unhealthy` if any becomes unhealthy after initial readiness.
 
 ### Preview Infrastructure
 
-For profiles that use platform infrastructure, use a `preview_infrastructure` table:
+For configs that use platform infrastructure, use a `preview_infrastructure` table:
 
 | Column | Type | Notes |
 |-------|------|-------|
@@ -1173,7 +1157,7 @@ The verification endpoints:
 | Use Design Mode (click elements, annotate, send feedback) | `member` |
 | Use Visual Editing controls | `member` |
 | Run interaction replay, multi-viewport capture, visual diff, and assertions | `member` |
-| Configure preview profiles, credentials, quotas, and defaults | `admin` |
+| Configure preview configs, credentials, quotas, and defaults | `admin` |
 
 In the current role model, `member` is the editor-equivalent role. Starting a preview is treated as an editor action because it causes sandbox execution and may initiate connected preview flows.
 
@@ -1182,7 +1166,7 @@ In the current role model, `member` is the editor-equivalent role. Starting a pr
 The session page on `app.143.dev` renders:
 
 - `Start Preview` / `Stop Preview`
-- Preview status (with per-service breakdown for multi-service profiles)
+- Preview status (with per-service breakdown for multi-service configs)
 - Responsive width presets
 - `Open in new tab`
 - **Design Mode toggle** — switches between interact mode (normal iframe) and design mode (overlay captures clicks)
@@ -1199,7 +1183,7 @@ Preview startup takes 10-90 seconds. A spinner with no context will feel broken.
 
 1. Show the current phase: **Building** → **Initializing** → **Starting**
 2. Stream the last few lines of build/init output in a collapsible terminal view below the progress indicator
-3. Show estimated time remaining based on historical startup times for the same repo and profile. Format as "Usually ready in ~25s" rather than a countdown, since estimates are approximate.
+3. Show estimated time remaining based on historical startup times for the same repo and config. Format as "Usually ready in ~25s" rather than a countdown, since estimates are approximate.
 4. If no historical data exists yet, show an indeterminate progress bar with the phase label only
 
 The preview manager should emit structured phase-transition events that the frontend consumes via the existing session WebSocket channel. These events are separate from `preview_logs` rows — they are ephemeral UI signals, not persisted records.
@@ -1216,7 +1200,7 @@ Known failure patterns the preview manager should detect and surface:
 
 | Pattern | Suggested Fix |
 |---------|--------------|
-| Port not reachable after timeout | "The dev server did not respond on port {port}. Check that your dev server binds to `0.0.0.0`, not `localhost`. You can set `HOST=0.0.0.0` in the preview profile env." |
+| Port not reachable after timeout | "The dev server did not respond on port {port}. Check that your dev server binds to `0.0.0.0`, not `localhost`. You can set `HOST=0.0.0.0` in the preview config env." |
 | `EADDRINUSE` in process output | "Port {port} is already in use inside the sandbox. Check for conflicting processes or change the port in `.143/preview.json`." |
 | `MODULE_NOT_FOUND` or `Cannot find module` | "A required dependency is missing. Ensure `npm install` or equivalent runs during the Build phase." |
 | OOM kill (exit code 137) | "The preview process exceeded its memory limit ({limit}MB). Try a lighter dev server configuration or request a higher limit." |
@@ -1906,7 +1890,7 @@ Preview execution has two trust tiers:
 | Tier | When Used | Policy |
 |------|-----------|--------|
 | `restricted` | generated `bootstrap` previews and repos with no approved connected setup | no third-party credentials; in MVP only repo-local runtime behavior, with broader isolated resources reserved for later phases |
-| `trusted_internal` | repo/profile combos that an admin has explicitly enabled | short-lived non-production credentials and approved named destinations allowed |
+| `trusted_internal` | repos that an admin has explicitly enabled | short-lived non-production credentials and approved named destinations allowed |
 
 Hard rules for both tiers:
 
@@ -1934,7 +1918,7 @@ But sandbox hardening alone is not enough. The browser render path is a separate
 Preview config must be treated as untrusted repo content:
 
 - `cwd` for every service must resolve inside the repo root
-- `port` for every service must be within an allowed range and unique across the profile
+- `port` for every service must be within an allowed range and unique across the config
 - `command` for every service must be executed without shell interpolation
 - repo config cannot inline secrets
 - credential set selection, `inject_into`, and managed destinations must come from base-branch config plus admin-managed settings
@@ -2163,7 +2147,7 @@ No auto-start in MVP. If a user wants a preview, they request it explicitly — 
 
 Each preview process must run under explicit resource limits enforced at the container / cgroup level. Without these, a single runaway dev server (e.g., webpack in a large monorepo with `--watch`) can consume all available memory on a worker node and degrade other sandboxes.
 
-Resource limits apply to the **entire preview** (all services in the profile), not per-service. All services share a single cgroup within the sandbox.
+Resource limits apply to the **entire preview** (all services in the config), not per-service. All services share a single cgroup within the sandbox.
 
 Default limits per preview:
 
@@ -2173,7 +2157,7 @@ Default limits per preview:
 | CPU | 0.5 cores | 1.0 cores | 2.0 cores |
 | File watchers (`fs.inotify.max_user_watches`) | 65536 | 131072 | 131072 |
 
-The preview manager automatically applies the multi-service defaults when a profile contains more than one service. These are enforced via Docker `--memory` and `--cpus` flags (or equivalent cgroup settings for other providers). The `PreviewConfig` should include a `resource_limits` field:
+The preview manager automatically applies the multi-service defaults when a config contains more than one service. These are enforced via Docker `--memory` and `--cpus` flags (or equivalent cgroup settings for other providers). The `PreviewConfig` should include a `resource_limits` field:
 
 ```go
 type ResourceLimits struct {
@@ -2234,13 +2218,13 @@ Phase 1 should support only:
 
 1. Docker provider
 2. Preview served from an isolated preview origin
-3. Single-service and multi-service profiles (up to 4 application services per profile, all in one sandbox)
-4. Platform-provided infrastructure services (PostgreSQL, Redis, MySQL) as sidecar containers, up to 2 per profile
+3. Single-service and multi-service configs (up to 4 application services per config, all in one sandbox)
+4. Platform-provided infrastructure services (PostgreSQL, Redis, MySQL) as sidecar containers, up to 2 per config
 5. Explicit single-node deployment (`MODE=all`)
 6. On-demand start / stop (manual from session UI, or via "Launch Preview" link on PR comment)
 7. Active sessions or short-lived post-run review windows
 8. WebSocket support for HMR when the underlying dev server uses it
-9. `bootstrap` and `staging_like` profiles
+9. `bootstrap` and `staging_like` trust tiers
 10. Managed credential sets and named destinations with `inject_into` scoping
 11. Agent visual feedback: `preview_screenshot`, `preview_console`, `preview_element` tools
 12. Auto-screenshot on HMR updates with screenshot timeline
@@ -2256,7 +2240,7 @@ Phase 1 should support only:
 22. PR preview integration: on-demand preview launch from PR comment, single updating PR comment with preview state and screenshot thumbnails, preview artifacts preserved after sandbox teardown
 23. Filesystem snapshot caching: cache the sandbox filesystem state after successful startup, keyed by lockfile + base commit, to skip the Build phase on subsequent preview starts
 24. Filesystem snapshot caching: restore node_modules and build artifacts from cached snapshots on repeat previews (keyed by lockfile + base commit + config)
-25. Progressive preview: show frontend preview before backend is fully ready (opt-in per profile)
+25. Progressive preview: show frontend preview before backend is fully ready (opt-in per config)
 
 Phase 1 should explicitly exclude:
 
@@ -2299,7 +2283,7 @@ Phase 1 should explicitly exclude:
 ### Phase 4: Auto-Detection And Setup
 
 1. Automatic preview config generation based on repo structure detection (framework markers, `package.json` scripts, port hints, presence of `docker-compose.yml`)
-2. Optional `lightweight` profiles and broader setup auto-detection
+2. Optional `lightweight` configs and broader setup auto-detection
 3. One-click "add preview config" scaffolding when detection identifies a supported repo shape
 4. Auto-detection of infrastructure needs (e.g., `DATABASE_URL` in `.env.example` suggests PostgreSQL)
 
@@ -2350,7 +2334,7 @@ Many dev servers default to binding on `127.0.0.1`, which makes the primary serv
 
 For support services, `localhost` binding is fine — they are only reached by other processes inside the same sandbox. However, if a support service's readiness probe is failing, the preview manager should note that the probe is hitting `localhost`, which is expected to work for intra-sandbox services, and focus diagnostics on process crashes or startup errors instead.
 
-For dev servers that do not respect the `HOST` variable, the preview manager should detect the condition (readiness probe fails on `0.0.0.0:$PORT` but the process is still running) and surface a diagnostic: "Dev server may be bound to localhost. Add `HOST=0.0.0.0` to your dev server configuration or preview profile env."
+For dev servers that do not respect the `HOST` variable, the preview manager should detect the condition (readiness probe fails on `0.0.0.0:$PORT` but the process is still running) and surface a diagnostic: "Dev server may be bound to localhost. Add `HOST=0.0.0.0` to your dev server configuration or preview config env."
 
 ### Static Asset Caching
 
@@ -2389,17 +2373,17 @@ The previewed app may write files to the sandbox filesystem (e.g., SQLite databa
 
 ### Port Conflicts Between Services
 
-In multi-service profiles, two services could be configured to use the same port, or a service could conflict with a port already in use by the sandbox runtime.
+In multi-service configs, two services could be configured to use the same port, or a service could conflict with a port already in use by the sandbox runtime.
 
-**Mitigation (MVP):** The preview manager must validate that all service ports in a profile are unique before starting any processes. If a conflict is detected, the preview transitions to `failed` immediately with a diagnostic: "Port {port} is used by both {service_a} and {service_b}. Each service must use a unique port." The allowed port range (e.g., 1024-65535) should be enforced, and ports used by sandbox infrastructure should be reserved.
+**Mitigation (MVP):** The preview manager must validate that all service ports in a config are unique before starting any processes. If a conflict is detected, the preview transitions to `failed` immediately with a diagnostic: "Port {port} is used by both {service_a} and {service_b}. Each service must use a unique port." The allowed port range (e.g., 1024-65535) should be enforced, and ports used by sandbox infrastructure should be reserved.
 
 ### Credential Leakage Between Services
 
-All services in a profile share a sandbox. Even though `inject_into` scopes which services receive credential env vars, a malicious or buggy process could read another process's environment via `/proc/<pid>/environ`.
+All services in a config share a sandbox. Even though `inject_into` scopes which services receive credential env vars, a malicious or buggy process could read another process's environment via `/proc/<pid>/environ`.
 
 **Mitigation (MVP):** This is an accepted risk in the current trust model. The trust boundary is the sandbox, not the individual process. The `inject_into` mechanism is a defense-in-depth measure that prevents accidental exposure (e.g., a frontend dev server logging all env vars on startup) but does not protect against intentional reads. This is acceptable because:
 
-- Connected previews require admin approval of the profile
+- Connected previews require admin approval of the config
 - All launch fields are pinned to the base branch for connected previews (preventing diff-injected processes from reading secrets)
 - The sandbox itself runs in gVisor with dropped capabilities
 
@@ -2440,7 +2424,7 @@ Per-preview hostnames use wildcard DNS (`*.preview.143.dev`). A compromised or m
 1. Should preview bootstrap state live in a signed JWT, a DB-backed session, or both?
 2. Do we want the preview gateway inside the main Go binary or as a separate service on the preview origin?
 3. Is Phase 1 limited to `MODE=all`, or do we also support split API/worker deployments immediately?
-4. Should org-level preview env profiles be stored in versioned settings tables?
+4. Should org-level preview env configs be stored in versioned settings tables?
 5. Do we want a "warm review sandbox" snapshot so preview can be restarted after a short stop without rerunning the agent?
 6. Should the agent's `preview_screenshot` tool be automatically called after every code change, or should the agent decide when to use it? Auto-capture creates a richer timeline but adds latency to the agent's edit loop.
 7. Should Design Mode visual edits support an "undo" stack (revert the last style tweak before applying to code), or is the two-phase model (visual preview → agent applies) sufficient?
