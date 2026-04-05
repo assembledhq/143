@@ -32,6 +32,7 @@ import (
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/storage"
 	"github.com/assembledhq/143/internal/services/validation"
+	"github.com/assembledhq/143/internal/version"
 	"github.com/assembledhq/143/internal/worker"
 )
 
@@ -39,6 +40,12 @@ func main() {
 	cfg := config.Load()
 	logger := logging.NewLogger(cfg.LogLevel)
 	cfg.LogStatus(logger)
+
+	if version.IsDev() {
+		logger.Warn().Msg("BuildSHA is \"dev\" — ldflags not injected; input manifests will not be reproducible")
+	} else {
+		logger.Info().Str("build_sha", version.BuildSHA).Msg("server build version")
+	}
 
 	if err := cfg.ValidateSecrets(); err != nil {
 		logger.Fatal().Err(err).Msg("security configuration check failed")

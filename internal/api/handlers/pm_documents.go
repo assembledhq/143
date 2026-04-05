@@ -17,6 +17,12 @@ import (
 type PMDocumentHandler struct {
 	store       *db.PMDocumentStore
 	credentials *db.OrgCredentialStore
+	audit       *db.AuditEmitter
+}
+
+// SetAuditEmitter injects the audit emitter for logging PM document events.
+func (h *PMDocumentHandler) SetAuditEmitter(audit *db.AuditEmitter) {
+	h.audit = audit
 }
 
 func NewPMDocumentHandler(store *db.PMDocumentStore, credentials *db.OrgCredentialStore) *PMDocumentHandler {
@@ -130,6 +136,10 @@ func (h *PMDocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "document not found")
 		return
 	}
+	if !doc.Active {
+		writeError(w, r, http.StatusConflict, "INACTIVE_VERSION", "cannot update an inactive document version; use the current active version")
+		return
+	}
 
 	var req struct {
 		Title      *string         `json:"title"`
@@ -173,6 +183,9 @@ func (h *PMDocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	idStr := doc.ID.String()
+	emitUserAudit(h.audit, r, models.AuditActionPMDocumentUpdated, models.AuditResourcePMDocument, &idStr, nil)
+
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.PMDocument]{Data: doc})
 }
 
@@ -184,8 +197,13 @@ func (h *PMDocumentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := h.store.GetByID(r.Context(), orgID, docID); err != nil {
+	doc, err := h.store.GetByID(r.Context(), orgID, docID)
+	if err != nil {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "document not found")
+		return
+	}
+	if !doc.Active {
+		writeError(w, r, http.StatusConflict, "INACTIVE_VERSION", "cannot delete an inactive document version; use the current active version")
 		return
 	}
 
@@ -195,6 +213,158 @@ func (h *PMDocumentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ListVersions returns all versions of a document (active and inactive), newest first.
+func (h *PMDocumentHandler) ListVersions(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	docID, err := uuid.Parse(chi.URLParam(r, "docId"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid document ID")
+		return
+	}
+
+	limit := queryInt(r, "limit", 100)
+
+	versions, err := h.store.ListVersions(r.Context(), orgID, docID, limit)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "LIST_VERSIONS_FAILED", "failed to list document versions", err)
+		return
+	}
+	if versions == nil {
+		versions = []models.PMDocument{}
+	}
+
+	writeJSON(w, http.StatusOK, models.ListResponse[models.PMDocument]{
+		Data: versions,
+		Meta: models.PaginationMeta{},
+	})
+}
+
+// RestoreVersion creates a new active version with the content from an old version.
+func (h *PMDocumentHandler) RestoreVersion(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	docID, err := uuid.Parse(chi.URLParam(r, "docId"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid document ID")
+		return
+	}
+
+	var req struct {
+		RestoreFromID uuid.UUID `json:"restore_from_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+	if req.RestoreFromID == uuid.Nil {
+		writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", "restore_from_id is required")
+		return
+	}
+
+	// Fetch the referenced doc (any version) and find the current active version
+	// for the same logical document. This allows callers to pass any version ID
+	// (or the active row ID) as the URL parameter.
+	doc, err := h.store.GetByID(r.Context(), orgID, docID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "document not found")
+		return
+	}
+
+	// Validate that restore_from_id belongs to the same logical document.
+	restoreSource, err := h.store.GetByID(r.Context(), orgID, req.RestoreFromID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "restore source document not found")
+		return
+	}
+	if restoreSource.LogicalID != doc.LogicalID {
+		writeError(w, r, http.StatusBadRequest, "LOGICAL_ID_MISMATCH", "restore_from_id must belong to the same logical document")
+		return
+	}
+
+	activeDoc, err := h.store.GetActiveByLogicalID(r.Context(), orgID, doc.LogicalID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "no active version found for this document")
+		return
+	}
+
+	restored, err := h.store.Restore(r.Context(), orgID, activeDoc.ID, req.RestoreFromID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "RESTORE_FAILED", "failed to restore document version", err)
+		return
+	}
+
+	idStr := restored.ID.String()
+	emitUserAudit(h.audit, r, models.AuditActionPMDocumentRestored, models.AuditResourcePMDocument, &idStr, nil)
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.PMDocument]{Data: restored})
+}
+
+// ListDocumentSetPins returns all document set pins for an org.
+func (h *PMDocumentHandler) ListDocumentSetPins(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+
+	limit := queryInt(r, "limit", 100)
+
+	pins, err := h.store.ListDocumentSetPins(r.Context(), orgID, limit)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "LIST_PINS_FAILED", "failed to list document set pins", err)
+		return
+	}
+	if pins == nil {
+		pins = []models.PMDocumentSetPin{}
+	}
+
+	writeJSON(w, http.StatusOK, models.ListResponse[models.PMDocumentSetPin]{
+		Data: pins,
+		Meta: models.PaginationMeta{},
+	})
+}
+
+// GetDocumentSetPin returns a pin with its member documents.
+func (h *PMDocumentHandler) GetDocumentSetPin(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	pinID, err := uuid.Parse(chi.URLParam(r, "pinId"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid pin ID")
+		return
+	}
+
+	pin, err := h.store.GetDocumentSetPin(r.Context(), orgID, pinID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "pin not found")
+		return
+	}
+
+	members, err := h.store.GetPinMembers(r.Context(), orgID, pinID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "GET_PIN_MEMBERS_FAILED", "failed to get pin members", err)
+		return
+	}
+	if members == nil {
+		members = []models.PMDocument{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"pin":       pin,
+		"documents": members,
+	})
+}
+
+// CreateDocumentSetPin captures the current active documents as a pin.
+func (h *PMDocumentHandler) CreateDocumentSetPin(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+
+	pin, err := h.store.CreateDocumentSetPin(r.Context(), orgID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CREATE_PIN_FAILED", "failed to create document set pin", err)
+		return
+	}
+
+	idStr := pin.ID.String()
+	emitUserAudit(h.audit, r, models.AuditActionPMDocumentSetPinned, models.AuditResourcePMDocumentSet, &idStr, nil)
+
+	writeJSON(w, http.StatusCreated, models.SingleResponse[models.PMDocumentSetPin]{Data: pin})
 }
 
 // getNotionStore returns a configured NotionDocumentStore for the org, or
@@ -235,6 +405,10 @@ func (h *PMDocumentHandler) SyncFromNotion(w http.ResponseWriter, r *http.Reques
 	doc, err := h.store.GetByID(r.Context(), orgID, docID)
 	if err != nil {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "document not found")
+		return
+	}
+	if !doc.Active {
+		writeError(w, r, http.StatusConflict, "INACTIVE_VERSION", "cannot sync an inactive document version; use the current active version")
 		return
 	}
 
