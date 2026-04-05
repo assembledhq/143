@@ -70,6 +70,9 @@ const (
 	AuditActionPMRefreshTriggered   AuditAction = "pm.refresh_triggered"
 	AuditActionPMRefreshAccepted    AuditAction = "pm.refresh_accepted"
 	AuditActionPMRefreshRejected    AuditAction = "pm.refresh_rejected"
+	AuditActionPMDocumentUpdated    AuditAction = "pm_document.updated"
+	AuditActionPMDocumentRestored   AuditAction = "pm_document.restored"
+	AuditActionPMDocumentSetPinned  AuditAction = "pm_document_set.pinned"
 
 	// Team & settings actions
 	AuditActionSettingsUpdated        AuditAction = "settings.updated"
@@ -107,6 +110,7 @@ func (a AuditAction) Validate() error {
 		AuditActionPMAnalysisTriggered, AuditActionPMPlanCreated, AuditActionPMDecisionMade,
 		AuditActionPMBootstrapTriggered, AuditActionPMRefreshTriggered,
 		AuditActionPMRefreshAccepted, AuditActionPMRefreshRejected,
+		AuditActionPMDocumentUpdated, AuditActionPMDocumentRestored, AuditActionPMDocumentSetPinned,
 		AuditActionSettingsUpdated, AuditActionTeamMemberInvited, AuditActionTeamMemberRoleChanged,
 		AuditActionTeamMemberRemoved, AuditActionTeamInvitationRevoked, AuditActionTeamInvitationAccepted,
 		AuditActionIntegrationConnected, AuditActionCredentialUpdated, AuditActionCredentialDeleted,
@@ -135,6 +139,7 @@ const (
 	AuditResourceUser                 AuditResourceType = "user"
 	AuditResourceSessionReviewComment AuditResourceType = "session_review_comment"
 	AuditResourcePMDocument           AuditResourceType = "pm_document"
+	AuditResourcePMDocumentSet        AuditResourceType = "pm_document_set"
 )
 
 func (t AuditResourceType) Validate() error {
@@ -143,7 +148,7 @@ func (t AuditResourceType) Validate() error {
 		AuditResourceIssue, AuditResourcePMPlan, AuditResourcePMDecision,
 		AuditResourceSettings, AuditResourceTeamMember, AuditResourceInvitation,
 		AuditResourceIntegration, AuditResourceCredential, AuditResourceUser,
-		AuditResourceSessionReviewComment, AuditResourcePMDocument:
+		AuditResourceSessionReviewComment, AuditResourcePMDocument, AuditResourcePMDocumentSet:
 		return nil
 	default:
 		return fmt.Errorf("invalid AuditResourceType: %q", t)

@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
-import { renderWithProviders, screen } from "@/test/test-utils";
+import { renderWithProviders, screen, waitFor, userEvent } from "@/test/test-utils";
+import { http, HttpResponse } from "msw";
+import { server } from "@/test/mocks/server";
 import { ProposalInbox } from "./proposal-inbox";
 import type { Project } from "@/lib/types";
 
@@ -136,5 +138,120 @@ describe("ProposalInbox", () => {
     expect(screen.getByText("Approve")).toBeInTheDocument();
     expect(screen.getByText("Dismiss")).toBeInTheDocument();
     expect(screen.getByText("View details")).toBeInTheDocument();
+  });
+
+  it("opens detail sheet showing goal, scope, criteria, and reasoning", async () => {
+    const user = userEvent.setup();
+    const proposals = [
+      makeProposal({
+        title: "Refactor auth module",
+        goal: "Improve auth security",
+        scope: "All auth endpoints",
+        completion_criteria: "All tests pass",
+        proposal_reasoning: "Security audit flagged issues",
+      }),
+    ];
+
+    server.use(
+      http.get("/api/v1/projects/:id", () =>
+        HttpResponse.json({ data: { ...proposals[0], tasks: [] } }),
+      ),
+    );
+
+    renderWithProviders(<ProposalInbox proposals={proposals} />);
+    await user.click(screen.getByText("View details"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Improve auth security")).toBeInTheDocument();
+    });
+    expect(screen.getByText("All auth endpoints")).toBeInTheDocument();
+    expect(screen.getByText("All tests pass")).toBeInTheDocument();
+    expect(screen.getByText("Security audit flagged issues")).toBeInTheDocument();
+    expect(screen.getByText("No tasks yet.")).toBeInTheDocument();
+  });
+
+  it("shows seed tasks in detail sheet", async () => {
+    const user = userEvent.setup();
+    const proposals = [makeProposal({ total_tasks: 2 })];
+
+    server.use(
+      http.get("/api/v1/projects/:id", () =>
+        HttpResponse.json({
+          data: {
+            ...proposals[0],
+            tasks: [
+              { id: "t-1", title: "Task A", description: "Do A", complexity: "medium", confidence: "high" },
+              { id: "t-2", title: "Task B", description: null, complexity: null, confidence: null },
+            ],
+          },
+        }),
+      ),
+    );
+
+    renderWithProviders(<ProposalInbox proposals={proposals} />);
+    await user.click(screen.getByText("View details"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Task A")).toBeInTheDocument();
+    });
+    expect(screen.getByText("Do A")).toBeInTheDocument();
+    expect(screen.getByText("medium")).toBeInTheDocument();
+    expect(screen.getByText("high confidence")).toBeInTheDocument();
+    expect(screen.getByText("Task B")).toBeInTheDocument();
+  });
+
+  it("shows source issues and similar projects in detail sheet", async () => {
+    const user = userEvent.setup();
+    const proposals = [
+      makeProposal({
+        source_issue_ids: ["issue-abc", "issue-def"],
+        similar_projects: [
+          {
+            project_id: "sp-1",
+            title: "Auth rewrite",
+            overlap_score: 0.85,
+            overlap_type: "goal",
+            explanation: "Both target auth module",
+          },
+        ],
+      }),
+    ];
+
+    server.use(
+      http.get("/api/v1/projects/:id", () =>
+        HttpResponse.json({ data: { ...proposals[0], tasks: [] } }),
+      ),
+    );
+
+    renderWithProviders(<ProposalInbox proposals={proposals} />);
+    await user.click(screen.getByText("View details"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Motivating issues")).toBeInTheDocument();
+    });
+    expect(screen.getByText("issue-abc")).toBeInTheDocument();
+    expect(screen.getByText("issue-def")).toBeInTheDocument();
+    expect(screen.getByText("Similar projects")).toBeInTheDocument();
+    expect(screen.getByText("85% goal")).toBeInTheDocument();
+    expect(screen.getByText("Both target auth module")).toBeInTheDocument();
+  });
+
+  it("shows approve and dismiss buttons in detail sheet", async () => {
+    const user = userEvent.setup();
+    const proposals = [makeProposal()];
+
+    server.use(
+      http.get("/api/v1/projects/:id", () =>
+        HttpResponse.json({ data: { ...proposals[0], tasks: [] } }),
+      ),
+    );
+
+    renderWithProviders(<ProposalInbox proposals={proposals} />);
+    await user.click(screen.getByText("View details"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Approve proposal")).toBeInTheDocument();
+    });
+    expect(screen.getByPlaceholderText("Reason for dismissal (optional)")).toBeInTheDocument();
   });
 });
