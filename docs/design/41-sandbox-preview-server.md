@@ -224,6 +224,34 @@ In this example:
 - `DATABASE_URL` is injected only into the `backend` service via `credentials.inject_into`, so the frontend process never sees database credentials
 - Both services share the same filesystem (the repo checkout + agent changes)
 
+#### How Staging Database Credentials Work
+
+The repo config **never contains actual secrets**. Instead, it references a named credential set that an org admin configures separately in the 143 UI. Here's the end-to-end flow:
+
+1. **Admin setup (once)**: An org admin goes to **Settings → Credentials** in the 143 UI and creates a credential set named `repo-main-preview`. They add the env vars the preview needs — for example, `DATABASE_URL=postgres://user:pass@staging-rds.amazonaws.com:5432/mydb`. These values are stored encrypted in the `org_credentials` table, never in the repo.
+
+2. **Repo config references the credential set**: The `.143/preview.json` declares which credential set to use and which env vars to pull from it:
+   ```json
+   "credentials": {
+     "mode": "managed_env",
+     "credential_set": "repo-main-preview",
+     "env": ["DATABASE_URL"],
+     "inject_into": ["backend"]
+   }
+   ```
+   - `credential_set` — the name of the admin-created credential set
+   - `env` — which env vars to extract from that set (allowlist — only listed vars are injected)
+   - `inject_into` — which services receive the env vars (scoped injection — unlisted services never see the secrets)
+
+3. **At preview startup**: The preview manager resolves `repo-main-preview`, extracts the `DATABASE_URL` value, and injects it into the `backend` service's environment. The `frontend` service never sees it.
+
+4. **Network access**: The `network.destinations` field controls which external hosts the sandbox can reach. In this example, `preview_db` is a named managed destination that resolves to the staging RDS endpoint. The sandbox firewall blocks all other outbound traffic — so even if a process somehow obtained a connection string for production, it couldn't connect.
+
+This separation means:
+- **Developers** can iterate on the preview config without ever seeing production/staging credentials
+- **Admins** control which secrets are available and can rotate them without touching the repo
+- **The agent** never has access to the credential values — they're injected by the platform at runtime
+
 ### Multi-Service Example With Platform Infrastructure (Frontend + Backend + Local PostgreSQL)
 
 For repos that don't have a staging database available, the config can request platform-provided infrastructure instead of a managed destination:
@@ -366,8 +394,8 @@ Platform infrastructure templates are maintained by 143 and versioned independen
 
 | Template | Image | Default Port | Notes |
 |----------|-------|-------------|-------|
+| `postgres-17` | `postgres:17-alpine` | 5432 | Auto-creates a database named `preview` |
 | `postgres-16` | `postgres:16-alpine` | 5432 | Auto-creates a database named `preview` |
-| `postgres-15` | `postgres:15-alpine` | 5432 | Auto-creates a database named `preview` |
 | `redis-7` | `redis:7-alpine` | 6379 | No auth by default |
 | `mysql-8` | `mysql:8-lts` | 3306 | Auto-creates a database named `preview` |
 
