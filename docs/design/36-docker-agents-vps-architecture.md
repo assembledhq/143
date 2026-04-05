@@ -4,15 +4,11 @@
 
 ## Context
 
-143.dev currently runs on **Render** (Go API + Next.js frontend + Render Managed
-Postgres). Render does not support Docker-in-Docker or privileged containers, so
-agent sandboxes cannot run there. We need infrastructure where we control the
-Docker daemon.
-
-This document describes how to migrate off Render to a self-hosted VPS and then
-scale incrementally. It is organized into four phases, each with a clear list of
-what changes in our code, what infrastructure to provision, and what is
-provider-specific.
+143.dev needs infrastructure where we control the Docker daemon so agent
+sandboxes can run. This document describes how to set up a self-hosted VPS
+deployment from scratch and scale incrementally. It is organized into four
+phases, each with a clear list of what changes in our code, what infrastructure
+to provision, and what is provider-specific.
 
 ### Design Principles
 
@@ -29,18 +25,6 @@ provider-specific.
 5. **Standard tooling** — Caddy (TLS), gVisor (sandbox isolation), cloud-init
    (node provisioning), S3-compatible storage (backups). All open source, all
    work on every provider.
-
-### What Exists Today (on Render)
-
-| Component | Render Service | Notes |
-|---|---|---|
-| Go API | Render Docker service | Runs API + worker + scheduler in `mode=all` |
-| Next.js frontend | Render Node service | Served separately |
-| PostgreSQL | Render Managed DB | Automated backups, managed TLS |
-| TLS | Render auto-TLS | Automatic cert management |
-| DNS | External (Cloudflare) | Points to Render |
-| CI/CD | `git push` → Render auto-builds | Zero-config deploys |
-| Agent sandboxes | **Cannot run** | No Docker socket access |
 
 ### What Exists in Our Codebase Today
 
@@ -59,7 +43,7 @@ provider-specific.
 
 ---
 
-## Phase 1: Single-Node Production (Migrate Off Render)
+## Phase 1: Single-Node Production
 
 **Goal:** Everything on one VPS. Agent sandboxes work. Zero application code
 changes.
@@ -234,8 +218,6 @@ The existing SOPS + age workflow works on any VPS. The `docker-entrypoint.sh`
 already decrypts `.env.production.enc` at boot using a single env var
 (`SOPS_AGE_KEY`).
 
-**Option A: Use SOPS (recommended if secrets are already in `.env.production.enc`):**
-
 The Dockerfile already has `sops` and `age` installed. The entrypoint handles
 everything. You just need the age private key on the VPS:
 
@@ -257,24 +239,6 @@ age-keygen -o /tmp/deploy-key.txt
 # Copy the private key (AGE-SECRET-KEY-...) to the VPS .env file
 rm /tmp/deploy-key.txt   # don't leave this lying around
 ```
-
-**Option B: Plain `.env` on the VPS (simpler for a single VPS):**
-
-Skip SOPS entirely. Put all secrets directly in `/opt/143/.env`:
-
-```bash
-# /opt/143/.env
-DATABASE_URL=postgres://onefortythree:secret@postgres:5432/onefortythree?sslmode=disable
-DB_PASSWORD=secret
-GITHUB_APP_ID=12345
-GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n..."
-GITHUB_WEBHOOK_SECRET=whsec_xxx
-LLM_API_KEY=sk-ant-xxx
-# ... etc (copy from Render's env var settings)
-```
-
-This is fine for a single VPS. The tradeoff: secrets aren't version-controlled
-and you need to manually keep the VPS `.env` in sync with any changes.
 
 #### Step 6: The Sandbox Image
 
@@ -354,11 +318,9 @@ docker pull ghcr.io/assembledhq/143-agent:latest
 #### Step 7: GitHub Webhooks
 
 Your GitHub App sends webhooks to `https://143.dev/api/github/webhooks` (or
-similar). After the DNS cutover, webhooks hit the VPS instead of Render.
-**Nothing changes in the GitHub App settings** — the webhook URL uses the domain,
-which stays the same.
+similar). Configure the GitHub App's webhook URL to point at your domain.
 
-Verify after cutover:
+Verify after setup:
 - Firewall allows port 443 from the internet (step 2)
 - `GITHUB_WEBHOOK_SECRET` in the VPS env matches the GitHub App config
 - Push a test commit or open a PR and check the server logs for webhook receipt
@@ -557,7 +519,7 @@ changes are new config/infra files checked into the repo (`docker-compose.prod.y
 
 ### CI/CD: GitHub Actions Deploy Workflow
 
-Replace Render's auto-deploy with SSH-based deployment.
+SSH-based deployment triggered on push to main.
 
 #### `deploy/scripts/deploy.sh`
 
@@ -648,59 +610,36 @@ jobs:
 Note: `DEPLOY_HOST` and `DEPLOY_SSH_KEY` are generic — they work regardless of
 whether the VPS is on Hetzner, AWS, GCP, or anywhere else with SSH access.
 
-### Database Migration from Render
+### Database Initialization
+
+Postgres starts with an empty database. The migration tool creates all tables:
 
 ```bash
-# 1. Export from Render (use Render's external connection string)
-pg_dump -h <render-db-host> -U <render-db-user> -Fc <render-db-name> > render.dump
-
-# 2. Copy dump to VPS
-scp render.dump deploy@<vps-ip>:/tmp/render.dump
-
-# 3. Start Postgres on the VPS
+# Start Postgres
 docker compose -f docker-compose.prod.yml up -d postgres
 
-# 4. Restore
-docker exec -i 143-postgres-1 \
-  pg_restore -U onefortythree -d onefortythree --clean --if-exists < /tmp/render.dump
+# Run migrations (creates all tables)
+docker compose -f docker-compose.prod.yml exec -T api /bin/migrate up
 
-# 5. Verify
+# Verify
 docker exec 143-postgres-1 \
-  psql -U onefortythree -c "SELECT count(*) FROM organizations;"
+  psql -U onefortythree -c "\dt"
+# Should list all application tables
 ```
 
-### DNS Cutover and TLS
+### DNS and TLS Setup
 
-The goal is to move `143.dev` (and `www.143.dev`) from pointing at Render to
-pointing at the new VPS with minimal downtime. DNS is managed in Cloudflare.
+Point your domain at the VPS. DNS is assumed to be managed in Cloudflare (or any
+DNS provider).
 
-#### Before the cutover
+1. **Create DNS records in Cloudflare:**
 
-1. **Lower TTL.** In Cloudflare, set the TTL for `143.dev` and `www.143.dev` to
-   60 seconds (or "Auto" with Cloudflare proxy enabled). Do this **24 hours before**
-   the cutover so the old long TTL expires from caches worldwide.
+   | Record | Type | Value |
+   |--------|------|-------|
+   | `143.dev` | A | `<vps-ip>` |
+   | `www.143.dev` | CNAME | `143.dev` |
 
-2. **Verify the VPS is fully working.** You can test by pointing a `/etc/hosts`
-   entry at the VPS IP, or by hitting the VPS IP directly:
-   ```bash
-   curl -H "Host: 143.dev" http://<vps-ip>/healthz
-   ```
-
-3. **Verify Caddy can issue certs.** Caddy needs to respond on port 80 for the
-   ACME HTTP-01 challenge. Make sure the VPS firewall allows inbound 80 and 443.
-   Caddy will automatically request certs the first time it receives traffic for
-   the domain.
-
-#### During the cutover
-
-4. **Flip the DNS records in Cloudflare:**
-
-   | Record | Type | Old Value (Render) | New Value |
-   |--------|------|--------------------|-----------|
-   | `143.dev` | A | Render's IP | `<vps-ip>` |
-   | `www.143.dev` | CNAME → A | Render's hostname | `<vps-ip>` (A record) or CNAME to `143.dev` |
-
-   If using Cloudflare's orange-cloud proxy (recommended during transition):
+   If using Cloudflare's orange-cloud proxy (recommended):
    - Cloudflare terminates TLS and forwards to your VPS over HTTPS
    - This gives you Cloudflare's DDoS protection and CDN caching for free
    - Caddy still issues its own Let's Encrypt cert (Cloudflare connects to your
@@ -711,77 +650,44 @@ pointing at the new VPS with minimal downtime. DNS is managed in Cloudflare.
    - Caddy handles TLS end-to-end
    - Simpler, but no Cloudflare CDN/DDoS protection
 
-5. **Wait for propagation.** With the 60s TTL from step 1, most clients will see
-   the new IP within 1-2 minutes. You can check with:
+2. **Verify Caddy can issue certs.** Caddy needs to respond on port 80 for the
+   ACME HTTP-01 challenge. Make sure the VPS firewall allows inbound 80 and 443.
+   Caddy will automatically request certs the first time it receives traffic for
+   the domain.
+
+3. **Verify TLS.** Open `https://143.dev` in a browser. Caddy should have
+   auto-provisioned the Let's Encrypt cert. Check:
    ```bash
    dig +short 143.dev
    # Should return your VPS IP
+
+   curl -I https://143.dev/healthz
+   # Should return 200 with a valid TLS cert
    ```
 
-6. **Verify TLS.** Open `https://143.dev` in a browser. Caddy should have
-   auto-provisioned the Let's Encrypt cert. If using Cloudflare proxy, the cert
-   chain is Cloudflare → Caddy (Let's Encrypt) → your app.
+### Setup Checklist
 
-#### After the cutover
-
-7. **Restore normal TTL.** Once everything is stable (give it a few hours), you
-   can raise the TTL back to 3600s or leave it at Auto.
-
-8. **Decommission Render.** Only after confirming everything works on the VPS.
-
-#### Downtime expectations
-
-The database migration (`pg_dump` → `pg_restore`) is the main source of
-downtime, not DNS. If you follow this order:
-
-1. Set up the VPS with everything running (new Postgres, fresh data)
-2. Put Render in maintenance mode / stop writes
-3. Do a final `pg_dump` from Render → `pg_restore` on VPS
-4. Flip DNS
-
-Then total downtime is roughly the duration of the final `pg_dump`/`pg_restore`
-(5-30 minutes depending on database size) plus DNS propagation (~1-2 minutes with
-low TTL).
-
-### Migration Checklist
-
-**Preparation (days before):**
+**Infrastructure:**
 - [ ] Provision VPS (any provider — see sizing table above)
 - [ ] Install Docker + gVisor (Step 3)
+- [ ] Set up GHCR pull access on VPS (`docker login ghcr.io`) (Step 4)
+- [ ] Copy SOPS age key to VPS `.env` (Step 5)
+
+**Repo changes:**
 - [ ] Create `Dockerfile.agent` — agent sandbox image with CLI tools (Step 6)
 - [ ] Create `deploy/` directory: Caddyfile, postgresql.conf, deploy scripts
 - [ ] Create `docker-compose.prod.yml`
 - [ ] Create `.github/workflows/deploy.yml` — builds and pushes server + agent images to GHCR
 - [ ] Verify images are pushed to GHCR: `ghcr.io/assembledhq/143-server` and `ghcr.io/assembledhq/143-agent`
-- [ ] Set up GHCR pull access on VPS (`docker login ghcr.io`) (Step 4)
-- [ ] Copy `.env` to VPS (or use SOPS-encrypted secrets) (Step 5)
-- [ ] Pull images and start all services on VPS; verify `/healthz` via direct IP (Step 10)
-- [ ] Lower DNS TTL to 60s in Cloudflare (24 hours before cutover)
 
-**Cutover day:**
-- [ ] Put Render in maintenance mode / stop writes
-- [ ] Final `pg_dump` from Render → `pg_restore` on VPS
-- [ ] Verify data on VPS: `SELECT count(*) FROM organizations;`
-- [ ] Flip DNS in Cloudflare (`143.dev` A record → VPS IP)
+**Go live:**
+- [ ] Copy config files to VPS and start all services (Steps 9-10)
+- [ ] Run migrations (`/bin/migrate up`)
+- [ ] Point DNS at VPS IP
 - [ ] Verify `https://143.dev` loads correctly (TLS, API, frontend)
 - [ ] Verify `https://www.143.dev` redirects to `https://143.dev`
-
-**After cutover:**
-- [ ] Monitor for errors in logs for 24 hours
-- [ ] Restore DNS TTL to normal (3600s or Auto)
-- [ ] Decommission Render services
-
-### Impact Assessment
-
-| Area | Impact | Notes |
-|---|---|---|
-| Application code | **None** | Zero changes to Go or frontend code |
-| Dockerfile | **None** | Existing multi-stage build works as-is |
-| Database | **Low** | `pg_dump`/`pg_restore`. ~30 min downtime for the cutover. |
-| DNS + TLS | **Low** | Lower TTL 24h before, flip A record, Caddy auto-provisions certs. See [DNS Cutover](#dns-cutover-and-tls) section. |
-| CI/CD | **Medium** | New GitHub Actions workflow replaces Render auto-deploy |
-| Secrets | **None** | SOPS + age works identically anywhere |
-| Agent sandboxes | **Huge win** | Docker socket access — sandboxes work natively |
+- [ ] Configure GitHub App webhook URL to point at `https://143.dev`
+- [ ] Monitor logs for errors
 
 ---
 
@@ -861,10 +767,11 @@ echo "Cleaned backups older than $RETENTION_DAYS days"
 
 **RPO:** 6 hours worst case. **RTO:** 15-30 minutes (spin up new VPS, restore from dump).
 
-#### 2. WAL Archiving (Optional — for Near-Zero Data Loss)
+#### 2. WAL Archiving (Required — Near-Zero Data Loss)
 
-Add WAL-G when 6 hours of potential data loss is unacceptable (typically once you
-have paying customers).
+WAL-G provides continuous WAL streaming to object storage. This is required for
+production — 6 hours of potential data loss from pg_dump alone is not acceptable
+for paying customers.
 
 **Changes to `deploy/postgres/postgresql.conf`** (append):
 
@@ -947,11 +854,11 @@ These checks are provider-agnostic — they query Postgres directly.
 
 ### Phase 2 Checklist
 
-- [ ] Set up `pg-backup.sh` cron (Layer 2 — **required before accepting users**)
+- [ ] Set up `pg-backup.sh` cron (Layer 2)
 - [ ] Configure offsite backup sync (`rclone` to S3-compatible storage)
-- [ ] Run a restore drill — verify the backup actually works
+- [ ] Enable WAL-G archiving (Layer 3) — **required before accepting users**
+- [ ] Run a restore drill — verify both pg_dump and WAL-G restores work
 - [ ] Set up monitoring (Datadog, Prometheus, or even just cron + email alerts)
-- [ ] (Optional) Enable WAL-G archiving (Layer 3) for near-zero RPO
 
 ### Environment Variables (Backup & Recovery)
 
@@ -987,10 +894,11 @@ Multi-node means you can't `docker build` on each node — you need pre-built
 images in a registry. The CI workflow from Phase 1 already pushes to GHCR.
 Each node pulls from `ghcr.io/assembledhq/143-server:latest`.
 
-#### 2. Read/Write Splitting (Go code change — optional, for Phase 3c)
+#### 2. Read/Write Splitting (Go code change — required for Phase 3c)
 
-If you add a Postgres read replica, the app needs to route read-heavy queries
-(dashboard, audit log, experiment reads) to the replica:
+When you add a Postgres read replica (which you should when separating the DB in
+Step 3a), the app needs to route read-heavy queries (dashboard, audit log,
+experiment reads) to the replica:
 
 ```go
 // internal/database/pool.go
@@ -1188,84 +1096,33 @@ headroom.
 **Move to Step 3c when:** you need API redundancy (uptime SLA), or a single API
 node can't keep up with webhook volume.
 
-#### Step 3c: Multiple API Nodes + Load Balancer
+#### Step 3c: Multiple API Nodes + Managed Load Balancer
 
 API nodes are stateless — sessions live in Postgres. Add as many as needed behind
-a load balancer. Keep at least one node as `mode=all` so the scheduler runs. All
-`api` and `all` nodes serve the same HTTP traffic.
-
-##### Load Balancer Progression
-
-The LB strategy evolves with your scale. Here's the recommended path:
-
-**Stage A: Caddy on a dedicated small VPS (recommended starting point)**
-
-This is the natural evolution from Phase 1. You already have a Caddyfile — you
-just move Caddy off the app VPS onto its own small VPS (2 CPU / 2 GB is plenty)
-and add upstream backends.
+a managed load balancer. Keep at least one node as `mode=all` so the scheduler
+runs. All `api` and `all` nodes serve the same HTTP traffic.
 
 ```
-                 ┌──────────────────┐
-                 │  VPS-LB          │
-                 │  Caddy (2C/2GB)  │
-                 │  :443 → backends │
-                 └──┬──────────┬────┘
-                    │          │
-              ┌─────▼──┐  ┌───▼────┐
-              │ VPS-2  │  │ VPS-6  │
-              │ all    │  │ api    │
-              └────┬───┘  └───┬────┘
-                   │          │
-     ┌─────────────▼──────────▼────────────┐
-     │          VPS-1 (DB)                  │
-     │          Postgres                    │
-     └──────────────────────────────────────┘
+              ┌──────────────────┐
+              │  Managed LB      │
+              │  :443 (TLS)      │
+              └──┬──────────┬────┘
+                 │          │
+           ┌─────▼──┐  ┌───▼────┐
+           │ VPS-2  │  │ VPS-6  │
+           │ all    │  │ api    │
+           │ :8080  │  │ :8080  │
+           └────┬───┘  └───┬────┘
+                │          │
+  ┌─────────────▼──────────▼────────────┐
+  │          VPS-1 (DB)                  │
+  │          Postgres                    │
+  └──────────────────────────────────────┘
 ```
 
-**`deploy/Caddyfile` (multi-node version):**
-
-```
-www.143.dev {
-    redir https://143.dev{uri} permanent
-}
-
-143.dev {
-    # Health-checked round-robin across API nodes.
-    # Add/remove backends by editing this list and reloading:
-    #   docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
-    reverse_proxy api-1:8080 api-2:8080 {
-        health_uri /healthz
-        health_interval 10s
-        health_timeout 5s
-        lb_policy round_robin
-
-        # Automatically remove unhealthy backends
-        fail_duration 30s
-    }
-}
-```
-
-Where `api-1` and `api-2` are private IPs (or hostnames if you set up internal
-DNS). On a private network, use the private IPs directly:
-
-```
-    reverse_proxy 10.0.0.3:8080 10.0.0.4:8080 {
-```
-
-**Pros:** Cloud-agnostic, cheap (~$4-8/mo for a small VPS), you already know
-Caddy from Phase 1, built-in health checks and automatic failover.
-
-**Cons:** Caddy VPS is itself a single point of failure. If it dies, everything
-is down until you restart it. For most teams this is fine — Caddy is extremely
-stable and restarts in <1 second.
-
-**Adding/removing backends:** Edit the Caddyfile upstream list and run
-`caddy reload`. No downtime.
-
-**Stage B: Managed cloud load balancer (when you need HA for the LB itself)**
-
-When you want the LB to be highly available without managing it yourself, switch
-to a managed LB. This is the only step that's provider-specific.
+Use a managed LB from your cloud provider. It's HA by default (no SPOF to
+manage), handles TLS termination, and supports health-checked routing out of the
+box. This is the end-state architecture — no intermediate self-hosted LB step.
 
 > **`[PROVIDER-SPECIFIC]` Managed load balancers:**
 >
@@ -1275,30 +1132,28 @@ to a managed LB. This is the only step that's provider-specific.
 > | AWS | ALB (Application LB) | ~$16/mo + per-request | Yes (HTTP path) | Yes (ACM certs, free) |
 > | GCP | Cloud Load Balancing | ~$18/mo + per-request | Yes (HTTP path) | Yes (managed certs) |
 > | DigitalOcean | DO Load Balancer | ~$12/mo | Yes (HTTP/TCP) | Yes (Let's Encrypt) |
->
-> All of these support:
-> - HTTP health checks (point at `/healthz`)
-> - Round-robin or least-connections balancing
-> - TLS termination (so your API nodes only need to serve HTTP)
-> - Adding/removing backends via API or console
->
-> **If using a managed LB with TLS termination**, you can simplify the API node
-> setup: remove Caddy from the API VPS entirely and let the LB handle TLS. The
-> API container serves plain HTTP on port 8080 and the LB wraps it in HTTPS.
 
-**When to switch from Caddy to managed LB:**
+**Setup:**
 
-| Signal | Action |
-|--------|--------|
-| Single Caddy VPS is acceptable SPOF | Stay with Caddy (Stage A) |
-| You need 99.9%+ uptime and can't tolerate LB downtime | Managed LB (Stage B) |
-| You're already heavily on one cloud provider | Managed LB may simplify ops |
-| You want to stay fully cloud-agnostic | Stay with Caddy (Stage A) |
+1. Create a managed LB from your provider's console or API
+2. Configure the health check to hit `/healthz` on port 8080
+3. Add your API VPSes as backend targets (use private IPs)
+4. Enable TLS termination — the LB handles HTTPS, your API nodes serve plain
+   HTTP on port 8080
+5. Point your domain's DNS at the LB's IP (instead of a single VPS IP)
 
-**Recommendation:** Start with Caddy on its own VPS (Stage A). It's the simplest
-path, works everywhere, and you already have the config. Move to a managed LB
-only if you need the LB itself to be HA, or if you're already committed to a
-specific cloud provider and want to reduce moving parts.
+**With TLS termination on the LB**, you can simplify the API node setup: remove
+Caddy from the API VPSes entirely. The LB handles HTTPS and forwards plain HTTP
+to port 8080. Each API node just runs the server container — no reverse proxy
+needed.
+
+Note: Caddy remains on the single-node Phase 1 setup (where it handles TLS +
+reverse proxy on the same machine). When you move to Phase 3c, the managed LB
+replaces Caddy's role.
+
+**Adding/removing API nodes:** Register or deregister backend targets with the
+LB via the provider's console or API. Health checks automatically stop routing
+to unhealthy nodes.
 
 #### Connection Pooling (PgBouncer) — When You Need It
 
@@ -1611,15 +1466,10 @@ workspace) to the local filesystem of whichever node ran the agent.
 a session, and the user later resumes that session via API node B, the snapshot
 file doesn't exist on node B. Multi-turn sessions break silently.
 
-**Fix (required for Phase 3):**
-- Switch `FileSnapshotStore` to an S3-compatible backend (`S3SnapshotStore`).
-  This is a straightforward change — the store interface is already abstracted.
-  Use the same S3-compatible storage configured for backups.
-- Alternatively, use a shared NFS mount across all nodes. Simpler but introduces
-  a new SPOF and I/O contention at scale.
-
-**Recommendation:** S3-compatible storage. It's what you'll need long-term anyway,
-and avoids the NFS operational burden.
+**Fix (required for Phase 3):** Switch `FileSnapshotStore` to an S3-compatible
+backend (`S3SnapshotStore`). This is a straightforward change — the store
+interface is already abstracted. Use the same S3-compatible storage configured
+for backups and WAL-G.
 
 #### 2. Rate Limiting is Per-Node In-Memory
 
@@ -1767,29 +1617,24 @@ balancer before restarting, and only re-add it after the health check passes.
 
 ```
 For each node in fleet:
-  1. Remove node from Caddy/LB upstream (stop sending traffic)
+  1. Deregister node from managed LB (stop sending traffic)
   2. Wait for in-flight requests to complete (graceful drain, ~30s)
   3. Pull new images
   4. docker compose up -d --remove-orphans
   5. Wait for /healthz to return 200
-  6. Re-add node to Caddy/LB upstream
+  6. Re-register node with managed LB
   7. Move to next node
 ```
 
-**With Caddy as LB (Phase 3c Stage A):** Use the Caddy admin API to dynamically
-add/remove upstreams without editing the Caddyfile:
+Use the provider API to deregister/register target nodes:
 
-```bash
-# Remove node from upstream
-curl -X DELETE http://caddy-lb:2019/config/apps/http/servers/srv0/routes/0/handle/0/upstreams/1
-
-# Re-add after deploy
-curl -X POST http://caddy-lb:2019/config/apps/http/servers/srv0/routes/0/handle/0/upstreams \
-  -H "Content-Type: application/json" \
-  -d '{"dial": "10.0.0.4:8080"}'
-```
-
-**With a managed LB:** Use the provider API to deregister/register target nodes.
+> **`[PROVIDER-SPECIFIC]` LB target management:**
+>
+> | Provider | Deregister | Register |
+> |----------|-----------|----------|
+> | Hetzner | `hcloud load-balancer remove-target <lb> --server <node>` | `hcloud load-balancer add-target <lb> --server <node>` |
+> | AWS | `aws elbv2 deregister-targets --target-group-arn <arn> --targets Id=<instance>` | `aws elbv2 register-targets ...` |
+> | GCP | `gcloud compute backend-services remove-backend ...` | `gcloud compute backend-services add-backend ...` |
 
 **For worker nodes:** Workers already support graceful shutdown — `SIGTERM`
 triggers drain (finish current jobs, stop accepting new ones, set status to
@@ -2142,7 +1987,7 @@ Everything in this design uses standard, portable technology:
 | CI/CD | GitHub Actions + SSH | Yes | Just needs SSH access to the target VPS |
 | Private networking | Provider VPC/vNetwork | **Provider-specific** | Concept is universal; API/config differs |
 | Auto-scaling | `CloudProvider` interface | **Provider-specific impl** | Interface is ours; implementations wrap vendor SDKs |
-| Managed load balancer | Provider LB | **Provider-specific** | Or use Caddy/nginx/HAProxy on a VPS instead |
+| Load balancer (Phase 3c) | Provider managed LB | **Provider-specific** | Every major provider offers one; config differs but concept is identical |
 
 **What you'd need to change to switch providers:**
 1. Provision new VPSes on the new provider (same specs)
