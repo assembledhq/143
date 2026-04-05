@@ -1836,4 +1836,117 @@ func TestRunEvalHandler(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
+
+	t.Run("batch run completes batch when all runs done", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newEvalTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		runID := uuid.New()
+		taskID := uuid.New()
+		batchID := uuid.New()
+		now := time.Now()
+
+		// GetByID for run — this time with a batch_id set
+		runRow := evalRunRow(runID, taskID, orgID, now)
+		runRow[3] = &batchID // batch_id field
+		mock.ExpectQuery("SELECT .+ FROM eval_runs WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(evalRunTestCols).AddRow(runRow...))
+
+		// GetByID for task
+		mock.ExpectQuery("SELECT .+ FROM eval_tasks WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(evalTaskTestCols).AddRow(
+				evalTaskRow(taskID, orgID, now, json.RawMessage(`[]`))...))
+
+		// UpdateStatus to running
+		mock.ExpectExec("UPDATE eval_runs SET status").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		// UpdateResult
+		mock.ExpectExec("UPDATE eval_runs SET").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		// CompleteBatchIfDone
+		mock.ExpectExec("UPDATE eval_batches SET status").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		payload, _ := json.Marshal(map[string]string{
+			"eval_run_id": runID.String(),
+			"org_id":      orgID.String(),
+			"batch_id":    batchID.String(),
+		})
+
+		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
+		err := handler(context.Background(), "run_eval", payload)
+		require.NoError(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("fetch run failure returns error", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newEvalTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		runID := uuid.New()
+
+		mock.ExpectQuery("SELECT .+ FROM eval_runs WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(evalRunTestCols))
+
+		payload, _ := json.Marshal(map[string]string{
+			"eval_run_id": runID.String(),
+			"org_id":      orgID.String(),
+		})
+
+		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
+		err := handler(context.Background(), "run_eval", payload)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "fetch eval run")
+	})
+
+	t.Run("update status failure returns error", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newEvalTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		runID := uuid.New()
+		taskID := uuid.New()
+		now := time.Now()
+
+		mock.ExpectQuery("SELECT .+ FROM eval_runs WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(evalRunTestCols).AddRow(evalRunRow(runID, taskID, orgID, now)...))
+
+		mock.ExpectQuery("SELECT .+ FROM eval_tasks WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(evalTaskTestCols).AddRow(
+				evalTaskRow(taskID, orgID, now, json.RawMessage(`[]`))...))
+
+		mock.ExpectExec("UPDATE eval_runs SET status").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(errors.New("db connection lost"))
+
+		payload, _ := json.Marshal(map[string]string{
+			"eval_run_id": runID.String(),
+			"org_id":      orgID.String(),
+		})
+
+		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
+		err := handler(context.Background(), "run_eval", payload)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "update eval run status to running")
+	})
 }
