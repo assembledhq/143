@@ -5,6 +5,7 @@
 -- periods. If duplicates exist, they must be resolved first.
 
 -- Remove any duplicate cycle numbers before adding constraint.
+-- Strategy: keep the row with the lower ID (oldest) and delete the newer duplicate.
 DELETE FROM project_cycles a
 USING project_cycles b
 WHERE a.id > b.id
@@ -16,6 +17,7 @@ ALTER TABLE project_cycles
     ADD CONSTRAINT uq_project_cycles_project_cycle UNIQUE (project_id, cycle_number);
 
 -- Remove any duplicate GitHub PRs before adding constraint.
+-- Strategy: keep the row with the lower ID (oldest) and delete the newer duplicate.
 DELETE FROM pull_requests a
 USING pull_requests b
 WHERE a.id > b.id

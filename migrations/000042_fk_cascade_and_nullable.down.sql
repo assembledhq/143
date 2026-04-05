@@ -1,6 +1,9 @@
 -- Restore pull_requests.session_id to NOT NULL.
--- Delete rows with NULL session_id since they can't satisfy the NOT NULL constraint.
--- These are external/unlinked PRs that were created after the forward migration.
+-- WARNING: This permanently deletes any PRs with NULL session_id (external/manual
+-- PRs created after the forward migration). Back up before rolling back if the
+-- forward migration has been live for any significant period:
+--   CREATE TABLE pull_requests_nullable_session_backup AS
+--     SELECT * FROM pull_requests WHERE session_id IS NULL;
 DELETE FROM pull_requests WHERE session_id IS NULL;
 ALTER TABLE pull_requests ALTER COLUMN session_id SET NOT NULL;
 

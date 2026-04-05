@@ -101,13 +101,13 @@ DROP TABLE session_logs CASCADE;
 
 CREATE TABLE session_logs (
     id           bigserial   PRIMARY KEY,
-    session_id   uuid        NOT NULL REFERENCES sessions(id),
+    session_id   uuid        NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     timestamp    timestamptz NOT NULL DEFAULT now(),
     level        text        NOT NULL DEFAULT 'info',
     message      text        NOT NULL,
     metadata     jsonb,
     turn_number  int         NOT NULL DEFAULT 0,
-    thread_id    uuid        REFERENCES session_threads(id)
+    thread_id    uuid        REFERENCES session_threads(id) ON DELETE CASCADE
 );
 
 INSERT INTO session_logs (id, session_id, timestamp, level, message, metadata, turn_number, thread_id)

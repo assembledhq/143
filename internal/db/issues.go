@@ -192,6 +192,7 @@ func (s *IssueStore) CountByOrg(ctx context.Context, orgID uuid.UUID) (int, erro
 }
 
 // SoftDelete marks an issue as deleted without removing the row.
+// Uses db.Exec directly (not a transaction) since this is a single atomic UPDATE.
 func (s *IssueStore) SoftDelete(ctx context.Context, orgID, issueID uuid.UUID) error {
 	query := `UPDATE issues SET deleted_at = now(), updated_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{

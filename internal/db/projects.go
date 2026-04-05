@@ -407,6 +407,7 @@ func (s *ProjectStore) ListByOrgRepoStatuses(ctx context.Context, orgID, repoID 
 }
 
 // SoftDelete marks a project as deleted without removing the row.
+// Uses db.Exec directly (not a transaction) since this is a single atomic UPDATE.
 func (s *ProjectStore) SoftDelete(ctx context.Context, orgID, projectID uuid.UUID) error {
 	query := `UPDATE projects SET deleted_at = now(), updated_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
