@@ -73,8 +73,11 @@ $$;
 -- session_logs: partition by timestamp (the time column for this table)
 -- =============================================================================
 
--- 1. Rename existing table and all its indexes.
+-- 1. Rename existing table, its indexes, and its backing sequence.
+--    bigserial columns own a *_id_seq sequence; renaming the table does NOT
+--    rename the sequence, so the subsequent CREATE TABLE would collide.
 ALTER TABLE session_logs RENAME TO session_logs_old;
+ALTER SEQUENCE session_logs_id_seq RENAME TO session_logs_id_seq_old;
 ALTER INDEX idx_session_logs_session RENAME TO idx_session_logs_session_old;
 ALTER INDEX idx_session_logs_timestamp RENAME TO idx_session_logs_timestamp_old;
 ALTER INDEX IF EXISTS idx_session_logs_thread RENAME TO idx_session_logs_thread_old;
@@ -137,6 +140,7 @@ DROP TABLE session_logs_old;
 -- =============================================================================
 
 ALTER TABLE session_messages RENAME TO session_messages_old;
+ALTER SEQUENCE session_messages_id_seq RENAME TO session_messages_id_seq_old;
 ALTER INDEX IF EXISTS idx_session_messages_session RENAME TO idx_session_messages_session_old;
 ALTER INDEX IF EXISTS idx_session_messages_thread RENAME TO idx_session_messages_thread_old;
 
@@ -191,6 +195,7 @@ DROP TABLE session_messages_old;
 DROP TRIGGER IF EXISTS audit_logs_immutable ON audit_logs;
 
 ALTER TABLE audit_logs RENAME TO audit_logs_old;
+ALTER SEQUENCE audit_logs_id_seq RENAME TO audit_logs_id_seq_old;
 ALTER INDEX IF EXISTS idx_audit_logs_org_created RENAME TO idx_audit_logs_org_created_old;
 ALTER INDEX IF EXISTS idx_audit_logs_resource RENAME TO idx_audit_logs_resource_old;
 ALTER INDEX IF EXISTS idx_audit_logs_user RENAME TO idx_audit_logs_user_old;
