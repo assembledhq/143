@@ -30,8 +30,8 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
 - Step 2: Prioritize and identify top issues based on business impact
     - The system determines how many customers were affected, regression severity, and optionally (if you integrate Salesforce or some other CRM) the revenue risk.
     - The admins can specify product context (philosophy + direction + focus/avoid areas) to steer prioritization.
-    - A **PM agent** now runs on a batch cadence, clusters related issues, and produces a prioritized plan that delegates work to coding agents (replacing per-issue auto-triggering for automation).
-    - **Projects** are the primary long-term control surface. Each project can be `finite` (completes) or `evergreen` (continuous maintenance) with optional cadence-based execution and project-scoped quick actions.
+    - A **PM agent** now runs on a batch cadence, clusters related issues, produces a prioritized plan, and can propose new **repo-scoped projects** for human review when it finds a strategic opportunity (replacing per-issue auto-triggering for automation).
+    - **Projects** are the primary long-term control surface. The canonical review surface for PM-proposed projects lives in `Projects`, while `Autopilot` shows lightweight PM proposal summaries and links users into that review flow. Each project can be `finite` (completes) or `evergreen` (continuous maintenance) with optional cadence-based execution and project-scoped quick actions.
 - Step 3: Execute a coding agent
     - Admins set a **confidence threshold** that controls which issues the system will auto-attempt. Issues below the threshold require manual triggering.
     - The Sessions area supports **one-off manual sessions** through a dedicated `/sessions/new` creation page with a chat-style composer. Users can start a manual run from free-form instructions, file/photo attachments, optional image URLs, and voice dictation without waiting for PM planning cadence.
