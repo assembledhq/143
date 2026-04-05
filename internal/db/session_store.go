@@ -44,7 +44,7 @@ const sessionSelectColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-00
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
-	sandbox_state, snapshot_key, target_branch, working_branch, repository_id, diff_stats, diff_history, created_at`
+	sandbox_state, snapshot_key, target_branch, working_branch, repository_id, diff_stats, diff_history, input_manifest, created_at`
 
 // sessionListColumns excludes large JSONB blobs (diff_history) from list queries
 // to avoid returning multi-megabyte payloads when listing many sessions.
@@ -56,7 +56,7 @@ const sessionListColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-0000
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
-	sandbox_state, snapshot_key, target_branch, working_branch, repository_id, diff_stats, NULL::jsonb AS diff_history, created_at`
+	sandbox_state, snapshot_key, target_branch, working_branch, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, created_at`
 
 // maxDiffHistoryEntries caps the number of entries kept in diff_history.
 // Older entries beyond this limit are pruned when a new entry is appended.

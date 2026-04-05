@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -46,13 +47,7 @@ func GenerateInternalToken(secret string, orgID uuid.UUID, repoID uuid.UUID, ttl
 // ValidateInternalToken verifies and decodes an internal API token.
 func ValidateInternalToken(secret, token string) (*InternalTokenClaims, error) {
 	// Split into payload and signature.
-	dotIdx := -1
-	for i := len(token) - 1; i >= 0; i-- {
-		if token[i] == '.' {
-			dotIdx = i
-			break
-		}
-	}
+	dotIdx := strings.LastIndexByte(token, '.')
 	if dotIdx < 0 {
 		return nil, fmt.Errorf("invalid token format")
 	}

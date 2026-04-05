@@ -7,9 +7,10 @@ COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
 COPY . .
+ARG BUILD_SHA=dev
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -o /bin/server ./cmd/server && \
+    CGO_ENABLED=0 go build -ldflags "-X github.com/assembledhq/143/internal/version.BuildSHA=${BUILD_SHA}" -o /bin/server ./cmd/server && \
     CGO_ENABLED=0 go build -o /bin/migrate ./cmd/migrate
 
 # Stage 2: Runtime

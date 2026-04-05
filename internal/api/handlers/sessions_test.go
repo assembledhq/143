@@ -50,7 +50,7 @@ var sessionColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
-	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "created_at",
+	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "created_at",
 }
 
 func TestSessionHandler_List(t *testing.T) {
@@ -87,6 +87,7 @@ func TestSessionHandler_List(t *testing.T) {
 							nil, // repository_id
 							nil, // diff_stats
 							nil, // diff_history
+							nil, // input_manifest
 							now,
 						),
 					)
@@ -168,6 +169,7 @@ func TestSessionHandler_List_WithRepositoryID(t *testing.T) {
 				nil, // repository_id
 				nil, // diff_stats
 				nil, // diff_history
+				nil, // input_manifest
 				now,
 			),
 		)
@@ -260,6 +262,7 @@ func TestSessionHandler_List_CommaSeparatedStatuses(t *testing.T) {
 				nil, // repository_id
 				nil, // diff_stats
 				nil, // diff_history
+				nil, // input_manifest
 				now,
 			),
 		)
@@ -315,6 +318,7 @@ func TestSessionHandler_Get(t *testing.T) {
 							nil, // repository_id
 							nil, // diff_stats
 							nil, // diff_history
+							nil, // input_manifest
 							now,
 						),
 					)
@@ -1027,6 +1031,7 @@ func TestSessionHandler_GetLogs_Success(t *testing.T) {
 				nil, // repository_id
 				nil, // diff_stats
 				nil, // diff_history
+				nil, // input_manifest
 				now,
 			),
 		)
@@ -1113,6 +1118,7 @@ func TestSessionHandler_GetLogs_EmptyLogs(t *testing.T) {
 				nil, // repository_id
 				nil, // diff_stats
 				nil, // diff_history
+				nil, // input_manifest
 				now,
 			),
 		)
@@ -1172,6 +1178,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil, // repository_id
 				nil, // diff_stats
 				nil, // diff_history
+				nil, // input_manifest
 				now,
 			),
 		)
@@ -1195,6 +1202,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil, // repository_id
 				nil, // diff_stats
 				nil, // diff_history
+				nil, // input_manifest
 				now,
 			),
 		)
@@ -1487,6 +1495,7 @@ func TestSessionHandler_EndSession_EnqueuesValidation(t *testing.T) {
 				nil, // repository_id
 				nil, // diff_stats
 				nil, // diff_history
+				nil, // input_manifest
 				now,
 			),
 		)
@@ -1545,6 +1554,7 @@ func TestSessionHandler_EndSession_ManualSkipsValidation(t *testing.T) {
 				nil, // repository_id
 				nil, // diff_stats
 				nil, // diff_history
+				nil, // input_manifest
 				now,
 			),
 		)
@@ -1724,6 +1734,7 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							nil, // repository_id
 							nil, // diff_stats
 							nil, // diff_history
+							nil, // input_manifest
 							now,
 						),
 					)
@@ -1762,6 +1773,7 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							nil, // repository_id
 							nil, // diff_stats
 							nil, // diff_history
+							nil, // input_manifest
 							now,
 						),
 					)
@@ -1842,6 +1854,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // repository_id
 							nil, // diff_stats
 							nil, // diff_history
+							nil, // input_manifest
 							now,
 						),
 					)
@@ -1864,6 +1877,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // repository_id
 							nil, // diff_stats
 							nil, // diff_history
+							nil, // input_manifest
 							now,
 						),
 					)
@@ -1903,6 +1917,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // repository_id
 							nil, // diff_stats
 							nil, // diff_history
+							nil, // input_manifest
 							now,
 						),
 					)
@@ -1946,6 +1961,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // repository_id
 							nil, // diff_stats
 							nil, // diff_history
+							nil, // input_manifest
 							now,
 						),
 					)
@@ -1980,6 +1996,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // triggered_by_user_id
 							nil, 3, &now, "destroyed", nil,
 							nil, nil, nil, nil, nil,
+							nil, // input_manifest
 							now,
 						),
 					)
@@ -2006,6 +2023,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // triggered_by_user_id
 							nil, 2, &now, "destroyed", nil,
 							nil, nil, nil, nil, nil,
+							nil, // input_manifest
 							now,
 						),
 					)
@@ -2037,6 +2055,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // repository_id
 							nil, // diff_stats
 							nil, // diff_history
+							nil, // input_manifest
 							now,
 						),
 					)
@@ -2063,6 +2082,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // repository_id
 							nil, // diff_stats
 							nil, // diff_history
+							nil, // input_manifest
 							now,
 						),
 					)
@@ -2389,6 +2409,7 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 				nil, // repository_id
 				nil, // diff_stats
 				nil, // diff_history
+				nil, // input_manifest
 				now,
 			),
 		)
@@ -2449,6 +2470,7 @@ func TestSessionHandler_CreatePR_NoDiff(t *testing.T) {
 				nil,
 				nil, 0, nil, "none", nil,
 				nil, nil, nil, nil, nil,
+				nil, // input_manifest
 				now,
 			),
 		)
@@ -2499,11 +2521,12 @@ func TestSessionHandler_CreatePR_AlreadyExists(t *testing.T) {
 				nil,
 				nil, 0, nil, "none", nil,
 				nil, nil, nil, nil, nil,
+				nil, // input_manifest
 				now,
 			),
 		)
 
-	// Mock PR lookup — PR already exists.
+	// Mock PR lookup - PR already exists.
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
@@ -2592,6 +2615,7 @@ func TestSessionHandler_CreatePR_PRLookupDBError(t *testing.T) {
 				nil,
 				nil, 0, nil, "none", nil,
 				nil, nil, nil, nil, nil,
+				nil, // input_manifest
 				now,
 			),
 		)

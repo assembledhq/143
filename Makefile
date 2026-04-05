@@ -125,8 +125,11 @@ migrate-up:
 migrate-down:
 	go run cmd/migrate/main.go down
 
+BUILD_SHA ?= $(shell git rev-parse HEAD 2>/dev/null || echo dev)
+LDFLAGS := -X github.com/assembledhq/143/internal/version.BuildSHA=$(BUILD_SHA)
+
 build:
-	go build -o bin/server ./cmd/server
+	go build -ldflags "$(LDFLAGS)" -o bin/server ./cmd/server
 	go build -o bin/migrate ./cmd/migrate
 
 frontend-dev:

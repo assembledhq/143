@@ -99,13 +99,13 @@ For eval tasks that need to freeze the full set of PM documents at a point in ti
 ```sql
 CREATE TABLE pm_document_set_pins (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    org_id          UUID NOT NULL REFERENCES organizations(id),
+    org_id          UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE pm_document_set_pin_members (
-    pin_id          UUID NOT NULL REFERENCES pm_document_set_pins(id),
-    document_id     UUID NOT NULL REFERENCES pm_documents(id),  -- points to specific version row
+    pin_id          UUID NOT NULL REFERENCES pm_document_set_pins(id) ON DELETE CASCADE,
+    document_id     UUID NOT NULL REFERENCES pm_documents(id) ON DELETE RESTRICT,  -- points to specific version row
     PRIMARY KEY (pin_id, document_id)
 );
 ```

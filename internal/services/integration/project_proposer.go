@@ -58,7 +58,12 @@ func (c *InternalProjectProposer) ProposeProject(ctx context.Context, params Pro
 	}
 
 	if resp.StatusCode != http.StatusCreated {
-		return nil, fmt.Errorf("project proposal failed (status %d): %s", resp.StatusCode, string(respBody))
+		// Truncate response body to avoid leaking large/sensitive payloads into logs.
+		bodyStr := string(respBody)
+		if len(bodyStr) > 512 {
+			bodyStr = bodyStr[:512] + "...(truncated)"
+		}
+		return nil, fmt.Errorf("project proposal failed (status %d): %s", resp.StatusCode, bodyStr)
 	}
 
 	var result ProposeProjectResult

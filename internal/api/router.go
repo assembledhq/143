@@ -195,6 +195,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	projectGenerateHandler := handlers.NewProjectGenerateHandler(llmClient)
 	codexAuthHandler := handlers.NewCodexAuthHandler(codexAuthSvc, logger)
 	pmDocumentHandler := handlers.NewPMDocumentHandler(pmDocumentStore, credentialStore)
+	pmDocumentHandler.SetAuditEmitter(auditEmitter)
 	auditLogHandler := handlers.NewAuditLogHandler(auditLogStore)
 	sessionReviewCommentHandler := handlers.NewSessionReviewCommentHandler(sessionReviewCommentStore, sessionStore, logger)
 	sessionReviewCommentHandler.SetAuditEmitter(auditEmitter)
@@ -281,6 +282,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.RequireRole("admin", "member", "viewer"))
 
+			r.Get("/api/v1/version", healthHandler.Version)
+
 			// GitHub connection status for PR authorship
 			r.Get("/api/v1/users/me/github-status", githubStatusHandler.GetStatus)
 
@@ -338,6 +341,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/projects/{id}/specs/{specId}", projectSpecHandler.Get)
 			r.Get("/api/v1/pm/documents", pmDocumentHandler.List)
 			r.Get("/api/v1/pm/documents/{docId}", pmDocumentHandler.Get)
+			r.Get("/api/v1/pm/documents/{docId}/versions", pmDocumentHandler.ListVersions)
+			r.Get("/api/v1/pm/document-set-pins", pmDocumentHandler.ListDocumentSetPins)
+			r.Get("/api/v1/pm/document-set-pins/{pinId}", pmDocumentHandler.GetDocumentSetPin)
 		})
 
 		// Write routes (admin and member only)
@@ -418,6 +424,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Patch("/api/v1/pm/documents/{docId}", pmDocumentHandler.Update)
 			r.Delete("/api/v1/pm/documents/{docId}", pmDocumentHandler.Delete)
 			r.Post("/api/v1/pm/documents/{docId}/sync", pmDocumentHandler.SyncFromNotion)
+			r.Post("/api/v1/pm/documents/{docId}/restore", pmDocumentHandler.RestoreVersion)
+			r.Post("/api/v1/pm/document-set-pins", pmDocumentHandler.CreateDocumentSetPin)
 		})
 
 		// Admin-only routes
