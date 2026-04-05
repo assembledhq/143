@@ -446,8 +446,7 @@ func TestProjectHandler_UpdateTask_Success(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, uuid.New(), models.ProjectStatusDraft, now)...))
 
-	// Update task (wrapped in transaction for dependency sync)
-	mock.ExpectBegin()
+	// Update task
 	mock.ExpectExec("UPDATE project_tasks SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -458,7 +457,6 @@ func TestProjectHandler_UpdateTask_Success(t *testing.T) {
 	mock.ExpectExec("DELETE FROM project_task_dependencies WHERE task_id").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("DELETE", 0))
-	mock.ExpectCommit()
 
 	// UpdateProgress
 	mock.ExpectExec("UPDATE projects SET").
@@ -557,7 +555,6 @@ func TestProjectHandler_Create(t *testing.T) {
 	repoID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO projects").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -567,7 +564,6 @@ func TestProjectHandler_Create(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
-	mock.ExpectCommit()
 
 	body, _ := json.Marshal(map[string]string{
 		"title":         "New Project",
@@ -767,8 +763,7 @@ func TestProjectHandler_CreateTask(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"max"}).AddRow(1))
 
-	// Create task (wrapped in transaction for dependency sync)
-	mock.ExpectBegin()
+	// Create task
 	mock.ExpectQuery("INSERT INTO project_tasks").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -778,7 +773,6 @@ func TestProjectHandler_CreateTask(t *testing.T) {
 	mock.ExpectExec("DELETE FROM project_task_dependencies WHERE task_id").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("DELETE", 0))
-	mock.ExpectCommit()
 
 	// UpdateProgress
 	mock.ExpectExec("UPDATE projects SET").
