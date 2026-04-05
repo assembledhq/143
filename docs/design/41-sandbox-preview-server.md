@@ -885,26 +885,6 @@ Phase 1 does not need the full immutable image cache pipeline yet, but the lifec
 
 Preview startup time is the single biggest UX bottleneck. A typical first-time preview for a React + Express app takes 30-90 seconds (npm install + build + start). For the PR review workflow, where a reviewer clicks "Launch Preview" and expects to see something quickly, this delay is unacceptable. The system uses three strategies to minimize startup time.
 
-#### Warm Sandbox Pools
-
-Instead of cold-starting a Docker container for every preview, the worker maintains a **pool of pre-provisioned warm sandboxes** with common base images:
-
-| Pool | Base Image | Pre-installed | Target Repos |
-|------|-----------|--------------|-------------|
-| `go-122` | Ubuntu + Go 1.22 + common tools (air, templ) | Pre-built module cache for common deps | Go backends (Chi, Gin, Echo, stdlib) |
-| `go-123` | Ubuntu + Go 1.23 + common tools | Same as go-122 | Newer Go projects |
-| `python-312` | Ubuntu + Python 3.12 + pip + venv | Common packages (django, flask, fastapi) | Python backends |
-| `node-20` | Ubuntu + Node 20 + npm/yarn/pnpm | Common global packages (typescript, vite) | React, Vue, Svelte, Next.js |
-| `node-22` | Ubuntu + Node 22 + npm/yarn/pnpm | Same as node-20 | Newer JS projects |
-
-Go and Python pools are the **primary priority** for MVP. Node pools are included because most frontend services (the primary service in multi-service profiles) use Node dev servers. Ruby and other runtimes are deferred to Phase 2.
-
-When a preview is requested, the preview manager claims a warm sandbox from the matching pool and injects the repo checkout + agent changes. This skips the container start time (~2-5 seconds) and base dependency installation.
-
-**Pool sizing**: each worker maintains a configurable number of warm sandboxes per pool (default: 2 per pool type). Warm sandboxes are recycled after use — stopped, cleaned, and returned to the pool. If the pool is empty, the system falls back to cold start.
-
-**Pool selection**: the preview manager selects the pool based on the preview config's detected runtime (Go version from `go.mod`, Python version from `runtime.txt` or `pyproject.toml`, Node version from `.nvmrc` or `engines.node`). For multi-service profiles, the pool is selected based on the **primary runtime** (typically the most resource-intensive service). If no match is found, fall back to cold start.
-
 #### Filesystem Snapshot Caching
 
 After a successful preview startup (all three phases complete), the system takes a **filesystem snapshot** of the sandbox state — node_modules installed, build artifacts ready, infrastructure initialized. The snapshot is keyed by:
@@ -2144,7 +2124,7 @@ When a preview stops (idle timeout, hard TTL, or manual stop), the screenshot ti
 
 These artifacts are stored in blob storage with the same retention policy as screenshots (session lifetime + 24h). For PRs that remain open, artifacts are retained until the PR is merged or closed, up to a maximum of 7 days after the last preview session.
 
-When a reviewer clicks "Re-launch Preview" on a stopped preview, the system uses fast startup (warm pools + filesystem snapshots, see below) to minimize wait time.
+When a reviewer clicks "Re-launch Preview" on a stopped preview, the system uses fast startup (filesystem snapshot caching, see below) to minimize wait time.
 
 ## Scaling Model
 
@@ -2177,7 +2157,7 @@ Previews are expensive because they keep file watchers and application processes
 - idle timeout, default 15 minutes (activity-aware, see Frontend UX section)
 - hard TTL, default 30 minutes (auto-extendable to 2 hours on active use)
 
-No auto-start in MVP. If a user wants a preview, they request it explicitly — either from the session page or by clicking the "Launch Preview" link on the PR comment. The PR comment persists screenshot artifacts from the last session, so reviewers can browse the visual history without re-launching. When they do re-launch, warm sandbox pools and filesystem snapshots (see Fast Startup) minimize the wait.
+No auto-start in MVP. If a user wants a preview, they request it explicitly — either from the session page or by clicking the "Launch Preview" link on the PR comment. The PR comment persists screenshot artifacts from the last session, so reviewers can browse the visual history without re-launching. When they do re-launch, filesystem snapshot caching (see Fast Startup) minimizes the wait.
 
 ### Per-Preview Resource Limits
 
@@ -2274,7 +2254,7 @@ Phase 1 should support only:
 20. Agent-driven interaction replay: scripted browser interactions (click, type, navigate) for verifying multi-step flows like form submission and login
 21. Multi-viewport capture: simultaneous screenshots at mobile (375px), tablet (768px), and desktop (1280px) viewports
 22. PR preview integration: on-demand preview launch from PR comment, single updating PR comment with preview state and screenshot thumbnails, preview artifacts preserved after sandbox teardown
-23. Warm sandbox pools: pre-provisioned containers with common base images (Go 1.22/1.23, Python 3.12, Node 20/22) for faster cold starts
+23. Filesystem snapshot caching: cache the sandbox filesystem state after successful startup, keyed by lockfile + base commit, to skip the Build phase on subsequent preview starts
 24. Filesystem snapshot caching: restore node_modules and build artifacts from cached snapshots on repeat previews (keyed by lockfile + base commit + config)
 25. Progressive preview: show frontend preview before backend is fully ready (opt-in per profile)
 
@@ -2468,6 +2448,6 @@ Per-preview hostnames use wildcard DNS (`*.preview.143.dev`). A compromised or m
 9. Should the headless browser (Preview Inspector) use Playwright or Puppeteer? Playwright has better cross-browser support and a more modern API, but Puppeteer has lower overhead for Chromium-only use.
 10. How should screenshot storage scale for orgs with high preview volume? Blob storage with aggressive TTL (24h post-session) keeps costs low, but some orgs may want longer retention for audit purposes.
 11. Should PR preview artifacts (screenshot timeline, visual diff) be retained longer than the standard 24h for open PRs? The current proposal is "until PR is merged/closed, up to 7 days after last session" — is this sufficient for slow-moving reviews?
-12. How many warm sandbox pools should each worker maintain? More pools = faster cold starts for diverse repos, but higher idle resource cost. Should pool sizing be org-configurable or fixed platform-wide?
+12. Should filesystem snapshot cache size be org-configurable or fixed platform-wide? More cache = faster starts for diverse repos, but higher disk cost per worker.
 13. Should filesystem snapshots be worker-local only (fast but not shared) or also uploaded to blob storage (shared across workers but slower restore)? Phase 1 proposes worker-local only; Phase 2 adds cross-worker sharing.
 14. For the PR "Launch Preview" button, should it be a GitHub Actions-style button (requires GitHub App permissions to handle the click) or a simple deep link to the 143 session page? The deep link is simpler but requires the user to be logged into 143.
