@@ -73,8 +73,11 @@ CREATE TRIGGER trg_project_task_counts_insert
     FOR EACH STATEMENT
     EXECUTE FUNCTION update_project_task_counts_insert();
 
+-- Note: Cannot use UPDATE OF column with REFERENCING transition tables in
+-- PostgreSQL, so this fires on any column update. The function recounts from
+-- project_tasks, so extra firings are harmless (just slightly more work).
 CREATE TRIGGER trg_project_task_counts_update
-    AFTER UPDATE OF status ON project_tasks
+    AFTER UPDATE ON project_tasks
     REFERENCING NEW TABLE AS new_table OLD TABLE AS old_table
     FOR EACH STATEMENT
     EXECUTE FUNCTION update_project_task_counts_update();
