@@ -67,16 +67,20 @@ func (h *EvalHandler) ListTasks(w http.ResponseWriter, r *http.Request) {
 
 	if source := r.URL.Query().Get("source"); source != "" {
 		s := models.EvalTaskSource(source)
-		if err := s.Validate(); err == nil {
-			filters.Source = &s
+		if err := s.Validate(); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_SOURCE", "invalid source filter value")
+			return
 		}
+		filters.Source = &s
 	}
 
 	if complexity := r.URL.Query().Get("complexity"); complexity != "" {
 		c := models.EvalComplexity(complexity)
-		if err := c.Validate(); err == nil {
-			filters.Complexity = &c
+		if err := c.Validate(); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_COMPLEXITY", "invalid complexity filter value")
+			return
 		}
+		filters.Complexity = &c
 	}
 
 	if r.URL.Query().Get("archived") == "true" {
@@ -99,7 +103,7 @@ func (h *EvalHandler) ListTasks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if cursorParam := r.URL.Query().Get("cursor"); cursorParam != "" {
-		t, err := time.Parse("2006-01-02T15:04:05.999999Z07:00", cursorParam)
+		t, err := time.Parse(time.RFC3339Nano, cursorParam)
 		if err == nil {
 			filters.Cursor = &t
 		}
@@ -116,7 +120,7 @@ func (h *EvalHandler) ListTasks(w http.ResponseWriter, r *http.Request) {
 
 	var nextCursor string
 	if len(tasks) == filters.Limit {
-		nextCursor = tasks[len(tasks)-1].CreatedAt.Format("2006-01-02T15:04:05.999999Z07:00")
+		nextCursor = tasks[len(tasks)-1].CreatedAt.Format(time.RFC3339Nano)
 	}
 
 	writeJSON(w, http.StatusOK, models.ListResponse[models.EvalTask]{
@@ -371,16 +375,11 @@ func (h *EvalHandler) ArchiveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := h.taskStore.GetByID(r.Context(), orgID, taskID); err != nil {
+	if err := h.taskStore.Archive(r.Context(), orgID, taskID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "eval task not found")
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "eval task not found or already archived")
 			return
 		}
-		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to fetch eval task", err)
-		return
-	}
-
-	if err := h.taskStore.Archive(r.Context(), orgID, taskID); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "ARCHIVE_FAILED", "failed to archive eval task", err)
 		return
 	}
@@ -567,17 +566,16 @@ func (h *EvalHandler) StartBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate all task IDs belong to this org before starting the transaction
-	for _, taskID := range req.TaskIDs {
-		if _, err := h.taskStore.GetByID(r.Context(), orgID, taskID); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				writeError(w, r, http.StatusBadRequest, "INVALID_TASK_ID",
-					fmt.Sprintf("task %s not found or does not belong to this organization", taskID))
-				return
-			}
-			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to validate task", err)
-			return
-		}
+	// Validate all task IDs belong to this org in a single query
+	validCount, err := h.taskStore.CountByIDs(r.Context(), orgID, req.TaskIDs)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to validate tasks", err)
+		return
+	}
+	if validCount != len(req.TaskIDs) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_TASK_ID",
+			fmt.Sprintf("one or more task IDs not found or do not belong to this organization (expected %d, found %d)", len(req.TaskIDs), validCount))
+		return
 	}
 
 	totalRuns := len(req.TaskIDs) * len(req.Configs)

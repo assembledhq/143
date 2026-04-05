@@ -210,14 +210,31 @@ func (s *EvalTaskStore) Update(ctx context.Context, task *models.EvalTask) error
 }
 
 func (s *EvalTaskStore) Archive(ctx context.Context, orgID, taskID uuid.UUID) error {
-	_, err := s.db.Exec(ctx,
+	tag, err := s.db.Exec(ctx,
 		`UPDATE eval_tasks SET archived_at = now(), updated_at = now() WHERE id = @id AND org_id = @org_id AND archived_at IS NULL`,
 		pgx.NamedArgs{"id": taskID, "org_id": orgID},
 	)
 	if err != nil {
 		return fmt.Errorf("archive eval task: %w", err)
 	}
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
 	return nil
+}
+
+// CountByIDs returns how many of the given task IDs exist for this org (non-archived).
+// Used to validate batch task IDs in a single query instead of N+1 GetByID calls.
+func (s *EvalTaskStore) CountByIDs(ctx context.Context, orgID uuid.UUID, taskIDs []uuid.UUID) (int, error) {
+	var count int
+	err := s.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM eval_tasks WHERE org_id = @org_id AND id = ANY(@task_ids) AND archived_at IS NULL`,
+		pgx.NamedArgs{"org_id": orgID, "task_ids": taskIDs},
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count eval tasks by ids: %w", err)
+	}
+	return count, nil
 }
 
 func (s *EvalTaskStore) CountByOrg(ctx context.Context, orgID uuid.UUID) (int, error) {

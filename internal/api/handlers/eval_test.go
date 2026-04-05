@@ -801,16 +801,9 @@ func TestEvalHandler_ArchiveTask(t *testing.T) {
 		orgID := uuid.New()
 		userID := uuid.New()
 		taskID := uuid.New()
-		repoID := uuid.New()
-		now := time.Now()
 		handler := newEvalHandler(mock)
 
-		// GetByID
-		mock.ExpectQuery("SELECT .+ FROM eval_tasks WHERE id").
-			WithArgs(anyArgs(2)...).
-			WillReturnRows(pgxmock.NewRows(evalTaskColumns).AddRow(newTestEvalTaskRow(taskID, orgID, repoID, now)...))
-
-		// Archive
+		// Archive (returns 1 row affected)
 		mock.ExpectExec("UPDATE eval_tasks SET archived_at").
 			WithArgs(anyArgs(2)...).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -836,9 +829,10 @@ func TestEvalHandler_ArchiveTask(t *testing.T) {
 		taskID := uuid.New()
 		handler := newEvalHandler(mock)
 
-		mock.ExpectQuery("SELECT .+ FROM eval_tasks WHERE id").
+		// Archive returns 0 rows affected → ErrNoRows
+		mock.ExpectExec("UPDATE eval_tasks SET archived_at").
 			WithArgs(anyArgs(2)...).
-			WillReturnRows(pgxmock.NewRows(evalTaskColumns))
+			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 
 		req := httptest.NewRequest(http.MethodDelete, "/api/v1/eval/tasks/"+taskID.String(), nil)
 		req = req.WithContext(evalCtxWithChi(orgID, userID, map[string]string{"id": taskID.String()}))
@@ -881,13 +875,7 @@ func TestEvalHandler_ArchiveTask(t *testing.T) {
 		orgID := uuid.New()
 		userID := uuid.New()
 		taskID := uuid.New()
-		repoID := uuid.New()
-		now := time.Now()
 		handler := newEvalHandler(mock)
-
-		mock.ExpectQuery("SELECT .+ FROM eval_tasks WHERE id").
-			WithArgs(anyArgs(2)...).
-			WillReturnRows(pgxmock.NewRows(evalTaskColumns).AddRow(newTestEvalTaskRow(taskID, orgID, repoID, now)...))
 
 		mock.ExpectExec("UPDATE eval_tasks SET archived_at").
 			WithArgs(anyArgs(2)...).
@@ -1420,16 +1408,15 @@ func TestEvalHandler_StartBatch(t *testing.T) {
 		orgID := uuid.New()
 		userID := uuid.New()
 		taskID := uuid.New()
-		repoID := uuid.New()
 		batchID := uuid.New()
 		runID := uuid.New()
 		now := time.Now()
 		handler := newEvalHandler(mock)
 
-		// Validate task exists
-		mock.ExpectQuery("SELECT .+ FROM eval_tasks WHERE id").
+		// Validate task IDs via CountByIDs
+		mock.ExpectQuery("SELECT COUNT").
 			WithArgs(anyArgs(2)...).
-			WillReturnRows(pgxmock.NewRows(evalTaskColumns).AddRow(newTestEvalTaskRow(taskID, orgID, repoID, now)...))
+			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
 
 		// Transaction
 		mock.ExpectBegin()
@@ -1541,10 +1528,10 @@ func TestEvalHandler_StartBatch(t *testing.T) {
 		taskID := uuid.New()
 		handler := newEvalHandler(mock)
 
-		// Task not found
-		mock.ExpectQuery("SELECT .+ FROM eval_tasks WHERE id").
+		// CountByIDs returns 0 — task not found
+		mock.ExpectQuery("SELECT COUNT").
 			WithArgs(anyArgs(2)...).
-			WillReturnRows(pgxmock.NewRows(evalTaskColumns))
+			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
 		body := fmt.Sprintf(`{
 			"name": "Test Batch",
@@ -1595,13 +1582,11 @@ func TestEvalHandler_StartBatch(t *testing.T) {
 		orgID := uuid.New()
 		userID := uuid.New()
 		taskID := uuid.New()
-		repoID := uuid.New()
-		now := time.Now()
 		handler := newEvalHandler(mock)
 
-		mock.ExpectQuery("SELECT .+ FROM eval_tasks WHERE id").
+		mock.ExpectQuery("SELECT COUNT").
 			WithArgs(anyArgs(2)...).
-			WillReturnRows(pgxmock.NewRows(evalTaskColumns).AddRow(newTestEvalTaskRow(taskID, orgID, repoID, now)...))
+			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
 
 		mock.ExpectBegin().WillReturnError(fmt.Errorf("cannot begin tx"))
 
