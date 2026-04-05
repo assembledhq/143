@@ -26,7 +26,7 @@ var projectTestColumns = []string{
 
 func newProjectRow(projectID, orgID, repoID uuid.UUID, now time.Time) []interface{} {
 	return []interface{}{
-		projectID, orgID, repoID, "Test Project", "Build a thing", nil, nil,
+		projectID, orgID, &repoID, "Test Project", "Build a thing", nil, nil,
 		"draft", 50, "sequential", 2, false, "main",
 		nil, json.RawMessage(`[]`), json.RawMessage(`[]`),
 		0, 0, 0,

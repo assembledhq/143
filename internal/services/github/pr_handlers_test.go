@@ -34,7 +34,7 @@ var sessionColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning", "project_task_id",
 	"model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
-	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "created_at",
+	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "deleted_at", "created_at",
 }
 
 // newMockPool creates a pgxmock pool and returns it with a cleanup.
@@ -128,7 +128,7 @@ func TestHandlePullRequestEvent_MergedFlow(t *testing.T) {
 				AddRow(sessionID, issueID, orgID, "claude-code", "completed", "full", "standard",
 					nil, nil, nil, nil,
 					nil, nil, nil, nil,
-					nil, nil, nil, nil,
+					nil, nil, nil, false,
 					nil, nil, nil, nil, nil,
 					nil, nil, nil, nil, nil,
 					nil, // model_override
@@ -140,6 +140,7 @@ func TestHandlePullRequestEvent_MergedFlow(t *testing.T) {
 					nil, // diff_stats
 					nil, // diff_history
 					nil, // input_manifest
+					nil, // deleted_at
 					now),
 		)
 

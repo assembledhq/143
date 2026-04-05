@@ -50,7 +50,7 @@ var sessionColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
-	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "created_at",
+	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "deleted_at", "created_at",
 }
 
 func TestSessionHandler_List(t *testing.T) {
@@ -75,7 +75,7 @@ func TestSessionHandler_List(t *testing.T) {
 							runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 							nil, nil, nil, nil,
 							nil, &now, &now, nil,
-							nil, nil, nil, nil,
+							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
 							nil,                      // project_task_id
@@ -88,6 +88,7 @@ func TestSessionHandler_List(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, // deleted_at
 							now,
 						),
 					)
@@ -158,7 +159,7 @@ func TestSessionHandler_List_WithRepositoryID(t *testing.T) {
 				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 				nil, nil, nil, nil,
 				nil, &now, &now, nil,
-				nil, nil, nil, nil,
+				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil,
@@ -170,6 +171,7 @@ func TestSessionHandler_List_WithRepositoryID(t *testing.T) {
 				nil, // diff_stats
 				nil, // diff_history
 				nil, // input_manifest
+				nil, // deleted_at
 				now,
 			),
 		)
@@ -251,7 +253,7 @@ func TestSessionHandler_List_CommaSeparatedStatuses(t *testing.T) {
 				runID, issueID, orgID, "claude-code", "pending", "supervised", "standard",
 				nil, nil, nil, nil,
 				nil, &now, nil, nil,
-				nil, nil, nil, nil,
+				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil,
@@ -263,6 +265,7 @@ func TestSessionHandler_List_CommaSeparatedStatuses(t *testing.T) {
 				nil, // diff_stats
 				nil, // diff_history
 				nil, // input_manifest
+				nil, // deleted_at
 				now,
 			),
 		)
@@ -306,7 +309,7 @@ func TestSessionHandler_Get(t *testing.T) {
 							runID, issueID, orgID, "claude-code", "running", "supervised", "standard",
 							nil, nil, nil, nil,
 							nil, &now, nil, nil,
-							nil, nil, nil, nil,
+							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
 							nil,                      // project_task_id
@@ -319,6 +322,7 @@ func TestSessionHandler_Get(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, // deleted_at
 							now,
 						),
 					)
@@ -383,12 +387,12 @@ func triggerFixIssueMock(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
 				"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
 				"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
 				"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
-				"created_at", "updated_at",
+				"created_at", "updated_at", "deleted_at",
 			}).AddRow(
 				issueID, orgID, "ISSUE-1", "sentry", nil, nil,
 				"Test issue", nil, nil, "open", now, now,
 				1, 0, "medium", nil, "fp-1",
-				now, now,
+				now, now, nil,
 			),
 		)
 
@@ -423,12 +427,12 @@ func triggerFixIssueAndOrgDefaultMock(mock pgxmock.PgxPoolIface, orgID uuid.UUID
 				"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
 				"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
 				"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
-				"created_at", "updated_at",
+				"created_at", "updated_at", "deleted_at",
 			}).AddRow(
 				issueID, orgID, "ISSUE-1", "sentry", nil, nil,
 				"Test issue", nil, nil, "open", now, now,
 				1, 0, "medium", nil, "fp-1",
-				now, now,
+				now, now, nil,
 			),
 		)
 
@@ -527,12 +531,12 @@ func TestSessionHandler_TriggerFix(t *testing.T) {
 							"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
 							"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
 							"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
-							"created_at", "updated_at",
+							"created_at", "updated_at", "deleted_at",
 						}).AddRow(
 							issueID, orgID, "ISSUE-1", "sentry", nil, nil,
 							"Test issue", nil, nil, "open", now, now,
 							1, 0, "medium", nil, "fp-1",
-							now, now,
+							now, now, nil,
 						),
 					)
 			},
@@ -553,12 +557,12 @@ func TestSessionHandler_TriggerFix(t *testing.T) {
 							"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
 							"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
 							"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
-							"created_at", "updated_at",
+							"created_at", "updated_at", "deleted_at",
 						}).AddRow(
 							issueID, orgID, "ISSUE-1", "sentry", nil, nil,
 							"Test issue", nil, nil, "open", now, now,
 							1, 0, "medium", nil, "fp-1",
-							now, now,
+							now, now, nil,
 						),
 					)
 			},
@@ -975,12 +979,12 @@ func TestSessionHandler_TriggerFix_InvalidAutonomyLevel(t *testing.T) {
 				"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
 				"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
 				"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
-				"created_at", "updated_at",
+				"created_at", "updated_at", "deleted_at",
 			}).AddRow(
 				issueID, orgID, "ISSUE-1", "sentry", nil, nil,
 				"Test issue", nil, nil, "open", now, now,
 				1, 0, "medium", nil, "fp-1",
-				now, now,
+				now, now, nil,
 			),
 		)
 
@@ -1020,7 +1024,7 @@ func TestSessionHandler_GetLogs_Success(t *testing.T) {
 				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 				nil, nil, nil, nil,
 				nil, &now, &now, nil,
-				nil, nil, nil, nil,
+				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil,
@@ -1032,6 +1036,7 @@ func TestSessionHandler_GetLogs_Success(t *testing.T) {
 				nil, // diff_stats
 				nil, // diff_history
 				nil, // input_manifest
+				nil, // deleted_at
 				now,
 			),
 		)
@@ -1107,7 +1112,7 @@ func TestSessionHandler_GetLogs_EmptyLogs(t *testing.T) {
 				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 				nil, nil, nil, nil,
 				nil, &now, &now, nil,
-				nil, nil, nil, nil,
+				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil,
@@ -1119,6 +1124,7 @@ func TestSessionHandler_GetLogs_EmptyLogs(t *testing.T) {
 				nil, // diff_stats
 				nil, // diff_history
 				nil, // input_manifest
+				nil, // deleted_at
 				now,
 			),
 		)
@@ -1167,7 +1173,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 				nil, nil, nil, nil,
 				nil, &now, &now, nil,
-				nil, nil, nil, nil,
+				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil,
@@ -1179,6 +1185,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil, // diff_stats
 				nil, // diff_history
 				nil, // input_manifest
+				nil, // deleted_at
 				now,
 			),
 		)
@@ -1191,7 +1198,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 				nil, nil, nil, nil,
 				nil, &now, &now, nil,
-				nil, nil, nil, nil,
+				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil,
@@ -1203,6 +1210,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil, // diff_stats
 				nil, // diff_history
 				nil, // input_manifest
+				nil, // deleted_at
 				now,
 			),
 		)
@@ -1484,7 +1492,7 @@ func TestSessionHandler_EndSession_EnqueuesValidation(t *testing.T) {
 				sessionID, issueID, orgID, "claude_code", "idle", "semi", "low",
 				nil, nil, nil, nil,
 				nil, &now, nil, nil,
-				nil, nil, nil, nil,
+				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil,
@@ -1496,6 +1504,7 @@ func TestSessionHandler_EndSession_EnqueuesValidation(t *testing.T) {
 				nil, // diff_stats
 				nil, // diff_history
 				nil, // input_manifest
+				nil, // deleted_at
 				now,
 			),
 		)
@@ -1543,7 +1552,7 @@ func TestSessionHandler_EndSession_ManualSkipsValidation(t *testing.T) {
 				sessionID, issueID, orgID, "claude_code", "idle", "semi", "low",
 				nil, nil, nil, nil,
 				nil, &now, nil, nil,
-				nil, nil, nil, nil,
+				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil,
@@ -1555,6 +1564,7 @@ func TestSessionHandler_EndSession_ManualSkipsValidation(t *testing.T) {
 				nil, // diff_stats
 				nil, // diff_history
 				nil, // input_manifest
+				nil, // deleted_at
 				now,
 			),
 		)
@@ -1723,7 +1733,7 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							sessionID, uuid.New(), orgID, "claude-code", "idle", "semi", "low",
 							nil, nil, nil, nil,
 							nil, &now, nil, nil,
-							nil, nil, nil, nil,
+							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil,
@@ -1735,6 +1745,7 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, // deleted_at
 							now,
 						),
 					)
@@ -1762,7 +1773,7 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							sessionID, uuid.New(), orgID, "claude-code", "completed", "semi", "low",
 							nil, nil, nil, nil,
 							nil, &now, &now, nil,
-							nil, nil, nil, nil,
+							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil,
@@ -1774,6 +1785,7 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, // deleted_at
 							now,
 						),
 					)
@@ -1843,7 +1855,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							sessionID, uuid.New(), orgID, "claude-code", "idle", "semi", "low",
 							nil, nil, nil, nil,
 							nil, &now, nil, nil,
-							nil, nil, nil, nil,
+							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil,
@@ -1855,6 +1867,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, // deleted_at
 							now,
 						),
 					)
@@ -1866,7 +1879,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
 							nil, nil, nil, nil,
 							nil, &now, nil, nil,
-							nil, nil, nil, nil,
+							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil,
@@ -1878,6 +1891,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, // deleted_at
 							now,
 						),
 					)
@@ -1906,7 +1920,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
 							nil, nil, nil, nil,
 							nil, &now, nil, nil,
-							nil, nil, nil, nil,
+							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil,
@@ -1918,6 +1932,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, // deleted_at
 							now,
 						),
 					)
@@ -1950,7 +1965,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							sessionID, uuid.New(), orgID, "claude-code", "pending", "semi", "low",
 							nil, nil, nil, nil,
 							nil, &now, nil, nil,
-							nil, nil, nil, nil,
+							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil,
@@ -1962,6 +1977,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, // deleted_at
 							now,
 						),
 					)
@@ -1989,7 +2005,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							sessionID, uuid.New(), orgID, "claude-code", "completed", "semi", "low",
 							nil, nil, nil, nil,
 							nil, &now, nil, nil,
-							nil, nil, nil, nil,
+							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil,
@@ -1997,6 +2013,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, 3, &now, "destroyed", nil,
 							nil, nil, nil, nil, nil,
 							nil, // input_manifest
+							nil, // deleted_at
 							now,
 						),
 					)
@@ -2016,7 +2033,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							sessionID, uuid.New(), orgID, "claude-code", "idle", "semi", "low",
 							nil, nil, nil, nil,
 							nil, &now, nil, nil,
-							nil, nil, nil, nil,
+							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil,
@@ -2024,6 +2041,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, 2, &now, "destroyed", nil,
 							nil, nil, nil, nil, nil,
 							nil, // input_manifest
+							nil, // deleted_at
 							now,
 						),
 					)
@@ -2044,7 +2062,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							sessionID, uuid.New(), orgID, "claude-code", "completed", "semi", "low",
 							nil, nil, nil, nil,
 							nil, &now, nil, nil,
-							nil, nil, nil, nil,
+							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil,
@@ -2056,6 +2074,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, // deleted_at
 							now,
 						),
 					)
@@ -2071,7 +2090,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
 							nil, nil, nil, nil,
 							nil, &now, nil, nil,
-							nil, nil, nil, nil,
+							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil,
@@ -2083,6 +2102,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, // deleted_at
 							now,
 						),
 					)
@@ -2398,7 +2418,7 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
 				nil, &now, &now, nil,
-				nil, nil, nil, nil,
+				nil, nil, nil, false,
 				nil, nil, nil, nil, &diff,
 				nil, nil, nil, nil,
 				nil, nil,
@@ -2410,6 +2430,7 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 				nil, // diff_stats
 				nil, // diff_history
 				nil, // input_manifest
+				nil, // deleted_at
 				now,
 			),
 		)
@@ -2463,7 +2484,7 @@ func TestSessionHandler_CreatePR_NoDiff(t *testing.T) {
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
 				nil, &now, &now, nil,
-				nil, nil, nil, nil,
+				nil, nil, nil, false,
 				nil, nil, nil, nil, nil, // diff is nil
 				nil, nil, nil, nil,
 				nil, nil,
@@ -2471,6 +2492,7 @@ func TestSessionHandler_CreatePR_NoDiff(t *testing.T) {
 				nil, 0, nil, "none", nil,
 				nil, nil, nil, nil, nil,
 				nil, // input_manifest
+				nil, // deleted_at
 				now,
 			),
 		)
@@ -2514,7 +2536,7 @@ func TestSessionHandler_CreatePR_AlreadyExists(t *testing.T) {
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
 				nil, &now, &now, nil,
-				nil, nil, nil, nil,
+				nil, nil, nil, false,
 				nil, nil, nil, nil, &diff,
 				nil, nil, nil, nil,
 				nil, nil,
@@ -2522,6 +2544,7 @@ func TestSessionHandler_CreatePR_AlreadyExists(t *testing.T) {
 				nil, 0, nil, "none", nil,
 				nil, nil, nil, nil, nil,
 				nil, // input_manifest
+				nil, // deleted_at
 				now,
 			),
 		)
@@ -2608,7 +2631,7 @@ func TestSessionHandler_CreatePR_PRLookupDBError(t *testing.T) {
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
 				nil, &now, &now, nil,
-				nil, nil, nil, nil,
+				nil, nil, nil, false,
 				nil, nil, nil, nil, &diff,
 				nil, nil, nil, nil,
 				nil, nil,
@@ -2616,6 +2639,7 @@ func TestSessionHandler_CreatePR_PRLookupDBError(t *testing.T) {
 				nil, 0, nil, "none", nil,
 				nil, nil, nil, nil, nil,
 				nil, // input_manifest
+				nil, // deleted_at
 				now,
 			),
 		)

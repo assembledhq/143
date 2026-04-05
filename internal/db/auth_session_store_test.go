@@ -25,7 +25,7 @@ var sessionColumns = []string{
 	"agent_session_id", "current_turn", "last_activity_at",
 	"sandbox_state", "snapshot_key", "target_branch", "working_branch",
 	"repository_id", "diff_stats", "diff_history", "input_manifest",
-	"created_at",
+	"deleted_at", "created_at",
 }
 
 func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
@@ -33,7 +33,7 @@ func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 		id, issueID, orgID, "fixer", "pending", "supervised", "standard",
 		nil, nil, nil, []string{},
 		nil, nil, nil, json.RawMessage(`{}`),
-		nil, nil, []string{}, nil,
+		nil, nil, []string{}, false,
 		nil, json.RawMessage(`{}`), nil, nil, nil,
 		nil, nil, nil, nil,
 		nil, // project_task_id
@@ -50,6 +50,7 @@ func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 		nil,    // diff_stats
 		nil,    // diff_history
 		nil,    // input_manifest
+		nil,    // deleted_at
 		now,
 	}
 }

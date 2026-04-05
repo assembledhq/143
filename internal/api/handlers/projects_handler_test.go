@@ -30,7 +30,7 @@ func projectColumns() []string {
 		"proposed_by_pm", "source_issue_ids", "proposal_reasoning", "similar_projects",
 		"agent_type", "model_override",
 		"schedule_enabled", "schedule_interval", "schedule_unit", "next_run_at",
-		"created_by", "created_at", "updated_at", "completed_at",
+		"created_by", "deleted_at", "created_at", "updated_at", "completed_at",
 	}
 }
 
@@ -44,7 +44,7 @@ func newProjectRow(id, orgID, repoID uuid.UUID, status models.ProjectStatus, now
 		false, []uuid.UUID{}, nil, json.RawMessage("[]"),
 		nil, nil, // agent_type, model_override
 		false, 1, "days", nil, // schedule_enabled, schedule_interval, schedule_unit, next_run_at
-		&createdBy, now, now, nil,
+		&createdBy, (*time.Time)(nil), now, now, nil,
 	}
 }
 

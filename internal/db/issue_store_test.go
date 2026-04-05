@@ -17,7 +17,7 @@ var issueColumns = []string{
 	"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
 	"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
 	"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
-	"created_at", "updated_at",
+	"created_at", "updated_at", "deleted_at",
 }
 
 func TestIssueStore_ListByOrg(t *testing.T) {
@@ -47,13 +47,13 @@ func TestIssueStore_ListByOrg(t *testing.T) {
 								issueID1, orgID, "ext-1", "sentry", nil, nil,
 								"Issue One", nil, json.RawMessage(`{}`), "open", now, now,
 								5, 2, "high", []string{"bug"}, "fp-1",
-								now, now,
+								now, now, nil,
 							).
 							AddRow(
 								issueID2, orgID, "ext-2", "github", nil, nil,
 								"Issue Two", nil, json.RawMessage(`{}`), "open", now, now,
 								3, 1, "medium", []string{"perf"}, "fp-2",
-								now, now,
+								now, now, nil,
 							),
 					)
 			},
@@ -71,7 +71,7 @@ func TestIssueStore_ListByOrg(t *testing.T) {
 								issueID1, orgID, "ext-1", "sentry", nil, nil,
 								"Open Issue", nil, json.RawMessage(`{}`), "open", now, now,
 								1, 1, "low", []string{}, "fp-3",
-								now, now,
+								now, now, nil,
 							),
 					)
 			},
@@ -141,7 +141,7 @@ func TestIssueStore_GetByID(t *testing.T) {
 								issueID, orgID, "ext-1", "sentry", nil, nil,
 								"Found Issue", nil, json.RawMessage(`{}`), "open", now, now,
 								3, 1, "medium", []string{"bug"}, "fp-found",
-								now, now,
+								now, now, nil,
 							),
 					)
 			},
