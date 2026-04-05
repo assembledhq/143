@@ -274,7 +274,7 @@ BEGIN
           AND c.relname != 'audit_logs_default'
         ORDER BY c.relname
     LOOP
-        IF (regexp_match(rec.bound_expr, $$TO \('([^']+)'\)$$))[1]::date <= cutoff THEN
+        IF (regexp_match(rec.bound_expr, $regex$TO \('([^']+)'\)$regex$))[1]::date <= cutoff THEN
             EXECUTE format('DROP TABLE %s', rec.partition_name);
             dropped := dropped + 1;
         END IF;

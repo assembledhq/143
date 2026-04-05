@@ -149,7 +149,7 @@ func (s *ProjectStore) Create(ctx context.Context, p *models.Project) error {
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(ctx) //nolint:errcheck
 
 	row := tx.QueryRow(ctx, query, pgx.NamedArgs{
 		"org_id":              p.OrgID,

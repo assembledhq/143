@@ -73,7 +73,7 @@ func (s *ProjectTaskStore) Create(ctx context.Context, t *models.ProjectTask) er
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(ctx) //nolint:errcheck
 
 	query := `
 		INSERT INTO project_tasks (
@@ -156,7 +156,7 @@ func (s *ProjectTaskStore) Update(ctx context.Context, t *models.ProjectTask) er
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(ctx) //nolint:errcheck
 
 	query := `
 		UPDATE project_tasks SET
