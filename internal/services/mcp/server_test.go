@@ -198,6 +198,94 @@ func TestServerUnknownMethod(t *testing.T) {
 	}
 }
 
+func TestServerToolsCall(t *testing.T) {
+	t.Parallel()
+	reg := integration.NewRegistry()
+	reg.RegisterErrorTracker(&mockErrorTracker{name: "sentry"})
+	srv := NewServer(reg, &bytes.Buffer{})
+
+	lines := []string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"sentry_list_errors","arguments":{"limit":5}}}`,
+	}
+	input := strings.NewReader(strings.Join(lines, "\n") + "\n")
+	var output bytes.Buffer
+
+	done := make(chan error, 1)
+	go func() {
+		done <- srv.Serve(context.Background(), input, &output)
+	}()
+	<-done
+
+	decoder := json.NewDecoder(&output)
+	var initResp, callResp Response
+	_ = decoder.Decode(&initResp)
+	if err := decoder.Decode(&callResp); err != nil {
+		t.Fatalf("failed to parse call response: %v", err)
+	}
+	if callResp.Error != nil {
+		t.Fatalf("unexpected error: %v", callResp.Error)
+	}
+}
+
+func TestServerToolsCallMissingName(t *testing.T) {
+	t.Parallel()
+	reg := integration.NewRegistry()
+	srv := NewServer(reg, &bytes.Buffer{})
+
+	lines := []string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"","arguments":{}}}`,
+	}
+	input := strings.NewReader(strings.Join(lines, "\n") + "\n")
+	var output bytes.Buffer
+
+	done := make(chan error, 1)
+	go func() {
+		done <- srv.Serve(context.Background(), input, &output)
+	}()
+	<-done
+
+	decoder := json.NewDecoder(&output)
+	var initResp, callResp Response
+	_ = decoder.Decode(&initResp)
+	if err := decoder.Decode(&callResp); err != nil {
+		t.Fatalf("failed to parse call response: %v", err)
+	}
+	if callResp.Error == nil {
+		t.Fatal("expected error for missing tool name")
+	}
+}
+
+func TestServerToolsCallBadParams(t *testing.T) {
+	t.Parallel()
+	reg := integration.NewRegistry()
+	srv := NewServer(reg, &bytes.Buffer{})
+
+	lines := []string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":"not-an-object"}`,
+	}
+	input := strings.NewReader(strings.Join(lines, "\n") + "\n")
+	var output bytes.Buffer
+
+	done := make(chan error, 1)
+	go func() {
+		done <- srv.Serve(context.Background(), input, &output)
+	}()
+	<-done
+
+	decoder := json.NewDecoder(&output)
+	var initResp, callResp Response
+	_ = decoder.Decode(&initResp)
+	if err := decoder.Decode(&callResp); err != nil {
+		t.Fatalf("failed to parse call response: %v", err)
+	}
+	if callResp.Error == nil {
+		t.Fatal("expected error for bad params")
+	}
+}
+
 func TestServerParseError(t *testing.T) {
 	t.Parallel()
 	reg := integration.NewRegistry()

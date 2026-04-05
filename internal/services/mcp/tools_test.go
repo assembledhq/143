@@ -294,6 +294,25 @@ func TestSplitCommaSeparated(t *testing.T) {
 // Additional error tracker dispatch tests
 // --------------------------------------------------------------------------
 
+func TestCallToolErrorTrackerListErrors_WithSince(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildTestRegistry())
+	args := `{"severity":"high","since":"2024-01-01T00:00:00Z","limit":10}`
+	result := tr.CallTool(context.Background(), "sentry_list_errors", json.RawMessage(args))
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+}
+
+func TestCallToolErrorTrackerListErrors_EmptyArgs(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildTestRegistry())
+	result := tr.CallTool(context.Background(), "sentry_list_errors", json.RawMessage("{}"))
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+}
+
 func TestCallToolErrorTrackerFindRelated(t *testing.T) {
 	t.Parallel()
 	tr := NewToolRegistry(buildTestRegistry())
