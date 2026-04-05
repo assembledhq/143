@@ -1,5 +1,7 @@
 # Design: Infrastructure & Deployment
 
+> **Status:** Partially Implemented | **Last reviewed:** 2026-03-25
+
 This document describes how 143.dev is packaged, deployed, and scaled.
 
 ## Design Principles
@@ -129,6 +131,10 @@ go test ./...
 cd frontend && npm test
 ```
 
+For the standard local workflow, `make dev` builds `143-sandbox:latest` via
+`docker compose build sandbox` before starting the stack, so Docker-backed
+agent runs use the same sandbox image tag as the runtime default.
+
 ### Makefile
 
 ```makefile
@@ -218,28 +224,7 @@ EXPOSE 8080
 CMD ["./server"]
 ```
 
-**Sandbox Dockerfile**:
-
-```dockerfile
-FROM ubuntu:24.04@sha256:PINNED_DIGEST  # Pin by digest — tags are mutable
-
-# Install common dev tools
-RUN apt-get update && apt-get install -y \
-    git curl wget \
-    build-essential \
-    nodejs npm \
-    python3 python3-pip \
-    golang-go \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install agent CLIs
-RUN npm install -g @anthropic-ai/claude-code
-
-# Non-root user for sandbox execution
-RUN useradd -m -s /bin/bash sandbox
-USER sandbox
-WORKDIR /workspace
-```
+**Sandbox Dockerfile**: See `sandbox/Dockerfile` for the full definition. The image installs all three agent CLIs (Claude Code, Codex, Gemini) at pinned versions from `sandbox/versions.json` via `sandbox/install-agents.sh`. Build with `docker build -t 143-sandbox:latest sandbox/`. CI also builds this image, and local Docker development builds it through the `sandbox` compose target.
 
 This image is used by the Docker sandbox provider. It runs under **gVisor** (`runsc` runtime) by default for syscall-level isolation. The same image works with both `runsc` (gVisor) and `runc` (standard Docker) — no image changes needed when switching runtimes.
 
@@ -471,89 +456,12 @@ FOR UPDATE SKIP LOCKED;
 | Medium (5-20 repos) | 2 `all` nodes + 1-3 `worker` nodes | Two `all` nodes for API redundancy + scheduler failover. Workers for compute. |
 | Large (20+ repos) | N `api` behind LB + M `worker` nodes | Dedicated roles. Move Postgres to managed service. At least 1 `all` node (or separate scheduler process) for cron. |
 
-#### Scaling Playbook
-
-For the step-by-step scaling playbook (from single VPS to multi-node cluster with auto-scaling), see [36-docker-agents-vps-architecture.md](36-docker-agents-vps-architecture.md) — Phase 2.
-
-#### Production docker-compose.yml
-
-```yaml
-# docker-compose.prod.yml — single-node production stack
-services:
-  postgres:
-    image: postgres:18
-    environment:
-      POSTGRES_DB: onefortythree
-      POSTGRES_USER: onefortythree
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-      POSTGRES_INITDB_ARGS: "--data-checksums"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-      - ./deploy/postgres/postgresql.conf:/etc/postgresql/conf.d/custom.conf:ro
-    command: postgres -c config_file=/etc/postgresql/conf.d/custom.conf
-    ports:
-      - "127.0.0.1:5432:5432"   # only bind to localhost — no external access
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U onefortythree"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          memory: 1G
-          cpus: "1.0"
-
-  server:
-    image: 143-server:latest
-    environment:
-      DATABASE_URL: postgres://onefortythree:${DB_PASSWORD}@postgres:5432/onefortythree?sslmode=disable
-      MODE: all
-      PORT: "8080"
-      NODE_ID: ${HOSTNAME:-node-1}
-    env_file:
-      - .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          memory: 1G
-          cpus: "2.0"
-
-  caddy:
-    image: caddy:2
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-    restart: unless-stopped
-
-volumes:
-  pgdata:
-  caddy_data:
-```
-
-#### Connection Pooling
-
-When you have many app/worker nodes, each opens a pool of connections to Postgres. At scale (10+ nodes), this can exhaust `max_connections`. See [36-docker-agents-vps-architecture.md](36-docker-agents-vps-architecture.md) for PgBouncer setup.
-
-**When to add PgBouncer:** When total connections across all nodes approach 80% of `max_connections` (default 100). Each node's pgx pool defaults to ~10 connections, so with 8+ nodes you're getting close.
-
-**Important:** Use `POOL_MODE=transaction` (not `session`). Session mode breaks `FOR UPDATE SKIP LOCKED` across transaction boundaries.
-
 #### Draining & Graceful Shutdown
 
 When removing a node:
 
 ```bash
+# Signal the node to drain (finish current work, stop accepting new jobs)
 kill -SIGTERM <pid>
 ```
 
@@ -839,295 +747,11 @@ For teams that don't use Mezmo or Datadog:
   - Agent run duration, success rate
   - Active sandbox count
 
-## PostgreSQL Operations & Data Protection
-
-Postgres is the **only stateful component** in the entire system. The server, frontend, and sandboxes are all stateless — if any of them die, you just restart them. Losing Postgres means losing everything. This section describes how to make that effectively impossible.
-
-### Data Protection Layers
-
-There are three independent layers of protection. Each layer covers failures the previous one doesn't.
-
-#### Layer 1: Docker Volume Persistence
-
-The `pgdata` named volume ensures data survives container restarts, upgrades, and `docker compose down` (without `-v`).
-
-```yaml
-# Already configured in docker-compose
-volumes:
-  pgdata:/var/lib/postgresql/data
-```
-
-**Protects against:** container crashes, restarts, image upgrades, `docker compose down`.
-
-**Does NOT protect against:** disk failure, accidental `DROP TABLE`, VPS deletion, data corruption.
-
-#### Layer 2: Automated pg_dump Backups
-
-Scheduled logical backups via `pg_dump`, uploaded offsite. This is the **minimum viable backup strategy** and must be configured before accepting customers.
-
-**Backup script** (`deploy/scripts/pg-backup.sh`):
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-# Configuration
-BACKUP_DIR="${BACKUP_DIR:-/backups/postgres}"
-RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-30}"
-CONTAINER_NAME="${POSTGRES_CONTAINER:-143-postgres-1}"
-DB_USER="${POSTGRES_USER:-onefortythree}"
-DB_NAME="${POSTGRES_DB:-onefortythree}"
-
-mkdir -p "$BACKUP_DIR"
-
-TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-BACKUP_FILE="$BACKUP_DIR/$DB_NAME-$TIMESTAMP.dump"
-
-# Custom format: compressed, supports selective restore
-docker exec "$CONTAINER_NAME" \
-  pg_dump -U "$DB_USER" -Fc "$DB_NAME" > "$BACKUP_FILE"
-
-# Verify the backup is valid
-pg_restore --list "$BACKUP_FILE" > /dev/null 2>&1 || {
-  echo "ERROR: Backup verification failed for $BACKUP_FILE" >&2
-  rm -f "$BACKUP_FILE"
-  exit 1
-}
-
-BACKUP_SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
-echo "Backup complete: $BACKUP_FILE ($BACKUP_SIZE)"
-
-# Clean up old backups
-find "$BACKUP_DIR" -name "*.dump" -mtime +$RETENTION_DAYS -delete
-echo "Cleaned backups older than $RETENTION_DAYS days"
-```
-
-**Cron schedule** (add to host crontab or a dedicated backup container):
-
-```cron
-# Every 6 hours: dump the database
-0 */6 * * * /opt/143/deploy/scripts/pg-backup.sh >> /var/log/pg-backup.log 2>&1
-
-# Daily: sync backups offsite to S3-compatible storage (Hetzner Object Storage, AWS S3, etc.)
-30 2 * * * rclone sync /backups/postgres s3:143-backups/postgres/ --log-file=/var/log/pg-backup-sync.log
-```
-
-**Protects against:** disk failure, VPS deletion, accidental data deletion (up to 6 hours of data loss).
-
-**Does NOT protect against:** data written in the last 6 hours before a failure.
-
-**RPO (Recovery Point Objective):** 6 hours worst case. Reduce by increasing dump frequency.
-
-**RTO (Recovery Time Objective):** 15-30 minutes (spin up new VPS, restore from dump).
-
-#### Layer 3: WAL Archiving & Point-in-Time Recovery (PITR)
-
-For zero data loss tolerance. Postgres continuously streams its write-ahead log (WAL) to object storage. You can restore to any point in time, down to the second.
-
-**When to add this:** When 6 hours of potential data loss is unacceptable — typically when you have paying customers generating high-value data (agent runs, validated PRs, production learnings).
-
-**WAL-G setup** (recommended tool for WAL archiving):
-
-```yaml
-# docker-compose.prod.yml — postgres service with WAL archiving
-services:
-  postgres:
-    image: postgres:18
-    environment:
-      POSTGRES_DB: onefortythree
-      POSTGRES_USER: onefortythree
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-      # WAL archiving config
-      POSTGRES_INITDB_ARGS: "--wal-segsize=16"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-      - ./deploy/postgres/postgresql.conf:/etc/postgresql/conf.d/custom.conf:ro
-    command: postgres -c config_file=/etc/postgresql/conf.d/custom.conf
-```
-
-**Postgres config for WAL archiving** (`deploy/postgres/postgresql.conf`):
-
-```ini
-# Include defaults
-listen_addresses = '*'
-max_connections = 100
-
-# WAL archiving
-wal_level = replica
-archive_mode = on
-archive_command = 'wal-g wal-push %p'
-archive_timeout = 60    # force archive every 60s even if WAL segment isn't full
-
-# Checksums (detect silent corruption)
-# Note: must be enabled at initdb time with --data-checksums
-```
-
-**WAL-G environment** (configure in the postgres container or a sidecar):
-
-```bash
-# S3-compatible storage (Hetzner Object Storage, MinIO, AWS S3)
-export WALG_S3_PREFIX=s3://143-backups/wal-g
-export AWS_ACCESS_KEY_ID=your-key
-export AWS_SECRET_ACCESS_KEY=your-secret
-export AWS_ENDPOINT=https://fsn1.your-objectstorage.com  # Hetzner example
-export AWS_REGION=fsn1
-
-# Full backup: run weekly via cron
-wal-g backup-push /var/lib/postgresql/data
-
-# WAL segments: archived automatically every 60 seconds by archive_command
-```
-
-**Point-in-time restore:**
-
-```bash
-# Restore to a specific timestamp
-export WALG_S3_PREFIX=s3://143-backups/wal-g
-wal-g backup-fetch /var/lib/postgresql/data LATEST
-
-# Create recovery.signal and set target time
-cat > /var/lib/postgresql/data/recovery.signal <<EOF
-EOF
-
-cat >> /var/lib/postgresql/data/postgresql.conf <<EOF
-restore_command = 'wal-g wal-fetch %f %p'
-recovery_target_time = '2025-07-15 14:47:00 UTC'
-recovery_target_action = 'promote'
-EOF
-
-# Start postgres — it replays WAL up to the target time
-pg_ctl start -D /var/lib/postgresql/data
-```
-
-**Protects against:** everything — disk failure, data corruption, accidental deletion, VPS destruction.
-
-**RPO:** seconds (WAL segments archive every 60s).
-
-**RTO:** 15-30 minutes (fetch base backup + replay WAL).
-
-### Restore Procedures
-
-**Restore from pg_dump** (Layer 2):
-
-```bash
-# 1. Create a fresh postgres instance
-docker compose up -d postgres
-
-# 2. Restore from the most recent dump
-docker exec -i 143-postgres-1 \
-  pg_restore -U onefortythree -d onefortythree --clean --if-exists \
-  < /backups/postgres/onefortythree-20250715-020000.dump
-
-# 3. Verify
-docker exec 143-postgres-1 \
-  psql -U onefortythree -c "SELECT count(*) FROM organizations;"
-```
-
-**Restore from WAL-G** (Layer 3): See the point-in-time restore procedure above.
-
-**Test your restore procedure.** Run a restore drill at least once before going to production, and monthly afterward. An untested backup is not a backup.
-
-### Postgres Health Monitoring
-
-Add these checks to your Datadog or Prometheus monitoring:
-
-| Check | Query / Method | Alert Threshold |
-|-------|---------------|-----------------|
-| **Connection count** | `SELECT count(*) FROM pg_stat_activity` | > 80% of `max_connections` |
-| **Disk usage** | `SELECT pg_database_size('onefortythree')` | > 80% of available disk |
-| **Replication lag** (if using replicas) | `SELECT extract(epoch FROM replay_lag) FROM pg_stat_replication` | > 30 seconds |
-| **Long-running queries** | `SELECT * FROM pg_stat_activity WHERE state = 'active' AND now() - query_start > interval '5 minutes'` | Any |
-| **Dead tuples** (needs VACUUM) | `SELECT relname, n_dead_tup FROM pg_stat_user_tables ORDER BY n_dead_tup DESC` | > 100K dead tuples |
-| **Backup freshness** | Check latest `.dump` file mtime | > 12 hours old |
-| **WAL archiving status** | `SELECT last_archived_wal, last_failed_wal FROM pg_stat_archiver` | Any failed WAL |
-
-**Recommended Datadog monitors** (add to existing alert set):
-
-| Alert | Condition |
-|-------|-----------|
-| Postgres down | `pg_isready` fails for 30 seconds |
-| Disk usage critical | Postgres data directory > 85% of disk |
-| Backup stale | No new backup file in 12 hours |
-| Connection pool exhaustion | Active connections > 80 |
-| Long-running transaction | Any transaction open > 10 minutes |
-
-### Production Postgres Configuration
-
-For a single-VPS deployment (4-16GB RAM), these settings improve on the defaults without requiring tuning expertise:
-
-```ini
-# deploy/postgres/postgresql.conf
-
-# Connection limits
-max_connections = 100           # plenty for pgx pool + direct connections
-shared_buffers = 256MB          # 25% of RAM on a 1GB instance, scale up with RAM
-effective_cache_size = 768MB    # 75% of RAM — tells planner how much OS cache to expect
-work_mem = 4MB                  # per-sort/hash operation — keep conservative
-maintenance_work_mem = 64MB     # for VACUUM, CREATE INDEX
-
-# Write performance
-wal_buffers = 16MB
-checkpoint_completion_target = 0.9
-random_page_cost = 1.1          # for SSD storage (Hetzner uses SSDs)
-
-# Autovacuum (keep defaults, but ensure it runs aggressively enough)
-autovacuum = on
-autovacuum_max_workers = 3
-autovacuum_naptime = 60         # check every 60s instead of default 1min (same, but explicit)
-
-# Logging (useful for debugging slow queries)
-log_min_duration_statement = 1000  # log queries taking > 1 second
-log_checkpoints = on
-log_connections = on
-log_disconnections = on
-log_lock_waits = on
-
-# Data integrity
-fsync = on                      # NEVER turn this off in production
-full_page_writes = on           # protects against partial page writes on crash
-```
-
-Scale `shared_buffers` and `effective_cache_size` with your VPS RAM:
-
-| VPS RAM | `shared_buffers` | `effective_cache_size` |
-|---------|------------------|----------------------|
-| 2 GB | 512 MB | 1.5 GB |
-| 4 GB | 1 GB | 3 GB |
-| 8 GB | 2 GB | 6 GB |
-| 16 GB | 4 GB | 12 GB |
-
-### Data Integrity Safeguards
-
-These are already built into the schema and application, but worth calling out:
-
-1. **Data checksums** — Enable at `initdb` time (`--data-checksums`). Detects silent disk corruption. Add `POSTGRES_INITDB_ARGS: "--data-checksums"` to docker-compose.
-2. **Audit log immutability** — The `audit_log` table has a trigger that prevents `UPDATE` and `DELETE` operations (see migration `000001`).
-3. **Foreign key constraints** — All cross-table references use `ON DELETE CASCADE` or `ON DELETE RESTRICT` to prevent orphaned records.
-4. **`timestamptz` everywhere** — All timestamps are timezone-aware (UTC), preventing timezone-related data corruption.
-5. **UUID primary keys** — No auto-increment collisions across nodes in a multi-node deployment.
-6. **Transaction isolation** — The job queue uses `FOR UPDATE SKIP LOCKED` which operates correctly under Postgres's default `READ COMMITTED` isolation level.
-
-### Postgres Scaling Path
-
-| Scale | Database size | Setup | Action needed |
-|-------|--------------|-------|---------------|
-| **Launch** | < 1 GB | Single VPS, Postgres in Docker | Layer 1 + Layer 2 backups |
-| **Growing** | 1-50 GB | Single VPS, Postgres in Docker | Add Layer 3 (WAL archiving), tune `shared_buffers` |
-| **Busy** | 50-500 GB | Dedicated Postgres VPS (Hetzner CX22-CX42) | Separate DB from app server, add read replica for dashboard queries |
-| **Large** | 500 GB+ | Managed Postgres (RDS, Cloud SQL, Ubicloud) or Citus | Connection pooling (PgBouncer), table partitioning for `agent_run_logs` and `audit_log` |
-
-**Migration from self-hosted to managed is a single pg_dump/pg_restore.** No application code changes — the app only sees `DATABASE_URL`.
-
-### Environment Variables (Backup & Recovery)
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `BACKUP_DIR` | No | `/backups/postgres` | Directory for pg_dump backup files |
-| `BACKUP_RETENTION_DAYS` | No | `30` | Days to retain local backup files |
-| `WALG_S3_PREFIX` | No (Layer 3) | - | S3 path for WAL-G archives |
-| `AWS_ACCESS_KEY_ID` | No (Layer 3) | - | S3 credentials for WAL-G |
-| `AWS_SECRET_ACCESS_KEY` | No (Layer 3) | - | S3 credentials for WAL-G |
-| `AWS_ENDPOINT` | No (Layer 3) | - | S3-compatible endpoint (Hetzner, MinIO) |
+## Backup & Recovery
+
+- **Postgres**: Standard `pg_dump` for backups. In production, use managed Postgres with automated backups.
+- **No other stateful systems** — the server and sandboxes are stateless.
+- **Configuration**: All config is in environment variables. Store `.env` securely (e.g., in a secrets manager).
 
 ## Security Considerations
 
