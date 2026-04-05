@@ -255,6 +255,41 @@ func TestParseDuration(t *testing.T) {
 	}
 }
 
+func TestSplitCommaSeparated(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		input    string
+		expected []string
+	}{
+		{"empty string", "", nil},
+		{"single value", "abc", []string{"abc"}},
+		{"multiple values", "a,b,c", []string{"a", "b", "c"}},
+		{"with spaces", " a , b , c ", []string{"a", "b", "c"}},
+		{"trailing comma", "a,b,", []string{"a", "b"}},
+		{"leading comma", ",a,b", []string{"a", "b"}},
+		{"only commas", ",,", nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := splitCommaSeparated(tt.input)
+			if len(got) == 0 && len(tt.expected) == 0 {
+				return
+			}
+			if len(got) != len(tt.expected) {
+				t.Fatalf("got %v, want %v", got, tt.expected)
+			}
+			for i := range got {
+				if got[i] != tt.expected[i] {
+					t.Errorf("index %d: got %q, want %q", i, got[i], tt.expected[i])
+				}
+			}
+		})
+	}
+}
+
 func TestToolSchemaHasRequiredFields(t *testing.T) {
 	t.Parallel()
 	tr := NewToolRegistry(buildTestRegistry())

@@ -154,6 +154,77 @@ func TestTitleSimilarity(t *testing.T) {
 	}
 }
 
+func TestScopeSimilarity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		a        string
+		b        string
+		minScore float64
+		maxScore float64
+	}{
+		{"identical scopes", "refactor authentication middleware", "refactor authentication middleware", 0.9, 1.0},
+		{"overlapping keywords", "refactor authentication service and logging", "improve authentication service and caching", 0.3, 0.7},
+		{"no overlap", "database migration scripts", "frontend styling components", 0.0, 0.1},
+		{"empty first", "", "some scope", 0.0, 0.0},
+		{"empty second", "some scope", "", 0.0, 0.0},
+		{"both empty", "", "", 0.0, 0.0},
+		{"stop words only", "the and or but", "is are was were", 0.0, 0.0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			score := scopeSimilarity(tt.a, tt.b)
+			require.GreaterOrEqual(t, score, tt.minScore, "score should be >= %f, got %f", tt.minScore, score)
+			require.LessOrEqual(t, score, tt.maxScore, "score should be <= %f, got %f", tt.maxScore, score)
+		})
+	}
+}
+
+func TestExtractKeywords(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    string
+		expected []string
+	}{
+		{"filters stop words", "the quick brown fox and the lazy dog", []string{"quick", "brown", "fox", "lazy", "dog"}},
+		{"filters short words", "I am a go dev", []string{"dev"}},
+		{"removes punctuation", "hello, world! foo-bar", []string{"hello", "world", "foobar"}},
+		{"empty string", "", nil},
+		{"only stop words", "the and or but is are", nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := extractKeywords(tt.input)
+			require.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestDeduplicateProposal_ScopeOverlap(t *testing.T) {
+	t.Parallel()
+
+	scope1 := "refactor authentication middleware and session handling"
+	scope2 := "refactor authentication middleware and token validation"
+	result := DeduplicateProposal(
+		"Unrelated title A",
+		nil,
+		&scope1,
+		[]models.Project{
+			{ID: uuid.New(), Title: "Unrelated title B", Scope: &scope2, Status: models.ProjectStatusActive},
+		},
+	)
+
+	require.True(t, len(result.SimilarProjects) > 0, "should detect scope overlap")
+	require.Equal(t, "scope", result.SimilarProjects[0].OverlapType, "overlap type should be scope")
+}
+
 func TestIssueOverlap(t *testing.T) {
 	t.Parallel()
 
