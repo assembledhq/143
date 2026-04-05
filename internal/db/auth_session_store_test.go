@@ -30,7 +30,7 @@ var sessionColumns = []string{
 
 func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 	return []interface{}{
-		id, issueID, orgID, "fixer", "pending", "supervised", "standard",
+		id, issueID, orgID, "claude_code", "pending", "supervised", "low",
 		nil, nil, nil, []string{},
 		nil, nil, nil, json.RawMessage(`{}`),
 		nil, nil, []string{}, false,
@@ -249,10 +249,10 @@ func TestSessionStore_Create(t *testing.T) {
 	run := &models.Session{
 		IssueID:       uuid.New(),
 		OrgID:         uuid.New(),
-		AgentType:     "fixer",
+		AgentType:     "claude_code",
 		Status:        "pending",
 		AutonomyLevel: "supervised",
-		TokenMode:     "standard",
+		TokenMode:     "low",
 	}
 
 	mock.ExpectQuery("INSERT INTO sessions").
@@ -287,10 +287,10 @@ func TestSessionStore_Create_AllowsNilIssueID(t *testing.T) {
 	run := &models.Session{
 		IssueID:       uuid.Nil,
 		OrgID:         uuid.New(),
-		AgentType:     "fixer",
+		AgentType:     "claude_code",
 		Status:        "pending",
 		AutonomyLevel: "supervised",
-		TokenMode:     "standard",
+		TokenMode:     "low",
 	}
 
 	mock.ExpectQuery("INSERT INTO sessions").

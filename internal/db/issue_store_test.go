@@ -50,7 +50,7 @@ func TestIssueStore_ListByOrg(t *testing.T) {
 								now, now, nil,
 							).
 							AddRow(
-								issueID2, orgID, "ext-2", "github", nil, nil,
+								issueID2, orgID, "ext-2", "linear", nil, nil,
 								"Issue Two", nil, json.RawMessage(`{}`), "open", now, now,
 								3, 1, "medium", []string{"perf"}, "fp-2",
 								now, now, nil,
@@ -270,5 +270,42 @@ func TestIssueStore_CountByOrg(t *testing.T) {
 	count, err := store.CountByOrg(context.Background(), orgID)
 	require.NoError(t, err, "CountByOrg should not return an error")
 	require.Equal(t, 42, count, "should return the correct issue count for the org")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestIssueStore_SoftDelete(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewIssueStore(mock)
+
+	mock.ExpectExec("UPDATE issues SET deleted_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.SoftDelete(context.Background(), uuid.New(), uuid.New())
+	require.NoError(t, err, "SoftDelete should not return an error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestIssueStore_SoftDelete_NotFound(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewIssueStore(mock)
+
+	mock.ExpectExec("UPDATE issues SET deleted_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+	err = store.SoftDelete(context.Background(), uuid.New(), uuid.New())
+	require.Error(t, err, "SoftDelete should return an error when issue not found")
+	require.Contains(t, err.Error(), "not found or already deleted")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

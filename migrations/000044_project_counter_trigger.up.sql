@@ -14,21 +14,37 @@ BEGIN
         target_project_id := NEW.project_id;
     END IF;
 
-    -- Recompute all three counters from the source of truth.
+    -- Recompute all three counters in a single scan of project_tasks.
     UPDATE projects SET
-        total_tasks     = (SELECT count(*) FROM project_tasks WHERE project_id = target_project_id),
-        completed_tasks = (SELECT count(*) FROM project_tasks WHERE project_id = target_project_id AND status = 'completed'),
-        failed_tasks    = (SELECT count(*) FROM project_tasks WHERE project_id = target_project_id AND status = 'failed'),
+        total_tasks     = agg.total,
+        completed_tasks = agg.completed,
+        failed_tasks    = agg.failed,
         updated_at      = now()
+    FROM (
+        SELECT
+            count(*) AS total,
+            count(*) FILTER (WHERE status = 'completed') AS completed,
+            count(*) FILTER (WHERE status = 'failed') AS failed
+        FROM project_tasks
+        WHERE project_id = target_project_id
+    ) agg
     WHERE id = target_project_id;
 
     -- For UPDATE, if project_id changed, also update the old project.
     IF TG_OP = 'UPDATE' AND OLD.project_id != NEW.project_id THEN
         UPDATE projects SET
-            total_tasks     = (SELECT count(*) FROM project_tasks WHERE project_id = OLD.project_id),
-            completed_tasks = (SELECT count(*) FROM project_tasks WHERE project_id = OLD.project_id AND status = 'completed'),
-            failed_tasks    = (SELECT count(*) FROM project_tasks WHERE project_id = OLD.project_id AND status = 'failed'),
+            total_tasks     = agg.total,
+            completed_tasks = agg.completed,
+            failed_tasks    = agg.failed,
             updated_at      = now()
+        FROM (
+            SELECT
+                count(*) AS total,
+                count(*) FILTER (WHERE status = 'completed') AS completed,
+                count(*) FILTER (WHERE status = 'failed') AS failed
+            FROM project_tasks
+            WHERE project_id = OLD.project_id
+        ) agg
         WHERE id = OLD.project_id;
     END IF;
 

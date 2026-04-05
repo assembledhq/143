@@ -509,6 +509,8 @@ func (s *SessionStore) ListStaleIdleSessions(ctx context.Context, olderThan time
 
 // ListExpiredSnapshots returns non-active sessions whose snapshots have
 // exceeded the maximum snapshot age and should be cleaned up from storage.
+// Note: intentionally does NOT filter by deleted_at IS NULL — we want to
+// clean up snapshots even for soft-deleted sessions to free storage.
 func (s *SessionStore) ListExpiredSnapshots(ctx context.Context, olderThan time.Time) ([]models.Session, error) {
 	query := `
 		SELECT ` + sessionSelectColumns + `

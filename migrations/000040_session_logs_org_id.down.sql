@@ -1,2 +1,2 @@
-DROP INDEX IF EXISTS idx_session_logs_org_created;
-ALTER TABLE session_logs DROP COLUMN IF EXISTS org_id;
+-- No-op: org_id is managed by migration 000037 (partitioning_prep).
+-- See 000040 up migration for details.

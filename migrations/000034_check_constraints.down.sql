@@ -12,7 +12,7 @@ ALTER TABLE sessions
 
 ALTER TABLE session_threads DROP CONSTRAINT IF EXISTS chk_session_threads_status;
 ALTER TABLE session_questions DROP CONSTRAINT IF EXISTS chk_session_questions_status;
--- session_logs CHECK constraint is managed by migration 36 (partitioning).
+-- session_logs CHECK constraint is managed by migration 037 (partitioning).
 
 ALTER TABLE jobs DROP CONSTRAINT IF EXISTS chk_jobs_status;
 

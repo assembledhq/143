@@ -125,7 +125,7 @@ func TestHandlePullRequestEvent_MergedFlow(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(sessionColumns).
-				AddRow(sessionID, issueID, orgID, "claude-code", "completed", "full", "standard",
+				AddRow(sessionID, issueID, orgID, "claude-code", "completed", "full", "low",
 					nil, nil, nil, nil,
 					nil, nil, nil, nil,
 					nil, nil, nil, false,

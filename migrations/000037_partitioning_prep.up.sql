@@ -15,9 +15,6 @@
 -- session_logs and session_messages. For audit_logs, session_id and project_id
 -- FKs are intentionally omitted so audit entries survive if the referenced
 -- session or project is deleted (audit_logs comments explain further).
---
--- DEPENDENCY: Migration 000040 adds org_id to the partitioned session_logs
--- table created here. If consolidating migrations, preserve that ordering.
 
 -- =============================================================================
 -- Helper: create monthly partitions for a given table.
@@ -73,6 +70,9 @@ $$;
 -- session_logs: partition by timestamp (the time column for this table)
 -- =============================================================================
 
+-- Lock table to prevent concurrent writes during the swap.
+LOCK TABLE session_logs IN ACCESS EXCLUSIVE MODE;
+
 -- 1. Rename existing table, its indexes, and its backing sequence.
 --    bigserial columns own a *_id_seq sequence; renaming the table does NOT
 --    rename the sequence, so the subsequent CREATE TABLE would collide.
@@ -84,11 +84,14 @@ ALTER INDEX idx_session_logs_session RENAME TO idx_session_logs_session_old;
 ALTER INDEX idx_session_logs_timestamp RENAME TO idx_session_logs_timestamp_old;
 ALTER INDEX IF EXISTS idx_session_logs_thread RENAME TO idx_session_logs_thread_old;
 
--- 2. Create partitioned table with identical schema.
+-- 2. Create partitioned table with identical schema + org_id.
 --    PK must include the partition key, so we use (id, timestamp).
+--    org_id is included here (rather than in a later migration) to avoid a
+--    deployment gap where Go code expects the column but it doesn't exist yet.
 CREATE TABLE session_logs (
     id           bigserial   NOT NULL,
     session_id   uuid        NOT NULL,
+    org_id       uuid        NOT NULL,
     timestamp    timestamptz NOT NULL DEFAULT now(),
     level        text        NOT NULL DEFAULT 'info',
     message      text        NOT NULL,
@@ -101,14 +104,16 @@ CREATE TABLE session_logs (
 -- 3. Add FKs. CASCADE on session_id because logs are owned content.
 ALTER TABLE session_logs
     ADD CONSTRAINT fk_session_logs_session FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+    ADD CONSTRAINT fk_session_logs_org FOREIGN KEY (org_id) REFERENCES organizations(id),
     ADD CONSTRAINT fk_session_logs_thread FOREIGN KEY (thread_id) REFERENCES session_threads(id) ON DELETE CASCADE;
 
 -- 4. Recreate indexes (auto-propagate to partitions).
 CREATE INDEX idx_session_logs_session ON session_logs (session_id, timestamp);
 CREATE INDEX idx_session_logs_thread ON session_logs (thread_id) WHERE thread_id IS NOT NULL;
 CREATE INDEX idx_session_logs_timestamp ON session_logs (timestamp);
+CREATE INDEX idx_session_logs_org_created ON session_logs (org_id, timestamp DESC);
 
--- 5. Add the CHECK constraint from migration 33.
+-- 5. Add the CHECK constraint from migration 034.
 ALTER TABLE session_logs
     ADD CONSTRAINT chk_session_logs_level CHECK (level IN ('debug', 'info', 'warn', 'error'));
 
@@ -119,27 +124,24 @@ SELECT create_monthly_partitions('session_logs', '2025-01-01'::date,
 -- 7. Default partition for data outside defined ranges.
 CREATE TABLE session_logs_default PARTITION OF session_logs DEFAULT;
 
--- 8. Copy data from old table.
-INSERT INTO session_logs (id, session_id, timestamp, level, message, metadata, turn_number, thread_id)
-SELECT id, session_id, timestamp, level, message, metadata, turn_number, thread_id
-FROM session_logs_old;
+-- 8. Copy data from old table, backfilling org_id from sessions.
+--    Orphaned rows (session deleted) are excluded by the JOIN.
+INSERT INTO session_logs (id, session_id, org_id, timestamp, level, message, metadata, turn_number, thread_id)
+SELECT sl.id, sl.session_id, s.org_id, sl.timestamp, sl.level, sl.message, sl.metadata, sl.turn_number, sl.thread_id
+FROM session_logs_old sl
+JOIN sessions s ON s.id = sl.session_id;
 
--- 9. Verify row counts match before dropping old table.
-DO $$ BEGIN
-    IF (SELECT count(*) FROM session_logs) != (SELECT count(*) FROM session_logs_old) THEN
-        RAISE EXCEPTION 'session_logs row count mismatch after partition copy';
-    END IF;
-END $$;
-
--- 10. Sync the sequence.
+-- 9. Sync the sequence.
 SELECT setval('session_logs_id_seq', COALESCE((SELECT MAX(id) FROM session_logs), 1));
 
--- 11. Drop old table.
+-- 10. Drop old table.
 DROP TABLE session_logs_old;
 
 -- =============================================================================
 -- session_messages: partition by created_at
 -- =============================================================================
+
+LOCK TABLE session_messages IN ACCESS EXCLUSIVE MODE;
 
 ALTER TABLE session_messages RENAME TO session_messages_old;
 ALTER SEQUENCE session_messages_id_seq RENAME TO session_messages_id_seq_old;
@@ -192,6 +194,8 @@ DROP TABLE session_messages_old;
 -- =============================================================================
 -- audit_logs: partition by created_at
 -- =============================================================================
+
+LOCK TABLE audit_logs IN ACCESS EXCLUSIVE MODE;
 
 -- Must drop immutability trigger before rename.
 DROP TRIGGER IF EXISTS audit_logs_immutable ON audit_logs;
