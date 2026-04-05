@@ -184,7 +184,7 @@ func (s *Service) dispatchProjectTasks(ctx context.Context, orgID uuid.UUID, pro
 			PMReasoning:   &reasoning,
 			ProjectTaskID: &task.ID,
 			ModelOverride: project.ModelOverride,
-			RepositoryID:  &project.RepositoryID,
+			RepositoryID:  project.RepositoryID,
 			TargetBranch:  &branchName,
 		}
 		if err := s.sessions.Create(ctx, run); err != nil {

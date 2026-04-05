@@ -13,10 +13,10 @@ import (
 )
 
 type ProjectStore struct {
-	db DBTX
+	db TxStarter
 }
 
-func NewProjectStore(db DBTX) *ProjectStore {
+func NewProjectStore(db TxStarter) *ProjectStore {
 	return &ProjectStore{db: db}
 }
 
@@ -35,7 +35,7 @@ const projectColumns = `id, org_id, repository_id, title, goal, scope, completio
 	proposed_by_pm, source_issue_ids, proposal_reasoning, similar_projects,
 	agent_type, model_override,
 	schedule_enabled, schedule_interval, schedule_unit, next_run_at,
-	created_by, created_at, updated_at, completed_at`
+	created_by, deleted_at, created_at, updated_at, completed_at`
 
 func scanProject(row pgx.Row) (models.Project, error) {
 	var p models.Project
@@ -50,7 +50,7 @@ func scanProject(row pgx.Row) (models.Project, error) {
 		&p.ProposedByPM, &sourceIssueIDs, &p.ProposalReasoning, &p.SimilarProjects,
 		&p.AgentType, &p.ModelOverride,
 		&p.ScheduleEnabled, &p.ScheduleInterval, &p.ScheduleUnit, &p.NextRunAt,
-		&p.CreatedBy, &p.CreatedAt, &p.UpdatedAt, &p.CompletedAt,
+		&p.CreatedBy, &p.DeletedAt, &p.CreatedAt, &p.UpdatedAt, &p.CompletedAt,
 	)
 	if err != nil {
 		return models.Project{}, err
@@ -86,7 +86,7 @@ func scanProjects(rows pgx.Rows) ([]models.Project, error) {
 			&p.ProposedByPM, &sourceIssueIDs, &p.ProposalReasoning, &p.SimilarProjects,
 			&p.AgentType, &p.ModelOverride,
 			&p.ScheduleEnabled, &p.ScheduleInterval, &p.ScheduleUnit, &p.NextRunAt,
-			&p.CreatedBy, &p.CreatedAt, &p.UpdatedAt, &p.CompletedAt,
+			&p.CreatedBy, &p.DeletedAt, &p.CreatedAt, &p.UpdatedAt, &p.CompletedAt,
 		)
 		if err != nil {
 			return nil, err
@@ -145,7 +145,13 @@ func (s *ProjectStore) Create(ctx context.Context, p *models.Project) error {
 		)
 		RETURNING id, created_at, updated_at`
 
-	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	row := tx.QueryRow(ctx, query, pgx.NamedArgs{
 		"org_id":              p.OrgID,
 		"repository_id":       p.RepositoryID,
 		"title":               p.Title,
@@ -173,7 +179,20 @@ func (s *ProjectStore) Create(ctx context.Context, p *models.Project) error {
 		"schedule_unit":       p.ScheduleUnit,
 		"next_run_at":         p.NextRunAt,
 	})
-	return row.Scan(&p.ID, &p.CreatedAt, &p.UpdatedAt)
+	if err := row.Scan(&p.ID, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		return err
+	}
+
+	// Dual-write: populate the join table for source issue references.
+	for _, issueID := range p.SourceIssueIDs {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO project_source_issues (project_id, issue_id) VALUES (@project_id, @issue_id) ON CONFLICT DO NOTHING`,
+			pgx.NamedArgs{"project_id": p.ID, "issue_id": issueID}); err != nil {
+			return fmt.Errorf("sync source issue: %w", err)
+		}
+	}
+
+	return tx.Commit(ctx)
 }
 
 func (s *ProjectStore) GetByID(ctx context.Context, orgID, projectID uuid.UUID) (models.Project, error) {
@@ -187,7 +206,7 @@ func (s *ProjectStore) GetByID(ctx context.Context, orgID, projectID uuid.UUID) 
 }
 
 func (s *ProjectStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters ProjectFilters) ([]models.Project, error) {
-	query := fmt.Sprintf(`SELECT %s FROM projects WHERE org_id = @org_id`, projectColumns)
+	query := fmt.Sprintf(`SELECT %s FROM projects WHERE org_id = @org_id AND deleted_at IS NULL`, projectColumns)
 	args := pgx.NamedArgs{"org_id": orgID}
 
 	if filters.Status != "" {
@@ -196,7 +215,7 @@ func (s *ProjectStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters P
 	}
 	if filters.RepositoryID != uuid.Nil {
 		query += ` AND repository_id = @repository_id`
-		args["repository_id"] = filters.RepositoryID
+		args["repository_id"] = &filters.RepositoryID
 	}
 	if filters.Cursor != "" {
 		cursorID, err := uuid.Parse(filters.Cursor)
@@ -311,7 +330,7 @@ func (s *ProjectStore) UpdateProgress(ctx context.Context, orgID, projectID uuid
 // ListDueForSchedule returns active projects with scheduling enabled that are due to run.
 func (s *ProjectStore) ListDueForSchedule(ctx context.Context, now time.Time) ([]models.Project, error) {
 	query := fmt.Sprintf(`SELECT %s FROM projects
-		WHERE schedule_enabled = true AND status = 'active' AND next_run_at IS NOT NULL AND next_run_at <= @now
+		WHERE schedule_enabled = true AND status = 'active' AND deleted_at IS NULL AND next_run_at IS NOT NULL AND next_run_at <= @now
 		ORDER BY next_run_at ASC
 		LIMIT 100`, projectColumns)
 
@@ -385,4 +404,20 @@ func (s *ProjectStore) ListByOrgRepoStatuses(ctx context.Context, orgID, repoID 
 	}
 	defer rows.Close()
 	return scanProjects(rows)
+}
+
+// SoftDelete marks a project as deleted without removing the row.
+func (s *ProjectStore) SoftDelete(ctx context.Context, orgID, projectID uuid.UUID) error {
+	query := `UPDATE projects SET deleted_at = now(), updated_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":     projectID,
+		"org_id": orgID,
+	})
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("project not found or already deleted")
+	}
+	return nil
 }

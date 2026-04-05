@@ -293,7 +293,7 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	project := models.Project{
 		OrgID:              orgID,
-		RepositoryID:       repoID,
+		RepositoryID:       &repoID,
 		Title:              req.Title,
 		Goal:               req.Goal,
 		Scope:              req.Scope,

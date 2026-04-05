@@ -21,7 +21,7 @@ var projectTestColumns = []string{
 	"proposed_by_pm", "source_issue_ids", "proposal_reasoning", "similar_projects",
 	"agent_type", "model_override",
 	"schedule_enabled", "schedule_interval", "schedule_unit", "next_run_at",
-	"created_by", "created_at", "updated_at", "completed_at",
+	"created_by", "deleted_at", "created_at", "updated_at", "completed_at",
 }
 
 func newProjectRow(projectID, orgID, repoID uuid.UUID, now time.Time) []interface{} {
@@ -33,7 +33,7 @@ func newProjectRow(projectID, orgID, repoID uuid.UUID, now time.Time) []interfac
 		false, []uuid.UUID{}, nil, json.RawMessage(`[]`),
 		nil, nil,
 		false, 1, "days", nil,
-		nil, now, now, nil,
+		nil, (*time.Time)(nil), now, now, nil,
 	}
 }
 
@@ -58,14 +58,16 @@ func TestProjectStore_Create(t *testing.T) {
 	defer mock.Close()
 
 	// Create has 26 named args (including agent_type, model_override, schedule, and similar_projects fields)
+	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO projects").
 		WithArgs(anyArgs(26)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(projectID, now, now))
+	mock.ExpectCommit()
 
 	store := NewProjectStore(mock)
 	project := &models.Project{
 		OrgID:         orgID,
-		RepositoryID:  repoID,
+		RepositoryID:  &repoID,
 		Title:         "Test Project",
 		Goal:          "Build a thing",
 		Status:        models.ProjectStatusDraft,

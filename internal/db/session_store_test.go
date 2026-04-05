@@ -21,7 +21,7 @@ var sessionTestColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
-	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "created_at",
+	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "deleted_at", "created_at",
 }
 
 func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []interface{} {
@@ -29,7 +29,7 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 		sessionID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 		nil, nil, nil, nil,
 		nil, &now, &now, nil,
-		nil, nil, nil, nil,
+		nil, nil, nil, false,
 		nil, nil, nil, nil, nil,
 		nil, nil, nil, nil,
 		nil, nil, nil,
@@ -40,6 +40,7 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 		nil, // diff_stats
 		nil, // diff_history
 		nil, // input_manifest
+		nil, // deleted_at
 		now,
 	}
 }

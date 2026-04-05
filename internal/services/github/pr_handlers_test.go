@@ -1208,10 +1208,11 @@ func TestPushRevision_Success(t *testing.T) {
 		ResultSummary: &resultSummary,
 	}
 
+	sid := uuid.New()
 	pr := &models.PullRequest{
 		ID:             prID,
 		OrgID:          orgID,
-		SessionID:     uuid.New(),
+		SessionID:     &sid,
 		GitHubPRNumber: 42,
 		GitHubRepo:     "testorg/testrepo",
 	}
