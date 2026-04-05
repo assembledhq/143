@@ -172,7 +172,7 @@ func (h *InternalProjectHandler) Propose(w http.ResponseWriter, r *http.Request)
 			writeError(w, r, http.StatusBadRequest, "INVALID_SIMILAR_PROJECT", fmt.Sprintf("similar project %s not found", spID))
 			return
 		}
-		if sp.RepositoryID != repoID {
+		if sp.RepositoryID == nil || *sp.RepositoryID != repoID {
 			writeError(w, r, http.StatusBadRequest, "INVALID_SIMILAR_PROJECT", fmt.Sprintf("similar project %s belongs to a different repository", spID))
 			return
 		}
@@ -258,7 +258,7 @@ func (h *InternalProjectHandler) Propose(w http.ResponseWriter, r *http.Request)
 	// 10. Create project row.
 	project := models.Project{
 		OrgID:              claims.OrgID,
-		RepositoryID:       repoID,
+		RepositoryID:       &repoID,
 		Title:              req.Title,
 		Goal:               req.Goal,
 		Scope:              req.Scope,
