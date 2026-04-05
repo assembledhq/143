@@ -65,10 +65,11 @@ $$;
 -- session_logs: partition by timestamp (the time column for this table)
 -- =============================================================================
 
--- 1. Rename existing table.
+-- 1. Rename existing table and all its indexes.
 ALTER TABLE session_logs RENAME TO session_logs_old;
 ALTER INDEX idx_session_logs_session RENAME TO idx_session_logs_session_old;
 ALTER INDEX idx_session_logs_timestamp RENAME TO idx_session_logs_timestamp_old;
+ALTER INDEX IF EXISTS idx_session_logs_thread RENAME TO idx_session_logs_thread_old;
 
 -- 2. Create partitioned table with identical schema.
 --    PK must include the partition key, so we use (id, timestamp).
@@ -128,6 +129,8 @@ DROP TABLE session_logs_old;
 -- =============================================================================
 
 ALTER TABLE session_messages RENAME TO session_messages_old;
+ALTER INDEX IF EXISTS idx_session_messages_session RENAME TO idx_session_messages_session_old;
+ALTER INDEX IF EXISTS idx_session_messages_thread RENAME TO idx_session_messages_thread_old;
 
 CREATE TABLE session_messages (
     id          bigserial   NOT NULL,
@@ -180,6 +183,12 @@ DROP TABLE session_messages_old;
 DROP TRIGGER IF EXISTS audit_logs_immutable ON audit_logs;
 
 ALTER TABLE audit_logs RENAME TO audit_logs_old;
+ALTER INDEX IF EXISTS idx_audit_logs_org_created RENAME TO idx_audit_logs_org_created_old;
+ALTER INDEX IF EXISTS idx_audit_logs_resource RENAME TO idx_audit_logs_resource_old;
+ALTER INDEX IF EXISTS idx_audit_logs_user RENAME TO idx_audit_logs_user_old;
+ALTER INDEX IF EXISTS idx_audit_logs_action RENAME TO idx_audit_logs_action_old;
+ALTER INDEX IF EXISTS idx_audit_logs_session RENAME TO idx_audit_logs_session_old;
+ALTER INDEX IF EXISTS idx_audit_logs_project RENAME TO idx_audit_logs_project_old;
 
 CREATE TABLE audit_logs (
     id              bigserial       NOT NULL,
