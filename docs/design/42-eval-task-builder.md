@@ -1,8 +1,8 @@
-# 41 - Eval Task Builder
+# 42 - Eval Task Builder
 
 > **Status:** Not Started | **Last reviewed:** 2026-03-30
 >
-> **Depends on:** [16-ai-agent-evals.md](future/16-ai-agent-evals.md) (grading architecture, release gates), [42-prompt-and-input-versioning.md](42-prompt-and-input-versioning.md) (prompt/document freezing)
+> **Depends on:** [16-ai-agent-evals.md](future/16-ai-agent-evals.md) (grading architecture, release gates), [43-prompt-and-input-versioning.md](43-prompt-and-input-versioning.md) (prompt/document freezing)
 
 ## Problem
 
@@ -40,7 +40,7 @@ EvalTask {
   issue_description   string          -- what the agent is told to fix/build
   issue_context       jsonb           -- additional context (Sentry trace, Linear ticket, etc.)
 
-  -- Input configuration (frozen references, see doc 42)
+  -- Input configuration (frozen references, see doc 43)
   server_deploy_sha   string          -- pins all prompt templates (they're in the binary)
   pm_document_set_pin_id *UUID        -- pinned PM document set
   org_settings_version_id *UUID       -- pinned org settings version
@@ -263,9 +263,9 @@ Platform-level changes (model, agent type, org settings, PM documents) are not r
 
 An eval is only reproducible if the inputs are frozen. A thorough audit of `orchestrator.RunAgent()` and the agent adapter layer identified **every input** that flows into an agent run. Here's what needs freezing and how:
 
-### Inputs versioned by doc 42
+### Inputs versioned by doc 43
 
-These are covered in detail in [42-prompt-and-input-versioning.md](42-prompt-and-input-versioning.md):
+These are covered in detail in [43-prompt-and-input-versioning.md](43-prompt-and-input-versioning.md):
 
 | Input | Current state | Doc 42 solution |
 |-------|--------------|-----------------|
@@ -305,6 +305,14 @@ These are covered in detail in [42-prompt-and-input-versioning.md](42-prompt-and
 ## Settings UI
 
 The eval task builder lives in **Settings > Evals** (new section alongside the existing Agent, Prioritization, and Integrations settings).
+
+**Component conventions:** All UI in this section should use the existing shadcn component library and follow the same table/list/card patterns used on the Sessions and Projects pages. Specifically:
+
+- **Eval task list** — Use the same table structure as the Sessions list: shadcn `Table` with sortable column headers, status badges (`Badge`), and row-click navigation to detail view. Filter tabs (All | Manual | PR-Bootstrapped | Archived) use the same `Tabs` component as Sessions page filters.
+- **Create flow** — Multi-step form using shadcn `Card`, `Input`, `Textarea`, `Select`, `Switch`, `Slider`, and `Button`. Same side-sheet or full-page pattern used for project creation.
+- **Batch run panel** — `Dialog` or `Sheet` (consistent with how the Sessions page handles "New Session" creation). Configuration rows use `Card` with nested form fields.
+- **Results matrix** — shadcn `Table` with score cells. Delta indicators use the same color tokens (green/red) and `Badge` variants used elsewhere for status changes.
+- **Branch picker** — Reuse the same branch selector component used in the PR creation flow.
 
 ### Evals Settings Page
 
@@ -363,7 +371,7 @@ Repeatable form section. Each criterion:
 **Step 4: Pin inputs**
 
 - Server deploy SHA: defaults to current deploy (pins all prompt templates)
-- PM documents: "Current" or pick from snapshot history (requires doc 42)
+- PM documents: "Current" or pick from snapshot history (requires doc 43)
 - Additional context overrides (JSON editor, for PM guidance, memory, etc.)
 
 **Step 5: Review and save**
@@ -403,8 +411,8 @@ EvalRun {
   task_id             UUID
   org_id              UUID
 
-  -- Configuration used (full input manifest per doc 42)
-  input_manifest      jsonb           -- complete frozen inputs (see doc 42 §7)
+  -- Configuration used (full input manifest per doc 43)
+  input_manifest      jsonb           -- complete frozen inputs (see doc 43 §7)
   model               string
   server_deploy_sha   string          -- pins prompt templates
   pm_document_set_pin_id UUID
@@ -567,7 +575,7 @@ This design is the **user-facing task creation and management layer** that sits 
 | Release gates and rollout | Per-task run comparison with prompt/model overrides |
 | Trace-centric evaluation | Codebase snapshot mechanism (git-based time travel) |
 | Statistical rigor requirements | Batch run execution with comparison matrices |
-| Prompt override resolution | Input freezing via prompt/document versioning (doc 42) |
+| Prompt override resolution | Input freezing via prompt/document versioning (doc 43) |
 
 Eval tasks created here feed into doc 16's dataset buckets. PR-bootstrapped tasks are natural candidates for the golden set. Failure-derived tasks (from doc 16's data flywheel) can also be managed through this UI.
 
@@ -582,5 +590,5 @@ Eval tasks created here feed into doc 16's dataset buckets. PR-bootstrapped task
 5. **Settings UI** — task list, create flow, run trigger, results display
 6. **PR history bootstrapper** — scan, rank, propose candidates
 7. **Batch runs and comparison view** — multi-model/prompt matrices
-8. **Input freezing integration** — depends on doc 42 shipping first
+8. **Input freezing integration** — depends on doc 43 shipping first
 9. **Continuous bootstrap scheduling** — weekly candidate suggestions

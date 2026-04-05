@@ -1,12 +1,12 @@
-# 42 - Prompt and Input Versioning
+# 43 - Prompt and Input Versioning
 
 > **Status:** Not Started | **Last reviewed:** 2026-04-01
 >
-> **Required by:** [41-eval-task-builder.md](41-eval-task-builder.md) (input freezing for reproducible evals), [16-ai-agent-evals.md](future/16-ai-agent-evals.md) (prompt lifecycle and release gates)
+> **Required by:** [42-eval-task-builder.md](42-eval-task-builder.md) (input freezing for reproducible evals), [16-ai-agent-evals.md](future/16-ai-agent-evals.md) (prompt lifecycle and release gates)
 
 ## Problem
 
-The eval system (docs 16 and 41) requires pinning exact inputs to specific eval runs so results are reproducible and comparable. Today, most agent run inputs have no version history:
+The eval system (docs 16 and 42) requires pinning exact inputs to specific eval runs so results are reproducible and comparable. Today, most agent run inputs have no version history:
 
 - **Prompts** are embedded Go templates (`internal/prompts/templates/*.template`). They are identical across all orgs — they change only on server deploy. But the deploy version is not recorded on any run, so there's no way to know which prompt text was used.
 - **PM Documents** (`pm_documents` table) store current content. Updates overwrite in place. There is no history of what the PM agent was reading at any given point.
