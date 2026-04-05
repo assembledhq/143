@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent } from "@/components/ui/card";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
@@ -20,11 +20,6 @@ export function ProposalInbox({ proposals, onNavigateToProject }: ProposalInboxP
   const [selectedProposal, setSelectedProposal] = useState<Project | null>(null);
   const [dismissReason, setDismissReason] = useState("");
   const queryClient = useQueryClient();
-
-  // Reset dismiss reason when switching proposals to avoid stale state.
-  useEffect(() => {
-    setDismissReason("");
-  }, [selectedProposal]);
 
   // Fetch full project detail (including tasks) when a proposal is selected
   const { data: detailData, isLoading: detailLoading } = useQuery({
@@ -111,7 +106,7 @@ export function ProposalInbox({ proposals, onNavigateToProject }: ProposalInboxP
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={() => setSelectedProposal(proposal)}
+                    onClick={() => { setSelectedProposal(proposal); setDismissReason(""); }}
                   >
                     View details
                   </Button>

@@ -14,7 +14,7 @@ BEGIN
     JOIN project_cycles b ON a.id != b.id
       AND a.project_id = b.project_id
       AND a.cycle_number = b.cycle_number
-      AND (a.updated_at < b.updated_at OR (a.updated_at = b.updated_at AND a.id > b.id));
+      AND (a.created_at < b.created_at OR (a.created_at = b.created_at AND a.id > b.id));
     IF dup_count > 0 THEN
         RAISE NOTICE 'Deleting % duplicate project_cycles rows', dup_count;
     END IF;
@@ -25,7 +25,7 @@ USING project_cycles b
 WHERE a.id != b.id
   AND a.project_id = b.project_id
   AND a.cycle_number = b.cycle_number
-  AND (a.updated_at < b.updated_at OR (a.updated_at = b.updated_at AND a.id > b.id));
+  AND (a.created_at < b.created_at OR (a.created_at = b.created_at AND a.id > b.id));
 
 -- Prevent duplicate cycle numbers within a project.
 ALTER TABLE project_cycles
