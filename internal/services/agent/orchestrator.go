@@ -151,6 +151,7 @@ type Orchestrator struct {
 	memory            MemoryService // can be nil
 	userCredentials   UserCredentialProvider // can be nil
 	snapshots         storage.SnapshotStore // can be nil — multi-turn disabled if nil
+	usageTracker      *UsageTracker         // can be nil — billing tracking disabled if nil
 	logger            zerolog.Logger
 	maxConcurrent     int
 }
@@ -175,6 +176,7 @@ type OrchestratorConfig struct {
 	Memory            MemoryService // optional — injects learned memories into agent prompts
 	UserCredentials   UserCredentialProvider // optional — enables personal/team credential resolution
 	Snapshots         storage.SnapshotStore // optional — enables multi-turn snapshot/restore
+	UsageTracker      *UsageTracker         // optional — enables billing observability
 	Logger            zerolog.Logger
 	MaxConcurrent     int
 }
@@ -205,6 +207,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		memory:            cfg.Memory,
 		userCredentials:   cfg.UserCredentials,
 		snapshots:         cfg.Snapshots,
+		usageTracker:      cfg.UsageTracker,
 		logger:            cfg.Logger,
 		maxConcurrent:     maxConcurrent,
 	}
@@ -376,7 +379,19 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		o.failRun(ctx, run, fmt.Sprintf("create sandbox: %s", err))
 		return fmt.Errorf("create sandbox: %w", err)
 	}
+	containerStartedAt := time.Now()
+	var usageEventID uuid.UUID
+	if o.usageTracker != nil {
+		usageEventID = o.usageTracker.ContainerStarted(ctx, run.OrgID, run.ID, sandbox, sandboxCfg)
+	}
 	defer func() {
+		exitReason := "completed"
+		if err != nil {
+			exitReason = "failed"
+		}
+		if o.usageTracker != nil {
+			o.usageTracker.ContainerStopped(ctx, run.OrgID, usageEventID, containerStartedAt, exitReason)
+		}
 		if destroyErr := o.provider.Destroy(ctx, sandbox); destroyErr != nil {
 			log.Error().Err(destroyErr).Msg("failed to destroy sandbox")
 		}
@@ -648,7 +663,19 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		o.failRun(ctx, session, fmt.Sprintf("create sandbox: %s", err))
 		return fmt.Errorf("create sandbox: %w", err)
 	}
+	containerStartedAt := time.Now()
+	var usageEventID uuid.UUID
+	if o.usageTracker != nil {
+		usageEventID = o.usageTracker.ContainerStarted(ctx, session.OrgID, session.ID, sandbox, sandboxCfg)
+	}
 	defer func() {
+		exitReason := "completed"
+		if err != nil {
+			exitReason = "failed"
+		}
+		if o.usageTracker != nil {
+			o.usageTracker.ContainerStopped(ctx, session.OrgID, usageEventID, containerStartedAt, exitReason)
+		}
 		if destroyErr := o.provider.Destroy(ctx, sandbox); destroyErr != nil {
 			log.Error().Err(destroyErr).Msg("failed to destroy sandbox")
 		}

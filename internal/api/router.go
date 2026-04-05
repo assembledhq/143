@@ -122,6 +122,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		integrationOpts...,
 	)
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, userStore, repoStore, integrationStore, prService)
+	containerUsageStore := db.NewContainerUsageStore(pool)
+	usageHandler := handlers.NewUsageHandler(containerUsageStore)
 	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeAgentEnv(), cfg.SafeLLMEnv())
 	issueHandler := handlers.NewIssueHandler(issueStore)
 	sessionMessageStore := db.NewSessionMessageStore(pool)
@@ -317,6 +319,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.GetThreadMessages)
 			r.Get("/api/v1/sessions/{id}/threads/{tid}/logs", sessionThreadHandler.GetThreadLogs)
 			r.Get("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.List)
+			r.Get("/api/v1/sessions/{id}/usage", usageHandler.ListBySession)
+			r.Get("/api/v1/usage", usageHandler.GetSummary)
 			r.Get("/api/v1/uploads/files/*", uploadHandler.ServeUpload)
 			r.Get("/api/v1/sessions/{id}/files", sessionFileHandler.ListFiles)
 			r.Get("/api/v1/sessions/{id}/files/content", sessionFileHandler.GetFileContent)

@@ -291,6 +291,8 @@ func buildServices(
 	sessionLogStore := db.NewSessionLogStore(pool)
 	sessionQuestionStore := db.NewSessionQuestionStore(pool)
 	projectTaskUpdater := pm.NewProjectHooks(projectTaskStore, projectStore, logger)
+	containerUsageStore := db.NewContainerUsageStore(pool)
+	usageTracker := agent.NewUsageTracker(containerUsageStore, logger)
 	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:         sandboxProvider,
 		Adapters:         agentAdapters,
@@ -309,6 +311,7 @@ func buildServices(
 		Credentials:      credentialStore,
 		UserCredentials:  userCredentialStore,
 		Snapshots:        snapshotStore,
+		UsageTracker:     usageTracker,
 		Logger:           logger,
 	})
 
