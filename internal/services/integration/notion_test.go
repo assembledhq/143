@@ -716,3 +716,140 @@ func TestNotionServerError(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "500")
 }
+
+func TestNotionSearchDocuments_WorkspaceFilterByUUID(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/databases/a1b2c3d4-e5f6-7890-abcd-ef1234567890/query", func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodPost, r.Method, "should POST to database query endpoint")
+
+		resp := notionSearchResponse{
+			Results: []notionPage{
+				{
+					ID:  "page-in-db",
+					URL: "https://notion.so/page-in-db",
+					Properties: map[string]notionProperty{
+						"Name": {Type: "title", Title: []notionRichText{{PlainText: "Task Alpha"}}},
+					},
+				},
+				{
+					ID:  "page-in-db-2",
+					URL: "https://notion.so/page-in-db-2",
+					Properties: map[string]notionProperty{
+						"Name": {Type: "title", Title: []notionRichText{{PlainText: "Unrelated Page"}}},
+					},
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	store := NewNotionDocumentStore(NotionDocumentStoreConfig{
+		AuthToken: "test-token",
+		APIURL:    srv.URL,
+	})
+
+	// With query filter — should client-side filter by title.
+	results, err := store.SearchDocuments(context.Background(), "Alpha", DocFilter{
+		Workspace: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+		Limit:     10,
+	})
+	require.NoError(t, err, "search with UUID workspace should succeed")
+	require.Len(t, results, 1, "should filter to matching title only")
+	require.Equal(t, "Task Alpha", results[0].Title, "should return the matching page")
+}
+
+func TestNotionSearchDocuments_WorkspaceFilterByName(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+
+	// ListDatabases is called to resolve the name.
+	mux.HandleFunc("/v1/search", func(w http.ResponseWriter, r *http.Request) {
+		var body notionSearchRequest
+		json.NewDecoder(r.Body).Decode(&body)
+		require.Equal(t, "database", body.Filter.Value, "should search for databases")
+
+		resp := notionSearchResponse{
+			Results: []notionPage{
+				{
+					ID:    "resolved-db-id",
+					Title: []notionRichText{{PlainText: "Sprint Board"}},
+				},
+				{
+					ID:    "other-db-id",
+					Title: []notionRichText{{PlainText: "Knowledge Base"}},
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	// Database query for the resolved ID.
+	mux.HandleFunc("/v1/databases/resolved-db-id/query", func(w http.ResponseWriter, r *http.Request) {
+		resp := notionSearchResponse{
+			Results: []notionPage{
+				{
+					ID:  "sprint-page",
+					URL: "https://notion.so/sprint-page",
+					Properties: map[string]notionProperty{
+						"Name": {Type: "title", Title: []notionRichText{{PlainText: "Sprint 42"}}},
+					},
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	store := NewNotionDocumentStore(NotionDocumentStoreConfig{
+		AuthToken: "test-token",
+		APIURL:    srv.URL,
+	})
+
+	// Case-insensitive name match.
+	results, err := store.SearchDocuments(context.Background(), "", DocFilter{
+		Workspace: "sprint board",
+		Limit:     10,
+	})
+	require.NoError(t, err, "search with name workspace should succeed")
+	require.Len(t, results, 1, "should return pages from the resolved database")
+	require.Equal(t, "Sprint 42", results[0].Title, "should return the page from Sprint Board db")
+}
+
+func TestNotionSearchDocuments_WorkspaceNameNotFound(t *testing.T) {
+	t.Parallel()
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := notionSearchResponse{
+			Results: []notionPage{
+				{ID: "db-1", Title: []notionRichText{{PlainText: "Other DB"}}},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	store := NewNotionDocumentStore(NotionDocumentStoreConfig{
+		AuthToken: "test-token",
+		APIURL:    srv.URL,
+	})
+
+	_, err := store.SearchDocuments(context.Background(), "test", DocFilter{
+		Workspace: "Nonexistent DB",
+	})
+	require.Error(t, err, "should error when workspace name not found")
+	require.Contains(t, err.Error(), "no database found matching", "error should indicate name not found")
+}
