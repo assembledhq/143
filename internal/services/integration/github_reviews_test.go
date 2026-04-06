@@ -418,6 +418,59 @@ func TestGetPRReviews_PaginationSafetyCap(t *testing.T) {
 	require.Equal(t, maxPaginationPages, pageCount, "should stop at maxPaginationPages")
 }
 
+func TestGetPRReviews_PaginationMidPageError(t *testing.T) {
+	t.Parallel()
+
+	pageCount := 0
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/repos/o/r/pulls/1/reviews", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]any{
+			{
+				"id":           int64(100),
+				"user":         map[string]any{"login": "rev"},
+				"state":        "COMMENTED",
+				"body":         "",
+				"submitted_at": "2025-06-15T12:00:00Z",
+			},
+		})
+	})
+
+	mux.HandleFunc("/repos/o/r/pulls/1/comments", func(w http.ResponseWriter, r *http.Request) {
+		pageCount++
+		if pageCount == 1 {
+			// Page 1 succeeds with a Link header to page 2.
+			page2URL := fmt.Sprintf("http://%s/repos/o/r/pulls/1/comments?page=2", r.Host)
+			w.Header().Set("Link", `<`+page2URL+`>; rel="next"`)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"id": int64(200), "pull_request_review_id": int64(100),
+					"path": "a.go", "line": 1, "body": "page1-comment",
+					"diff_hunk": "@@", "user": map[string]any{"login": "rev"},
+				},
+			})
+		} else {
+			// Page 2 returns a server error.
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	src := NewGitHubCodeReviewSource(GitHubCodeReviewConfig{
+		BaseURL: server.URL, Token: "t", Owner: "o", Repo: "r",
+	})
+
+	reviews, err := src.GetPRReviews(context.Background(), 1)
+	require.NoError(t, err, "should succeed with partial results on mid-pagination error")
+	require.Len(t, reviews, 1, "should return the review")
+	require.Len(t, reviews[0].Comments, 1, "should preserve page 1 comments despite page 2 failure")
+	require.Equal(t, "a.go", reviews[0].Comments[0].Path, "should have the page 1 comment")
+}
+
 func TestReviewDecision(t *testing.T) {
 	t.Parallel()
 
