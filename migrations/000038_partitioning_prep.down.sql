@@ -1,5 +1,12 @@
 -- Reverse session_logs partitioning and drop helper functions.
 
+-- Verify the source table exists and is partitioned before proceeding.
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'session_logs' AND relkind = 'p') THEN
+        RAISE EXCEPTION 'session_logs is not a partitioned table — down migration may have already run';
+    END IF;
+END $$;
+
 CREATE TABLE session_logs_backup AS SELECT * FROM session_logs;
 
 DROP TABLE session_logs CASCADE;

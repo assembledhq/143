@@ -53,7 +53,8 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs (org_id, action, 
 CREATE INDEX IF NOT EXISTS idx_audit_logs_session ON audit_logs (session_id, created_at DESC) WHERE session_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_audit_logs_project ON audit_logs (project_id, created_at DESC) WHERE project_id IS NOT NULL;
 
-SELECT create_monthly_partitions('audit_logs', '2025-01-01'::date,
+SELECT create_monthly_partitions('audit_logs',
+    COALESCE((SELECT date_trunc('month', MIN(created_at))::date FROM audit_logs_old), '2025-01-01'::date),
     (date_trunc('month', now()::date) + interval '3 months')::date);
 
 CREATE TABLE audit_logs_default PARTITION OF audit_logs DEFAULT;
@@ -97,7 +98,8 @@ BEGIN
     cutoff := (now() - make_interval(days => retention_days))::date;
 
     FOR rec IN
-        SELECT inhrelid::regclass::text AS partition_name,
+        SELECT c.oid,
+               inhrelid::regclass::text AS partition_name,
                pg_get_expr(c.relpartbound, c.oid) AS bound_expr
         FROM pg_inherits
         JOIN pg_class c ON c.oid = inhrelid
@@ -105,10 +107,19 @@ BEGIN
           AND c.relname != 'audit_logs_default'
         ORDER BY c.relname
     LOOP
-        IF (regexp_match(rec.bound_expr, $re$TO \('([^']+)'\)$re$))[1]::date <= cutoff THEN
-            EXECUTE format('DROP TABLE %s', rec.partition_name);
-            dropped := dropped + 1;
-        END IF;
+        -- Extract the upper bound date from the partition range expression.
+        -- Use a sub-select to safely handle unexpected expression formats.
+        DECLARE
+            upper_bound date;
+        BEGIN
+            upper_bound := (regexp_match(rec.bound_expr, $re$TO \('([^']+)'\)$re$))[1]::date;
+            IF upper_bound <= cutoff THEN
+                EXECUTE format('DROP TABLE %s', rec.partition_name);
+                dropped := dropped + 1;
+            END IF;
+        EXCEPTION WHEN OTHERS THEN
+            RAISE WARNING 'Skipping partition % — could not parse bound: %', rec.partition_name, rec.bound_expr;
+        END;
     END LOOP;
 
     RETURN dropped;

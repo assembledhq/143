@@ -1,4 +1,12 @@
 -- Reverse session_messages partitioning.
+
+-- Verify the source table exists and is partitioned before proceeding.
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'session_messages' AND relkind = 'p') THEN
+        RAISE EXCEPTION 'session_messages is not a partitioned table — down migration may have already run';
+    END IF;
+END $$;
+
 CREATE TABLE session_messages_backup AS SELECT * FROM session_messages;
 
 DROP TABLE session_messages CASCADE;

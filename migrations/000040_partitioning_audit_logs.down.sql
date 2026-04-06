@@ -1,4 +1,12 @@
 -- Reverse audit_logs partitioning.
+
+-- Verify the source table exists and is partitioned before proceeding.
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'audit_logs' AND relkind = 'p') THEN
+        RAISE EXCEPTION 'audit_logs is not a partitioned table — down migration may have already run';
+    END IF;
+END $$;
+
 DROP TRIGGER IF EXISTS audit_logs_immutable ON audit_logs;
 
 CREATE TABLE audit_logs_backup AS SELECT * FROM audit_logs;

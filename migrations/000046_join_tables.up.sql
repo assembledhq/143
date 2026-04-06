@@ -54,3 +54,9 @@ WHERE p.source_issue_ids IS NOT NULL
 -- a phased rollout. The application code will be updated to use the join
 -- tables, and a future migration will drop the legacy columns once verified.
 -- This avoids data loss during the transition.
+--
+-- IMPORTANT: Application code MUST NOT write to both the old UUID[] columns
+-- and the new join tables simultaneously, as they will diverge. The join
+-- tables are the source of truth from this migration onward. The old columns
+-- (projects.source_issue_ids, project_tasks.depends_on) are frozen and will
+-- be dropped in a follow-up migration.

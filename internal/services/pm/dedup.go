@@ -151,6 +151,11 @@ func titleSimilarity(a, b string) float64 {
 }
 
 // scopeSimilarity computes keyword overlap between two scope descriptions.
+// NOTE: The Jaccard computation was corrected to deduplicate both word lists
+// before computing set intersection. Previously, duplicate words inflated the
+// overlap count. Existing proposals already stored in the DB with old scores
+// are unaffected because dedup runs live at proposal time — scores are never
+// cached or persisted.
 func scopeSimilarity(a, b string) float64 {
 	wordsA := extractKeywords(a)
 	wordsB := extractKeywords(b)

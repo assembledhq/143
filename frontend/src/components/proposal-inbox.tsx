@@ -37,8 +37,8 @@ export function ProposalInbox({ proposals, onNavigateToProject }: ProposalInboxP
       queryClient.invalidateQueries({ queryKey: ["proposalSummary"] });
       setSelectedProposal(null);
     },
-    onError: () => {
-      console.error("Failed to approve proposal");
+    onError: (error: Error) => {
+      console.error("Failed to approve proposal:", error.message);
     },
   });
 
@@ -51,8 +51,8 @@ export function ProposalInbox({ proposals, onNavigateToProject }: ProposalInboxP
       setSelectedProposal(null);
       setDismissReason("");
     },
-    onError: () => {
-      console.error("Failed to dismiss proposal");
+    onError: (error: Error) => {
+      console.error("Failed to dismiss proposal:", error.message);
     },
   });
 
@@ -280,9 +280,14 @@ export function ProposalInbox({ proposals, onNavigateToProject }: ProposalInboxP
                     placeholder="Reason for dismissal (optional)"
                     className="w-full text-sm border rounded-md px-3 py-1.5 bg-background"
                   />
-                  {(approveMutation.isError || dismissMutation.isError) && (
+                  {approveMutation.isError && (
                     <p className="text-xs text-red-600 dark:text-red-400">
-                      {approveMutation.isError ? "Failed to approve proposal. Please try again." : "Failed to dismiss proposal. Please try again."}
+                      Failed to approve: {approveMutation.error?.message || "Unknown error"}. Please try again.
+                    </p>
+                  )}
+                  {dismissMutation.isError && (
+                    <p className="text-xs text-red-600 dark:text-red-400">
+                      Failed to dismiss: {dismissMutation.error?.message || "Unknown error"}. Please try again.
                     </p>
                   )}
                 </div>

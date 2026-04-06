@@ -50,6 +50,23 @@ BEGIN
     END IF;
 END $$;
 
+-- Log the specific IDs being deleted for audit purposes.
+DO $$
+DECLARE
+    deleted_ids text;
+BEGIN
+    SELECT string_agg(a.id::text, ', ') INTO deleted_ids
+    FROM pull_requests a
+    JOIN pull_requests b ON a.id != b.id
+      AND a.org_id = b.org_id
+      AND a.github_repo = b.github_repo
+      AND a.github_pr_number = b.github_pr_number
+      AND (a.updated_at < b.updated_at OR (a.updated_at = b.updated_at AND a.id > b.id));
+    IF deleted_ids IS NOT NULL THEN
+        RAISE WARNING 'Deleting pull_requests IDs: %', deleted_ids;
+    END IF;
+END $$;
+
 DELETE FROM pull_requests a
 USING pull_requests b
 WHERE a.id != b.id

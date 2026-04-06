@@ -18,6 +18,10 @@ UPDATE webhook_deliveries SET seq = sub.rn
 FROM (SELECT id, row_number() OVER (ORDER BY received_at, id) AS rn FROM webhook_deliveries) sub
 WHERE webhook_deliveries.id = sub.id;
 
+-- Sync the sequence so new inserts continue from max(seq), ensuring
+-- new rows always have seq > all backfilled rows.
+SELECT setval(pg_get_serial_sequence('webhook_deliveries', 'seq'), COALESCE((SELECT MAX(seq) FROM webhook_deliveries), 1));
+
 CREATE INDEX idx_webhook_deliveries_seq ON webhook_deliveries (seq);
 
 -- 3. Add missing index for retry/replay workers (documented in schema but never created).

@@ -182,6 +182,75 @@ func TestHandlePullRequestEvent_MergedFlow(t *testing.T) {
 	require.NoError(t, jobMock.ExpectationsWereMet(), "all job store expectations should be met")
 }
 
+func TestHandlePullRequestEvent_MergedWithNilSessionID(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	now := time.Now()
+
+	prMock := newMockPool(t)
+	deployMock := newMockPool(t)
+	jobMock := newMockPool(t)
+
+	prStore := db.NewPullRequestStore(prMock)
+	deployStore := db.NewDeployStore(deployMock)
+	jobStore := db.NewJobStore(jobMock)
+
+	svc := &PRService{
+		pullRequests: prStore,
+		sessions:     db.NewSessionStore(newMockPool(t)),
+		issues:       db.NewIssueStore(newMockPool(t)),
+		deploys:      deployStore,
+		jobs:         jobStore,
+		logger:       zerolog.Nop(),
+	}
+
+	// Mock: GetByRepoAndNumber returns a PR with nil session_id.
+	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE github_repo").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(handlerPRColumns).
+				AddRow(prID, (*uuid.UUID)(nil), orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
+					"Fix bug", (*string)(nil), "open", "pending", (*time.Time)(nil), now, now),
+		)
+
+	// Mock: UpdateStatus to merged.
+	prMock.ExpectExec("UPDATE pull_requests SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	// Mock: Create deploy.
+	deployMock.ExpectQuery("INSERT INTO deploys").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "deployed_at", "created_at"}).
+				AddRow(uuid.New(), now, now),
+		)
+
+	// Mock: Enqueue job.
+	jobMock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()),
+		)
+
+	event := PullRequestEvent{
+		Action: "closed",
+		Number: 42,
+	}
+	event.PR.Merged = true
+	event.PR.Head.SHA = "abc123commit"
+	event.Repository.FullName = "testorg/testrepo"
+
+	err := svc.HandlePullRequestEvent(context.Background(), event)
+	require.NoError(t, err, "HandlePullRequestEvent should not return an error for a merged PR with nil session_id")
+	require.NoError(t, prMock.ExpectationsWereMet(), "all PR store expectations should be met")
+	require.NoError(t, deployMock.ExpectationsWereMet(), "all deploy store expectations should be met")
+	require.NoError(t, jobMock.ExpectationsWereMet(), "all job store expectations should be met")
+}
+
 func TestHandlePullRequestEvent_ClosedWithoutMergeFlow(t *testing.T) {
 	t.Parallel()
 

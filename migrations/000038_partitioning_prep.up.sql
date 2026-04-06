@@ -131,7 +131,8 @@ ALTER TABLE session_logs
     ADD CONSTRAINT chk_session_logs_level CHECK (level IN ('debug', 'info', 'warn', 'error'));
 
 -- 6. Create partitions: from 2025-01 through 3 months from now.
-SELECT create_monthly_partitions('session_logs', '2025-01-01'::date,
+SELECT create_monthly_partitions('session_logs',
+    COALESCE((SELECT date_trunc('month', MIN(timestamp))::date FROM session_logs_old), '2025-01-01'::date),
     (date_trunc('month', now()::date) + interval '3 months')::date);
 
 -- 7. Default partition for data outside defined ranges.

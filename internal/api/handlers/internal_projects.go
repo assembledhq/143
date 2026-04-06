@@ -358,11 +358,16 @@ func (h *InternalProjectHandler) incrementAndCheckProposal(key string) bool {
 	now := time.Now()
 	cutoff := now.Add(-rateLimiterWindow)
 
-	// Evict stale entries.
+	// Evict stale entries. Collect keys first to avoid modifying the map
+	// during iteration, which can cause unpredictable behavior.
+	var stale []string
 	for k, v := range h.perTokenRepoCount {
 		if v.createdAt.Before(cutoff) {
-			delete(h.perTokenRepoCount, k)
+			stale = append(stale, k)
 		}
+	}
+	for _, k := range stale {
+		delete(h.perTokenRepoCount, k)
 	}
 
 	entry, ok := h.perTokenRepoCount[key]

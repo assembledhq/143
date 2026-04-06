@@ -37,7 +37,8 @@ ALTER TABLE session_messages
 CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages (org_id, session_id, turn_number);
 CREATE INDEX IF NOT EXISTS idx_session_messages_thread ON session_messages (thread_id) WHERE thread_id IS NOT NULL;
 
-SELECT create_monthly_partitions('session_messages', '2025-01-01'::date,
+SELECT create_monthly_partitions('session_messages',
+    COALESCE((SELECT date_trunc('month', MIN(created_at))::date FROM session_messages_old), '2025-01-01'::date),
     (date_trunc('month', now()::date) + interval '3 months')::date);
 
 CREATE TABLE session_messages_default PARTITION OF session_messages DEFAULT;

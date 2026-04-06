@@ -80,5 +80,8 @@ ALTER TABLE project_cycles VALIDATE CONSTRAINT chk_project_cycles_cycle_number;
 
 -- =============================================================================
 -- Issue 17: Org-scoped job dequeue index for fair scheduling
+-- The dequeue query uses ORDER BY run_at ASC, priority DESC to pick the
+-- highest-priority job that is ready to run. The DESC on priority matches
+-- this query shape so the index can be scanned forward without a sort.
 -- =============================================================================
 CREATE INDEX IF NOT EXISTS idx_jobs_org_dequeue ON jobs (org_id, queue, status, run_at, priority DESC);
