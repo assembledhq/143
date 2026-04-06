@@ -73,16 +73,17 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"SessionFileHandler.GetFileContent": "delegates to getSessionContainer which uses OrgIDFromContext",
 		"SessionFileHandler.GetFileContext": "delegates to getSessionContainer which uses OrgIDFromContext",
 
-		// Preview inspector stubs — not yet implemented, return 501 with no data access.
-		"PreviewHandler.DetectReadiness":      "stub, no org-scoped data access",
-		"PreviewHandler.CaptureScreenshot":    "stub, no org-scoped data access",
-		"PreviewHandler.InspectElement":       "stub, no org-scoped data access",
-		"PreviewHandler.ReadConsole":          "stub, no org-scoped data access",
-		"PreviewHandler.SubmitDesignFeedback": "stub, no org-scoped data access",
-		"PreviewHandler.ExecuteInteraction":   "stub, no org-scoped data access",
-		"PreviewHandler.CaptureMultiViewport": "stub, no org-scoped data access",
-		"PreviewHandler.ComputeVisualDiff":    "stub, no org-scoped data access",
-		"PreviewHandler.RunAssertions":        "stub, no org-scoped data access",
+		// Preview inspector handlers — delegate to requireInspector + getActivePreview
+		// which use OrgIDFromContext.
+		"PreviewHandler.DetectReadiness":      "uses OrgIDFromContext directly",
+		"PreviewHandler.CaptureScreenshot":    "delegates to getActivePreview which uses OrgIDFromContext",
+		"PreviewHandler.InspectElement":       "delegates to getActivePreview which uses OrgIDFromContext",
+		"PreviewHandler.ReadConsole":          "delegates to getActivePreview which uses OrgIDFromContext",
+		"PreviewHandler.SubmitDesignFeedback": "delegates to getActivePreview which uses OrgIDFromContext; also calls OrgIDFromContext directly for log entry",
+		"PreviewHandler.ExecuteInteraction":   "delegates to getActivePreview which uses OrgIDFromContext",
+		"PreviewHandler.CaptureMultiViewport": "delegates to getActivePreview which uses OrgIDFromContext",
+		"PreviewHandler.ComputeVisualDiff":    "delegates to getActivePreview which uses OrgIDFromContext",
+		"PreviewHandler.RunAssertions":        "delegates to getActivePreview which uses OrgIDFromContext",
 	}
 
 	fset := token.NewFileSet()

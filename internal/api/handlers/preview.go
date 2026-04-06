@@ -1,9 +1,13 @@
 package handlers
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
@@ -60,6 +64,22 @@ func (h *PreviewHandler) getActivePreview(w http.ResponseWriter, r *http.Request
 	}
 
 	return instance, true
+}
+
+// requireInspector returns the PreviewInspector or writes a 501 error response.
+func (h *PreviewHandler) requireInspector(w http.ResponseWriter, r *http.Request) (preview.PreviewInspector, bool) {
+	if h.manager == nil {
+		writeError(w, r, http.StatusNotImplemented, "PREVIEW_INSPECTOR_NOT_AVAILABLE",
+			"preview inspector (headless browser) is not configured on this worker")
+		return nil, false
+	}
+	inspector := h.manager.Inspector()
+	if inspector == nil {
+		writeError(w, r, http.StatusNotImplemented, "PREVIEW_INSPECTOR_NOT_AVAILABLE",
+			"preview inspector (headless browser) is not configured on this worker")
+		return nil, false
+	}
+	return inspector, true
 }
 
 // =============================================================================
@@ -276,60 +296,411 @@ func (h *PreviewHandler) ExtendTTL(w http.ResponseWriter, r *http.Request) {
 // =============================================================================
 
 func (h *PreviewHandler) DetectReadiness(w http.ResponseWriter, r *http.Request) {
-	// For MVP, return a placeholder. Full implementation requires reading
-	// .143/preview.json from the repo via the GitHub API.
-	result := map[string]string{
-		"readiness": string(models.PreviewReadinessNotSupported),
-		"reason":    "preview readiness detection not yet implemented",
+	orgID := middleware.OrgIDFromContext(r.Context())
+	_ = orgID // Used for future org-level credential/destination lookups.
+
+	// Check for a config query parameter (base64-encoded JSON).
+	configParam := r.URL.Query().Get("config")
+	if configParam == "" {
+		// No config provided — report not supported (full implementation would
+		// read .143/preview.json from the repo via the GitHub API).
+		result := models.PreviewDetectionResult{
+			Readiness: models.PreviewReadinessNotSupported,
+			ValidationErrors: []string{
+				"no preview config provided; pass config as a base64-encoded query parameter or read .143/preview.json from the repository",
+			},
+		}
+		writeJSON(w, http.StatusOK, models.SingleResponse[models.PreviewDetectionResult]{Data: result})
+		return
 	}
-	writeJSON(w, http.StatusOK, models.SingleResponse[map[string]string]{Data: result})
+
+	// Decode the base64-encoded config JSON.
+	configJSON, err := base64.RawURLEncoding.DecodeString(configParam)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_CONFIG", "config parameter must be base64url-encoded JSON", err)
+		return
+	}
+
+	cfg, err := preview.ParseConfig(configJSON)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_CONFIG", err.Error())
+		return
+	}
+
+	result := preview.DetectReadiness(cfg)
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.PreviewDetectionResult]{Data: result})
 }
 
 // =============================================================================
-// Preview Inspector stubs (require headless browser — not yet implemented)
+// POST /api/v1/sessions/{id}/preview/screenshot — Capture a screenshot
 // =============================================================================
 
-func inspectorNotAvailable(w http.ResponseWriter, r *http.Request) {
-	writeError(w, r, http.StatusNotImplemented, "PREVIEW_INSPECTOR_NOT_AVAILABLE",
-		"preview inspector (headless browser) is not yet implemented")
+type captureScreenshotRequest struct {
+	Path      string `json:"path"`
+	ViewportW int    `json:"viewport_w"`
+	ViewportH int    `json:"viewport_h"`
+	FullPage  bool   `json:"full_page"`
+	DelayMS   int    `json:"delay_ms"`
 }
 
-// CaptureScreenshot handles POST .../screenshot.
+type captureScreenshotResponse struct {
+	PageTitle     string                 `json:"page_title"`
+	ConsoleErrors []models.ConsoleMessage `json:"console_errors,omitempty"`
+	URL           string                 `json:"url"`
+	CapturedAt    time.Time              `json:"captured_at"`
+	PNGBase64     string                 `json:"png_base64"`
+}
+
 func (h *PreviewHandler) CaptureScreenshot(w http.ResponseWriter, r *http.Request) {
-	inspectorNotAvailable(w, r)
+	inspector, ok := h.requireInspector(w, r)
+	if !ok {
+		return
+	}
+	instance, ok := h.getActivePreview(w, r)
+	if !ok {
+		return
+	}
+
+	var body captureScreenshotRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
+		return
+	}
+
+	// Cap viewport dimensions to prevent absurdly large screenshots. A 4K
+	// viewport (3840x2160) is generous; larger values waste memory encoding
+	// the PNG as base64 in the JSON response.
+	const maxViewportDim = 3840
+	opts := models.DefaultScreenshotOpts()
+	if body.Path != "" {
+		opts.Path = body.Path
+	}
+	if body.ViewportW > 0 {
+		opts.ViewportW = min(body.ViewportW, maxViewportDim)
+	}
+	if body.ViewportH > 0 {
+		opts.ViewportH = min(body.ViewportH, maxViewportDim)
+	}
+	opts.FullPage = body.FullPage
+	if body.DelayMS > 0 {
+		opts.Delay = time.Duration(body.DelayMS) * time.Millisecond
+	}
+
+	result, err := inspector.CaptureScreenshot(r.Context(), instance.ID.String(), opts)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SCREENSHOT_FAILED", "failed to capture screenshot", err)
+		return
+	}
+
+	resp := captureScreenshotResponse{
+		PageTitle:     result.PageTitle,
+		ConsoleErrors: result.ConsoleErrors,
+		URL:           result.URL,
+		CapturedAt:    result.CapturedAt,
+		PNGBase64:     base64.StdEncoding.EncodeToString(result.PNG),
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[captureScreenshotResponse]{Data: resp})
 }
 
-// InspectElement handles POST .../inspect.
+// =============================================================================
+// POST /api/v1/sessions/{id}/preview/inspect — Inspect a DOM element
+// =============================================================================
+
+type inspectElementRequest struct {
+	X int `json:"x"`
+	Y int `json:"y"`
+}
+
 func (h *PreviewHandler) InspectElement(w http.ResponseWriter, r *http.Request) {
-	inspectorNotAvailable(w, r)
+	inspector, ok := h.requireInspector(w, r)
+	if !ok {
+		return
+	}
+	instance, ok := h.getActivePreview(w, r)
+	if !ok {
+		return
+	}
+
+	var body inspectElementRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
+		return
+	}
+	// Max coordinate is generous but prevents obviously absurd values.
+	const maxCoordinate = 10000
+	if body.X < 0 || body.Y < 0 || body.X > maxCoordinate || body.Y > maxCoordinate {
+		writeError(w, r, http.StatusBadRequest, "INVALID_COORDINATES",
+			"x and y must be between 0 and "+strconv.Itoa(maxCoordinate))
+		return
+	}
+
+	element, err := inspector.InspectElement(r.Context(), instance.ID.String(), body.X, body.Y)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "INSPECT_FAILED", "failed to inspect element", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[*models.ElementInfo]{Data: element})
 }
 
-// ReadConsole handles GET .../console.
+// =============================================================================
+// GET /api/v1/sessions/{id}/preview/console — Read console messages
+// =============================================================================
+
 func (h *PreviewHandler) ReadConsole(w http.ResponseWriter, r *http.Request) {
-	inspectorNotAvailable(w, r)
+	inspector, ok := h.requireInspector(w, r)
+	if !ok {
+		return
+	}
+	instance, ok := h.getActivePreview(w, r)
+	if !ok {
+		return
+	}
+
+	messages, err := inspector.ReadConsole(r.Context(), instance.ID.String())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CONSOLE_READ_FAILED", "failed to read console messages", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.ListResponse[preview.ConsoleMessage]{Data: messages})
 }
 
-// SubmitDesignFeedback handles POST .../design-feedback.
+// =============================================================================
+// POST /api/v1/sessions/{id}/preview/design-feedback — Submit design feedback
+// =============================================================================
+
 func (h *PreviewHandler) SubmitDesignFeedback(w http.ResponseWriter, r *http.Request) {
-	inspectorNotAvailable(w, r)
+	// Design feedback is stored as a log entry — it does not require the
+	// headless browser inspector. It only needs an active preview.
+	instance, ok := h.getActivePreview(w, r)
+	if !ok {
+		return
+	}
+
+	var body models.DesignModeFeedback
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
+		return
+	}
+
+	if body.Type == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_TYPE", "feedback type is required")
+		return
+	}
+
+	// Store the design feedback as a preview log entry so it appears in the
+	// session timeline and is available to the agent.
+	metadata, _ := json.Marshal(body)
+	log := &models.PreviewLog{
+		PreviewInstanceID: instance.ID,
+		OrgID:             middleware.OrgIDFromContext(r.Context()),
+		Level:             "info",
+		Step:              models.PreviewLogStepDesignFeedback,
+		Message:           "design feedback submitted",
+		Metadata:          metadata,
+	}
+	if err := h.store.CreatePreviewLog(r.Context(), log); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to store design feedback", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[map[string]string]{Data: map[string]string{
+		"status":     "accepted",
+		"preview_id": instance.ID.String(),
+	}})
 }
 
-// ExecuteInteraction handles POST .../interact.
+// =============================================================================
+// POST /api/v1/sessions/{id}/preview/interact — Execute browser interactions
+// =============================================================================
+
+const (
+	maxInteractionSteps    = 20
+	maxInteractionDuration = 60 * time.Second
+	maxAssertions          = 50
+)
+
+type executeInteractionRequest struct {
+	Steps []models.InteractionStep `json:"steps"`
+}
+
 func (h *PreviewHandler) ExecuteInteraction(w http.ResponseWriter, r *http.Request) {
-	inspectorNotAvailable(w, r)
+	inspector, ok := h.requireInspector(w, r)
+	if !ok {
+		return
+	}
+	instance, ok := h.getActivePreview(w, r)
+	if !ok {
+		return
+	}
+
+	var body executeInteractionRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
+		return
+	}
+
+	if len(body.Steps) == 0 {
+		writeError(w, r, http.StatusBadRequest, "MISSING_STEPS", "at least one interaction step is required")
+		return
+	}
+	if len(body.Steps) > maxInteractionSteps {
+		writeError(w, r, http.StatusBadRequest, "TOO_MANY_STEPS",
+			"at most "+strconv.Itoa(maxInteractionSteps)+" interaction steps allowed")
+		return
+	}
+
+	// Enforce the max total duration per the design doc (60 seconds).
+	ctx, cancel := context.WithTimeout(r.Context(), maxInteractionDuration)
+	defer cancel()
+
+	result, err := inspector.ExecuteInteraction(ctx, instance.ID.String(), body.Steps)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "INTERACTION_FAILED", "failed to execute interaction", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[*models.InteractionResult]{Data: result})
 }
 
-// CaptureMultiViewport handles POST .../multi-viewport.
+// =============================================================================
+// POST /api/v1/sessions/{id}/preview/multi-viewport — Multi-viewport capture
+// =============================================================================
+
+const maxViewportsPerCapture = 5
+
+type captureMultiViewportRequest struct {
+	Path      string               `json:"path"`
+	Viewports []models.ViewportSpec `json:"viewports"`
+	DelayMS   int                  `json:"delay_ms"`
+}
+
 func (h *PreviewHandler) CaptureMultiViewport(w http.ResponseWriter, r *http.Request) {
-	inspectorNotAvailable(w, r)
+	inspector, ok := h.requireInspector(w, r)
+	if !ok {
+		return
+	}
+	instance, ok := h.getActivePreview(w, r)
+	if !ok {
+		return
+	}
+
+	var body captureMultiViewportRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
+		return
+	}
+
+	viewports := body.Viewports
+	if len(viewports) == 0 {
+		viewports = models.DefaultViewports()
+	}
+	if len(viewports) > maxViewportsPerCapture {
+		writeError(w, r, http.StatusBadRequest, "TOO_MANY_VIEWPORTS",
+			"at most "+strconv.Itoa(maxViewportsPerCapture)+" viewports allowed per capture")
+		return
+	}
+
+	opts := models.MultiViewportOpts{
+		Path:      body.Path,
+		Viewports: viewports,
+	}
+	if opts.Path == "" {
+		opts.Path = "/"
+	}
+	if body.DelayMS > 0 {
+		opts.Delay = time.Duration(body.DelayMS) * time.Millisecond
+	}
+
+	result, err := inspector.CaptureMultiViewport(r.Context(), instance.ID.String(), opts)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "MULTI_VIEWPORT_FAILED", "failed to capture multi-viewport screenshots", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[*models.MultiViewportResult]{Data: result})
 }
 
-// ComputeVisualDiff handles POST .../visual-diff.
+// =============================================================================
+// POST /api/v1/sessions/{id}/preview/visual-diff — Compute visual diff
+// =============================================================================
+
+type computeVisualDiffRequest struct {
+	BeforeSnapshotID string `json:"before_snapshot_id"`
+	AfterSnapshotID  string `json:"after_snapshot_id"`
+}
+
 func (h *PreviewHandler) ComputeVisualDiff(w http.ResponseWriter, r *http.Request) {
-	inspectorNotAvailable(w, r)
+	inspector, ok := h.requireInspector(w, r)
+	if !ok {
+		return
+	}
+	instance, ok := h.getActivePreview(w, r)
+	if !ok {
+		return
+	}
+
+	var body computeVisualDiffRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
+		return
+	}
+
+	if body.BeforeSnapshotID == "" || body.AfterSnapshotID == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_SNAPSHOT_IDS", "before_snapshot_id and after_snapshot_id are required")
+		return
+	}
+
+	diff, err := inspector.ComputeVisualDiff(r.Context(), instance.ID.String(), body.BeforeSnapshotID, body.AfterSnapshotID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "VISUAL_DIFF_FAILED", "failed to compute visual diff", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[*models.VisualDiff]{Data: diff})
 }
 
-// RunAssertions handles POST .../assert.
+// =============================================================================
+// POST /api/v1/sessions/{id}/preview/assert — Run visual assertions
+// =============================================================================
+
+type runAssertionsRequest struct {
+	Assertions []preview.Assertion `json:"assertions"`
+}
+
 func (h *PreviewHandler) RunAssertions(w http.ResponseWriter, r *http.Request) {
-	inspectorNotAvailable(w, r)
+	inspector, ok := h.requireInspector(w, r)
+	if !ok {
+		return
+	}
+	instance, ok := h.getActivePreview(w, r)
+	if !ok {
+		return
+	}
+
+	var body runAssertionsRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
+		return
+	}
+
+	if len(body.Assertions) == 0 {
+		writeError(w, r, http.StatusBadRequest, "MISSING_ASSERTIONS", "at least one assertion is required")
+		return
+	}
+	if len(body.Assertions) > maxAssertions {
+		writeError(w, r, http.StatusBadRequest, "TOO_MANY_ASSERTIONS",
+			"at most "+strconv.Itoa(maxAssertions)+" assertions allowed per call")
+		return
+	}
+
+	result, err := inspector.RunAssertions(r.Context(), instance.ID.String(), body.Assertions)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "ASSERTIONS_FAILED", "failed to run assertions", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[*preview.AssertionResult]{Data: result})
 }

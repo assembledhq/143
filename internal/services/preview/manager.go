@@ -54,6 +54,11 @@ type Manager struct {
 
 	workerNodeID string // identity of this worker for routing
 
+	// Inspector is the headless browser used for screenshot capture, DOM
+	// inspection, and interaction replay. It may be nil if the headless
+	// browser has not been configured on this worker node.
+	inspector PreviewInspector
+
 	// Caps (configurable per org in future; hardcoded for MVP).
 	maxPerUser   int
 	maxPerOrg    int
@@ -64,6 +69,7 @@ type Manager struct {
 type ManagerConfig struct {
 	Store        *db.PreviewStore
 	Provider     PreviewCapableProvider
+	Inspector    PreviewInspector
 	Logger       zerolog.Logger
 	WorkerNodeID string
 	MaxPerUser   int
@@ -76,6 +82,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 	m := &Manager{
 		store:        cfg.Store,
 		provider:     cfg.Provider,
+		inspector:    cfg.Inspector,
 		logger:       cfg.Logger,
 		workerNodeID: cfg.WorkerNodeID,
 		maxPerUser:   cfg.MaxPerUser,
@@ -433,6 +440,20 @@ func (m *Manager) DialPreview(ctx context.Context, orgID, previewID uuid.UUID) (
 	}
 
 	return m.provider.DialPreview(ctx, instance.PreviewHandle)
+}
+
+// =============================================================================
+// Inspector
+// =============================================================================
+
+// Inspector returns the PreviewInspector, or nil if not configured.
+func (m *Manager) Inspector() PreviewInspector {
+	return m.inspector
+}
+
+// SetInspector sets the headless browser inspector (useful for late binding).
+func (m *Manager) SetInspector(inspector PreviewInspector) {
+	m.inspector = inspector
 }
 
 // =============================================================================

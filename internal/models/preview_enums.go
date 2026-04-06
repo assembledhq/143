@@ -141,11 +141,12 @@ func (t PreviewSnapshotTrigger) Validate() error {
 type PreviewLogStep string
 
 const (
-	PreviewLogStepBuild   PreviewLogStep = "build"
-	PreviewLogStepInit    PreviewLogStep = "init"
-	PreviewLogStepStart   PreviewLogStep = "start"
-	PreviewLogStepProxy   PreviewLogStep = "proxy"
-	PreviewLogStepCleanup PreviewLogStep = "cleanup"
+	PreviewLogStepBuild          PreviewLogStep = "build"
+	PreviewLogStepInit           PreviewLogStep = "init"
+	PreviewLogStepStart          PreviewLogStep = "start"
+	PreviewLogStepProxy          PreviewLogStep = "proxy"
+	PreviewLogStepCleanup        PreviewLogStep = "cleanup"
+	PreviewLogStepDesignFeedback PreviewLogStep = "design_feedback"
 )
 
 func (s PreviewLogStep) Validate() error {
@@ -154,7 +155,8 @@ func (s PreviewLogStep) Validate() error {
 		PreviewLogStepInit,
 		PreviewLogStepStart,
 		PreviewLogStepProxy,
-		PreviewLogStepCleanup:
+		PreviewLogStepCleanup,
+		PreviewLogStepDesignFeedback:
 		return nil
 	default:
 		return fmt.Errorf("invalid PreviewLogStep: %q", s)
