@@ -279,20 +279,11 @@ func (s *Service) canDispatchForProject(ctx context.Context, orgID uuid.UUID, pr
 			return 0
 		}
 		return 1
-	case models.ProjectExecModeParallel:
-		maxConcurrent := project.MaxConcurrent
-		if maxConcurrent <= 0 {
-			maxConcurrent = 1
-		}
-		remaining := maxConcurrent - activeCount
-		if remaining < 0 {
-			return 0
-		}
-		return remaining
-	case models.ProjectExecModeDependencyGraph:
-		// Dependency graph mode: allow parallel execution up to max_concurrent,
-		// but actual eligibility is filtered in dispatchProjectTasks based on
-		// whether each task's dependencies are satisfied.
+	case models.ProjectExecModeParallel, models.ProjectExecModeDependencyGraph:
+		// Both modes allow parallel execution up to max_concurrent. For
+		// dependency_graph mode, actual eligibility is further filtered in
+		// dispatchProjectTasks based on whether each task's dependencies
+		// are satisfied.
 		maxConcurrent := project.MaxConcurrent
 		if maxConcurrent <= 0 {
 			maxConcurrent = 1
@@ -417,7 +408,7 @@ func checkDependenciesStatus(dependsOn []uuid.UUID, statusByID map[uuid.UUID]mod
 		switch status {
 		case models.ProjectTaskStatusCompleted:
 			continue
-		case models.ProjectTaskStatusFailed, models.ProjectTaskStatusCancelled, models.ProjectTaskStatusSkipped:
+		case models.ProjectTaskStatusFailed, models.ProjectTaskStatusCancelled, models.ProjectTaskStatusSkipped, models.ProjectTaskStatusBlocked:
 			return depStatusBlocked
 		default:
 			return depStatusWaiting

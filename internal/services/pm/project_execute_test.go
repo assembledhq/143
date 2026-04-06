@@ -609,6 +609,14 @@ func TestCheckDependenciesStatus(t *testing.T) {
 			want: depStatusBlocked,
 		},
 		{
+			name:      "blocked dep propagates blocked (transitive)",
+			dependsOn: []uuid.UUID{depA},
+			statuses: map[uuid.UUID]models.ProjectTaskStatus{
+				depA: models.ProjectTaskStatusBlocked,
+			},
+			want: depStatusBlocked,
+		},
+		{
 			name:      "unknown dep is waiting",
 			dependsOn: []uuid.UUID{depC},
 			statuses:  map[uuid.UUID]models.ProjectTaskStatus{},
