@@ -175,9 +175,24 @@ func (h *PMHandler) Decisions(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
 	limit := queryInt(r, "limit", 50)
+
+	decisionType := r.URL.Query().Get("decision_type")
+	if decisionType != "" && decisionType != "delegate" && decisionType != "skip" && decisionType != "cluster" {
+		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid decision_type: must be delegate, skip, or cluster")
+		return
+	}
+
+	outcome := r.URL.Query().Get("outcome")
+	if outcome != "" && outcome != "succeeded" && outcome != "failed" && outcome != "still_open" {
+		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid outcome: must be succeeded, failed, or still_open")
+		return
+	}
+
 	filters := db.PMDecisionFilters{
-		Limit:  limit,
-		Cursor: r.URL.Query().Get("cursor"),
+		Limit:        limit,
+		Cursor:       r.URL.Query().Get("cursor"),
+		DecisionType: decisionType,
+		Outcome:      outcome,
 	}
 
 	decisions, err := h.decisionLogStore.ListDecisionViews(r.Context(), orgID, filters)
