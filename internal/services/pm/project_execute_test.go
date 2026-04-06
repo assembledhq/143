@@ -685,7 +685,7 @@ func TestDispatchProjectTasks_DependencyGraph(t *testing.T) {
 		OrgID:     orgID,
 		Title:     "Deploy",
 		Status:    models.ProjectTaskStatusPending,
-		DependsOn: []uuid.UUID{uuid.New()}, // depends on non-existent task
+		DependsOn: []uuid.UUID{uuid.New()}, // depends on unknown task — treated as waiting
 	}
 
 	pts := &mockProjectTaskStore{
@@ -719,4 +719,58 @@ func TestDispatchProjectTasks_DependencyGraph(t *testing.T) {
 	}
 	require.NotNil(t, found, "ready task should still be in store")
 	require.Equal(t, models.ProjectTaskStatusDelegated, found.Status, "ready task should be delegated")
+}
+
+func TestDispatchProjectTasks_DependencyGraph_BlockedPath(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	projectID := uuid.New()
+
+	failedDep := &models.ProjectTask{
+		ID:        uuid.New(),
+		ProjectID: projectID,
+		OrgID:     orgID,
+		Title:     "Broken Step",
+		Status:    models.ProjectTaskStatusFailed,
+	}
+
+	blockedTask := &models.ProjectTask{
+		ID:        uuid.New(),
+		ProjectID: projectID,
+		OrgID:     orgID,
+		Title:     "Depends on Broken",
+		Status:    models.ProjectTaskStatusPending,
+		DependsOn: []uuid.UUID{failedDep.ID},
+	}
+
+	pts := &mockProjectTaskStore{
+		tasks:         []*models.ProjectTask{failedDep, blockedTask},
+		countByStatus: map[string]int{},
+	}
+	svc := newTestProjectService(nil, pts, &mockProjectCycleStore{})
+
+	project := &models.Project{
+		ID:            projectID,
+		ExecutionMode: models.ProjectExecModeDependencyGraph,
+		MaxConcurrent: 5,
+	}
+
+	dispatched := svc.dispatchProjectTasks(context.Background(), orgID, project, models.OrgSettings{
+		AutonomyLevel:    "auto_all",
+		DefaultAgentType: "codex",
+	}, uuid.New())
+
+	require.Equal(t, 0, dispatched, "should not dispatch any tasks when dependency failed")
+
+	// The task with a failed dependency should be marked as blocked.
+	var found *models.ProjectTask
+	for _, task := range pts.tasks {
+		if task.ID == blockedTask.ID {
+			found = task
+			break
+		}
+	}
+	require.NotNil(t, found, "blocked task should still be in store")
+	require.Equal(t, models.ProjectTaskStatusBlocked, found.Status, "task with failed dependency should be marked blocked")
 }
