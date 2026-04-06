@@ -2120,3 +2120,563 @@ func TestBuildEvalManifest(t *testing.T) {
 	require.Equal(t, &settingsID, manifest.OrgSettingsVersionID)
 	require.Equal(t, "sha256:abc123", manifest.SandboxImageDigest)
 }
+
+// ---------------------------------------------------------------------------
+// configurable sandbox provider for grading tests
+// ---------------------------------------------------------------------------
+
+// execFunc allows per-test control of sandbox Exec behavior.
+type execFunc func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error)
+
+// configurableSandboxProvider embeds stubSandboxProvider but overrides Exec.
+type configurableSandboxProvider struct {
+	stubSandboxProvider
+	execFn execFunc
+}
+
+func (c *configurableSandboxProvider) Exec(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+	if c.execFn != nil {
+		return c.execFn(ctx, sb, cmd, stdout, stderr)
+	}
+	return 0, nil
+}
+
+// ---------------------------------------------------------------------------
+// mock LLM client for gradeLLMJudge tests
+// ---------------------------------------------------------------------------
+
+type mockLLMClient struct {
+	response string
+	err      error
+}
+
+func (m *mockLLMClient) Complete(_ context.Context, _, _ string) (string, error) {
+	return m.response, m.err
+}
+
+// ---------------------------------------------------------------------------
+// gradeCodeCheck tests
+// ---------------------------------------------------------------------------
+
+func TestGradeCodeCheck(t *testing.T) {
+	t.Parallel()
+
+	t.Run("passing command returns score 1", func(t *testing.T) {
+		t.Parallel()
+
+		provider := &configurableSandboxProvider{
+			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, _, _ io.Writer) (int, error) {
+				return 0, nil
+			},
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "build",
+			GraderType:   "code_check",
+			GraderConfig: json.RawMessage(`{"command":"make test"}`),
+			Weight:       1.0,
+		}
+		sb := &agent.Sandbox{ID: "test-sb"}
+		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
+
+		require.Equal(t, "build", result.Name)
+		require.Equal(t, 1.0, result.Score)
+		require.True(t, result.Pass)
+		require.Contains(t, result.Details, "exit_code=0")
+	})
+
+	t.Run("failing command returns score 0", func(t *testing.T) {
+		t.Parallel()
+
+		provider := &configurableSandboxProvider{
+			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, _, stderr io.Writer) (int, error) {
+				_, _ = stderr.Write([]byte("build failed"))
+				return 1, nil
+			},
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "build",
+			GraderType:   "code_check",
+			GraderConfig: json.RawMessage(`{"command":"make test"}`),
+			Weight:       1.0,
+		}
+		sb := &agent.Sandbox{ID: "test-sb"}
+		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
+
+		require.Equal(t, "build", result.Name)
+		require.Equal(t, 0.0, result.Score)
+		require.False(t, result.Pass)
+		require.Contains(t, result.Details, "exit_code=1")
+	})
+
+	t.Run("exec error returns score 0", func(t *testing.T) {
+		t.Parallel()
+
+		provider := &configurableSandboxProvider{
+			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, _, _ io.Writer) (int, error) {
+				return -1, errors.New("sandbox unreachable")
+			},
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "build",
+			GraderType:   "code_check",
+			GraderConfig: json.RawMessage(`{"command":"make test"}`),
+			Weight:       1.0,
+		}
+		sb := &agent.Sandbox{ID: "test-sb"}
+		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
+
+		require.Equal(t, 0.0, result.Score)
+		require.False(t, result.Pass)
+		require.Contains(t, result.Details, "exec_error")
+	})
+
+	t.Run("invalid grader config returns score 0", func(t *testing.T) {
+		t.Parallel()
+
+		provider := &configurableSandboxProvider{}
+		criterion := models.ScoringCriterion{
+			Name:         "build",
+			GraderType:   "code_check",
+			GraderConfig: json.RawMessage(`{invalid`),
+			Weight:       1.0,
+		}
+		sb := &agent.Sandbox{ID: "test-sb"}
+		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
+
+		require.Equal(t, 0.0, result.Score)
+		require.False(t, result.Pass)
+		require.Contains(t, result.Details, "invalid code_check config")
+	})
+
+	t.Run("JSON stdout with custom score overrides exit code", func(t *testing.T) {
+		t.Parallel()
+
+		provider := &configurableSandboxProvider{
+			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, stdout, _ io.Writer) (int, error) {
+				_, _ = stdout.Write([]byte(`{"score": 0.75}`))
+				return 0, nil
+			},
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "quality",
+			GraderType:   "code_check",
+			GraderConfig: json.RawMessage(`{"command":"check_quality"}`),
+			Weight:       1.0,
+		}
+		sb := &agent.Sandbox{ID: "test-sb"}
+		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
+
+		require.InDelta(t, 0.75, result.Score, 0.001)
+		require.True(t, result.Pass) // 0.75 >= 0.5
+	})
+
+	t.Run("JSON stdout score below 0.5 fails", func(t *testing.T) {
+		t.Parallel()
+
+		provider := &configurableSandboxProvider{
+			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, stdout, _ io.Writer) (int, error) {
+				_, _ = stdout.Write([]byte(`{"score": 0.3}`))
+				return 0, nil
+			},
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "quality",
+			GraderType:   "code_check",
+			GraderConfig: json.RawMessage(`{"command":"check_quality"}`),
+			Weight:       1.0,
+		}
+		sb := &agent.Sandbox{ID: "test-sb"}
+		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
+
+		require.InDelta(t, 0.3, result.Score, 0.001)
+		require.False(t, result.Pass) // 0.3 < 0.5
+	})
+
+	t.Run("custom timeout from config is respected", func(t *testing.T) {
+		t.Parallel()
+
+		provider := &configurableSandboxProvider{
+			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, _, _ io.Writer) (int, error) {
+				return 0, nil
+			},
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "build",
+			GraderType:   "code_check",
+			GraderConfig: json.RawMessage(`{"command":"make test","timeout_seconds":10}`),
+			Weight:       1.0,
+		}
+		sb := &agent.Sandbox{ID: "test-sb"}
+		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
+
+		require.Equal(t, 1.0, result.Score)
+		require.True(t, result.Pass)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// gradeLLMJudge tests
+// ---------------------------------------------------------------------------
+
+func TestGradeLLMJudge(t *testing.T) {
+	t.Parallel()
+
+	solutionDiff := "diff --git a/main.go b/main.go\n+fixed"
+	task := &models.EvalTask{
+		IssueDescription: "Fix the bug in main.go",
+		SolutionDiff:     &solutionDiff,
+	}
+
+	t.Run("nil LLM client returns error result", func(t *testing.T) {
+		t.Parallel()
+
+		criterion := models.ScoringCriterion{
+			Name:       "correctness",
+			GraderType: "llm_judge",
+		}
+		result := gradeLLMJudge(context.Background(), nil, criterion, "some diff", task, zerolog.Nop())
+
+		require.Equal(t, "correctness", result.Name)
+		require.Equal(t, 0.0, result.Score)
+		require.False(t, result.Pass)
+		require.Contains(t, result.Details, "LLM client not configured")
+	})
+
+	t.Run("pass_fail mode with passing judgment", func(t *testing.T) {
+		t.Parallel()
+
+		llm := &mockLLMClient{
+			response: `{"pass": true, "reasoning": "The diff correctly fixes the bug."}`,
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "correctness",
+			GraderType:   "llm_judge",
+			GraderConfig: json.RawMessage(`{"output":"pass_fail"}`),
+			Weight:       1.0,
+		}
+		result := gradeLLMJudge(context.Background(), llm, criterion, "some diff", task, zerolog.Nop())
+
+		require.Equal(t, "correctness", result.Name)
+		require.Equal(t, 1.0, result.Score)
+		require.True(t, result.Pass)
+		require.Equal(t, "The diff correctly fixes the bug.", result.Reasoning)
+	})
+
+	t.Run("pass_fail mode with failing judgment", func(t *testing.T) {
+		t.Parallel()
+
+		llm := &mockLLMClient{
+			response: `{"pass": false, "reasoning": "The fix is incorrect."}`,
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "correctness",
+			GraderType:   "llm_judge",
+			GraderConfig: json.RawMessage(`{"output":"pass_fail"}`),
+			Weight:       1.0,
+		}
+		result := gradeLLMJudge(context.Background(), llm, criterion, "some diff", task, zerolog.Nop())
+
+		require.Equal(t, 0.0, result.Score)
+		require.False(t, result.Pass)
+	})
+
+	t.Run("score mode uses numeric score", func(t *testing.T) {
+		t.Parallel()
+
+		llm := &mockLLMClient{
+			response: `{"pass": true, "score": 0.85, "reasoning": "Mostly correct."}`,
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "quality",
+			GraderType:   "llm_judge",
+			GraderConfig: json.RawMessage(`{"output":"score"}`),
+			Weight:       1.0,
+		}
+		result := gradeLLMJudge(context.Background(), llm, criterion, "some diff", task, zerolog.Nop())
+
+		require.InDelta(t, 0.85, result.Score, 0.001)
+		require.True(t, result.Pass)
+	})
+
+	t.Run("LLM error returns failure result", func(t *testing.T) {
+		t.Parallel()
+
+		llm := &mockLLMClient{
+			err: errors.New("rate limited"),
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "correctness",
+			GraderType:   "llm_judge",
+			GraderConfig: json.RawMessage(`{"output":"pass_fail"}`),
+			Weight:       1.0,
+		}
+		result := gradeLLMJudge(context.Background(), llm, criterion, "some diff", task, zerolog.Nop())
+
+		require.Equal(t, 0.0, result.Score)
+		require.False(t, result.Pass)
+		require.Contains(t, result.Details, "LLM judge call failed")
+	})
+
+	t.Run("unparseable LLM response returns failure", func(t *testing.T) {
+		t.Parallel()
+
+		llm := &mockLLMClient{
+			response: "I'm not sure what to say here",
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "correctness",
+			GraderType:   "llm_judge",
+			GraderConfig: json.RawMessage(`{"output":"pass_fail"}`),
+			Weight:       1.0,
+		}
+		result := gradeLLMJudge(context.Background(), llm, criterion, "some diff", task, zerolog.Nop())
+
+		require.Equal(t, 0.0, result.Score)
+		require.False(t, result.Pass)
+		require.Contains(t, result.Details, "failed to parse judge response")
+	})
+
+	t.Run("markdown-fenced JSON is extracted", func(t *testing.T) {
+		t.Parallel()
+
+		llm := &mockLLMClient{
+			response: "Here is my judgment:\n```json\n{\"pass\": true, \"reasoning\": \"Good fix.\"}\n```",
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "correctness",
+			GraderType:   "llm_judge",
+			GraderConfig: json.RawMessage(`{"output":"pass_fail"}`),
+			Weight:       1.0,
+		}
+		result := gradeLLMJudge(context.Background(), llm, criterion, "some diff", task, zerolog.Nop())
+
+		require.Equal(t, 1.0, result.Score)
+		require.True(t, result.Pass)
+	})
+
+	t.Run("nil solution diff handled gracefully", func(t *testing.T) {
+		t.Parallel()
+
+		taskNoSolution := &models.EvalTask{
+			IssueDescription: "Fix the bug",
+		}
+		llm := &mockLLMClient{
+			response: `{"pass": true, "reasoning": "ok"}`,
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "correctness",
+			GraderType:   "llm_judge",
+			GraderConfig: json.RawMessage(`{"output":"pass_fail"}`),
+			Weight:       1.0,
+		}
+		result := gradeLLMJudge(context.Background(), llm, criterion, "diff", taskNoSolution, zerolog.Nop())
+
+		require.True(t, result.Pass)
+	})
+
+	t.Run("invalid grader config defaults to pass_fail", func(t *testing.T) {
+		t.Parallel()
+
+		llm := &mockLLMClient{
+			response: `{"pass": true, "reasoning": "ok"}`,
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "correctness",
+			GraderType:   "llm_judge",
+			GraderConfig: json.RawMessage(`{invalid`),
+			Weight:       1.0,
+		}
+		result := gradeLLMJudge(context.Background(), llm, criterion, "diff", task, zerolog.Nop())
+
+		require.Equal(t, 1.0, result.Score)
+		require.True(t, result.Pass)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// applyConfigOverlay tests
+// ---------------------------------------------------------------------------
+
+func TestApplyConfigOverlay(t *testing.T) {
+	t.Parallel()
+
+	t.Run("calls exec for fetch and each config file and dir", func(t *testing.T) {
+		t.Parallel()
+
+		var commands []string
+		provider := &configurableSandboxProvider{
+			execFn: func(_ context.Context, _ *agent.Sandbox, cmd string, _, _ io.Writer) (int, error) {
+				commands = append(commands, cmd)
+				return 0, nil
+			},
+		}
+		sb := &agent.Sandbox{ID: "test-sb"}
+		applyConfigOverlay(context.Background(), provider, sb, "refs/heads/my-branch", zerolog.Nop())
+
+		// Should have: 1 fetch + 2 config files + 2 config dirs = 5 commands
+		require.Len(t, commands, 5)
+		require.Contains(t, commands[0], "git fetch origin refs/heads/my-branch")
+		// Config files: AGENTS.md and CLAUDE.md
+		require.Contains(t, commands[1], "AGENTS.md")
+		require.Contains(t, commands[2], "CLAUDE.md")
+		// Config dirs: .claude and .143
+		require.Contains(t, commands[3], ".claude")
+		require.Contains(t, commands[4], ".143")
+	})
+
+	t.Run("exec failures are non-fatal", func(t *testing.T) {
+		t.Parallel()
+
+		provider := &configurableSandboxProvider{
+			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, _, _ io.Writer) (int, error) {
+				return 1, errors.New("command failed")
+			},
+		}
+		sb := &agent.Sandbox{ID: "test-sb"}
+
+		// Should not panic
+		applyConfigOverlay(context.Background(), provider, sb, "refs/heads/broken", zerolog.Nop())
+	})
+}
+
+// ---------------------------------------------------------------------------
+// weightedAverage tests
+// ---------------------------------------------------------------------------
+
+func TestWeightedAverage(t *testing.T) {
+	t.Parallel()
+
+	t.Run("equal weights", func(t *testing.T) {
+		t.Parallel()
+
+		criteria := []models.ScoringCriterion{
+			{Name: "a", Weight: 1.0},
+			{Name: "b", Weight: 1.0},
+		}
+		results := map[string]models.CriterionResult{
+			"a": {Name: "a", Score: 1.0},
+			"b": {Name: "b", Score: 0.5},
+		}
+		avg := weightedAverage(criteria, results)
+		require.InDelta(t, 0.75, avg, 0.001)
+	})
+
+	t.Run("unequal weights", func(t *testing.T) {
+		t.Parallel()
+
+		criteria := []models.ScoringCriterion{
+			{Name: "a", Weight: 3.0},
+			{Name: "b", Weight: 1.0},
+		}
+		results := map[string]models.CriterionResult{
+			"a": {Name: "a", Score: 1.0},
+			"b": {Name: "b", Score: 0.0},
+		}
+		avg := weightedAverage(criteria, results)
+		require.InDelta(t, 0.75, avg, 0.001)
+	})
+
+	t.Run("zero weight defaults to 1", func(t *testing.T) {
+		t.Parallel()
+
+		criteria := []models.ScoringCriterion{
+			{Name: "a", Weight: 0},
+			{Name: "b", Weight: 0},
+		}
+		results := map[string]models.CriterionResult{
+			"a": {Name: "a", Score: 1.0},
+			"b": {Name: "b", Score: 0.0},
+		}
+		avg := weightedAverage(criteria, results)
+		require.InDelta(t, 0.5, avg, 0.001)
+	})
+
+	t.Run("missing result treated as zero", func(t *testing.T) {
+		t.Parallel()
+
+		criteria := []models.ScoringCriterion{
+			{Name: "a", Weight: 1.0},
+			{Name: "b", Weight: 1.0},
+		}
+		results := map[string]models.CriterionResult{
+			"a": {Name: "a", Score: 1.0},
+		}
+		avg := weightedAverage(criteria, results)
+		require.InDelta(t, 0.5, avg, 0.001)
+	})
+
+	t.Run("empty criteria returns zero", func(t *testing.T) {
+		t.Parallel()
+
+		avg := weightedAverage(nil, nil)
+		require.Equal(t, 0.0, avg)
+	})
+
+	t.Run("negative weight defaults to 1", func(t *testing.T) {
+		t.Parallel()
+
+		criteria := []models.ScoringCriterion{
+			{Name: "a", Weight: -5.0},
+		}
+		results := map[string]models.CriterionResult{
+			"a": {Name: "a", Score: 0.8},
+		}
+		avg := weightedAverage(criteria, results)
+		require.InDelta(t, 0.8, avg, 0.001)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// runCodingAgent tests
+// ---------------------------------------------------------------------------
+
+func TestRunCodingAgent(t *testing.T) {
+	t.Parallel()
+
+	t.Run("successful agent execution returns diff", func(t *testing.T) {
+		t.Parallel()
+
+		callCount := 0
+		provider := &configurableSandboxProvider{
+			execFn: func(_ context.Context, _ *agent.Sandbox, cmd string, stdout, _ io.Writer) (int, error) {
+				callCount++
+				if callCount == 1 {
+					// The claude CLI call
+					_, _ = stdout.Write([]byte("agent output"))
+					return 0, nil
+				}
+				// The git diff call
+				_, _ = stdout.Write([]byte("diff --git a/file.go b/file.go\n+new line"))
+				return 0, nil
+			},
+		}
+		services := &Services{
+			SandboxProvider: provider,
+		}
+		sb := &agent.Sandbox{ID: "test-sb"}
+		diff, trace, tokenUsage := runCodingAgent(context.Background(), services, sb, "claude-sonnet-4-6", "Fix the bug", zerolog.Nop())
+
+		require.Contains(t, diff, "diff --git")
+		require.NotNil(t, trace)
+		require.Equal(t, 0, trace["exit_code"])
+		require.Nil(t, tokenUsage)
+	})
+
+	t.Run("agent exec error is captured in trace", func(t *testing.T) {
+		t.Parallel()
+
+		provider := &configurableSandboxProvider{
+			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, _, _ io.Writer) (int, error) {
+				return 1, errors.New("sandbox crashed")
+			},
+		}
+		services := &Services{
+			SandboxProvider: provider,
+		}
+		sb := &agent.Sandbox{ID: "test-sb"}
+		_, trace, _ := runCodingAgent(context.Background(), services, sb, "claude-sonnet-4-6", "Fix", zerolog.Nop())
+
+		require.Equal(t, 1, trace["exit_code"])
+		require.Equal(t, "sandbox crashed", trace["exec_error"])
+	})
+}
