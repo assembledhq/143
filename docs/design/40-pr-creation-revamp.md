@@ -1,6 +1,8 @@
 # Design: PR Creation Revamp — User-Authored PRs, Template Support, and Issueless Sessions
 
-> **Status:** Proposal | **Last reviewed:** 2026-03-29
+> **Status:** Partially Implemented | **Last reviewed:** 2026-04-05
+>
+> **Implementation notes:** PR template detection and caching implemented (`pr_templates` store). Missing: user GitHub auth OAuth expansion, user-authored PR creation flow, issueless session support.
 
 **Depends on**: [08-pr-and-ship.md](implemented/08-pr-and-ship.md), [13-repository-onboarding.md](implemented/13-repository-onboarding.md), [34-personal-team-coding-agents.md](implemented/34-personal-team-coding-agents.md)
 
