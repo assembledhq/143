@@ -78,6 +78,13 @@ type Config struct {
 	GeminiAPIKey string `env:"GEMINI_API_KEY"`
 	GeminiModel  string `env:"GEMINI_MODEL"`
 
+	// SMTP (optional — invitation emails are logged to console when not configured)
+	SMTPHost     string `env:"SMTP_HOST"`
+	SMTPPort     string `env:"SMTP_PORT"     envDefault:"587"`
+	SMTPUsername string `env:"SMTP_USERNAME"`
+	SMTPPassword string `env:"SMTP_PASSWORD"`
+	SMTPFrom     string `env:"SMTP_FROM"`
+
 	// Sandbox
 	SandboxRuntime     string `env:"SANDBOX_RUNTIME" envDefault:"runc"`
 	SandboxRequireGVisor bool   `env:"SANDBOX_REQUIRE_GVISOR" envDefault:"false"`

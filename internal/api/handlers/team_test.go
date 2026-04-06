@@ -146,7 +146,7 @@ func newTeamHandler(users *mockTeamUserStore, sessions *mockTeamSessionStore, in
 	if orgs == nil {
 		orgs = &mockTeamOrgStore{}
 	}
-	return NewTeamHandler(users, sessions, invitations, orgs, "http://localhost:3000")
+	return NewTeamHandler(users, sessions, invitations, orgs, "http://localhost:3000", nil)
 }
 
 func teamCtx(orgID uuid.UUID, user *models.User) context.Context {

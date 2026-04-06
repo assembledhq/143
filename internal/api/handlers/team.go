@@ -19,6 +19,7 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/email"
 )
 
 // teamUserStore is the interface the team handler depends on for user operations.
@@ -58,6 +59,7 @@ type TeamHandler struct {
 	sessions    teamSessionStore
 	invitations teamInvitationStore
 	orgs        teamOrgStore
+	emailSender email.Sender
 	frontendURL string
 	audit       *db.AuditEmitter
 }
@@ -74,12 +76,17 @@ func NewTeamHandler(
 	invitations teamInvitationStore,
 	orgs teamOrgStore,
 	frontendURL string,
+	emailSender email.Sender,
 ) *TeamHandler {
+	if emailSender == nil {
+		emailSender = email.NewNoopSender()
+	}
 	return &TeamHandler{
 		users:       users,
 		sessions:    sessions,
 		invitations: invitations,
 		orgs:        orgs,
+		emailSender: emailSender,
 		frontendURL: frontendURL,
 	}
 }
@@ -287,13 +294,28 @@ func (h *TeamHandler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 	}
 	emitUserAudit(h.audit, r, models.AuditActionTeamMemberInvited, models.AuditResourceInvitation, &invIDStr, invDetails)
 
-	// Log the invitation link to console (SMTP delivery is future work).
 	acceptURL := h.frontendURL + "/invite/accept?token=" + token
+
+	// Look up org name for the email.
+	orgName := ""
+	if org, orgErr := h.orgs.GetByID(r.Context(), orgID); orgErr == nil {
+		orgName = org.Name
+	}
+
+	// Send invitation email. If delivery fails, log the error but don't fail
+	// the request — the invitation record is valid and the admin can share
+	// the link manually.
+	if err := h.emailSender.SendInvitation(r.Context(), body.Email, currentUser.Name, orgName, acceptURL); err != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(err).
+			Str("email", body.Email).
+			Msg("failed to send invitation email — invitation is still valid")
+	}
+
 	zerolog.Ctx(r.Context()).Info().
 		Str("email", body.Email).
 		Str("role", body.Role).
 		Str("accept_url", acceptURL).
-		Msg("invitation created — share this link with the invitee")
+		Msg("invitation created")
 
 	resp := models.InvitationResponse{
 		ID:     inv.ID,
