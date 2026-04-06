@@ -18,6 +18,7 @@ import (
 //   - Go: const blocks in internal/models/*_enums.go, issue_source.go, org_settings.go
 //   - DB: CHECK constraints in migrations/000035_check_constraints.up.sql
 func TestEnumValuesMatchCheckConstraints(t *testing.T) {
+	t.Parallel()
 	migrationPath := "../../migrations/000035_check_constraints.up.sql"
 	sql, err := os.ReadFile(migrationPath)
 	if err != nil {
