@@ -9,6 +9,7 @@ import (
 )
 
 func TestNewCleanupWorker_Defaults(t *testing.T) {
+	t.Parallel()
 	w := NewCleanupWorker(CleanupWorkerConfig{
 		Logger: zerolog.Nop(),
 	})
@@ -17,6 +18,7 @@ func TestNewCleanupWorker_Defaults(t *testing.T) {
 }
 
 func TestNewCleanupWorker_CustomConfig(t *testing.T) {
+	t.Parallel()
 	w := NewCleanupWorker(CleanupWorkerConfig{
 		Logger:      zerolog.Nop(),
 		Interval:    30 * time.Second,
@@ -27,6 +29,7 @@ func TestNewCleanupWorker_CustomConfig(t *testing.T) {
 }
 
 func TestCleanupWorker_StartStop(t *testing.T) {
+	t.Parallel()
 	w := NewCleanupWorker(CleanupWorkerConfig{
 		Logger:   zerolog.Nop(),
 		Interval: 100 * time.Millisecond, // fast for testing

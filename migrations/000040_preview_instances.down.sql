@@ -1,4 +1,4 @@
--- Reverse 000035: Preview System Tables
+-- Reverse 000040: Preview System Tables
 -- Drop in reverse dependency order.
 
 DROP TABLE IF EXISTS pr_preview_state CASCADE;

@@ -8,6 +8,7 @@ import (
 )
 
 func TestExtractPreviewID(t *testing.T) {
+	t.Parallel()
 	id := uuid.New()
 
 	tests := []struct {
@@ -40,6 +41,7 @@ func TestExtractPreviewID(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got, err := extractPreviewID(tt.host)
 			if tt.wantErr {
 				require.Error(t, err)
@@ -52,6 +54,7 @@ func TestExtractPreviewID(t *testing.T) {
 }
 
 func TestEncodeDecode_CookieValue(t *testing.T) {
+	t.Parallel()
 	orgID := uuid.New()
 	previewID := uuid.New()
 	accessSessionID := uuid.New()
@@ -67,6 +70,7 @@ func TestEncodeDecode_CookieValue(t *testing.T) {
 }
 
 func TestDecodeCookieValue_Invalid(t *testing.T) {
+	t.Parallel()
 	_, _, _, err := decodeCookieValue("not-valid-base64!!!")
 	require.Error(t, err)
 
@@ -75,6 +79,7 @@ func TestDecodeCookieValue_Invalid(t *testing.T) {
 }
 
 func TestIsWebSocketUpgrade(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		connection string
@@ -90,6 +95,7 @@ func TestIsWebSocketUpgrade(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			r := &mockHTTPRequest{connection: tt.connection, upgrade: tt.upgrade}
 			require.Equal(t, tt.want, isWebSocketUpgradeHelper(r.connection, r.upgrade))
 		})

@@ -35,6 +35,7 @@ func previewTestContext(r *http.Request) *http.Request {
 }
 
 func TestPreviewHandler_InspectorStubs(t *testing.T) {
+	t.Parallel()
 	h := newPreviewTestHandler()
 
 	stubs := []struct {
@@ -55,6 +56,7 @@ func TestPreviewHandler_InspectorStubs(t *testing.T) {
 
 	for _, tt := range stubs {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			req := httptest.NewRequest(tt.method, tt.path, nil)
 			req = previewTestContext(req)
 			w := httptest.NewRecorder()
@@ -72,6 +74,7 @@ func TestPreviewHandler_InspectorStubs(t *testing.T) {
 }
 
 func TestPreviewHandler_StartPreview_InvalidBody(t *testing.T) {
+	t.Parallel()
 	h := newPreviewTestHandler()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/not-a-uuid/preview", strings.NewReader("{}"))
@@ -89,6 +92,7 @@ func TestPreviewHandler_StartPreview_InvalidBody(t *testing.T) {
 }
 
 func TestPreviewHandler_StartPreview_MissingConfig(t *testing.T) {
+	t.Parallel()
 	h := newPreviewTestHandler()
 
 	sessionID := uuid.New()
@@ -113,6 +117,7 @@ func TestPreviewHandler_StartPreview_MissingConfig(t *testing.T) {
 }
 
 func TestPreviewHandler_DetectReadiness(t *testing.T) {
+	t.Parallel()
 	h := newPreviewTestHandler()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/repos/owner/repo/preview/detect", nil)
@@ -130,6 +135,7 @@ func TestPreviewHandler_DetectReadiness(t *testing.T) {
 }
 
 func TestPreviewHandler_GetPreview_NoActivePreview(t *testing.T) {
+	t.Parallel()
 	// This test would require a store mock. Since the handler uses concrete
 	// types, we verify the pattern by testing with nil store (expects panic
 	// to be caught by the handler's nil check or error path).

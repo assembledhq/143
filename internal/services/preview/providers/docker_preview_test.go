@@ -94,6 +94,7 @@ func TestShellEscape(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
+			t.Parallel()
 			require.Equal(t, tt.want, shellEscape(tt.input))
 		})
 	}

@@ -521,7 +521,9 @@ func (d *DockerPreviewProvider) runInitScript(
 	if _, err := attachResp.Conn.Write(scriptContent); err != nil {
 		return fmt.Errorf("write init script to stdin: %w", err)
 	}
-	attachResp.CloseWrite()
+	if err := attachResp.CloseWrite(); err != nil {
+		return fmt.Errorf("close stdin for init script: %w", err)
+	}
 
 	// Wait for execution and check exit code.
 	inspectCtx, cancel := context.WithTimeout(ctx, 60*time.Second)

@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bufio"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -327,17 +328,16 @@ func (t *previewTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	// Write the request to the preview connection.
 	if err := req.Write(conn); err != nil {
-		conn.Close()
+		_ = conn.Close() // best-effort cleanup; returning the write error
 		return nil, fmt.Errorf("write request: %w", err)
 	}
 
 	// Read the response.
 	resp, err := http.ReadResponse(
-		/* bufio.Reader */ nil, req,
+		bufio.NewReader(conn), req,
 	)
 	if err != nil {
-		// Fall back to reading with a buffered reader.
-		conn.Close()
+		_ = conn.Close() // best-effort cleanup; returning the read error
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 
