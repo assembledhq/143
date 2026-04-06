@@ -1080,3 +1080,218 @@ func TestPreviewStore_WithTx(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+// =============================================================================
+// Additional Preview Store Tests for Coverage
+// =============================================================================
+
+func TestPreviewStore_UpdatePreviewExpiry(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectExec("UPDATE preview_instances SET expires_at").
+		WithArgs(previewAnyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdatePreviewExpiry(context.Background(), uuid.New(), uuid.New(), time.Now().Add(time.Hour))
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewStore_UpdateLastPath(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectExec("UPDATE preview_instances SET last_path").
+		WithArgs(previewAnyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdateLastPath(context.Background(), uuid.New(), uuid.New(), "/dashboard")
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewStore_CountActivePreviewsByUser(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(3))
+
+	count, err := store.CountActivePreviewsByUser(context.Background(), uuid.New(), uuid.New())
+	require.NoError(t, err)
+	require.Equal(t, 3, count)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewStore_CountActivePreviewsByWorker(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(previewAnyArgs(1)...).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(2))
+
+	count, err := store.CountActivePreviewsByWorker(context.Background(), "worker-1")
+	require.NoError(t, err)
+	require.Equal(t, 2, count)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewStore_ListIdlePreviews(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	now := time.Now()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances.+last_accessed_at").
+		WithArgs(previewAnyArgs(1)...).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, now)...),
+		)
+
+	previews, err := store.ListIdlePreviews(context.Background(), now.Add(-15*time.Minute))
+	require.NoError(t, err)
+	require.Len(t, previews, 1)
+	require.Equal(t, previewID, previews[0].ID)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewStore_UpdateServicePID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectExec("UPDATE preview_services SET pid").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdateServicePID(context.Background(), uuid.New(), uuid.New(), "web", 12345)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewStore_UpdateInfraStatus(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectExec("UPDATE preview_infrastructure SET status").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdateInfraStatus(context.Background(), uuid.New(), uuid.New(), "db", models.PreviewInfraStatusHealthy, "")
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewStore_UpdateAccessSessionActivity(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectExec("UPDATE preview_access_sessions SET last_accessed_at").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdateAccessSessionActivity(context.Background(), uuid.New(), uuid.New())
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewStore_TouchCache(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectExec("UPDATE preview_startup_cache SET last_used_at").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.TouchCache(context.Background(), uuid.New(), uuid.New())
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewStore_ListCacheByWorker(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectQuery("SELECT .+ FROM preview_startup_cache").
+		WithArgs(previewAnyArgs(1)...).
+		WillReturnRows(pgxmock.NewRows(previewStartupCacheTestCols))
+
+	caches, err := store.ListCacheByWorker(context.Background(), "worker-1")
+	require.NoError(t, err)
+	require.Len(t, caches, 0)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewStore_UpdatePRPreviewStatus(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectExec("UPDATE pr_preview_state SET status").
+		WithArgs(previewAnyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdatePRPreviewStatus(context.Background(), uuid.New(), uuid.New(), models.PRPreviewStatusRunning)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
