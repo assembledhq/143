@@ -324,3 +324,7 @@ Do **NOT** use for operational/lifecycle entities, external entity mirrors, comp
 | `prompt_overrides` | (org_id, template_id, scope_type, repository_id, issue_type, phase) |
 | `eval_release_gates` | (org_id, gate_name) |
 | `tuning_config_versions` | (org_id, config_scope, scope_key) |
+
+## Database Triggers
+
+The `trg_project_task_counts_update` trigger (migration 000047) fires on ALL column updates to `project_tasks`, not just status changes. This is because PostgreSQL does not allow `REFERENCING` transition tables with column-list triggers (`AFTER UPDATE OF status`). The recount logic is idempotent so correctness is unaffected, but be aware that updating non-status columns (e.g. `branch_name`, `pr_url`) will also trigger a recount of `total_tasks`, `completed_tasks`, and `failed_tasks` on the parent project.

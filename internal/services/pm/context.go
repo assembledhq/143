@@ -114,7 +114,7 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 		for _, pr := range prs {
 			prSummaries = append(prSummaries, PRSummary{
 				ID:           pr.ID,
-				SessionID:   pr.SessionID,
+				SessionID:    pr.SessionID,
 				Title:        pr.Title,
 				Status:       pr.Status,
 				ReviewStatus: pr.ReviewStatus,

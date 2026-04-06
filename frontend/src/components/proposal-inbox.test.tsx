@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
-import { renderWithProviders, screen, waitFor, userEvent } from "@/test/test-utils";
+import { renderWithProviders, screen, waitFor } from "@/test/test-utils";
+import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { server } from "@/test/mocks/server";
 import { ProposalInbox } from "./proposal-inbox";

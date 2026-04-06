@@ -12,7 +12,11 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
-// OrgCredentialStore handles encrypted per-org credential storage.
+// OrgCredentialStore manages org-level API credentials (e.g. Anthropic API keys, OpenAI keys).
+// These are distinct from integrations (which store third-party platform connections like GitHub,
+// Sentry, Linear). The credential store holds keys used for AI model access and other
+// infrastructure services, while integrations hold OAuth tokens and webhook configs for
+// external platform connectivity.
 type OrgCredentialStore struct {
 	db     DBTX
 	crypto *crypto.Service // nil = dev mode (plaintext with v0: prefix)

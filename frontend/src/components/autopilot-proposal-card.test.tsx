@@ -12,6 +12,10 @@ vi.mock("next/navigation", () => ({
   }),
 }));
 
+vi.mock("@/hooks/use-auth", () => ({
+  useAuth: () => ({ isAuthenticated: true, user: { id: "u1" }, isLoading: false, logout: vi.fn() }),
+}));
+
 describe("AutopilotProposalCard", () => {
   it("renders nothing when count is 0", async () => {
     server.use(

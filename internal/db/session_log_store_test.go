@@ -13,12 +13,12 @@ import (
 )
 
 var logColumns = []string{
-	"id", "session_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number",
+	"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number",
 }
 
 func newLogRow(id int64, sessionID uuid.UUID, now time.Time) []any {
 	return []any{
-		id, sessionID, nil, now, "info", "doing something", json.RawMessage(`{}`), 0,
+		id, sessionID, uuid.New(), nil, now, "info", "doing something", json.RawMessage(`{}`), 0,
 	}
 }
 
@@ -39,7 +39,7 @@ func TestSessionLogStore_Create_Success(t *testing.T) {
 	}
 
 	mock.ExpectQuery("INSERT INTO session_logs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "timestamp"}).
 				AddRow(int64(1), now),
@@ -63,7 +63,7 @@ func TestSessionLogStore_ListByRunID_Success(t *testing.T) {
 	sessionID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery("SELECT .+ FROM session_logs .+ JOIN sessions").
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(logColumns).
@@ -91,7 +91,7 @@ func TestSessionLogStore_ListByRunID_Empty(t *testing.T) {
 
 	store := NewSessionLogStore(mock)
 
-	mock.ExpectQuery("SELECT .+ FROM session_logs .+ JOIN sessions").
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(logColumns))
 
@@ -112,7 +112,7 @@ func TestSessionLogStore_ListByRunIDSince_Success(t *testing.T) {
 	sessionID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery("SELECT .+ FROM session_logs sl JOIN sessions s ON .+ WHERE .+\\.id >").
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id .+ sl.id >").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(logColumns).

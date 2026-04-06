@@ -34,18 +34,18 @@ func (s *IssueStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters Iss
 		SELECT i.id, i.org_id, i.external_id, i.source, i.source_integration_id, i.repository_id,
 		       i.title, i.description, i.raw_data, i.status, i.first_seen_at, i.last_seen_at,
 		       i.occurrence_count, i.affected_customer_count, i.severity, i.tags, i.fingerprint,
-		       i.created_at, i.updated_at
+		       i.created_at, i.updated_at, i.deleted_at
 		FROM issues i
 		LEFT JOIN priority_scores ps ON ps.issue_id = i.id
-		WHERE i.org_id = @org_id`
+		WHERE i.org_id = @org_id AND i.deleted_at IS NULL`
 	} else {
 		query = `
 		SELECT id, org_id, external_id, source, source_integration_id, repository_id,
 		       title, description, raw_data, status, first_seen_at, last_seen_at,
 		       occurrence_count, affected_customer_count, severity, tags, fingerprint,
-		       created_at, updated_at
+		       created_at, updated_at, deleted_at
 		FROM issues
-		WHERE org_id = @org_id`
+		WHERE org_id = @org_id AND deleted_at IS NULL`
 	}
 
 	args := pgx.NamedArgs{"org_id": orgID}
@@ -94,9 +94,9 @@ func (s *IssueStore) GetByID(ctx context.Context, orgID, issueID uuid.UUID) (mod
 		SELECT id, org_id, external_id, source, source_integration_id, repository_id,
 		       title, description, raw_data, status, first_seen_at, last_seen_at,
 		       occurrence_count, affected_customer_count, severity, tags, fingerprint,
-		       created_at, updated_at
+		       created_at, updated_at, deleted_at
 		FROM issues
-		WHERE id = @id AND org_id = @org_id`
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"id":     issueID,
@@ -117,9 +117,9 @@ func (s *IssueStore) ListByIDs(ctx context.Context, orgID uuid.UUID, issueIDs []
 		SELECT id, org_id, external_id, source, source_integration_id, repository_id,
 		       title, description, raw_data, status, first_seen_at, last_seen_at,
 		       occurrence_count, affected_customer_count, severity, tags, fingerprint,
-		       created_at, updated_at
+		       created_at, updated_at, deleted_at
 		FROM issues
-		WHERE org_id = @org_id AND id = ANY(@issue_ids)`
+		WHERE org_id = @org_id AND id = ANY(@issue_ids) AND deleted_at IS NULL`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"org_id":    orgID,
@@ -150,6 +150,7 @@ func (s *IssueStore) Upsert(ctx context.Context, issue *models.Issue) error {
 		    severity = EXCLUDED.severity,
 		    tags = EXCLUDED.tags,
 		    updated_at = now()
+		WHERE issues.deleted_at IS NULL
 		RETURNING id, created_at, updated_at`
 
 	args := pgx.NamedArgs{
@@ -176,7 +177,7 @@ func (s *IssueStore) Upsert(ctx context.Context, issue *models.Issue) error {
 }
 
 func (s *IssueStore) UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status string) error {
-	query := `UPDATE issues SET status = @status, updated_at = now() WHERE id = @id AND org_id = @org_id`
+	query := `UPDATE issues SET status = @status, updated_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     issueID,
 		"org_id": orgID,
@@ -187,6 +188,23 @@ func (s *IssueStore) UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID,
 
 func (s *IssueStore) CountByOrg(ctx context.Context, orgID uuid.UUID) (int, error) {
 	var count int
-	err := s.db.QueryRow(ctx, `SELECT count(*) FROM issues WHERE org_id = @org_id`, pgx.NamedArgs{"org_id": orgID}).Scan(&count)
+	err := s.db.QueryRow(ctx, `SELECT count(*) FROM issues WHERE org_id = @org_id AND deleted_at IS NULL`, pgx.NamedArgs{"org_id": orgID}).Scan(&count)
 	return count, err
+}
+
+// SoftDelete marks an issue as deleted without removing the row.
+// Uses db.Exec directly (not a transaction) since this is a single atomic UPDATE.
+func (s *IssueStore) SoftDelete(ctx context.Context, orgID, issueID uuid.UUID) error {
+	query := `UPDATE issues SET deleted_at = now(), updated_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":     issueID,
+		"org_id": orgID,
+	})
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("issue not found or already deleted")
+	}
+	return nil
 }

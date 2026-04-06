@@ -40,10 +40,16 @@ func TestProjectTaskStore_Create(t *testing.T) {
 	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
+	// Create wraps insert + dependency sync in a transaction.
+	mock.ExpectBegin()
 	// Create has 16 named args
 	mock.ExpectQuery("INSERT INTO project_tasks").
 		WithArgs(anyArgs(16)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(taskID, now, now))
+	mock.ExpectExec("DELETE FROM project_task_dependencies").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("DELETE", 0))
+	mock.ExpectCommit()
 
 	store := NewProjectTaskStore(mock)
 	task := &models.ProjectTask{
@@ -358,10 +364,16 @@ func TestProjectTaskStore_Update(t *testing.T) {
 
 	store := NewProjectTaskStore(mock)
 
+	// Update wraps update + dependency sync in a transaction.
+	mock.ExpectBegin()
 	// Update has 18 named args
 	mock.ExpectExec("UPDATE project_tasks SET").
 		WithArgs(anyArgs(18)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("DELETE FROM project_task_dependencies").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("DELETE", 0))
+	mock.ExpectCommit()
 
 	task := &models.ProjectTask{
 		ID:        uuid.New(),
