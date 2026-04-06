@@ -1,0 +1,22 @@
+## Issue Description
+
+{{.IssueDescription}}
+
+## Agent's Diff
+
+{{if .AgentDiff}}```diff
+{{.AgentDiff}}
+```{{else}}(No changes produced by the agent){{end}}
+
+## Scoring Criterion
+
+**Name:** {{.CriterionName}}
+**Notes:** {{.CriterionNotes}}
+{{if .SolutionDiff}}
+## Known-Good Solution Diff (for reference)
+
+```diff
+{{.SolutionDiff}}
+```
+{{end}}
+Evaluate the agent's diff against the criterion above. Return your judgment as JSON.

@@ -6,6 +6,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { api } from "@/lib/api";
 import type { Project, ProjectTask } from "@/lib/types";
@@ -285,12 +286,12 @@ export function ProposalInbox({ proposals, onNavigateToProject }: ProposalInboxP
                       Dismiss
                     </Button>
                   </div>
-                  <input
-                    type="text"
+                  <Input
+                    id="dismiss-reason"
+                    aria-label="Reason for dismissal"
                     value={dismissReason}
                     onChange={(e) => setDismissReason(e.target.value)}
                     placeholder="Reason for dismissal (optional)"
-                    className="w-full text-sm border rounded-md px-3 py-1.5 bg-background"
                   />
                   {approveMutation.isError && (
                     <p className="text-xs text-red-600 dark:text-red-400">

@@ -1167,4 +1167,225 @@ describe('api client', () => {
       expect(loc.href).toBe('/api/v1/integrations/linear/login');
     });
   });
+
+  describe('evals', () => {
+    it('lists tasks without params', async () => {
+      server.use(
+        http.get('/api/v1/evals/tasks', () => {
+          return HttpResponse.json({ data: [{ id: 'task-1', name: 'Test task' }], meta: {} });
+        }),
+      );
+      const result = await api.evals.listTasks();
+      expect(result.data).toHaveLength(1);
+      expect(result.data[0].id).toBe('task-1');
+    });
+
+    it('lists tasks with filter params', async () => {
+      let capturedUrl: string | undefined;
+      server.use(
+        http.get('/api/v1/evals/tasks', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ data: [], meta: {} });
+        }),
+      );
+      await api.evals.listTasks({ source: 'manual', complexity: 'simple', tags: 'unit,e2e' });
+      const url = new URL(capturedUrl!);
+      expect(url.searchParams.get('source')).toBe('manual');
+      expect(url.searchParams.get('complexity')).toBe('simple');
+      expect(url.searchParams.get('tags')).toBe('unit,e2e');
+    });
+
+    it('gets a single task', async () => {
+      server.use(
+        http.get('/api/v1/evals/tasks/:id', ({ params }) => {
+          return HttpResponse.json({ data: { id: params.id, name: 'Task A' } });
+        }),
+      );
+      const result = await api.evals.getTask('task-42');
+      expect(result.data.id).toBe('task-42');
+    });
+
+    it('creates a task', async () => {
+      let capturedBody: unknown;
+      server.use(
+        http.post('/api/v1/evals/tasks', async ({ request }) => {
+          capturedBody = await request.json();
+          return HttpResponse.json({ data: { id: 'new-task', name: 'Created' } });
+        }),
+      );
+      const body = {
+        repo_id: 'r-1',
+        name: 'Created',
+        description: 'desc',
+        base_commit_sha: 'abc123',
+        issue_description: 'Fix bug',
+        scoring_criteria: [],
+        pass_threshold: 0.7,
+        complexity: 'moderate',
+      };
+      const result = await api.evals.createTask(body);
+      expect(result.data.id).toBe('new-task');
+      expect(capturedBody).toMatchObject({ name: 'Created', repo_id: 'r-1' });
+    });
+
+    it('updates a task', async () => {
+      server.use(
+        http.patch('/api/v1/evals/tasks/:id', () => {
+          return HttpResponse.json({ data: { id: 'task-1', name: 'Updated' } });
+        }),
+      );
+      const result = await api.evals.updateTask('task-1', { name: 'Updated' });
+      expect(result.data.name).toBe('Updated');
+    });
+
+    it('archives a task', async () => {
+      let deleteCalled = false;
+      server.use(
+        http.delete('/api/v1/evals/tasks/:id', () => {
+          deleteCalled = true;
+          return new HttpResponse(null, { status: 204 });
+        }),
+      );
+      await api.evals.archiveTask('task-1');
+      expect(deleteCalled).toBe(true);
+    });
+
+    it('starts a run', async () => {
+      server.use(
+        http.post('/api/v1/evals/tasks/:taskId/runs', () => {
+          return HttpResponse.json({ data: { id: 'run-1', status: 'pending' } });
+        }),
+      );
+      const result = await api.evals.startRun('task-1', { model: 'claude-sonnet-4-6' });
+      expect(result.data.id).toBe('run-1');
+    });
+
+    it('lists runs without params', async () => {
+      server.use(
+        http.get('/api/v1/evals/tasks/:taskId/runs', () => {
+          return HttpResponse.json({ data: [{ id: 'run-1' }], meta: {} });
+        }),
+      );
+      const result = await api.evals.listRuns('task-1');
+      expect(result.data).toHaveLength(1);
+    });
+
+    it('lists runs with params', async () => {
+      let capturedUrl: string | undefined;
+      server.use(
+        http.get('/api/v1/evals/tasks/:taskId/runs', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ data: [], meta: {} });
+        }),
+      );
+      await api.evals.listRuns('task-1', { limit: 10, cursor: 'abc' });
+      const url = new URL(capturedUrl!);
+      expect(url.searchParams.get('limit')).toBe('10');
+      expect(url.searchParams.get('cursor')).toBe('abc');
+    });
+
+    it('gets a single run', async () => {
+      server.use(
+        http.get('/api/v1/evals/runs/:id', () => {
+          return HttpResponse.json({ data: { id: 'run-1', status: 'completed' } });
+        }),
+      );
+      const result = await api.evals.getRun('run-1');
+      expect(result.data.id).toBe('run-1');
+    });
+
+    it('lists batches without params', async () => {
+      server.use(
+        http.get('/api/v1/evals/batch', () => {
+          return HttpResponse.json({ data: [{ id: 'b-1' }], meta: {} });
+        }),
+      );
+      const result = await api.evals.listBatches();
+      expect(result.data).toHaveLength(1);
+    });
+
+    it('lists batches with params', async () => {
+      let capturedUrl: string | undefined;
+      server.use(
+        http.get('/api/v1/evals/batch', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ data: [], meta: {} });
+        }),
+      );
+      await api.evals.listBatches({ limit: 5 });
+      const url = new URL(capturedUrl!);
+      expect(url.searchParams.get('limit')).toBe('5');
+    });
+
+    it('starts a batch', async () => {
+      server.use(
+        http.post('/api/v1/evals/batch', () => {
+          return HttpResponse.json({ data: { id: 'b-1', status: 'pending' } });
+        }),
+      );
+      const result = await api.evals.startBatch({
+        name: 'Batch 1',
+        task_ids: ['t-1'],
+        configs: [{ model: 'claude-sonnet-4-6' }],
+      });
+      expect(result.data.id).toBe('b-1');
+    });
+
+    it('gets a batch', async () => {
+      server.use(
+        http.get('/api/v1/evals/batch/:id', () => {
+          return HttpResponse.json({ data: { id: 'b-1', runs: [] } });
+        }),
+      );
+      const result = await api.evals.getBatch('b-1');
+      expect(result.data.id).toBe('b-1');
+    });
+
+    it('triggers bootstrap', async () => {
+      server.use(
+        http.post('/api/v1/evals/bootstrap', () => {
+          return HttpResponse.json({ data: { id: 'bs-1', status: 'pending' } });
+        }),
+      );
+      const result = await api.evals.bootstrap({ repo_id: 'r-1' });
+      expect(result.data.id).toBe('bs-1');
+    });
+
+    it('gets bootstrap candidates without params', async () => {
+      server.use(
+        http.get('/api/v1/evals/bootstrap/candidates', () => {
+          return HttpResponse.json({ data: { id: 'bs-1', candidates: [] } });
+        }),
+      );
+      const result = await api.evals.getBootstrapCandidates();
+      expect(result.data.id).toBe('bs-1');
+    });
+
+    it('gets bootstrap candidates with params', async () => {
+      let capturedUrl: string | undefined;
+      server.use(
+        http.get('/api/v1/evals/bootstrap/candidates', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ data: { id: 'bs-1', candidates: [] } });
+        }),
+      );
+      await api.evals.getBootstrapCandidates({ repo_id: 'r-1', bootstrap_run_id: 'bs-1' });
+      const url = new URL(capturedUrl!);
+      expect(url.searchParams.get('repo_id')).toBe('r-1');
+      expect(url.searchParams.get('bootstrap_run_id')).toBe('bs-1');
+    });
+
+    it('accepts bootstrap candidates', async () => {
+      server.use(
+        http.post('/api/v1/evals/bootstrap/accept', () => {
+          return HttpResponse.json({ data: [{ id: 'task-1' }] });
+        }),
+      );
+      const result = await api.evals.acceptBootstrapCandidates({
+        bootstrap_run_id: 'bs-1',
+        candidate_indices: [0, 2],
+      });
+      expect(result.data).toHaveLength(1);
+    });
+  });
 });
