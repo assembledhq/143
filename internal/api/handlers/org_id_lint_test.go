@@ -72,6 +72,17 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"SessionFileHandler.ListFiles":      "delegates to getSessionContainer which uses OrgIDFromContext",
 		"SessionFileHandler.GetFileContent": "delegates to getSessionContainer which uses OrgIDFromContext",
 		"SessionFileHandler.GetFileContext": "delegates to getSessionContainer which uses OrgIDFromContext",
+
+		// Preview inspector stubs — not yet implemented, return 501 with no data access.
+		"PreviewHandler.DetectReadiness":      "stub, no org-scoped data access",
+		"PreviewHandler.CaptureScreenshot":    "stub, no org-scoped data access",
+		"PreviewHandler.InspectElement":       "stub, no org-scoped data access",
+		"PreviewHandler.ReadConsole":          "stub, no org-scoped data access",
+		"PreviewHandler.SubmitDesignFeedback": "stub, no org-scoped data access",
+		"PreviewHandler.ExecuteInteraction":   "stub, no org-scoped data access",
+		"PreviewHandler.CaptureMultiViewport": "stub, no org-scoped data access",
+		"PreviewHandler.ComputeVisualDiff":    "stub, no org-scoped data access",
+		"PreviewHandler.RunAssertions":        "stub, no org-scoped data access",
 	}
 
 	fset := token.NewFileSet()
