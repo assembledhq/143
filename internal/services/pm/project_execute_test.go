@@ -553,3 +553,232 @@ func TestDispatchProjectTasks_SkipsLowConfidenceUnlessAutoAll(t *testing.T) {
 	}, uuid.New())
 	require.Equal(t, 1, dispatched)
 }
+
+func TestCheckDependenciesStatus(t *testing.T) {
+	t.Parallel()
+
+	depA := uuid.New()
+	depB := uuid.New()
+	depC := uuid.New()
+
+	tests := []struct {
+		name      string
+		dependsOn []uuid.UUID
+		statuses  map[uuid.UUID]models.ProjectTaskStatus
+		want      depStatus
+	}{
+		{
+			name:      "no dependencies is ready",
+			dependsOn: nil,
+			statuses:  nil,
+			want:      depStatusReady,
+		},
+		{
+			name:      "all completed is ready",
+			dependsOn: []uuid.UUID{depA, depB},
+			statuses: map[uuid.UUID]models.ProjectTaskStatus{
+				depA: models.ProjectTaskStatusCompleted,
+				depB: models.ProjectTaskStatusCompleted,
+			},
+			want: depStatusReady,
+		},
+		{
+			name:      "one pending is waiting",
+			dependsOn: []uuid.UUID{depA, depB},
+			statuses: map[uuid.UUID]models.ProjectTaskStatus{
+				depA: models.ProjectTaskStatusCompleted,
+				depB: models.ProjectTaskStatusRunning,
+			},
+			want: depStatusWaiting,
+		},
+		{
+			name:      "one failed is blocked",
+			dependsOn: []uuid.UUID{depA, depB},
+			statuses: map[uuid.UUID]models.ProjectTaskStatus{
+				depA: models.ProjectTaskStatusCompleted,
+				depB: models.ProjectTaskStatusFailed,
+			},
+			want: depStatusBlocked,
+		},
+		{
+			name:      "cancelled dep is blocked",
+			dependsOn: []uuid.UUID{depA},
+			statuses: map[uuid.UUID]models.ProjectTaskStatus{
+				depA: models.ProjectTaskStatusCancelled,
+			},
+			want: depStatusBlocked,
+		},
+		{
+			name:      "blocked dep propagates blocked (transitive)",
+			dependsOn: []uuid.UUID{depA},
+			statuses: map[uuid.UUID]models.ProjectTaskStatus{
+				depA: models.ProjectTaskStatusBlocked,
+			},
+			want: depStatusBlocked,
+		},
+		{
+			name:      "unknown dep is waiting",
+			dependsOn: []uuid.UUID{depC},
+			statuses:  map[uuid.UUID]models.ProjectTaskStatus{},
+			want:      depStatusWaiting,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := checkDependenciesStatus(tt.dependsOn, tt.statuses)
+			require.Equal(t, tt.want, got, "checkDependenciesStatus should return expected status")
+		})
+	}
+}
+
+func TestCanDispatchForProject_DependencyGraph(t *testing.T) {
+	t.Parallel()
+
+	pts := &mockProjectTaskStore{countByStatus: map[string]int{}}
+	svc := newTestProjectService(nil, pts, nil)
+
+	project := &models.Project{
+		ID:            uuid.New(),
+		ExecutionMode: models.ProjectExecModeDependencyGraph,
+		MaxConcurrent: 3,
+	}
+
+	t.Run("no active tasks returns max concurrent", func(t *testing.T) { //nolint:paralleltest
+		pts.countByStatus = map[string]int{}
+		got := svc.canDispatchForProject(context.Background(), uuid.New(), project)
+		require.Equal(t, 3, got, "should allow max_concurrent when no active tasks")
+	})
+
+	t.Run("some active returns remaining", func(t *testing.T) { //nolint:paralleltest
+		pts.countByStatus = map[string]int{string(models.ProjectTaskStatusRunning): 2}
+		got := svc.canDispatchForProject(context.Background(), uuid.New(), project)
+		require.Equal(t, 1, got, "should return remaining slots")
+	})
+
+	t.Run("all slots used returns 0", func(t *testing.T) { //nolint:paralleltest
+		pts.countByStatus = map[string]int{string(models.ProjectTaskStatusRunning): 3}
+		got := svc.canDispatchForProject(context.Background(), uuid.New(), project)
+		require.Equal(t, 0, got, "should return 0 when all slots are used")
+	})
+}
+
+func TestDispatchProjectTasks_DependencyGraph(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	projectID := uuid.New()
+
+	depTask := &models.ProjectTask{
+		ID:        uuid.New(),
+		ProjectID: projectID,
+		OrgID:     orgID,
+		Title:     "Setup DB",
+		Status:    models.ProjectTaskStatusCompleted,
+	}
+
+	readyTask := &models.ProjectTask{
+		ID:        uuid.New(),
+		ProjectID: projectID,
+		OrgID:     orgID,
+		Title:     "Build API",
+		Status:    models.ProjectTaskStatusPending,
+		DependsOn: []uuid.UUID{depTask.ID},
+	}
+
+	blockedTask := &models.ProjectTask{
+		ID:        uuid.New(),
+		ProjectID: projectID,
+		OrgID:     orgID,
+		Title:     "Deploy",
+		Status:    models.ProjectTaskStatusPending,
+		DependsOn: []uuid.UUID{uuid.New()}, // depends on unknown task — treated as waiting
+	}
+
+	pts := &mockProjectTaskStore{
+		tasks:         []*models.ProjectTask{depTask, readyTask, blockedTask},
+		countByStatus: map[string]int{},
+	}
+	svc := newTestProjectService(nil, pts, &mockProjectCycleStore{})
+
+	project := &models.Project{
+		ID:            projectID,
+		ExecutionMode: models.ProjectExecModeDependencyGraph,
+		MaxConcurrent: 5,
+	}
+
+	dispatched := svc.dispatchProjectTasks(context.Background(), orgID, project, models.OrgSettings{
+		AutonomyLevel:    "auto_all",
+		DefaultAgentType: "codex",
+	}, uuid.New())
+
+	require.Equal(t, 1, dispatched, "should only dispatch the task with satisfied dependencies")
+
+	// Look up the task via the mock store — dispatchProjectTasks works on
+	// copies returned by ListByProject, so the original readyTask pointer
+	// isn't mutated; the mock's Update replaces the entry in pts.tasks.
+	var found *models.ProjectTask
+	for _, task := range pts.tasks {
+		if task.ID == readyTask.ID {
+			found = task
+			break
+		}
+	}
+	require.NotNil(t, found, "ready task should still be in store")
+	require.Equal(t, models.ProjectTaskStatusDelegated, found.Status, "ready task should be delegated")
+}
+
+func TestDispatchProjectTasks_DependencyGraph_BlockedPath(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	projectID := uuid.New()
+
+	failedDep := &models.ProjectTask{
+		ID:        uuid.New(),
+		ProjectID: projectID,
+		OrgID:     orgID,
+		Title:     "Broken Step",
+		Status:    models.ProjectTaskStatusFailed,
+	}
+
+	blockedTask := &models.ProjectTask{
+		ID:        uuid.New(),
+		ProjectID: projectID,
+		OrgID:     orgID,
+		Title:     "Depends on Broken",
+		Status:    models.ProjectTaskStatusPending,
+		DependsOn: []uuid.UUID{failedDep.ID},
+	}
+
+	pts := &mockProjectTaskStore{
+		tasks:         []*models.ProjectTask{failedDep, blockedTask},
+		countByStatus: map[string]int{},
+	}
+	svc := newTestProjectService(nil, pts, &mockProjectCycleStore{})
+
+	project := &models.Project{
+		ID:            projectID,
+		ExecutionMode: models.ProjectExecModeDependencyGraph,
+		MaxConcurrent: 5,
+	}
+
+	dispatched := svc.dispatchProjectTasks(context.Background(), orgID, project, models.OrgSettings{
+		AutonomyLevel:    "auto_all",
+		DefaultAgentType: "codex",
+	}, uuid.New())
+
+	require.Equal(t, 0, dispatched, "should not dispatch any tasks when dependency failed")
+
+	// The task with a failed dependency should be marked as blocked.
+	var found *models.ProjectTask
+	for _, task := range pts.tasks {
+		if task.ID == blockedTask.ID {
+			found = task
+			break
+		}
+	}
+	require.NotNil(t, found, "blocked task should still be in store")
+	require.Equal(t, models.ProjectTaskStatusBlocked, found.Status, "task with failed dependency should be marked blocked")
+}
