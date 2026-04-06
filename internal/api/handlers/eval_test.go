@@ -37,6 +37,7 @@ var evalTaskColumns = []string{
 	"memory_snapshot", "sandbox_image_digest", "context_overrides",
 	"scoring_criteria", "pass_threshold",
 	"source", "source_pr_number", "complexity", "tags",
+	"snapshot_broken",
 	"created_by", "created_at", "updated_at", "archived_at",
 }
 
@@ -63,6 +64,7 @@ func newTestEvalTaskRow(taskID, orgID, repoID uuid.UUID, now time.Time) []interf
 		nil, nil, json.RawMessage(`{}`),
 		json.RawMessage(`[]`), 0.7,
 		"manual", nil, "moderate", []string{"test"},
+		false,
 		nil, now, now, nil,
 	}
 }
@@ -2263,6 +2265,157 @@ func TestEvalHandler_AcceptBootstrapCandidates(t *testing.T) {
 		handler.AcceptBootstrapCandidates(w, req)
 		require.Equal(t, http.StatusInternalServerError, w.Code)
 		require.Contains(t, w.Body.String(), "CREATE_FAILED")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
+// --- ListBatches ---
+
+func TestEvalHandler_ListBatches(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns batches successfully", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		batchID := uuid.New()
+		now := time.Now()
+		handler := newEvalHandler(mock)
+
+		mock.ExpectQuery("SELECT .+ FROM eval_batches WHERE org_id").
+			WithArgs(anyArgs(2)...).
+			WillReturnRows(
+				pgxmock.NewRows(evalBatchColumns).
+					AddRow(batchID, orgID, "Test Batch", "completed", 3, 6, &userID, now, &now),
+			)
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/evals/batch", nil)
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.ListBatches(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var resp models.ListResponse[models.EvalBatch]
+		err = json.Unmarshal(w.Body.Bytes(), &resp)
+		require.NoError(t, err)
+		require.Len(t, resp.Data, 1)
+		require.Equal(t, batchID, resp.Data[0].ID)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns empty list", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		handler := newEvalHandler(mock)
+
+		mock.ExpectQuery("SELECT .+ FROM eval_batches WHERE org_id").
+			WithArgs(anyArgs(2)...).
+			WillReturnRows(pgxmock.NewRows(evalBatchColumns))
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/evals/batch", nil)
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.ListBatches(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var resp models.ListResponse[models.EvalBatch]
+		err = json.Unmarshal(w.Body.Bytes(), &resp)
+		require.NoError(t, err)
+		require.Len(t, resp.Data, 0)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
+// --- SHA validation ---
+
+func TestEvalHandler_CreateTask_SHAValidation(t *testing.T) {
+	t.Parallel()
+
+	t.Run("rejects invalid base_commit_sha", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		handler := newEvalHandler(mock)
+		orgID := uuid.New()
+		userID := uuid.New()
+
+		body := fmt.Sprintf(`{"repo_id":"%s","name":"test","base_commit_sha":"not-a-sha!","issue_description":"fix it"}`, uuid.New())
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/tasks", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.CreateTask(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Contains(t, w.Body.String(), "INVALID_SHA")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("rejects too-short SHA", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		handler := newEvalHandler(mock)
+		orgID := uuid.New()
+		userID := uuid.New()
+
+		body := fmt.Sprintf(`{"repo_id":"%s","name":"test","base_commit_sha":"abc","issue_description":"fix it"}`, uuid.New())
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/tasks", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.CreateTask(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Contains(t, w.Body.String(), "INVALID_SHA")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("accepts valid SHA", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		handler := newEvalHandler(mock)
+		orgID := uuid.New()
+		userID := uuid.New()
+		taskID := uuid.New()
+		repoID := uuid.New()
+		now := time.Now()
+
+		mock.ExpectQuery("INSERT INTO eval_tasks").
+			WithArgs(anyArgs(22)...).
+			WillReturnRows(pgxmock.NewRows(evalTaskColumns).AddRow(newTestEvalTaskRow(taskID, orgID, repoID, now)...))
+
+		body := fmt.Sprintf(`{"repo_id":"%s","name":"test","base_commit_sha":"abcd1234","issue_description":"fix it"}`, repoID)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/tasks", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.CreateTask(w, req)
+		require.Equal(t, http.StatusCreated, w.Code)
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 }

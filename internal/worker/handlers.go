@@ -1140,6 +1140,12 @@ func executeEvalRun(ctx context.Context, stores *Stores, services *Services, run
 	var stderr bytes.Buffer
 	exitCode, err := services.SandboxProvider.Exec(ctx, sb, fmt.Sprintf("git checkout %s", task.BaseCommitSHA), io.Discard, &stderr)
 	if err != nil || exitCode != 0 {
+		// Mark the task as snapshot_broken so the UI can surface it
+		if stores.EvalTasks != nil {
+			if markErr := stores.EvalTasks.MarkSnapshotBroken(ctx, task.OrgID, task.ID, true); markErr != nil {
+				logger.Warn().Err(markErr).Msg("failed to mark eval task as snapshot_broken")
+			}
+		}
 		return evalFailed("checkout base commit %s: exit=%d err=%v stderr=%s", task.BaseCommitSHA, exitCode, err, stderr.String())
 	}
 

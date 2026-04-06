@@ -479,6 +479,68 @@ export const api = {
     },
     get: (id: number) => get<import('./types').SingleResponse<import('./types').AuditLog>>(`/api/v1/audit-logs/${id}`),
   },
+  evals: {
+    // Tasks
+    listTasks: (params?: { source?: string; complexity?: string; archived?: string; tags?: string; cursor?: string; limit?: number }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.source) searchParams.set('source', params.source);
+      if (params?.complexity) searchParams.set('complexity', params.complexity);
+      if (params?.archived) searchParams.set('archived', params.archived);
+      if (params?.tags) searchParams.set('tags', params.tags);
+      if (params?.cursor) searchParams.set('cursor', params.cursor);
+      if (params?.limit) searchParams.set('limit', String(params.limit));
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').EvalTask>>(`/api/v1/evals/tasks${qs ? `?${qs}` : ''}`);
+    },
+    getTask: (id: string) => get<import('./types').SingleResponse<import('./types').EvalTask>>(`/api/v1/evals/tasks/${id}`),
+    createTask: (body: {
+      repo_id: string;
+      name: string;
+      description: string;
+      base_commit_sha: string;
+      solution_commit_sha?: string;
+      solution_diff?: string;
+      issue_description: string;
+      issue_context?: Record<string, unknown>;
+      scoring_criteria: import('./types').ScoringCriterion[];
+      pass_threshold: number;
+      source?: string;
+      source_pr_number?: number;
+      complexity: string;
+      tags?: string[];
+    }) => post<import('./types').SingleResponse<import('./types').EvalTask>>('/api/v1/evals/tasks', body),
+    updateTask: (id: string, body: Record<string, unknown>) =>
+      patch<import('./types').SingleResponse<import('./types').EvalTask>>(`/api/v1/evals/tasks/${id}`, body),
+    archiveTask: (id: string) => del(`/api/v1/evals/tasks/${id}`),
+    // Runs
+    startRun: (taskId: string, body: { model: string; config_ref?: string; context_overrides?: Record<string, unknown> }) =>
+      post<import('./types').SingleResponse<import('./types').EvalRun>>(`/api/v1/evals/tasks/${taskId}/runs`, body),
+    listRuns: (taskId: string, params?: { cursor?: string; limit?: number }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.cursor) searchParams.set('cursor', params.cursor);
+      if (params?.limit) searchParams.set('limit', String(params.limit));
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').EvalRun>>(`/api/v1/evals/tasks/${taskId}/runs${qs ? `?${qs}` : ''}`);
+    },
+    getRun: (id: string) => get<import('./types').SingleResponse<import('./types').EvalRun>>(`/api/v1/evals/runs/${id}`),
+    // Batch
+    listBatches: (params?: { limit?: number }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.limit) searchParams.set('limit', String(params.limit));
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').EvalBatch>>(`/api/v1/evals/batch${qs ? `?${qs}` : ''}`);
+    },
+    startBatch: (body: { name: string; task_ids: string[]; configs: Array<{ model: string; config_ref?: string }> }) =>
+      post<import('./types').SingleResponse<import('./types').EvalBatch>>('/api/v1/evals/batch', body),
+    getBatch: (id: string) => get<import('./types').SingleResponse<import('./types').EvalBatchDetail>>(`/api/v1/evals/batch/${id}`),
+    // Bootstrap
+    bootstrap: (body: { repo_id: string }) =>
+      post<import('./types').SingleResponse<import('./types').EvalBootstrapRun>>('/api/v1/evals/bootstrap', body),
+    getBootstrapCandidates: () =>
+      get<import('./types').SingleResponse<import('./types').EvalBootstrapRun>>('/api/v1/evals/bootstrap/candidates'),
+    acceptBootstrapCandidates: (body: { bootstrap_run_id: string; candidate_indices: number[] }) =>
+      post<import('./types').ListResponse<import('./types').EvalTask>>('/api/v1/evals/bootstrap/accept', body),
+  },
   reviewComments: {
     list: (params?: { pull_request_id?: string; filter_status?: string; cursor?: string }) => {
       const searchParams = new URLSearchParams();

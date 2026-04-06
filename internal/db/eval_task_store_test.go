@@ -21,6 +21,7 @@ var evalTaskTestColumns = []string{
 	"memory_snapshot", "sandbox_image_digest", "context_overrides",
 	"scoring_criteria", "pass_threshold",
 	"source", "source_pr_number", "complexity", "tags",
+	"snapshot_broken",
 	"created_by", "created_at", "updated_at", "archived_at",
 }
 
@@ -33,6 +34,7 @@ func newEvalTaskRow(taskID, orgID, repoID uuid.UUID, now time.Time) []interface{
 		nil, nil, json.RawMessage(`{}`),
 		json.RawMessage(`[{"name":"tests_pass","grader_type":"code_check","weight":1.0}]`), 0.7,
 		"manual", nil, "moderate", []string{"auth"},
+		false,
 		nil, now, now, nil,
 	}
 }
@@ -242,6 +244,26 @@ func TestEvalTaskStore_Archive(t *testing.T) {
 	store := NewEvalTaskStore(mock)
 	err = store.Archive(context.Background(), orgID, taskID)
 	require.NoError(t, err, "Archive should not return an error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestEvalTaskStore_MarkSnapshotBroken(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	taskID := uuid.New()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	mock.ExpectExec("UPDATE eval_tasks SET snapshot_broken").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	store := NewEvalTaskStore(mock)
+	err = store.MarkSnapshotBroken(context.Background(), orgID, taskID, true)
+	require.NoError(t, err, "MarkSnapshotBroken should not return an error")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

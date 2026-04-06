@@ -1663,6 +1663,7 @@ var evalTaskTestCols = []string{
 	"memory_snapshot", "sandbox_image_digest", "context_overrides",
 	"scoring_criteria", "pass_threshold",
 	"source", "source_pr_number", "complexity", "tags",
+	"snapshot_broken",
 	"created_by", "created_at", "updated_at", "archived_at",
 }
 
@@ -1700,6 +1701,7 @@ func evalTaskRow(taskID, orgID uuid.UUID, now time.Time, criteria json.RawMessag
 		nil, nil, json.RawMessage(`{}`),
 		criteria, 0.7,
 		"manual", nil, "moderate", []string{"test"},
+		false,
 		nil, now, now, nil,
 	}
 }

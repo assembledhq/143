@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -40,6 +41,9 @@ func NewEvalHandler(taskStore *db.EvalTaskStore, runStore *db.EvalRunStore, batc
 func (h *EvalHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 	h.audit = audit
 }
+
+// validGitSHA matches a hex string of 4-40 characters (short or full SHA).
+var validGitSHA = regexp.MustCompile(`^[0-9a-fA-F]{4,40}$`)
 
 // validateScoringCriteria validates that scoring_criteria is a well-formed JSON array
 // with valid grader_type values. Used by both CreateTask and UpdateTask.
@@ -164,6 +168,14 @@ func (h *EvalHandler) CreateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.BaseCommitSHA == "" {
 		writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", "base_commit_sha is required")
+		return
+	}
+	if !validGitSHA.MatchString(req.BaseCommitSHA) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SHA", "base_commit_sha must be a valid git SHA (4-40 hex characters)")
+		return
+	}
+	if req.SolutionCommitSHA != nil && *req.SolutionCommitSHA != "" && !validGitSHA.MatchString(*req.SolutionCommitSHA) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SHA", "solution_commit_sha must be a valid git SHA (4-40 hex characters)")
 		return
 	}
 	if req.IssueDescription == "" {
@@ -656,6 +668,22 @@ func (h *EvalHandler) StartBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.EvalBatch]{Data: batch})
+}
+
+func (h *EvalHandler) ListBatches(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	limit := queryInt(r, "limit", 20)
+
+	batches, err := h.batchStore.ListByOrg(r.Context(), orgID, limit)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list eval batches", err)
+		return
+	}
+	if batches == nil {
+		batches = []models.EvalBatch{}
+	}
+
+	writeJSON(w, http.StatusOK, models.ListResponse[models.EvalBatch]{Data: batches})
 }
 
 func (h *EvalHandler) GetBatch(w http.ResponseWriter, r *http.Request) {

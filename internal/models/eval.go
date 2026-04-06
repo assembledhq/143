@@ -128,6 +128,7 @@ type EvalTask struct {
 	SourcePRNumber *int           `db:"source_pr_number" json:"source_pr_number,omitempty"`
 	Complexity     EvalComplexity `db:"complexity" json:"complexity"`
 	Tags           []string       `db:"tags" json:"tags"`
+	SnapshotBroken bool           `db:"snapshot_broken" json:"snapshot_broken"`
 	CreatedBy      *uuid.UUID     `db:"created_by" json:"created_by,omitempty"`
 	CreatedAt      time.Time      `db:"created_at" json:"created_at"`
 	UpdatedAt      time.Time      `db:"updated_at" json:"updated_at"`

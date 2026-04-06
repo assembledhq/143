@@ -26,6 +26,7 @@ const evalTaskColumns = `id, org_id, repo_id, name, description,
 	memory_snapshot, sandbox_image_digest, context_overrides,
 	scoring_criteria, pass_threshold,
 	source, source_pr_number, complexity, tags,
+	snapshot_broken,
 	created_by, created_at, updated_at, archived_at`
 
 func scanEvalTask(row pgx.Row) (models.EvalTask, error) {
@@ -38,6 +39,7 @@ func scanEvalTask(row pgx.Row) (models.EvalTask, error) {
 		&t.MemorySnapshot, &t.SandboxImageDigest, &t.ContextOverrides,
 		&t.ScoringCriteria, &t.PassThreshold,
 		&t.Source, &t.SourcePRNumber, &t.Complexity, &t.Tags,
+		&t.SnapshotBroken,
 		&t.CreatedBy, &t.CreatedAt, &t.UpdatedAt, &t.ArchivedAt,
 	)
 	return t, err
@@ -55,6 +57,7 @@ func scanEvalTasks(rows pgx.Rows) ([]models.EvalTask, error) {
 			&t.MemorySnapshot, &t.SandboxImageDigest, &t.ContextOverrides,
 			&t.ScoringCriteria, &t.PassThreshold,
 			&t.Source, &t.SourcePRNumber, &t.Complexity, &t.Tags,
+			&t.SnapshotBroken,
 			&t.CreatedBy, &t.CreatedAt, &t.UpdatedAt, &t.ArchivedAt,
 		)
 		if err != nil {
@@ -219,6 +222,19 @@ func (s *EvalTaskStore) Archive(ctx context.Context, orgID, taskID uuid.UUID) er
 	}
 	if tag.RowsAffected() == 0 {
 		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+// MarkSnapshotBroken sets the snapshot_broken flag on a task (e.g., when the
+// base_commit_sha is no longer reachable after a force-push).
+func (s *EvalTaskStore) MarkSnapshotBroken(ctx context.Context, orgID, taskID uuid.UUID, broken bool) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE eval_tasks SET snapshot_broken = @broken, updated_at = now() WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": taskID, "org_id": orgID, "broken": broken},
+	)
+	if err != nil {
+		return fmt.Errorf("mark snapshot broken: %w", err)
 	}
 	return nil
 }

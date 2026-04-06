@@ -356,6 +356,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/evals/tasks/{id}", evalHandler.GetTask)
 			r.Get("/api/v1/evals/tasks/{id}/runs", evalHandler.ListRuns)
 			r.Get("/api/v1/evals/runs/{runId}", evalHandler.GetRun)
+			r.Get("/api/v1/evals/batch", evalHandler.ListBatches)
 			r.Get("/api/v1/evals/batch/{batchId}", evalHandler.GetBatch)
 			r.Get("/api/v1/evals/bootstrap/candidates", evalHandler.GetBootstrapCandidates)
 		})
