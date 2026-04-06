@@ -1138,6 +1138,11 @@ func executeEvalRun(ctx context.Context, stores *Stores, services *Services, run
 		return evalFailed("clone repo: %v", err)
 	}
 
+	// Validate BaseCommitSHA as defense-in-depth (API layer also validates)
+	if !validGitSHA.MatchString(task.BaseCommitSHA) {
+		return evalFailed("invalid base commit SHA format: %s", task.BaseCommitSHA)
+	}
+
 	var stderr bytes.Buffer
 	exitCode, err := services.SandboxProvider.Exec(ctx, sb, fmt.Sprintf("git checkout %s", task.BaseCommitSHA), io.Discard, &stderr)
 	if err != nil || exitCode != 0 {
@@ -1219,6 +1224,9 @@ func evalFailed(format string, args ...any) *models.EvalRunResult {
 	}
 }
 
+// validGitSHA matches short and full hex SHA hashes.
+var validGitSHA = regexp.MustCompile(`^[0-9a-fA-F]{4,40}$`)
+
 // validConfigRef matches branch names, tags, and SHAs safe for shell use.
 var validConfigRef = regexp.MustCompile(`^[a-zA-Z0-9._/-]+$`)
 
@@ -1233,13 +1241,17 @@ func applyConfigOverlay(ctx context.Context, provider agent.SandboxProvider, sb 
 
 	// Fetch the config ref first
 	var stderr bytes.Buffer
-	_, _ = provider.Exec(ctx, sb, fmt.Sprintf("git fetch origin %s", configRef), io.Discard, &stderr)
+	if _, err := provider.Exec(ctx, sb, fmt.Sprintf("git fetch origin %s", configRef), io.Discard, &stderr); err != nil {
+		logger.Debug().Err(err).Str("config_ref", configRef).Msg("git fetch for config overlay failed (non-fatal)")
+	}
 
 	// Overlay individual config files — failures are non-fatal (file may not exist on branch)
 	configFiles := []string{"AGENTS.md", "CLAUDE.md"}
 	for _, f := range configFiles {
 		cmd := fmt.Sprintf("git show %s:%s > %s 2>/dev/null || true", configRef, f, f)
-		_, _ = provider.Exec(ctx, sb, cmd, io.Discard, io.Discard)
+		if _, err := provider.Exec(ctx, sb, cmd, io.Discard, io.Discard); err != nil {
+			logger.Debug().Err(err).Str("config_file", f).Msg("config file overlay failed (non-fatal)")
+		}
 	}
 
 	// Overlay config directories
@@ -1247,7 +1259,9 @@ func applyConfigOverlay(ctx context.Context, provider agent.SandboxProvider, sb 
 	for _, d := range configDirs {
 		// Remove existing dir and recreate from config ref
 		cmd := fmt.Sprintf("rm -rf %s && git checkout %s -- %s 2>/dev/null || true", d, configRef, d)
-		_, _ = provider.Exec(ctx, sb, cmd, io.Discard, io.Discard)
+		if _, err := provider.Exec(ctx, sb, cmd, io.Discard, io.Discard); err != nil {
+			logger.Debug().Err(err).Str("config_dir", d).Msg("config dir overlay failed (non-fatal)")
+		}
 	}
 
 	logger.Debug().Str("config_ref", configRef).Msg("applied config overlay")
@@ -1263,8 +1277,15 @@ func runCodingAgent(ctx context.Context, services *Services, sb *agent.Sandbox, 
 		return "", map[string]any{"error": "invalid model name"}, nil
 	}
 
-	// Run Claude Code CLI with --print flag for non-interactive output
-	cmd := fmt.Sprintf("claude --model %s --print %q 2>&1", model, issueDescription)
+	// Write issue description to a temp file to avoid shell injection via interpolation
+	var writeStderr bytes.Buffer
+	writeCmd := fmt.Sprintf("cat > /tmp/issue_description.txt << 'ISSUE_EOF'\n%s\nISSUE_EOF", strings.ReplaceAll(issueDescription, "'", "'\\''"))
+	if _, writeErr := services.SandboxProvider.Exec(ctx, sb, writeCmd, io.Discard, &writeStderr); writeErr != nil {
+		return "", map[string]any{"error": fmt.Sprintf("write issue description: %v", writeErr)}, nil
+	}
+
+	// Run Claude Code CLI with --print flag, reading issue from file
+	cmd := fmt.Sprintf("claude --model %s --print \"$(cat /tmp/issue_description.txt)\" 2>&1", model)
 
 	var stdout, stderr bytes.Buffer
 	exitCode, err := services.SandboxProvider.Exec(ctx, sb, cmd, &stdout, &stderr)
@@ -1653,6 +1674,9 @@ func executeBootstrapScan(ctx context.Context, stores *Stores, services *Service
 	exitCode, execErr := services.SandboxProvider.Exec(ctx, sb, cmd, &stdout, &stderr)
 	if execErr != nil {
 		return nil, fmt.Errorf("execute bootstrap agent: %w", execErr)
+	}
+	if exitCode != 0 {
+		return nil, fmt.Errorf("bootstrap agent failed with exit code %d, stderr: %s", exitCode, truncateString(stderr.String(), 1000))
 	}
 
 	logger.Info().

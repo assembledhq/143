@@ -11,7 +11,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { ArrowLeft, Loader2, RefreshCw } from "lucide-react";
-import type { EvalBatchDetail, EvalRun } from "@/lib/types";
+import type { EvalBatchDetail, EvalRun, EvalTask, ListResponse } from "@/lib/types";
 import { evalRunStatusConfig } from "@/lib/types";
 
 export default function BatchDetailPage() {
@@ -29,11 +29,25 @@ export default function BatchDetailPage() {
 
   const batch = batchResponse?.data;
 
+  // Fetch task details so we can show real names in the matrix
+  const { data: tasksResponse } = useQuery<ListResponse<EvalTask>>({
+    queryKey: queryKeys.evals.tasks(),
+    queryFn: () => api.evals.listTasks({}),
+    enabled: !!batch?.runs?.length,
+  });
+  const taskNameMap = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const t of tasksResponse?.data ?? []) {
+      map.set(t.id, t.name);
+    }
+    return map;
+  }, [tasksResponse]);
+
   // Build comparison matrix: rows = tasks, columns = configs
   const { taskNames, configLabels, matrix } = useMemo(() => {
     if (!batch?.runs?.length) return { taskNames: [], configLabels: [], matrix: new Map() };
-    return buildComparisonMatrix(batch);
-  }, [batch]);
+    return buildComparisonMatrix(batch, taskNameMap);
+  }, [batch, taskNameMap]);
 
   if (isLoading) {
     return (
@@ -231,25 +245,25 @@ function BatchSummary({ batch }: { batch: EvalBatchDetail }) {
 }
 
 /** Build a lookup matrix from flat runs array. */
-function buildComparisonMatrix(batch: EvalBatchDetail) {
+function buildComparisonMatrix(batch: EvalBatchDetail, taskNameMap: Map<string, string>) {
   const runs = batch.runs;
 
   // Identify unique task IDs and config labels
-  const taskMap = new Map<string, string>();
+  const taskIdSet = new Set<string>();
   const configSet = new Set<string>();
   const matrix = new Map<string, EvalRun>();
 
   for (const run of runs) {
     const configLabel = run.config_ref || run.model;
     configSet.add(configLabel);
-    taskMap.set(run.task_id, run.task_id); // we'll try to get names
+    taskIdSet.add(run.task_id);
 
     matrix.set(`${run.task_id}:${configLabel}`, run);
   }
 
-  const taskNames = Array.from(taskMap.entries()).map(([id]) => ({
+  const taskNames = Array.from(taskIdSet).map((id) => ({
     taskId: id,
-    name: id.slice(0, 8), // short ID as fallback
+    name: taskNameMap.get(id) || id.slice(0, 8),
   }));
   const configLabels = Array.from(configSet);
 

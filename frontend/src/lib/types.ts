@@ -807,7 +807,7 @@ export type EvalTaskSource = 'manual' | 'pr_bootstrap' | 'failure_derived';
 export type EvalComplexity = 'trivial' | 'simple' | 'moderate' | 'complex';
 export type GraderType = 'code_check' | 'llm_judge';
 export type EvalRunStatus = 'pending' | 'running' | 'completed' | 'failed';
-export type EvalBatchStatus = 'pending' | 'running' | 'completed';
+export type EvalBatchStatus = 'pending' | 'running' | 'completed' | 'failed';
 export type EvalBootstrapStatus = 'pending' | 'running' | 'completed' | 'failed';
 
 export interface ScoringCriterion {

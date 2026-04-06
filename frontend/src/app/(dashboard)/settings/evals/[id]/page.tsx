@@ -125,6 +125,11 @@ export default function EvalTaskDetailPage() {
                         This will archive the eval task. It can still be viewed but won&apos;t appear in the default list.
                       </AlertDialogDescription>
                     </AlertDialogHeader>
+                    {archiveMutation.isError && (
+                      <div className="rounded-md bg-destructive/10 px-3 py-2 text-[13px] text-destructive">
+                        Failed to archive eval task. Please try again.
+                      </div>
+                    )}
                     <AlertDialogFooter>
                       <AlertDialogCancel>Cancel</AlertDialogCancel>
                       <AlertDialogAction
@@ -368,6 +373,11 @@ function RunEvalDialog({ taskId }: { taskId: string }) {
             </p>
           </div>
         </div>
+        {runMutation.isError && (
+          <div className="rounded-md bg-destructive/10 px-3 py-2 text-[13px] text-destructive">
+            Failed to start eval run. Please try again.
+          </div>
+        )}
         <div className="flex items-center justify-end gap-2">
           <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
           <Button onClick={() => runMutation.mutate()} disabled={runMutation.isPending}>

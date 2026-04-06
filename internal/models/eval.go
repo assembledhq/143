@@ -187,6 +187,7 @@ const (
 	EvalBatchStatusPending   EvalBatchStatus = "pending"
 	EvalBatchStatusRunning   EvalBatchStatus = "running"
 	EvalBatchStatusCompleted EvalBatchStatus = "completed"
+	EvalBatchStatusFailed    EvalBatchStatus = "failed"
 )
 
 // EvalBatch groups multiple eval runs for comparison across tasks × configs.

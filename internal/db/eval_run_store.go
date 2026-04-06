@@ -54,7 +54,7 @@ func scanEvalRuns(rows pgx.Rows) ([]models.EvalRun, error) {
 			&r.StartedAt, &r.CompletedAt, &r.ErrorMessage, &r.CreatedAt,
 		)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan eval run: %w", err)
 		}
 		runs = append(runs, r)
 	}
@@ -268,7 +268,7 @@ func (s *EvalBatchStore) ListByOrg(ctx context.Context, orgID uuid.UUID, limit i
 			&b.CreatedBy, &b.CreatedAt, &b.CompletedAt,
 		)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan eval batch: %w", err)
 		}
 		batches = append(batches, b)
 	}
@@ -277,7 +277,7 @@ func (s *EvalBatchStore) ListByOrg(ctx context.Context, orgID uuid.UUID, limit i
 
 func (s *EvalBatchStore) UpdateStatus(ctx context.Context, orgID, batchID uuid.UUID, status models.EvalBatchStatus) error {
 	query := `UPDATE eval_batches SET status = @status,
-		completed_at = CASE WHEN @status = 'completed' THEN now() ELSE completed_at END
+		completed_at = CASE WHEN @status IN ('completed', 'failed') THEN now() ELSE completed_at END
 		WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     batchID,

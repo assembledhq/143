@@ -351,7 +351,9 @@ export default function CreateEvalTaskPage() {
               </div>
               {createMutation.isError && (
                 <div className="rounded-md bg-destructive/10 px-3 py-2 text-[13px] text-destructive">
-                  Failed to create eval task. Please try again.
+                  {createMutation.error instanceof Error
+                    ? createMutation.error.message
+                    : "Failed to create eval task. Please try again."}
                 </div>
               )}
               <div className="flex justify-between">

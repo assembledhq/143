@@ -113,6 +113,11 @@ export default function EvalsSettingsPage() {
                 </SelectContent>
               </Select>
             </div>
+            {bootstrapMutation.isError && (
+              <div className="rounded-md bg-destructive/10 px-3 py-2 text-[13px] text-destructive">
+                Bootstrap scan failed. Please try again.
+              </div>
+            )}
             <AlertDialogFooter>
               <AlertDialogCancel>Cancel</AlertDialogCancel>
               <AlertDialogAction

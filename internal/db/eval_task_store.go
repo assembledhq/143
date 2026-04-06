@@ -61,7 +61,7 @@ func scanEvalTasks(rows pgx.Rows) ([]models.EvalTask, error) {
 			&t.CreatedBy, &t.CreatedAt, &t.UpdatedAt, &t.ArchivedAt,
 		)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan eval task: %w", err)
 		}
 		tasks = append(tasks, t)
 	}
