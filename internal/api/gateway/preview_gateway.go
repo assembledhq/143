@@ -2,7 +2,10 @@ package gateway
 
 import (
 	"bufio"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,27 +25,30 @@ import (
 // It validates preview access, proxies HTTP and WebSocket traffic, and
 // injects security headers. It does NOT use the main app session middleware.
 type Gateway struct {
-	store     *db.PreviewStore
-	manager   *preview.Manager
-	logger    zerolog.Logger
-	appOrigin string
+	store        *db.PreviewStore
+	manager      *preview.Manager
+	logger       zerolog.Logger
+	appOrigin    string
+	cookieSecret []byte
 }
 
 // GatewayConfig holds initialization options.
 type GatewayConfig struct {
-	Store     *db.PreviewStore
-	Manager   *preview.Manager
-	Logger    zerolog.Logger
-	AppOrigin string // e.g. "https://app.143.dev"
+	Store        *db.PreviewStore
+	Manager      *preview.Manager
+	Logger       zerolog.Logger
+	AppOrigin    string // e.g. "https://app.143.dev"
+	CookieSecret []byte // HMAC key for signing preview session cookies
 }
 
 // NewGateway creates a new preview gateway.
 func NewGateway(cfg GatewayConfig) *Gateway {
 	return &Gateway{
-		store:     cfg.Store,
-		manager:   cfg.Manager,
-		logger:    cfg.Logger,
-		appOrigin: cfg.AppOrigin,
+		store:        cfg.Store,
+		manager:      cfg.Manager,
+		logger:       cfg.Logger,
+		appOrigin:    cfg.AppOrigin,
+		cookieSecret: cfg.CookieSecret,
 	}
 }
 
@@ -147,41 +153,25 @@ func (g *Gateway) handleBootstrapExchange(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Look up the preview instance to get the orgID.
-	// For MVP, try with a scan across orgs. Since preview IDs are UUIDs and
-	// globally unique, we look up the instance directly.
-	// The store requires orgID, so we need to find it. Use the preview_instances
-	// table. For MVP, we accept this limitation and require the orgID to be
-	// encoded in the bootstrap flow.
-	//
-	// Approach: the manager.ValidateBootstrapToken looks up by token hash and
-	// filters by orgID. We need the orgID. For now, we'll iterate — but this
-	// is a known limitation. In production, we'd add a store method that looks
-	// up by token hash without org scoping, or encode orgID in the preview hostname.
-	//
-	// HACK for MVP: We'll try to find the preview instance by checking all orgs.
-	// This is safe because preview IDs are UUIDs and tokens are cryptographically random.
-	// Better approach: encode orgID in the cookie or add a direct lookup method.
-
-	// For now, use uuid.Nil as org_id — the manager's ValidateBootstrapToken
-	// will need to be updated to support unscoped lookup, or we encode the org
-	// in the token. As a temporary measure, we'll use the preview instance lookup
-	// to get org_id first, but that also requires org_id...
-	//
-	// Resolution: Add the preview_id to the exchange request so we can look up
-	// the instance. But we already have it from the hostname.
-	// The real fix is to add a GetPreviewInstanceUnscoped method to the store.
-	// For now, we'll attempt validation with uuid.Nil and accept this as a TODO.
-
-	sess, err := g.manager.ValidateBootstrapToken(r.Context(), uuid.Nil, body.Token)
+	// Bootstrap tokens are validated without org scoping because the gateway
+	// does not have session middleware — the orgID is not known until the
+	// token is exchanged. The token hash is cryptographically random (32 bytes)
+	// so unscoped lookup is safe from collision.
+	sess, err := g.manager.ValidateBootstrapTokenUnscoped(r.Context(), body.Token)
 	if err != nil {
 		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("bootstrap exchange failed")
 		http.Error(w, "invalid or expired bootstrap token", http.StatusUnauthorized)
 		return
 	}
 
-	// Set the preview session cookie.
-	cookieValue := encodeCookieValue(sess.OrgID, previewID, sess.ID)
+	// Verify the token's preview matches the hostname's preview ID.
+	if sess.PreviewInstanceID != previewID {
+		http.Error(w, "token does not match this preview", http.StatusForbidden)
+		return
+	}
+
+	// Set the preview session cookie (HMAC-signed).
+	cookieValue := encodeCookieValue(g.cookieSecret, sess.OrgID, previewID, sess.ID)
 	http.SetCookie(w, &http.Cookie{
 		Name:     "__Host-preview_session",
 		Value:    cookieValue,
@@ -194,7 +184,9 @@ func (g *Gateway) handleBootstrapExchange(w http.ResponseWriter, r *http.Request
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
+		g.logger.Warn().Err(err).Msg("failed to write bootstrap exchange response")
+	}
 }
 
 // =============================================================================
@@ -209,7 +201,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 		return
 	}
 
-	orgID, cookiePreviewID, _, err := decodeCookieValue(cookie.Value)
+	orgID, cookiePreviewID, _, err := decodeCookieValue(g.cookieSecret, cookie.Value)
 	if err != nil {
 		http.Error(w, "invalid preview session", http.StatusUnauthorized)
 		return
@@ -301,10 +293,14 @@ func (g *Gateway) handleWebSocket(w http.ResponseWriter, r *http.Request, orgID,
 	// Bidirectional copy.
 	done := make(chan struct{})
 	go func() {
-		_, _ = io.Copy(clientConn, backendConn)
+		if _, err := io.Copy(clientConn, backendConn); err != nil {
+			g.logger.Debug().Err(err).Str("preview_id", previewID.String()).Msg("websocket: backend→client copy ended")
+		}
 		close(done)
 	}()
-	_, _ = io.Copy(backendConn, clientConn)
+	if _, err := io.Copy(backendConn, clientConn); err != nil {
+		g.logger.Debug().Err(err).Str("preview_id", previewID.String()).Msg("websocket: client→backend copy ended")
+	}
 	<-done
 }
 
@@ -390,20 +386,33 @@ func stripPreviewCookie(req *http.Request) {
 // Cookie encoding
 // =============================================================================
 
-func encodeCookieValue(orgID, previewID, accessSessionID uuid.UUID) string {
-	raw := fmt.Sprintf("%s:%s:%s", orgID, previewID, accessSessionID)
+// encodeCookieValue produces an HMAC-signed, base64url-encoded cookie value.
+// Format: base64url(orgID:previewID:accessSessionID:hmac_hex)
+func encodeCookieValue(secret []byte, orgID, previewID, accessSessionID uuid.UUID) string {
+	payload := fmt.Sprintf("%s:%s:%s", orgID, previewID, accessSessionID)
+	sig := computeCookieHMAC(secret, payload)
+	raw := payload + ":" + sig
 	return base64.RawURLEncoding.EncodeToString([]byte(raw))
 }
 
-func decodeCookieValue(value string) (orgID, previewID, accessSessionID uuid.UUID, err error) {
+// decodeCookieValue decodes and verifies the HMAC signature on the cookie.
+func decodeCookieValue(secret []byte, value string) (orgID, previewID, accessSessionID uuid.UUID, err error) {
 	raw, err := base64.RawURLEncoding.DecodeString(value)
 	if err != nil {
 		return uuid.UUID{}, uuid.UUID{}, uuid.UUID{}, fmt.Errorf("decode cookie: %w", err)
 	}
-	parts := strings.SplitN(string(raw), ":", 3)
-	if len(parts) != 3 {
+	parts := strings.SplitN(string(raw), ":", 4)
+	if len(parts) != 4 {
 		return uuid.UUID{}, uuid.UUID{}, uuid.UUID{}, fmt.Errorf("invalid cookie format")
 	}
+
+	// Verify HMAC before trusting any field values.
+	payload := parts[0] + ":" + parts[1] + ":" + parts[2]
+	expectedSig := computeCookieHMAC(secret, payload)
+	if !hmac.Equal([]byte(parts[3]), []byte(expectedSig)) {
+		return uuid.UUID{}, uuid.UUID{}, uuid.UUID{}, fmt.Errorf("invalid cookie signature")
+	}
+
 	orgID, err = uuid.Parse(parts[0])
 	if err != nil {
 		return uuid.UUID{}, uuid.UUID{}, uuid.UUID{}, fmt.Errorf("invalid org_id in cookie: %w", err)
@@ -417,6 +426,13 @@ func decodeCookieValue(value string) (orgID, previewID, accessSessionID uuid.UUI
 		return uuid.UUID{}, uuid.UUID{}, uuid.UUID{}, fmt.Errorf("invalid access_session_id in cookie: %w", err)
 	}
 	return orgID, previewID, accessSessionID, nil
+}
+
+// computeCookieHMAC returns a hex-encoded HMAC-SHA256 of the given payload.
+func computeCookieHMAC(secret []byte, payload string) string {
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(payload))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 // =============================================================================

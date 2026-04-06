@@ -57,14 +57,15 @@ func TestExtractPreviewID(t *testing.T) {
 
 func TestEncodeDecode_CookieValue(t *testing.T) {
 	t.Parallel()
+	secret := []byte("test-secret-key-for-hmac")
 	orgID := uuid.New()
 	previewID := uuid.New()
 	accessSessionID := uuid.New()
 
-	encoded := encodeCookieValue(orgID, previewID, accessSessionID)
+	encoded := encodeCookieValue(secret, orgID, previewID, accessSessionID)
 	require.NotEmpty(t, encoded)
 
-	gotOrg, gotPreview, gotAccess, err := decodeCookieValue(encoded)
+	gotOrg, gotPreview, gotAccess, err := decodeCookieValue(secret, encoded)
 	require.NoError(t, err)
 	require.Equal(t, orgID, gotOrg)
 	require.Equal(t, previewID, gotPreview)
@@ -73,11 +74,27 @@ func TestEncodeDecode_CookieValue(t *testing.T) {
 
 func TestDecodeCookieValue_Invalid(t *testing.T) {
 	t.Parallel()
-	_, _, _, err := decodeCookieValue("not-valid-base64!!!")
+	secret := []byte("test-secret-key-for-hmac")
+
+	_, _, _, err := decodeCookieValue(secret, "not-valid-base64!!!")
 	require.Error(t, err)
 
-	_, _, _, err = decodeCookieValue("dHdvOnBhcnRz") // "two:parts" base64
+	_, _, _, err = decodeCookieValue(secret, "dHdvOnBhcnRz") // "two:parts" base64
 	require.Error(t, err)
+}
+
+func TestDecodeCookieValue_WrongSecret(t *testing.T) {
+	t.Parallel()
+	secret1 := []byte("correct-secret")
+	secret2 := []byte("wrong-secret")
+	orgID := uuid.New()
+	previewID := uuid.New()
+	accessSessionID := uuid.New()
+
+	encoded := encodeCookieValue(secret1, orgID, previewID, accessSessionID)
+	_, _, _, err := decodeCookieValue(secret2, encoded)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid cookie signature")
 }
 
 func TestIsWebSocketUpgrade(t *testing.T) {
@@ -273,12 +290,13 @@ func TestGateway_ServeHTTP_Proxy_InvalidCookie(t *testing.T) {
 func TestGateway_ServeHTTP_Proxy_CookieMismatch(t *testing.T) {
 	t.Parallel()
 
-	gw := NewGateway(GatewayConfig{AppOrigin: "https://app.143.dev"})
+	secret := []byte("test-secret")
+	gw := NewGateway(GatewayConfig{AppOrigin: "https://app.143.dev", CookieSecret: secret})
 	previewID := uuid.New()
 	otherPreviewID := uuid.New()
 
 	// Encode a cookie for a different preview ID.
-	cookieVal := encodeCookieValue(uuid.New(), otherPreviewID, uuid.New())
+	cookieVal := encodeCookieValue(secret, uuid.New(), otherPreviewID, uuid.New())
 
 	req := httptest.NewRequest(http.MethodGet, "/some-page", nil)
 	req.Host = previewID.String() + ".preview.143.dev"

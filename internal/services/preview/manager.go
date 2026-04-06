@@ -196,8 +196,10 @@ func (m *Manager) StartPreview(ctx context.Context, input StartPreviewInput) (*m
 			Port:              svcCfg.Port,
 		}
 		if err := m.store.CreatePreviewService(ctx, svc); err != nil {
-			_ = m.store.UpdatePreviewStatus(ctx, input.OrgID, instance.ID, models.PreviewStatusFailed,
-				fmt.Sprintf("failed to create service record for %q: %v", name, err))
+			if statusErr := m.store.UpdatePreviewStatus(ctx, input.OrgID, instance.ID, models.PreviewStatusFailed,
+				fmt.Sprintf("failed to create service record for %q: %v", name, err)); statusErr != nil {
+				m.logger.Warn().Err(statusErr).Str("preview_id", instance.ID.String()).Msg("failed to update preview status to failed")
+			}
 			return nil, fmt.Errorf("create service record %q: %w", name, err)
 		}
 	}
@@ -211,8 +213,10 @@ func (m *Manager) StartPreview(ctx context.Context, input StartPreviewInput) (*m
 			Status:            models.PreviewInfraStatusProvisioning,
 		}
 		if err := m.store.CreatePreviewInfrastructure(ctx, infra); err != nil {
-			_ = m.store.UpdatePreviewStatus(ctx, input.OrgID, instance.ID, models.PreviewStatusFailed,
-				fmt.Sprintf("failed to create infrastructure record for %q: %v", name, err))
+			if statusErr := m.store.UpdatePreviewStatus(ctx, input.OrgID, instance.ID, models.PreviewStatusFailed,
+				fmt.Sprintf("failed to create infrastructure record for %q: %v", name, err)); statusErr != nil {
+				m.logger.Warn().Err(statusErr).Str("preview_id", instance.ID.String()).Msg("failed to update preview status to failed")
+			}
 			return nil, fmt.Errorf("create infrastructure record %q: %w", name, err)
 		}
 	}
@@ -220,7 +224,9 @@ func (m *Manager) StartPreview(ctx context.Context, input StartPreviewInput) (*m
 	// 9. Start the preview via the provider (async-friendly).
 	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config)
 	if err != nil {
-		_ = m.store.UpdatePreviewStatus(ctx, input.OrgID, instance.ID, models.PreviewStatusFailed, err.Error())
+		if statusErr := m.store.UpdatePreviewStatus(ctx, input.OrgID, instance.ID, models.PreviewStatusFailed, err.Error()); statusErr != nil {
+			m.logger.Warn().Err(statusErr).Str("preview_id", instance.ID.String()).Msg("failed to update preview status to failed")
+		}
 		return nil, fmt.Errorf("provider start preview: %w", err)
 	}
 
@@ -382,6 +388,35 @@ func (m *Manager) ValidateBootstrapToken(ctx context.Context, orgID uuid.UUID, t
 
 	// Mark as used by updating activity.
 	_ = m.store.UpdateAccessSessionActivity(ctx, orgID, sess.ID)
+
+	return sess, nil
+}
+
+// =============================================================================
+// ValidateBootstrapTokenUnscoped
+// =============================================================================
+
+// ValidateBootstrapTokenUnscoped exchanges a bootstrap token without requiring
+// an org_id. This is used by the preview gateway which does not have session
+// middleware. The token hash is 32 random bytes, making unscoped lookup safe.
+func (m *Manager) ValidateBootstrapTokenUnscoped(ctx context.Context, token string) (*models.PreviewAccessSession, error) {
+	tokenHash := hashToken(token)
+
+	sess, err := m.store.GetAccessSessionByTokenUnscoped(ctx, tokenHash)
+	if err != nil {
+		return nil, fmt.Errorf("invalid bootstrap token")
+	}
+
+	if sess.RevokedAt != nil {
+		return nil, fmt.Errorf("bootstrap token has been revoked")
+	}
+
+	if time.Now().After(sess.ExpiresAt) {
+		return nil, fmt.Errorf("bootstrap token has expired")
+	}
+
+	// Mark as used by updating activity.
+	_ = m.store.UpdateAccessSessionActivity(ctx, sess.OrgID, sess.ID)
 
 	return sess, nil
 }

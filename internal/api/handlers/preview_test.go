@@ -120,7 +120,7 @@ func TestPreviewHandler_InspectorNilManager(t *testing.T) {
 
 func TestPreviewHandler_StartPreview_InvalidBody(t *testing.T) {
 	t.Parallel()
-	h := newPreviewTestHandler()
+	h := newPreviewTestHandlerWithManager()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/not-a-uuid/preview", strings.NewReader("{}"))
 	req = previewTestContext(req)
@@ -138,7 +138,7 @@ func TestPreviewHandler_StartPreview_InvalidBody(t *testing.T) {
 
 func TestPreviewHandler_StartPreview_MissingConfig(t *testing.T) {
 	t.Parallel()
-	h := newPreviewTestHandler()
+	h := newPreviewTestHandlerWithManager()
 
 	sessionID := uuid.New()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/preview",
@@ -159,6 +159,42 @@ func TestPreviewHandler_StartPreview_MissingConfig(t *testing.T) {
 	err := json.NewDecoder(w.Body).Decode(&resp)
 	require.NoError(t, err)
 	require.Equal(t, "MISSING_CONFIG", resp.Error.Code)
+}
+
+func TestPreviewHandler_ManagerNotConfigured(t *testing.T) {
+	t.Parallel()
+	// Handler with nil manager should return 501 for manager-dependent endpoints.
+	h := newPreviewTestHandler()
+
+	handlers := []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{"StartPreview", h.StartPreview},
+		{"GetPreview", h.GetPreview},
+		{"StopPreview", h.StopPreview},
+		{"RestartPreview", h.RestartPreview},
+		{"MintBootstrapToken", h.MintBootstrapToken},
+		{"ExtendTTL", h.ExtendTTL},
+	}
+
+	for _, tt := range handlers {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			req := httptest.NewRequest(http.MethodPost, "/test", strings.NewReader("{}"))
+			req = previewTestContext(req)
+			w := httptest.NewRecorder()
+
+			tt.handler(w, req)
+
+			require.Equal(t, http.StatusNotImplemented, w.Code)
+
+			var resp models.ErrorResponse
+			err := json.NewDecoder(w.Body).Decode(&resp)
+			require.NoError(t, err)
+			require.Equal(t, "PREVIEW_NOT_AVAILABLE", resp.Error.Code)
+		})
+	}
 }
 
 func TestPreviewHandler_DetectReadiness_NoConfig(t *testing.T) {

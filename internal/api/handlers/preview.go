@@ -66,6 +66,16 @@ func (h *PreviewHandler) getActivePreview(w http.ResponseWriter, r *http.Request
 	return instance, true
 }
 
+// requireManager checks that the preview manager is configured.
+func (h *PreviewHandler) requireManager(w http.ResponseWriter, r *http.Request) bool {
+	if h.manager == nil {
+		writeError(w, r, http.StatusNotImplemented, "PREVIEW_NOT_AVAILABLE",
+			"preview manager is not configured on this worker")
+		return false
+	}
+	return true
+}
+
 // requireInspector returns the PreviewInspector or writes a 501 error response.
 func (h *PreviewHandler) requireInspector(w http.ResponseWriter, r *http.Request) (preview.PreviewInspector, bool) {
 	if h.manager == nil {
@@ -93,6 +103,9 @@ type startPreviewRequest struct {
 }
 
 func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
+	if !h.requireManager(w, r) {
+		return
+	}
 	orgID := middleware.OrgIDFromContext(r.Context())
 	user := middleware.UserFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
@@ -134,6 +147,9 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 // =============================================================================
 
 func (h *PreviewHandler) GetPreview(w http.ResponseWriter, r *http.Request) {
+	if !h.requireManager(w, r) {
+		return
+	}
 	orgID := middleware.OrgIDFromContext(r.Context())
 	instance, ok := h.getActivePreview(w, r)
 	if !ok {
@@ -154,6 +170,9 @@ func (h *PreviewHandler) GetPreview(w http.ResponseWriter, r *http.Request) {
 // =============================================================================
 
 func (h *PreviewHandler) StopPreview(w http.ResponseWriter, r *http.Request) {
+	if !h.requireManager(w, r) {
+		return
+	}
 	orgID := middleware.OrgIDFromContext(r.Context())
 	instance, ok := h.getActivePreview(w, r)
 	if !ok {
@@ -173,6 +192,9 @@ func (h *PreviewHandler) StopPreview(w http.ResponseWriter, r *http.Request) {
 // =============================================================================
 
 func (h *PreviewHandler) RestartPreview(w http.ResponseWriter, r *http.Request) {
+	if !h.requireManager(w, r) {
+		return
+	}
 	orgID := middleware.OrgIDFromContext(r.Context())
 	instance, ok := h.getActivePreview(w, r)
 	if !ok {
@@ -233,6 +255,9 @@ func (h *PreviewHandler) GetServices(w http.ResponseWriter, r *http.Request) {
 // =============================================================================
 
 func (h *PreviewHandler) MintBootstrapToken(w http.ResponseWriter, r *http.Request) {
+	if !h.requireManager(w, r) {
+		return
+	}
 	orgID := middleware.OrgIDFromContext(r.Context())
 	user := middleware.UserFromContext(r.Context())
 	instance, ok := h.getActivePreview(w, r)
@@ -277,6 +302,9 @@ func (h *PreviewHandler) GetSnapshots(w http.ResponseWriter, r *http.Request) {
 // =============================================================================
 
 func (h *PreviewHandler) ExtendTTL(w http.ResponseWriter, r *http.Request) {
+	if !h.requireManager(w, r) {
+		return
+	}
 	orgID := middleware.OrgIDFromContext(r.Context())
 	instance, ok := h.getActivePreview(w, r)
 	if !ok {
@@ -296,9 +324,6 @@ func (h *PreviewHandler) ExtendTTL(w http.ResponseWriter, r *http.Request) {
 // =============================================================================
 
 func (h *PreviewHandler) DetectReadiness(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
-	_ = orgID // Used for future org-level credential/destination lookups.
-
 	// Check for a config query parameter (base64-encoded JSON).
 	configParam := r.URL.Query().Get("config")
 	if configParam == "" {

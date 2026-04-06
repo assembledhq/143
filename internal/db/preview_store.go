@@ -639,6 +639,25 @@ func (s *PreviewStore) GetAccessSessionByToken(ctx context.Context, orgID uuid.U
 	return &row, nil
 }
 
+// GetAccessSessionByTokenUnscoped looks up an access session by token hash
+// without org scoping. Used by the preview gateway during bootstrap exchange,
+// where the org is not yet known. Safe because token hashes are derived from
+// 32 cryptographically random bytes.
+func (s *PreviewStore) GetAccessSessionByTokenUnscoped(ctx context.Context, tokenHash string) (*models.PreviewAccessSession, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_access_sessions
+		WHERE session_token_hash = @hash`, previewAccessSessionColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"hash": tokenHash})
+	if err != nil {
+		return nil, fmt.Errorf("query access session: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewAccessSession])
+	if err != nil {
+		return nil, fmt.Errorf("get access session: %w", err)
+	}
+	return &row, nil
+}
+
 // RevokeAccessSession revokes a single access session, scoped to org.
 func (s *PreviewStore) RevokeAccessSession(ctx context.Context, orgID, id uuid.UUID) error {
 	_, err := s.db.Exec(ctx,

@@ -75,7 +75,7 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 
 		// Preview inspector handlers — delegate to requireInspector + getActivePreview
 		// which use OrgIDFromContext.
-		"PreviewHandler.DetectReadiness":      "uses OrgIDFromContext directly",
+		"PreviewHandler.DetectReadiness":      "config-only check, no org-scoped data access",
 		"PreviewHandler.CaptureScreenshot":    "delegates to getActivePreview which uses OrgIDFromContext",
 		"PreviewHandler.InspectElement":       "delegates to getActivePreview which uses OrgIDFromContext",
 		"PreviewHandler.ReadConsole":          "delegates to getActivePreview which uses OrgIDFromContext",
