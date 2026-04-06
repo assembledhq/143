@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -1218,9 +1219,18 @@ func evalFailed(format string, args ...any) *models.EvalRunResult {
 	}
 }
 
+// validConfigRef matches branch names, tags, and SHAs safe for shell use.
+var validConfigRef = regexp.MustCompile(`^[a-zA-Z0-9._/-]+$`)
+
 // applyConfigOverlay overlays repo config files from a branch/SHA onto the sandbox.
 // Config paths: AGENTS.md, CLAUDE.md, .claude/, .143/
 func applyConfigOverlay(ctx context.Context, provider agent.SandboxProvider, sb *agent.Sandbox, configRef string, logger zerolog.Logger) {
+	// Validate configRef to prevent shell injection
+	if !validConfigRef.MatchString(configRef) {
+		logger.Warn().Str("config_ref", configRef).Msg("invalid config_ref, skipping overlay")
+		return
+	}
+
 	// Fetch the config ref first
 	var stderr bytes.Buffer
 	_, _ = provider.Exec(ctx, sb, fmt.Sprintf("git fetch origin %s", configRef), io.Discard, &stderr)
@@ -1243,8 +1253,16 @@ func applyConfigOverlay(ctx context.Context, provider agent.SandboxProvider, sb 
 	logger.Debug().Str("config_ref", configRef).Msg("applied config overlay")
 }
 
+// validModelName matches alphanumeric model identifiers with dashes and dots (no shell metacharacters).
+var validModelName = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+
 // runCodingAgent executes the coding agent CLI in the sandbox and returns the diff, trace, and token usage.
 func runCodingAgent(ctx context.Context, services *Services, sb *agent.Sandbox, model, issueDescription string, logger zerolog.Logger) (diff string, trace map[string]any, tokenUsage map[string]any) {
+	// Validate model name to prevent shell injection
+	if !validModelName.MatchString(model) {
+		return "", map[string]any{"error": "invalid model name"}, nil
+	}
+
 	// Run Claude Code CLI with --print flag for non-interactive output
 	cmd := fmt.Sprintf("claude --model %s --print %q 2>&1", model, issueDescription)
 
@@ -1283,6 +1301,14 @@ func gradeCodeCheck(ctx context.Context, provider agent.SandboxProvider, sb *age
 			Score:   0,
 			Pass:    false,
 			Details: fmt.Sprintf("invalid code_check config: %v", err),
+		}
+	}
+	if config.Command == "" {
+		return models.CriterionResult{
+			Name:    criterion.Name,
+			Score:   0,
+			Pass:    false,
+			Details: "code_check config is missing required 'command' field",
 		}
 	}
 

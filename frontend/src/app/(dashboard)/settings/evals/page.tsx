@@ -174,7 +174,7 @@ export default function EvalsSettingsPage() {
       <BatchHistory />
 
       {/* Bootstrap candidates banner */}
-      <BootstrapCandidatesBanner />
+      <BootstrapCandidatesBanner repoIds={repos.map((r) => r.id)} />
     </SettingsPageFrame>
   );
 }
@@ -269,10 +269,12 @@ function BatchHistory() {
   );
 }
 
-function BootstrapCandidatesBanner() {
+function BootstrapCandidatesBanner({ repoIds }: { repoIds: string[] }) {
+  const firstRepoId = repoIds[0];
   const { data: bootstrapResponse } = useQuery({
     queryKey: queryKeys.evals.bootstrapCandidates,
-    queryFn: () => api.evals.getBootstrapCandidates(),
+    queryFn: () => api.evals.getBootstrapCandidates({ repo_id: firstRepoId }),
+    enabled: !!firstRepoId,
     retry: false,
   });
 

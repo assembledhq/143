@@ -536,8 +536,13 @@ export const api = {
     // Bootstrap
     bootstrap: (body: { repo_id: string }) =>
       post<import('./types').SingleResponse<import('./types').EvalBootstrapRun>>('/api/v1/evals/bootstrap', body),
-    getBootstrapCandidates: () =>
-      get<import('./types').SingleResponse<import('./types').EvalBootstrapRun>>('/api/v1/evals/bootstrap/candidates'),
+    getBootstrapCandidates: (params?: { repo_id?: string; bootstrap_run_id?: string }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.repo_id) searchParams.set('repo_id', params.repo_id);
+      if (params?.bootstrap_run_id) searchParams.set('bootstrap_run_id', params.bootstrap_run_id);
+      const qs = searchParams.toString();
+      return get<import('./types').SingleResponse<import('./types').EvalBootstrapRun>>(`/api/v1/evals/bootstrap/candidates${qs ? `?${qs}` : ''}`);
+    },
     acceptBootstrapCandidates: (body: { bootstrap_run_id: string; candidate_indices: number[] }) =>
       post<import('./types').ListResponse<import('./types').EvalTask>>('/api/v1/evals/bootstrap/accept', body),
   },

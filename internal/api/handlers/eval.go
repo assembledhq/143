@@ -45,6 +45,24 @@ func (h *EvalHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 // validGitSHA matches a hex string of 4-40 characters (short or full SHA).
 var validGitSHA = regexp.MustCompile(`^[0-9a-fA-F]{4,40}$`)
 
+// validGitRef matches a branch name or tag (alphanumeric, dots, dashes, underscores, slashes).
+var validGitRef = regexp.MustCompile(`^[a-zA-Z0-9._/-]+$`)
+
+// allowedModels is the set of models that can be used for eval runs.
+var allowedModels = map[string]bool{
+	"claude-opus-4-6":   true,
+	"claude-sonnet-4-6": true,
+	"codex":             true,
+	"gemini-cli":        true,
+}
+
+const (
+	maxBatchTotalRuns    = 100
+	minPassThreshold     = 0.0
+	maxPassThreshold     = 1.0
+	defaultPassThreshold = 0.7
+)
+
 // validateScoringCriteria validates that scoring_criteria is a well-formed JSON array
 // with valid grader_type values. Used by both CreateTask and UpdateTask.
 func validateScoringCriteria(w http.ResponseWriter, r *http.Request, raw json.RawMessage) bool {
@@ -211,8 +229,12 @@ func (h *EvalHandler) CreateTask(w http.ResponseWriter, r *http.Request) {
 		complexity = *req.Complexity
 	}
 
-	passThreshold := 0.7
+	passThreshold := defaultPassThreshold
 	if req.PassThreshold != nil {
+		if *req.PassThreshold < minPassThreshold || *req.PassThreshold > maxPassThreshold {
+			writeError(w, r, http.StatusBadRequest, "INVALID_THRESHOLD", "pass_threshold must be between 0.0 and 1.0")
+			return
+		}
 		passThreshold = *req.PassThreshold
 	}
 
@@ -350,9 +372,17 @@ func (h *EvalHandler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		task.ScoringCriteria = req.ScoringCriteria
 	}
 	if req.PassThreshold != nil {
+		if *req.PassThreshold < minPassThreshold || *req.PassThreshold > maxPassThreshold {
+			writeError(w, r, http.StatusBadRequest, "INVALID_THRESHOLD", "pass_threshold must be between 0.0 and 1.0")
+			return
+		}
 		task.PassThreshold = *req.PassThreshold
 	}
 	if req.Complexity != nil {
+		if err := req.Complexity.Validate(); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_COMPLEXITY", "invalid complexity value")
+			return
+		}
 		task.Complexity = *req.Complexity
 	}
 	if req.Tags != nil {
@@ -446,6 +476,16 @@ func (h *EvalHandler) StartRun(w http.ResponseWriter, r *http.Request) {
 	if req.Model == "" {
 		writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", "model is required")
 		return
+	}
+	if !allowedModels[req.Model] {
+		writeError(w, r, http.StatusBadRequest, "INVALID_MODEL", "model must be one of: claude-opus-4-6, claude-sonnet-4-6, codex, gemini-cli")
+		return
+	}
+	if req.ConfigRef != nil && *req.ConfigRef != "" {
+		if !validGitRef.MatchString(*req.ConfigRef) && !validGitSHA.MatchString(*req.ConfigRef) {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CONFIG_REF", "config_ref must be a valid branch name or git SHA")
+			return
+		}
 	}
 
 	contextOverrides := json.RawMessage(`{}`)
@@ -580,6 +620,34 @@ func (h *EvalHandler) StartBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate each config has a valid model and config_ref
+	for i, cfg := range req.Configs {
+		if cfg.Model == "" {
+			writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", fmt.Sprintf("configs[%d].model is required", i))
+			return
+		}
+		if !allowedModels[cfg.Model] {
+			writeError(w, r, http.StatusBadRequest, "INVALID_MODEL",
+				fmt.Sprintf("configs[%d].model must be one of: claude-opus-4-6, claude-sonnet-4-6, codex, gemini-cli", i))
+			return
+		}
+		if cfg.ConfigRef != nil && *cfg.ConfigRef != "" {
+			if !validGitRef.MatchString(*cfg.ConfigRef) && !validGitSHA.MatchString(*cfg.ConfigRef) {
+				writeError(w, r, http.StatusBadRequest, "INVALID_CONFIG_REF",
+					fmt.Sprintf("configs[%d].config_ref must be a valid branch name or git SHA", i))
+				return
+			}
+		}
+	}
+
+	// Cap total runs to prevent resource exhaustion
+	totalRuns := len(req.TaskIDs) * len(req.Configs)
+	if totalRuns > maxBatchTotalRuns {
+		writeError(w, r, http.StatusBadRequest, "BATCH_TOO_LARGE",
+			fmt.Sprintf("batch would create %d runs, maximum is %d (reduce tasks or configs)", totalRuns, maxBatchTotalRuns))
+		return
+	}
+
 	// Validate all task IDs belong to this org in a single query
 	validCount, err := h.taskStore.CountByIDs(r.Context(), orgID, req.TaskIDs)
 	if err != nil {
@@ -591,8 +659,6 @@ func (h *EvalHandler) StartBatch(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("one or more task IDs not found or do not belong to this organization (expected %d, found %d)", len(req.TaskIDs), validCount))
 		return
 	}
-
-	totalRuns := len(req.TaskIDs) * len(req.Configs)
 
 	// Create batch + all runs + enqueue jobs atomically in a transaction
 	ctx := r.Context()
@@ -829,6 +895,10 @@ func (h *EvalHandler) AcceptBootstrapCandidates(w http.ResponseWriter, r *http.R
 		writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", "bootstrap_run_id is required")
 		return
 	}
+	if len(req.CandidateIndices) == 0 {
+		writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", "candidate_indices is required (at least one index)")
+		return
+	}
 
 	run, err := h.bootstrapStore.GetByID(r.Context(), orgID, req.BootstrapRunID)
 	if err != nil {
@@ -851,37 +921,64 @@ func (h *EvalHandler) AcceptBootstrapCandidates(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	var created []models.EvalTask
+	// Validate all indices are in range before creating anything
 	for _, idx := range req.CandidateIndices {
 		if idx < 0 || idx >= len(candidates) {
-			continue
+			writeError(w, r, http.StatusBadRequest, "INVALID_INDEX",
+				fmt.Sprintf("candidate index %d is out of range (0-%d)", idx, len(candidates)-1))
+			return
 		}
+	}
+
+	// Wrap all task creations in a transaction for atomicity
+	ctx := r.Context()
+	tx, err := h.txStarter.Begin(ctx)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "TX_FAILED", "failed to start transaction", err)
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	txTaskStore := db.NewEvalTaskStore(tx)
+
+	var created []models.EvalTask
+	for _, idx := range req.CandidateIndices {
 		c := candidates[idx]
-		criteriaJSON, _ := json.Marshal(c.ScoringCriteria)
+		criteriaJSON, err := json.Marshal(c.ScoringCriteria)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "MARSHAL_FAILED",
+				fmt.Sprintf("failed to marshal scoring criteria for candidate %d", idx), err)
+			return
+		}
 		prNum := c.PRNumber
 
 		task := models.EvalTask{
-			OrgID:            orgID,
-			RepoID:           run.RepoID,
-			Name:             c.PRTitle,
-			Description:      fmt.Sprintf("Bootstrapped from PR #%d", c.PRNumber),
-			BaseCommitSHA:    c.BaseCommitSHA,
+			OrgID:             orgID,
+			RepoID:            run.RepoID,
+			Name:              c.PRTitle,
+			Description:       fmt.Sprintf("Bootstrapped from PR #%d", c.PRNumber),
+			BaseCommitSHA:     c.BaseCommitSHA,
 			SolutionCommitSHA: &c.SolutionCommitSHA,
-			SolutionDiff:     &c.SolutionDiff,
-			IssueDescription: c.IssueDescription,
-			ScoringCriteria:  criteriaJSON,
-			PassThreshold:    0.7,
-			Source:           models.EvalTaskSourcePRBootstrap,
-			SourcePRNumber:   &prNum,
-			Complexity:       c.Complexity,
-			CreatedBy:        &user.ID,
+			SolutionDiff:      &c.SolutionDiff,
+			IssueDescription:  c.IssueDescription,
+			ScoringCriteria:   criteriaJSON,
+			PassThreshold:     defaultPassThreshold,
+			Source:            models.EvalTaskSourcePRBootstrap,
+			SourcePRNumber:    &prNum,
+			Complexity:        c.Complexity,
+			CreatedBy:         &user.ID,
 		}
-		if err := h.taskStore.Create(r.Context(), &task); err != nil {
+		if err := txTaskStore.Create(ctx, &task); err != nil {
 			writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED",
 				fmt.Sprintf("failed to create task from candidate %d", idx), err)
 			return
 		}
 		created = append(created, task)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "TX_COMMIT_FAILED", "failed to commit accepted candidates", err)
+		return
 	}
 
 	writeJSON(w, http.StatusCreated, models.ListResponse[models.EvalTask]{Data: created})

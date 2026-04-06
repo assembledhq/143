@@ -2042,9 +2042,13 @@ func TestEvalHandler_AcceptBootstrapCandidates(t *testing.T) {
 			WillReturnRows(pgxmock.NewRows(bootstrapRunColumns).
 				AddRow(newTestBootstrapRunRow(runID, orgID, repoID, &userID, "completed", candidates, now)...))
 
+		mock.ExpectBegin()
+
 		mock.ExpectQuery("INSERT INTO eval_tasks").
 			WithArgs(anyArgs(22)...).
 			WillReturnRows(pgxmock.NewRows(evalTaskColumns).AddRow(newTestEvalTaskRow(taskID, orgID, repoID, now)...))
+
+		mock.ExpectCommit()
 
 		body := fmt.Sprintf(`{"bootstrap_run_id": %q, "candidate_indices": [0]}`, runID.String())
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/bootstrap/accept", strings.NewReader(body))
@@ -2193,7 +2197,7 @@ func TestEvalHandler_AcceptBootstrapCandidates(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 
-	t.Run("skips out-of-range candidate indices", func(t *testing.T) {
+	t.Run("rejects out-of-range candidate indices", func(t *testing.T) {
 		t.Parallel()
 
 		mock, err := pgxmock.NewPool()
@@ -2214,20 +2218,40 @@ func TestEvalHandler_AcceptBootstrapCandidates(t *testing.T) {
 			WillReturnRows(pgxmock.NewRows(bootstrapRunColumns).
 				AddRow(newTestBootstrapRunRow(runID, orgID, repoID, &userID, "completed", candidates, now)...))
 
-		// Only out-of-range indices: -1 and 5 (only 1 candidate at index 0)
-		body := fmt.Sprintf(`{"bootstrap_run_id": %q, "candidate_indices": [-1, 5]}`, runID.String())
+		// Out-of-range index 5 (only 1 candidate at index 0) — now returns error
+		body := fmt.Sprintf(`{"bootstrap_run_id": %q, "candidate_indices": [5]}`, runID.String())
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/bootstrap/accept", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		req = req.WithContext(evalCtx(orgID, userID))
 		w := httptest.NewRecorder()
 
 		handler.AcceptBootstrapCandidates(w, req)
-		require.Equal(t, http.StatusCreated, w.Code)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Contains(t, w.Body.String(), "INVALID_INDEX")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
 
-		var resp models.ListResponse[models.EvalTask]
-		err = json.Unmarshal(w.Body.Bytes(), &resp)
+	t.Run("rejects empty candidate_indices", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
 		require.NoError(t, err)
-		require.Empty(t, resp.Data)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		runID := uuid.New()
+		handler := newEvalHandler(mock)
+
+		body := fmt.Sprintf(`{"bootstrap_run_id": %q, "candidate_indices": []}`, runID.String())
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/bootstrap/accept", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.AcceptBootstrapCandidates(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Contains(t, w.Body.String(), "MISSING_FIELD")
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 
@@ -2252,9 +2276,13 @@ func TestEvalHandler_AcceptBootstrapCandidates(t *testing.T) {
 			WillReturnRows(pgxmock.NewRows(bootstrapRunColumns).
 				AddRow(newTestBootstrapRunRow(runID, orgID, repoID, &userID, "completed", candidates, now)...))
 
+		mock.ExpectBegin()
+
 		mock.ExpectQuery("INSERT INTO eval_tasks").
 			WithArgs(anyArgs(22)...).
 			WillReturnError(fmt.Errorf("unique constraint violation"))
+
+		mock.ExpectRollback()
 
 		body := fmt.Sprintf(`{"bootstrap_run_id": %q, "candidate_indices": [0]}`, runID.String())
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/bootstrap/accept", strings.NewReader(body))
@@ -2416,6 +2444,213 @@ func TestEvalHandler_CreateTask_SHAValidation(t *testing.T) {
 
 		handler.CreateTask(w, req)
 		require.Equal(t, http.StatusCreated, w.Code)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
+func TestEvalHandler_CreateTask_ThresholdValidation(t *testing.T) {
+	t.Parallel()
+
+	t.Run("rejects negative pass_threshold", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		handler := newEvalHandler(mock)
+		orgID := uuid.New()
+		userID := uuid.New()
+
+		body := fmt.Sprintf(`{"repo_id":"%s","name":"test","base_commit_sha":"abcd1234","issue_description":"fix it","pass_threshold":-0.5}`, uuid.New())
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/tasks", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.CreateTask(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Contains(t, w.Body.String(), "INVALID_THRESHOLD")
+	})
+
+	t.Run("rejects pass_threshold above 1.0", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		handler := newEvalHandler(mock)
+		orgID := uuid.New()
+		userID := uuid.New()
+
+		body := fmt.Sprintf(`{"repo_id":"%s","name":"test","base_commit_sha":"abcd1234","issue_description":"fix it","pass_threshold":1.5}`, uuid.New())
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/tasks", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.CreateTask(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Contains(t, w.Body.String(), "INVALID_THRESHOLD")
+	})
+}
+
+func TestEvalHandler_StartRun_ModelValidation(t *testing.T) {
+	t.Parallel()
+
+	t.Run("rejects invalid model", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		taskID := uuid.New()
+		repoID := uuid.New()
+		now := time.Now()
+		handler := newEvalHandler(mock)
+
+		mock.ExpectQuery("SELECT .+ FROM eval_tasks WHERE id").
+			WithArgs(anyArgs(2)...).
+			WillReturnRows(pgxmock.NewRows(evalTaskColumns).AddRow(newTestEvalTaskRow(taskID, orgID, repoID, now)...))
+
+		body := `{"model": "gpt-4o"}`
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/eval/tasks/"+taskID.String()+"/runs", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(evalCtxWithChi(orgID, userID, map[string]string{"id": taskID.String()}))
+		w := httptest.NewRecorder()
+
+		handler.StartRun(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Contains(t, w.Body.String(), "INVALID_MODEL")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("rejects invalid config_ref", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		taskID := uuid.New()
+		repoID := uuid.New()
+		now := time.Now()
+		handler := newEvalHandler(mock)
+
+		mock.ExpectQuery("SELECT .+ FROM eval_tasks WHERE id").
+			WithArgs(anyArgs(2)...).
+			WillReturnRows(pgxmock.NewRows(evalTaskColumns).AddRow(newTestEvalTaskRow(taskID, orgID, repoID, now)...))
+
+		body := `{"model": "claude-sonnet-4-6", "config_ref": "main; rm -rf /"}`
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/eval/tasks/"+taskID.String()+"/runs", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(evalCtxWithChi(orgID, userID, map[string]string{"id": taskID.String()}))
+		w := httptest.NewRecorder()
+
+		handler.StartRun(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Contains(t, w.Body.String(), "INVALID_CONFIG_REF")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
+func TestEvalHandler_StartBatch_Validation(t *testing.T) {
+	t.Parallel()
+
+	t.Run("rejects batch exceeding max total runs", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		handler := newEvalHandler(mock)
+
+		// 51 tasks × 2 configs = 102 runs > 100 max
+		taskIDs := make([]string, 51)
+		for i := range taskIDs {
+			taskIDs[i] = fmt.Sprintf("%q", uuid.New().String())
+		}
+		body := fmt.Sprintf(`{
+			"name": "Big Batch",
+			"task_ids": [%s],
+			"configs": [{"model": "claude-sonnet-4-6"}, {"model": "claude-opus-4-6"}]
+		}`, strings.Join(taskIDs, ","))
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/eval/batches", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.StartBatch(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Contains(t, w.Body.String(), "BATCH_TOO_LARGE")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("rejects config with invalid model", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		taskID := uuid.New()
+		handler := newEvalHandler(mock)
+
+		body := fmt.Sprintf(`{
+			"name": "Test Batch",
+			"task_ids": [%q],
+			"configs": [{"model": "bad-model"}]
+		}`, taskID.String())
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/eval/batches", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.StartBatch(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Contains(t, w.Body.String(), "INVALID_MODEL")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("rejects config with empty model", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		taskID := uuid.New()
+		handler := newEvalHandler(mock)
+
+		body := fmt.Sprintf(`{
+			"name": "Test Batch",
+			"task_ids": [%q],
+			"configs": [{"model": ""}]
+		}`, taskID.String())
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/eval/batches", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.StartBatch(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Contains(t, w.Body.String(), "MISSING_FIELD")
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 }
