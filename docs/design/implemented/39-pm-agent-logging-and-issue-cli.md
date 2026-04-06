@@ -1,6 +1,8 @@
 # 39 - PM Agent Logging & Issue Creation CLI
 
-> **Status:** Proposed | **Last reviewed:** 2026-03-29
+> **Status:** Partially Implemented | **Last reviewed:** 2026-04-05
+>
+> **Implementation notes:** PM agent logs now stream into `session_logs`. Missing: issue creation CLI tool.
 
 ## Problem
 
