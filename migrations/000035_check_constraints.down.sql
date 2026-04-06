@@ -9,6 +9,8 @@ ALTER TABLE sessions
     DROP CONSTRAINT IF EXISTS chk_sessions_autonomy_level,
     DROP CONSTRAINT IF EXISTS chk_sessions_token_mode,
     DROP CONSTRAINT IF EXISTS chk_sessions_agent_type;
+-- Restore legacy default that existed before migration 35.
+ALTER TABLE sessions ALTER COLUMN autonomy_level SET DEFAULT 'manual';
 
 ALTER TABLE session_threads DROP CONSTRAINT IF EXISTS chk_session_threads_status;
 ALTER TABLE session_questions DROP CONSTRAINT IF EXISTS chk_session_questions_status;
