@@ -167,8 +167,9 @@ func TestIsWebSocketUpgrade_HTTPRequest(t *testing.T) {
 func TestInjectSecurityHeaders(t *testing.T) {
 	t.Parallel()
 
+	gw := NewGateway(GatewayConfig{AppOrigin: "https://app.143.dev"})
 	h := make(http.Header)
-	injectSecurityHeaders(h, "https://app.143.dev")
+	gw.injectSecurityHeaders(h)
 
 	require.Contains(t, h.Get("X-Frame-Options"), "ALLOW-FROM https://app.143.dev")
 	require.Contains(t, h.Get("Content-Security-Policy"), "frame-ancestors https://app.143.dev")

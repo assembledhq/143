@@ -372,24 +372,11 @@ func (m *Manager) MintBootstrapToken(ctx context.Context, orgID, userID, preview
 // session. Returns the session if the token is valid and not expired.
 func (m *Manager) ValidateBootstrapToken(ctx context.Context, orgID uuid.UUID, token string) (*models.PreviewAccessSession, error) {
 	tokenHash := hashToken(token)
-
 	sess, err := m.store.GetAccessSessionByToken(ctx, orgID, tokenHash)
 	if err != nil {
 		return nil, fmt.Errorf("invalid bootstrap token")
 	}
-
-	if sess.RevokedAt != nil {
-		return nil, fmt.Errorf("bootstrap token has been revoked")
-	}
-
-	if time.Now().After(sess.ExpiresAt) {
-		return nil, fmt.Errorf("bootstrap token has expired")
-	}
-
-	// Mark as used by updating activity.
-	_ = m.store.UpdateAccessSessionActivity(ctx, orgID, sess.ID)
-
-	return sess, nil
+	return m.validateSession(ctx, sess)
 }
 
 // =============================================================================
@@ -401,23 +388,24 @@ func (m *Manager) ValidateBootstrapToken(ctx context.Context, orgID uuid.UUID, t
 // middleware. The token hash is 32 random bytes, making unscoped lookup safe.
 func (m *Manager) ValidateBootstrapTokenUnscoped(ctx context.Context, token string) (*models.PreviewAccessSession, error) {
 	tokenHash := hashToken(token)
-
 	sess, err := m.store.GetAccessSessionByTokenUnscoped(ctx, tokenHash)
 	if err != nil {
 		return nil, fmt.Errorf("invalid bootstrap token")
 	}
+	return m.validateSession(ctx, sess)
+}
 
+// validateSession checks revocation, expiration, and records activity for a
+// bootstrap session. Shared by scoped and unscoped token validation.
+func (m *Manager) validateSession(ctx context.Context, sess *models.PreviewAccessSession) (*models.PreviewAccessSession, error) {
 	if sess.RevokedAt != nil {
 		return nil, fmt.Errorf("bootstrap token has been revoked")
 	}
-
 	if time.Now().After(sess.ExpiresAt) {
 		return nil, fmt.Errorf("bootstrap token has expired")
 	}
-
 	// Mark as used by updating activity.
 	_ = m.store.UpdateAccessSessionActivity(ctx, sess.OrgID, sess.ID)
-
 	return sess, nil
 }
 

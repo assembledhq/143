@@ -5,8 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
@@ -456,7 +456,7 @@ func (h *PreviewHandler) InspectElement(w http.ResponseWriter, r *http.Request) 
 	const maxCoordinate = 10000
 	if body.X < 0 || body.Y < 0 || body.X > maxCoordinate || body.Y > maxCoordinate {
 		writeError(w, r, http.StatusBadRequest, "INVALID_COORDINATES",
-			"x and y must be between 0 and "+strconv.Itoa(maxCoordinate))
+			fmt.Sprintf("x and y must be between 0 and %d", maxCoordinate))
 		return
 	}
 
@@ -573,7 +573,7 @@ func (h *PreviewHandler) ExecuteInteraction(w http.ResponseWriter, r *http.Reque
 	}
 	if len(body.Steps) > maxInteractionSteps {
 		writeError(w, r, http.StatusBadRequest, "TOO_MANY_STEPS",
-			"at most "+strconv.Itoa(maxInteractionSteps)+" interaction steps allowed")
+			fmt.Sprintf("at most %d interaction steps allowed", maxInteractionSteps))
 		return
 	}
 
@@ -624,7 +624,7 @@ func (h *PreviewHandler) CaptureMultiViewport(w http.ResponseWriter, r *http.Req
 	}
 	if len(viewports) > maxViewportsPerCapture {
 		writeError(w, r, http.StatusBadRequest, "TOO_MANY_VIEWPORTS",
-			"at most "+strconv.Itoa(maxViewportsPerCapture)+" viewports allowed per capture")
+			fmt.Sprintf("at most %d viewports allowed per capture", maxViewportsPerCapture))
 		return
 	}
 
@@ -717,7 +717,7 @@ func (h *PreviewHandler) RunAssertions(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(body.Assertions) > maxAssertions {
 		writeError(w, r, http.StatusBadRequest, "TOO_MANY_ASSERTIONS",
-			"at most "+strconv.Itoa(maxAssertions)+" assertions allowed per call")
+			fmt.Sprintf("at most %d assertions allowed per call", maxAssertions))
 		return
 	}
 

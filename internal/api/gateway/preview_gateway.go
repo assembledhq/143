@@ -30,6 +30,7 @@ type Gateway struct {
 	logger       zerolog.Logger
 	appOrigin    string
 	cookieSecret []byte
+	cspHeader    string // pre-computed CSP header value
 }
 
 // GatewayConfig holds initialization options.
@@ -49,6 +50,19 @@ func NewGateway(cfg GatewayConfig) *Gateway {
 		logger:       cfg.Logger,
 		appOrigin:    cfg.AppOrigin,
 		cookieSecret: cfg.CookieSecret,
+		cspHeader: strings.Join([]string{
+			"default-src 'self' blob: data:",
+			"script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+			"style-src 'self' 'unsafe-inline'",
+			"img-src 'self' data: blob:",
+			"font-src 'self' data:",
+			"connect-src 'self' wss://*.preview.143.dev",
+			"form-action 'self'",
+			"object-src 'none'",
+			"base-uri 'none'",
+			"frame-ancestors " + cfg.AppOrigin,
+			"worker-src 'none'",
+		}, "; "),
 	}
 }
 
@@ -243,7 +257,7 @@ func (g *Gateway) handleHTTPProxy(w http.ResponseWriter, r *http.Request, orgID,
 			previewID: previewID,
 		},
 		ModifyResponse: func(resp *http.Response) error {
-			injectSecurityHeaders(resp.Header, g.appOrigin)
+			g.injectSecurityHeaders(resp.Header)
 			stripSensitiveResponseHeaders(resp.Header)
 			return nil
 		},
@@ -345,21 +359,9 @@ func (t *previewTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 // Security headers
 // =============================================================================
 
-func injectSecurityHeaders(h http.Header, appOrigin string) {
-	h.Set("X-Frame-Options", "ALLOW-FROM "+appOrigin)
-	h.Set("Content-Security-Policy", strings.Join([]string{
-		"default-src 'self' blob: data:",
-		"script-src 'self' 'unsafe-inline' 'unsafe-eval'",
-		"style-src 'self' 'unsafe-inline'",
-		"img-src 'self' data: blob:",
-		"font-src 'self' data:",
-		"connect-src 'self' wss://*.preview.143.dev",
-		"form-action 'self'",
-		"object-src 'none'",
-		"base-uri 'none'",
-		"frame-ancestors " + appOrigin,
-		"worker-src 'none'",
-	}, "; "))
+func (g *Gateway) injectSecurityHeaders(h http.Header) {
+	h.Set("X-Frame-Options", "ALLOW-FROM "+g.appOrigin)
+	h.Set("Content-Security-Policy", g.cspHeader)
 	h.Set("Referrer-Policy", "no-referrer")
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Cross-Origin-Opener-Policy", "same-origin")
