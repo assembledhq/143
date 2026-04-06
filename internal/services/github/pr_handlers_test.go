@@ -18,13 +18,19 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
-// prColumns matches the SELECT columns from pull_requests queries.
+// handlerPRColumns matches the SELECT columns from PullRequestStore.GetByRepoAndNumber
+// (internal/db/pull_requests.go). pgxmock requires column names to match the query,
+// but order need not match the struct because pgx.RowToStructByName maps by name.
+// If the store query changes its SELECT list, update this slice to match.
 var handlerPRColumns = []string{
 	"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
 	"title", "body", "status", "review_status", "merged_at", "created_at", "updated_at",
 }
 
-// sessionColumns matches the SELECT columns from sessions queries (must match sessionSelectColumns in session_store.go).
+// sessionColumns matches the SELECT columns from SessionStore queries
+// (internal/db/session_store.go — sessionSelectColumns). pgx maps by name so
+// column order is not critical, but the set of names must match the query.
+// If session_store.go changes its SELECT list, update this slice to match.
 var sessionColumns = []string{
 	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",

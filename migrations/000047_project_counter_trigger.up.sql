@@ -37,7 +37,22 @@ CREATE OR REPLACE FUNCTION update_project_task_counts_update()
 RETURNS TRIGGER AS $$
 DECLARE
     affected_project_id uuid;
+    has_counter_change bool;
 BEGIN
+    -- Early exit: only recount if a counter-relevant column (status,
+    -- project_id) actually changed. This avoids unnecessary recounts when
+    -- only non-counter columns (branch_name, pr_url, etc.) are updated.
+    SELECT EXISTS (
+        SELECT 1 FROM new_table n
+        JOIN old_table o ON n.id = o.id
+        WHERE n.status IS DISTINCT FROM o.status
+           OR n.project_id IS DISTINCT FROM o.project_id
+    ) INTO has_counter_change;
+
+    IF NOT has_counter_change THEN
+        RETURN NULL;
+    END IF;
+
     FOR affected_project_id IN
         SELECT DISTINCT project_id FROM (
             SELECT project_id FROM new_table

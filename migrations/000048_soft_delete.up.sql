@@ -30,7 +30,12 @@ CREATE INDEX idx_issues_deleted ON issues (org_id, status) WHERE deleted_at IS N
 CREATE OR REPLACE FUNCTION prevent_hard_delete()
 RETURNS TRIGGER AS $$
 BEGIN
-    IF current_setting('app.allow_hard_delete', true) = 'true' THEN
+    -- The second arg to current_setting is missing_ok (not a default value).
+    -- When app.allow_hard_delete is unset, current_setting returns '' (empty
+    -- string), which does NOT equal 'true', so hard deletes are blocked by
+    -- default. To allow a hard delete:
+    --   SET LOCAL app.allow_hard_delete = 'true';
+    IF current_setting('app.allow_hard_delete', /* missing_ok */ true) = 'true' THEN
         RETURN OLD;
     END IF;
     EXECUTE format(

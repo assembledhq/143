@@ -60,3 +60,25 @@ WHERE p.source_issue_ids IS NOT NULL
 -- tables are the source of truth from this migration onward. The old columns
 -- (projects.source_issue_ids, project_tasks.depends_on) are frozen and will
 -- be dropped in a follow-up migration.
+
+-- DB-level guard: reject writes that modify the legacy UUID[] columns.
+-- This prevents accidental drift during the transition period.
+CREATE OR REPLACE FUNCTION reject_legacy_array_write()
+RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'Legacy UUID[] column is frozen — use the join table (project_task_dependencies / project_source_issues) instead';
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_freeze_depends_on
+    BEFORE UPDATE OF depends_on ON project_tasks
+    FOR EACH ROW
+    WHEN (OLD.depends_on IS DISTINCT FROM NEW.depends_on)
+    EXECUTE FUNCTION reject_legacy_array_write();
+
+CREATE TRIGGER trg_freeze_source_issue_ids
+    BEFORE UPDATE OF source_issue_ids ON projects
+    FOR EACH ROW
+    WHEN (OLD.source_issue_ids IS DISTINCT FROM NEW.source_issue_ids)
+    EXECUTE FUNCTION reject_legacy_array_write();
