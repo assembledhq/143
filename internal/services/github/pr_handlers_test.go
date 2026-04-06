@@ -218,7 +218,7 @@ func TestHandlePullRequestEvent_MergedWithNilSessionID(t *testing.T) {
 		WillReturnRows(
 			pgxmock.NewRows(handlerPRColumns).
 				AddRow(prID, (*uuid.UUID)(nil), orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
-					"Fix bug", (*string)(nil), "open", "pending", (*time.Time)(nil), now, now),
+					"Fix bug", (*string)(nil), "open", "pending", "app", (*time.Time)(nil), now, now),
 		)
 
 	// Mock: UpdateStatus to merged.
