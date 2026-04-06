@@ -687,5 +687,3 @@ func TestPMHandler_CurrentNotFound(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, rr.Code, "should return 404 when no plan exists")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
-
-func strPtr(s string) *string { return &s }

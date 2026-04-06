@@ -42,4 +42,13 @@ export const queryKeys = {
   team: {
     members: ["team", "members"] as const,
   },
+  evals: {
+    tasks: (params?: Record<string, string | undefined>) => ["evals", "tasks", params] as const,
+    taskDetail: (id: string) => ["evals", "task", id] as const,
+    runs: (taskId: string) => ["evals", "task", taskId, "runs"] as const,
+    runDetail: (id: string) => ["evals", "run", id] as const,
+    batches: ["evals", "batches"] as const,
+    batch: (id: string) => ["evals", "batch", id] as const,
+    bootstrapCandidates: ["evals", "bootstrap", "candidates"] as const,
+  },
 } as const;
