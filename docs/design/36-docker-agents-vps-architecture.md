@@ -144,91 +144,195 @@ example, with equivalents noted for other providers.
    > - **GCP:** `gcloud compute instances create 143-prod-1 --machine-type=e2-standard-4 --image-family=ubuntu-2404-lts`
    > - **DigitalOcean:** `doctl compute droplet create 143-prod-1 --size s-8vcpu-16gb --image ubuntu-24-04-x64`
 
-#### Step 3: Bootstrap the VPS
+#### Step 3: Bootstrap the VPS (Automated via cloud-init)
 
-SSH in and set up the machine. These commands are **identical on every provider**.
+Every major cloud provider supports **cloud-init** — a user-data script that runs
+automatically on first boot. This eliminates manual SSH setup entirely. You
+provision the VPS with a cloud-init YAML, and it boots ready to go with Docker,
+gVisor, GHCR access, and the app directory configured.
 
-```bash
-ssh -i ~/.ssh/143-deploy root@<vps-ip>
+**Create `deploy/cloud-init/app.yml`** (for the single-node Phase 1 setup):
 
-# --- Create a non-root deploy user ---
-adduser --disabled-password --gecos "" deploy
-mkdir -p /home/deploy/.ssh
-cp ~/.ssh/authorized_keys /home/deploy/.ssh/
-chown -R deploy:deploy /home/deploy/.ssh
-chmod 700 /home/deploy/.ssh
-chmod 600 /home/deploy/.ssh/authorized_keys
+```yaml
+#cloud-config
 
-# --- Install Docker ---
-curl -fsSL https://get.docker.com | sh
-usermod -aG docker deploy
+users:
+  - name: deploy
+    groups: docker
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - ${SSH_PUBLIC_KEY}   # replaced at provision time via envsubst
 
-# --- Install gVisor (sandbox isolation) ---
-curl -fsSL https://gvisor.dev/archive.key \
-  | gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
-echo "deb [arch=amd64 signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" \
-  > /etc/apt/sources.list.d/gvisor.list
-apt-get update && apt-get install -y runsc
-runsc install
-systemctl restart docker
+packages:
+  - docker.io
+  - docker-compose-plugin
+  - jq
 
-# --- Verify ---
-docker run --rm --runtime=runsc hello-world
-# Should print "Hello from Docker!" using gVisor
+runcmd:
+  # Install gVisor
+  - curl -fsSL https://gvisor.dev/archive.key | gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+  - echo "deb [arch=amd64 signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" > /etc/apt/sources.list.d/gvisor.list
+  - apt-get update && apt-get install -y runsc
+  - runsc install
+  - systemctl restart docker
 
-# --- Create the app directory ---
-mkdir -p /opt/143
-chown deploy:deploy /opt/143
+  # Set up GHCR access
+  - su - deploy -c 'echo "${GHCR_TOKEN}" | docker login ghcr.io -u deploy --password-stdin'
+
+  # Pull images
+  - su - deploy -c 'docker pull ghcr.io/assembledhq/143-server:latest'
+  - su - deploy -c 'docker pull ghcr.io/assembledhq/143-agent:latest'
+
+  # Apply kernel tuning
+  - sysctl -p /etc/sysctl.d/99-postgres.conf
+
+  # Start the stack
+  - su - deploy -c 'cd /opt/143 && docker compose -f docker-compose.prod.yml up -d'
+  - su - deploy -c 'cd /opt/143 && docker compose -f docker-compose.prod.yml exec -T api /bin/migrate up'
+
+write_files:
+  - path: /opt/143/.env
+    owner: deploy:deploy
+    permissions: '0600'
+    content: |
+      SOPS_AGE_KEY=${SOPS_AGE_KEY}
+      DB_PASSWORD=${DB_PASSWORD}
+
+  - path: /opt/143/.env.production.enc
+    owner: deploy:deploy
+    permissions: '0600'
+    encoding: b64
+    content: ${ENV_PRODUCTION_ENC_B64}   # base64-encoded .env.production.enc
+
+  # Kernel tuning for Postgres
+  - path: /etc/sysctl.d/99-postgres.conf
+    content: |
+      vm.overcommit_memory = 2
+      vm.overcommit_ratio = 80
+      vm.swappiness = 1
 ```
 
-From this point on, **all work is done as the `deploy` user** — never root.
+The compose files, Caddyfile, and Postgres config are baked into the server
+Docker image or SCP'd separately (see Step 9). For a fully self-contained setup,
+add them as `write_files` entries.
+
+**Provision with cloud-init** (the VPS boots fully configured, no SSH needed):
+
+```bash
+# Substitute secrets into the cloud-init template
+export SSH_PUBLIC_KEY="$(cat ~/.ssh/143-deploy.pub)"
+export GHCR_TOKEN="ghp_xxxx"
+export SOPS_AGE_KEY="AGE-SECRET-KEY-xxxx"
+export DB_PASSWORD="your-db-password"
+export ENV_PRODUCTION_ENC_B64="$(base64 < .env.production.enc)"
+
+envsubst < deploy/cloud-init/app.yml > /tmp/user-data.yml
+```
+
+> **`[PROVIDER-SPECIFIC]` Pass user-data at instance creation:**
+>
+> | Provider | Command |
+> |----------|---------|
+> | Hetzner | `hcloud server create --name 143-prod-1 --type cx42 --image ubuntu-24.04 --ssh-key 143-deploy --user-data "$(cat /tmp/user-data.yml)"` |
+> | AWS | `aws ec2 run-instances --instance-type t3.xlarge --image-id ami-xxxxx --key-name 143-deploy --user-data file:///tmp/user-data.yml` |
+> | GCP | `gcloud compute instances create 143-prod-1 --machine-type=e2-standard-4 --metadata-from-file user-data=/tmp/user-data.yml` |
+> | DigitalOcean | `doctl compute droplet create 143-prod-1 --size s-8vcpu-16gb --image ubuntu-24-04-x64 --user-data "$(cat /tmp/user-data.yml)"` |
+
+The VPS boots, cloud-init runs (~90 seconds), and the stack is up. Verify with:
+
+```bash
+ssh -i ~/.ssh/143-deploy deploy@<vps-ip> "docker compose -f /opt/143/docker-compose.prod.yml ps"
+```
+
+**Create role-specific cloud-init files** for multi-node (Phase 3):
+
+| File | Role | What it starts |
+|------|------|---------------|
+| `deploy/cloud-init/app.yml` | API + frontend + Postgres (Phase 1 single-node) | `docker-compose.prod.yml` |
+| `deploy/cloud-init/db.yml` | Dedicated Postgres (Phase 3a) | `docker-compose.db.yml` |
+| `deploy/cloud-init/worker.yml` | Agent sandbox worker (Phase 3b) | `docker-compose.worker.yml` |
+| `deploy/cloud-init/api.yml` | API-only node behind LB (Phase 3c) | `docker-compose.api.yml` |
+
+Each is a variation of the same template — only the compose file and env vars
+differ. The Docker + gVisor + kernel tuning section is identical across all roles.
+
+**Alternative: `deploy/scripts/bootstrap.sh`** for machines where cloud-init isn't
+available (e.g., bare metal, or re-provisioning an existing VPS):
+
+```bash
+#!/usr/bin/env bash
+# deploy/scripts/bootstrap.sh — idempotent machine setup
+# Usage: ssh root@<vps-ip> 'bash -s' < deploy/scripts/bootstrap.sh
+set -euo pipefail
+
+# Create deploy user (idempotent)
+id deploy &>/dev/null || adduser --disabled-password --gecos "" deploy
+usermod -aG docker deploy 2>/dev/null || true
+mkdir -p /home/deploy/.ssh /opt/143
+[ -f /root/.ssh/authorized_keys ] && cp /root/.ssh/authorized_keys /home/deploy/.ssh/
+chown -R deploy:deploy /home/deploy/.ssh /opt/143
+chmod 700 /home/deploy/.ssh
+
+# Docker (idempotent)
+command -v docker &>/dev/null || (curl -fsSL https://get.docker.com | sh)
+
+# gVisor (idempotent)
+command -v runsc &>/dev/null || {
+  curl -fsSL https://gvisor.dev/archive.key | gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+  echo "deb [arch=amd64 signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" \
+    > /etc/apt/sources.list.d/gvisor.list
+  apt-get update && apt-get install -y runsc
+  runsc install
+  systemctl restart docker
+}
+
+# Kernel tuning (idempotent)
+cat > /etc/sysctl.d/99-postgres.conf <<SYSCTL
+vm.overcommit_memory = 2
+vm.overcommit_ratio = 80
+vm.swappiness = 1
+SYSCTL
+sysctl -p /etc/sysctl.d/99-postgres.conf
+
+echo "Bootstrap complete. Machine is ready for deploy."
+```
+
+Run it once: `ssh root@<vps-ip> 'bash -s' < deploy/scripts/bootstrap.sh`
 
 #### Step 4: Container Registry (GHCR)
 
-We use **GitHub Container Registry (ghcr.io)** for Docker images. It's the right
-choice because:
+We use **GitHub Container Registry (ghcr.io)** for Docker images:
 
-- **Free for public repos.** For private repos, included in your GitHub plan (the
-  free tier gives 500 MB storage + 1 GB egress/month; Team/Enterprise includes
-  much more). Given our image sizes (~100-200 MB compressed), the free tier is
-  plenty for a single-node deployment.
-- **Zero additional credentials.** GitHub Actions can push to GHCR using the
-  built-in `GITHUB_TOKEN` — no extra secrets to manage.
-- **Already where our CI runs.** No new service to sign up for or manage.
-- **Standard Docker registry API.** If you ever want to switch to ECR, GCR, or
-  Docker Hub, change the image URLs in the compose files. No code changes.
+- **Free for public repos.** For private repos, included in your GitHub plan (free
+  tier: 500 MB storage + 1 GB egress/month; Team/Enterprise includes much more).
+- **Zero additional credentials in CI.** GitHub Actions uses the built-in `GITHUB_TOKEN`.
+- **Standard Docker registry API.** Swap to ECR, GCR, or Docker Hub by changing
+  image URLs in compose files — no code changes.
 
-**Set up GHCR access on the VPS** (as the `deploy` user):
+GHCR access on the VPS is configured by cloud-init (Step 3). If setting up
+manually, create a GitHub PAT with `read:packages` scope:
 
 ```bash
-su - deploy
-
-# Create a GitHub Personal Access Token (classic) with read:packages scope.
-# Settings → Developer settings → Personal access tokens → Tokens (classic)
-# This is ONLY for pulling images from the VPS — CI uses GITHUB_TOKEN.
 echo "<your-ghcr-read-token>" | docker login ghcr.io -u <github-username> --password-stdin
 ```
-
-The Docker login credentials are saved to `~deploy/.docker/config.json` and
-persist across reboots.
 
 #### Step 5: Secrets
 
 The existing SOPS + age workflow works on any VPS. The `docker-entrypoint.sh`
-already decrypts `.env.production.enc` at boot using a single env var
-(`SOPS_AGE_KEY`).
+already decrypts `.env.production.enc` at boot using `SOPS_AGE_KEY`.
 
-The Dockerfile already has `sops` and `age` installed. The entrypoint handles
-everything. You just need the age private key on the VPS:
+Cloud-init (Step 3) writes the age key and encrypted env file to the VPS
+automatically. If setting up manually, you need two files on the VPS:
 
 ```bash
-# /opt/143/.env (on the VPS — this is the ONLY secret on disk)
+# /opt/143/.env — the ONLY plaintext secret on disk
 SOPS_AGE_KEY=AGE-SECRET-KEY-1XXXXXX...
 DB_PASSWORD=<your-db-password>
-```
 
-Everything else (GitHub App keys, LLM API keys, webhook secrets, etc.) lives in
-`.env.production.enc` in the git repo and is decrypted at container start.
+# /opt/143/.env.production.enc — copied from the git repo
+# Contains all other secrets, decrypted at container start by docker-entrypoint.sh
+```
 
 If you don't have a deploy key yet:
 ```bash
@@ -236,7 +340,7 @@ If you don't have a deploy key yet:
 age-keygen -o /tmp/deploy-key.txt
 # Copy the public key (age1...) and add it to .sops.yaml
 # Then: make secrets-rotate && git add .sops.yaml .env.production.enc && git push
-# Copy the private key (AGE-SECRET-KEY-...) to the VPS .env file
+# The private key (AGE-SECRET-KEY-...) goes into the cloud-init template or VPS .env
 rm /tmp/deploy-key.txt   # don't leave this lying around
 ```
 
@@ -337,49 +441,45 @@ Add these secrets in GitHub → Settings → Secrets and Variables → Actions:
 These are provider-agnostic — they work the same whether the VPS is on Hetzner,
 AWS, GCP, or anywhere else with SSH access.
 
-#### Step 9: Copy Config Files to the VPS
+#### Step 9: Copy Config Files and Start
+
+If you used cloud-init (Step 3), the VPS is already running. Skip to
+verification below.
+
+If you bootstrapped manually (via `bootstrap.sh`), copy the config files and
+start the stack:
 
 ```bash
-# From your local machine, with the repo checked out:
+# Copy config files to the VPS
 scp -i ~/.ssh/143-deploy docker-compose.prod.yml deploy@<vps-ip>:/opt/143/
 scp -i ~/.ssh/143-deploy -r deploy/ deploy@<vps-ip>:/opt/143/deploy/
 scp -i ~/.ssh/143-deploy .env.production.enc deploy@<vps-ip>:/opt/143/
 
-# SSH in and verify:
+# SSH in, pull images, and start
 ssh -i ~/.ssh/143-deploy deploy@<vps-ip>
-ls /opt/143/
-# Should see: docker-compose.prod.yml  deploy/  .env  .env.production.enc
+cd /opt/143
+docker compose -f docker-compose.prod.yml pull
+docker compose -f docker-compose.prod.yml up -d
+docker compose -f docker-compose.prod.yml exec -T api /bin/migrate up
 ```
 
-After the first deploy, the GitHub Actions workflow handles this automatically.
-This manual copy is only for the initial bootstrap.
-
-#### Step 10: Start Everything
+**Verify** (regardless of how you bootstrapped):
 
 ```bash
 ssh -i ~/.ssh/143-deploy deploy@<vps-ip>
-cd /opt/143
-
-# Pull images
-docker compose -f docker-compose.prod.yml pull
-
-# Start the stack
-docker compose -f docker-compose.prod.yml up -d
-
-# Run migrations
-docker compose -f docker-compose.prod.yml exec -T api /bin/migrate up
-
-# Verify
-docker compose -f docker-compose.prod.yml ps
+docker compose -f /opt/143/docker-compose.prod.yml ps
 # All services should be "Up" and healthy
 
 curl http://localhost:8080/healthz
 # Should return 200
 ```
 
-At this point, the VPS is running but serving on a raw IP. Caddy won't issue TLS
-certs until DNS points at it — see [DNS Cutover and TLS](#dns-cutover-and-tls)
-below. First, create the config files that `docker-compose.prod.yml` references.
+After the first deploy, the GitHub Actions workflow handles image pulls and
+restarts automatically. Manual setup is only for the initial bootstrap.
+
+At this point the VPS is running but serving on a raw IP. Caddy won't issue TLS
+certs until DNS points at it — see [DNS and TLS Setup](#dns-and-tls-setup) below.
+First, create the config files that `docker-compose.prod.yml` references.
 
 ### New Files to Create in the Repo
 
@@ -1260,56 +1360,17 @@ and Postgres high availability.
 **When to do this:** When you're managing 5+ nodes and
 provisioning/decommissioning frequently enough that it's a chore.
 
-### Node Provisioning with cloud-init
+### Automated Node Provisioning
 
-cloud-init is a standard supported by **every major cloud provider** (AWS, GCP,
-Azure, Hetzner, DigitalOcean, Oracle Cloud, Vultr). You write a user-data script
-once; it runs on first boot regardless of provider.
+Phase 1 introduced cloud-init scripts for bootstrapping VPSes (see
+[Step 3](#step-3-bootstrap-the-vps-automated-via-cloud-init)). In Phase 4, the
+auto-scaler uses these same cloud-init templates programmatically — the
+`CloudProvider.CreateInstance()` method passes the `worker.yml` cloud-init as
+user-data when provisioning new VPSes.
 
-#### `deploy/cloud-init/worker.yml`
-
-```yaml
-#cloud-config
-
-packages:
-  - docker.io
-  - docker-compose-plugin
-
-runcmd:
-  # Install gVisor
-  - curl -fsSL https://gvisor.dev/archive.key | gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
-  - echo "deb [arch=amd64 signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" > /etc/apt/sources.list.d/gvisor.list
-  - apt-get update && apt-get install -y runsc
-  - runsc install
-  - systemctl restart docker
-
-  # Pull images
-  - docker login ghcr.io -u deploy -p ${REGISTRY_TOKEN}
-  - docker pull ghcr.io/assembledhq/143-server:latest
-  - docker pull ghcr.io/assembledhq/143-agent:latest
-
-  # Write compose file and start
-  - mkdir -p /opt/143
-  - cp /opt/143/docker-compose.worker.yml /opt/143/docker-compose.yml
-  - cd /opt/143 && docker compose up -d
-
-write_files:
-  - path: /opt/143/.env
-    content: |
-      DATABASE_URL=${DATABASE_URL}
-      MEZMO_INGESTION_KEY=${MEZMO_INGESTION_KEY}
-      DD_API_KEY=${DD_API_KEY}
-    permissions: '0600'
-```
-
-> **`[PROVIDER-SPECIFIC]` How to pass user-data at instance creation:**
->
-> | Provider | Method |
-> |----------|--------|
-> | Hetzner | `hcloud server create --user-data "$(cat worker.yml)"` |
-> | AWS | `aws ec2 run-instances --user-data file://worker.yml` |
-> | GCP | `gcloud compute instances create --metadata-from-file user-data=worker.yml` |
-> | DigitalOcean | `doctl compute droplet create --user-data "$(cat worker.yml)"` |
+The role-specific cloud-init files (`deploy/cloud-init/worker.yml`,
+`deploy/cloud-init/db.yml`, etc.) are already defined in Phase 1. The auto-scaler
+just calls the cloud provider API with the appropriate template.
 
 ### Auto-Scaling Workers (Go Code Change)
 
