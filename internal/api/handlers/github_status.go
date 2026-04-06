@@ -138,6 +138,7 @@ func (h *GitHubStatusHandler) HandleConnectCallback(w http.ResponseWriter, r *ht
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "not authenticated")
 		return
 	}
+	orgID := middleware.OrgIDFromContext(r.Context())
 
 	// Exchange code for token using the shared helper.
 	tokenResp, err := exchangeGitHubOAuthCode(h.githubClientID, h.githubSecret, code)
@@ -152,7 +153,7 @@ func (h *GitHubStatusHandler) HandleConnectCallback(w http.ResponseWriter, r *ht
 		TokenType:   tokenResp.TokenType,
 		Scope:       tokenResp.Scope,
 	}
-	if err := h.credentials.Upsert(r.Context(), user.ID, user.OrgID, cfg, false); err != nil {
+	if err := h.credentials.Upsert(r.Context(), user.ID, orgID, cfg, false); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to store credential", err)
 		return
 	}
