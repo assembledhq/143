@@ -55,8 +55,8 @@ func (s *PMDecisionLogStore) ListRecentByOrg(ctx context.Context, orgID uuid.UUI
 type PMDecisionFilters struct {
 	Limit        int
 	Cursor       string
-	DecisionType string // "delegate", "skip", "cluster" — empty means all
-	Outcome      string // "succeeded", "failed", "still_open" — empty means all
+	DecisionType models.PMDecisionType    // empty means all
+	Outcome      models.PMDecisionOutcome // empty means all
 }
 
 // ListDecisionViews returns enriched decisions joined with issue and project data.
@@ -80,7 +80,7 @@ func (s *PMDecisionLogStore) ListDecisionViews(ctx context.Context, orgID uuid.U
 	}
 
 	if filters.Outcome != "" {
-		if filters.Outcome == "still_open" {
+		if filters.Outcome == models.PMDecisionOutcomeStillOpen {
 			query += ` AND (d.outcome = 'still_open' OR d.outcome IS NULL OR d.outcome = '')`
 		} else {
 			query += ` AND d.outcome = @outcome`
