@@ -47,6 +47,7 @@ func TestEvalBootstrapStore_GetByID(t *testing.T) {
 	t.Parallel()
 
 	t.Run("found", func(t *testing.T) {
+		t.Parallel()
 		orgID := uuid.New()
 		runID := uuid.New()
 		repoID := uuid.New()
@@ -72,6 +73,7 @@ func TestEvalBootstrapStore_GetByID(t *testing.T) {
 	})
 
 	t.Run("not found", func(t *testing.T) {
+		t.Parallel()
 		orgID := uuid.New()
 		runID := uuid.New()
 

@@ -1154,7 +1154,7 @@ func executeEvalRun(ctx context.Context, stores *Stores, services *Services, run
 	// 5. If agent produced no diff, collect it explicitly
 	if agentDiff == "" {
 		var diffBuf bytes.Buffer
-		services.SandboxProvider.Exec(ctx, sb, "git diff HEAD", &diffBuf, io.Discard)
+		_, _ = services.SandboxProvider.Exec(ctx, sb, "git diff HEAD", &diffBuf, io.Discard)
 		agentDiff = diffBuf.String()
 	}
 
@@ -1217,13 +1217,13 @@ func evalFailed(format string, args ...any) *models.EvalRunResult {
 func applyConfigOverlay(ctx context.Context, provider agent.SandboxProvider, sb *agent.Sandbox, configRef string, logger zerolog.Logger) {
 	// Fetch the config ref first
 	var stderr bytes.Buffer
-	provider.Exec(ctx, sb, fmt.Sprintf("git fetch origin %s", configRef), io.Discard, &stderr)
+	_, _ = provider.Exec(ctx, sb, fmt.Sprintf("git fetch origin %s", configRef), io.Discard, &stderr)
 
 	// Overlay individual config files — failures are non-fatal (file may not exist on branch)
 	configFiles := []string{"AGENTS.md", "CLAUDE.md"}
 	for _, f := range configFiles {
 		cmd := fmt.Sprintf("git show %s:%s > %s 2>/dev/null || true", configRef, f, f)
-		provider.Exec(ctx, sb, cmd, io.Discard, io.Discard)
+		_, _ = provider.Exec(ctx, sb, cmd, io.Discard, io.Discard)
 	}
 
 	// Overlay config directories
@@ -1231,7 +1231,7 @@ func applyConfigOverlay(ctx context.Context, provider agent.SandboxProvider, sb 
 	for _, d := range configDirs {
 		// Remove existing dir and recreate from config ref
 		cmd := fmt.Sprintf("rm -rf %s && git checkout %s -- %s 2>/dev/null || true", d, configRef, d)
-		provider.Exec(ctx, sb, cmd, io.Discard, io.Discard)
+		_, _ = provider.Exec(ctx, sb, cmd, io.Discard, io.Discard)
 	}
 
 	logger.Debug().Str("config_ref", configRef).Msg("applied config overlay")
@@ -1261,7 +1261,7 @@ func runCodingAgent(ctx context.Context, services *Services, sb *agent.Sandbox, 
 
 	// Collect the diff produced by the agent
 	var diffBuf bytes.Buffer
-	services.SandboxProvider.Exec(ctx, sb, "git diff HEAD", &diffBuf, io.Discard)
+	_, _ = services.SandboxProvider.Exec(ctx, sb, "git diff HEAD", &diffBuf, io.Discard)
 
 	return diffBuf.String(), trace, nil
 }

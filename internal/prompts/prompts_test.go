@@ -286,6 +286,7 @@ func TestEvalJudgePrompt(t *testing.T) {
 	t.Parallel()
 
 	t.Run("pass_fail mode", func(t *testing.T) {
+		t.Parallel()
 		result := EvalJudgePrompt(EvalJudgePromptData{OutputMode: "pass_fail"})
 		assert.Contains(t, result, "expert code review judge")
 		assert.Contains(t, result, "1.0 if pass else 0.0")
@@ -293,11 +294,13 @@ func TestEvalJudgePrompt(t *testing.T) {
 	})
 
 	t.Run("score mode", func(t *testing.T) {
+		t.Parallel()
 		result := EvalJudgePrompt(EvalJudgePromptData{OutputMode: "score"})
 		assert.Contains(t, result, "float 0.0-1.0")
 	})
 
 	t.Run("default mode", func(t *testing.T) {
+		t.Parallel()
 		result := EvalJudgePrompt(EvalJudgePromptData{})
 		assert.Contains(t, result, "1.0 if pass else 0.0")
 	})
@@ -307,6 +310,7 @@ func TestEvalJudgeUserPrompt(t *testing.T) {
 	t.Parallel()
 
 	t.Run("with solution diff", func(t *testing.T) {
+		t.Parallel()
 		result := EvalJudgeUserPrompt(EvalJudgeUserPromptData{
 			IssueDescription: "Fix the auth bug",
 			AgentDiff:        "+fixed auth",
@@ -323,6 +327,7 @@ func TestEvalJudgeUserPrompt(t *testing.T) {
 	})
 
 	t.Run("without solution diff", func(t *testing.T) {
+		t.Parallel()
 		result := EvalJudgeUserPrompt(EvalJudgeUserPromptData{
 			IssueDescription: "Fix the auth bug",
 			AgentDiff:        "+fixed",
@@ -333,6 +338,7 @@ func TestEvalJudgeUserPrompt(t *testing.T) {
 	})
 
 	t.Run("empty agent diff", func(t *testing.T) {
+		t.Parallel()
 		result := EvalJudgeUserPrompt(EvalJudgeUserPromptData{
 			IssueDescription: "Do something",
 			CriterionName:    "test",

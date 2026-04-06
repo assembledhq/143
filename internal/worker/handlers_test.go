@@ -1987,6 +1987,7 @@ func TestComputeWeightedScore(t *testing.T) {
 	t.Parallel()
 
 	t.Run("simple pass", func(t *testing.T) {
+		t.Parallel()
 		criteria := []models.ScoringCriterion{
 			{Name: "tests", Weight: 1.0, Required: false},
 			{Name: "quality", Weight: 1.0, Required: false},
@@ -2001,6 +2002,7 @@ func TestComputeWeightedScore(t *testing.T) {
 	})
 
 	t.Run("required criterion fails overall", func(t *testing.T) {
+		t.Parallel()
 		criteria := []models.ScoringCriterion{
 			{Name: "tests", Weight: 1.0, Required: true},
 			{Name: "quality", Weight: 1.0, Required: false},
@@ -2015,6 +2017,7 @@ func TestComputeWeightedScore(t *testing.T) {
 	})
 
 	t.Run("below threshold fails", func(t *testing.T) {
+		t.Parallel()
 		criteria := []models.ScoringCriterion{
 			{Name: "tests", Weight: 1.0},
 		}
@@ -2026,12 +2029,14 @@ func TestComputeWeightedScore(t *testing.T) {
 	})
 
 	t.Run("empty results return zero", func(t *testing.T) {
+		t.Parallel()
 		score, passed := computeWeightedScore(nil, nil, 0.5)
 		require.Equal(t, 0.0, score)
 		require.False(t, passed)
 	})
 
 	t.Run("unequal weights", func(t *testing.T) {
+		t.Parallel()
 		criteria := []models.ScoringCriterion{
 			{Name: "tests", Weight: 3.0},
 			{Name: "quality", Weight: 1.0},
@@ -2049,18 +2054,21 @@ func TestExtractJSON(t *testing.T) {
 	t.Parallel()
 
 	t.Run("extracts from markdown fences", func(t *testing.T) {
+		t.Parallel()
 		input := "Here is the result:\n```json\n{\"pass\": true}\n```"
 		result := extractJSON(input)
 		require.Equal(t, "{\"pass\": true}", result)
 	})
 
 	t.Run("plain JSON passthrough", func(t *testing.T) {
+		t.Parallel()
 		input := `{"pass": false, "reasoning": "bad"}`
 		result := extractJSON(input)
 		require.Equal(t, input, result)
 	})
 
 	t.Run("no JSON returns input", func(t *testing.T) {
+		t.Parallel()
 		input := "no json here"
 		result := extractJSON(input)
 		require.Equal(t, input, result)
@@ -2071,10 +2079,12 @@ func TestTruncateString(t *testing.T) {
 	t.Parallel()
 
 	t.Run("short string unchanged", func(t *testing.T) {
+		t.Parallel()
 		require.Equal(t, "hello", truncateString("hello", 10))
 	})
 
 	t.Run("long string truncated", func(t *testing.T) {
+		t.Parallel()
 		result := truncateString("hello world", 5)
 		require.Equal(t, "hello...(truncated)", result)
 	})
