@@ -10,7 +10,8 @@ import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ThemeSelect } from "@/components/theme-select";
-import type { Organization, SingleResponse } from "@/lib/types";
+import { useAuth } from "@/hooks/use-auth";
+import type { Organization, OrgSettings, SingleResponse } from "@/lib/types";
 
 function GitHubPRConnection() {
   const queryClient = useQueryClient();
@@ -79,7 +80,83 @@ function GitHubPRConnection() {
   );
 }
 
+const PR_AUTHORSHIP_OPTIONS = [
+  { value: "user_preferred", label: "User preferred", description: "Use the user's GitHub token when available, fall back to the 143 app" },
+  { value: "app_only", label: "App only", description: "Always create PRs as the 143 GitHub App" },
+  { value: "user_required", label: "User required", description: "Require users to connect GitHub before creating PRs" },
+] as const;
+
+function PRAuthorshipSettings() {
+  const queryClient = useQueryClient();
+  const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
+    queryKey: ["settings"],
+    queryFn: () => api.settings.get(),
+  });
+
+  const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
+  const currentAuthorship = settings.pr_authorship ?? "user_preferred";
+  const currentDraftDefault = settings.pr_draft_default ?? false;
+
+  const mutation = useMutation({
+    mutationFn: (payload: Record<string, unknown>) => api.settings.update(payload),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["settings"] }),
+  });
+
+  return (
+    <section className="space-y-3">
+      <h2 className="text-[13px] font-medium text-foreground">Pull request defaults</h2>
+      <Card>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label>PR authorship</Label>
+            <p className="text-[13px] text-muted-foreground">
+              Controls who appears as the author when 143 creates a pull request.
+            </p>
+            <div className="space-y-1.5">
+              {PR_AUTHORSHIP_OPTIONS.map((option) => (
+                <label
+                  key={option.value}
+                  className="flex items-start gap-2 cursor-pointer"
+                >
+                  <input
+                    type="radio"
+                    name="pr_authorship"
+                    value={option.value}
+                    checked={currentAuthorship === option.value}
+                    onChange={() =>
+                      mutation.mutate({ settings: { pr_authorship: option.value } })
+                    }
+                    className="mt-0.5"
+                  />
+                  <div>
+                    <span className="text-[13px] font-medium">{option.label}</span>
+                    <p className="text-[12px] text-muted-foreground">{option.description}</p>
+                  </div>
+                </label>
+              ))}
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              id="pr-draft-default"
+              checked={currentDraftDefault}
+              onChange={(e) =>
+                mutation.mutate({ settings: { pr_draft_default: e.target.checked } })
+              }
+            />
+            <Label htmlFor="pr-draft-default" className="cursor-pointer">
+              Create PRs as drafts by default
+            </Label>
+          </div>
+        </CardContent>
+      </Card>
+    </section>
+  );
+}
+
 export default function SettingsPage() {
+  const { user } = useAuth();
   const { data: settings } = useQuery<SingleResponse<Organization>>({
     queryKey: ["settings"],
     queryFn: () => api.settings.get(),
@@ -114,6 +191,7 @@ export default function SettingsPage() {
         </section>
 
         <GitHubPRConnection />
+        {user?.role === "admin" && <PRAuthorshipSettings />}
 
         <section className="space-y-3">
           <h2 className="text-[13px] font-medium text-foreground">General</h2>

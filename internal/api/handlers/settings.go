@@ -88,7 +88,12 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		org.Name = *req.Name
 	}
 	if req.Settings != nil {
-		org.Settings = *req.Settings
+		merged, mergeErr := mergeSettingsJSON(org.Settings, *req.Settings)
+		if mergeErr != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to merge settings")
+			return
+		}
+		org.Settings = merged
 	}
 
 	if err := h.orgStore.Update(r.Context(), &org); err != nil {
@@ -99,4 +104,21 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	orgIDStr := orgID.String()
 	emitUserAudit(h.audit, r, models.AuditActionSettingsUpdated, models.AuditResourceSettings, &orgIDStr, nil)
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Organization]{Data: org})
+}
+
+func mergeSettingsJSON(existing, patch json.RawMessage) (json.RawMessage, error) {
+	base := map[string]json.RawMessage{}
+	if len(existing) > 0 {
+		if err := json.Unmarshal(existing, &base); err != nil {
+			return nil, err
+		}
+	}
+	incoming := map[string]json.RawMessage{}
+	if err := json.Unmarshal(patch, &incoming); err != nil {
+		return nil, err
+	}
+	for k, v := range incoming {
+		base[k] = v
+	}
+	return json.Marshal(base)
 }
