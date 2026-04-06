@@ -302,6 +302,8 @@ export interface OrgSettings {
   llm_reasoning_effort?: 'low' | 'medium' | 'high' | '';
   agent_config?: Record<string, Record<string, string>>;
   default_agent_type?: 'codex' | 'claude_code' | 'gemini_cli';
+  pr_authorship?: 'user_preferred' | 'app_only' | 'user_required';
+  pr_draft_default?: boolean;
 }
 
 export interface ProductContext {

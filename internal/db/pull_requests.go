@@ -26,12 +26,16 @@ type PullRequestFilters struct {
 
 func (s *PullRequestStore) Create(ctx context.Context, pr *models.PullRequest) error {
 	query := `
-		INSERT INTO pull_requests (session_id, org_id, github_pr_number, github_pr_url, github_repo, title, body, status, review_status)
-		VALUES (@session_id, @org_id, @github_pr_number, @github_pr_url, @github_repo, @title, @body, @status, @review_status)
+		INSERT INTO pull_requests (session_id, org_id, github_pr_number, github_pr_url, github_repo, title, body, status, review_status, authored_by)
+		VALUES (@session_id, @org_id, @github_pr_number, @github_pr_url, @github_repo, @title, @body, @status, @review_status, @authored_by)
 		RETURNING id, created_at, updated_at`
 
+	authoredBy := pr.AuthoredBy
+	if authoredBy == "" {
+		authoredBy = "app"
+	}
 	args := pgx.NamedArgs{
-		"session_id":     pr.SessionID,
+		"session_id":       pr.SessionID,
 		"org_id":           pr.OrgID,
 		"github_pr_number": pr.GitHubPRNumber,
 		"github_pr_url":    pr.GitHubPRURL,
@@ -40,6 +44,7 @@ func (s *PullRequestStore) Create(ctx context.Context, pr *models.PullRequest) e
 		"body":             pr.Body,
 		"status":           pr.Status,
 		"review_status":    pr.ReviewStatus,
+		"authored_by":      authoredBy,
 	}
 
 	row := s.db.QueryRow(ctx, query, args)
@@ -49,7 +54,7 @@ func (s *PullRequestStore) Create(ctx context.Context, pr *models.PullRequest) e
 func (s *PullRequestStore) GetByID(ctx context.Context, orgID, id uuid.UUID) (models.PullRequest, error) {
 	query := `
 		SELECT id, session_id, org_id, github_pr_number, github_pr_url, github_repo,
-		       title, body, status, review_status, merged_at, created_at, updated_at
+		       title, body, status, review_status, authored_by, merged_at, created_at, updated_at
 		FROM pull_requests
 		WHERE id = @id AND org_id = @org_id`
 
@@ -66,7 +71,7 @@ func (s *PullRequestStore) GetByID(ctx context.Context, orgID, id uuid.UUID) (mo
 func (s *PullRequestStore) GetBySessionID(ctx context.Context, orgID, sessionID uuid.UUID) (models.PullRequest, error) {
 	query := `
 		SELECT id, session_id, org_id, github_pr_number, github_pr_url, github_repo,
-		       title, body, status, review_status, merged_at, created_at, updated_at
+		       title, body, status, review_status, authored_by, merged_at, created_at, updated_at
 		FROM pull_requests
 		WHERE session_id = @session_id AND org_id = @org_id`
 
@@ -100,7 +105,7 @@ func (s *PullRequestStore) UpdateStatus(ctx context.Context, orgID, id uuid.UUID
 func (s *PullRequestStore) GetByRepoAndNumber(ctx context.Context, repo string, number int) (models.PullRequest, error) {
 	query := `
 		SELECT id, session_id, org_id, github_pr_number, github_pr_url, github_repo,
-		       title, body, status, review_status, merged_at, created_at, updated_at
+		       title, body, status, review_status, authored_by, merged_at, created_at, updated_at
 		FROM pull_requests
 		WHERE github_repo = @github_repo AND github_pr_number = @github_pr_number`
 
@@ -127,7 +132,7 @@ func (s *PullRequestStore) UpdateReviewStatus(ctx context.Context, orgID, id uui
 func (s *PullRequestStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters PullRequestFilters) ([]models.PullRequest, error) {
 	query := `
 		SELECT id, session_id, org_id, github_pr_number, github_pr_url, github_repo,
-		       title, body, status, review_status, merged_at, created_at, updated_at
+		       title, body, status, review_status, authored_by, merged_at, created_at, updated_at
 		FROM pull_requests
 		WHERE org_id = @org_id`
 

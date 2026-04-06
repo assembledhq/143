@@ -62,6 +62,7 @@ type GitHubStatusResponse struct {
 	HasRepoScope     bool   `json:"has_repo_scope"`
 	GitHubLogin      string `json:"github_login,omitempty"`
 	PRAuthorshipMode string `json:"pr_authorship_mode"`
+	PRDraftDefault   bool   `json:"pr_draft_default"`
 }
 
 // GetStatus returns the user's GitHub connection status and the org's PR authorship mode.
@@ -83,6 +84,7 @@ func (h *GitHubStatusHandler) GetStatus(w http.ResponseWriter, r *http.Request) 
 		settings, parseErr := models.ParseOrgSettings(org.Settings)
 		if parseErr == nil {
 			resp.PRAuthorshipMode = string(settings.PRAuthorship)
+			resp.PRDraftDefault = settings.PRDraftDefault
 		}
 	}
 
