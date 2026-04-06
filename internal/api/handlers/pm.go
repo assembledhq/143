@@ -176,27 +176,27 @@ func (h *PMHandler) Decisions(w http.ResponseWriter, r *http.Request) {
 
 	limit := queryInt(r, "limit", 50)
 
-	decisionType := models.PMDecisionType(r.URL.Query().Get("decision_type"))
-	if decisionType != "" {
+	filters := db.PMDecisionFilters{
+		Limit:  limit,
+		Cursor: r.URL.Query().Get("cursor"),
+	}
+
+	if dt := r.URL.Query().Get("decision_type"); dt != "" {
+		decisionType := models.PMDecisionType(dt)
 		if err := decisionType.Validate(); err != nil {
 			writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid decision_type: must be delegate, skip, or cluster")
 			return
 		}
+		filters.DecisionType = &decisionType
 	}
 
-	outcome := models.PMDecisionOutcome(r.URL.Query().Get("outcome"))
-	if outcome != "" {
+	if o := r.URL.Query().Get("outcome"); o != "" {
+		outcome := models.PMDecisionOutcome(o)
 		if err := outcome.Validate(); err != nil {
 			writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid outcome: must be succeeded, failed, or still_open")
 			return
 		}
-	}
-
-	filters := db.PMDecisionFilters{
-		Limit:        limit,
-		Cursor:       r.URL.Query().Get("cursor"),
-		DecisionType: decisionType,
-		Outcome:      outcome,
+		filters.Outcome = &outcome
 	}
 
 	decisions, err := h.decisionLogStore.ListDecisionViews(r.Context(), orgID, filters)
