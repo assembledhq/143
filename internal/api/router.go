@@ -22,6 +22,7 @@ import (
 	"github.com/assembledhq/143/internal/services/storage"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
+	"github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	threadservice "github.com/assembledhq/143/internal/services/thread"
 )
@@ -57,6 +58,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	projectSpecStore := db.NewProjectSpecStore(pool)
 	pmDocumentStore := db.NewPMDocumentStore(pool)
 	sessionReviewCommentStore := db.NewSessionReviewCommentStore(pool)
+	previewStore := db.NewPreviewStore(pool)
 	auditLogStore := db.NewAuditLogStore(pool)
 	auditEmitter := db.NewAuditEmitter(auditLogStore, logger)
 
@@ -202,6 +204,15 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	sessionReviewCommentHandler.SetMessageAndJobStores(sessionMessageStore, jobStore)
 	sessionFileHandler := handlers.NewSessionFileHandler(sessionStore, fileReader, logger)
 
+	// Preview manager and handler.
+	previewManager := preview.NewManager(preview.ManagerConfig{
+		Store:        previewStore,
+		Logger:       logger,
+		WorkerNodeID: "local", // MODE=all: single-node
+	})
+	previewHandler := handlers.NewPreviewHandler(previewManager, previewStore, logger)
+	previewHandler.SetAuditEmitter(auditEmitter)
+
 	// Upload store: use S3 if configured, otherwise fall back to local filesystem.
 	var uploadStore storage.UploadStore
 	if cfg.UploadS3Bucket != "" {
@@ -317,6 +328,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.GetThreadMessages)
 			r.Get("/api/v1/sessions/{id}/threads/{tid}/logs", sessionThreadHandler.GetThreadLogs)
 			r.Get("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.List)
+			r.Get("/api/v1/sessions/{id}/preview", previewHandler.GetPreview)
+			r.Get("/api/v1/sessions/{id}/preview/logs", previewHandler.GetLogs)
+			r.Get("/api/v1/sessions/{id}/preview/services", previewHandler.GetServices)
+			r.Get("/api/v1/sessions/{id}/preview/console", previewHandler.ReadConsole)
+			r.Get("/api/v1/sessions/{id}/preview/snapshots", previewHandler.GetSnapshots)
+			r.Get("/api/v1/repos/{owner}/{repo}/preview/detect", previewHandler.DetectReadiness)
 			r.Get("/api/v1/uploads/files/*", uploadHandler.ServeUpload)
 			r.Get("/api/v1/sessions/{id}/files", sessionFileHandler.ListFiles)
 			r.Get("/api/v1/sessions/{id}/files/content", sessionFileHandler.GetFileContent)
@@ -395,6 +412,18 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Post("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.SendThreadMessage)
 			r.Post("/api/v1/sessions/{id}/threads/{tid}/end", sessionThreadHandler.EndThread)
 			r.Post("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.Create)
+			r.Post("/api/v1/sessions/{id}/preview", previewHandler.StartPreview)
+			r.Delete("/api/v1/sessions/{id}/preview", previewHandler.StopPreview)
+			r.Post("/api/v1/sessions/{id}/preview/restart", previewHandler.RestartPreview)
+			r.Post("/api/v1/sessions/{id}/preview/bootstrap", previewHandler.MintBootstrapToken)
+			r.Post("/api/v1/sessions/{id}/preview/extend", previewHandler.ExtendTTL)
+			r.Post("/api/v1/sessions/{id}/preview/screenshot", previewHandler.CaptureScreenshot)
+			r.Post("/api/v1/sessions/{id}/preview/inspect", previewHandler.InspectElement)
+			r.Post("/api/v1/sessions/{id}/preview/design-feedback", previewHandler.SubmitDesignFeedback)
+			r.Post("/api/v1/sessions/{id}/preview/interact", previewHandler.ExecuteInteraction)
+			r.Post("/api/v1/sessions/{id}/preview/multi-viewport", previewHandler.CaptureMultiViewport)
+			r.Post("/api/v1/sessions/{id}/preview/visual-diff", previewHandler.ComputeVisualDiff)
+			r.Post("/api/v1/sessions/{id}/preview/assert", previewHandler.RunAssertions)
 			r.Post("/api/v1/sessions/{id}/review-comments/send", sessionReviewCommentHandler.SendToAgent)
 			r.Patch("/api/v1/sessions/{id}/review-comments/{commentId}", sessionReviewCommentHandler.Update)
 			r.Delete("/api/v1/sessions/{id}/review-comments/{commentId}", sessionReviewCommentHandler.Delete)
