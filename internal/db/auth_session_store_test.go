@@ -25,15 +25,15 @@ var sessionColumns = []string{
 	"agent_session_id", "current_turn", "last_activity_at",
 	"sandbox_state", "snapshot_key", "target_branch", "working_branch",
 	"repository_id", "diff_stats", "diff_history", "input_manifest",
-	"created_at",
+	"deleted_at", "created_at",
 }
 
 func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 	return []interface{}{
-		id, issueID, orgID, "fixer", "pending", "supervised", "standard",
+		id, issueID, orgID, "claude_code", "pending", "supervised", "low",
 		nil, nil, nil, []string{},
 		nil, nil, nil, json.RawMessage(`{}`),
-		nil, nil, []string{}, nil,
+		nil, nil, []string{}, false,
 		nil, json.RawMessage(`{}`), nil, nil, nil,
 		nil, nil, nil, nil,
 		nil, // project_task_id
@@ -50,6 +50,7 @@ func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 		nil,    // diff_stats
 		nil,    // diff_history
 		nil,    // input_manifest
+		nil,    // deleted_at
 		now,
 	}
 }
@@ -202,7 +203,7 @@ func TestSessionStore_GetByID(t *testing.T) {
 			require.NoError(t, err, "GetByID should not return an error")
 			require.Equal(t, runID, run.ID, "should return the correct agent run ID")
 			require.Equal(t, issueID, run.IssueID, "should return the correct issue ID")
-			require.Equal(t, models.AgentType("fixer"), run.AgentType, "should return the correct agent type")
+			require.Equal(t, models.AgentType("claude_code"), run.AgentType, "should return the correct agent type")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
@@ -248,10 +249,10 @@ func TestSessionStore_Create(t *testing.T) {
 	run := &models.Session{
 		IssueID:       uuid.New(),
 		OrgID:         uuid.New(),
-		AgentType:     "fixer",
+		AgentType:     "claude_code",
 		Status:        "pending",
 		AutonomyLevel: "supervised",
-		TokenMode:     "standard",
+		TokenMode:     "low",
 	}
 
 	mock.ExpectQuery("INSERT INTO sessions").
@@ -286,10 +287,10 @@ func TestSessionStore_Create_AllowsNilIssueID(t *testing.T) {
 	run := &models.Session{
 		IssueID:       uuid.Nil,
 		OrgID:         uuid.New(),
-		AgentType:     "fixer",
+		AgentType:     "claude_code",
 		Status:        "pending",
 		AutonomyLevel: "supervised",
-		TokenMode:     "standard",
+		TokenMode:     "low",
 	}
 
 	mock.ExpectQuery("INSERT INTO sessions").

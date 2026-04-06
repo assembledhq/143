@@ -333,7 +333,7 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session) (*models.
 
 	// 7. Store PR in DB.
 	pr := &models.PullRequest{
-		SessionID:      run.ID,
+		SessionID:      &run.ID,
 		OrgID:          run.OrgID,
 		GitHubPRNumber: prNumber,
 		GitHubPRURL:    prURL,
@@ -397,15 +397,17 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 			return fmt.Errorf("update PR status to merged: %w", err)
 		}
 
-		// Get the agent run to find the issue.
-		run, err := s.sessions.GetByID(ctx, pr.OrgID, pr.SessionID)
-		if err != nil {
-			return fmt.Errorf("get agent run: %w", err)
-		}
+		// Get the agent run to find the issue (only if PR is linked to a session).
+		if pr.SessionID != nil {
+			run, err := s.sessions.GetByID(ctx, pr.OrgID, *pr.SessionID)
+			if err != nil {
+				return fmt.Errorf("get agent run: %w", err)
+			}
 
-		// Update issue status to fixed.
-		if err := s.issues.UpdateStatus(ctx, pr.OrgID, run.IssueID, "fixed"); err != nil {
-			s.logger.Warn().Err(err).Str("issue_id", run.IssueID.String()).Msg("failed to update issue status to fixed")
+			// Update issue status to fixed.
+			if err := s.issues.UpdateStatus(ctx, pr.OrgID, run.IssueID, "fixed"); err != nil {
+				s.logger.Warn().Err(err).Str("issue_id", run.IssueID.String()).Msg("failed to update issue status to fixed")
+			}
 		}
 
 		// Create deploy record.

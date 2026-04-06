@@ -24,7 +24,7 @@ func TestIssueHandler_List(t *testing.T) {
 		"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
 		"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
 		"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
-		"created_at", "updated_at",
+		"created_at", "updated_at", "deleted_at",
 	}
 
 	tests := []struct {
@@ -45,7 +45,7 @@ func TestIssueHandler_List(t *testing.T) {
 							issueID, orgID, "ext-1", "sentry", nil, nil,
 							"Test Issue", nil, json.RawMessage(`{}`), "open", now, now,
 							5, 2, "high", []string{"bug"}, "fp123",
-							now, now,
+							now, now, nil,
 						),
 					)
 			},
@@ -102,7 +102,7 @@ func TestIssueHandler_Get(t *testing.T) {
 		"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
 		"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
 		"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
-		"created_at", "updated_at",
+		"created_at", "updated_at", "deleted_at",
 	}
 
 	tests := []struct {
@@ -125,7 +125,7 @@ func TestIssueHandler_Get(t *testing.T) {
 							issueID, orgID, "ext-1", "sentry", nil, nil,
 							"Found Issue", nil, json.RawMessage(`{}`), "open", now, now,
 							3, 1, "medium", []string{}, "fp456",
-							now, now,
+							now, now, nil,
 						),
 					)
 			},

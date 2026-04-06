@@ -11,6 +11,7 @@ import (
 type PMPlan struct {
 	ID                     uuid.UUID       `json:"id" db:"id"`
 	OrgID                  uuid.UUID       `json:"org_id" db:"org_id"`
+	RepositoryID           *uuid.UUID      `json:"repository_id,omitempty" db:"repository_id"`
 	Status                 PMPlanStatus    `json:"status" db:"status"`
 	Analysis               string          `json:"analysis" db:"analysis"`
 	Tasks                  json.RawMessage `json:"tasks" db:"tasks"`

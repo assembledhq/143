@@ -180,7 +180,7 @@ func TestAnalyzeProject_RepoNotFound(t *testing.T) {
 	project := models.Project{
 		ID:           projectID,
 		OrgID:        orgID,
-		RepositoryID: repoID,
+		RepositoryID: &repoID,
 		Status:       models.ProjectStatusActive,
 	}
 	svc := &Service{

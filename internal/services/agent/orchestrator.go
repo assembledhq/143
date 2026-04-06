@@ -944,6 +944,7 @@ func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, t
 
 		log := &models.SessionLog{
 			SessionID:  runID,
+			OrgID:      orgID,
 			Level:      entry.Level,
 			Message:    entry.Message,
 			Metadata:   metadata,

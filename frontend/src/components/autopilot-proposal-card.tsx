@@ -6,20 +6,24 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 import { Lightbulb, ArrowRight } from "lucide-react";
+import { useAuth } from "@/hooks/use-auth";
 
 export function AutopilotProposalCard() {
   const router = useRouter();
+  const { isAuthenticated } = useAuth();
 
   const { data: summaryData } = useQuery({
     queryKey: ["proposalSummary"],
     queryFn: () => api.projects.proposalSummary(),
     refetchInterval: 30000,
+    enabled: isAuthenticated,
   });
 
   const { data: topProposalData } = useQuery({
     queryKey: ["projects", "proposed", "top"],
     queryFn: () => api.projects.list({ status: "proposed", limit: 1 }),
     refetchInterval: 30000,
+    enabled: isAuthenticated,
   });
 
   const count = summaryData?.data?.count ?? 0;
