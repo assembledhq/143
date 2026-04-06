@@ -218,6 +218,7 @@ func (s *PMDocumentStore) Update(ctx context.Context, doc *models.PMDocument) er
 	}
 
 	// Skip insert if nothing changed across all mutable fields.
+	// NOTE: If you add a new mutable field to PMDocument, add it to this check.
 	if newHash == current.ContentHash &&
 		doc.Title == current.Title &&
 		doc.DocType == current.DocType &&

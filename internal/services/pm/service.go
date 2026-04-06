@@ -487,6 +487,7 @@ func (s *Service) streamPMLogs(ctx context.Context, pmSession *models.Session, l
 		}
 		log := &models.SessionLog{
 			SessionID: pmSession.ID,
+			OrgID:     pmSession.OrgID,
 			Level:     entry.Level,
 			Message:   entry.Message,
 			Metadata:  metadata,

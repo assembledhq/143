@@ -3,4 +3,6 @@
 ALTER TABLE projects ADD COLUMN similar_projects JSONB NOT NULL DEFAULT '[]'::jsonb;
 
 -- GIN index for querying which proposals reference a given project.
-CREATE INDEX idx_projects_similar_projects ON projects USING GIN (similar_projects);
+-- NOTE: For production, consider creating this index with CONCURRENTLY before
+-- running the migration. IF NOT EXISTS ensures the migration is idempotent.
+CREATE INDEX IF NOT EXISTS idx_projects_similar_projects ON projects USING GIN (similar_projects);

@@ -44,7 +44,7 @@ const sessionSelectColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-00
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
-	sandbox_state, snapshot_key, target_branch, working_branch, repository_id, diff_stats, diff_history, input_manifest, created_at`
+	sandbox_state, snapshot_key, target_branch, working_branch, repository_id, diff_stats, diff_history, input_manifest, deleted_at, created_at`
 
 // sessionListColumns excludes large JSONB blobs (diff_history) from list queries
 // to avoid returning multi-megabyte payloads when listing many sessions.
@@ -56,7 +56,7 @@ const sessionListColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-0000
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
-	sandbox_state, snapshot_key, target_branch, working_branch, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, created_at`
+	sandbox_state, snapshot_key, target_branch, working_branch, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, deleted_at, created_at`
 
 // maxDiffHistoryEntries caps the number of entries kept in diff_history.
 // Older entries beyond this limit are pruned when a new entry is appended.
@@ -103,7 +103,7 @@ func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters S
 	query := `
 		SELECT ` + sessionListColumns + `
 		FROM sessions
-		WHERE org_id = @org_id`
+		WHERE org_id = @org_id AND deleted_at IS NULL`
 
 	if filters.RepositoryID != uuid.Nil {
 		query += ` AND repository_id = @repository_id`
@@ -136,6 +136,8 @@ func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters S
 		}
 	}
 
+	// Uses partial index idx_sessions_deleted (org_id, created_at DESC)
+	// WHERE deleted_at IS NULL for efficient filtering and sort.
 	query += ` ORDER BY created_at DESC`
 
 	limit := filters.Limit
@@ -155,7 +157,7 @@ func (s *SessionStore) GetByID(ctx context.Context, orgID, runID uuid.UUID) (mod
 	query := `
 		SELECT ` + sessionSelectColumns + `
 		FROM sessions
-		WHERE id = @id AND org_id = @org_id`
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"id":     runID,
@@ -212,11 +214,11 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 }
 
 func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string) error {
-	query := `UPDATE sessions SET status = @status WHERE id = @id AND org_id = @org_id`
+	query := `UPDATE sessions SET status = @status WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	if status == "running" {
-		query = `UPDATE sessions SET status = @status, started_at = now() WHERE id = @id AND org_id = @org_id`
+		query = `UPDATE sessions SET status = @status, started_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	} else if status == "completed" || status == "failed" || status == "cancelled" {
-		query = `UPDATE sessions SET status = @status, completed_at = now() WHERE id = @id AND org_id = @org_id`
+		query = `UPDATE sessions SET status = @status, completed_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	}
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     runID,
@@ -252,7 +254,7 @@ func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 		    result_summary = @result_summary, diff = @diff, error = @error,
 		    diff_stats = @diff_stats,
 		    diff_history = ` + diffHistoryAppendSQL("COALESCE(current_turn, 0) + 1") + `
-		WHERE id = @id AND org_id = @org_id`
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":                   runID,
@@ -321,7 +323,7 @@ func (s *SessionStore) UpdateFailure(ctx context.Context, orgID, runID uuid.UUID
 		    failure_category = @failure_category,
 		    failure_next_steps = @failure_next_steps,
 		    failure_retry_advised = @failure_retry_advised
-		WHERE id = @id AND org_id = @org_id`
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":                    runID,
@@ -354,7 +356,7 @@ func (s *SessionStore) ListByIssue(ctx context.Context, orgID, issueID uuid.UUID
 	query := `
 		SELECT ` + sessionListColumns + `
 		FROM sessions
-		WHERE org_id = @org_id AND issue_id = @issue_id
+		WHERE org_id = @org_id AND issue_id = @issue_id AND deleted_at IS NULL
 		ORDER BY created_at DESC`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
@@ -371,7 +373,7 @@ func (s *SessionStore) ListRecentByOrg(ctx context.Context, orgID uuid.UUID, sta
 	query := `
 		SELECT ` + sessionListColumns + `
 		FROM sessions
-		WHERE org_id = @org_id AND status = ANY(@statuses)
+		WHERE org_id = @org_id AND status = ANY(@statuses) AND deleted_at IS NULL
 		ORDER BY created_at DESC`
 
 	if limit <= 0 || limit > 200 {
@@ -397,7 +399,7 @@ func (s *SessionStore) ListByIDs(ctx context.Context, orgID uuid.UUID, ids []uui
 	query := `
 		SELECT ` + sessionListColumns + `
 		FROM sessions
-		WHERE org_id = @org_id AND id = ANY(@ids)`
+		WHERE org_id = @org_id AND id = ANY(@ids) AND deleted_at IS NULL`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"org_id": orgID,
@@ -494,6 +496,7 @@ func (s *SessionStore) ListStaleIdleSessions(ctx context.Context, olderThan time
 		SELECT ` + sessionListColumns + `
 		FROM sessions
 		WHERE status = 'idle'
+		  AND deleted_at IS NULL
 		  AND last_activity_at < @older_than
 		ORDER BY last_activity_at ASC NULLS FIRST
 		LIMIT 100`
@@ -509,6 +512,8 @@ func (s *SessionStore) ListStaleIdleSessions(ctx context.Context, olderThan time
 
 // ListExpiredSnapshots returns non-active sessions whose snapshots have
 // exceeded the maximum snapshot age and should be cleaned up from storage.
+// Note: intentionally does NOT filter by deleted_at IS NULL — we want to
+// clean up snapshots even for soft-deleted sessions to free storage.
 func (s *SessionStore) ListExpiredSnapshots(ctx context.Context, olderThan time.Time) ([]models.Session, error) {
 	query := `
 		SELECT ` + sessionSelectColumns + `
@@ -526,4 +531,21 @@ func (s *SessionStore) ListExpiredSnapshots(ctx context.Context, olderThan time.
 		return nil, fmt.Errorf("query expired snapshots: %w", err)
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+}
+
+// SoftDelete marks a session as deleted without removing the row.
+// Child rows (logs, messages, threads, etc.) remain intact for audit purposes.
+func (s *SessionStore) SoftDelete(ctx context.Context, orgID, sessionID uuid.UUID) error {
+	query := `UPDATE sessions SET deleted_at = now(), updated_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	})
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("session not found or already deleted")
+	}
+	return nil
 }

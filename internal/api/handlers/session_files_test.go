@@ -78,7 +78,7 @@ var sessionColumnsForFiles = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
-	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "created_at",
+	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "deleted_at", "created_at",
 }
 
 func setupSessionMock(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID, containerID *string) {
@@ -91,7 +91,7 @@ func setupSessionMock(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID, con
 				sessionID, issueID, orgID, "claude_code", "running", "supervised", "standard",
 				nil, nil, nil, nil,                // complexity_tier through risk_factors
 				containerID, &now, nil, nil,        // container_id, started_at, completed_at, token_usage
-				nil, nil, nil, nil,                // failure fields
+				nil, nil, nil, false,              // failure fields
 				nil, nil, nil, nil, nil,            // parent_session_id through diff
 				nil, nil, nil, nil,                // pm_plan_id through pm_reasoning
 				nil, nil, nil,                      // project_task_id, model_override, triggered_by_user_id
@@ -99,6 +99,7 @@ func setupSessionMock(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID, con
 				nil, nil, nil,                      // target_branch, working_branch, repository_id
 				nil, nil,                           // diff_stats, diff_history
 				nil,                                // input_manifest
+				nil,                                // deleted_at
 				now,                                // created_at
 			),
 		)

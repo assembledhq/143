@@ -96,6 +96,7 @@ type Issue struct {
 	Severity              string          `db:"severity" json:"severity"`
 	Tags                  []string        `db:"tags" json:"tags"`
 	Fingerprint           string          `db:"fingerprint" json:"fingerprint"`
+	DeletedAt             *time.Time      `db:"deleted_at" json:"-"`
 	CreatedAt             time.Time       `db:"created_at" json:"created_at"`
 	UpdatedAt             time.Time       `db:"updated_at" json:"updated_at"`
 }
@@ -120,7 +121,10 @@ type Session struct {
 	FailureExplanation   *string         `db:"failure_explanation" json:"failure_explanation,omitempty"`
 	FailureCategory      *string         `db:"failure_category" json:"failure_category,omitempty"`
 	FailureNextSteps     []string        `db:"failure_next_steps" json:"failure_next_steps,omitempty"`
-	FailureRetryAdvised  *bool           `db:"failure_retry_advised" json:"failure_retry_advised,omitempty"`
+	// FailureRetryAdvised uses plain bool (not *bool) because false is the
+	// meaningful default — a session that hasn't failed never advises retry.
+	// The DB column is NOT NULL DEFAULT false, so pgx scans cleanly into bool.
+	FailureRetryAdvised  bool            `db:"failure_retry_advised" json:"failure_retry_advised"`
 	ParentSessionID      *uuid.UUID      `db:"parent_session_id" json:"parent_session_id,omitempty"`
 	RevisionContext      json.RawMessage `db:"revision_context" json:"revision_context,omitempty"`
 	Error                *string         `db:"error" json:"error,omitempty"`
@@ -147,6 +151,7 @@ type Session struct {
 	// field being non-nil unless the session was fetched individually.
 	DiffHistory   json.RawMessage `db:"diff_history" json:"diff_history,omitempty"`
 	InputManifest json.RawMessage `db:"input_manifest" json:"input_manifest,omitempty"`
+	DeletedAt     *time.Time      `db:"deleted_at" json:"-"`
 	CreatedAt     time.Time       `db:"created_at" json:"created_at"`
 }
 
@@ -188,9 +193,11 @@ type Validation struct {
 }
 
 // PullRequest represents a GitHub PR created by an agent run.
+// NOTE: SessionID is nullable (*uuid.UUID) because PRs can be created manually
+// without an associated session. API consumers should handle null session_id.
 type PullRequest struct {
 	ID             uuid.UUID  `db:"id" json:"id"`
-	SessionID     uuid.UUID  `db:"session_id" json:"session_id"`
+	SessionID     *uuid.UUID `db:"session_id" json:"session_id,omitempty"`
 	OrgID          uuid.UUID  `db:"org_id" json:"org_id"`
 	GitHubPRNumber int        `db:"github_pr_number" json:"github_pr_number"`
 	GitHubPRURL    string     `db:"github_pr_url" json:"github_pr_url"`
@@ -208,6 +215,7 @@ type PullRequest struct {
 type SessionLog struct {
 	ID         int64           `db:"id" json:"id"`
 	SessionID  uuid.UUID       `db:"session_id" json:"session_id"`
+	OrgID      uuid.UUID       `db:"org_id" json:"org_id"`
 	ThreadID   *uuid.UUID      `db:"thread_id" json:"thread_id,omitempty"`
 	Timestamp  time.Time       `db:"timestamp" json:"created_at"`
 	Level      string          `db:"level" json:"level"`
