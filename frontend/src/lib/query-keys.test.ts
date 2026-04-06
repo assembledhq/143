@@ -73,4 +73,35 @@ describe("queryKeys", () => {
       expect(queryKeys.team.members).toEqual(["team", "members"]);
     });
   });
+
+  describe("evals", () => {
+    it("tasks returns key with optional params", () => {
+      expect(queryKeys.evals.tasks()).toEqual(["evals", "tasks", undefined]);
+      expect(queryKeys.evals.tasks({ source: "manual" })).toEqual(["evals", "tasks", { source: "manual" }]);
+    });
+
+    it("taskDetail includes task id", () => {
+      expect(queryKeys.evals.taskDetail("t-1")).toEqual(["evals", "task", "t-1"]);
+    });
+
+    it("runs includes task id", () => {
+      expect(queryKeys.evals.runs("t-1")).toEqual(["evals", "task", "t-1", "runs"]);
+    });
+
+    it("runDetail includes run id", () => {
+      expect(queryKeys.evals.runDetail("r-1")).toEqual(["evals", "run", "r-1"]);
+    });
+
+    it("batches returns static key", () => {
+      expect(queryKeys.evals.batches).toEqual(["evals", "batches"]);
+    });
+
+    it("batch includes batch id", () => {
+      expect(queryKeys.evals.batch("b-1")).toEqual(["evals", "batch", "b-1"]);
+    });
+
+    it("bootstrapCandidates returns static key", () => {
+      expect(queryKeys.evals.bootstrapCandidates).toEqual(["evals", "bootstrap", "candidates"]);
+    });
+  });
 });

@@ -1642,3 +1642,1054 @@ func TestDataRetentionHandler_SkipsZeroRetentionDays(t *testing.T) {
 	require.NoError(t, err, "handler should skip cleanup when retention days are 0")
 	require.NoError(t, mock.ExpectationsWereMet(), "no DB calls should be made")
 }
+
+// --- Eval handler tests ---
+
+var evalRunTestCols = []string{
+	"id", "task_id", "org_id", "batch_id",
+	"input_manifest", "model", "server_deploy_sha", "pm_document_set_pin_id",
+	"config_ref", "context_overrides",
+	"agent_diff", "agent_trace", "token_usage",
+	"criterion_results", "final_score", "passed",
+	"status", "duration_seconds", "sandbox_id",
+	"started_at", "completed_at", "error_message", "created_at",
+}
+
+var evalTaskTestCols = []string{
+	"id", "org_id", "repo_id", "name", "description",
+	"base_commit_sha", "solution_commit_sha", "solution_diff",
+	"issue_description", "issue_context",
+	"server_deploy_sha", "pm_document_set_pin_id", "org_settings_version_id",
+	"memory_snapshot", "sandbox_image_digest", "context_overrides",
+	"scoring_criteria", "pass_threshold",
+	"source", "source_pr_number", "complexity", "tags",
+	"snapshot_broken",
+	"created_by", "created_at", "updated_at", "archived_at",
+}
+
+func newEvalTestStores(t *testing.T) (*Stores, pgxmock.PgxPoolIface) {
+	t.Helper()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	return &Stores{
+		EvalTasks:      db.NewEvalTaskStore(mock),
+		EvalRuns:       db.NewEvalRunStore(mock),
+		EvalBatches:    db.NewEvalBatchStore(mock),
+		EvalBootstraps: db.NewEvalBootstrapStore(mock),
+		Repositories:   db.NewRepositoryStore(mock),
+	}, mock
+}
+
+func evalRunRow(runID, taskID, orgID uuid.UUID, now time.Time) []interface{} {
+	return []interface{}{
+		runID, taskID, orgID, nil,
+		nil, "claude-sonnet-4-6", nil, nil,
+		nil, json.RawMessage(`{}`),
+		nil, nil, nil,
+		nil, nil, nil,
+		"pending", nil, nil,
+		nil, nil, nil, now,
+	}
+}
+
+func evalTaskRow(taskID, orgID uuid.UUID, now time.Time, criteria json.RawMessage) []interface{} {
+	return []interface{}{
+		taskID, orgID, uuid.New(), "Test Task", "desc",
+		"abc123", nil, nil,
+		"Fix the bug", json.RawMessage(`{}`),
+		nil, nil, nil,
+		nil, nil, json.RawMessage(`{}`),
+		criteria, 0.7,
+		"manual", nil, "moderate", []string{"test"},
+		false,
+		nil, now, now, nil,
+	}
+}
+
+func TestExecuteEvalRun(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns failed with placeholder message for valid criteria", func(t *testing.T) {
+		t.Parallel()
+
+		run := &models.EvalRun{Model: "claude-sonnet-4-6"}
+		task := &models.EvalTask{
+			ScoringCriteria: json.RawMessage(`[{"name":"tests_pass","grader_type":"code_check","weight":1.0}]`),
+		}
+		logger := zerolog.Nop()
+
+		result := executeEvalRun(context.Background(), &Stores{}, &Services{}, run, task, logger)
+		require.Equal(t, models.EvalRunStatusFailed, result.Status)
+		require.NotNil(t, result.ErrorMessage)
+		require.Contains(t, *result.ErrorMessage, "repository store not configured")
+	})
+
+	t.Run("returns failed on invalid scoring criteria JSON", func(t *testing.T) {
+		t.Parallel()
+
+		run := &models.EvalRun{Model: "claude-sonnet-4-6"}
+		task := &models.EvalTask{
+			ScoringCriteria: json.RawMessage(`not valid json`),
+		}
+		logger := zerolog.Nop()
+
+		result := executeEvalRun(context.Background(), &Stores{}, &Services{}, run, task, logger)
+		require.Equal(t, models.EvalRunStatusFailed, result.Status)
+		require.NotNil(t, result.ErrorMessage)
+		require.Contains(t, *result.ErrorMessage, "failed to parse scoring criteria")
+	})
+
+	t.Run("returns failed when repository store is nil", func(t *testing.T) {
+		t.Parallel()
+
+		run := &models.EvalRun{Model: "claude-sonnet-4-6"}
+		task := &models.EvalTask{
+			ScoringCriteria: json.RawMessage(`[]`),
+		}
+		logger := zerolog.Nop()
+
+		result := executeEvalRun(context.Background(), &Stores{}, &Services{}, run, task, logger)
+		require.Equal(t, models.EvalRunStatusFailed, result.Status)
+		require.NotNil(t, result.ErrorMessage)
+		require.Contains(t, *result.ErrorMessage, "repository store not configured")
+	})
+
+	t.Run("returns failed when sandbox provider is nil", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newEvalTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		repoID := uuid.New()
+		run := &models.EvalRun{Model: "claude-sonnet-4-6"}
+		task := &models.EvalTask{
+			OrgID:           orgID,
+			RepoID:          repoID,
+			ScoringCriteria: json.RawMessage(`[]`),
+		}
+		logger := zerolog.Nop()
+
+		// Mock repository lookup
+		mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "integration_id", "github_id", "full_name", "default_branch", "private", "language", "description", "clone_url", "installation_id", "status", "last_synced_at", "context_quality", "settings", "created_at", "updated_at"}).
+				AddRow(repoID, orgID, uuid.New(), int64(123), "org/repo", "main", false, nil, nil, "https://github.com/org/repo.git", int64(456), "active", nil, nil, json.RawMessage(`{}`), time.Now(), time.Now()))
+
+		result := executeEvalRun(context.Background(), stores, &Services{}, run, task, logger)
+		require.Equal(t, models.EvalRunStatusFailed, result.Status)
+		require.NotNil(t, result.ErrorMessage)
+		require.Contains(t, *result.ErrorMessage, "sandbox provider not configured")
+	})
+}
+
+func TestRunEvalHandler(t *testing.T) {
+	t.Parallel()
+
+	t.Run("invalid JSON payload returns error", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newEvalTestStores(t)
+		defer mock.Close()
+
+		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
+		err := handler(context.Background(), "run_eval", json.RawMessage(`{invalid`))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "unmarshal run_eval payload")
+	})
+
+	t.Run("missing org ID returns error", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newEvalTestStores(t)
+		defer mock.Close()
+
+		payload := json.RawMessage(`{"eval_run_id":"` + uuid.New().String() + `"}`)
+		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
+		err := handler(context.Background(), "run_eval", payload)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "parse org ID")
+	})
+
+	t.Run("invalid eval run ID returns error", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newEvalTestStores(t)
+		defer mock.Close()
+
+		payload := json.RawMessage(`{"eval_run_id":"not-a-uuid","org_id":"` + uuid.New().String() + `"}`)
+		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
+		err := handler(context.Background(), "run_eval", payload)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "parse eval run ID")
+	})
+
+	t.Run("successful run executes full lifecycle", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newEvalTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		runID := uuid.New()
+		taskID := uuid.New()
+		now := time.Now()
+
+		// GetByID for run
+		mock.ExpectQuery("SELECT .+ FROM eval_runs WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(evalRunTestCols).AddRow(evalRunRow(runID, taskID, orgID, now)...))
+
+		// GetByID for task
+		mock.ExpectQuery("SELECT .+ FROM eval_tasks WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(evalTaskTestCols).AddRow(
+				evalTaskRow(taskID, orgID, now, json.RawMessage(`[]`))...))
+
+		// UpdateStatus to running
+		mock.ExpectExec("UPDATE eval_runs SET status").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		// UpdateResult
+		mock.ExpectExec("UPDATE eval_runs SET").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		payload, _ := json.Marshal(map[string]string{
+			"eval_run_id": runID.String(),
+			"org_id":      orgID.String(),
+		})
+
+		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
+		err := handler(context.Background(), "run_eval", payload)
+		require.NoError(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("batch run completes batch when all runs done", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newEvalTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		runID := uuid.New()
+		taskID := uuid.New()
+		batchID := uuid.New()
+		now := time.Now()
+
+		// GetByID for run — this time with a batch_id set
+		runRow := evalRunRow(runID, taskID, orgID, now)
+		runRow[3] = &batchID // batch_id field
+		mock.ExpectQuery("SELECT .+ FROM eval_runs WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(evalRunTestCols).AddRow(runRow...))
+
+		// GetByID for task
+		mock.ExpectQuery("SELECT .+ FROM eval_tasks WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(evalTaskTestCols).AddRow(
+				evalTaskRow(taskID, orgID, now, json.RawMessage(`[]`))...))
+
+		// UpdateStatus to running
+		mock.ExpectExec("UPDATE eval_runs SET status").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		// UpdateResult
+		mock.ExpectExec("UPDATE eval_runs SET").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		// CompleteBatchIfDone
+		mock.ExpectExec("UPDATE eval_batches SET status").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		payload, _ := json.Marshal(map[string]string{
+			"eval_run_id": runID.String(),
+			"org_id":      orgID.String(),
+			"batch_id":    batchID.String(),
+		})
+
+		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
+		err := handler(context.Background(), "run_eval", payload)
+		require.NoError(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("fetch run failure returns error", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newEvalTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		runID := uuid.New()
+
+		mock.ExpectQuery("SELECT .+ FROM eval_runs WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(evalRunTestCols))
+
+		payload, _ := json.Marshal(map[string]string{
+			"eval_run_id": runID.String(),
+			"org_id":      orgID.String(),
+		})
+
+		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
+		err := handler(context.Background(), "run_eval", payload)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "fetch eval run")
+	})
+
+	t.Run("update status failure returns error", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newEvalTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		runID := uuid.New()
+		taskID := uuid.New()
+		now := time.Now()
+
+		mock.ExpectQuery("SELECT .+ FROM eval_runs WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(evalRunTestCols).AddRow(evalRunRow(runID, taskID, orgID, now)...))
+
+		mock.ExpectQuery("SELECT .+ FROM eval_tasks WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(evalTaskTestCols).AddRow(
+				evalTaskRow(taskID, orgID, now, json.RawMessage(`[]`))...))
+
+		mock.ExpectExec("UPDATE eval_runs SET status").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(errors.New("db connection lost"))
+
+		payload, _ := json.Marshal(map[string]string{
+			"eval_run_id": runID.String(),
+			"org_id":      orgID.String(),
+		})
+
+		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
+		err := handler(context.Background(), "run_eval", payload)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "update eval run status to running")
+	})
+}
+
+func TestComputeWeightedScore(t *testing.T) {
+	t.Parallel()
+
+	t.Run("simple pass", func(t *testing.T) {
+		t.Parallel()
+		criteria := []models.ScoringCriterion{
+			{Name: "tests", Weight: 1.0, Required: false},
+			{Name: "quality", Weight: 1.0, Required: false},
+		}
+		results := []models.CriterionResult{
+			{Name: "tests", Score: 1.0, Pass: true},
+			{Name: "quality", Score: 0.8, Pass: true},
+		}
+		score, passed := computeWeightedScore(criteria, results, 0.7)
+		require.InDelta(t, 0.9, score, 0.01)
+		require.True(t, passed)
+	})
+
+	t.Run("required criterion fails overall", func(t *testing.T) {
+		t.Parallel()
+		criteria := []models.ScoringCriterion{
+			{Name: "tests", Weight: 1.0, Required: true},
+			{Name: "quality", Weight: 1.0, Required: false},
+		}
+		results := []models.CriterionResult{
+			{Name: "tests", Score: 0.0, Pass: false},
+			{Name: "quality", Score: 1.0, Pass: true},
+		}
+		score, passed := computeWeightedScore(criteria, results, 0.3)
+		require.InDelta(t, 0.5, score, 0.01) // weighted avg is 0.5
+		require.False(t, passed)              // but fails due to required criterion
+	})
+
+	t.Run("below threshold fails", func(t *testing.T) {
+		t.Parallel()
+		criteria := []models.ScoringCriterion{
+			{Name: "tests", Weight: 1.0},
+		}
+		results := []models.CriterionResult{
+			{Name: "tests", Score: 0.5, Pass: true},
+		}
+		_, passed := computeWeightedScore(criteria, results, 0.7)
+		require.False(t, passed)
+	})
+
+	t.Run("empty results return zero", func(t *testing.T) {
+		t.Parallel()
+		score, passed := computeWeightedScore(nil, nil, 0.5)
+		require.Equal(t, 0.0, score)
+		require.False(t, passed)
+	})
+
+	t.Run("unequal weights", func(t *testing.T) {
+		t.Parallel()
+		criteria := []models.ScoringCriterion{
+			{Name: "tests", Weight: 3.0},
+			{Name: "quality", Weight: 1.0},
+		}
+		results := []models.CriterionResult{
+			{Name: "tests", Score: 1.0, Pass: true},
+			{Name: "quality", Score: 0.0, Pass: false},
+		}
+		score, _ := computeWeightedScore(criteria, results, 0.5)
+		require.InDelta(t, 0.75, score, 0.01) // (3*1.0 + 1*0.0) / 4
+	})
+}
+
+func TestExtractJSON(t *testing.T) {
+	t.Parallel()
+
+	t.Run("extracts from markdown fences", func(t *testing.T) {
+		t.Parallel()
+		input := "Here is the result:\n```json\n{\"pass\": true}\n```"
+		result := extractJSON(input)
+		require.Equal(t, "{\"pass\": true}", result)
+	})
+
+	t.Run("plain JSON passthrough", func(t *testing.T) {
+		t.Parallel()
+		input := `{"pass": false, "reasoning": "bad"}`
+		result := extractJSON(input)
+		require.Equal(t, input, result)
+	})
+
+	t.Run("no JSON returns input", func(t *testing.T) {
+		t.Parallel()
+		input := "no json here"
+		result := extractJSON(input)
+		require.Equal(t, input, result)
+	})
+}
+
+func TestTruncateString(t *testing.T) {
+	t.Parallel()
+
+	t.Run("short string unchanged", func(t *testing.T) {
+		t.Parallel()
+		require.Equal(t, "hello", truncateString("hello", 10))
+	})
+
+	t.Run("long string truncated", func(t *testing.T) {
+		t.Parallel()
+		result := truncateString("hello world", 5)
+		require.Equal(t, "hello...(truncated)", result)
+	})
+}
+
+func TestEvalFailed(t *testing.T) {
+	t.Parallel()
+
+	result := evalFailed("test error: %v", "details")
+	require.Equal(t, models.EvalRunStatusFailed, result.Status)
+	require.NotNil(t, result.ErrorMessage)
+	require.Equal(t, "test error: details", *result.ErrorMessage)
+}
+
+func TestBuildEvalManifest(t *testing.T) {
+	t.Parallel()
+
+	pinID := uuid.New()
+	settingsID := uuid.New()
+	digest := "sha256:abc123"
+	task := &models.EvalTask{
+		BaseCommitSHA:        "abc123",
+		PMDocumentSetPinID:   &pinID,
+		OrgSettingsVersionID: &settingsID,
+		SandboxImageDigest:   &digest,
+	}
+	run := &models.EvalRun{Model: "claude-sonnet-4-6"}
+
+	manifest := buildEvalManifest(task, run)
+	require.Equal(t, "abc123", manifest.RepoBaseCommitSHA)
+	require.Equal(t, "claude-sonnet-4-6", manifest.Model)
+	require.Equal(t, &pinID, manifest.PMDocumentSetPinID)
+	require.Equal(t, &settingsID, manifest.OrgSettingsVersionID)
+	require.Equal(t, "sha256:abc123", manifest.SandboxImageDigest)
+}
+
+// ---------------------------------------------------------------------------
+// configurable sandbox provider for grading tests
+// ---------------------------------------------------------------------------
+
+// execFunc allows per-test control of sandbox Exec behavior.
+type execFunc func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error)
+
+// configurableSandboxProvider embeds stubSandboxProvider but overrides Exec.
+type configurableSandboxProvider struct {
+	stubSandboxProvider
+	execFn execFunc
+}
+
+func (c *configurableSandboxProvider) Exec(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+	if c.execFn != nil {
+		return c.execFn(ctx, sb, cmd, stdout, stderr)
+	}
+	return 0, nil
+}
+
+// ---------------------------------------------------------------------------
+// mock LLM client for gradeLLMJudge tests
+// ---------------------------------------------------------------------------
+
+type mockLLMClient struct {
+	response string
+	err      error
+}
+
+func (m *mockLLMClient) Complete(_ context.Context, _, _ string) (string, error) {
+	return m.response, m.err
+}
+
+// ---------------------------------------------------------------------------
+// gradeCodeCheck tests
+// ---------------------------------------------------------------------------
+
+func TestGradeCodeCheck(t *testing.T) {
+	t.Parallel()
+
+	t.Run("passing command returns score 1", func(t *testing.T) {
+		t.Parallel()
+
+		provider := &configurableSandboxProvider{
+			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, _, _ io.Writer) (int, error) {
+				return 0, nil
+			},
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "build",
+			GraderType:   "code_check",
+			GraderConfig: json.RawMessage(`{"command":"make test"}`),
+			Weight:       1.0,
+		}
+		sb := &agent.Sandbox{ID: "test-sb"}
+		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
+
+		require.Equal(t, "build", result.Name)
+		require.Equal(t, 1.0, result.Score)
+		require.True(t, result.Pass)
+		require.Contains(t, result.Details, "exit_code=0")
+	})
+
+	t.Run("failing command returns score 0", func(t *testing.T) {
+		t.Parallel()
+
+		provider := &configurableSandboxProvider{
+			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, _, stderr io.Writer) (int, error) {
+				_, _ = stderr.Write([]byte("build failed"))
+				return 1, nil
+			},
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "build",
+			GraderType:   "code_check",
+			GraderConfig: json.RawMessage(`{"command":"make test"}`),
+			Weight:       1.0,
+		}
+		sb := &agent.Sandbox{ID: "test-sb"}
+		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
+
+		require.Equal(t, "build", result.Name)
+		require.Equal(t, 0.0, result.Score)
+		require.False(t, result.Pass)
+		require.Contains(t, result.Details, "exit_code=1")
+	})
+
+	t.Run("exec error returns score 0", func(t *testing.T) {
+		t.Parallel()
+
+		provider := &configurableSandboxProvider{
+			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, _, _ io.Writer) (int, error) {
+				return -1, errors.New("sandbox unreachable")
+			},
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "build",
+			GraderType:   "code_check",
+			GraderConfig: json.RawMessage(`{"command":"make test"}`),
+			Weight:       1.0,
+		}
+		sb := &agent.Sandbox{ID: "test-sb"}
+		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
+
+		require.Equal(t, 0.0, result.Score)
+		require.False(t, result.Pass)
+		require.Contains(t, result.Details, "exec_error")
+	})
+
+	t.Run("invalid grader config returns score 0", func(t *testing.T) {
+		t.Parallel()
+
+		provider := &configurableSandboxProvider{}
+		criterion := models.ScoringCriterion{
+			Name:         "build",
+			GraderType:   "code_check",
+			GraderConfig: json.RawMessage(`{invalid`),
+			Weight:       1.0,
+		}
+		sb := &agent.Sandbox{ID: "test-sb"}
+		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
+
+		require.Equal(t, 0.0, result.Score)
+		require.False(t, result.Pass)
+		require.Contains(t, result.Details, "invalid code_check config")
+	})
+
+	t.Run("JSON stdout with custom score overrides exit code", func(t *testing.T) {
+		t.Parallel()
+
+		provider := &configurableSandboxProvider{
+			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, stdout, _ io.Writer) (int, error) {
+				_, _ = stdout.Write([]byte(`{"score": 0.75}`))
+				return 0, nil
+			},
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "quality",
+			GraderType:   "code_check",
+			GraderConfig: json.RawMessage(`{"command":"check_quality"}`),
+			Weight:       1.0,
+		}
+		sb := &agent.Sandbox{ID: "test-sb"}
+		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
+
+		require.InDelta(t, 0.75, result.Score, 0.001)
+		require.True(t, result.Pass) // 0.75 >= 0.5
+	})
+
+	t.Run("JSON stdout score below 0.5 fails", func(t *testing.T) {
+		t.Parallel()
+
+		provider := &configurableSandboxProvider{
+			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, stdout, _ io.Writer) (int, error) {
+				_, _ = stdout.Write([]byte(`{"score": 0.3}`))
+				return 0, nil
+			},
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "quality",
+			GraderType:   "code_check",
+			GraderConfig: json.RawMessage(`{"command":"check_quality"}`),
+			Weight:       1.0,
+		}
+		sb := &agent.Sandbox{ID: "test-sb"}
+		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
+
+		require.InDelta(t, 0.3, result.Score, 0.001)
+		require.False(t, result.Pass) // 0.3 < 0.5
+	})
+
+	t.Run("custom timeout from config is respected", func(t *testing.T) {
+		t.Parallel()
+
+		provider := &configurableSandboxProvider{
+			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, _, _ io.Writer) (int, error) {
+				return 0, nil
+			},
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "build",
+			GraderType:   "code_check",
+			GraderConfig: json.RawMessage(`{"command":"make test","timeout_seconds":10}`),
+			Weight:       1.0,
+		}
+		sb := &agent.Sandbox{ID: "test-sb"}
+		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
+
+		require.Equal(t, 1.0, result.Score)
+		require.True(t, result.Pass)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// gradeLLMJudge tests
+// ---------------------------------------------------------------------------
+
+func TestGradeLLMJudge(t *testing.T) {
+	t.Parallel()
+
+	solutionDiff := "diff --git a/main.go b/main.go\n+fixed"
+	task := &models.EvalTask{
+		IssueDescription: "Fix the bug in main.go",
+		SolutionDiff:     &solutionDiff,
+	}
+
+	t.Run("nil LLM client returns error result", func(t *testing.T) {
+		t.Parallel()
+
+		criterion := models.ScoringCriterion{
+			Name:       "correctness",
+			GraderType: "llm_judge",
+		}
+		result := gradeLLMJudge(context.Background(), nil, criterion, "some diff", task, zerolog.Nop())
+
+		require.Equal(t, "correctness", result.Name)
+		require.Equal(t, 0.0, result.Score)
+		require.False(t, result.Pass)
+		require.Contains(t, result.Details, "LLM client not configured")
+	})
+
+	t.Run("pass_fail mode with passing judgment", func(t *testing.T) {
+		t.Parallel()
+
+		llm := &mockLLMClient{
+			response: `{"pass": true, "reasoning": "The diff correctly fixes the bug."}`,
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "correctness",
+			GraderType:   "llm_judge",
+			GraderConfig: json.RawMessage(`{"output":"pass_fail"}`),
+			Weight:       1.0,
+		}
+		result := gradeLLMJudge(context.Background(), llm, criterion, "some diff", task, zerolog.Nop())
+
+		require.Equal(t, "correctness", result.Name)
+		require.Equal(t, 1.0, result.Score)
+		require.True(t, result.Pass)
+		require.Equal(t, "The diff correctly fixes the bug.", result.Reasoning)
+	})
+
+	t.Run("pass_fail mode with failing judgment", func(t *testing.T) {
+		t.Parallel()
+
+		llm := &mockLLMClient{
+			response: `{"pass": false, "reasoning": "The fix is incorrect."}`,
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "correctness",
+			GraderType:   "llm_judge",
+			GraderConfig: json.RawMessage(`{"output":"pass_fail"}`),
+			Weight:       1.0,
+		}
+		result := gradeLLMJudge(context.Background(), llm, criterion, "some diff", task, zerolog.Nop())
+
+		require.Equal(t, 0.0, result.Score)
+		require.False(t, result.Pass)
+	})
+
+	t.Run("score mode uses numeric score", func(t *testing.T) {
+		t.Parallel()
+
+		llm := &mockLLMClient{
+			response: `{"pass": true, "score": 0.85, "reasoning": "Mostly correct."}`,
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "quality",
+			GraderType:   "llm_judge",
+			GraderConfig: json.RawMessage(`{"output":"score"}`),
+			Weight:       1.0,
+		}
+		result := gradeLLMJudge(context.Background(), llm, criterion, "some diff", task, zerolog.Nop())
+
+		require.InDelta(t, 0.85, result.Score, 0.001)
+		require.True(t, result.Pass)
+	})
+
+	t.Run("LLM error returns failure result", func(t *testing.T) {
+		t.Parallel()
+
+		llm := &mockLLMClient{
+			err: errors.New("rate limited"),
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "correctness",
+			GraderType:   "llm_judge",
+			GraderConfig: json.RawMessage(`{"output":"pass_fail"}`),
+			Weight:       1.0,
+		}
+		result := gradeLLMJudge(context.Background(), llm, criterion, "some diff", task, zerolog.Nop())
+
+		require.Equal(t, 0.0, result.Score)
+		require.False(t, result.Pass)
+		require.Contains(t, result.Details, "LLM judge call failed")
+	})
+
+	t.Run("unparseable LLM response returns failure", func(t *testing.T) {
+		t.Parallel()
+
+		llm := &mockLLMClient{
+			response: "I'm not sure what to say here",
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "correctness",
+			GraderType:   "llm_judge",
+			GraderConfig: json.RawMessage(`{"output":"pass_fail"}`),
+			Weight:       1.0,
+		}
+		result := gradeLLMJudge(context.Background(), llm, criterion, "some diff", task, zerolog.Nop())
+
+		require.Equal(t, 0.0, result.Score)
+		require.False(t, result.Pass)
+		require.Contains(t, result.Details, "failed to parse judge response")
+	})
+
+	t.Run("markdown-fenced JSON is extracted", func(t *testing.T) {
+		t.Parallel()
+
+		llm := &mockLLMClient{
+			response: "Here is my judgment:\n```json\n{\"pass\": true, \"reasoning\": \"Good fix.\"}\n```",
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "correctness",
+			GraderType:   "llm_judge",
+			GraderConfig: json.RawMessage(`{"output":"pass_fail"}`),
+			Weight:       1.0,
+		}
+		result := gradeLLMJudge(context.Background(), llm, criterion, "some diff", task, zerolog.Nop())
+
+		require.Equal(t, 1.0, result.Score)
+		require.True(t, result.Pass)
+	})
+
+	t.Run("nil solution diff handled gracefully", func(t *testing.T) {
+		t.Parallel()
+
+		taskNoSolution := &models.EvalTask{
+			IssueDescription: "Fix the bug",
+		}
+		llm := &mockLLMClient{
+			response: `{"pass": true, "reasoning": "ok"}`,
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "correctness",
+			GraderType:   "llm_judge",
+			GraderConfig: json.RawMessage(`{"output":"pass_fail"}`),
+			Weight:       1.0,
+		}
+		result := gradeLLMJudge(context.Background(), llm, criterion, "diff", taskNoSolution, zerolog.Nop())
+
+		require.True(t, result.Pass)
+	})
+
+	t.Run("invalid grader config defaults to pass_fail", func(t *testing.T) {
+		t.Parallel()
+
+		llm := &mockLLMClient{
+			response: `{"pass": true, "reasoning": "ok"}`,
+		}
+		criterion := models.ScoringCriterion{
+			Name:         "correctness",
+			GraderType:   "llm_judge",
+			GraderConfig: json.RawMessage(`{invalid`),
+			Weight:       1.0,
+		}
+		result := gradeLLMJudge(context.Background(), llm, criterion, "diff", task, zerolog.Nop())
+
+		require.Equal(t, 1.0, result.Score)
+		require.True(t, result.Pass)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// applyConfigOverlay tests
+// ---------------------------------------------------------------------------
+
+func TestApplyConfigOverlay(t *testing.T) {
+	t.Parallel()
+
+	t.Run("calls exec for fetch and each config file and dir", func(t *testing.T) {
+		t.Parallel()
+
+		var commands []string
+		provider := &configurableSandboxProvider{
+			execFn: func(_ context.Context, _ *agent.Sandbox, cmd string, _, _ io.Writer) (int, error) {
+				commands = append(commands, cmd)
+				return 0, nil
+			},
+		}
+		sb := &agent.Sandbox{ID: "test-sb"}
+		applyConfigOverlay(context.Background(), provider, sb, "refs/heads/my-branch", zerolog.Nop())
+
+		// Should have: 1 fetch + 2 config files + 2 config dirs = 5 commands
+		require.Len(t, commands, 5)
+		require.Contains(t, commands[0], "git fetch origin refs/heads/my-branch")
+		// Config files: AGENTS.md and CLAUDE.md
+		require.Contains(t, commands[1], "AGENTS.md")
+		require.Contains(t, commands[2], "CLAUDE.md")
+		// Config dirs: .claude and .143
+		require.Contains(t, commands[3], ".claude")
+		require.Contains(t, commands[4], ".143")
+	})
+
+	t.Run("exec failures are non-fatal", func(t *testing.T) {
+		t.Parallel()
+
+		provider := &configurableSandboxProvider{
+			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, _, _ io.Writer) (int, error) {
+				return 1, errors.New("command failed")
+			},
+		}
+		sb := &agent.Sandbox{ID: "test-sb"}
+
+		// Should not panic
+		applyConfigOverlay(context.Background(), provider, sb, "refs/heads/broken", zerolog.Nop())
+	})
+}
+
+// ---------------------------------------------------------------------------
+// weightedAverage tests
+// ---------------------------------------------------------------------------
+
+func TestWeightedAverage(t *testing.T) {
+	t.Parallel()
+
+	t.Run("equal weights", func(t *testing.T) {
+		t.Parallel()
+
+		criteria := []models.ScoringCriterion{
+			{Name: "a", Weight: 1.0},
+			{Name: "b", Weight: 1.0},
+		}
+		results := map[string]models.CriterionResult{
+			"a": {Name: "a", Score: 1.0},
+			"b": {Name: "b", Score: 0.5},
+		}
+		avg := weightedAverage(criteria, results)
+		require.InDelta(t, 0.75, avg, 0.001)
+	})
+
+	t.Run("unequal weights", func(t *testing.T) {
+		t.Parallel()
+
+		criteria := []models.ScoringCriterion{
+			{Name: "a", Weight: 3.0},
+			{Name: "b", Weight: 1.0},
+		}
+		results := map[string]models.CriterionResult{
+			"a": {Name: "a", Score: 1.0},
+			"b": {Name: "b", Score: 0.0},
+		}
+		avg := weightedAverage(criteria, results)
+		require.InDelta(t, 0.75, avg, 0.001)
+	})
+
+	t.Run("zero weight defaults to 1", func(t *testing.T) {
+		t.Parallel()
+
+		criteria := []models.ScoringCriterion{
+			{Name: "a", Weight: 0},
+			{Name: "b", Weight: 0},
+		}
+		results := map[string]models.CriterionResult{
+			"a": {Name: "a", Score: 1.0},
+			"b": {Name: "b", Score: 0.0},
+		}
+		avg := weightedAverage(criteria, results)
+		require.InDelta(t, 0.5, avg, 0.001)
+	})
+
+	t.Run("missing result treated as zero", func(t *testing.T) {
+		t.Parallel()
+
+		criteria := []models.ScoringCriterion{
+			{Name: "a", Weight: 1.0},
+			{Name: "b", Weight: 1.0},
+		}
+		results := map[string]models.CriterionResult{
+			"a": {Name: "a", Score: 1.0},
+		}
+		avg := weightedAverage(criteria, results)
+		require.InDelta(t, 0.5, avg, 0.001)
+	})
+
+	t.Run("empty criteria returns zero", func(t *testing.T) {
+		t.Parallel()
+
+		avg := weightedAverage(nil, nil)
+		require.Equal(t, 0.0, avg)
+	})
+
+	t.Run("negative weight defaults to 1", func(t *testing.T) {
+		t.Parallel()
+
+		criteria := []models.ScoringCriterion{
+			{Name: "a", Weight: -5.0},
+		}
+		results := map[string]models.CriterionResult{
+			"a": {Name: "a", Score: 0.8},
+		}
+		avg := weightedAverage(criteria, results)
+		require.InDelta(t, 0.8, avg, 0.001)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// runCodingAgent tests
+// ---------------------------------------------------------------------------
+
+func TestRunCodingAgent(t *testing.T) {
+	t.Parallel()
+
+	t.Run("successful agent execution returns diff", func(t *testing.T) {
+		t.Parallel()
+
+		callCount := 0
+		provider := &configurableSandboxProvider{
+			execFn: func(_ context.Context, _ *agent.Sandbox, cmd string, stdout, _ io.Writer) (int, error) {
+				callCount++
+				if callCount == 1 {
+					// Write issue description to temp file
+					return 0, nil
+				}
+				if callCount == 2 {
+					// The claude CLI call
+					_, _ = stdout.Write([]byte("agent output"))
+					return 0, nil
+				}
+				// The git diff call
+				_, _ = stdout.Write([]byte("diff --git a/file.go b/file.go\n+new line"))
+				return 0, nil
+			},
+		}
+		services := &Services{
+			SandboxProvider: provider,
+		}
+		sb := &agent.Sandbox{ID: "test-sb"}
+		diff, trace, tokenUsage := runCodingAgent(context.Background(), services, sb, "claude-sonnet-4-6", "Fix the bug", zerolog.Nop())
+
+		require.Contains(t, diff, "diff --git")
+		require.NotNil(t, trace)
+		require.Equal(t, 0, trace["exit_code"])
+		require.Nil(t, tokenUsage)
+	})
+
+	t.Run("agent exec error is captured in trace", func(t *testing.T) {
+		t.Parallel()
+
+		callCount := 0
+		provider := &configurableSandboxProvider{
+			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, _, _ io.Writer) (int, error) {
+				callCount++
+				if callCount == 1 {
+					// Write issue description to temp file succeeds
+					return 0, nil
+				}
+				// CLI call fails
+				return 1, errors.New("sandbox crashed")
+			},
+		}
+		services := &Services{
+			SandboxProvider: provider,
+		}
+		sb := &agent.Sandbox{ID: "test-sb"}
+		_, trace, _ := runCodingAgent(context.Background(), services, sb, "claude-sonnet-4-6", "Fix", zerolog.Nop())
+
+		require.Equal(t, 1, trace["exit_code"])
+		require.Equal(t, "sandbox crashed", trace["exec_error"])
+	})
+}

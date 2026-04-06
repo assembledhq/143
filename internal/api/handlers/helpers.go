@@ -21,6 +21,8 @@ func queryInt(r *http.Request, key string, defaultVal int) int {
 	return n
 }
 
+func strPtr(s string) *string { return &s }
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
