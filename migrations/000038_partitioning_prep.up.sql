@@ -70,6 +70,11 @@ $$;
 -- session_logs: partition by timestamp (the time column for this table)
 -- =============================================================================
 
+-- Guard: use a short lock_timeout to prevent accidental execution outside
+-- a maintenance window. If the lock cannot be acquired in 5s, the migration
+-- fails fast rather than blocking production traffic indefinitely.
+SET LOCAL lock_timeout = '5s';
+
 -- Lock table to prevent concurrent writes during the swap.
 LOCK TABLE session_logs IN ACCESS EXCLUSIVE MODE;
 
@@ -79,7 +84,15 @@ LOCK TABLE session_logs IN ACCESS EXCLUSIVE MODE;
 ALTER TABLE session_logs RENAME TO session_logs_old;
 -- The sequence kept its original name (agent_run_logs_id_seq) when the table
 -- was renamed from agent_run_logs to session_logs in migration 000015.
-ALTER SEQUENCE agent_run_logs_id_seq RENAME TO agent_run_logs_id_seq_old;
+-- The sequence may be named agent_run_logs_id_seq (original) or
+-- session_logs_id_seq (if already renamed). Handle both cases.
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_class WHERE relname = 'agent_run_logs_id_seq' AND relkind = 'S') THEN
+        ALTER SEQUENCE agent_run_logs_id_seq RENAME TO agent_run_logs_id_seq_old;
+    ELSIF EXISTS (SELECT 1 FROM pg_class WHERE relname = 'session_logs_id_seq' AND relkind = 'S') THEN
+        ALTER SEQUENCE session_logs_id_seq RENAME TO agent_run_logs_id_seq_old;
+    END IF;
+END $$;
 ALTER INDEX idx_session_logs_session RENAME TO idx_session_logs_session_old;
 ALTER INDEX idx_session_logs_timestamp RENAME TO idx_session_logs_timestamp_old;
 ALTER INDEX IF EXISTS idx_session_logs_thread RENAME TO idx_session_logs_thread_old;
@@ -108,10 +121,10 @@ ALTER TABLE session_logs
     ADD CONSTRAINT fk_session_logs_thread FOREIGN KEY (thread_id) REFERENCES session_threads(id) ON DELETE CASCADE;
 
 -- 4. Recreate indexes (auto-propagate to partitions).
-CREATE INDEX idx_session_logs_session ON session_logs (session_id, timestamp);
-CREATE INDEX idx_session_logs_thread ON session_logs (thread_id) WHERE thread_id IS NOT NULL;
-CREATE INDEX idx_session_logs_timestamp ON session_logs (timestamp);
-CREATE INDEX idx_session_logs_org_created ON session_logs (org_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_session_logs_session ON session_logs (session_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_session_logs_thread ON session_logs (thread_id) WHERE thread_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_session_logs_timestamp ON session_logs (timestamp);
+CREATE INDEX IF NOT EXISTS idx_session_logs_org_created ON session_logs (org_id, timestamp DESC);
 
 -- 5. Add the CHECK constraint from migration 034.
 ALTER TABLE session_logs

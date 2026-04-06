@@ -121,6 +121,9 @@ type Session struct {
 	FailureExplanation   *string         `db:"failure_explanation" json:"failure_explanation,omitempty"`
 	FailureCategory      *string         `db:"failure_category" json:"failure_category,omitempty"`
 	FailureNextSteps     []string        `db:"failure_next_steps" json:"failure_next_steps,omitempty"`
+	// FailureRetryAdvised uses plain bool (not *bool) because false is the
+	// meaningful default — a session that hasn't failed never advises retry.
+	// The DB column is NOT NULL DEFAULT false, so pgx scans cleanly into bool.
 	FailureRetryAdvised  bool            `db:"failure_retry_advised" json:"failure_retry_advised,omitempty"`
 	ParentSessionID      *uuid.UUID      `db:"parent_session_id" json:"parent_session_id,omitempty"`
 	RevisionContext      json.RawMessage `db:"revision_context" json:"revision_context,omitempty"`

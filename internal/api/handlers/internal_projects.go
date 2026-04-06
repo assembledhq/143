@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -41,8 +42,12 @@ type InternalProjectHandler struct {
 	// reset on server restart, which is acceptable because PM run tokens are
 	// short-lived and a restart mid-run is rare. The hard cap per repo
 	// (maxOpenProposalsPerRepo, checked via DB) provides durable protection.
+	//
+	// Eviction is time-bucketed: entries older than rateLimiterWindow are
+	// dropped on each access rather than clearing the entire map at a size
+	// threshold, avoiding thundering-herd cache misses.
 	perTokenMu        sync.Mutex
-	perTokenRepoCount map[string]int
+	perTokenRepoCount map[string]rateLimiterEntry
 }
 
 // NewInternalProjectHandler creates a handler for internal project proposal creation.
@@ -61,9 +66,18 @@ func NewInternalProjectHandler(
 		repoStore:         repoStore,
 		signingSecret:     signingSecret,
 		logger:            logger,
-		perTokenRepoCount: make(map[string]int),
+		perTokenRepoCount: make(map[string]rateLimiterEntry),
 	}
 }
+
+// rateLimiterEntry pairs a count with a timestamp for time-bucketed eviction.
+type rateLimiterEntry struct {
+	count     int
+	createdAt time.Time
+}
+
+// rateLimiterWindow is how long rate limiter entries survive before eviction.
+const rateLimiterWindow = 10 * time.Minute
 
 type proposeProjectRequest struct {
 	RepositoryID       string             `json:"repository_id"`
@@ -335,22 +349,31 @@ func (h *InternalProjectHandler) Propose(w http.ResponseWriter, r *http.Request)
 
 // incrementAndCheckProposal atomically increments the per-token-repo proposal count
 // and returns true if the count is within the allowed limit.
-// maxRateLimiterEntries caps the in-memory rate limiter map size.
-// When exceeded, the map is cleared. This is safe because the durable cap
-// (maxOpenProposalsPerRepo) is enforced via DB query inside the transaction.
-const maxRateLimiterEntries = 10000
-
+// Entries older than rateLimiterWindow are evicted on each call, keeping memory
+// bounded without a hard cap that clears everything at once.
 func (h *InternalProjectHandler) incrementAndCheckProposal(key string) bool {
 	h.perTokenMu.Lock()
 	defer h.perTokenMu.Unlock()
-	if len(h.perTokenRepoCount) >= maxRateLimiterEntries {
-		h.perTokenRepoCount = make(map[string]int)
+
+	now := time.Now()
+	cutoff := now.Add(-rateLimiterWindow)
+
+	// Evict stale entries.
+	for k, v := range h.perTokenRepoCount {
+		if v.createdAt.Before(cutoff) {
+			delete(h.perTokenRepoCount, k)
+		}
 	}
-	count := h.perTokenRepoCount[key]
-	if count >= maxProposalsPerRepoPerRun {
+
+	entry, ok := h.perTokenRepoCount[key]
+	if !ok {
+		entry = rateLimiterEntry{createdAt: now}
+	}
+	if entry.count >= maxProposalsPerRepoPerRun {
 		return false
 	}
-	h.perTokenRepoCount[key] = count + 1
+	entry.count++
+	h.perTokenRepoCount[key] = entry
 	return true
 }
 

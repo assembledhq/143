@@ -197,15 +197,16 @@ func syncTaskDependencies(ctx context.Context, db DBTX, taskID uuid.UUID, depend
 		return err
 	}
 
-	// Insert new dependencies.
-	for _, depID := range dependsOn {
-		if _, err := db.Exec(ctx,
-			`INSERT INTO project_task_dependencies (task_id, depends_on_id) VALUES (@task_id, @depends_on_id)`,
-			pgx.NamedArgs{"task_id": taskID, "depends_on_id": depID}); err != nil {
-			return err
-		}
+	if len(dependsOn) == 0 {
+		return nil
 	}
-	return nil
+
+	// Batch insert all dependencies in a single statement.
+	_, err := db.Exec(ctx,
+		`INSERT INTO project_task_dependencies (task_id, depends_on_id)
+		 SELECT @task_id, unnest(@depends_on_ids::uuid[])`,
+		pgx.NamedArgs{"task_id": taskID, "depends_on_ids": dependsOn})
+	return err
 }
 
 func (s *ProjectTaskStore) Delete(ctx context.Context, orgID, taskID uuid.UUID) error {

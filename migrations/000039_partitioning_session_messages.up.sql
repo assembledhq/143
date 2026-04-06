@@ -1,6 +1,11 @@
 -- Partition session_messages by created_at.
 -- IMPORTANT: Run during maintenance window. See 000037 for helper function definitions.
 
+-- Guard: use a short lock_timeout to prevent accidental execution outside
+-- a maintenance window. If the lock cannot be acquired in 5s, the migration
+-- fails fast rather than blocking production traffic indefinitely.
+SET LOCAL lock_timeout = '5s';
+
 LOCK TABLE session_messages IN ACCESS EXCLUSIVE MODE;
 
 ALTER TABLE session_messages RENAME TO session_messages_old;
@@ -29,8 +34,8 @@ ALTER TABLE session_messages
     ADD CONSTRAINT fk_session_messages_user FOREIGN KEY (user_id) REFERENCES users(id),
     ADD CONSTRAINT fk_session_messages_thread FOREIGN KEY (thread_id) REFERENCES session_threads(id) ON DELETE CASCADE;
 
-CREATE INDEX idx_session_messages_session ON session_messages (org_id, session_id, turn_number);
-CREATE INDEX idx_session_messages_thread ON session_messages (thread_id) WHERE thread_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages (org_id, session_id, turn_number);
+CREATE INDEX IF NOT EXISTS idx_session_messages_thread ON session_messages (thread_id) WHERE thread_id IS NOT NULL;
 
 SELECT create_monthly_partitions('session_messages', '2025-01-01'::date,
     (date_trunc('month', now()::date) + interval '3 months')::date);

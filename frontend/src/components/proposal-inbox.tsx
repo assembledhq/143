@@ -280,6 +280,11 @@ export function ProposalInbox({ proposals, onNavigateToProject }: ProposalInboxP
                     placeholder="Reason for dismissal (optional)"
                     className="w-full text-sm border rounded-md px-3 py-1.5 bg-background"
                   />
+                  {(approveMutation.isError || dismissMutation.isError) && (
+                    <p className="text-xs text-red-600 dark:text-red-400">
+                      {approveMutation.isError ? "Failed to approve proposal. Please try again." : "Failed to dismiss proposal. Please try again."}
+                    </p>
+                  )}
                 </div>
               </div>
             </>

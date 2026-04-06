@@ -1,6 +1,11 @@
 -- Partition audit_logs by created_at.
 -- IMPORTANT: Run during maintenance window. See 000037 for helper function definitions.
 
+-- Guard: use a short lock_timeout to prevent accidental execution outside
+-- a maintenance window. If the lock cannot be acquired in 5s, the migration
+-- fails fast rather than blocking production traffic indefinitely.
+SET LOCAL lock_timeout = '5s';
+
 LOCK TABLE audit_logs IN ACCESS EXCLUSIVE MODE;
 
 -- Must drop immutability trigger before rename.
@@ -41,12 +46,12 @@ ALTER TABLE audit_logs
     ADD CONSTRAINT fk_audit_logs_org FOREIGN KEY (org_id) REFERENCES organizations(id),
     ADD CONSTRAINT fk_audit_logs_user FOREIGN KEY (user_id) REFERENCES users(id);
 
-CREATE INDEX idx_audit_logs_org_created ON audit_logs (org_id, created_at DESC, id DESC);
-CREATE INDEX idx_audit_logs_resource ON audit_logs (org_id, resource_type, resource_id, created_at DESC);
-CREATE INDEX idx_audit_logs_user ON audit_logs (org_id, user_id, created_at DESC) WHERE user_id IS NOT NULL;
-CREATE INDEX idx_audit_logs_action ON audit_logs (org_id, action, created_at DESC);
-CREATE INDEX idx_audit_logs_session ON audit_logs (session_id, created_at DESC) WHERE session_id IS NOT NULL;
-CREATE INDEX idx_audit_logs_project ON audit_logs (project_id, created_at DESC) WHERE project_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_audit_logs_org_created ON audit_logs (org_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_resource ON audit_logs (org_id, resource_type, resource_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON audit_logs (org_id, user_id, created_at DESC) WHERE user_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs (org_id, action, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_session ON audit_logs (session_id, created_at DESC) WHERE session_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_audit_logs_project ON audit_logs (project_id, created_at DESC) WHERE project_id IS NOT NULL;
 
 SELECT create_monthly_partitions('audit_logs', '2025-01-01'::date,
     (date_trunc('month', now()::date) + interval '3 months')::date);

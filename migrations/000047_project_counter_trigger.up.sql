@@ -5,6 +5,14 @@
 -- Uses STATEMENT-level triggers with transition tables to avoid N+1 count queries
 -- during bulk operations. Each trigger collects distinct affected project_ids and
 -- updates each project once per statement.
+--
+-- PERFORMANCE NOTE: The UPDATE trigger fires on ALL column updates to project_tasks,
+-- not just status changes, because PostgreSQL does not allow REFERENCING transition
+-- tables with column-list triggers (e.g. AFTER UPDATE OF status). The recount is
+-- idempotent so correctness is unaffected, but non-status updates (branch_name,
+-- pr_url, etc.) will also trigger a recount. If this becomes a hot path, consider
+-- adding an early-exit check inside the trigger function comparing old and new
+-- counter-relevant columns.
 
 CREATE OR REPLACE FUNCTION update_project_task_counts_insert()
 RETURNS TRIGGER AS $$
