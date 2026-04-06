@@ -170,7 +170,7 @@ func TestEvalRunStore_UpdateResult(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectExec("UPDATE eval_runs SET").
-		WithArgs(anyArgs(12)...).
+		WithArgs(anyArgs(13)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	store := NewEvalRunStore(mock)

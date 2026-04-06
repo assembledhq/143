@@ -280,6 +280,80 @@ func TestComplexityEstimateUserPrompt(t *testing.T) {
 	assert.Contains(t, result, "5")
 }
 
+// ─── Eval Prompts ────────────────────────────────────────────────────────────
+
+func TestEvalJudgePrompt(t *testing.T) {
+	t.Parallel()
+
+	t.Run("pass_fail mode", func(t *testing.T) {
+		result := EvalJudgePrompt(EvalJudgePromptData{OutputMode: "pass_fail"})
+		assert.Contains(t, result, "expert code review judge")
+		assert.Contains(t, result, "1.0 if pass else 0.0")
+		assert.NotEmpty(t, result)
+	})
+
+	t.Run("score mode", func(t *testing.T) {
+		result := EvalJudgePrompt(EvalJudgePromptData{OutputMode: "score"})
+		assert.Contains(t, result, "float 0.0-1.0")
+	})
+
+	t.Run("default mode", func(t *testing.T) {
+		result := EvalJudgePrompt(EvalJudgePromptData{})
+		assert.Contains(t, result, "1.0 if pass else 0.0")
+	})
+}
+
+func TestEvalJudgeUserPrompt(t *testing.T) {
+	t.Parallel()
+
+	t.Run("with solution diff", func(t *testing.T) {
+		result := EvalJudgeUserPrompt(EvalJudgeUserPromptData{
+			IssueDescription: "Fix the auth bug",
+			AgentDiff:        "+fixed auth",
+			CriterionName:    "tests_pass",
+			CriterionNotes:   "All tests should pass",
+			SolutionDiff:     "+correct fix",
+		})
+		assert.Contains(t, result, "Fix the auth bug")
+		assert.Contains(t, result, "+fixed auth")
+		assert.Contains(t, result, "tests_pass")
+		assert.Contains(t, result, "All tests should pass")
+		assert.Contains(t, result, "+correct fix")
+		assert.Contains(t, result, "Known-Good Solution")
+	})
+
+	t.Run("without solution diff", func(t *testing.T) {
+		result := EvalJudgeUserPrompt(EvalJudgeUserPromptData{
+			IssueDescription: "Fix the auth bug",
+			AgentDiff:        "+fixed",
+			CriterionName:    "quality",
+			CriterionNotes:   "Good code",
+		})
+		assert.NotContains(t, result, "Known-Good Solution")
+	})
+
+	t.Run("empty agent diff", func(t *testing.T) {
+		result := EvalJudgeUserPrompt(EvalJudgeUserPromptData{
+			IssueDescription: "Do something",
+			CriterionName:    "test",
+			CriterionNotes:   "notes",
+		})
+		assert.Contains(t, result, "No changes produced")
+	})
+}
+
+func TestEvalBootstrapPrompt(t *testing.T) {
+	t.Parallel()
+
+	result := EvalBootstrapPrompt(EvalBootstrapPromptData{
+		RepoFullName: "org/repo",
+	})
+	assert.Contains(t, result, "org/repo")
+	assert.Contains(t, result, "eval task discovery")
+	assert.Contains(t, result, "git log")
+	assert.NotEmpty(t, result)
+}
+
 func TestUserPrompts_EmptyFields(t *testing.T) {
 	t.Parallel()
 

@@ -17,21 +17,23 @@ import (
 )
 
 type EvalHandler struct {
-	taskStore  *db.EvalTaskStore
-	runStore   *db.EvalRunStore
-	batchStore *db.EvalBatchStore
-	jobStore   *db.JobStore
-	txStarter  db.TxStarter
-	audit      *db.AuditEmitter
+	taskStore      *db.EvalTaskStore
+	runStore       *db.EvalRunStore
+	batchStore     *db.EvalBatchStore
+	bootstrapStore *db.EvalBootstrapStore
+	jobStore       *db.JobStore
+	txStarter      db.TxStarter
+	audit          *db.AuditEmitter
 }
 
-func NewEvalHandler(taskStore *db.EvalTaskStore, runStore *db.EvalRunStore, batchStore *db.EvalBatchStore, jobStore *db.JobStore, txStarter db.TxStarter) *EvalHandler {
+func NewEvalHandler(taskStore *db.EvalTaskStore, runStore *db.EvalRunStore, batchStore *db.EvalBatchStore, bootstrapStore *db.EvalBootstrapStore, jobStore *db.JobStore, txStarter db.TxStarter) *EvalHandler {
 	return &EvalHandler{
-		taskStore:  taskStore,
-		runStore:   runStore,
-		batchStore: batchStore,
-		jobStore:   jobStore,
-		txStarter:  txStarter,
+		taskStore:      taskStore,
+		runStore:       runStore,
+		batchStore:     batchStore,
+		bootstrapStore: bootstrapStore,
+		jobStore:       jobStore,
+		txStarter:      txStarter,
 	}
 }
 
@@ -689,4 +691,170 @@ func (h *EvalHandler) GetBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.EvalBatchDetail]{Data: detail})
+}
+
+// --- Bootstrap ---
+
+// Bootstrap triggers a PR history scan to discover eval task candidates.
+func (h *EvalHandler) Bootstrap(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	userID := middleware.UserIDFromContext(r.Context())
+
+	var req struct {
+		RepoID uuid.UUID `json:"repo_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	if req.RepoID == uuid.Nil {
+		writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", "repo_id is required")
+		return
+	}
+
+	run := models.EvalBootstrapRun{
+		OrgID:     orgID,
+		RepoID:    req.RepoID,
+		Status:    models.EvalBootstrapStatusPending,
+		CreatedBy: &userID,
+	}
+	if err := h.bootstrapStore.Create(r.Context(), &run); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create bootstrap run", err)
+		return
+	}
+
+	// Enqueue the bootstrap job
+	_, err := h.jobStore.Enqueue(r.Context(), orgID, "eval", "run_eval_bootstrap", map[string]string{
+		"bootstrap_run_id": run.ID.String(),
+		"org_id":           orgID.String(),
+		"repo_id":          req.RepoID.String(),
+	}, 0, nil)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue bootstrap job", err)
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, models.SingleResponse[models.EvalBootstrapRun]{Data: run})
+}
+
+// GetBootstrapCandidates returns the candidates from a bootstrap run.
+func (h *EvalHandler) GetBootstrapCandidates(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+
+	// Get specific run by ID or latest for a repo
+	if runIDStr := r.URL.Query().Get("bootstrap_run_id"); runIDStr != "" {
+		runID, err := uuid.Parse(runIDStr)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid bootstrap_run_id")
+			return
+		}
+		run, err := h.bootstrapStore.GetByID(r.Context(), orgID, runID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, r, http.StatusNotFound, "NOT_FOUND", "bootstrap run not found")
+				return
+			}
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to fetch bootstrap run", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, models.SingleResponse[models.EvalBootstrapRun]{Data: run})
+		return
+	}
+
+	repoIDStr := r.URL.Query().Get("repo_id")
+	if repoIDStr == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_PARAM", "repo_id or bootstrap_run_id query param required")
+		return
+	}
+	repoID, err := uuid.Parse(repoIDStr)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid repo_id")
+		return
+	}
+
+	run, err := h.bootstrapStore.GetLatestByOrg(r.Context(), orgID, repoID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "no bootstrap runs found for this repo")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to fetch bootstrap run", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.EvalBootstrapRun]{Data: run})
+}
+
+// AcceptBootstrapCandidates creates eval tasks from selected bootstrap candidates.
+func (h *EvalHandler) AcceptBootstrapCandidates(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	userID := middleware.UserIDFromContext(r.Context())
+
+	var req struct {
+		BootstrapRunID uuid.UUID `json:"bootstrap_run_id"`
+		CandidateIndices []int   `json:"candidate_indices"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	if req.BootstrapRunID == uuid.Nil {
+		writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", "bootstrap_run_id is required")
+		return
+	}
+
+	run, err := h.bootstrapStore.GetByID(r.Context(), orgID, req.BootstrapRunID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "bootstrap run not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to fetch bootstrap run", err)
+		return
+	}
+
+	if run.Status != models.EvalBootstrapStatusCompleted {
+		writeError(w, r, http.StatusBadRequest, "NOT_READY", "bootstrap run is not completed")
+		return
+	}
+
+	var candidates []models.EvalBootstrapCandidate
+	if err := json.Unmarshal(run.Candidates, &candidates); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "PARSE_FAILED", "failed to parse bootstrap candidates", err)
+		return
+	}
+
+	var created []models.EvalTask
+	for _, idx := range req.CandidateIndices {
+		if idx < 0 || idx >= len(candidates) {
+			continue
+		}
+		c := candidates[idx]
+		criteriaJSON, _ := json.Marshal(c.ScoringCriteria)
+		prNum := c.PRNumber
+
+		task := models.EvalTask{
+			OrgID:            orgID,
+			RepoID:           run.RepoID,
+			Name:             c.PRTitle,
+			Description:      fmt.Sprintf("Bootstrapped from PR #%d", c.PRNumber),
+			BaseCommitSHA:    c.BaseCommitSHA,
+			SolutionCommitSHA: &c.SolutionCommitSHA,
+			SolutionDiff:     &c.SolutionDiff,
+			IssueDescription: c.IssueDescription,
+			ScoringCriteria:  criteriaJSON,
+			PassThreshold:    0.7,
+			Source:           models.EvalTaskSourcePRBootstrap,
+			SourcePRNumber:   &prNum,
+			Complexity:       c.Complexity,
+			CreatedBy:        &userID,
+		}
+		if err := h.taskStore.Create(r.Context(), &task); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED",
+				fmt.Sprintf("failed to create task from candidate %d", idx), err)
+			return
+		}
+		created = append(created, task)
+	}
+
+	writeJSON(w, http.StatusCreated, models.ListResponse[models.EvalTask]{Data: created})
 }

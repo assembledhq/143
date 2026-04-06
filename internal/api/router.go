@@ -59,6 +59,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	evalTaskStore := db.NewEvalTaskStore(pool)
 	evalRunStore := db.NewEvalRunStore(pool)
 	evalBatchStore := db.NewEvalBatchStore(pool)
+	evalBootstrapStore := db.NewEvalBootstrapStore(pool)
 	sessionReviewCommentStore := db.NewSessionReviewCommentStore(pool)
 	auditLogStore := db.NewAuditLogStore(pool)
 	auditEmitter := db.NewAuditEmitter(auditLogStore, logger)
@@ -199,7 +200,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	codexAuthHandler := handlers.NewCodexAuthHandler(codexAuthSvc, logger)
 	pmDocumentHandler := handlers.NewPMDocumentHandler(pmDocumentStore, credentialStore)
 	pmDocumentHandler.SetAuditEmitter(auditEmitter)
-	evalHandler := handlers.NewEvalHandler(evalTaskStore, evalRunStore, evalBatchStore, jobStore, pool)
+	evalHandler := handlers.NewEvalHandler(evalTaskStore, evalRunStore, evalBatchStore, evalBootstrapStore, jobStore, pool)
 	evalHandler.SetAuditEmitter(auditEmitter)
 	auditLogHandler := handlers.NewAuditLogHandler(auditLogStore)
 	sessionReviewCommentHandler := handlers.NewSessionReviewCommentHandler(sessionReviewCommentStore, sessionStore, logger)
@@ -356,6 +357,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/evals/tasks/{id}/runs", evalHandler.ListRuns)
 			r.Get("/api/v1/evals/runs/{runId}", evalHandler.GetRun)
 			r.Get("/api/v1/evals/batch/{batchId}", evalHandler.GetBatch)
+			r.Get("/api/v1/evals/bootstrap/candidates", evalHandler.GetBootstrapCandidates)
 		})
 
 		// Write routes (admin and member only)
@@ -445,6 +447,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Delete("/api/v1/evals/tasks/{id}", evalHandler.ArchiveTask)
 			r.Post("/api/v1/evals/tasks/{id}/runs", evalHandler.StartRun)
 			r.Post("/api/v1/evals/batch", evalHandler.StartBatch)
+			r.Post("/api/v1/evals/bootstrap", evalHandler.Bootstrap)
+			r.Post("/api/v1/evals/bootstrap/accept", evalHandler.AcceptBootstrapCandidates)
 		})
 
 		// Admin-only routes

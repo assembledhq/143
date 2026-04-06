@@ -139,6 +139,8 @@ func main() {
 			EvalTasks:           db.NewEvalTaskStore(pool),
 			EvalRuns:            db.NewEvalRunStore(pool),
 			EvalBatches:         db.NewEvalBatchStore(pool),
+			EvalBootstraps:      db.NewEvalBootstrapStore(pool),
+			Repositories:        repoStore,
 		}
 
 		// Build Phase 3+ services if runtime dependencies are available.
@@ -377,5 +379,7 @@ func buildServices(
 		Prioritization:  prioritizationSvc,
 		PM:              pmSvc,
 		SlackSummarizer: slackSummarizer,
+		LLM:             llmClient,
+		GitHub:          ghSvc,
 	}
 }

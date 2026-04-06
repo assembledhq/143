@@ -219,6 +219,7 @@ type EvalRunResult struct {
 	DurationSeconds  *int            `json:"duration_seconds,omitempty"`
 	SandboxID        *string         `json:"sandbox_id,omitempty"`
 	ErrorMessage     *string         `json:"error_message,omitempty"`
+	InputManifest    json.RawMessage `json:"input_manifest,omitempty"`
 }
 
 // EvalTaskListFilters holds optional filters for listing eval tasks.
@@ -229,4 +230,44 @@ type EvalTaskListFilters struct {
 	Tags       []string
 	Cursor     *time.Time
 	Limit      int
+}
+
+// --- Bootstrap ---
+
+// EvalBootstrapCandidate represents a proposed eval task from PR history scanning.
+type EvalBootstrapCandidate struct {
+	PRNumber          int                `json:"pr_number"`
+	PRTitle           string             `json:"pr_title"`
+	BaseCommitSHA     string             `json:"base_commit_sha"`
+	SolutionCommitSHA string             `json:"solution_commit_sha"`
+	SolutionDiff      string             `json:"solution_diff"`
+	IssueDescription  string             `json:"issue_description"`
+	ScoringCriteria   []ScoringCriterion `json:"scoring_criteria"`
+	Complexity        EvalComplexity     `json:"complexity"`
+	FitnessScore      float64            `json:"fitness_score"`
+	FitnessReasoning  string             `json:"fitness_reasoning"`
+}
+
+// EvalBootstrapStatus tracks the lifecycle of a bootstrap scan.
+type EvalBootstrapStatus string
+
+const (
+	EvalBootstrapStatusPending   EvalBootstrapStatus = "pending"
+	EvalBootstrapStatusRunning   EvalBootstrapStatus = "running"
+	EvalBootstrapStatusCompleted EvalBootstrapStatus = "completed"
+	EvalBootstrapStatusFailed    EvalBootstrapStatus = "failed"
+)
+
+// EvalBootstrapRun represents a single PR history scanning session.
+type EvalBootstrapRun struct {
+	ID           uuid.UUID           `db:"id" json:"id"`
+	OrgID        uuid.UUID           `db:"org_id" json:"org_id"`
+	RepoID       uuid.UUID           `db:"repo_id" json:"repo_id"`
+	Status       EvalBootstrapStatus `db:"status" json:"status"`
+	Candidates   json.RawMessage     `db:"candidates" json:"candidates,omitempty"`
+	SessionID    *uuid.UUID          `db:"session_id" json:"session_id,omitempty"`
+	CreatedBy    *uuid.UUID          `db:"created_by" json:"created_by,omitempty"`
+	CreatedAt    time.Time           `db:"created_at" json:"created_at"`
+	CompletedAt  *time.Time          `db:"completed_at" json:"completed_at,omitempty"`
+	ErrorMessage *string             `db:"error_message" json:"error_message,omitempty"`
 }

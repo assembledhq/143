@@ -89,6 +89,7 @@ func newEvalHandler(mock pgxmock.PgxPoolIface) *EvalHandler {
 		db.NewEvalTaskStore(mock),
 		db.NewEvalRunStore(mock),
 		db.NewEvalBatchStore(mock),
+		db.NewEvalBootstrapStore(mock),
 		db.NewJobStore(mock),
 		mock,
 	)

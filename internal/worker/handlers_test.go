@@ -1671,9 +1671,11 @@ func newEvalTestStores(t *testing.T) (*Stores, pgxmock.PgxPoolIface) {
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	return &Stores{
-		EvalTasks:   db.NewEvalTaskStore(mock),
-		EvalRuns:    db.NewEvalRunStore(mock),
-		EvalBatches: db.NewEvalBatchStore(mock),
+		EvalTasks:      db.NewEvalTaskStore(mock),
+		EvalRuns:       db.NewEvalRunStore(mock),
+		EvalBatches:    db.NewEvalBatchStore(mock),
+		EvalBootstraps: db.NewEvalBootstrapStore(mock),
+		Repositories:   db.NewRepositoryStore(mock),
 	}, mock
 }
 
@@ -1735,7 +1737,7 @@ func TestExecuteEvalRun(t *testing.T) {
 		require.Contains(t, *result.ErrorMessage, "failed to parse scoring criteria")
 	})
 
-	t.Run("returns failed with empty criteria array", func(t *testing.T) {
+	t.Run("returns failed when repository store is nil", func(t *testing.T) {
 		t.Parallel()
 
 		run := &models.EvalRun{Model: "claude-sonnet-4-6"}
@@ -1747,7 +1749,35 @@ func TestExecuteEvalRun(t *testing.T) {
 		result := executeEvalRun(context.Background(), &Stores{}, &Services{}, run, task, logger)
 		require.Equal(t, models.EvalRunStatusFailed, result.Status)
 		require.NotNil(t, result.ErrorMessage)
-		require.Contains(t, *result.ErrorMessage, "not yet implemented")
+		require.Contains(t, *result.ErrorMessage, "repository store not configured")
+	})
+
+	t.Run("returns failed when sandbox provider is nil", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newEvalTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		repoID := uuid.New()
+		run := &models.EvalRun{Model: "claude-sonnet-4-6"}
+		task := &models.EvalTask{
+			OrgID:           orgID,
+			RepoID:          repoID,
+			ScoringCriteria: json.RawMessage(`[]`),
+		}
+		logger := zerolog.Nop()
+
+		// Mock repository lookup
+		mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "integration_id", "github_id", "full_name", "default_branch", "private", "language", "description", "clone_url", "installation_id", "status", "last_synced_at", "context_quality", "settings", "created_at", "updated_at"}).
+				AddRow(repoID, orgID, uuid.New(), int64(123), "org/repo", "main", false, nil, nil, "https://github.com/org/repo.git", int64(456), "active", nil, nil, json.RawMessage(`{}`), time.Now(), time.Now()))
+
+		result := executeEvalRun(context.Background(), stores, &Services{}, run, task, logger)
+		require.Equal(t, models.EvalRunStatusFailed, result.Status)
+		require.NotNil(t, result.ErrorMessage)
+		require.Contains(t, *result.ErrorMessage, "sandbox provider not configured")
 	})
 }
 
@@ -1823,7 +1853,8 @@ func TestRunEvalHandler(t *testing.T) {
 		mock.ExpectExec("UPDATE eval_runs SET").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 		payload, _ := json.Marshal(map[string]string{
@@ -1871,7 +1902,8 @@ func TestRunEvalHandler(t *testing.T) {
 		mock.ExpectExec("UPDATE eval_runs SET").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 		// CompleteBatchIfDone
@@ -1949,4 +1981,132 @@ func TestRunEvalHandler(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "update eval run status to running")
 	})
+}
+
+func TestComputeWeightedScore(t *testing.T) {
+	t.Parallel()
+
+	t.Run("simple pass", func(t *testing.T) {
+		criteria := []models.ScoringCriterion{
+			{Name: "tests", Weight: 1.0, Required: false},
+			{Name: "quality", Weight: 1.0, Required: false},
+		}
+		results := []models.CriterionResult{
+			{Name: "tests", Score: 1.0, Pass: true},
+			{Name: "quality", Score: 0.8, Pass: true},
+		}
+		score, passed := computeWeightedScore(criteria, results, 0.7)
+		require.InDelta(t, 0.9, score, 0.01)
+		require.True(t, passed)
+	})
+
+	t.Run("required criterion fails overall", func(t *testing.T) {
+		criteria := []models.ScoringCriterion{
+			{Name: "tests", Weight: 1.0, Required: true},
+			{Name: "quality", Weight: 1.0, Required: false},
+		}
+		results := []models.CriterionResult{
+			{Name: "tests", Score: 0.0, Pass: false},
+			{Name: "quality", Score: 1.0, Pass: true},
+		}
+		score, passed := computeWeightedScore(criteria, results, 0.3)
+		require.InDelta(t, 0.5, score, 0.01) // weighted avg is 0.5
+		require.False(t, passed)              // but fails due to required criterion
+	})
+
+	t.Run("below threshold fails", func(t *testing.T) {
+		criteria := []models.ScoringCriterion{
+			{Name: "tests", Weight: 1.0},
+		}
+		results := []models.CriterionResult{
+			{Name: "tests", Score: 0.5, Pass: true},
+		}
+		_, passed := computeWeightedScore(criteria, results, 0.7)
+		require.False(t, passed)
+	})
+
+	t.Run("empty results return zero", func(t *testing.T) {
+		score, passed := computeWeightedScore(nil, nil, 0.5)
+		require.Equal(t, 0.0, score)
+		require.False(t, passed)
+	})
+
+	t.Run("unequal weights", func(t *testing.T) {
+		criteria := []models.ScoringCriterion{
+			{Name: "tests", Weight: 3.0},
+			{Name: "quality", Weight: 1.0},
+		}
+		results := []models.CriterionResult{
+			{Name: "tests", Score: 1.0, Pass: true},
+			{Name: "quality", Score: 0.0, Pass: false},
+		}
+		score, _ := computeWeightedScore(criteria, results, 0.5)
+		require.InDelta(t, 0.75, score, 0.01) // (3*1.0 + 1*0.0) / 4
+	})
+}
+
+func TestExtractJSON(t *testing.T) {
+	t.Parallel()
+
+	t.Run("extracts from markdown fences", func(t *testing.T) {
+		input := "Here is the result:\n```json\n{\"pass\": true}\n```"
+		result := extractJSON(input)
+		require.Equal(t, "{\"pass\": true}", result)
+	})
+
+	t.Run("plain JSON passthrough", func(t *testing.T) {
+		input := `{"pass": false, "reasoning": "bad"}`
+		result := extractJSON(input)
+		require.Equal(t, input, result)
+	})
+
+	t.Run("no JSON returns input", func(t *testing.T) {
+		input := "no json here"
+		result := extractJSON(input)
+		require.Equal(t, input, result)
+	})
+}
+
+func TestTruncateString(t *testing.T) {
+	t.Parallel()
+
+	t.Run("short string unchanged", func(t *testing.T) {
+		require.Equal(t, "hello", truncateString("hello", 10))
+	})
+
+	t.Run("long string truncated", func(t *testing.T) {
+		result := truncateString("hello world", 5)
+		require.Equal(t, "hello...(truncated)", result)
+	})
+}
+
+func TestEvalFailed(t *testing.T) {
+	t.Parallel()
+
+	result := evalFailed("test error: %v", "details")
+	require.Equal(t, models.EvalRunStatusFailed, result.Status)
+	require.NotNil(t, result.ErrorMessage)
+	require.Equal(t, "test error: details", *result.ErrorMessage)
+}
+
+func TestBuildEvalManifest(t *testing.T) {
+	t.Parallel()
+
+	pinID := uuid.New()
+	settingsID := uuid.New()
+	digest := "sha256:abc123"
+	task := &models.EvalTask{
+		BaseCommitSHA:        "abc123",
+		PMDocumentSetPinID:   &pinID,
+		OrgSettingsVersionID: &settingsID,
+		SandboxImageDigest:   &digest,
+	}
+	run := &models.EvalRun{Model: "claude-sonnet-4-6"}
+
+	manifest := buildEvalManifest(task, run)
+	require.Equal(t, "abc123", manifest.RepoBaseCommitSHA)
+	require.Equal(t, "claude-sonnet-4-6", manifest.Model)
+	require.Equal(t, &pinID, manifest.PMDocumentSetPinID)
+	require.Equal(t, &settingsID, manifest.OrgSettingsVersionID)
+	require.Equal(t, "sha256:abc123", manifest.SandboxImageDigest)
 }

@@ -164,6 +164,7 @@ func (s *EvalRunStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 		duration_seconds = @duration_seconds,
 		sandbox_id = @sandbox_id,
 		error_message = @error_message,
+		input_manifest = @input_manifest,
 		completed_at = now()
 		WHERE id = @id AND org_id = @org_id`
 
@@ -180,6 +181,7 @@ func (s *EvalRunStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 		"duration_seconds":  result.DurationSeconds,
 		"sandbox_id":        result.SandboxID,
 		"error_message":     result.ErrorMessage,
+		"input_manifest":    result.InputManifest,
 	})
 	if err != nil {
 		return fmt.Errorf("update eval run result: %w", err)
