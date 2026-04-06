@@ -217,7 +217,8 @@ export const api = {
     getLogs: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/logs`),
     getValidation: (sessionId: string) => get<import('./types').SingleResponse<import('./types').Validation>>(`/api/v1/sessions/${sessionId}/validation`),
     getPR: (sessionId: string) => get<import('./types').SingleResponse<import('./types').PullRequest>>(`/api/v1/sessions/${sessionId}/pr`),
-    createPR: (sessionId: string) => post<{ status: string }>(`/api/v1/sessions/${sessionId}/pr`),
+    createPR: (sessionId: string, options?: { draft?: boolean }) =>
+      post<{ status: string }>(`/api/v1/sessions/${sessionId}/pr`, options),
     getQuestions: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions`),
     answerQuestion: (sessionId: string, questionId: string, answer: string) =>
       post<import('./types').SingleResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions/${questionId}/answer`, { answer }),
@@ -335,7 +336,7 @@ export const api = {
     disconnect: () => post('/api/v1/settings/codex-auth/disconnect'),
   },
   githubStatus: {
-    get: () => get<{ connected: boolean; has_repo_scope: boolean; github_login?: string; pr_authorship_mode: string }>('/api/v1/users/me/github-status'),
+    get: () => get<{ connected: boolean; has_repo_scope: boolean; github_login?: string; pr_authorship_mode: string; pr_draft_default: boolean }>('/api/v1/users/me/github-status'),
     connect: () => { window.location.href = `${API_BASE}/api/v1/users/me/github/connect`; },
     disconnect: () => post('/api/v1/users/me/github/disconnect'),
   },

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strings"
@@ -470,9 +471,23 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	payload := map[string]string{
+	// Parse optional request body for per-PR overrides (e.g. draft).
+	var req struct {
+		Draft *bool `json:"draft,omitempty"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+			return
+		}
+	}
+
+	payload := map[string]any{
 		"session_id": sessionID.String(),
 		"org_id":     orgID.String(),
+	}
+	if req.Draft != nil {
+		payload["draft"] = *req.Draft
 	}
 	dedupeKey := fmt.Sprintf("open_pr:%s", sessionID)
 	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "open_pr", payload, 5, &dedupeKey); err != nil {
@@ -481,7 +496,8 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionIDStr := sessionID.String()
-	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionPRRequested, models.AuditResourceSession, &sessionIDStr, &session.ID, nil, nil)
+	draftDetails := auditDetailsDraft(req.Draft)
+	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionPRRequested, models.AuditResourceSession, &sessionIDStr, &session.ID, nil, draftDetails)
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
 }
 

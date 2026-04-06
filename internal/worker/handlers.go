@@ -685,7 +685,8 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
 			SessionID string `json:"session_id"`
-			OrgID      string `json:"org_id"`
+			OrgID     string `json:"org_id"`
+			Draft     *bool  `json:"draft,omitempty"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal open_pr payload: %w", err)
@@ -710,7 +711,11 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			Str("org_id", orgID.String()).
 			Msg("starting open_pr job")
 
-		_, err = services.PR.CreatePR(ctx, &run)
+		var params []ghservice.CreatePRParams
+		if input.Draft != nil {
+			params = append(params, ghservice.CreatePRParams{Draft: input.Draft})
+		}
+		_, err = services.PR.CreatePR(ctx, &run, params...)
 		return err
 	}
 }

@@ -885,8 +885,18 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
   const canCreatePR = hasDiff && !hasPR && !isRunning;
 
   const [prQueued, setPRQueued] = useState(false);
+  const [prDraftOverride, setPRDraftOverride] = useState<boolean | null>(null);
+
+  const { data: ghStatus } = useQuery({
+    queryKey: ["github-status"],
+    queryFn: () => api.githubStatus.get(),
+    enabled: canCreatePR,
+    staleTime: 5 * 60 * 1000, // 5 min
+  });
+
+  const draftValue = prDraftOverride ?? ghStatus?.pr_draft_default ?? false;
   const createPRMutation = useMutation({
-    mutationFn: () => api.sessions.createPR(sessionId),
+    mutationFn: () => api.sessions.createPR(sessionId, prDraftOverride !== null ? { draft: prDraftOverride } : undefined),
     onSuccess: () => {
       setPRQueued(true);
       // Clear the queued banner after 30s if the PR hasn't appeared yet.
@@ -894,14 +904,6 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
       queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
       queryClient.invalidateQueries({ queryKey: ["session", sessionId, "pr"] });
     },
-  });
-
-  // Fetch GitHub connection status for PR authorship indicator.
-  const { data: ghStatus } = useQuery({
-    queryKey: ["github-status"],
-    queryFn: () => api.githubStatus.get(),
-    enabled: canCreatePR,
-    staleTime: 5 * 60 * 1000, // 5 min
   });
 
   // Auto-resize textarea
@@ -1131,27 +1133,38 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
 
             <div className="ml-auto flex items-center gap-1">
               {canCreatePR && (
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
-                  title={
-                    ghStatus?.connected && ghStatus?.has_repo_scope
-                      ? `Create PR as @${ghStatus.github_login}`
-                      : ghStatus?.connected && !ghStatus?.has_repo_scope
-                        ? "Create PR (app token — reconnect GitHub with repo access for user-authored PRs)"
-                        : ghStatus?.pr_authorship_mode === "user_required"
-                          ? "Connect GitHub to create PRs"
-                          : "Create PR"
-                  }
-                  disabled={
-                    createPRMutation.isPending ||
-                    (ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected)
-                  }
-                  onClick={() => createPRMutation.mutate()}
-                >
-                  <GitPullRequest className="h-3.5 w-3.5" />
-                </Button>
+                <>
+                  <label className="flex items-center gap-1 text-[11px] text-muted-foreground cursor-pointer select-none" title="Create PR as a draft">
+                    <input
+                      type="checkbox"
+                      checked={draftValue}
+                      onChange={(e) => setPRDraftOverride(e.target.checked)}
+                      className="h-3 w-3"
+                    />
+                    Draft
+                  </label>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
+                    title={
+                      ghStatus?.connected && ghStatus?.has_repo_scope
+                        ? `Create PR as @${ghStatus.github_login}`
+                        : ghStatus?.connected && !ghStatus?.has_repo_scope
+                          ? "Create PR (app token — reconnect GitHub with repo access for user-authored PRs)"
+                          : ghStatus?.pr_authorship_mode === "user_required"
+                            ? "Connect GitHub to create PRs"
+                            : "Create PR"
+                    }
+                    disabled={
+                      createPRMutation.isPending ||
+                      (ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected)
+                    }
+                    onClick={() => createPRMutation.mutate()}
+                  >
+                    <GitPullRequest className="h-3.5 w-3.5" />
+                  </Button>
+                </>
               )}
               {isRunning ? (
                 <Button
