@@ -1889,6 +1889,152 @@ Multi-service previews with infrastructure consume significantly more resources 
 
 These caps should be configurable by admins at the org level. The preview manager should return a clear error when a cap is hit: "Your org has reached its limit of 5 concurrent previews. Stop an existing preview to start a new one." The UI should show the current count and cap.
 
+## Local Development (`make dev`)
+
+The preview system must be fully testable locally via `make dev` (Docker Compose) before deploying to any remote environment. This section describes how the preview architecture maps to the local dev setup.
+
+### Prerequisites
+
+`make dev` already:
+- Builds the sandbox image (`make sandbox-image`)
+- Mounts the Docker socket into the server container (`/var/run/docker.sock`), so the server can create sandbox containers from inside Docker
+- Runs in `MODE=all`, meaning the API server, preview manager, preview gateway, and worker are all in the same process
+
+The only additional one-time setup is `dnsmasq` for wildcard local DNS (see Preview Origin below). Everything else is handled by `make dev`.
+
+### Docker Networking
+
+When the server creates a sandbox container via the mounted Docker socket, the sandbox container runs as a **sibling** on the host Docker daemon (not nested Docker-in-Docker). To ensure the server container can reach sandbox containers and vice versa:
+
+1. The server's Docker provider should create a dedicated Docker network (e.g., `143-preview-net`) on first use
+2. Sandbox containers and their infrastructure sidecars (preview PostgreSQL, Redis) are attached to this network
+3. The server container attaches itself to the same network at startup (or the docker-compose config adds it)
+4. Services reach each other by container name on this shared network
+
+The docker-compose file should add a named external network that the server joins:
+
+```yaml
+services:
+  server:
+    networks:
+      - default
+      - preview-net
+    # ... existing config ...
+
+networks:
+  preview-net:
+    name: 143-preview-net
+```
+
+The Docker provider creates sandbox containers on the `143-preview-net` network. This avoids relying on `host` networking or port mapping, which would conflict with multiple concurrent previews.
+
+### Preview Origin (Wildcard Local DNS)
+
+Production uses wildcard DNS (`<preview-id>.preview.143.dev`) for origin isolation. Local dev uses the **same subdomain-based routing** so that the gateway, bootstrap token flow, iframe origin checks, and CSP headers all exercise the identical code path.
+
+**Setup (one-time):** install `dnsmasq` to resolve `*.preview.localhost` to `127.0.0.1`:
+
+```bash
+# macOS
+brew install dnsmasq
+echo "address=/preview.localhost/127.0.0.1" >> $(brew --prefix)/etc/dnsmasq.conf
+sudo brew services start dnsmasq
+sudo mkdir -p /etc/resolver
+echo "nameserver 127.0.0.1" | sudo tee /etc/resolver/preview.localhost
+
+# Linux (systemd-resolved)
+# Add to /etc/dnsmasq.d/preview.conf:
+#   address=/preview.localhost/127.0.0.1
+# Then: sudo systemctl restart dnsmasq
+```
+
+After this, `curl http://anything.preview.localhost:9090/` resolves to `127.0.0.1`.
+
+**How it works:**
+
+- The preview gateway listens on port 9090 (exposed in docker-compose)
+- Local previews use `<preview-id>.preview.localhost:9090` — structurally identical to production's `<preview-id>.preview.143.dev`
+- The gateway extracts the preview ID from the `Host` header, exactly as in production
+- The bootstrap token exchange, `postMessage` origin validation, and preview-domain session cookie all work unchanged
+- The frontend reads a `PREVIEW_ORIGIN_TEMPLATE` env var (e.g., `http://{id}.preview.localhost:9090` locally, `https://{id}.preview.143.dev` in production) to construct iframe URLs — one template, no branching
+
+```yaml
+services:
+  server:
+    ports:
+      - "8080:8080"
+      - "9090:9090"  # preview gateway
+    environment:
+      PREVIEW_ORIGIN_TEMPLATE: "http://{id}.preview.localhost:9090"
+      # production: "https://{id}.preview.143.dev"
+```
+
+**Self-signed TLS (optional):** for even closer parity, generate a wildcard cert for `*.preview.localhost` with `mkcert` and terminate TLS at the gateway. This exercises the TLS code path and catches mixed-content issues early:
+
+```bash
+mkcert -install
+mkcert "*.preview.localhost"
+# Configure the gateway to use the generated cert and key
+```
+
+This is optional — most preview functionality works over plain HTTP. Use it when debugging TLS-specific behavior (secure cookies, HSTS, mixed content).
+
+### Infrastructure Containers
+
+When a preview config declares infrastructure (e.g., PostgreSQL for the previewed app), the preview manager creates those containers on the `143-preview-net` network with unique names (e.g., `preview-db-{preview-id}`). These are separate from the platform's own PostgreSQL instance that stores 143's data — there is no conflict.
+
+The credential injection and init script flow works identically to production: the preview manager generates ephemeral credentials, templates the connection string, and injects it into the sandbox's environment.
+
+### Headless Browser
+
+The headless Chromium instance (used for screenshots, DOM inspection, Design Mode) runs as a sidecar in docker-compose:
+
+```yaml
+services:
+  chrome:
+    image: chromedp/headless-shell:latest
+    ports:
+      - "9222:9222"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+    networks:
+      - default
+      - preview-net
+```
+
+The server connects to it via the Chrome DevTools Protocol at `chrome:9222`. The headless browser can reach preview containers on the shared network.
+
+### What To Test Locally
+
+A developer working on the preview feature should be able to:
+
+1. Start the full stack with `make dev`
+2. Create a session against a repo that has a `.143/preview.json`
+3. Click "Start Preview" in the session UI
+4. See the preview lifecycle (Build → Init → Start) streamed in the UI
+5. Interact with the live preview in the iframe
+6. Test multi-service configs (frontend + backend in one sandbox)
+7. Test infrastructure configs (preview with its own PostgreSQL)
+8. Test agent screenshot and DOM inspection tools against the running preview
+9. Test Design Mode element selection and annotation
+10. Test preview stop, restart, and idle timeout behavior
+
+### Local vs Production Parity
+
+| Aspect | Local | Production | Same code path? |
+|--------|-------|------------|-----------------|
+| Preview origin | `<id>.preview.localhost:9090` | `<id>.preview.143.dev` | Yes — template only |
+| Origin isolation | Per-preview subdomain (via dnsmasq) | Per-preview subdomain (via wildcard DNS) | Yes |
+| Bootstrap token flow | Identical | Identical | Yes |
+| Gateway routing | Host header extraction | Host header extraction | Yes |
+| TLS | Plain HTTP (optional self-signed via mkcert) | Wildcard TLS cert | No (unless mkcert used) |
+| Docker networking | Sibling containers on `143-preview-net` | Same (or provider-specific) | Yes for Docker provider |
+| Concurrency | Limited by laptop resources (~1-2 previews) | Node-level caps (3 per worker) | Yes (same cap logic) |
+| Filesystem snapshot cache | Local Docker volumes | Same mechanism | Yes |
+
 ## More Realistic MVP Boundary
 
 Phase 1 should support only:
