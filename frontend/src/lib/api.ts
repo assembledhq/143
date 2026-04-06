@@ -182,10 +182,12 @@ export const api = {
     },
     latest: () => get<import('./types').SingleResponse<import('./types').PMPlan>>('/api/v1/pm/plans/latest'),
     get: (id: string) => get<import('./types').SingleResponse<import('./types').PMPlan>>(`/api/v1/pm/plans/${id}`),
-    decisions: (params?: { cursor?: string; limit?: number }) => {
+    decisions: (params?: { cursor?: string; limit?: number; decision_type?: string; outcome?: string }) => {
       const searchParams = new URLSearchParams();
       if (params?.cursor) searchParams.set('cursor', params.cursor);
       if (params?.limit != null) searchParams.set('limit', String(params.limit));
+      if (params?.decision_type) searchParams.set('decision_type', params.decision_type);
+      if (params?.outcome) searchParams.set('outcome', params.outcome);
       const qs = searchParams.toString();
       return get<import('./types').PMDecisionsResponse>(`/api/v1/pm/decisions${qs ? `?${qs}` : ''}`);
     },

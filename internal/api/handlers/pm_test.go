@@ -152,6 +152,44 @@ func TestPMHandler_Decisions(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestPMHandler_Decisions_InvalidDecisionType(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	handler := NewPMHandler(db.NewPMPlanStore(mock), db.NewPMDecisionLogStore(mock), db.NewJobStore(mock), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/pm/decisions?decision_type=invalid", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	rr := httptest.NewRecorder()
+
+	handler.Decisions(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "should reject invalid decision_type")
+	require.Contains(t, rr.Body.String(), "VALIDATION_ERROR", "should return validation error code")
+}
+
+func TestPMHandler_Decisions_InvalidOutcome(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	handler := NewPMHandler(db.NewPMPlanStore(mock), db.NewPMDecisionLogStore(mock), db.NewJobStore(mock), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/pm/decisions?outcome=bogus", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	rr := httptest.NewRecorder()
+
+	handler.Decisions(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "should reject invalid outcome")
+	require.Contains(t, rr.Body.String(), "VALIDATION_ERROR", "should return validation error code")
+}
+
 func TestPMHandler_Status(t *testing.T) {
 	t.Parallel()
 
