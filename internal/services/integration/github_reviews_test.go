@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -272,6 +273,149 @@ func TestGitHubCodeReviewSource_GetPRReviews_APIError(t *testing.T) {
 	_, err := src.GetPRReviews(context.Background(), 1)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "403")
+}
+
+func TestParseLinkNext(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		header   string
+		expected string
+	}{
+		{
+			name:     "standard next link",
+			header:   `<https://api.github.com/repos/o/r/pulls/1/comments?per_page=100&page=2>; rel="next", <https://api.github.com/repos/o/r/pulls/1/comments?per_page=100&page=5>; rel="last"`,
+			expected: "https://api.github.com/repos/o/r/pulls/1/comments?per_page=100&page=2",
+		},
+		{
+			name:     "no next link",
+			header:   `<https://api.github.com/repos/o/r/pulls/1/comments?per_page=100&page=1>; rel="first"`,
+			expected: "",
+		},
+		{
+			name:     "empty header",
+			header:   "",
+			expected: "",
+		},
+		{
+			name:     "next only",
+			header:   `<https://example.com/page2>; rel="next"`,
+			expected: "https://example.com/page2",
+		},
+		{
+			name:     "next at end",
+			header:   `<https://example.com/first>; rel="first", <https://example.com/next>; rel="next"`,
+			expected: "https://example.com/next",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := parseLinkNext(tt.header)
+			require.Equal(t, tt.expected, result, "parseLinkNext should extract the correct URL")
+		})
+	}
+}
+
+func TestGetPRReviews_PaginatesComments(t *testing.T) {
+	t.Parallel()
+
+	commentPage := 0
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/repos/o/r/pulls/1/reviews", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]any{
+			{
+				"id":           int64(100),
+				"user":         map[string]any{"login": "rev"},
+				"state":        "COMMENTED",
+				"body":         "",
+				"submitted_at": "2025-06-15T12:00:00Z",
+			},
+		})
+	})
+
+	mux.HandleFunc("/repos/o/r/pulls/1/comments", func(w http.ResponseWriter, r *http.Request) {
+		commentPage++
+		if commentPage == 1 {
+			// First page — include Link header pointing to page 2.
+			page2URL := "http://" + r.Host + "/repos/o/r/pulls/1/comments?per_page=100&page=2"
+			w.Header().Set("Link", `<`+page2URL+`>; rel="next"`)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"id": int64(200), "pull_request_review_id": int64(100),
+					"path": "a.go", "line": 1, "body": "comment1",
+					"diff_hunk": "@@", "user": map[string]any{"login": "rev"},
+				},
+			})
+		} else {
+			// Second page — no Link header.
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"id": int64(201), "pull_request_review_id": int64(100),
+					"path": "b.go", "line": 2, "body": "comment2",
+					"diff_hunk": "@@", "user": map[string]any{"login": "rev"},
+				},
+			})
+		}
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	src := NewGitHubCodeReviewSource(GitHubCodeReviewConfig{
+		BaseURL: server.URL, Token: "t", Owner: "o", Repo: "r",
+	})
+
+	reviews, err := src.GetPRReviews(context.Background(), 1)
+	require.NoError(t, err, "GetPRReviews should succeed")
+	require.Len(t, reviews, 1, "should return one review")
+	require.Len(t, reviews[0].Comments, 2, "should have paginated comments from both pages")
+	require.Equal(t, "a.go", reviews[0].Comments[0].Path, "first comment from page 1")
+	require.Equal(t, "b.go", reviews[0].Comments[1].Path, "second comment from page 2")
+}
+
+func TestGetPRReviews_PaginationSafetyCap(t *testing.T) {
+	t.Parallel()
+
+	pageCount := 0
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/repos/o/r/pulls/1/reviews", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]any{})
+	})
+
+	mux.HandleFunc("/repos/o/r/pulls/1/comments", func(w http.ResponseWriter, r *http.Request) {
+		pageCount++
+		// Always return a next link to simulate infinite pagination.
+		nextURL := fmt.Sprintf("http://%s/repos/o/r/pulls/1/comments?page=%d", r.Host, pageCount+1)
+		w.Header().Set("Link", `<`+nextURL+`>; rel="next"`)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]any{
+			{
+				"id": int64(pageCount), "pull_request_review_id": int64(0),
+				"path": "f.go", "line": pageCount, "body": "c",
+				"diff_hunk": "@@", "user": map[string]any{"login": "u"},
+			},
+		})
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	src := NewGitHubCodeReviewSource(GitHubCodeReviewConfig{
+		BaseURL: server.URL, Token: "t", Owner: "o", Repo: "r",
+	})
+
+	_, err := src.GetPRReviews(context.Background(), 1)
+	require.NoError(t, err, "GetPRReviews should succeed even at safety cap")
+	require.Equal(t, maxPaginationPages, pageCount, "should stop at maxPaginationPages")
 }
 
 func TestReviewDecision(t *testing.T) {
