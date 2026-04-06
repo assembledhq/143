@@ -3,6 +3,7 @@ package email
 import (
 	"context"
 	"fmt"
+	"html"
 	"net/smtp"
 	"strings"
 
@@ -79,11 +80,14 @@ func (n *NoopSender) SendInvitation(ctx context.Context, to, inviterName, orgNam
 }
 
 // invitationHTML returns the HTML body for an invitation email.
+// All dynamic values are HTML-escaped to prevent injection.
 func invitationHTML(inviterName, orgName, acceptURL string) string {
 	inviterText := "Someone"
 	if inviterName != "" {
-		inviterText = inviterName
+		inviterText = html.EscapeString(inviterName)
 	}
+	safeOrg := html.EscapeString(orgName)
+	safeURL := html.EscapeString(acceptURL)
 
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html>
@@ -110,5 +114,5 @@ func invitationHTML(inviterName, orgName, acceptURL string) string {
     </td></tr>
   </table>
 </body>
-</html>`, orgName, inviterText, orgName, acceptURL)
+</html>`, safeOrg, inviterText, safeOrg, safeURL)
 }

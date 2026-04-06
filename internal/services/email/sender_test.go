@@ -47,6 +47,17 @@ func TestInvitationHTML(t *testing.T) {
 				"TestOrg",
 			},
 		},
+		{
+			name:    "HTML special characters are escaped",
+			inviter: "<script>alert('xss')</script>",
+			org:     "Org & Co <Ltd>",
+			url:     "https://example.com/invite?a=1&b=2",
+			mustContain: []string{
+				"&lt;script&gt;",
+				"Org &amp; Co &lt;Ltd&gt;",
+				"a=1&amp;b=2",
+			},
+		},
 	}
 
 	for _, tt := range tests {
