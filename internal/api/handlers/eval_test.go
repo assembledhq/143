@@ -15,6 +15,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
@@ -1605,6 +1606,663 @@ func TestEvalHandler_StartBatch(t *testing.T) {
 		handler.StartBatch(w, req)
 		require.Equal(t, http.StatusInternalServerError, w.Code)
 		require.Contains(t, w.Body.String(), "TX_FAILED")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
+// --- Bootstrap ---
+
+var bootstrapRunColumns = []string{
+	"id", "org_id", "repo_id", "status", "candidates", "session_id",
+	"created_by", "created_at", "completed_at", "error_message",
+}
+
+func newTestBootstrapRunRow(runID, orgID, repoID uuid.UUID, userID *uuid.UUID, status string, candidates json.RawMessage, now time.Time) []interface{} {
+	return []interface{}{
+		runID, orgID, repoID, status, candidates, nil,
+		userID, now, nil, nil,
+	}
+}
+
+func TestEvalHandler_Bootstrap(t *testing.T) {
+	t.Parallel()
+
+	t.Run("creates bootstrap run and enqueues job", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		repoID := uuid.New()
+		runID := uuid.New()
+		now := time.Now()
+		handler := newEvalHandler(mock)
+
+		mock.ExpectQuery("INSERT INTO eval_bootstrap_runs").
+			WithArgs(anyArgs(4)...).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
+
+		mock.ExpectQuery("INSERT INTO jobs").
+			WithArgs(anyArgs(6)...).
+			WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+		body := fmt.Sprintf(`{"repo_id": %q}`, repoID.String())
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/bootstrap", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.Bootstrap(w, req)
+		require.Equal(t, http.StatusAccepted, w.Code)
+
+		var resp models.SingleResponse[models.EvalBootstrapRun]
+		err = json.Unmarshal(w.Body.Bytes(), &resp)
+		require.NoError(t, err)
+		require.Equal(t, runID, resp.Data.ID)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns error for invalid JSON body", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		handler := newEvalHandler(mock)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/bootstrap", strings.NewReader(`{bad json`))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.Bootstrap(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Contains(t, w.Body.String(), "INVALID_BODY")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns error for missing repo_id", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		handler := newEvalHandler(mock)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/bootstrap", strings.NewReader(`{}`))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.Bootstrap(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Contains(t, w.Body.String(), "MISSING_FIELD")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns error on bootstrap store create failure", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		repoID := uuid.New()
+		handler := newEvalHandler(mock)
+
+		mock.ExpectQuery("INSERT INTO eval_bootstrap_runs").
+			WithArgs(anyArgs(4)...).
+			WillReturnError(fmt.Errorf("db error"))
+
+		body := fmt.Sprintf(`{"repo_id": %q}`, repoID.String())
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/bootstrap", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.Bootstrap(w, req)
+		require.Equal(t, http.StatusInternalServerError, w.Code)
+		require.Contains(t, w.Body.String(), "CREATE_FAILED")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns error on enqueue failure", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		repoID := uuid.New()
+		runID := uuid.New()
+		now := time.Now()
+		handler := newEvalHandler(mock)
+
+		mock.ExpectQuery("INSERT INTO eval_bootstrap_runs").
+			WithArgs(anyArgs(4)...).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
+
+		mock.ExpectQuery("INSERT INTO jobs").
+			WithArgs(anyArgs(6)...).
+			WillReturnError(fmt.Errorf("queue full"))
+
+		body := fmt.Sprintf(`{"repo_id": %q}`, repoID.String())
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/bootstrap", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.Bootstrap(w, req)
+		require.Equal(t, http.StatusInternalServerError, w.Code)
+		require.Contains(t, w.Body.String(), "ENQUEUE_FAILED")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
+func TestEvalHandler_GetBootstrapCandidates(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns run by bootstrap_run_id", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		repoID := uuid.New()
+		runID := uuid.New()
+		now := time.Now()
+		handler := newEvalHandler(mock)
+
+		mock.ExpectQuery("SELECT .+ FROM eval_bootstrap_runs WHERE id").
+			WithArgs(anyArgs(2)...).
+			WillReturnRows(pgxmock.NewRows(bootstrapRunColumns).
+				AddRow(newTestBootstrapRunRow(runID, orgID, repoID, &userID, "completed", json.RawMessage(`[]`), now)...))
+
+		url := fmt.Sprintf("/api/v1/evals/bootstrap/candidates?bootstrap_run_id=%s", runID.String())
+		req := httptest.NewRequest(http.MethodGet, url, nil)
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.GetBootstrapCandidates(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var resp models.SingleResponse[models.EvalBootstrapRun]
+		err = json.Unmarshal(w.Body.Bytes(), &resp)
+		require.NoError(t, err)
+		require.Equal(t, runID, resp.Data.ID)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns error for invalid bootstrap_run_id", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		handler := newEvalHandler(mock)
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/evals/bootstrap/candidates?bootstrap_run_id=not-a-uuid", nil)
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.GetBootstrapCandidates(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Contains(t, w.Body.String(), "INVALID_ID")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns 404 when bootstrap_run_id not found", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		runID := uuid.New()
+		handler := newEvalHandler(mock)
+
+		mock.ExpectQuery("SELECT .+ FROM eval_bootstrap_runs WHERE id").
+			WithArgs(anyArgs(2)...).
+			WillReturnError(pgx.ErrNoRows)
+
+		url := fmt.Sprintf("/api/v1/evals/bootstrap/candidates?bootstrap_run_id=%s", runID.String())
+		req := httptest.NewRequest(http.MethodGet, url, nil)
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.GetBootstrapCandidates(w, req)
+		require.Equal(t, http.StatusNotFound, w.Code)
+		require.Contains(t, w.Body.String(), "NOT_FOUND")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns error on db failure for bootstrap_run_id lookup", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		runID := uuid.New()
+		handler := newEvalHandler(mock)
+
+		mock.ExpectQuery("SELECT .+ FROM eval_bootstrap_runs WHERE id").
+			WithArgs(anyArgs(2)...).
+			WillReturnError(fmt.Errorf("connection reset"))
+
+		url := fmt.Sprintf("/api/v1/evals/bootstrap/candidates?bootstrap_run_id=%s", runID.String())
+		req := httptest.NewRequest(http.MethodGet, url, nil)
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.GetBootstrapCandidates(w, req)
+		require.Equal(t, http.StatusInternalServerError, w.Code)
+		require.Contains(t, w.Body.String(), "INTERNAL_ERROR")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns latest run by repo_id", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		repoID := uuid.New()
+		runID := uuid.New()
+		now := time.Now()
+		handler := newEvalHandler(mock)
+
+		mock.ExpectQuery("SELECT .+ FROM eval_bootstrap_runs WHERE org_id").
+			WithArgs(anyArgs(2)...).
+			WillReturnRows(pgxmock.NewRows(bootstrapRunColumns).
+				AddRow(newTestBootstrapRunRow(runID, orgID, repoID, &userID, "completed", json.RawMessage(`[]`), now)...))
+
+		url := fmt.Sprintf("/api/v1/evals/bootstrap/candidates?repo_id=%s", repoID.String())
+		req := httptest.NewRequest(http.MethodGet, url, nil)
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.GetBootstrapCandidates(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var resp models.SingleResponse[models.EvalBootstrapRun]
+		err = json.Unmarshal(w.Body.Bytes(), &resp)
+		require.NoError(t, err)
+		require.Equal(t, runID, resp.Data.ID)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns error when neither param provided", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		handler := newEvalHandler(mock)
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/evals/bootstrap/candidates", nil)
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.GetBootstrapCandidates(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Contains(t, w.Body.String(), "MISSING_PARAM")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns error for invalid repo_id", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		handler := newEvalHandler(mock)
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/evals/bootstrap/candidates?repo_id=not-valid", nil)
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.GetBootstrapCandidates(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Contains(t, w.Body.String(), "INVALID_ID")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns 404 when no runs for repo_id", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		repoID := uuid.New()
+		handler := newEvalHandler(mock)
+
+		mock.ExpectQuery("SELECT .+ FROM eval_bootstrap_runs WHERE org_id").
+			WithArgs(anyArgs(2)...).
+			WillReturnError(pgx.ErrNoRows)
+
+		url := fmt.Sprintf("/api/v1/evals/bootstrap/candidates?repo_id=%s", repoID.String())
+		req := httptest.NewRequest(http.MethodGet, url, nil)
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.GetBootstrapCandidates(w, req)
+		require.Equal(t, http.StatusNotFound, w.Code)
+		require.Contains(t, w.Body.String(), "NOT_FOUND")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns error on db failure for repo_id lookup", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		repoID := uuid.New()
+		handler := newEvalHandler(mock)
+
+		mock.ExpectQuery("SELECT .+ FROM eval_bootstrap_runs WHERE org_id").
+			WithArgs(anyArgs(2)...).
+			WillReturnError(fmt.Errorf("timeout"))
+
+		url := fmt.Sprintf("/api/v1/evals/bootstrap/candidates?repo_id=%s", repoID.String())
+		req := httptest.NewRequest(http.MethodGet, url, nil)
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.GetBootstrapCandidates(w, req)
+		require.Equal(t, http.StatusInternalServerError, w.Code)
+		require.Contains(t, w.Body.String(), "INTERNAL_ERROR")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
+func TestEvalHandler_AcceptBootstrapCandidates(t *testing.T) {
+	t.Parallel()
+
+	t.Run("creates tasks from selected candidates", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		repoID := uuid.New()
+		runID := uuid.New()
+		taskID := uuid.New()
+		now := time.Now()
+		handler := newEvalHandler(mock)
+
+		candidates := json.RawMessage(`[{"pr_number":42,"pr_title":"Fix auth","base_commit_sha":"aaa","solution_commit_sha":"bbb","solution_diff":"diff","issue_description":"Auth broken","scoring_criteria":[],"complexity":"moderate","fitness_score":0.8,"fitness_reasoning":"good"}]`)
+
+		mock.ExpectQuery("SELECT .+ FROM eval_bootstrap_runs WHERE id").
+			WithArgs(anyArgs(2)...).
+			WillReturnRows(pgxmock.NewRows(bootstrapRunColumns).
+				AddRow(newTestBootstrapRunRow(runID, orgID, repoID, &userID, "completed", candidates, now)...))
+
+		mock.ExpectQuery("INSERT INTO eval_tasks").
+			WithArgs(anyArgs(22)...).
+			WillReturnRows(pgxmock.NewRows(evalTaskColumns).AddRow(newTestEvalTaskRow(taskID, orgID, repoID, now)...))
+
+		body := fmt.Sprintf(`{"bootstrap_run_id": %q, "candidate_indices": [0]}`, runID.String())
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/bootstrap/accept", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.AcceptBootstrapCandidates(w, req)
+		require.Equal(t, http.StatusCreated, w.Code)
+
+		var resp models.ListResponse[models.EvalTask]
+		err = json.Unmarshal(w.Body.Bytes(), &resp)
+		require.NoError(t, err)
+		require.Len(t, resp.Data, 1)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns error for invalid JSON body", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		handler := newEvalHandler(mock)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/bootstrap/accept", strings.NewReader(`{bad`))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.AcceptBootstrapCandidates(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Contains(t, w.Body.String(), "INVALID_BODY")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns error for missing bootstrap_run_id", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		handler := newEvalHandler(mock)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/bootstrap/accept", strings.NewReader(`{"candidate_indices": [0]}`))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.AcceptBootstrapCandidates(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Contains(t, w.Body.String(), "MISSING_FIELD")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns 404 when bootstrap run not found", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		runID := uuid.New()
+		handler := newEvalHandler(mock)
+
+		mock.ExpectQuery("SELECT .+ FROM eval_bootstrap_runs WHERE id").
+			WithArgs(anyArgs(2)...).
+			WillReturnError(pgx.ErrNoRows)
+
+		body := fmt.Sprintf(`{"bootstrap_run_id": %q, "candidate_indices": [0]}`, runID.String())
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/bootstrap/accept", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.AcceptBootstrapCandidates(w, req)
+		require.Equal(t, http.StatusNotFound, w.Code)
+		require.Contains(t, w.Body.String(), "NOT_FOUND")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns error on db failure fetching bootstrap run", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		runID := uuid.New()
+		handler := newEvalHandler(mock)
+
+		mock.ExpectQuery("SELECT .+ FROM eval_bootstrap_runs WHERE id").
+			WithArgs(anyArgs(2)...).
+			WillReturnError(fmt.Errorf("connection refused"))
+
+		body := fmt.Sprintf(`{"bootstrap_run_id": %q, "candidate_indices": [0]}`, runID.String())
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/bootstrap/accept", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.AcceptBootstrapCandidates(w, req)
+		require.Equal(t, http.StatusInternalServerError, w.Code)
+		require.Contains(t, w.Body.String(), "INTERNAL_ERROR")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns error when bootstrap run not completed", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		repoID := uuid.New()
+		runID := uuid.New()
+		now := time.Now()
+		handler := newEvalHandler(mock)
+
+		mock.ExpectQuery("SELECT .+ FROM eval_bootstrap_runs WHERE id").
+			WithArgs(anyArgs(2)...).
+			WillReturnRows(pgxmock.NewRows(bootstrapRunColumns).
+				AddRow(newTestBootstrapRunRow(runID, orgID, repoID, &userID, "running", nil, now)...))
+
+		body := fmt.Sprintf(`{"bootstrap_run_id": %q, "candidate_indices": [0]}`, runID.String())
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/bootstrap/accept", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.AcceptBootstrapCandidates(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Contains(t, w.Body.String(), "NOT_READY")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("skips out-of-range candidate indices", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		repoID := uuid.New()
+		runID := uuid.New()
+		now := time.Now()
+		handler := newEvalHandler(mock)
+
+		candidates := json.RawMessage(`[{"pr_number":1,"pr_title":"PR1","base_commit_sha":"aaa","solution_commit_sha":"bbb","solution_diff":"diff","issue_description":"desc","scoring_criteria":[],"complexity":"simple","fitness_score":0.9,"fitness_reasoning":"ok"}]`)
+
+		mock.ExpectQuery("SELECT .+ FROM eval_bootstrap_runs WHERE id").
+			WithArgs(anyArgs(2)...).
+			WillReturnRows(pgxmock.NewRows(bootstrapRunColumns).
+				AddRow(newTestBootstrapRunRow(runID, orgID, repoID, &userID, "completed", candidates, now)...))
+
+		// Only out-of-range indices: -1 and 5 (only 1 candidate at index 0)
+		body := fmt.Sprintf(`{"bootstrap_run_id": %q, "candidate_indices": [-1, 5]}`, runID.String())
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/bootstrap/accept", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.AcceptBootstrapCandidates(w, req)
+		require.Equal(t, http.StatusCreated, w.Code)
+
+		var resp models.ListResponse[models.EvalTask]
+		err = json.Unmarshal(w.Body.Bytes(), &resp)
+		require.NoError(t, err)
+		require.Empty(t, resp.Data)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns error on task create failure", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		repoID := uuid.New()
+		runID := uuid.New()
+		now := time.Now()
+		handler := newEvalHandler(mock)
+
+		candidates := json.RawMessage(`[{"pr_number":42,"pr_title":"Fix auth","base_commit_sha":"aaa","solution_commit_sha":"bbb","solution_diff":"diff","issue_description":"Auth broken","scoring_criteria":[],"complexity":"moderate","fitness_score":0.8,"fitness_reasoning":"good"}]`)
+
+		mock.ExpectQuery("SELECT .+ FROM eval_bootstrap_runs WHERE id").
+			WithArgs(anyArgs(2)...).
+			WillReturnRows(pgxmock.NewRows(bootstrapRunColumns).
+				AddRow(newTestBootstrapRunRow(runID, orgID, repoID, &userID, "completed", candidates, now)...))
+
+		mock.ExpectQuery("INSERT INTO eval_tasks").
+			WithArgs(anyArgs(22)...).
+			WillReturnError(fmt.Errorf("unique constraint violation"))
+
+		body := fmt.Sprintf(`{"bootstrap_run_id": %q, "candidate_indices": [0]}`, runID.String())
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/bootstrap/accept", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.AcceptBootstrapCandidates(w, req)
+		require.Equal(t, http.StatusInternalServerError, w.Code)
+		require.Contains(t, w.Body.String(), "CREATE_FAILED")
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 }
