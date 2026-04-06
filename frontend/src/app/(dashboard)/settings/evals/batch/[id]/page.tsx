@@ -184,17 +184,27 @@ function ScoreCell({ run }: { run: EvalRun }) {
 }
 
 function BatchSummary({ batch }: { batch: EvalBatchDetail }) {
-  const completedRuns = batch.runs.filter((r) => r.status === "completed");
-  const failedRuns = batch.runs.filter((r) => r.status === "failed");
-  const passedRuns = completedRuns.filter((r) => r.passed);
-  const scores = completedRuns.filter((r) => r.final_score != null).map((r) => r.final_score!);
-  const avgScore = scores.length > 0 ? scores.reduce((a, b) => a + b, 0) / scores.length : null;
+  let completedCount = 0;
+  let failedCount = 0;
+  let passedCount = 0;
+  let scoreSum = 0;
+  let scoreCount = 0;
+  for (const r of batch.runs) {
+    if (r.status === "completed") {
+      completedCount++;
+      if (r.passed) passedCount++;
+      if (r.final_score != null) { scoreSum += r.final_score; scoreCount++; }
+    } else if (r.status === "failed") {
+      failedCount++;
+    }
+  }
+  const avgScore = scoreCount > 0 ? scoreSum / scoreCount : null;
 
   return (
     <div className="grid gap-4 md:grid-cols-4">
       <Card>
         <CardContent className="py-3 text-center">
-          <p className="text-2xl font-bold">{completedRuns.length}/{batch.run_count}</p>
+          <p className="text-2xl font-bold">{completedCount}/{batch.run_count}</p>
           <p className="text-xs text-muted-foreground">Runs completed</p>
         </CardContent>
       </Card>
@@ -206,13 +216,13 @@ function BatchSummary({ batch }: { batch: EvalBatchDetail }) {
       </Card>
       <Card>
         <CardContent className="py-3 text-center">
-          <p className="text-2xl font-bold text-emerald-600 dark:text-emerald-400">{passedRuns.length}</p>
+          <p className="text-2xl font-bold text-emerald-600 dark:text-emerald-400">{passedCount}</p>
           <p className="text-xs text-muted-foreground">Passed</p>
         </CardContent>
       </Card>
       <Card>
         <CardContent className="py-3 text-center">
-          <p className="text-2xl font-bold text-red-600 dark:text-red-400">{failedRuns.length}</p>
+          <p className="text-2xl font-bold text-red-600 dark:text-red-400">{failedCount}</p>
           <p className="text-xs text-muted-foreground">Errors</p>
         </CardContent>
       </Card>

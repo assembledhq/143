@@ -58,7 +58,7 @@ export default function EvalsSettingsPage() {
   const bootstrapMutation = useMutation({
     mutationFn: (repoId: string) => api.evals.bootstrap({ repo_id: repoId }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["evals"] });
+      queryClient.invalidateQueries({ queryKey: queryKeys.evals.tasks() });
     },
   });
 

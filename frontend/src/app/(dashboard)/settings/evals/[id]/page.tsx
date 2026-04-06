@@ -63,7 +63,7 @@ export default function EvalTaskDetailPage() {
   const archiveMutation = useMutation({
     mutationFn: () => api.evals.archiveTask(taskId),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["evals"] });
+      queryClient.invalidateQueries({ queryKey: queryKeys.evals.tasks() });
       router.push("/settings/evals");
     },
   });

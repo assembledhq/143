@@ -111,7 +111,7 @@ export default function CreateEvalTaskPage() {
           .filter(Boolean),
       }),
     onSuccess: (response) => {
-      queryClient.invalidateQueries({ queryKey: ["evals"] });
+      queryClient.invalidateQueries({ queryKey: queryKeys.evals.tasks() });
       router.push(`/settings/evals/${response.data.id}`);
     },
   });
