@@ -20,6 +20,11 @@ ALTER TABLE users VALIDATE CONSTRAINT chk_users_role;
 -- =============================================================================
 -- sessions
 -- =============================================================================
+-- Fix legacy values: 'manual', 'auto_simple', 'auto_all' are org-level autonomy
+-- values that don't belong in the session-level column. The API defaults to 'semi'.
+UPDATE sessions SET autonomy_level = 'semi' WHERE autonomy_level NOT IN ('full', 'semi', 'supervised');
+ALTER TABLE sessions ALTER COLUMN autonomy_level SET DEFAULT 'semi';
+
 ALTER TABLE sessions
     ADD CONSTRAINT chk_sessions_status CHECK (status IN (
         'pending', 'running', 'idle', 'awaiting_input', 'needs_human_guidance',
