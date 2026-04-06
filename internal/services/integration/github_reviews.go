@@ -222,7 +222,7 @@ func doGetPaginated[T any](ctx context.Context, g *GitHubCodeReviewSource, initi
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if len(all) > 0 {
 				zerolog.Ctx(ctx).Warn().Int("status", resp.StatusCode).Int("pages_fetched", page).Msg("pagination stopped: non-200 status")
 				return all, nil
@@ -232,7 +232,7 @@ func doGetPaginated[T any](ctx context.Context, g *GitHubCodeReviewSource, initi
 
 		var items []T
 		decodeErr := json.NewDecoder(resp.Body).Decode(&items)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if decodeErr != nil {
 			if len(all) > 0 {
 				zerolog.Ctx(ctx).Warn().Err(decodeErr).Int("pages_fetched", page).Msg("pagination stopped: decode error")
