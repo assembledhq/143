@@ -1719,7 +1719,7 @@ func TestExecuteEvalRun(t *testing.T) {
 		result := executeEvalRun(context.Background(), &Stores{}, &Services{}, run, task, logger)
 		require.Equal(t, models.EvalRunStatusFailed, result.Status)
 		require.NotNil(t, result.ErrorMessage)
-		require.Contains(t, *result.ErrorMessage, "not yet implemented")
+		require.Contains(t, *result.ErrorMessage, "repository store not configured")
 	})
 
 	t.Run("returns failed on invalid scoring criteria JSON", func(t *testing.T) {

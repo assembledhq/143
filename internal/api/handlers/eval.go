@@ -698,7 +698,7 @@ func (h *EvalHandler) GetBatch(w http.ResponseWriter, r *http.Request) {
 // Bootstrap triggers a PR history scan to discover eval task candidates.
 func (h *EvalHandler) Bootstrap(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
-	userID := middleware.UserIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
 
 	var req struct {
 		RepoID uuid.UUID `json:"repo_id"`
@@ -716,7 +716,7 @@ func (h *EvalHandler) Bootstrap(w http.ResponseWriter, r *http.Request) {
 		OrgID:     orgID,
 		RepoID:    req.RepoID,
 		Status:    models.EvalBootstrapStatusPending,
-		CreatedBy: &userID,
+		CreatedBy: &user.ID,
 	}
 	if err := h.bootstrapStore.Create(r.Context(), &run); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create bootstrap run", err)
@@ -787,7 +787,7 @@ func (h *EvalHandler) GetBootstrapCandidates(w http.ResponseWriter, r *http.Requ
 // AcceptBootstrapCandidates creates eval tasks from selected bootstrap candidates.
 func (h *EvalHandler) AcceptBootstrapCandidates(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
-	userID := middleware.UserIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
 
 	var req struct {
 		BootstrapRunID uuid.UUID `json:"bootstrap_run_id"`
@@ -846,7 +846,7 @@ func (h *EvalHandler) AcceptBootstrapCandidates(w http.ResponseWriter, r *http.R
 			Source:           models.EvalTaskSourcePRBootstrap,
 			SourcePRNumber:   &prNum,
 			Complexity:       c.Complexity,
-			CreatedBy:        &userID,
+			CreatedBy:        &user.ID,
 		}
 		if err := h.taskStore.Create(r.Context(), &task); err != nil {
 			writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED",
