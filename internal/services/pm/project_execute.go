@@ -73,6 +73,7 @@ func (s *Service) executeProjectPlan(ctx context.Context, orgID uuid.UUID, pp *P
 
 	// Create new tasks from the PM's plan.
 	tasksCreated := 0
+	titleToID := make(map[string]uuid.UUID) // maps task title → UUID for dependency resolution
 	for i, spec := range pp.NewTasks {
 		task := &models.ProjectTask{
 			ProjectID:   pp.ProjectID,
@@ -103,7 +104,13 @@ func (s *Service) executeProjectPlan(ctx context.Context, orgID uuid.UUID, pp *P
 			s.logger.Error().Err(err).Str("task_title", spec.Title).Msg("failed to create project task")
 			continue
 		}
+		titleToID[spec.Title] = task.ID
 		tasksCreated++
+	}
+
+	// Resolve title-based depends_on references to UUIDs for dependency_graph mode.
+	if project.ExecutionMode == models.ProjectExecModeDependencyGraph && tasksCreated > 0 {
+		s.resolveDependsOnTitles(ctx, orgID, pp, titleToID)
 	}
 
 	// Dispatch eligible pending tasks based on execution mode.
@@ -147,6 +154,21 @@ func (s *Service) dispatchProjectTasks(ctx context.Context, orgID uuid.UUID, pro
 		agentType = models.DefaultDefaultAgentType
 	}
 
+	// For dependency_graph mode, build a status lookup of all project tasks so
+	// we can check whether each task's dependencies have been satisfied.
+	var taskStatusByID map[uuid.UUID]models.ProjectTaskStatus
+	if project.ExecutionMode == models.ProjectExecModeDependencyGraph {
+		allTasks, err := s.projectTasks.ListByProject(ctx, orgID, project.ID, db.ProjectTaskFilters{})
+		if err != nil {
+			s.logger.Error().Err(err).Msg("failed to list all project tasks for dependency check")
+			return 0
+		}
+		taskStatusByID = make(map[uuid.UUID]models.ProjectTaskStatus, len(allTasks))
+		for _, t := range allTasks {
+			taskStatusByID[t.ID] = t.Status
+		}
+	}
+
 	dispatched := 0
 	for i := range pending {
 		if dispatched >= slotsAvailable {
@@ -158,6 +180,24 @@ func (s *Service) dispatchProjectTasks(ctx context.Context, orgID uuid.UUID, pro
 		// Skip low-confidence tasks unless autonomy is auto_all.
 		if task.Confidence != nil && *task.Confidence == "low" && settings.AutonomyLevel != models.AutonomyLevelAutoAll {
 			continue
+		}
+
+		// In dependency_graph mode, only dispatch tasks whose dependencies are all completed.
+		if project.ExecutionMode == models.ProjectExecModeDependencyGraph && len(task.DependsOn) > 0 {
+			depStatus := checkDependenciesStatus(task.DependsOn, taskStatusByID)
+			if depStatus == depStatusBlocked {
+				// At least one dependency failed — mark this task as blocked.
+				task.Status = models.ProjectTaskStatusBlocked
+				if err := s.projectTasks.Update(ctx, task); err != nil {
+					s.logger.Warn().Err(err).Str("task_id", task.ID.String()).Msg("failed to mark task as blocked")
+				}
+				continue
+			}
+			if depStatus == depStatusWaiting {
+				// Dependencies still in progress — skip for now.
+				continue
+			}
+			// depStatusReady: all dependencies completed, proceed with dispatch.
 		}
 
 		branchName := generateProjectBranchName(project.ID, task.BatchNumber, task.SortOrder, task.Title)
@@ -249,8 +289,20 @@ func (s *Service) canDispatchForProject(ctx context.Context, orgID uuid.UUID, pr
 			return 0
 		}
 		return remaining
+	case models.ProjectExecModeDependencyGraph:
+		// Dependency graph mode: allow parallel execution up to max_concurrent,
+		// but actual eligibility is filtered in dispatchProjectTasks based on
+		// whether each task's dependencies are satisfied.
+		maxConcurrent := project.MaxConcurrent
+		if maxConcurrent <= 0 {
+			maxConcurrent = 1
+		}
+		remaining := maxConcurrent - activeCount
+		if remaining < 0 {
+			return 0
+		}
+		return remaining
 	default:
-		// dependency_graph not implemented yet; treat as sequential.
 		if activeCount > 0 {
 			return 0
 		}
@@ -343,6 +395,89 @@ func placeholderIssueID(task *models.ProjectTask) uuid.UUID {
 		return *task.IssueID
 	}
 	return uuid.Nil
+}
+
+// depStatus represents the aggregate state of a task's dependencies.
+type depStatus int
+
+const (
+	depStatusReady   depStatus = iota // all deps completed
+	depStatusWaiting                  // some deps still pending/running
+	depStatusBlocked                  // at least one dep failed/cancelled
+)
+
+// checkDependenciesStatus evaluates whether a task's dependencies allow dispatch.
+func checkDependenciesStatus(dependsOn []uuid.UUID, statusByID map[uuid.UUID]models.ProjectTaskStatus) depStatus {
+	for _, depID := range dependsOn {
+		status, ok := statusByID[depID]
+		if !ok {
+			// Unknown dependency — treat as waiting (may not be created yet).
+			return depStatusWaiting
+		}
+		switch status {
+		case models.ProjectTaskStatusCompleted:
+			continue
+		case models.ProjectTaskStatusFailed, models.ProjectTaskStatusCancelled, models.ProjectTaskStatusSkipped:
+			return depStatusBlocked
+		default:
+			return depStatusWaiting
+		}
+	}
+	return depStatusReady
+}
+
+// resolveDependsOnTitles converts title-based dependency references in new tasks
+// to UUID-based references. The PM agent specifies dependencies by title since
+// IDs don't exist at plan time. After creating the tasks, we resolve titles to
+// the actual task UUIDs. Also looks up existing tasks in the project for
+// cross-batch references.
+func (s *Service) resolveDependsOnTitles(ctx context.Context, orgID uuid.UUID, pp *ProjectPlan, titleToID map[string]uuid.UUID) {
+	// Build a broader title→ID map from all existing tasks in the project.
+	existing, err := s.projectTasks.ListByProject(ctx, orgID, pp.ProjectID, db.ProjectTaskFilters{})
+	if err != nil {
+		s.logger.Warn().Err(err).Msg("failed to list existing tasks for dependency resolution")
+		return
+	}
+	allTitleToID := make(map[string]uuid.UUID, len(existing))
+	for _, t := range existing {
+		allTitleToID[t.Title] = t.ID
+	}
+	// Overlay the newly created tasks (which take precedence).
+	for title, id := range titleToID {
+		allTitleToID[title] = id
+	}
+
+	// Resolve each new task's depends_on titles to UUIDs.
+	for _, spec := range pp.NewTasks {
+		if len(spec.DependsOn) == 0 {
+			continue
+		}
+		taskID, ok := titleToID[spec.Title]
+		if !ok {
+			continue
+		}
+
+		var resolved []uuid.UUID
+		for _, depTitle := range spec.DependsOn {
+			if depID, found := allTitleToID[depTitle]; found {
+				resolved = append(resolved, depID)
+			} else {
+				s.logger.Warn().Str("task", spec.Title).Str("missing_dep", depTitle).Msg("dependency title not found — skipping")
+			}
+		}
+
+		if len(resolved) > 0 {
+			task, err := s.projectTasks.GetByID(ctx, orgID, taskID)
+			if err != nil {
+				s.logger.Warn().Err(err).Str("task_id", taskID.String()).Msg("failed to fetch task for dependency update")
+				continue
+			}
+			task.DependsOn = resolved
+			if err := s.projectTasks.Update(ctx, &task); err != nil {
+				s.logger.Warn().Err(err).Str("task_id", taskID.String()).Msg("failed to update task dependencies")
+			}
+		}
+	}
 }
 
 // tokenModeFromTaskComplexity maps a task's complexity string to a token mode.
