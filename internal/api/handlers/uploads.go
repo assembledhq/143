@@ -123,6 +123,13 @@ func (h *UploadHandler) ServeUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate that the file belongs to the requesting user's org.
+	orgID := middleware.OrgIDFromContext(r.Context())
+	if !strings.HasPrefix(key, orgID.String()+"/") {
+		writeError(w, r, http.StatusForbidden, "FORBIDDEN", "access denied")
+		return
+	}
+
 	fileStore.ServeFile(w, r, key)
 }
 

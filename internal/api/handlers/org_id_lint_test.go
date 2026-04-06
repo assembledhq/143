@@ -1,0 +1,197 @@
+package handlers
+
+import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// TestHandlersMustUseOrgIDFromContext ensures every HTTP handler method on a
+// handler struct calls middleware.OrgIDFromContext (or is explicitly exempted).
+//
+// This prevents regressions where new endpoints accidentally skip org-scoping
+// and allows cross-org data access.
+//
+// If you add a new handler that is legitimately exempt (e.g. public routes,
+// webhooks, or methods that access no org-scoped data), add it to the
+// allowlist below with a comment explaining why.
+func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
+	t.Parallel()
+
+	// Methods exempt from requiring OrgIDFromContext, keyed as "TypeName.MethodName".
+	// Each entry has a comment explaining why the exemption exists.
+	allowlist := map[string]string{
+		// Public routes — no auth middleware, no org context.
+		"HealthHandler.Healthz":              "public health check",
+		"HealthHandler.Readyz":               "public health check",
+		"AuthHandler.Providers":              "public, pre-auth",
+		"AuthHandler.Login":                  "public, pre-auth (GitHub OAuth start)",
+		"AuthHandler.Callback":               "public, pre-auth (GitHub OAuth callback)",
+		"AuthHandler.GoogleLogin":            "public, pre-auth (Google OAuth start)",
+		"AuthHandler.GoogleCallback":         "public, pre-auth (Google OAuth callback)",
+		"AuthHandler.Register":               "public, pre-auth",
+		"AuthHandler.EmailLogin":             "public, pre-auth",
+		"TeamHandler.AcceptInvitation":       "public, token-based (no auth middleware)",
+
+		// Webhook routes — signature-verified, not session-authenticated.
+		"WebhookHandler.HandleGitHub":            "external webhook, signature auth",
+		"IngestionWebhookHandler.HandleSentry":   "external webhook, signature auth",
+		"IngestionWebhookHandler.HandleLinear":    "external webhook, signature auth",
+
+		// Internal API routes — use claims.OrgID from internal JWT, not middleware.
+		"InternalIssueHandler.Create":       "internal API, uses claims.OrgID",
+		"InternalProjectHandler.Propose":    "internal API, uses claims.OrgID",
+
+		// Authenticated but legitimately no org-scoped data access.
+		"AuthHandler.Me":                    "returns user from context only",
+		"AuthHandler.Logout":                "deletes session by cookie token only",
+		"SettingsHandler.GetAgentDefaults":  "returns static server config",
+		"SettingsHandler.GetLLMDefaults":    "returns static server config",
+		"SettingsHandler.GetLLMModels":      "returns static server config",
+		"ProjectGenerateHandler.Generate":   "calls LLM only, no org-scoped data",
+		"GitHubStatusHandler.StartConnect":  "OAuth redirect only, no store calls",
+
+		// OAuth start handlers — just redirect to external provider, no org data access.
+		"IntegrationHandler.StartLinearOAuth":  "OAuth redirect only",
+		"IntegrationHandler.StartSentryOAuth":  "OAuth redirect only",
+		"IntegrationHandler.StartGitHubOAuth":  "OAuth redirect only",
+		"IntegrationHandler.StartSlackOAuth":   "OAuth redirect only",
+
+		// Thin wrappers that delegate to a helper which calls OrgIDFromContext.
+		"PMHandler.Bootstrap":           "delegates to enqueueAndRespond which uses OrgIDFromContext",
+		"PMHandler.Refresh":             "delegates to enqueueAndRespond which uses OrgIDFromContext",
+		"ProjectHandler.Start":          "delegates to transitionStatus which uses OrgIDFromContext",
+		"ProjectHandler.Pause":          "delegates to transitionStatus which uses OrgIDFromContext",
+		"ProjectHandler.Resume":         "delegates to transitionStatus which uses OrgIDFromContext",
+		"ProjectHandler.Approve":        "delegates to transitionStatus which uses OrgIDFromContext",
+		"SessionFileHandler.ListFiles":      "delegates to getSessionContainer which uses OrgIDFromContext",
+		"SessionFileHandler.GetFileContent": "delegates to getSessionContainer which uses OrgIDFromContext",
+		"SessionFileHandler.GetFileContext": "delegates to getSessionContainer which uses OrgIDFromContext",
+	}
+
+	fset := token.NewFileSet()
+
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("failed to read handler directory: %v", err)
+	}
+
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+
+		path := filepath.Join(".", name)
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatalf("failed to parse %s: %v", name, err)
+		}
+
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv == nil || fn.Type.Results != nil {
+				continue
+			}
+
+			// Check this is an HTTP handler: (http.ResponseWriter, *http.Request)
+			params := fn.Type.Params.List
+			if !isHTTPHandlerSignature(params) {
+				continue
+			}
+
+			// Get receiver type name.
+			recvType := receiverTypeName(fn.Recv.List[0].Type)
+			if recvType == "" {
+				continue
+			}
+
+			key := recvType + "." + fn.Name.Name
+
+			if _, exempt := allowlist[key]; exempt {
+				continue
+			}
+
+			// Check that the method body contains a call to OrgIDFromContext.
+			if !containsOrgIDFromContext(fn.Body) {
+				t.Errorf("%s:%d: %s does not call middleware.OrgIDFromContext — "+
+					"add the call or add to the allowlist in org_id_lint_test.go with justification",
+					name, fset.Position(fn.Pos()).Line, key)
+			}
+		}
+	}
+}
+
+// isHTTPHandlerSignature checks that params match (http.ResponseWriter, *http.Request).
+func isHTTPHandlerSignature(params []*ast.Field) bool {
+	if len(params) != 2 {
+		return false
+	}
+
+	// First param: http.ResponseWriter (a selector expression)
+	sel1, ok := params[0].Type.(*ast.SelectorExpr)
+	if !ok || sel1.Sel.Name != "ResponseWriter" {
+		return false
+	}
+
+	// Second param: *http.Request (a pointer to selector expression)
+	star, ok := params[1].Type.(*ast.StarExpr)
+	if !ok {
+		return false
+	}
+	sel2, ok := star.X.(*ast.SelectorExpr)
+	if !ok || sel2.Sel.Name != "Request" {
+		return false
+	}
+
+	return true
+}
+
+// receiverTypeName extracts the type name from a receiver (handles *T and T).
+func receiverTypeName(expr ast.Expr) string {
+	switch t := expr.(type) {
+	case *ast.StarExpr:
+		if ident, ok := t.X.(*ast.Ident); ok {
+			return ident.Name
+		}
+	case *ast.Ident:
+		return t.Name
+	}
+	return ""
+}
+
+// containsOrgIDFromContext walks the AST looking for a call to OrgIDFromContext.
+func containsOrgIDFromContext(node ast.Node) bool {
+	if node == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(node, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		// Match: middleware.OrgIDFromContext(...) or just OrgIDFromContext(...)
+		switch fn := call.Fun.(type) {
+		case *ast.SelectorExpr:
+			if fn.Sel.Name == "OrgIDFromContext" {
+				found = true
+				return false
+			}
+		case *ast.Ident:
+			if fn.Name == "OrgIDFromContext" {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
+}
