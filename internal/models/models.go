@@ -206,6 +206,7 @@ type PullRequest struct {
 	Body           *string    `db:"body" json:"body,omitempty"`
 	Status         string     `db:"status" json:"status"`
 	ReviewStatus   string     `db:"review_status" json:"review_status"`
+	AuthoredBy     string     `db:"authored_by" json:"authored_by"`
 	MergedAt       *time.Time `db:"merged_at" json:"merged_at,omitempty"`
 	CreatedAt      time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt      time.Time  `db:"updated_at" json:"updated_at"`
