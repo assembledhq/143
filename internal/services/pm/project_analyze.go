@@ -45,9 +45,12 @@ func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID
 	}
 
 	// Fetch the repository for this project.
-	repo, err := s.repos.GetByID(ctx, orgID, project.RepositoryID)
+	if project.RepositoryID == nil {
+		return fmt.Errorf("project %s has no repository_id", projectID)
+	}
+	repo, err := s.repos.GetByID(ctx, orgID, *project.RepositoryID)
 	if err != nil {
-		return fmt.Errorf("get repository %s: %w", project.RepositoryID, err)
+		return fmt.Errorf("get repository %s: %w", *project.RepositoryID, err)
 	}
 
 	// Build project-specific context.

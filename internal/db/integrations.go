@@ -12,6 +12,9 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
+// IntegrationStore manages third-party platform connections (GitHub, Sentry, Linear, etc.).
+// Integrations store OAuth credentials, webhook configs, and sync state for external platforms.
+// For AI model API keys and infrastructure credentials, see OrgCredentialStore.
 type IntegrationStore struct {
 	db DBTX
 }

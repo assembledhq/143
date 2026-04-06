@@ -239,7 +239,7 @@ func TestServiceGatherContext(t *testing.T) {
 			},
 			pullRequests: &gatherPRStoreMock{prs: []models.PullRequest{{
 				ID:           prID,
-				SessionID:   pendingRunID,
+				SessionID:   &pendingRunID,
 				Title:        "Fix payment panic",
 				Status:       "open",
 				ReviewStatus: "pending",

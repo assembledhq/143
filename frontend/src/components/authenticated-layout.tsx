@@ -13,6 +13,7 @@ import {
   Sparkles,
   ScrollText,
   Target,
+  FlaskConical,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
@@ -190,6 +191,10 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                 <DropdownMenuItem onClick={() => router.push("/settings/autopilot")}>
                   <Target className="h-4 w-4" />
                   Autopilot settings
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => router.push("/settings/evals")}>
+                  <FlaskConical className="h-4 w-4" />
+                  Evals
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => router.push("/team")}>
                   <Users className="h-4 w-4" />

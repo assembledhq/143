@@ -1,0 +1,14 @@
+DROP INDEX IF EXISTS idx_jobs_org_dequeue;
+ALTER TABLE project_cycles DROP CONSTRAINT IF EXISTS chk_project_cycles_cycle_number;
+ALTER TABLE session_review_comments DROP CONSTRAINT IF EXISTS chk_session_review_comments_diff_side;
+ALTER TABLE review_comments DROP CONSTRAINT IF EXISTS chk_review_comments_category;
+ALTER TABLE complexity_estimates DROP CONSTRAINT IF EXISTS chk_complexity_estimates_label;
+ALTER TABLE complexity_estimates DROP CONSTRAINT IF EXISTS chk_complexity_estimates_tier;
+ALTER TABLE session_messages DROP CONSTRAINT IF EXISTS chk_session_messages_role;
+ALTER TABLE issue_events DROP CONSTRAINT IF EXISTS chk_issue_events_event_type;
+CREATE INDEX idx_auth_sessions_token ON auth_sessions (token);
+DROP INDEX IF EXISTS idx_issue_events_org_issue;
+DROP INDEX IF EXISTS idx_project_tasks_session_id;
+DROP INDEX IF EXISTS idx_sessions_pm_plan_id;
+DROP INDEX IF EXISTS idx_sessions_project_task_id;
+DROP INDEX IF EXISTS idx_sessions_repository_id;

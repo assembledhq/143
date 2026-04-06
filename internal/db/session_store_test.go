@@ -21,15 +21,15 @@ var sessionTestColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
-	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "created_at",
+	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "deleted_at", "created_at",
 }
 
 func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 	return []interface{}{
-		sessionID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
+		sessionID, issueID, orgID, "claude-code", "completed", "supervised", "low",
 		nil, nil, nil, nil,
 		nil, &now, &now, nil,
-		nil, nil, nil, nil,
+		nil, nil, nil, false,
 		nil, nil, nil, nil, nil,
 		nil, nil, nil, nil,
 		nil, nil, nil,
@@ -40,6 +40,7 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 		nil, // diff_stats
 		nil, // diff_history
 		nil, // input_manifest
+		nil, // deleted_at
 		now,
 	}
 }
@@ -335,6 +336,43 @@ func TestSessionStore_UpdatePMPlanID(t *testing.T) {
 	err = store.UpdatePMPlanID(context.Background(), uuid.New(), uuid.New(), uuid.New())
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionStore_SoftDelete(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+
+	mock.ExpectExec("UPDATE sessions SET deleted_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.SoftDelete(context.Background(), uuid.New(), uuid.New())
+	require.NoError(t, err, "SoftDelete should not return an error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_SoftDelete_NotFound(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+
+	mock.ExpectExec("UPDATE sessions SET deleted_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+	err = store.SoftDelete(context.Background(), uuid.New(), uuid.New())
+	require.Error(t, err, "SoftDelete should return an error when session not found")
+	require.Contains(t, err.Error(), "not found or already deleted")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func stringPtr(s string) *string { return &s }

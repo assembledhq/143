@@ -1,6 +1,8 @@
 # 43 - Prompt and Input Versioning
 
-> **Status:** Not Started | **Last reviewed:** 2026-04-01
+> **Status:** Partially Implemented | **Last reviewed:** 2026-04-05
+>
+> **Implementation notes:** PM document versioning fully implemented (insert-only pattern, logical_id, content_hash, set pins). Input manifest struct and DB column exist on sessions table. Deploy SHA via version package. Missing: manifest recording during agent runs, org settings version tracking, memory snapshot recording, sandbox image pinning, integration skills hash, frontend version history UI.
 >
 > **Required by:** [42-eval-task-builder.md](42-eval-task-builder.md) (input freezing for reproducible evals), [16-ai-agent-evals.md](future/16-ai-agent-evals.md) (prompt lifecycle and release gates)
 

@@ -20,7 +20,7 @@ import (
 
 // pmPlanColumnsWithContext includes the new context count columns.
 var pmPlanColumnsWithContext = []string{
-	"id", "org_id", "status", "analysis", "tasks", "clusters", "skipped_issues",
+	"id", "org_id", "repository_id", "status", "analysis", "tasks", "clusters", "skipped_issues",
 	"issues_reviewed", "in_flight_runs_checked", "past_outcomes_reviewed",
 	"recent_prs_checked", "past_decisions_reviewed", "commits_analyzed",
 	"product_context_snapshot", "token_usage", "triggered_by",
@@ -76,7 +76,7 @@ func TestPMHandler_ListPlans(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(pmPlanColumnsWithContext).
-				AddRow(uuid.New(), orgID, "completed", "analysis",
+				AddRow(uuid.New(), orgID, nil, "completed", "analysis",
 					json.RawMessage(`[]`), json.RawMessage(`[]`), json.RawMessage(`[]`),
 					2, 3, 5, 1, 8, 20,
 					json.RawMessage(`{}`), json.RawMessage(`{}`), "cron",
@@ -172,7 +172,7 @@ func TestPMHandler_Status(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(pmPlanColumnsWithContext).
-				AddRow(uuid.New(), orgID, "completed", "analysis",
+				AddRow(uuid.New(), orgID, nil, "completed", "analysis",
 					json.RawMessage(`[]`), json.RawMessage(`[]`), json.RawMessage(`[]`),
 					14, 3, 8, 5, 12, 20,
 					json.RawMessage(`{}`), json.RawMessage(`{}`), "cron",
@@ -232,7 +232,7 @@ func TestPMHandler_StatusWithJobError(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(pmPlanColumnsWithContext).
-				AddRow(uuid.New(), orgID, "completed", "analysis",
+				AddRow(uuid.New(), orgID, nil, "completed", "analysis",
 					json.RawMessage(`[]`), json.RawMessage(`[]`), json.RawMessage(`[]`),
 					5, 0, 0, 0, 0, 0,
 					json.RawMessage(`{}`), json.RawMessage(`{}`), "cron",
@@ -621,7 +621,7 @@ func TestPMHandler_Current(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(pmPlanColumnsWithContext).
-				AddRow(uuid.New(), orgID, "completed", "Payment cluster found",
+				AddRow(uuid.New(), orgID, nil, "completed", "Payment cluster found",
 					json.RawMessage(`[{"rank":1,"title":"Fix auth"}]`),
 					json.RawMessage(`[]`),
 					json.RawMessage(`[{"issue_id":"abc","reason":"duplicate","detail":"Already fixed"}]`),
@@ -687,5 +687,3 @@ func TestPMHandler_CurrentNotFound(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, rr.Code, "should return 404 when no plan exists")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
-
-func strPtr(s string) *string { return &s }

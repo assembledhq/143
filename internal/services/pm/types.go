@@ -119,7 +119,7 @@ type OutcomeSummary struct {
 
 type PRSummary struct {
 	ID           uuid.UUID  `json:"id"`
-	SessionID   uuid.UUID  `json:"session_id"`
+	SessionID   *uuid.UUID `json:"session_id,omitempty"`
 	Title        string     `json:"title"`
 	Status       string     `json:"status"`
 	ReviewStatus string     `json:"review_status"`

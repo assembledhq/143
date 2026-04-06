@@ -11,7 +11,7 @@ import (
 type Project struct {
 	ID                 uuid.UUID        `db:"id" json:"id"`
 	OrgID              uuid.UUID        `db:"org_id" json:"org_id"`
-	RepositoryID       uuid.UUID        `db:"repository_id" json:"repository_id"`
+	RepositoryID       *uuid.UUID       `db:"repository_id" json:"repository_id,omitempty"`
 	Title              string           `db:"title" json:"title"`
 	Goal               string           `db:"goal" json:"goal"`
 	Scope              *string          `db:"scope" json:"scope,omitempty"`
@@ -39,6 +39,7 @@ type Project struct {
 	ScheduleUnit       string           `db:"schedule_unit" json:"schedule_unit"`
 	NextRunAt          *time.Time       `db:"next_run_at" json:"next_run_at,omitempty"`
 	CreatedBy          *uuid.UUID       `db:"created_by" json:"created_by,omitempty"`
+	DeletedAt          *time.Time       `db:"deleted_at" json:"-"`
 	CreatedAt          time.Time        `db:"created_at" json:"created_at"`
 	UpdatedAt          time.Time        `db:"updated_at" json:"updated_at"`
 	CompletedAt        *time.Time       `db:"completed_at" json:"completed_at,omitempty"`
