@@ -2643,6 +2643,10 @@ func TestRunCodingAgent(t *testing.T) {
 			execFn: func(_ context.Context, _ *agent.Sandbox, cmd string, stdout, _ io.Writer) (int, error) {
 				callCount++
 				if callCount == 1 {
+					// Write issue description to temp file
+					return 0, nil
+				}
+				if callCount == 2 {
 					// The claude CLI call
 					_, _ = stdout.Write([]byte("agent output"))
 					return 0, nil
@@ -2667,8 +2671,15 @@ func TestRunCodingAgent(t *testing.T) {
 	t.Run("agent exec error is captured in trace", func(t *testing.T) {
 		t.Parallel()
 
+		callCount := 0
 		provider := &configurableSandboxProvider{
 			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, _, _ io.Writer) (int, error) {
+				callCount++
+				if callCount == 1 {
+					// Write issue description to temp file succeeds
+					return 0, nil
+				}
+				// CLI call fails
 				return 1, errors.New("sandbox crashed")
 			},
 		}
