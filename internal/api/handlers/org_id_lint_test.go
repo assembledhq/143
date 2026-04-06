@@ -28,6 +28,7 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		// Public routes — no auth middleware, no org context.
 		"HealthHandler.Healthz":              "public health check",
 		"HealthHandler.Readyz":               "public health check",
+		"HealthHandler.Version":              "public version endpoint",
 		"AuthHandler.Providers":              "public, pre-auth",
 		"AuthHandler.Login":                  "public, pre-auth (GitHub OAuth start)",
 		"AuthHandler.Callback":               "public, pre-auth (GitHub OAuth callback)",
