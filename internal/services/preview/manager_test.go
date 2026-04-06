@@ -529,6 +529,131 @@ func TestValidateBootstrapToken_NotFound(t *testing.T) {
 }
 
 // =============================================================================
+// ValidateBootstrapTokenUnscoped tests
+// =============================================================================
+
+func TestValidateBootstrapTokenUnscoped_Valid(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	previewID := uuid.New()
+	sessID := uuid.New()
+	now := time.Now()
+	token := generateToken()
+	tokenHash := hashToken(token)
+
+	// Return a valid, non-expired, non-revoked session (unscoped query has 1 arg).
+	mock.ExpectQuery("SELECT .+ FROM preview_access_sessions").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewAccessSessionTestCols).
+				AddRow(newAccessSessionRow(sessID, orgID, userID, previewID, tokenHash, now.Add(5*time.Minute), nil, now)...),
+		)
+
+	// Expect UpdateAccessSessionActivity.
+	mock.ExpectExec("UPDATE preview_access_sessions SET last_accessed_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	sess, err := mgr.ValidateBootstrapTokenUnscoped(context.Background(), token)
+	require.NoError(t, err)
+	require.Equal(t, sessID, sess.ID)
+	require.Equal(t, orgID, sess.OrgID)
+	require.Equal(t, previewID, sess.PreviewInstanceID)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestValidateBootstrapTokenUnscoped_Expired(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	previewID := uuid.New()
+	sessID := uuid.New()
+	now := time.Now()
+	token := generateToken()
+	tokenHash := hashToken(token)
+
+	// Return an expired session.
+	mock.ExpectQuery("SELECT .+ FROM preview_access_sessions").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewAccessSessionTestCols).
+				AddRow(newAccessSessionRow(sessID, orgID, userID, previewID, tokenHash, now.Add(-1*time.Minute), nil, now)...),
+		)
+
+	_, err = mgr.ValidateBootstrapTokenUnscoped(context.Background(), token)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "expired")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestValidateBootstrapTokenUnscoped_Revoked(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	previewID := uuid.New()
+	sessID := uuid.New()
+	now := time.Now()
+	token := generateToken()
+	tokenHash := hashToken(token)
+	revokedAt := now.Add(-30 * time.Second)
+
+	mock.ExpectQuery("SELECT .+ FROM preview_access_sessions").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewAccessSessionTestCols).
+				AddRow(newAccessSessionRow(sessID, orgID, userID, previewID, tokenHash, now.Add(5*time.Minute), &revokedAt, now)...),
+		)
+
+	_, err = mgr.ValidateBootstrapTokenUnscoped(context.Background(), token)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "revoked")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestValidateBootstrapTokenUnscoped_NotFound(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+
+	token := generateToken()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_access_sessions").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewAccessSessionTestCols))
+
+	_, err = mgr.ValidateBootstrapTokenUnscoped(context.Background(), token)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid bootstrap token")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// =============================================================================
 // ExtendTTL tests
 // =============================================================================
 

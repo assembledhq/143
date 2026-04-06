@@ -775,6 +775,61 @@ func TestPreviewStore_GetAccessSessionByToken(t *testing.T) {
 	}
 }
 
+func TestPreviewStore_GetAccessSessionByTokenUnscoped(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface)
+		expectErr bool
+	}{
+		{
+			name: "returns session when found",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM preview_access_sessions.+session_token_hash").
+					WithArgs(previewAnyArgs(1)...).
+					WillReturnRows(
+						pgxmock.NewRows(previewAccessSessionTestCols).
+							AddRow(uuid.New(), uuid.New(), uuid.New(), uuid.New(),
+								"hash", now, now.Add(time.Hour), nil, now, now),
+					)
+			},
+		},
+		{
+			name: "returns error when not found",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("SELECT .+ FROM preview_access_sessions.+session_token_hash").
+					WithArgs(previewAnyArgs(1)...).
+					WillReturnRows(pgxmock.NewRows(previewAccessSessionTestCols))
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err)
+			defer mock.Close()
+
+			store := NewPreviewStore(mock)
+			tt.setupMock(mock)
+
+			sess, err := store.GetAccessSessionByTokenUnscoped(context.Background(), "hash")
+			if tt.expectErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, sess)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
 func TestPreviewStore_RevokeAccessSession(t *testing.T) {
 	t.Parallel()
 
