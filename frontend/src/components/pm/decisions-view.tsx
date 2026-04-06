@@ -132,9 +132,13 @@ export function DecisionsView() {
   const [outcomeFilter, setOutcomeFilter] = useState<OutcomeFilter>("all");
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["pm", "decisions"],
-    // TODO: add server-side filter params to avoid fetching all decisions client-side
-    queryFn: () => api.pm.decisions({ limit: 200 }),
+    queryKey: ["pm", "decisions", decisionFilter, outcomeFilter],
+    queryFn: () =>
+      api.pm.decisions({
+        limit: 200,
+        decision_type: decisionFilter !== "all" ? decisionFilter : undefined,
+        outcome: outcomeFilter !== "all" ? outcomeFilter : undefined,
+      }),
     refetchInterval: 30000,
   });
 
@@ -171,14 +175,8 @@ export function DecisionsView() {
     );
   }
 
-  // Apply filters
-  const decisions = allDecisions.filter((d) => {
-    if (decisionFilter !== "all" && d.decision !== decisionFilter) return false;
-    if (outcomeFilter === "succeeded" && d.outcome !== "succeeded") return false;
-    if (outcomeFilter === "failed" && d.outcome !== "failed") return false;
-    if (outcomeFilter === "still_open" && d.outcome && d.outcome !== "still_open") return false;
-    return true;
-  });
+  // Server-side filtering is applied via query params; use results directly.
+  const decisions = allDecisions;
 
   const filterButtons: { value: DecisionFilter; label: string }[] = [
     { value: "all", label: "All" },
@@ -232,7 +230,7 @@ export function DecisionsView() {
         </div>
         {(decisionFilter !== "all" || outcomeFilter !== "all") && (
           <span className="text-[11px] text-muted-foreground self-center">
-            {decisions.length} of {allDecisions.length} decisions
+            {decisions.length} decisions
           </span>
         )}
       </div>
