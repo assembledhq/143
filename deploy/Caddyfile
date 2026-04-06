@@ -1,0 +1,19 @@
+# Reverse proxy configuration for 143.
+# The domain is set via the DOMAIN environment variable (default: 143.dev).
+# Pass DOMAIN when starting Caddy: DOMAIN=example.com docker compose up
+#
+# If your provider doesn't support env vars in Caddyfile, replace {$DOMAIN}
+# with your actual domain.
+
+www.{$DOMAIN:143.dev} {
+	redir https://{$DOMAIN:143.dev}{uri} permanent
+}
+
+{$DOMAIN:143.dev} {
+	handle /api/* {
+		reverse_proxy api:8080
+	}
+	handle {
+		reverse_proxy frontend:3000
+	}
+}

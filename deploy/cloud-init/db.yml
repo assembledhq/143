@@ -1,0 +1,52 @@
+#cloud-config
+# Dedicated Postgres node bootstrap (Phase 3a).
+# Same substitution as app.yml:
+#   envsubst < deploy/cloud-init/db.yml > /tmp/user-data.yml
+
+users:
+  - name: deploy
+    groups: docker
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - ${SSH_PUBLIC_KEY}
+
+packages:
+  - docker.io
+  - docker-compose-plugin
+  - git
+  - jq
+
+runcmd:
+  # Set up GHCR access (token written to file to avoid leaking in cloud-init logs)
+  - su - deploy -c 'cat /opt/143/.ghcr-token | docker login ghcr.io -u deploy --password-stdin && rm -f /opt/143/.ghcr-token'
+
+  # Clone repo to get compose files and Postgres config
+  - su - deploy -c 'git clone --depth 1 ${REPO_URL} /tmp/143-repo'
+  - su - deploy -c 'cp /tmp/143-repo/docker-compose.db.yml /opt/143/'
+  - su - deploy -c 'cp -r /tmp/143-repo/deploy /opt/143/deploy'
+  - rm -rf /tmp/143-repo
+
+  # Apply kernel tuning
+  - sysctl -p /etc/sysctl.d/99-postgres.conf
+
+  # Start Postgres
+  - su - deploy -c 'cd /opt/143 && docker compose -f docker-compose.db.yml up -d'
+
+write_files:
+  - path: /opt/143/.env
+    owner: deploy:deploy
+    permissions: '0600'
+    content: |
+      DB_PASSWORD=${DB_PASSWORD}
+
+  - path: /opt/143/.ghcr-token
+    owner: deploy:deploy
+    permissions: '0600'
+    content: ${GHCR_TOKEN}
+
+  - path: /etc/sysctl.d/99-postgres.conf
+    content: |
+      vm.overcommit_memory = 2
+      vm.overcommit_ratio = 80
+      vm.swappiness = 1

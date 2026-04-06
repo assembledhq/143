@@ -1,0 +1,33 @@
+# Dedicated Postgres node (Phase 3a: separate DB from app).
+# See docs/design/36-docker-agents-vps-architecture.md
+
+services:
+  postgres:
+    image: postgres:18
+    shm_size: 4g
+    environment:
+      POSTGRES_DB: onefortythree
+      POSTGRES_USER: onefortythree
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres/postgresql.conf:/etc/postgresql/conf.d/custom.conf:ro
+      - ./deploy/postgres/pg_hba.conf:/etc/postgresql/conf.d/pg_hba.conf:ro
+    command: postgres -c config_file=/etc/postgresql/conf.d/custom.conf -c hba_file=/etc/postgresql/conf.d/pg_hba.conf
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U onefortythree"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+          cpus: "3.0"
+
+volumes:
+  pgdata:
