@@ -58,11 +58,9 @@ func TestProjectStore_Create(t *testing.T) {
 	defer mock.Close()
 
 	// Create has 26 named args (including agent_type, model_override, schedule, and similar_projects fields)
-	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO projects").
 		WithArgs(anyArgs(26)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(projectID, now, now))
-	mock.ExpectCommit()
 
 	store := NewProjectStore(mock)
 	project := &models.Project{
