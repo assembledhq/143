@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { api } from "@/lib/api";
 import type { Project, ProjectTask } from "@/lib/types";
-import { AlertTriangle, CheckCircle2, XCircle, Lightbulb, ListTodo, FileText, Loader2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, XCircle, Lightbulb, ListTodo, FileText, Loader2, AlertCircle } from "lucide-react";
 
 interface ProposalInboxProps {
   proposals: Project[];
@@ -56,6 +56,8 @@ export function ProposalInbox({ proposals, onNavigateToProject }: ProposalInboxP
     },
   });
 
+  const isError = approveMutation.isError || dismissMutation.isError;
+
   if (proposals.length === 0) return null;
 
   return (
@@ -65,6 +67,16 @@ export function ProposalInbox({ proposals, onNavigateToProject }: ProposalInboxP
           <Lightbulb className="h-4 w-4 text-purple-500" />
           <h3 className="text-sm font-semibold">PM proposals ({proposals.length})</h3>
         </div>
+        {isError && (
+          <div className="flex items-center gap-2 text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/30 px-3 py-2 rounded-md">
+            <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+            <span>
+              {approveMutation.isError
+                ? `Failed to approve: ${approveMutation.error?.message || "Unknown error"}`
+                : `Failed to dismiss: ${dismissMutation.error?.message || "Unknown error"}`}
+            </span>
+          </div>
+        )}
         {proposals.map((proposal) => {
           const overlaps = proposal.similar_projects ?? [];
           return (

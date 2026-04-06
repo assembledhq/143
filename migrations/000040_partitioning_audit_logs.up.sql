@@ -1,5 +1,8 @@
 -- Partition audit_logs by created_at.
--- IMPORTANT: Run during maintenance window. See 000037 for helper function definitions.
+-- IMPORTANT: MAINTENANCE-WINDOW-ONLY MIGRATION. The ACCESS EXCLUSIVE lock is
+-- held for the full data copy, not just acquisition. For large tables, consider
+-- batched copy outside a transaction or pg_partman for zero-downtime migration.
+-- See 000037 for helper function definitions.
 
 -- Guard: use a short lock_timeout to prevent accidental execution outside
 -- a maintenance window. If the lock cannot be acquired in 5s, the migration

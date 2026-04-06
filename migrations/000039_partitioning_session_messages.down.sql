@@ -14,14 +14,14 @@ DROP TABLE session_messages CASCADE;
 CREATE TABLE session_messages (
     id          bigserial   PRIMARY KEY,
     session_id  uuid        NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    org_id      uuid        NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    org_id      uuid        NOT NULL REFERENCES organizations(id),
     user_id     uuid        REFERENCES users(id),
     turn_number int         NOT NULL,
     role        text        NOT NULL,
     content     text        NOT NULL,
     attachments text[],
     token_usage jsonb,
-    thread_id   uuid        REFERENCES session_threads(id),
+    thread_id   uuid        REFERENCES session_threads(id) ON DELETE CASCADE,
     created_at  timestamptz NOT NULL DEFAULT now()
 );
 

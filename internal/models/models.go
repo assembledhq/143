@@ -124,7 +124,7 @@ type Session struct {
 	// FailureRetryAdvised uses plain bool (not *bool) because false is the
 	// meaningful default — a session that hasn't failed never advises retry.
 	// The DB column is NOT NULL DEFAULT false, so pgx scans cleanly into bool.
-	FailureRetryAdvised  bool            `db:"failure_retry_advised" json:"failure_retry_advised,omitempty"`
+	FailureRetryAdvised  bool            `db:"failure_retry_advised" json:"failure_retry_advised"`
 	ParentSessionID      *uuid.UUID      `db:"parent_session_id" json:"parent_session_id,omitempty"`
 	RevisionContext      json.RawMessage `db:"revision_context" json:"revision_context,omitempty"`
 	Error                *string         `db:"error" json:"error,omitempty"`
@@ -193,6 +193,8 @@ type Validation struct {
 }
 
 // PullRequest represents a GitHub PR created by an agent run.
+// NOTE: SessionID is nullable (*uuid.UUID) because PRs can be created manually
+// without an associated session. API consumers should handle null session_id.
 type PullRequest struct {
 	ID             uuid.UUID  `db:"id" json:"id"`
 	SessionID     *uuid.UUID `db:"session_id" json:"session_id,omitempty"`

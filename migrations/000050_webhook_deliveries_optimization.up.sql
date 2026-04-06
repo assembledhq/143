@@ -13,7 +13,8 @@ CREATE INDEX idx_webhook_deliveries_received_brin
 ALTER TABLE webhook_deliveries ADD COLUMN seq bigserial;
 
 -- Backfill existing rows with monotonic seq values ordered by received_at.
--- This ensures all rows have a non-null seq for consistent ordering.
+-- MAINTENANCE-WINDOW-ONLY: This UPDATE rewrites every row in webhook_deliveries.
+-- For large tables, run this in batches outside the migration transaction.
 UPDATE webhook_deliveries SET seq = sub.rn
 FROM (SELECT id, row_number() OVER (ORDER BY received_at, id) AS rn FROM webhook_deliveries) sub
 WHERE webhook_deliveries.id = sub.id;

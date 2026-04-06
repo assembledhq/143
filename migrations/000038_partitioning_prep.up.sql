@@ -7,9 +7,15 @@
 --   3. Swapping the old table out and the new table in
 --   4. Creating initial partitions covering past data + the next 3 months
 --
--- IMPORTANT: This migration should be run during a maintenance window as it
--- copies data and swaps tables. For large datasets, consider running the
--- data copy steps manually in batches before deploying this migration.
+-- IMPORTANT: MAINTENANCE-WINDOW-ONLY MIGRATION.
+-- This migration copies data and swaps tables while holding an ACCESS EXCLUSIVE
+-- lock for the entire duration (not just acquisition). The lock_timeout below
+-- only guards *acquiring* the lock — once held, the copy can take minutes to
+-- hours on large tables. For production, consider:
+--   (a) create partitioned table,
+--   (b) copy data in batches outside a transaction,
+--   (c) swap with a brief lock.
+-- Or use pg_partman / logical replication for zero-downtime migration.
 --
 -- FK NOTE: Partitioned tables retain FKs on session_id and thread_id for
 -- session_logs and session_messages. For audit_logs, session_id and project_id

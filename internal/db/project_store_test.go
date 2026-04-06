@@ -57,10 +57,13 @@ func TestProjectStore_Create(t *testing.T) {
 	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
+	// Create wraps insert + join-table writes in a transaction.
+	mock.ExpectBegin()
 	// Create has 26 named args (including agent_type, model_override, schedule, and similar_projects fields)
 	mock.ExpectQuery("INSERT INTO projects").
 		WithArgs(anyArgs(26)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(projectID, now, now))
+	mock.ExpectCommit()
 
 	store := NewProjectStore(mock)
 	project := &models.Project{

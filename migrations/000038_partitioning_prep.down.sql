@@ -14,6 +14,7 @@ DROP TABLE session_logs CASCADE;
 CREATE TABLE session_logs (
     id           bigserial   PRIMARY KEY,
     session_id   uuid        NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    org_id       uuid        NOT NULL REFERENCES organizations(id),
     timestamp    timestamptz NOT NULL DEFAULT now(),
     level        text        NOT NULL DEFAULT 'info',
     message      text        NOT NULL,
@@ -22,8 +23,8 @@ CREATE TABLE session_logs (
     thread_id    uuid        REFERENCES session_threads(id) ON DELETE CASCADE
 );
 
-INSERT INTO session_logs (id, session_id, timestamp, level, message, metadata, turn_number, thread_id)
-SELECT id, session_id, timestamp, level, message, metadata, turn_number, thread_id
+INSERT INTO session_logs (id, session_id, org_id, timestamp, level, message, metadata, turn_number, thread_id)
+SELECT id, session_id, org_id, timestamp, level, message, metadata, turn_number, thread_id
 FROM session_logs_backup;
 
 DO $$ BEGIN
@@ -40,7 +41,8 @@ CREATE INDEX idx_session_logs_timestamp ON session_logs (timestamp);
 
 DROP TABLE session_logs_backup;
 
--- Drop helper functions (created in up migration).
-DROP FUNCTION IF EXISTS drop_expired_audit_log_partitions(int);
+-- Drop helper functions created in this migration's up.
+-- NOTE: drop_expired_audit_log_partitions is created in 000040, not here —
+-- it is dropped in 000040's down migration.
 DROP FUNCTION IF EXISTS ensure_future_partitions(text, int);
 DROP FUNCTION IF EXISTS create_monthly_partitions(text, date, date);

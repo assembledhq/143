@@ -150,6 +150,7 @@ func (s *IssueStore) Upsert(ctx context.Context, issue *models.Issue) error {
 		    severity = EXCLUDED.severity,
 		    tags = EXCLUDED.tags,
 		    updated_at = now()
+		WHERE issues.deleted_at IS NULL
 		RETURNING id, created_at, updated_at`
 
 	args := pgx.NamedArgs{

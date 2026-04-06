@@ -67,6 +67,24 @@ BEGIN
     END IF;
 END $$;
 
+-- Back up duplicate rows (and their child review_comments/deploys) to a staging
+-- table before deletion so data can be recovered if needed.
+CREATE TABLE IF NOT EXISTS _pull_requests_duplicates AS
+SELECT a.* FROM pull_requests a
+JOIN pull_requests b ON a.id != b.id
+  AND a.org_id = b.org_id
+  AND a.github_repo = b.github_repo
+  AND a.github_pr_number = b.github_pr_number
+  AND (a.updated_at < b.updated_at OR (a.updated_at = b.updated_at AND a.id > b.id));
+
+CREATE TABLE IF NOT EXISTS _review_comments_duplicates AS
+SELECT rc.* FROM review_comments rc
+WHERE rc.pull_request_id IN (SELECT id FROM _pull_requests_duplicates);
+
+CREATE TABLE IF NOT EXISTS _deploys_duplicates AS
+SELECT d.* FROM deploys d
+WHERE d.pull_request_id IN (SELECT id FROM _pull_requests_duplicates);
+
 DELETE FROM pull_requests a
 USING pull_requests b
 WHERE a.id != b.id

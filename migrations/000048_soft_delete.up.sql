@@ -1,6 +1,14 @@
 -- Add soft-delete support to high-value entities. Hard deletes via CASCADE
 -- can be catastrophic — deleting a session cascades to logs, messages,
 -- threads, questions, validations, and review comments with no recovery.
+--
+-- IMPORTANT: The BEFORE DELETE trigger below converts DELETEs to UPDATEs,
+-- which means ON DELETE CASCADE foreign keys on child tables (session_logs,
+-- session_messages, project_tasks, etc.) will NEVER fire during normal
+-- soft-delete operations. Child rows remain visible after their parent is
+-- soft-deleted. Queries on child tables should join with the parent and
+-- check the parent's deleted_at, or the application layer should filter
+-- appropriately.
 
 -- =============================================================================
 -- sessions: most critical — deletion cascades to 6+ child tables
@@ -28,7 +36,8 @@ CREATE INDEX idx_issues_deleted ON issues (org_id, status) WHERE deleted_at IS N
 -- To truly hard-delete, SET LOCAL app.allow_hard_delete = 'true' first.
 -- =============================================================================
 CREATE OR REPLACE FUNCTION prevent_hard_delete()
-RETURNS TRIGGER AS $$
+RETURNS TRIGGER
+SECURITY INVOKER AS $$
 BEGIN
     -- The second arg to current_setting is missing_ok (not a default value).
     -- When app.allow_hard_delete is unset, current_setting returns '' (empty

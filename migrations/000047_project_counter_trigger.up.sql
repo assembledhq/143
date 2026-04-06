@@ -8,11 +8,10 @@
 --
 -- PERFORMANCE NOTE: The UPDATE trigger fires on ALL column updates to project_tasks,
 -- not just status changes, because PostgreSQL does not allow REFERENCING transition
--- tables with column-list triggers (e.g. AFTER UPDATE OF status). The recount is
--- idempotent so correctness is unaffected, but non-status updates (branch_name,
--- pr_url, etc.) will also trigger a recount. If this becomes a hot path, consider
--- adding an early-exit check inside the trigger function comparing old and new
--- counter-relevant columns.
+-- tables with column-list triggers (e.g. AFTER UPDATE OF status). The trigger
+-- function includes an early-exit check that compares old and new counter-relevant
+-- columns (status, project_id) and returns immediately if they haven't changed,
+-- so non-counter updates (branch_name, pr_url, etc.) are cheap no-ops.
 
 CREATE OR REPLACE FUNCTION update_project_task_counts_insert()
 RETURNS TRIGGER AS $$

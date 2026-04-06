@@ -126,6 +126,12 @@ func (s *ProjectStore) Create(ctx context.Context, p *models.Project) error {
 		similarJSON = []byte("[]")
 	}
 
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	query := `
 		INSERT INTO projects (
 			org_id, repository_id, title, goal, scope, completion_criteria,
@@ -145,7 +151,7 @@ func (s *ProjectStore) Create(ctx context.Context, p *models.Project) error {
 		)
 		RETURNING id, created_at, updated_at`
 
-	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+	row := tx.QueryRow(ctx, query, pgx.NamedArgs{
 		"org_id":              p.OrgID,
 		"repository_id":       p.RepositoryID,
 		"title":               p.Title,
@@ -179,14 +185,14 @@ func (s *ProjectStore) Create(ctx context.Context, p *models.Project) error {
 
 	// Dual-write: populate the join table for source issue references.
 	for _, issueID := range p.SourceIssueIDs {
-		if _, err := s.db.Exec(ctx,
+		if _, err := tx.Exec(ctx,
 			`INSERT INTO project_source_issues (project_id, issue_id) VALUES (@project_id, @issue_id) ON CONFLICT DO NOTHING`,
 			pgx.NamedArgs{"project_id": p.ID, "issue_id": issueID}); err != nil {
 			return fmt.Errorf("sync source issue: %w", err)
 		}
 	}
 
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (s *ProjectStore) GetByID(ctx context.Context, orgID, projectID uuid.UUID) (models.Project, error) {

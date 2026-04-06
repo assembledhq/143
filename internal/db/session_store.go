@@ -136,6 +136,8 @@ func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters S
 		}
 	}
 
+	// Uses partial index idx_sessions_deleted (org_id, created_at DESC)
+	// WHERE deleted_at IS NULL for efficient filtering and sort.
 	query += ` ORDER BY created_at DESC`
 
 	limit := filters.Limit
