@@ -344,7 +344,18 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	}
 
 	// 6b. Auto-assign reviewers from CODEOWNERS (best-effort).
-	s.autoAssignReviewers(ctx, token, owner, repoName, prNumber, files)
+	// Use installation token for reviewer assignment — the PR author (which may
+	// be the user token) cannot request themselves as a reviewer, and the app
+	// token has the necessary repo permissions.
+	reviewerToken := token
+	if resolution.IsUserToken {
+		if appToken, err := s.tokenProvider.GetInstallationToken(ctx, repo.InstallationID); err == nil {
+			reviewerToken = appToken
+		} else {
+			s.logger.Warn().Err(err).Msg("failed to get installation token for reviewer assignment, falling back to user token")
+		}
+	}
+	s.autoAssignReviewers(ctx, reviewerToken, owner, repoName, prNumber, files)
 
 	// 7. Store PR in DB.
 	authoredBy := "app"

@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS project_output_destinations (
 );
 
 CREATE INDEX idx_project_output_destinations_project ON project_output_destinations(project_id) WHERE enabled = true;
-CREATE INDEX idx_project_output_destinations_org ON project_output_destinations(org_id);
+CREATE INDEX idx_project_output_destinations_org_project ON project_output_destinations(org_id, project_id);
 
 -- Add reviewer_strategy to projects for auto-reviewer assignment on PRs.
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS reviewer_strategy TEXT NOT NULL DEFAULT 'codeowners';

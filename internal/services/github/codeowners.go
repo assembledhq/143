@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -87,13 +89,12 @@ func ResolveReviewers(rules []CodeownersRule, changedFiles []string) []string {
 	for o, c := range counts {
 		sorted = append(sorted, ownerCount{o, c})
 	}
-	for i := 0; i < len(sorted); i++ {
-		for j := i + 1; j < len(sorted); j++ {
-			if sorted[j].count > sorted[i].count || (sorted[j].count == sorted[i].count && sorted[j].owner < sorted[i].owner) {
-				sorted[i], sorted[j] = sorted[j], sorted[i]
-			}
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].count != sorted[j].count {
+			return sorted[i].count > sorted[j].count
 		}
-	}
+		return sorted[i].owner < sorted[j].owner
+	})
 
 	result := make([]string, len(sorted))
 	for i, oc := range sorted {
@@ -137,15 +138,16 @@ func fetchFileContent(ctx context.Context, token, owner, repo, path string, http
 		return "", fmt.Errorf("unexpected status: %d", resp.StatusCode)
 	}
 
-	var buf strings.Builder
-	if _, err := buf.ReadFrom(resp.Body); err != nil {
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
 		return "", err
 	}
-	return buf.String(), nil
+	return string(body), nil
 }
 
 // matchPattern matches a CODEOWNERS pattern against a file path.
-// Supports: exact match, directory patterns ending in /, and glob patterns.
+// Supports: exact match, directory patterns ending in /, glob patterns,
+// and ** (doublestar) for matching across directories.
 func matchPattern(pattern, filePath string) bool {
 	// Directory pattern: "dir/" matches all files under dir.
 	if strings.HasSuffix(pattern, "/") {
@@ -157,6 +159,11 @@ func matchPattern(pattern, filePath string) bool {
 	// Pattern with leading / means anchored to repo root.
 	anchored := strings.HasPrefix(pattern, "/")
 	cleanPattern := strings.TrimPrefix(pattern, "/")
+
+	// Handle ** (doublestar) patterns: match zero or more directories.
+	if strings.Contains(cleanPattern, "**") {
+		return matchDoublestar(cleanPattern, filePath)
+	}
 
 	if anchored {
 		matched, _ := filepath.Match(cleanPattern, filePath)
@@ -176,6 +183,50 @@ func matchPattern(pattern, filePath string) bool {
 		return true
 	}
 
+	return false
+}
+
+// matchDoublestar handles patterns containing ** which match zero or more path segments.
+// For example, "docs/**/*.md" matches "docs/foo.md" and "docs/a/b/c.md".
+func matchDoublestar(pattern, filePath string) bool {
+	// Split pattern on "**" and match each segment.
+	parts := strings.SplitN(pattern, "**", 2)
+	prefix := parts[0]
+	suffix := strings.TrimPrefix(parts[1], "/")
+
+	// Prefix must match the start of the path.
+	if prefix != "" {
+		prefix = strings.TrimSuffix(prefix, "/")
+		if !strings.HasPrefix(filePath, prefix+"/") && filePath != prefix {
+			return false
+		}
+	}
+
+	// If no suffix after **, it matches everything under prefix.
+	if suffix == "" {
+		return true
+	}
+
+	// Try matching suffix against every possible subpath.
+	// e.g. for "docs/**/*.md" and "docs/a/b/file.md", try *.md against
+	// "a/b/file.md", "b/file.md", and "file.md".
+	remaining := filePath
+	if prefix != "" {
+		remaining = strings.TrimPrefix(filePath, prefix+"/")
+	}
+
+	// Try suffix match against the full remaining path and each progressively shorter subpath.
+	for {
+		if matched, _ := filepath.Match(suffix, remaining); matched {
+			return true
+		}
+		// Also try against just the basename for simple suffix patterns.
+		idx := strings.Index(remaining, "/")
+		if idx < 0 {
+			break
+		}
+		remaining = remaining[idx+1:]
+	}
 	return false
 }
 

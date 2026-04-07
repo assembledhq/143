@@ -11,9 +11,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
+	"mime"
+	"net"
 	"net/http"
 	"net/smtp"
+	"net/url"
 	"strings"
 	"time"
 
@@ -34,16 +38,16 @@ type DeliveryResult struct {
 
 // CycleOutput is the payload delivered to each destination after a project cycle.
 type CycleOutput struct {
-	ProjectID   uuid.UUID `json:"project_id"`
-	ProjectName string    `json:"project_name"`
-	CycleNumber int       `json:"cycle_number"`
-	Analysis    string    `json:"analysis"`
-	Summary     string    `json:"summary"`
-	TasksCreated   int    `json:"tasks_created"`
-	TasksCompleted int    `json:"tasks_completed"`
-	TasksFailed    int    `json:"tasks_failed"`
-	PRURLs      []string  `json:"pr_urls,omitempty"`
-	Timestamp   time.Time `json:"timestamp"`
+	ProjectID      uuid.UUID `json:"project_id"`
+	ProjectName    string    `json:"project_name"`
+	CycleNumber    int       `json:"cycle_number"`
+	Analysis       string    `json:"analysis"`
+	Summary        string    `json:"summary"`
+	TasksCreated   int       `json:"tasks_created"`
+	TasksCompleted int       `json:"tasks_completed"`
+	TasksFailed    int       `json:"tasks_failed"`
+	PRURLs         []string  `json:"pr_urls,omitempty"`
+	Timestamp      time.Time `json:"timestamp"`
 }
 
 // credentialResolver looks up org integration credentials.
@@ -133,6 +137,13 @@ func (s *Service) DeliverCycleOutput(ctx context.Context, orgID uuid.UUID, outpu
 	return results
 }
 
+// slackResponse is the JSON envelope returned by Slack API methods.
+// Slack returns HTTP 200 even on application errors; the `ok` field indicates success.
+type slackResponse struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
 // deliverSlack posts a formatted message to a Slack channel using the org's Slack token.
 func (s *Service) deliverSlack(ctx context.Context, orgID uuid.UUID, dest models.OutputDestination, output CycleOutput) error {
 	var cfg models.SlackOutputConfig
@@ -175,10 +186,21 @@ func (s *Service) deliverSlack(ctx context.Context, orgID uuid.UUID, dest models
 	}
 	defer resp.Body.Close()
 
+	respBody, _ := io.ReadAll(resp.Body)
+
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("slack API error: %s %s", resp.Status, string(respBody))
+		return fmt.Errorf("slack API HTTP error: %s %s", resp.Status, string(respBody))
 	}
+
+	// Slack returns HTTP 200 even on application errors — check the "ok" field.
+	var slackResp slackResponse
+	if err := json.Unmarshal(respBody, &slackResp); err != nil {
+		return fmt.Errorf("parse slack response: %w", err)
+	}
+	if !slackResp.OK {
+		return fmt.Errorf("slack API error: %s", slackResp.Error)
+	}
+
 	return nil
 }
 
@@ -200,13 +222,15 @@ func (s *Service) deliverEmail(ctx context.Context, dest models.OutputDestinatio
 	if subject == "" {
 		subject = fmt.Sprintf("[143] %s — Cycle #%d complete", output.ProjectName, output.CycleNumber)
 	}
+	// RFC 2047 Q-encode the subject to handle non-ASCII characters safely.
+	encodedSubject := mime.QEncoding.Encode("utf-8", subject)
 
 	body := formatEmailHTML(output)
 
 	msg := strings.Join([]string{
 		"From: " + s.smtpCfg.From,
 		"To: " + strings.Join(cfg.Recipients, ","),
-		"Subject: " + subject,
+		"Subject: " + encodedSubject,
 		"MIME-Version: 1.0",
 		"Content-Type: text/html; charset=UTF-8",
 		"",
@@ -285,11 +309,38 @@ func (s *Service) deliverNotion(ctx context.Context, orgID uuid.UUID, dest model
 	return nil
 }
 
+// validateWebhookURL checks that the URL is safe to call (HTTPS, no private IPs).
+func validateWebhookURL(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("webhook URL must use HTTPS (got %q)", u.Scheme)
+	}
+	host := u.Hostname()
+	// Block obviously private/loopback addresses.
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return fmt.Errorf("webhook URL must not point to a private or loopback address")
+		}
+	}
+	// Block localhost by name.
+	if host == "localhost" {
+		return fmt.Errorf("webhook URL must not point to localhost")
+	}
+	return nil
+}
+
 // deliverWebhook POSTs the cycle output as JSON to a configured URL.
 func (s *Service) deliverWebhook(ctx context.Context, dest models.OutputDestination, output CycleOutput) error {
 	var cfg models.WebhookOutputConfig
 	if err := json.Unmarshal(dest.Config, &cfg); err != nil {
 		return fmt.Errorf("parse webhook config: %w", err)
+	}
+
+	if err := validateWebhookURL(cfg.URL); err != nil {
+		return fmt.Errorf("webhook URL validation failed: %w", err)
 	}
 
 	jsonBody, _ := json.Marshal(output)
@@ -337,8 +388,8 @@ func formatSlackMessage(o CycleOutput) string {
 	fmt.Fprintf(&b, "Tasks: %d created, %d completed, %d failed\n", o.TasksCreated, o.TasksCompleted, o.TasksFailed)
 	if len(o.PRURLs) > 0 {
 		b.WriteString("\nPull Requests:\n")
-		for _, url := range o.PRURLs {
-			fmt.Fprintf(&b, "• %s\n", url)
+		for _, u := range o.PRURLs {
+			fmt.Fprintf(&b, "• %s\n", u)
 		}
 	}
 	return b.String()
@@ -351,11 +402,15 @@ func formatEmailHTML(o CycleOutput) string {
 		var prLinks strings.Builder
 		prLinks.WriteString("<h3 style='margin:16px 0 8px;font-size:14px;color:#18181b;'>Pull Requests</h3><ul style='margin:0;padding-left:20px;'>")
 		for _, u := range o.PRURLs {
-			fmt.Fprintf(&prLinks, "<li><a href='%s'>%s</a></li>", u, u)
+			escaped := html.EscapeString(u)
+			fmt.Fprintf(&prLinks, "<li><a href='%s'>%s</a></li>", escaped, escaped)
 		}
 		prLinks.WriteString("</ul>")
 		prSection = prLinks.String()
 	}
+
+	safeName := html.EscapeString(o.ProjectName)
+	safeSummary := html.EscapeString(o.Summary)
 
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html><head><meta charset="UTF-8"></head>
@@ -389,6 +444,6 @@ func formatEmailHTML(o CycleOutput) string {
 </table>
 </td></tr></table>
 </body></html>`,
-		o.ProjectName, o.CycleNumber, o.Timestamp.Format("Jan 2, 2006 3:04 PM"),
-		o.Summary, o.TasksCreated, o.TasksCompleted, o.TasksFailed, prSection)
+		safeName, o.CycleNumber, o.Timestamp.Format("Jan 2, 2006 3:04 PM"),
+		safeSummary, o.TasksCreated, o.TasksCompleted, o.TasksFailed, prSection)
 }

@@ -12,11 +12,12 @@ import (
 )
 
 type OutputDestinationHandler struct {
-	store *db.OutputDestinationStore
+	store        *db.OutputDestinationStore
+	projectStore *db.ProjectStore
 }
 
-func NewOutputDestinationHandler(store *db.OutputDestinationStore) *OutputDestinationHandler {
-	return &OutputDestinationHandler{store: store}
+func NewOutputDestinationHandler(store *db.OutputDestinationStore, projectStore *db.ProjectStore) *OutputDestinationHandler {
+	return &OutputDestinationHandler{store: store, projectStore: projectStore}
 }
 
 func (h *OutputDestinationHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -44,6 +45,14 @@ func (h *OutputDestinationHandler) Create(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project id")
 		return
+	}
+
+	// Verify the project belongs to this org.
+	if h.projectStore != nil {
+		if _, err := h.projectStore.GetByID(r.Context(), orgID, projectID); err != nil {
+			writeError(w, r, http.StatusNotFound, "PROJECT_NOT_FOUND", "project not found")
+			return
+		}
 	}
 
 	var body struct {

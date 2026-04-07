@@ -47,7 +47,7 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 	}
 	if services != nil && services.PM != nil {
 		w.Register(models.JobTypePMAnalyze, newPMAnalyzeHandler(stores, services, logger))
-		w.Register(models.JobTypeProjectCycle, newProjectCycleHandler(services, logger))
+		w.Register(models.JobTypeProjectCycle, newProjectCycleHandler(stores, services, logger))
 		w.Register(models.JobTypePMBootstrap, newOrgIDJobHandler("pm_bootstrap", services.PM.RunBootstrap, logger))
 		w.Register(models.JobTypePMContextRefresh, newOrgIDJobHandler("pm_context_refresh", services.PM.RunRefresh, logger))
 	}
@@ -244,7 +244,7 @@ func newPMAnalyzeHandler(stores *Stores, services *Services, logger zerolog.Logg
 }
 
 // project_cycle handler runs a focused PM analysis for a single scheduled project.
-func newProjectCycleHandler(services *Services, logger zerolog.Logger) JobHandler {
+func newProjectCycleHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
 			OrgID     string `json:"org_id"`
@@ -274,6 +274,33 @@ func newProjectCycleHandler(services *Services, logger zerolog.Logger) JobHandle
 				ProjectID: projectID,
 				Timestamp: time.Now().UTC(),
 			}
+
+			// Populate project details for richer output messages.
+			if stores != nil && stores.Projects != nil {
+				project, err := stores.Projects.GetByID(ctx, orgID, projectID)
+				if err == nil {
+					cycleOutput.ProjectName = project.Title
+					cycleOutput.TasksCompleted = project.CompletedTasks
+					cycleOutput.TasksFailed = project.FailedTasks
+					cycleOutput.Summary = project.Goal
+				} else {
+					logger.Warn().Err(err).Msg("failed to fetch project for cycle output")
+				}
+
+				// Collect PR URLs from tasks.
+				if stores.ProjectTasks != nil {
+					tasks, err := stores.ProjectTasks.ListByProject(ctx, orgID, projectID, db.ProjectTaskFilters{})
+					if err == nil {
+						for _, t := range tasks {
+							if t.PRURL != nil && *t.PRURL != "" {
+								cycleOutput.PRURLs = append(cycleOutput.PRURLs, *t.PRURL)
+							}
+						}
+						cycleOutput.TasksCreated = len(tasks)
+					}
+				}
+			}
+
 			results := services.OutputDelivery.DeliverCycleOutput(ctx, orgID, cycleOutput)
 			for _, r := range results {
 				if !r.Success {

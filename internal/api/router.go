@@ -175,7 +175,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	teamHandler := handlers.NewTeamHandler(userStore, authSessionStore, invitationStore, orgStore, cfg.FrontendURL, emailSender)
 
 	outputDestinationStore := db.NewOutputDestinationStore(pool)
-	outputDestinationHandler := handlers.NewOutputDestinationHandler(outputDestinationStore)
+	outputDestinationHandler := handlers.NewOutputDestinationHandler(outputDestinationStore, projectStore)
 
 	projectHandler := handlers.NewProjectHandler(projectStore, projectTaskStore, projectCycleStore, projectAttachmentStore, projectSpecStore)
 	projectHandler.SetJobStore(jobStore)

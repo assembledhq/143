@@ -58,6 +58,9 @@ func (s *OutputDestinationStore) ListByProject(ctx context.Context, orgID, proje
 		}
 		dests = append(dests, d)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate output destinations: %w", err)
+	}
 	return dests, nil
 }
 
@@ -76,6 +79,9 @@ func (s *OutputDestinationStore) ListEnabledByProject(ctx context.Context, orgID
 			return nil, fmt.Errorf("scan output destination: %w", err)
 		}
 		dests = append(dests, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate enabled output destinations: %w", err)
 	}
 	return dests, nil
 }
