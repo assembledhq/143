@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -77,13 +78,50 @@ func NewSessionHandler(
 	}
 }
 
+// encodeSessionCursor produces an opaque, base64-encoded cursor from the last
+// row's created_at and id. Format: "RFC3339Nano,uuid" → base64.
+func encodeSessionCursor(createdAt time.Time, id uuid.UUID) string {
+	raw := fmt.Sprintf("%s,%s", createdAt.UTC().Format(time.RFC3339Nano), id.String())
+	return base64.StdEncoding.EncodeToString([]byte(raw))
+}
+
+// decodeSessionCursor is the inverse of encodeSessionCursor.
+func decodeSessionCursor(cursor string) (time.Time, uuid.UUID, error) {
+	b, err := base64.StdEncoding.DecodeString(cursor)
+	if err != nil {
+		return time.Time{}, uuid.Nil, fmt.Errorf("invalid cursor encoding: %w", err)
+	}
+	parts := strings.SplitN(string(b), ",", 2)
+	if len(parts) != 2 {
+		return time.Time{}, uuid.Nil, fmt.Errorf("invalid cursor format")
+	}
+	t, err := time.Parse(time.RFC3339Nano, parts[0])
+	if err != nil {
+		return time.Time{}, uuid.Nil, fmt.Errorf("invalid cursor timestamp: %w", err)
+	}
+	id, err := uuid.Parse(parts[1])
+	if err != nil {
+		return time.Time{}, uuid.Nil, fmt.Errorf("invalid cursor id: %w", err)
+	}
+	return t, id, nil
+}
+
 func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
 	limit := queryInt(r, "limit", 50)
 	filters := db.SessionFilters{
-		Limit:  limit,
-		Cursor: r.URL.Query().Get("cursor"),
+		Limit: limit,
+	}
+
+	if cursor := r.URL.Query().Get("cursor"); cursor != "" {
+		t, id, err := decodeSessionCursor(cursor)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "invalid cursor")
+			return
+		}
+		filters.CursorTime = &t
+		filters.CursorID = &id
 	}
 
 	if statusParam := r.URL.Query().Get("status"); statusParam != "" {
@@ -129,8 +167,9 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var nextCursor string
-	if len(runs) > 0 && len(runs) == filters.Limit {
-		nextCursor = runs[len(runs)-1].ID.String()
+	if len(runs) > 0 && len(runs) == limit {
+		last := runs[len(runs)-1]
+		nextCursor = encodeSessionCursor(last.CreatedAt, last.ID)
 	}
 
 	writeJSON(w, http.StatusOK, models.ListResponse[models.Session]{
