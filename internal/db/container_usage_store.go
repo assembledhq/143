@@ -114,6 +114,8 @@ func (s *ContainerUsageStore) GetUsageSummary(ctx context.Context, orgID uuid.UU
 	}
 
 	// Peak concurrent containers (sampled by overlapping time ranges).
+	// NOTE: This self-join is O(n^2) in the number of events per org per period.
+	// Acceptable for <10K events/period; replace with a rollup table at higher scale.
 	var peakConcurrent int
 	err = s.db.QueryRow(ctx, `
 		SELECT COALESCE(MAX(concurrent), 0)

@@ -7,7 +7,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
-	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -38,10 +38,10 @@ func (t *UsageTracker) ContainerStarted(ctx context.Context, orgID, sessionID uu
 	orgIDStr := orgID.String()
 
 	// Prometheus metrics (always emitted, even if store is nil).
-	middleware.ContainerStartsTotal.WithLabelValues(orgIDStr, sandbox.Provider, cfg.Image).Inc()
-	middleware.ContainersActive.WithLabelValues(orgIDStr).Inc()
-	middleware.ContainerCPUAllocated.WithLabelValues(orgIDStr).Observe(cfg.CPULimit)
-	middleware.ContainerMemoryAllocatedMB.WithLabelValues(orgIDStr).Observe(float64(cfg.MemoryLimitMB))
+	metrics.ContainerStartsTotal.WithLabelValues(orgIDStr, sandbox.Provider, cfg.Image).Inc()
+	metrics.ContainersActive.WithLabelValues(orgIDStr).Inc()
+	metrics.ContainerCPUAllocated.WithLabelValues(orgIDStr).Observe(cfg.CPULimit)
+	metrics.ContainerMemoryAllocatedMB.WithLabelValues(orgIDStr).Observe(float64(cfg.MemoryLimitMB))
 
 	// DB persistence.
 	if t.store != nil {
@@ -76,10 +76,10 @@ func (t *UsageTracker) ContainerStopped(ctx context.Context, orgID uuid.UUID, ev
 	durationMin := durationSec / 60.0
 
 	// Prometheus metrics.
-	middleware.ContainersActive.WithLabelValues(orgIDStr).Dec()
-	middleware.ContainerStopsTotal.WithLabelValues(orgIDStr, "", exitReason).Inc()
-	middleware.ContainerDurationSeconds.WithLabelValues(orgIDStr, exitReason).Observe(durationSec)
-	middleware.ContainerMinutesTotal.WithLabelValues(orgIDStr).Add(durationMin)
+	metrics.ContainersActive.WithLabelValues(orgIDStr).Dec()
+	metrics.ContainerStopsTotal.WithLabelValues(orgIDStr, exitReason).Inc()
+	metrics.ContainerDurationSeconds.WithLabelValues(orgIDStr, exitReason).Observe(durationSec)
+	metrics.ContainerMinutesTotal.WithLabelValues(orgIDStr).Add(durationMin)
 
 	// DB persistence.
 	if t.store != nil {

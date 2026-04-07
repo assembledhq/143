@@ -51,6 +51,11 @@ func (h *UsageHandler) GetSummary(w http.ResponseWriter, r *http.Request) {
 		end = parsed
 	}
 
+	if !start.Before(end) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "start must be before end")
+		return
+	}
+
 	summary, err := h.usageStore.GetUsageSummary(r.Context(), orgID, start, end)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "INTERNAL", "failed to fetch usage summary", err)

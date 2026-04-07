@@ -103,7 +103,7 @@ func TestUsageHandler_ListBySession(t *testing.T) {
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", sessionID.String())
 	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
-	ctx = context.WithValue(ctx, middleware.OrgIDKey, orgID)
+	ctx = middleware.WithOrgID(ctx, orgID)
 	req = req.WithContext(ctx)
 	rr := httptest.NewRecorder()
 

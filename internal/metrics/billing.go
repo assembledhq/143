@@ -1,4 +1,4 @@
-package middleware
+package metrics
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
@@ -6,6 +6,10 @@ import (
 )
 
 // Billing-related Prometheus metrics for container usage observability.
+//
+// NOTE: org_id is used as a label dimension. This is acceptable for deployments
+// with up to ~100 orgs. For higher cardinality, remove org_id from labels and
+// rely on the container_usage_events DB table for per-org queries.
 var (
 	// ContainerStartsTotal counts sandbox container creation events.
 	ContainerStartsTotal = promauto.NewCounterVec(
@@ -22,7 +26,7 @@ var (
 			Name: "container_stops_total",
 			Help: "Total number of sandbox containers stopped",
 		},
-		[]string{"org_id", "provider", "exit_reason"},
+		[]string{"org_id", "exit_reason"},
 	)
 
 	// ContainersActive tracks the number of currently running sandbox containers.
