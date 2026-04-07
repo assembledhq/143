@@ -128,3 +128,47 @@ func TestSessionLogStore_ListByRunIDSince_Success(t *testing.T) {
 	require.Equal(t, "doing something", logs[0].Message, "returned log entry should have the correct message")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
+
+func TestSessionLogStore_ListByThread(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionLogStore(mock)
+	orgID := uuid.New()
+	threadID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.thread_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(logColumns).
+				AddRow(newLogRow(1, sessionID, now)...),
+		)
+
+	logs, err := store.ListByThread(context.Background(), orgID, threadID)
+	require.NoError(t, err, "ListByThread should not return an error")
+	require.Len(t, logs, 1, "should return the log entry")
+	require.Equal(t, int64(1), logs[0].ID)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionLogStore_DeleteExpired(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionLogStore(mock)
+
+	mock.ExpectQuery("SELECT delete_expired_session_logs").
+		WithArgs(30).
+		WillReturnRows(pgxmock.NewRows([]string{"delete_expired_session_logs"}).AddRow(int64(100)))
+
+	deleted, err := store.DeleteExpired(context.Background(), 30)
+	require.NoError(t, err, "DeleteExpired should not return an error")
+	require.Equal(t, int64(100), deleted, "should return the number of deleted rows")
+	require.NoError(t, mock.ExpectationsWereMet())
+}

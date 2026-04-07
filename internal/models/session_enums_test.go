@@ -70,6 +70,38 @@ func TestSandboxState_Validate(t *testing.T) {
 	}
 }
 
+func TestThreadStatus_Validate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		value   ThreadStatus
+		wantErr bool
+	}{
+		{name: "pending is valid", value: ThreadStatusPending, wantErr: false},
+		{name: "running is valid", value: ThreadStatusRunning, wantErr: false},
+		{name: "idle is valid", value: ThreadStatusIdle, wantErr: false},
+		{name: "awaiting_input is valid", value: ThreadStatusAwaitingInput, wantErr: false},
+		{name: "completed is valid", value: ThreadStatusCompleted, wantErr: false},
+		{name: "failed is valid", value: ThreadStatusFailed, wantErr: false},
+		{name: "cancelled is valid", value: ThreadStatusCancelled, wantErr: false},
+		{name: "empty is invalid", value: "", wantErr: true},
+		{name: "unknown is invalid", value: "unknown", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := tt.value.Validate()
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestMessageRole_Validate(t *testing.T) {
 	t.Parallel()
 
