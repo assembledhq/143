@@ -29,10 +29,11 @@ func NewSessionStore(db DBTX) *SessionStore {
 type SessionFilters struct {
 	Statuses           []models.SessionStatus // When non-empty, filter to sessions matching any of these statuses.
 	Limit              int
-	Cursor             string
-	AdHocOnly          bool      // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
-	RepositoryID       uuid.UUID // When non-zero, filter sessions by repository via issues table.
-	TriggeredByUserID  uuid.UUID // When non-zero, filter sessions to those triggered by this user.
+	CursorTime         *time.Time // Cursor-based pagination: created_at of the last item.
+	CursorID           *uuid.UUID // Cursor-based pagination: id of the last item.
+	AdHocOnly          bool       // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
+	RepositoryID       uuid.UUID  // When non-zero, filter sessions by repository via issues table.
+	TriggeredByUserID  uuid.UUID  // When non-zero, filter sessions to those triggered by this user.
 }
 
 // sessionSelectColumns is used for single-session queries where we want all fields.
@@ -128,17 +129,15 @@ func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters S
 	if filters.AdHocOnly {
 		query += ` AND pm_plan_id IS NULL`
 	}
-	if filters.Cursor != "" {
-		cursorID, err := uuid.Parse(filters.Cursor)
-		if err == nil {
-			query += ` AND id < @cursor_id`
-			args["cursor_id"] = cursorID
-		}
+	if filters.CursorTime != nil && filters.CursorID != nil {
+		query += ` AND (created_at, id) < (@cursor_time, @cursor_id)`
+		args["cursor_time"] = *filters.CursorTime
+		args["cursor_id"] = *filters.CursorID
 	}
 
-	// Uses partial index idx_sessions_deleted (org_id, created_at DESC)
+	// Uses partial index idx_sessions_deleted (org_id, created_at DESC, id DESC)
 	// WHERE deleted_at IS NULL for efficient filtering and sort.
-	query += ` ORDER BY created_at DESC`
+	query += ` ORDER BY created_at DESC, id DESC`
 
 	limit := filters.Limit
 	if limit <= 0 || limit > 100 {

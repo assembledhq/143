@@ -77,13 +77,40 @@ func NewSessionHandler(
 	}
 }
 
+// encodeSessionCursor produces an opaque cursor from the last row's created_at and id.
+func encodeSessionCursor(createdAt time.Time, id uuid.UUID) string {
+	return encodeCursor(createdAt, id.String())
+}
+
+// decodeSessionCursor is the inverse of encodeSessionCursor.
+func decodeSessionCursor(cursor string) (time.Time, uuid.UUID, error) {
+	t, rawID, err := decodeCursor(cursor)
+	if err != nil {
+		return time.Time{}, uuid.Nil, err
+	}
+	id, err := uuid.Parse(rawID)
+	if err != nil {
+		return time.Time{}, uuid.Nil, fmt.Errorf("invalid cursor id: %w", err)
+	}
+	return t, id, nil
+}
+
 func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
 	limit := queryInt(r, "limit", 50)
 	filters := db.SessionFilters{
-		Limit:  limit,
-		Cursor: r.URL.Query().Get("cursor"),
+		Limit: limit,
+	}
+
+	if cursor := r.URL.Query().Get("cursor"); cursor != "" {
+		t, id, err := decodeSessionCursor(cursor)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "invalid cursor")
+			return
+		}
+		filters.CursorTime = &t
+		filters.CursorID = &id
 	}
 
 	if statusParam := r.URL.Query().Get("status"); statusParam != "" {
@@ -129,8 +156,9 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var nextCursor string
-	if len(runs) > 0 && len(runs) == filters.Limit {
-		nextCursor = runs[len(runs)-1].ID.String()
+	if len(runs) > 0 && len(runs) == limit {
+		last := runs[len(runs)-1]
+		nextCursor = encodeSessionCursor(last.CreatedAt, last.ID)
 	}
 
 	writeJSON(w, http.StatusOK, models.ListResponse[models.Session]{
