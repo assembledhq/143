@@ -6,7 +6,7 @@ type PageContainerSize = "narrow" | "default" | "wide" | "full";
 const sizeClassMap: Record<PageContainerSize, string> = {
   narrow: "max-w-3xl",
   default: "max-w-5xl",
-  wide: "max-w-5xl",
+  wide: "max-w-7xl",
   full: "max-w-none",
 };
 

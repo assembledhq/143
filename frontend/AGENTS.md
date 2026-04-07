@@ -84,14 +84,14 @@ Use `PageContainer` (`src/components/page-container.tsx`) for ALL dashboard page
 </PageContainer>
 ```
 
-**All pages MUST use the same `size="default"` (max-w-5xl)** to ensure consistent margins across the app. This is critical — using different sizes creates jarring layout shifts when navigating between pages.
+Available sizes:
 
 - `narrow` (max-w-3xl): Only for focused single-column forms/modals
-- `default` (max-w-5xl): **Standard for all dashboard pages** — use this
-- `wide` (max-w-5xl): Alias for default (kept for backwards compat)
+- `default` (max-w-5xl): **Standard for most dashboard pages** — use this
+- `wide` (max-w-7xl): For data-heavy pages (tables, logs) that benefit from extra horizontal space
 - `full` (max-w-none): Only for true full-bleed layouts
 
-**NEVER use `size="wide"` or `size="narrow"` for regular dashboard pages.** The outer `<div className="space-y-6">` is mandatory for consistent vertical rhythm.
+Use `size="default"` for most pages. Use `size="wide"` for pages dominated by data tables or tabular content. The outer `<div className="space-y-6">` is mandatory for consistent vertical rhythm.
 
 ### Page Header
 
@@ -423,7 +423,7 @@ Use the `tags` parameter to add searchable context (feature name, endpoint, comp
 3. **Ad-hoc page headers** — Never use `<h1>` directly. Use `PageHeader` component.
 4. **Non-responsive grids** — Never `grid grid-cols-2` without `md:` breakpoint.
 5. **Missing PageContainer** — Every dashboard page must be wrapped in `PageContainer`.
-6. **Inconsistent container sizes** — All dashboard pages MUST use `size="default"`. Never use `size="wide"` or `size="narrow"` for regular pages — this creates different margins between pages.
+6. **Inconsistent container sizes** — Use `size="default"` for most pages and `size="wide"` for data-table-heavy pages. Never use `size="narrow"` for regular dashboard pages.
 7. **Inconsistent row padding** — Always `py-3.5 px-4` for list rows.
 8. **Missing dark mode** — Banners/alerts using hardcoded Tailwind colors (e.g., `bg-blue-50`, `border-green-200`) need `dark:` variant classes. Semantic tokens (`bg-destructive/10`, `bg-primary/10`) adapt automatically.
 9. **Flat cards** — Cards should always have `shadow-sm` (provided by the Card component). Don't override with `shadow-none`.
