@@ -3,6 +3,7 @@ package preview
 import (
 	"context"
 	"fmt"
+	"net"
 	"testing"
 	"time"
 
@@ -48,6 +49,12 @@ func (m *mockProvider) PreviewStatus(_ context.Context, _ string) (*PreviewStatu
 	}
 	return m.statusSnap, nil
 }
+
+type mockStream struct {
+	net.Conn
+}
+
+func (m *mockStream) Close() error { return nil }
 
 type mockInspector struct {
 	closed bool
@@ -768,6 +775,57 @@ func TestDialPreview_NotActive(t *testing.T) {
 	_, err = mgr.DialPreview(context.Background(), orgID, previewID)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not active")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDialPreview_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	stream := &mockStream{}
+	mgr := newTestManager(mock, &mockProvider{dialStream: stream})
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-abc", now)...),
+		)
+
+	result, err := mgr.DialPreview(context.Background(), orgID, previewID)
+	require.NoError(t, err)
+	require.Equal(t, stream, result)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDialPreview_InstanceNotFound(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+
+	_, err = mgr.DialPreview(context.Background(), orgID, previewID)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "get preview instance")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
