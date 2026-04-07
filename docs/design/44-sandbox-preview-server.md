@@ -2062,7 +2062,7 @@ Phase 1 should support only:
 21. Multi-viewport capture: simultaneous screenshots at mobile (375px), tablet (768px), and desktop (1280px) viewports
 22. PR preview integration: on-demand preview launch from PR comment, single updating PR comment with preview state and screenshot thumbnails, preview artifacts preserved after sandbox teardown
 23. Filesystem snapshot caching: cache and restore sandbox filesystem state (node_modules, build artifacts) after successful startup, keyed by lockfile + base commit + config, to skip the Build phase on subsequent preview starts
-25. Progressive preview: show frontend preview before backend is fully ready (opt-in per config)
+24. Progressive preview: show frontend preview before backend is fully ready (opt-in per config)
 
 Phase 1 should explicitly exclude:
 

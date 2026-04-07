@@ -1,0 +1,48 @@
+{
+  "name": "manado",
+  "primary": "frontend",
+  "services": {
+    "frontend": {
+      "command": ["npm", "run", "dev"],
+      "cwd": "frontend",
+      "port": 3000,
+      "env": {
+        "API_PROXY_TARGET": "http://localhost:8080",
+        "NODE_OPTIONS": "--max-old-space-size=768"
+      },
+      "ready": {
+        "http_path": "/",
+        "timeout_seconds": 120
+      }
+    },
+    "server": {
+      "command": ["go", "run", "./cmd/server"],
+      "port": 8080,
+      "env": {
+        "MODE": "all",
+        "LOG_LEVEL": "info",
+        "SESSION_SECRET": "preview-dogfood-secret"
+      },
+      "ready": {
+        "http_path": "/api/v1/health",
+        "timeout_seconds": 90
+      }
+    }
+  },
+  "infrastructure": {
+    "db": {
+      "template": "postgres-17",
+      "init_script": ".143/seed.sql",
+      "inject_env": {
+        "DATABASE_URL": "postgres://{{username}}:{{password}}@{{host}}:{{port}}/{{database}}?sslmode=disable"
+      },
+      "inject_into": ["server"]
+    }
+  },
+  "credentials": {
+    "mode": "none"
+  },
+  "network": {
+    "mode": "restricted"
+  }
+}

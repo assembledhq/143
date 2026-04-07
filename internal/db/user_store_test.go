@@ -407,6 +407,92 @@ func TestUserStore_GetByGitHubID(t *testing.T) {
 	}
 }
 
+func TestUserStore_ListByOrg(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewUserStore(mock)
+	orgID := uuid.New()
+	userID1 := uuid.New()
+	userID2 := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM users WHERE org_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(userColumns).
+				AddRow(userID1, orgID, "alice@example.com", "Alice", "admin", nil, nil, nil, nil, nil, now).
+				AddRow(userID2, orgID, "bob@example.com", "Bob", "member", nil, nil, nil, nil, nil, now),
+		)
+
+	users, err := store.ListByOrg(context.Background(), orgID)
+	require.NoError(t, err, "ListByOrg should not return an error")
+	require.Len(t, users, 2, "should return both users")
+	require.Equal(t, "Alice", users[0].Name)
+	require.Equal(t, "Bob", users[1].Name)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestUserStore_UpdateRole(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		rowsAffected int64
+		expectErr    bool
+	}{
+		{name: "success", rowsAffected: 1, expectErr: false},
+		{name: "user not found", rowsAffected: 0, expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err)
+			defer mock.Close()
+
+			store := NewUserStore(mock)
+
+			mock.ExpectExec("UPDATE users SET role").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rowsAffected))
+
+			err = store.UpdateRole(context.Background(), uuid.New(), uuid.New(), "admin")
+			if tt.expectErr {
+				require.Error(t, err)
+				require.True(t, errors.Is(err, pgx.ErrNoRows))
+			} else {
+				require.NoError(t, err)
+			}
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestUserStore_CountAdmins(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewUserStore(mock)
+
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(3))
+
+	count, err := store.CountAdmins(context.Background(), uuid.New())
+	require.NoError(t, err, "CountAdmins should not return an error")
+	require.Equal(t, 3, count, "should return the correct admin count")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestUserStore_Delete(t *testing.T) {
 	t.Parallel()
 
