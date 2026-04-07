@@ -287,6 +287,108 @@ func TestSessionHandler_List_CommaSeparatedStatuses(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionCursorRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC().Truncate(time.Nanosecond)
+	id := uuid.New()
+
+	encoded := encodeSessionCursor(now, id)
+	decodedTime, decodedID, err := decodeSessionCursor(encoded)
+	require.NoError(t, err)
+	require.True(t, now.Equal(decodedTime), "decoded time should match")
+	require.Equal(t, id, decodedID, "decoded ID should match")
+}
+
+func TestDecodeSessionCursor_Invalid(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		cursor string
+	}{
+		{name: "not base64", cursor: "!!!invalid!!!"},
+		{name: "missing comma", cursor: "bm9jb21tYQ=="},                                                     // "nocomma"
+		{name: "bad timestamp", cursor: "YmFkdGltZSwwMTIzNDU2Ny04OWFiLWNkZWYtMDEyMy00NTY3ODlhYmNkZWY="}, // "badtime,..."
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, _, err := decodeSessionCursor(tt.cursor)
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestSessionHandler_List_WithCursor(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	now := time.Now()
+	runID := uuid.New()
+	issueID := uuid.New()
+	cursorTime := now.Add(-time.Hour)
+	cursorID := uuid.New()
+	cursor := encodeSessionCursor(cursorTime, cursorID)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id .+ AND \\(created_at, id\\) <").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).AddRow(
+				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
+				nil, nil, nil, nil,
+				nil, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil, nil,
+				nil, 0, nil, "none", nil,
+				nil, nil, nil, nil, nil, nil, nil, now,
+			),
+		)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions?cursor="+cursor, nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.List(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "should return 200 with cursor")
+
+	var resp models.ListResponse[models.Session]
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err, "response body should be valid JSON")
+	require.Equal(t, 1, len(resp.Data), "should return sessions after cursor")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_List_InvalidCursor(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions?cursor=invalid", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.List(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "should return 400 for invalid cursor")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionHandler_Get(t *testing.T) {
 	t.Parallel()
 
