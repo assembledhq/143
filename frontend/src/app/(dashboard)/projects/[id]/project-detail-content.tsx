@@ -3,10 +3,13 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
+  AlertTriangle,
+  Clock,
   FileText,
   GitPullRequest,
   Play,
   Settings,
+  Target,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -291,6 +294,8 @@ export function ProjectDetailContent({ id }: { id: string }) {
 
   const runningCount = tasks.filter((t) => t.status === "running").length;
   const prCount = tasks.filter((t) => t.pr_url).length;
+  const blockedTasks = tasks.filter((t) => t.status === "failed" || t.status === "blocked");
+  const lastActivity = project.updated_at || project.created_at;
 
   return (
     <div className="p-6 space-y-6">
@@ -327,6 +332,41 @@ export function ProjectDetailContent({ id }: { id: string }) {
           />
         </div>
       </div>
+
+      {/* At a glance summary */}
+      <Card>
+        <CardContent className="py-4 space-y-3">
+          {project.goal && (
+            <div className="flex gap-2">
+              <Target className="h-4 w-4 mt-0.5 flex-shrink-0 text-muted-foreground" />
+              <p className="text-sm text-foreground line-clamp-2">{project.goal}</p>
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-muted-foreground">
+            <span>
+              {project.completed_tasks} of {project.total_tasks} tasks complete
+              {project.failed_tasks > 0 && (
+                <span className="text-red-600 dark:text-red-400"> &middot; {project.failed_tasks} failed</span>
+              )}
+            </span>
+
+            {blockedTasks.length > 0 && (
+              <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400">
+                <AlertTriangle className="h-3 w-3" />
+                {blockedTasks.length} {blockedTasks.length === 1 ? "task needs" : "tasks need"} attention
+              </span>
+            )}
+
+            {lastActivity && (
+              <span className="inline-flex items-center gap-1">
+                <Clock className="h-3 w-3" />
+                Last activity {new Date(lastActivity).toLocaleDateString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+              </span>
+            )}
+          </div>
+        </CardContent>
+      </Card>
 
       <Tabs defaultValue="work">
         <TabsList>
