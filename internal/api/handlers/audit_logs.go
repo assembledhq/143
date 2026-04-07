@@ -2,12 +2,10 @@ package handlers
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
@@ -33,28 +31,18 @@ func NewAuditLogHandler(store auditLogReader) *AuditLogHandler {
 	return &AuditLogHandler{store: store}
 }
 
-// encodeCursor produces an opaque, base64-encoded cursor from the last row's
-// created_at and id. Format: "RFC3339Nano,id" → base64.
+// encodeAuditCursor produces an opaque cursor from the last row's created_at and id.
 func encodeAuditCursor(createdAt time.Time, id int64) string {
-	raw := fmt.Sprintf("%s,%d", createdAt.UTC().Format(time.RFC3339Nano), id)
-	return base64.StdEncoding.EncodeToString([]byte(raw))
+	return encodeCursor(createdAt, strconv.FormatInt(id, 10))
 }
 
 // decodeAuditCursor is the inverse of encodeAuditCursor.
 func decodeAuditCursor(cursor string) (time.Time, int64, error) {
-	b, err := base64.StdEncoding.DecodeString(cursor)
+	t, rawID, err := decodeCursor(cursor)
 	if err != nil {
-		return time.Time{}, 0, fmt.Errorf("invalid cursor encoding: %w", err)
+		return time.Time{}, 0, err
 	}
-	parts := strings.SplitN(string(b), ",", 2)
-	if len(parts) != 2 {
-		return time.Time{}, 0, fmt.Errorf("invalid cursor format")
-	}
-	t, err := time.Parse(time.RFC3339Nano, parts[0])
-	if err != nil {
-		return time.Time{}, 0, fmt.Errorf("invalid cursor timestamp: %w", err)
-	}
-	id, err := strconv.ParseInt(parts[1], 10, 64)
+	id, err := strconv.ParseInt(rawID, 10, 64)
 	if err != nil {
 		return time.Time{}, 0, fmt.Errorf("invalid cursor id: %w", err)
 	}
