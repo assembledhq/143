@@ -1,448 +1,430 @@
-# 45 - Global Search & Command Palette
+# 45 - Global Command Palette
 
-> **Status:** Proposed | **Last reviewed:** 2026-04-07
+> **Status:** Not Started | **Last reviewed:** 2026-04-06
+>
+> **Depends on:** [03-frontend.md](03-frontend.md), [34-repo-ribbons-nav.md](34-repo-ribbons-nav.md)
 
 ## Problem
 
-For a team of 50, discoverability is everything. Today, there is no `Cmd+K` command palette, no search bar, and no way to quickly jump to a session, project, or setting. Users must navigate through sidebar clicks and dropdown menus to reach anything.
+The app already assumes keyboard-first usage in multiple places, but there is still no single global entry point for navigation, search, and quick actions.
 
-Settings are buried behind the user avatar dropdown in the sidebar (General, Integrations, Coding Agents, LLM, Autopilot Settings, Evals, Team, Audit Log). There is no unified way to search across entities (sessions, projects, repositories) or discover available actions.
+Today a user must:
 
-This is table stakes for developer tools and directly impacts daily efficiency.
+- click through the sidebar to reach major surfaces
+- open the avatar menu to discover settings destinations
+- manually scan Sessions or Projects to jump to a specific item
+- use the separate repo context switcher for repository scope changes
+
+That is workable for first-run exploration, but not for daily usage. In a multi-repo, agent-heavy app, this creates too much UI travel and too little discoverability.
+
+This is especially visible because [03-frontend.md](03-frontend.md) already establishes `Cmd+K` as a cross-cutting UX pattern, but the product does not yet implement it.
 
 ## Design Goal
 
-Provide a single, keyboard-first entry point that lets any user:
+Provide a single palette that lets a user:
 
-- Navigate to any page in under two keystrokes
-- Search across sessions, projects, and repositories by name
-- Discover settings and actions without memorizing menu locations
-- Execute quick actions (create session, switch repo context, toggle theme)
+- open from any authenticated dashboard page with `Cmd+K` / `Ctrl+K`
+- navigate to core pages and settings without hunting through menus
+- jump directly to sessions and projects
+- switch repository context without leaving the keyboard
+- launch a new manual session from the current query when no exact match exists
 
-## Core Principles
+The palette is not a second sidebar and not a mini page builder. It is a fast control surface for navigation, lightweight actions, and entity jump-to.
 
-### 1. Instant and keyboard-first
+## Principles
 
-The palette opens with `Cmd+K` (Mac) or `Ctrl+K` (Windows/Linux) from any authenticated page. No mouse required. Arrow keys navigate, Enter selects, Escape closes.
+### 1. Keyboard-first, always reachable
 
-### 2. Static actions are always available
+`Cmd+K` / `Ctrl+K` must open the palette regardless of where focus currently is — including inside `input`, `textarea`, `select`, and content-editable regions. This matches the convention established by Linear, VS Code, GitHub, and Slack. Users often want the palette most when they're already typing in a search box or form field. Suppressing the shortcut in those contexts would break the "always available" contract.
 
-Navigation items, settings pages, and quick actions appear immediately on open — before the user types anything. Typing filters them client-side with fuzzy matching.
+The palette itself must not consume normal typing when it is closed. When open, `Escape` closes it and restores focus to the previously active element.
 
-### 3. Search is progressive
+### 2. Empty-state useful, typed-state precise
 
-Static items filter instantly. Dynamic entity search (sessions, projects) fires only after 2+ characters with a 200ms debounce. Results augment the static list, never replace it.
+Opening the palette with no query should still be valuable. The default view should show high-signal actions, recent items, and repository switching. Typing should narrow results quickly and predictably.
 
-### 4. Minimal footprint
+### 3. Static actions are instant; dynamic search is additive
 
-No new context providers, no global state stores, no new dependencies beyond `cmdk`. The palette is self-contained: one component mounted in the authenticated layout.
+Navigation, settings, and quick actions appear immediately on open and are filtered client-side. Dynamic entity results augment the static actions after the user types at least 2 characters.
 
----
+### 4. Repository context is first-class
 
-## Technology
+This app already has a global repo scope model via the `repo` URL param and `RepoContextSwitcher`. The command palette must integrate with that model, not invent a second context system.
 
-**[cmdk](https://github.com/pacocoursey/cmdk)** via shadcn/ui's `Command` component.
+### 5. One mounted surface, no parallel state model
 
-- `cmdk` is the standard React command palette primitive (used by Vercel, Linear, Raycast)
-- shadcn/ui provides a pre-styled `Command` wrapper built on cmdk + Radix Dialog
-- Integrates with the existing Tailwind CSS variables, dark mode, and "new-york" style
+The palette should be mounted once in `AuthenticatedLayout` and controlled there. Do not introduce a separate global provider or duplicate state tree unless implementation pressure proves it necessary.
 
-Install:
+### 6. AI-forward means action, not novelty
 
-```bash
-npm install cmdk
-npx shadcn@latest add command
-```
+The most useful AI-native behavior is not a chatbot inside the palette. It is letting the user turn an unmatched query into work: "Start manual session: <query>" in the current repository context.
 
-This generates `src/components/ui/command.tsx` — styled wrappers around `CommandDialog`, `CommandInput`, `CommandList`, `CommandGroup`, `CommandItem`, `CommandEmpty`.
+## Scope
 
----
+### In scope for MVP
+
+- global open/close shortcut
+- static navigation and settings actions
+- direct session and project search
+- repository context switching
+- recent items
+- "start manual session from query" action
+
+### Explicitly out of scope for MVP
+
+- full-text search across logs, diffs, or audit history
+- nested multi-step command trees
+- cross-device synced recents
+- freeform AI chat inside the palette dialog
+
+## UX Model
+
+### Entry points
+
+- `Cmd+K` on macOS, `Ctrl+K` on Windows/Linux
+- a visible palette trigger in the sidebar/header area for discoverability and mouse users
+
+The trigger should use shadcn/ui primitives, not a raw `<button>`. In this repo that means a `Button`-based trigger styled like a compact utility control.
+
+### Default view on open
+
+When the query is empty, show these groups in order:
+
+1. `Recent`
+2. `Switch Repository`
+3. `Navigation`
+4. `Settings`
+5. `Quick Actions`
+
+This ordering makes the empty state useful for both power users and occasional users.
+
+### Query behavior
+
+- Static items filter immediately via cmdk's client-side matching.
+- Dynamic entity search starts at 2+ characters.
+- Use a short deferred query window so typing stays responsive without firing on every keystroke.
+- Dynamic results appear above static groups, but static groups remain visible.
+
+### Result ranking
+
+cmdk supports a custom `filter` function. Use it to implement recent-first, frequency-aware ranking rather than purely alphabetical matching:
+
+1. Exact prefix matches rank highest.
+2. Items the user has visited recently (from the recent-items list) rank above cold matches.
+3. Within a tie, items with more recent activity (e.g., session updated more recently) rank higher.
+
+This makes the palette feel predictive rather than encyclopedic.
+
+### Keyboard shortcut hints
+
+Static action rows should display shortcut hints on the right side of the row when a keyboard shortcut exists for that action (e.g., `G then S` for "Go to Sessions"). This makes the palette double as a shortcut discovery surface and helps users graduate from palette usage to direct shortcuts over time. Only display hints for shortcuts that are actually registered in the app — do not show aspirational shortcuts.
+
+### Result anatomy
+
+Each dynamic result row should include enough context to disambiguate entities in a multi-repo product:
+
+- primary label: title or best human-readable fallback
+- secondary label: repo short name
+- state badge: session status or project status
+- optional metadata: updated time or task counts
+
+Avoid raw UUID-only rows unless there is no better label.
+
+### No-result behavior
+
+If the user typed a query and there are no matching entities or actions:
+
+- show a clear empty state
+- offer `Start manual session: "<query>"` as the primary action
+- preserve current repo context when launching that session flow
+
+That keeps the palette useful even when search misses.
+
+## Information Architecture
+
+### Static groups
+
+The static actions must match the current route structure in the repo, not an abstract future sitemap.
+
+#### Navigation
+
+Sidebar-primary pages (these match the current sidebar `navItems` in `authenticated-layout.tsx`):
+
+- `Autopilot` → `/autopilot`
+- `Sessions` → `/sessions`
+- `Projects` → `/projects`
+
+Palette-only pages (these routes exist but are not in the sidebar — the palette is the primary keyboard discovery path for them, so labels and icons must be clear):
+
+- `Analytics` → `/analytics`
+- `Costs` → `/costs`
+- `Automations` → `/automations`
+
+#### Settings and admin destinations
+
+- `General` → `/settings`
+- `Integrations` → `/integrations`
+- `Coding agents` → `/agent`
+- `LLM` → `/llm`
+- `Autopilot settings` → `/settings/autopilot`
+- `Evals` → `/settings/evals`
+- `Team` → `/team`
+- `Audit log` → `/settings/audit-log` (`admin` only)
+
+**Role-based filtering:** Items marked `admin` only must be excluded from the palette for non-admin users. Read `user.role` from the existing `useAuth()` hook (already available in `AuthenticatedLayout`) and filter the static action list before passing it to cmdk. Do not render admin items and hide them with CSS — omit them from the data entirely so they are not reachable via keyboard navigation or screen readers.
+
+#### Quick actions
+
+- `New session` → `/sessions/new`
+- `New project` → `/projects/new`
+- `Create eval task` → `/settings/evals/new`
+- `Log out` → imperative action via existing auth hook
+
+### Dynamic groups
+
+#### Sessions
+
+Search across session title first, with fallback matching against related issue title where available.
+
+#### Projects
+
+Search across project title and goal.
+
+#### Repositories
+
+Do not make repository switching a phase-4 add-on. It is part of the global navigation model already and should be present from the first version.
+
+Repository rows should mirror the existing `RepoContextSwitcher` summary model:
+
+- repo full name
+- active session count
+- most urgent latest status dot
+
+Selecting a repository updates the shared `repo` query state using the same `nuqs` model as the existing switcher.
 
 ## Architecture
 
-```
-src/
+### Mount point
+
+Mount a single `<CommandPalette />` inside [frontend/src/components/authenticated-layout.tsx](/Users/wangjohn/conductor/workspaces/143/managua-v2/frontend/src/components/authenticated-layout.tsx).
+
+That keeps the palette available on every authenticated dashboard route and allows the layout to own:
+
+- open/close state
+- shortcut registration
+- trigger button wiring
+- repo-context preservation
+
+### Recommended structure
+
+```text
+frontend/src/
 ├── components/
-│   ├── ui/
-│   │   └── command.tsx                    # shadcn/ui primitives (generated)
 │   ├── command-palette/
-│   │   ├── command-palette.tsx            # Main component (dialog + groups)
-│   │   ├── use-command-palette.ts         # Open/close state + Cmd+K listener
-│   │   ├── command-actions.ts             # Static action registry
-│   │   └── use-command-search.ts          # Debounced API search hook
-├── hooks/
-│   └── use-debounce.ts                    # Debounce utility hook
-├── components/
-│   └── authenticated-layout.tsx           # Mount point (modified)
+│   │   ├── command-palette.tsx
+│   │   ├── command-palette-trigger.tsx
+│   │   ├── command-palette-actions.ts
+│   │   ├── use-command-palette-search.ts
+│   │   └── use-recent-palette-items.ts
+│   └── ui/
+│       └── command.tsx          ← does not exist yet
 ```
 
-### Integration point
+**Prerequisite:** `command.tsx` does not exist in the codebase. Run `npx shadcn@latest add command` before starting implementation. This will install the `cmdk` dependency and generate the shadcn `Command` primitives into `frontend/src/components/ui/command.tsx`.
 
-`<CommandPalette />` is rendered inside `AuthenticatedLayout` at `src/components/authenticated-layout.tsx`. It sits as a sibling to the sidebar and main content — no provider wrapping needed.
+Use the existing `AuthenticatedLayout` as the owner of `open` state rather than creating a dedicated provider.
 
-```tsx
-// authenticated-layout.tsx
-return (
-  <div className="flex h-screen">
-    <CommandPalette />
-    <aside className="w-64 ...">
-      {/* existing sidebar */}
-    </aside>
-    <main>
-      {children}
-    </main>
-  </div>
-);
-```
+### State model
 
----
+- `open` lives in `AuthenticatedLayout`
+- the palette query lives inside `CommandPalette`
+- the selected repo continues to live in the URL via `useQueryState("repo")`
+- recent items live in `localStorage` (see [Recent Items](#recent-items) below)
 
-## Component Design
+This matches existing repo patterns: local UI state stays local; shared filter state uses `nuqs`.
 
-### Static Action Registry (`command-actions.ts`)
+### Recent Items
 
-A flat array defining every navigable destination and quick action. This is the single source of truth for what appears in the palette when the user hasn't typed a search query.
+Recent items track palette selections so the most useful destinations appear first on re-open.
 
-```ts
-export interface CommandAction {
-  id: string;
-  label: string;
-  group: "Navigation" | "Settings" | "Quick Actions";
-  icon: LucideIcon;
-  href?: string;
-  action?: () => void;
-  keywords?: string[];
-  adminOnly?: boolean;
-}
-```
+- **What counts as recent:** Any palette selection that results in a navigation or entity jump. Static actions (like "Log out") and repo-context switches do not count — they are utility actions, not destinations.
+- **Storage:** `localStorage` under the key `143:command-palette:recents`. Value is a JSON array of `{ type, id, label, href, timestamp }` objects.
+- **Max entries:** 10. When a new item would exceed the cap, evict the oldest.
+- **Deduplication:** By `type + id` (e.g., `session:sess_abc123`). If an item already exists, move it to the front and update its timestamp and label (labels can change).
+- **Display:** The `Recent` group renders the most recent 5 items. The full 10 are retained in storage so that removing a stale item still leaves a useful list.
+- **Staleness:** Do not proactively prune deleted entities from recents. If a user selects a stale recent and gets a 404, remove it from the list at that point.
 
-**Navigation group** — mirrors the sidebar nav items:
+### Trigger wiring
 
-| ID | Label | Route |
-|----|-------|-------|
-| `nav-autopilot` | Autopilot | `/autopilot` |
-| `nav-sessions` | Sessions | `/sessions` |
-| `nav-projects` | Projects | `/projects` |
-| `nav-team` | Team | `/team` |
-| `nav-analytics` | Analytics | `/analytics` |
-| `nav-costs` | Costs | `/costs` |
-| `nav-automations` | Automations | `/automations` |
+The sidebar trigger and the keyboard shortcut both toggle the same layout-owned state.
 
-**Settings group** — mirrors the avatar dropdown menu:
+Do not rely on a hook returning `setOpen` from inside the palette subtree while the trigger lives elsewhere. That coupling becomes awkward immediately and is unnecessary because the layout already owns both surfaces.
 
-| ID | Label | Route |
-|----|-------|-------|
-| `set-general` | General Settings | `/settings` |
-| `set-integrations` | Integrations | `/integrations` |
-| `set-agent` | Coding Agents | `/agent` |
-| `set-llm` | LLM Configuration | `/llm` |
-| `set-autopilot` | Autopilot Settings | `/settings/autopilot` |
-| `set-evals` | Evals | `/settings/evals` |
-| `set-team` | Team Settings | `/settings/team` |
-| `set-audit` | Audit Log | `/settings/audit-log` |
+## Search Data Flow
 
-`set-audit` is marked `adminOnly: true` and filtered out for non-admin users at render time.
+### Frontend
 
-**Quick Actions group** — imperative shortcuts:
+- Static items: filter client-side with cmdk.
+- Repositories: use the existing repository summary query already used by `RepoContextSwitcher`.
+- Sessions/projects: fetch with TanStack Query when the deferred query length is `>= 2`.
 
-| ID | Label | Route / Action |
-|----|-------|----------------|
-| `act-new-session` | New Session | `/sessions/new` |
-| `act-new-eval` | New Eval Task | `/settings/evals/new` |
+Prefer using the existing centralized query-key factory in [frontend/src/lib/query-keys.ts](/Users/wangjohn/conductor/workspaces/143/managua-v2/frontend/src/lib/query-keys.ts) instead of introducing new ad hoc keys in the palette code.
 
-### Keyboard Hook (`use-command-palette.ts`)
+**Note:** `queryKeys.sessions.list` already exists and accepts a `repo` param. `queryKeys.projects` does not yet have a `list` key — add `projects.list` (and a search-accepting variant if needed) to `query-keys.ts` as part of Phase 2 implementation.
 
-Manages the open/close boolean and the global keydown listener:
+### Backend
 
-```ts
-export function useCommandPalette() {
-  const [open, setOpen] = useState(false);
+For MVP, add optional `search` support to the existing list endpoints instead of introducing a new global search endpoint:
 
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
-        e.preventDefault();
-        setOpen((prev) => !prev);
-      }
-    };
-    document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
-  }, []);
+- `GET /api/v1/sessions?search=<q>&limit=5`
+- `GET /api/v1/projects?search=<q>&limit=5`
 
-  return { open, setOpen };
-}
-```
+This keeps the first version aligned with current backend patterns:
 
-The hook returns `setOpen` so the sidebar search button can also trigger the palette.
+- routes remain under `/api/v1/`
+- handlers parse validated query params
+- handlers call store/service methods
+- queries remain org-scoped
+- standard list response shape stays intact
 
-### Search Hook (`use-command-search.ts`)
+If later we need blended ranking across many entity types, a dedicated `/api/v1/command/search` endpoint can be introduced. Do not pay that complexity cost in v1.
 
-Debounced search using React Query against list endpoints:
+### Backend implementation constraints
 
-```ts
-export function useCommandSearch(query: string) {
-  const debouncedQuery = useDebounce(query, 200);
+Any new search support must follow the existing backend rules:
 
-  const sessions = useQuery({
-    queryKey: [...queryKeys.sessions.all, "search", debouncedQuery],
-    queryFn: () => api.sessions.list({ search: debouncedQuery, limit: 5 }),
-    enabled: debouncedQuery.length >= 2,
-  });
+- every query filters by `org_id`
+- handlers remain thin
+- business logic belongs in services if ranking logic becomes non-trivial
+- db access stays in `internal/db/*` store methods
+- tests must verify org scoping and search filtering
 
-  const projects = useQuery({
-    queryKey: ["projects", "search", debouncedQuery],
-    queryFn: () => api.projects.list({ search: debouncedQuery, limit: 5 }),
-    enabled: debouncedQuery.length >= 2,
-  });
+## Repo Context Behavior
 
-  return {
-    sessions: sessions.data?.data ?? [],
-    projects: projects.data?.data ?? [],
-    isLoading: sessions.isLoading || projects.isLoading,
-  };
-}
-```
+This is the biggest usability requirement for this app.
 
-### Main Component (`command-palette.tsx`)
+### Preserving context on navigation
 
-The palette renders a `CommandDialog` containing:
+When the user has a repository selected, palette navigation to repo-scoped list pages should preserve that context:
 
-1. **Input** — placeholder: "Search sessions, projects, settings..."
-2. **Dynamic results** — sessions and projects matching the query (shown when query >= 2 chars)
-3. **Static groups** — Navigation, Settings, Quick Actions (always present, filtered by cmdk fuzzy match)
-4. **Footer** — keyboard hint bar (`↑↓ navigate`, `↵ select`, `esc close`)
+- `/sessions` should keep `?repo=<id>`
+- `/projects` should keep `?repo=<id>`
+- `/automations` should keep `?repo=<id>` if the page continues to honor repo scope
 
-On item selection: call `router.push(href)` for navigation items, or invoke `action()` for imperative actions. Close the palette immediately on selection.
+Settings pages should not inherit repo context unless that page already supports it.
 
-### Sidebar Search Button
+### Switching repository context
 
-A clickable hint in the sidebar for mouse users and discoverability, placed between the logo and the nav items:
+The palette and the existing header switcher must produce identical outcomes:
 
-```tsx
-<button
-  onClick={() => setCommandPaletteOpen(true)}
-  className="mx-2.5 flex items-center gap-2 rounded-lg border
-             border-border/50 px-2.5 py-1.5 text-xs
-             text-muted-foreground hover:bg-sidebar-accent transition-colors"
->
-  <Search className="h-3.5 w-3.5" />
-  <span>Search...</span>
-  <kbd className="ml-auto text-[10px] bg-muted px-1.5 py-0.5 rounded">
-    ⌘K
-  </kbd>
-</button>
-```
+- selecting `All repositories` clears the `repo` query param
+- selecting a repo sets `repo=<repository_id>`
+- if the current repo is disconnected, clear the param
 
----
+Do not create a second persistence rule such as separate localStorage for repo context.
 
-## Data Flow
+## AI-Forward Behavior
 
-```
-User presses Cmd+K (or clicks sidebar button)
-          │
-          ▼
-  CommandDialog opens
-          │
-          ├── Static actions shown immediately
-          │   (filtered client-side by cmdk fuzzy match)
-          │
-          ├── User types 2+ characters
-          │   │
-          │   ▼
-          │   200ms debounce
-          │   │
-          │   ▼
-          │   React Query fetches:
-          │     GET /api/v1/sessions?search=<q>&limit=5
-          │     GET /api/v1/projects?search=<q>&limit=5
-          │   │
-          │   ▼
-          │   Dynamic results merged into list
-          │
-          ▼
-  User selects item
-          │
-          ├── href → router.push(href)
-          └── action → action()
-          │
-          ▼
-  Dialog closes
-```
+The palette should include one AI-native action path:
 
----
+- if the query does not match a known entity or action, show `Start manual session: "<query>"`
+- selecting it routes to `/sessions/new` with the draft prompt and current repo prefilled, or directly creates a draft session if that flow already exists by implementation time
+
+This makes the palette feel like a control center for an AI product instead of a generic app launcher.
+
+Do not turn the palette itself into a streaming chat surface. That would overload a tool meant for fast movement and lightweight actions.
+
+### Future AI-forward actions (post-MVP)
+
+These are not in scope for v1, but worth capturing as natural extensions:
+
+- **Re-run failed session** — For recently failed sessions surfaced in dynamic search results, offer a "Re-run" action inline. This turns the palette into a recovery tool, not just a navigation tool.
+- **Contextual suggestions** — If the user is on a session detail page and opens the palette, surface actions relevant to that session (e.g., "Create project from this session", "View PR") above generic navigation.
 
 ## Accessibility
 
-- `CommandDialog` wraps Radix `Dialog` — provides focus trap, `aria-modal`, backdrop click-to-close
-- cmdk provides `role="combobox"` on input, `role="listbox"` on results, `aria-selected` on active item
-- Full keyboard navigation: `↑`/`↓` arrows, `Enter` to select, `Escape` to close
-- Respects `prefers-reduced-motion` (skip entry/exit animations)
-- Screen reader announces group headings and item count
+- use shadcn/ui `Command` primitives built on `cmdk`
+- keep full keyboard support: open, navigate, select, close
+- trap focus while open
+- restore focus to the trigger on close when appropriate
+- expose clear group labels
+- support reduced motion
+- ensure loading and empty states are announced accessibly
 
----
+## Testing Requirements
 
-## File Changelist
+### Frontend
 
-| File | Action | Description |
-|------|--------|-------------|
-| `frontend/package.json` | Modify | Add `cmdk` dependency |
-| `frontend/src/components/ui/command.tsx` | Create | shadcn/ui Command primitives (generated) |
-| `frontend/src/components/command-palette/command-palette.tsx` | Create | Main palette component with dialog, groups, and footer |
-| `frontend/src/components/command-palette/use-command-palette.ts` | Create | Open/close state + global `Cmd+K` / `Ctrl+K` listener |
-| `frontend/src/components/command-palette/command-actions.ts` | Create | Static action registry (nav, settings, quick actions) |
-| `frontend/src/components/command-palette/use-command-search.ts` | Create | Debounced React Query search for sessions and projects |
-| `frontend/src/hooks/use-debounce.ts` | Create | Generic debounce hook |
-| `frontend/src/components/authenticated-layout.tsx` | Modify | Mount `<CommandPalette />` + add sidebar search button |
+Add tests for:
 
----
+- shortcut opens and closes the palette
+- shortcut opens the palette even when focus is inside an input or textarea
+- `Escape` closes the palette and restores focus to the previously active element
+- admin-only actions are excluded from the rendered list for non-admin users
+- admin-only actions are present for admin users
+- selecting a repo updates URL state
+- selecting a repo-scoped navigation item preserves `repo`
+- empty search offers `Start manual session: "<query>"`
+- recent items render in order, deduplicate by type+id, and cap at 5 visible
+- stale recent items are removed on 404 navigation
+
+### Backend
+
+If `search` is added to sessions/projects endpoints, add:
+
+- handler tests for valid and invalid search params
+- store tests for search filtering
+- tenancy coverage proving `org_id` is still enforced
 
 ## Implementation Phases
 
-### Phase 1: MVP — Static Navigation Palette
+### Phase 1: Static palette + repo switching
 
-**Goal:** Ship a working `Cmd+K` palette with static navigation, settings, and quick actions. No API search. This alone solves the discoverability and navigation efficiency problems.
+Ship:
 
-**Tasks:**
+- mounted palette in `AuthenticatedLayout`
+- keyboard shortcut and trigger button
+- static nav/settings/quick actions
+- repository context group backed by the existing repo summary query
 
-1. Install `cmdk` and generate shadcn/ui `command` component
-2. Create `command-actions.ts` with the static action registry
-3. Create `use-command-palette.ts` hook with `Cmd+K` / `Ctrl+K` listener
-4. Create `command-palette.tsx` rendering static groups only
-5. Mount `<CommandPalette />` in `authenticated-layout.tsx`
-6. Add sidebar search button with `⌘K` hint
-7. Filter `adminOnly` actions based on `user.role` from `useAuth()`
-8. Add keyboard hint footer to the dialog
-9. Write tests for the keyboard hook and action registry
+This is the minimum version that already feels coherent in the current app.
 
-**Acceptance criteria:**
+### Phase 2: Session and project search
 
-- `Cmd+K` opens the palette from any authenticated page
-- Typing filters navigation items, settings, and quick actions via fuzzy match
-- Selecting an item navigates to the correct route
-- `Escape` closes the palette
-- Admin-only items (Audit Log) are hidden for non-admin users
-- Sidebar shows a clickable search button with keyboard shortcut hint
+Ship:
 
----
+- dynamic search for sessions and projects
+- result metadata with repo labels and status
+- preserved repo-scoped navigation
 
-### Phase 2: Dynamic Entity Search
+### Phase 3: Recent items + AI-forward fallback
 
-**Goal:** Add server-side search for sessions and projects so users can jump directly to any entity by name.
+Ship:
 
-**Tasks:**
+- recent items
+- start-manual-session fallback from query
 
-1. Create `use-debounce.ts` hook
-2. Create `use-command-search.ts` with debounced React Query calls
-3. Update `command-palette.tsx` to render dynamic Sessions and Projects groups above static groups
-4. Show loading state ("Searching...") while queries are in-flight
-5. Display session status as a badge on each result item
-6. Display project name and task count on each result item
-7. Add `search` query parameter support to backend `GET /api/v1/sessions` endpoint (Go)
-8. Add `search` query parameter support to backend `GET /api/v1/projects` endpoint (Go)
-9. Write integration tests for search behavior
+### Phase 4: Iteration
 
-**Backend changes required:**
+Evaluate usage and only then consider:
 
-```go
-// In the sessions list handler, add optional search filtering:
-// WHERE title ILIKE '%' || $1 || '%'
-// Parameterized to prevent SQL injection.
-```
+- slash prefixes
+- nested sub-commands
+- additional entity types
+- a dedicated multi-entity backend search endpoint
 
-**Acceptance criteria:**
-
-- Typing 2+ characters triggers a debounced search
-- Session results show title (or ID fallback) and status badge
-- Project results show name
-- Selecting a result navigates to `/sessions/{id}` or `/projects/{id}`
-- Empty search state shows "No results found."
-- Queries are cached by React Query and don't re-fire on re-open with same term
-
-**Fallback if backend changes are blocked:**
-
-Client-side filter against the already-cached list data from React Query (the sessions and projects lists fetched by other pages). This avoids any backend work but limits results to already-loaded data.
-
----
-
-### Phase 3: Recent Items & Personalization
-
-**Goal:** Surface recently visited items for instant access on palette open, before the user types anything.
-
-**Tasks:**
-
-1. Create `use-recent-items.ts` hook backed by `localStorage`
-2. Track navigation events: when a user navigates to a session, project, or settings page, record `{ type, id, label, href, timestamp }` in localStorage
-3. Cap at 5 most recent items, deduplicated by href
-4. Render a "Recent" group at the top of the palette when the query is empty
-5. Add a "Clear recents" action at the bottom of the Recent group
-6. Persist across page reloads but not across browsers
-
-**Acceptance criteria:**
-
-- Opening the palette with no query shows up to 5 recent items at the top
-- Recent items update as the user navigates
-- Clearing recents removes all entries
-- Recent items are user-specific (tied to localStorage, which is per-browser)
-
----
-
-### Phase 4: Extended Actions & Sub-Commands
-
-**Goal:** Expand the palette beyond navigation into a true command center.
-
-**Tasks:**
-
-1. **Theme toggle** — Add "Switch to dark mode" / "Switch to light mode" action using `next-themes`' `useTheme()` hook
-2. **Repo context switching** — Add "Switch repository" action that opens a nested list of repositories (fetched via `api.repositories.list()`)
-3. **Nested sub-commands** — Implement a drill-down pattern: selecting "Settings" shows a sub-list of all settings pages. Back via `Backspace` on empty input.
-4. **Slash-command filtering** — Typing `/session` scopes results to sessions only; `/project` scopes to projects only. Implemented as prefix detection in the filter logic.
-5. **Logout action** — Add "Log out" to Quick Actions, wired to `useAuth().logout()`
-
-**Acceptance criteria:**
-
-- Theme toggle switches theme immediately without navigation
-- Repo context switching updates the global repo filter
-- Nested commands allow drilling into sub-menus
-- Slash prefixes scope search to a single entity type
-- All actions are discoverable via the palette's fuzzy search
-
----
-
-### Phase 5: Analytics & Iteration
-
-**Goal:** Understand how the palette is used and refine based on data.
-
-**Tasks:**
-
-1. Track palette open events (count, trigger method: keyboard vs click)
-2. Track search queries (anonymized, for popular term analysis)
-3. Track selected items (which actions/entities are most used)
-4. Send events to the existing analytics pipeline
-5. Review data after 2 weeks and adjust:
-   - Re-order groups by usage frequency
-   - Add missing actions users search for but don't find
-   - Tune fuzzy match sensitivity
-
-**Acceptance criteria:**
-
-- Analytics events fire on open, search, and select
-- Dashboard shows palette usage metrics
-- At least one iteration based on data within 30 days of launch
-
----
-
-## Risk & Mitigations
+## Risks
 
 | Risk | Mitigation |
 |------|------------|
-| `Cmd+K` conflicts with browser "focus address bar" | Browsers allow `preventDefault()` on `Cmd+K`. Tested in Chrome, Firefox, Safari, Edge. |
-| Search API latency causes jank | 200ms debounce + React Query caching. Loading state shown. Static items always available instantly. |
-| Backend doesn't support `?search=` param | Phase 1 ships without API search. Phase 2 fallback: client-side filter from cache. |
-| Palette keyboard conflicts with diff viewer (`j`/`k` nav) | Palette uses `Cmd+K` (modifier key required). Diff viewer uses single keys without modifiers. No conflict. Palette's Radix Dialog focus trap prevents key leak. |
-| Large session/project lists slow down search | Server-side `LIMIT 5` on search queries. No full-list fetches for search. |
+| Palette shortcut interferes with text entry | `Cmd+K` always opens the palette (matching industry convention). The palette captures focus on open and restores it on close, so in-progress text entry is not lost. |
+| Repo switching becomes inconsistent with the header switcher | Reuse the same `nuqs` query-state model and repository summary data. |
+| Dynamic search adds backend complexity too early | Reuse existing list endpoints with optional `search` params first. |
+| Search results are ambiguous in multi-repo orgs | Always show repo context in dynamic entity rows. |
+| Palette becomes a dumping ground for every action | Keep MVP focused on navigation, repo context, entity jump-to, and one AI-native action. |
 
 ## Open Questions
 
-1. **Should the palette support repository search?** Repos are less frequently navigated directly, but it could be useful for multi-repo teams. Candidate for Phase 4.
-2. **Should we add a "Help" group with links to docs?** Low effort, high discoverability value. Could include links to keyboard shortcut reference, API docs, changelog.
-3. **Should recent items sync across devices?** Would require backend storage. Likely not worth it for MVP — localStorage is sufficient.
+1. Should `Issues` become a dynamic search source once that surface is reintroduced in the active app IA?
+2. Should selecting `New session` from the palette open the existing page or create a draft session immediately?
+3. If usage becomes heavy, is a blended `/api/v1/command/search` endpoint justified for cross-entity ranking?
