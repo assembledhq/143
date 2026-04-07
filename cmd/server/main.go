@@ -156,7 +156,9 @@ func main() {
 		go w.Start(ctx)
 		logger.Info().Msg("worker started with registered handlers")
 
-		reaper := agent.NewSessionReaper(sessionStore, snapshotStore, cfg.SessionMaxIdleAge, cfg.SessionMaxSnapshotAge, cfg.SessionReaperInterval, logger)
+		reaper := agent.NewSessionReaper(sessionStore, snapshotStore, cfg.SessionMaxIdleAge, cfg.SessionMaxSnapshotAge, cfg.SessionReaperInterval, logger,
+			agent.WithOrphanCloser(db.NewContainerUsageStore(pool)),
+		)
 		go reaper.Run(ctx)
 
 		// Upload reaper: clean up old uploaded files (local mode only; use S3 lifecycle rules for S3).

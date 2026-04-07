@@ -69,8 +69,12 @@ func (s *ContainerUsageStore) GetUsageSummary(ctx context.Context, orgID uuid.UU
 	// Total minutes and session count.
 	var totalMinutes float64
 	var totalSessions int
+	// Use COALESCE to include still-running containers (stopped_at IS NULL)
+	// by computing their duration as now() - started_at.
 	err := s.db.QueryRow(ctx, `
-		SELECT COALESCE(SUM(container_minutes), 0), COUNT(DISTINCT session_id)
+		SELECT COALESCE(SUM(
+			COALESCE(container_minutes, EXTRACT(EPOCH FROM (now() - started_at)) / 60.0)
+		), 0), COUNT(DISTINCT session_id)
 		FROM container_usage_events
 		WHERE org_id = @org_id AND started_at >= @start AND started_at < @end`,
 		pgx.NamedArgs{"org_id": orgID, "start": start, "end": end},
@@ -82,7 +86,9 @@ func (s *ContainerUsageStore) GetUsageSummary(ctx context.Context, orgID uuid.UU
 	// Capacity breakdown.
 	rows, err := s.db.Query(ctx, `
 		SELECT cpu_limit, memory_limit_mb,
-		       COALESCE(SUM(container_minutes), 0) AS minutes,
+		       COALESCE(SUM(
+		           COALESCE(container_minutes, EXTRACT(EPOCH FROM (now() - started_at)) / 60.0)
+		       ), 0) AS minutes,
 		       COUNT(DISTINCT session_id) AS sessions
 		FROM container_usage_events
 		WHERE org_id = @org_id AND started_at >= @start AND started_at < @end
@@ -141,6 +147,25 @@ func (s *ContainerUsageStore) GetUsageSummary(ctx context.Context, orgID uuid.UU
 		PeakConcurrent:        peakConcurrent,
 		ByCapacity:            buckets,
 	}, nil
+}
+
+// CloseOrphans closes container usage events that were never stopped (e.g. due
+// to server crash). It sets stopped_at = now() and exit_reason = "orphaned" for
+// any event started before the cutoff that still has stopped_at IS NULL.
+// Returns the number of rows updated.
+func (s *ContainerUsageStore) CloseOrphans(ctx context.Context, startedBefore time.Time) (int64, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE container_usage_events
+		SET stopped_at = now(),
+		    duration_ms = EXTRACT(EPOCH FROM (now() - started_at)) * 1000,
+		    container_minutes = EXTRACT(EPOCH FROM (now() - started_at)) / 60.0,
+		    exit_reason = 'orphaned'
+		WHERE stopped_at IS NULL AND started_at < @cutoff`,
+		pgx.NamedArgs{"cutoff": startedBefore})
+	if err != nil {
+		return 0, fmt.Errorf("close orphaned usage events: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // ListBySession returns all container usage events for a given session.

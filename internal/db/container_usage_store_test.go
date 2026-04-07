@@ -145,3 +145,22 @@ func TestContainerUsageStore_ListBySession(t *testing.T) {
 	require.Equal(t, "ctr-1", events[0].ContainerID)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+func TestContainerUsageStore_CloseOrphans(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewContainerUsageStore(mock)
+
+	mock.ExpectExec("UPDATE container_usage_events").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 3))
+
+	closed, err := store.CloseOrphans(context.Background(), time.Now().Add(-2*time.Hour))
+	require.NoError(t, err)
+	require.Equal(t, int64(3), closed)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
