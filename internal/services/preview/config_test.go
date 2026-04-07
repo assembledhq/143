@@ -1,0 +1,694 @@
+package preview
+
+import (
+	"encoding/json"
+	"testing"
+
+	"github.com/assembledhq/143/internal/models"
+)
+
+func TestParseConfig_SingleService(t *testing.T) {
+	t.Parallel()
+
+	raw := `{
+		"version": "3",
+		"name": "frontend",
+		"command": ["npm", "run", "dev"],
+		"cwd": "frontend",
+		"port": 3000,
+		"env": {"NODE_ENV": "development"},
+		"ready": {"http_path": "/", "timeout_seconds": 90},
+		"credentials": {"mode": "none"},
+		"network": {"mode": "managed", "destinations": []}
+	}`
+
+	cfg, err := ParseConfig([]byte(raw))
+	if err != nil {
+		t.Fatalf("ParseConfig() error = %v", err)
+	}
+
+	// Should normalize to multi-service with name as service key.
+	if cfg.Primary != "frontend" {
+		t.Errorf("Primary = %q, want %q", cfg.Primary, "frontend")
+	}
+	if len(cfg.Services) != 1 {
+		t.Fatalf("len(Services) = %d, want 1", len(cfg.Services))
+	}
+	svc, ok := cfg.Services["frontend"]
+	if !ok {
+		t.Fatal("Services[\"frontend\"] not found")
+	}
+	if svc.Port != 3000 {
+		t.Errorf("Port = %d, want 3000", svc.Port)
+	}
+	if svc.Cwd != "frontend" {
+		t.Errorf("Cwd = %q, want %q", svc.Cwd, "frontend")
+	}
+	if len(svc.Command) != 3 || svc.Command[0] != "npm" {
+		t.Errorf("Command = %v, want [npm run dev]", svc.Command)
+	}
+}
+
+func TestParseConfig_MultiService(t *testing.T) {
+	t.Parallel()
+
+	raw := `{
+		"version": "3",
+		"name": "Full Stack",
+		"primary": "frontend",
+		"services": {
+			"frontend": {
+				"command": ["npm", "run", "dev"],
+				"port": 3000,
+				"ready": {"http_path": "/", "timeout_seconds": 90}
+			},
+			"backend": {
+				"command": ["python", "manage.py", "runserver", "0.0.0.0:4000"],
+				"cwd": "backend",
+				"port": 4000,
+				"ready": {"http_path": "/health", "timeout_seconds": 60}
+			}
+		},
+		"credentials": {"mode": "none"},
+		"network": {"mode": "managed"}
+	}`
+
+	cfg, err := ParseConfig([]byte(raw))
+	if err != nil {
+		t.Fatalf("ParseConfig() error = %v", err)
+	}
+
+	if cfg.Primary != "frontend" {
+		t.Errorf("Primary = %q, want %q", cfg.Primary, "frontend")
+	}
+	if len(cfg.Services) != 2 {
+		t.Errorf("len(Services) = %d, want 2", len(cfg.Services))
+	}
+}
+
+func TestParseConfig_WithInfrastructure(t *testing.T) {
+	t.Parallel()
+
+	raw := `{
+		"version": "3",
+		"name": "Full Stack (Local DB)",
+		"primary": "frontend",
+		"services": {
+			"frontend": {"command": ["npm", "run", "dev"], "port": 3000, "ready": {"http_path": "/"}}
+		},
+		"infrastructure": {
+			"db": {
+				"template": "postgres-16",
+				"init_script": "db/seed.sql",
+				"inject_env": {"DATABASE_URL": "postgres://{{username}}:{{password}}@{{host}}:{{port}}/{{database}}"},
+				"inject_into": ["frontend"]
+			}
+		},
+		"credentials": {"mode": "none"},
+		"network": {"mode": "managed"}
+	}`
+
+	cfg, err := ParseConfig([]byte(raw))
+	if err != nil {
+		t.Fatalf("ParseConfig() error = %v", err)
+	}
+
+	if len(cfg.Infrastructure) != 1 {
+		t.Fatalf("len(Infrastructure) = %d, want 1", len(cfg.Infrastructure))
+	}
+	db := cfg.Infrastructure["db"]
+	if db.Template != "postgres-16" {
+		t.Errorf("Template = %q, want %q", db.Template, "postgres-16")
+	}
+	if db.InitScript != "db/seed.sql" {
+		t.Errorf("InitScript = %q, want %q", db.InitScript, "db/seed.sql")
+	}
+}
+
+func TestParseConfig_InvalidJSON(t *testing.T) {
+	t.Parallel()
+
+	_, err := ParseConfig([]byte(`{invalid`))
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func TestParseConfig_BothFormats(t *testing.T) {
+	t.Parallel()
+
+	raw := `{
+		"version": "3",
+		"name": "test",
+		"command": ["echo"],
+		"port": 3000,
+		"services": {"web": {"command": ["npm", "start"], "port": 3000, "ready": {"http_path": "/"}}},
+		"credentials": {"mode": "none"},
+		"network": {"mode": "managed"}
+	}`
+	_, err := ParseConfig([]byte(raw))
+	if err == nil {
+		t.Fatal("expected error when both single-service and multi-service fields present")
+	}
+}
+
+func TestValidateConfig(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		cfg     models.PreviewConfig
+		wantErr int // expected error count, 0 = valid
+	}{
+		{
+			name: "valid single service",
+			cfg: models.PreviewConfig{
+				Primary:  "app",
+				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm", "start"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Infrastructure: map[string]models.InfrastructureConfig{},
+			},
+			wantErr: 0,
+		},
+		{
+			name: "valid multi service",
+			cfg: models.PreviewConfig{
+				Primary: "frontend",
+				Services: map[string]models.ServiceConfig{
+					"frontend": {Command: []string{"npm", "start"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+					"backend":  {Command: []string{"python", "app.py"}, Port: 4000, Ready: models.ReadinessProbe{HTTPPath: "/health"}},
+				},
+				Infrastructure: map[string]models.InfrastructureConfig{},
+			},
+			wantErr: 0,
+		},
+		{
+			name: "missing primary",
+			cfg: models.PreviewConfig{
+				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Infrastructure: map[string]models.InfrastructureConfig{},
+			},
+			wantErr: 1,
+		},
+		{
+			name: "primary references missing service",
+			cfg: models.PreviewConfig{
+				Primary:  "missing",
+				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Infrastructure: map[string]models.InfrastructureConfig{},
+			},
+			wantErr: 1,
+		},
+		{
+			name: "no services",
+			cfg: models.PreviewConfig{
+				Primary:  "app",
+				Services: map[string]models.ServiceConfig{},
+				Infrastructure: map[string]models.InfrastructureConfig{},
+			},
+			wantErr: 2, // no services + primary references missing
+		},
+		{
+			name: "too many services",
+			cfg: models.PreviewConfig{
+				Primary: "a",
+				Services: map[string]models.ServiceConfig{
+					"a": {Command: []string{"a"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+					"b": {Command: []string{"b"}, Port: 3001, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+					"c": {Command: []string{"c"}, Port: 3002, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+					"d": {Command: []string{"d"}, Port: 3003, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+					"e": {Command: []string{"e"}, Port: 3004, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+				},
+				Infrastructure: map[string]models.InfrastructureConfig{},
+			},
+			wantErr: 1,
+		},
+		{
+			name: "port out of range",
+			cfg: models.PreviewConfig{
+				Primary:  "app",
+				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 80, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Infrastructure: map[string]models.InfrastructureConfig{},
+			},
+			wantErr: 1,
+		},
+		{
+			name: "duplicate ports",
+			cfg: models.PreviewConfig{
+				Primary: "a",
+				Services: map[string]models.ServiceConfig{
+					"a": {Command: []string{"a"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+					"b": {Command: []string{"b"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+				},
+				Infrastructure: map[string]models.InfrastructureConfig{},
+			},
+			wantErr: 1,
+		},
+		{
+			name: "missing command",
+			cfg: models.PreviewConfig{
+				Primary:  "app",
+				Services: map[string]models.ServiceConfig{"app": {Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Infrastructure: map[string]models.InfrastructureConfig{},
+			},
+			wantErr: 1,
+		},
+		{
+			name: "missing ready path",
+			cfg: models.PreviewConfig{
+				Primary:  "app",
+				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000}},
+				Infrastructure: map[string]models.InfrastructureConfig{},
+			},
+			wantErr: 1,
+		},
+		{
+			name: "shell injection in ready path",
+			cfg: models.PreviewConfig{
+				Primary:  "app",
+				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/; rm -rf /"}}},
+				Infrastructure: map[string]models.InfrastructureConfig{},
+			},
+			wantErr: 1,
+		},
+		{
+			name: "cwd escapes repo root",
+			cfg: models.PreviewConfig{
+				Primary:  "app",
+				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Cwd: "../../etc", Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Infrastructure: map[string]models.InfrastructureConfig{},
+			},
+			wantErr: 1,
+		},
+		{
+			name: "cwd is absolute path",
+			cfg: models.PreviewConfig{
+				Primary:  "app",
+				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Cwd: "/etc/passwd", Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Infrastructure: map[string]models.InfrastructureConfig{},
+			},
+			wantErr: 1,
+		},
+		{
+			name: "unsupported infra template",
+			cfg: models.PreviewConfig{
+				Primary:  "app",
+				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Infrastructure: map[string]models.InfrastructureConfig{
+					"search": {Template: "elasticsearch-8"},
+				},
+			},
+			wantErr: 1,
+		},
+		{
+			name: "too many infra",
+			cfg: models.PreviewConfig{
+				Primary:  "app",
+				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Infrastructure: map[string]models.InfrastructureConfig{
+					"db":    {Template: "postgres-16"},
+					"cache": {Template: "redis-7"},
+					"extra": {Template: "mysql-8"},
+				},
+			},
+			wantErr: 1,
+		},
+		{
+			name: "infra inject_into unknown service",
+			cfg: models.PreviewConfig{
+				Primary:  "app",
+				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Infrastructure: map[string]models.InfrastructureConfig{
+					"db": {Template: "postgres-16", InjectInto: []string{"nonexistent"}},
+				},
+			},
+			wantErr: 1,
+		},
+		{
+			name: "credential inject_into unknown service",
+			cfg: models.PreviewConfig{
+				Primary:     "app",
+				Services:    map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Infrastructure: map[string]models.InfrastructureConfig{},
+				Credentials: models.CredentialConfig{Mode: "managed_env", InjectInto: []string{"unknown"}},
+			},
+			wantErr: 1,
+		},
+		{
+			name: "init_script escapes repo",
+			cfg: models.PreviewConfig{
+				Primary:  "app",
+				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Infrastructure: map[string]models.InfrastructureConfig{
+					"db": {Template: "postgres-16", InitScript: "../../../etc/passwd"},
+				},
+			},
+			wantErr: 1,
+		},
+		{
+			name: "invalid network mode",
+			cfg: models.PreviewConfig{
+				Primary:        "app",
+				Services:       map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Infrastructure: map[string]models.InfrastructureConfig{},
+				Network:        models.NetworkConfig{Mode: "bogus"},
+			},
+			wantErr: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			errs := ValidateConfig(&tt.cfg)
+			if len(errs) != tt.wantErr {
+				t.Errorf("ValidateConfig() returned %d errors, want %d: %v", len(errs), tt.wantErr, errs)
+			}
+		})
+	}
+}
+
+func TestResolveConfig_NonConnected(t *testing.T) {
+	t.Parallel()
+
+	baseCfg := &models.PreviewConfig{
+		Version: "3",
+		Name:    "Test",
+		Primary: "frontend",
+		Services: map[string]models.ServiceConfig{
+			"frontend": {Command: []string{"npm", "start"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+			"backend":  {Command: []string{"python", "app.py"}, Port: 4000, Ready: models.ReadinessProbe{HTTPPath: "/health"}},
+		},
+		Infrastructure: map[string]models.InfrastructureConfig{
+			"db": {Template: "postgres-16", InitScript: "db/base_seed.sql", InjectInto: []string{"backend"}},
+		},
+		Credentials: models.CredentialConfig{Mode: "none"},
+		Network:     models.NetworkConfig{Mode: "managed"},
+	}
+
+	diffCfg := &models.PreviewConfig{
+		Services: map[string]models.ServiceConfig{
+			"frontend": {Command: []string{"npm", "run", "dev"}, Port: 3000, Cwd: "frontend", Ready: models.ReadinessProbe{HTTPPath: "/", TimeoutSeconds: 120}},
+			"backend":  {Command: []string{"python", "app.py", "--debug"}, Port: 4000, Ready: models.ReadinessProbe{HTTPPath: "/health"}},
+		},
+		Infrastructure: map[string]models.InfrastructureConfig{
+			"db": {Template: "postgres-16", InitScript: "db/test_seed.sql"},
+		},
+	}
+
+	resolved := ResolveConfig(baseCfg, diffCfg)
+
+	// Primary comes from base.
+	if resolved.Primary != "frontend" {
+		t.Errorf("Primary = %q, want %q", resolved.Primary, "frontend")
+	}
+
+	// Credentials and network from base.
+	if resolved.Credentials.Mode != "none" {
+		t.Errorf("Credentials.Mode = %q, want %q", resolved.Credentials.Mode, "none")
+	}
+
+	// Service runtime fields from diff.
+	fe := resolved.Services["frontend"]
+	if fe.Cwd != "frontend" {
+		t.Errorf("frontend.Cwd = %q, want %q", fe.Cwd, "frontend")
+	}
+	if fe.Command[0] != "npm" || fe.Command[1] != "run" {
+		t.Errorf("frontend.Command = %v, want [npm run dev]", fe.Command)
+	}
+
+	be := resolved.Services["backend"]
+	if len(be.Command) != 3 || be.Command[2] != "--debug" {
+		t.Errorf("backend.Command = %v, want [python app.py --debug]", be.Command)
+	}
+
+	// Infrastructure: template/inject from base, init_script from diff.
+	db := resolved.Infrastructure["db"]
+	if db.Template != "postgres-16" {
+		t.Errorf("db.Template = %q, want %q", db.Template, "postgres-16")
+	}
+	if db.InitScript != "db/test_seed.sql" {
+		t.Errorf("db.InitScript = %q, want %q (from diff)", db.InitScript, "db/test_seed.sql")
+	}
+	if len(db.InjectInto) != 1 || db.InjectInto[0] != "backend" {
+		t.Errorf("db.InjectInto = %v, want [backend] (from base)", db.InjectInto)
+	}
+}
+
+func TestResolveConfig_Connected_PinsEverythingToBase(t *testing.T) {
+	t.Parallel()
+
+	baseCfg := &models.PreviewConfig{
+		Version: "3",
+		Primary: "frontend",
+		Services: map[string]models.ServiceConfig{
+			"frontend": {Command: []string{"npm", "start"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+		},
+		Infrastructure: map[string]models.InfrastructureConfig{
+			"db": {Template: "postgres-16", InitScript: "db/base_seed.sql"},
+		},
+		Credentials: models.CredentialConfig{Mode: "managed_env", CredentialSet: "staging"},
+		Network:     models.NetworkConfig{Mode: "managed", Destinations: []string{"staging_db"}},
+	}
+
+	diffCfg := &models.PreviewConfig{
+		Services: map[string]models.ServiceConfig{
+			"frontend": {Command: []string{"npm", "run", "malicious"}, Port: 9999, Cwd: "/etc"},
+		},
+		Infrastructure: map[string]models.InfrastructureConfig{
+			"db": {Template: "postgres-16", InitScript: "db/malicious.sql"},
+		},
+	}
+
+	resolved := ResolveConfig(baseCfg, diffCfg)
+
+	// All service fields pinned to base.
+	fe := resolved.Services["frontend"]
+	if fe.Command[0] != "npm" || fe.Command[1] != "start" {
+		t.Errorf("Command = %v, want [npm start] (pinned to base)", fe.Command)
+	}
+	if fe.Port != 3000 {
+		t.Errorf("Port = %d, want 3000 (pinned to base)", fe.Port)
+	}
+
+	// init_script pinned to base for connected config.
+	db := resolved.Infrastructure["db"]
+	if db.InitScript != "db/base_seed.sql" {
+		t.Errorf("InitScript = %q, want %q (pinned to base for connected)", db.InitScript, "db/base_seed.sql")
+	}
+}
+
+func TestResolveConfig_DiffCannotAddServices(t *testing.T) {
+	t.Parallel()
+
+	baseCfg := &models.PreviewConfig{
+		Version: "3",
+		Primary: "app",
+		Services: map[string]models.ServiceConfig{
+			"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+		},
+		Infrastructure: map[string]models.InfrastructureConfig{},
+		Credentials:    models.CredentialConfig{Mode: "none"},
+	}
+
+	diffCfg := &models.PreviewConfig{
+		Services: map[string]models.ServiceConfig{
+			"app":     {Command: []string{"npm", "dev"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+			"sneaked": {Command: []string{"evil"}, Port: 6666, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+		},
+	}
+
+	resolved := ResolveConfig(baseCfg, diffCfg)
+
+	// Only services from base should exist.
+	if len(resolved.Services) != 1 {
+		t.Errorf("len(Services) = %d, want 1 (diff cannot add services)", len(resolved.Services))
+	}
+	if _, ok := resolved.Services["sneaked"]; ok {
+		t.Error("diff-added service 'sneaked' should not appear in resolved config")
+	}
+}
+
+func TestIsConnected(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		cfg  models.PreviewConfig
+		want bool
+	}{
+		{
+			name: "mode none",
+			cfg:  models.PreviewConfig{Credentials: models.CredentialConfig{Mode: "none"}},
+			want: false,
+		},
+		{
+			name: "mode empty",
+			cfg:  models.PreviewConfig{Credentials: models.CredentialConfig{Mode: ""}},
+			want: false,
+		},
+		{
+			name: "managed_env",
+			cfg:  models.PreviewConfig{Credentials: models.CredentialConfig{Mode: "managed_env"}},
+			want: true,
+		},
+		{
+			name: "has destinations",
+			cfg:  models.PreviewConfig{Network: models.NetworkConfig{Destinations: []string{"db"}}},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsConnected(&tt.cfg); got != tt.want {
+				t.Errorf("IsConnected() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDetectReadiness(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		cfg      models.PreviewConfig
+		wantReady models.PreviewReadiness
+	}{
+		{
+			name: "ready - simple config",
+			cfg: models.PreviewConfig{
+				Primary:  "app",
+				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Infrastructure: map[string]models.InfrastructureConfig{},
+				Credentials: models.CredentialConfig{Mode: "none"},
+			},
+			wantReady: models.PreviewReadinessReady,
+		},
+		{
+			name: "admin setup - has credentials",
+			cfg: models.PreviewConfig{
+				Primary:  "app",
+				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Infrastructure: map[string]models.InfrastructureConfig{},
+				Credentials: models.CredentialConfig{Mode: "managed_env", CredentialSet: "staging", Env: []string{"DB_URL"}},
+			},
+			wantReady: models.PreviewReadinessAdminSetupRequired,
+		},
+		{
+			name: "admin setup - has destinations",
+			cfg: models.PreviewConfig{
+				Primary:  "app",
+				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Infrastructure: map[string]models.InfrastructureConfig{},
+				Network: models.NetworkConfig{Mode: "managed", Destinations: []string{"staging_db"}},
+			},
+			wantReady: models.PreviewReadinessAdminSetupRequired,
+		},
+		{
+			name: "not supported - invalid config",
+			cfg: models.PreviewConfig{
+				Primary:  "missing",
+				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Infrastructure: map[string]models.InfrastructureConfig{},
+			},
+			wantReady: models.PreviewReadinessNotSupported,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := DetectReadiness(&tt.cfg)
+			if result.Readiness != tt.wantReady {
+				t.Errorf("Readiness = %q, want %q (errors: %v)", result.Readiness, tt.wantReady, result.ValidationErrors)
+			}
+		})
+	}
+}
+
+func TestResolveResourceLimits(t *testing.T) {
+	t.Parallel()
+
+	single := models.PreviewConfig{
+		Services: map[string]models.ServiceConfig{"app": {}},
+	}
+	multi := models.PreviewConfig{
+		Services: map[string]models.ServiceConfig{"a": {}, "b": {}},
+	}
+
+	singleLimits := ResolveResourceLimits(&single)
+	if singleLimits.MemoryMB != 512 || singleLimits.CPUMillis != 500 {
+		t.Errorf("single = %+v, want {512, 500}", singleLimits)
+	}
+
+	multiLimits := ResolveResourceLimits(&multi)
+	if multiLimits.MemoryMB != 1024 || multiLimits.CPUMillis != 1000 {
+		t.Errorf("multi = %+v, want {1024, 1000}", multiLimits)
+	}
+}
+
+func TestLookupInfraTemplate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		found bool
+	}{
+		{"postgres-17", true},
+		{"postgres-16", true},
+		{"redis-7", true},
+		{"mysql-8", true},
+		{"elasticsearch-8", false},
+		{"kafka-3", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, ok := LookupInfraTemplate(tt.name)
+			if ok != tt.found {
+				t.Errorf("LookupInfraTemplate(%q) found = %v, want %v", tt.name, ok, tt.found)
+			}
+		})
+	}
+}
+
+func TestParseConfig_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	// Parse, then marshal back, then parse again — should be equivalent.
+	raw := `{
+		"version": "3",
+		"name": "frontend",
+		"command": ["npm", "run", "dev"],
+		"port": 3000,
+		"ready": {"http_path": "/"},
+		"credentials": {"mode": "none"},
+		"network": {"mode": "managed"}
+	}`
+
+	cfg1, err := ParseConfig([]byte(raw))
+	if err != nil {
+		t.Fatalf("first parse: %v", err)
+	}
+
+	data, err := json.Marshal(cfg1)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	// The marshaled form is in multi-service format, so parse it as such.
+	cfg2 := &models.PreviewConfig{}
+	if err := json.Unmarshal(data, cfg2); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if cfg1.Primary != cfg2.Primary {
+		t.Errorf("Primary mismatch: %q vs %q", cfg1.Primary, cfg2.Primary)
+	}
+	if len(cfg1.Services) != len(cfg2.Services) {
+		t.Errorf("Services count mismatch: %d vs %d", len(cfg1.Services), len(cfg2.Services))
+	}
+}

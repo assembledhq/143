@@ -72,6 +72,18 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"SessionFileHandler.ListFiles":      "delegates to getSessionContainer which uses OrgIDFromContext",
 		"SessionFileHandler.GetFileContent": "delegates to getSessionContainer which uses OrgIDFromContext",
 		"SessionFileHandler.GetFileContext": "delegates to getSessionContainer which uses OrgIDFromContext",
+
+		// Preview inspector handlers — delegate to requireInspector + getActivePreview
+		// which use OrgIDFromContext.
+		"PreviewHandler.DetectReadiness":      "config-only check, no org-scoped data access",
+		"PreviewHandler.CaptureScreenshot":    "delegates to getActivePreview which uses OrgIDFromContext",
+		"PreviewHandler.InspectElement":       "delegates to getActivePreview which uses OrgIDFromContext",
+		"PreviewHandler.ReadConsole":          "delegates to getActivePreview which uses OrgIDFromContext",
+		"PreviewHandler.SubmitDesignFeedback": "delegates to getActivePreview which uses OrgIDFromContext; also calls OrgIDFromContext directly for log entry",
+		"PreviewHandler.ExecuteInteraction":   "delegates to getActivePreview which uses OrgIDFromContext",
+		"PreviewHandler.CaptureMultiViewport": "delegates to getActivePreview which uses OrgIDFromContext",
+		"PreviewHandler.ComputeVisualDiff":    "delegates to getActivePreview which uses OrgIDFromContext",
+		"PreviewHandler.RunAssertions":        "delegates to getActivePreview which uses OrgIDFromContext",
 	}
 
 	fset := token.NewFileSet()
