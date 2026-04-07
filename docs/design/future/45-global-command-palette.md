@@ -1,4 +1,4 @@
-# 45 - Global Command Palette
+# Design: Global Command Palette
 
 > **Status:** Not Started | **Last reviewed:** 2026-04-06
 >
@@ -37,7 +37,9 @@ The palette is not a second sidebar and not a mini page builder. It is a fast co
 
 `Cmd+K` / `Ctrl+K` must open the palette regardless of where focus currently is — including inside `input`, `textarea`, `select`, and content-editable regions. This matches the convention established by Linear, VS Code, GitHub, and Slack. Users often want the palette most when they're already typing in a search box or form field. Suppressing the shortcut in those contexts would break the "always available" contract.
 
-The palette itself must not consume normal typing when it is closed. When open, `Escape` closes it and restores focus to the previously active element.
+**Note:** The existing `useDiffKeyboardNav` hook explicitly skips shortcuts when modifier keys are held. The command palette shortcut handler must be registered independently (e.g., a dedicated `useEffect` in `AuthenticatedLayout`) — do not layer it on top of the existing keyboard nav system.
+
+The palette itself must not consume normal typing when it is closed. When open, `Escape` closes it and restores focus to the previously active element. If the previously active element has been unmounted (e.g., a modal closed while the palette was open), fall back to focusing the palette trigger button.
 
 ### 2. Empty-state useful, typed-state precise
 
@@ -91,19 +93,20 @@ The trigger should use shadcn/ui primitives, not a raw `<button>`. In this repo 
 When the query is empty, show these groups in order:
 
 1. `Recent`
-2. `Switch Repository`
-3. `Navigation`
-4. `Settings`
-5. `Quick Actions`
+2. `Quick Actions`
+3. `Switch Repository`
+4. `Navigation`
+5. `Settings`
 
-This ordering makes the empty state useful for both power users and occasional users.
+This ordering puts high-frequency creation actions ("New session", "New project") above lower-frequency settings navigation, reflecting the primary workflow of an AI-agent app where session creation is the most common action.
 
 ### Query behavior
 
 - Static items filter immediately via cmdk's client-side matching.
 - Dynamic entity search starts at 2+ characters.
-- Use a short deferred query window so typing stays responsive without firing on every keystroke.
+- Use React's `useDeferredValue` to defer the search query passed to dynamic fetch hooks. This keeps the input responsive without manual debounce timers and integrates naturally with React's concurrent rendering.
 - Dynamic results appear above static groups, but static groups remain visible.
+- While dynamic results are loading, show a `<Command.Loading>` indicator in the dynamic results area so the user knows a fetch is in progress. Do not block or hide static results during loading.
 
 ### Result ranking
 
@@ -206,7 +209,7 @@ Selecting a repository updates the shared `repo` query state using the same `nuq
 
 ### Mount point
 
-Mount a single `<CommandPalette />` inside [frontend/src/components/authenticated-layout.tsx](/Users/wangjohn/conductor/workspaces/143/managua-v2/frontend/src/components/authenticated-layout.tsx).
+Mount a single `<CommandPalette />` inside [frontend/src/components/authenticated-layout.tsx](../../frontend/src/components/authenticated-layout.tsx).
 
 That keeps the palette available on every authenticated dashboard route and allows the layout to own:
 
@@ -253,6 +256,7 @@ Recent items track palette selections so the most useful destinations appear fir
 - **Deduplication:** By `type + id` (e.g., `session:sess_abc123`). If an item already exists, move it to the front and update its timestamp and label (labels can change).
 - **Display:** The `Recent` group renders the most recent 5 items. The full 10 are retained in storage so that removing a stale item still leaves a useful list.
 - **Staleness:** Do not proactively prune deleted entities from recents. If a user selects a stale recent and gets a 404, remove it from the list at that point.
+- **Cross-tab sync:** Listen for `window.addEventListener("storage", ...)` on the recents key so that a palette opened in a second tab reflects selections made in the first tab without requiring a page reload.
 
 ### Trigger wiring
 
@@ -268,9 +272,9 @@ Do not rely on a hook returning `setOpen` from inside the palette subtree while 
 - Repositories: use the existing repository summary query already used by `RepoContextSwitcher`.
 - Sessions/projects: fetch with TanStack Query when the deferred query length is `>= 2`.
 
-Prefer using the existing centralized query-key factory in [frontend/src/lib/query-keys.ts](/Users/wangjohn/conductor/workspaces/143/managua-v2/frontend/src/lib/query-keys.ts) instead of introducing new ad hoc keys in the palette code.
+Prefer using the existing centralized query-key factory in [frontend/src/lib/query-keys.ts](../../frontend/src/lib/query-keys.ts) instead of introducing new ad hoc keys in the palette code.
 
-**Note:** `queryKeys.sessions.list` already exists and accepts a `repo` param. `queryKeys.projects` does not yet have a `list` key — add `projects.list` (and a search-accepting variant if needed) to `query-keys.ts` as part of Phase 2 implementation.
+**Note:** `queryKeys.sessions.list` already exists and accepts a `repo` param. `queryKeys.projects` does not yet have a `list` key — add `projects.list` (and a search-accepting variant if needed) to `query-keys.ts` as part of Phase 2 implementation. Also add `repositories.summary` to the factory — `RepoContextSwitcher` currently uses a raw `["repositories", "summary"]` tuple, and the palette should use the centralized key.
 
 ### Backend
 
@@ -422,6 +426,17 @@ Evaluate usage and only then consider:
 | Dynamic search adds backend complexity too early | Reuse existing list endpoints with optional `search` params first. |
 | Search results are ambiguous in multi-repo orgs | Always show repo context in dynamic entity rows. |
 | Palette becomes a dumping ground for every action | Keep MVP focused on navigation, repo context, entity jump-to, and one AI-native action. |
+
+## Telemetry
+
+Track these events to inform Phase 4 prioritization:
+
+- **Palette opened** — distinguish keyboard shortcut vs. trigger button click
+- **Item selected** — log the item type (navigation, session, project, repo switch, quick action, manual-session fallback) and the query length at selection time
+- **Empty results** — log when the user typed a query and saw no matches (high frequency here signals missing search coverage)
+- **Session-from-query used** — track how often users convert an unmatched query into a manual session
+
+Use the existing analytics patterns in the app. Do not introduce a new analytics provider for the palette.
 
 ## Open Questions
 
