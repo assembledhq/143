@@ -35,6 +35,7 @@ const projectColumns = `id, org_id, repository_id, title, goal, scope, completio
 	proposed_by_pm, source_issue_ids, proposal_reasoning, similar_projects,
 	agent_type, model_override,
 	schedule_enabled, schedule_interval, schedule_unit, next_run_at,
+	reviewer_strategy,
 	created_by, deleted_at, created_at, updated_at, completed_at`
 
 func scanProject(row pgx.Row) (models.Project, error) {
@@ -50,6 +51,7 @@ func scanProject(row pgx.Row) (models.Project, error) {
 		&p.ProposedByPM, &sourceIssueIDs, &p.ProposalReasoning, &p.SimilarProjects,
 		&p.AgentType, &p.ModelOverride,
 		&p.ScheduleEnabled, &p.ScheduleInterval, &p.ScheduleUnit, &p.NextRunAt,
+		&p.ReviewerStrategy,
 		&p.CreatedBy, &p.DeletedAt, &p.CreatedAt, &p.UpdatedAt, &p.CompletedAt,
 	)
 	if err != nil {
@@ -86,6 +88,7 @@ func scanProjects(rows pgx.Rows) ([]models.Project, error) {
 			&p.ProposedByPM, &sourceIssueIDs, &p.ProposalReasoning, &p.SimilarProjects,
 			&p.AgentType, &p.ModelOverride,
 			&p.ScheduleEnabled, &p.ScheduleInterval, &p.ScheduleUnit, &p.NextRunAt,
+			&p.ReviewerStrategy,
 			&p.CreatedBy, &p.DeletedAt, &p.CreatedAt, &p.UpdatedAt, &p.CompletedAt,
 		)
 		if err != nil {
@@ -139,7 +142,8 @@ func (s *ProjectStore) Create(ctx context.Context, p *models.Project) error {
 			current_phase, lessons_learned, approach_history,
 			proposed_by_pm, source_issue_ids, proposal_reasoning, similar_projects, created_by,
 			agent_type, model_override,
-			schedule_enabled, schedule_interval, schedule_unit, next_run_at
+			schedule_enabled, schedule_interval, schedule_unit, next_run_at,
+			reviewer_strategy
 		)
 		VALUES (
 			@org_id, @repository_id, @title, @goal, @scope, @completion_criteria,
@@ -147,9 +151,15 @@ func (s *ProjectStore) Create(ctx context.Context, p *models.Project) error {
 			@current_phase, @lessons_learned, @approach_history,
 			@proposed_by_pm, @source_issue_ids, @proposal_reasoning, @similar_projects, @created_by,
 			@agent_type, @model_override,
-			@schedule_enabled, @schedule_interval, @schedule_unit, @next_run_at
+			@schedule_enabled, @schedule_interval, @schedule_unit, @next_run_at,
+			@reviewer_strategy
 		)
 		RETURNING id, created_at, updated_at`
+
+	reviewerStrategy := p.ReviewerStrategy
+	if reviewerStrategy == "" {
+		reviewerStrategy = string(models.ReviewerStrategyCodeowners)
+	}
 
 	row := tx.QueryRow(ctx, query, pgx.NamedArgs{
 		"org_id":              p.OrgID,
@@ -178,6 +188,7 @@ func (s *ProjectStore) Create(ctx context.Context, p *models.Project) error {
 		"schedule_interval":   p.ScheduleInterval,
 		"schedule_unit":       p.ScheduleUnit,
 		"next_run_at":         p.NextRunAt,
+		"reviewer_strategy":   reviewerStrategy,
 	})
 	if err := row.Scan(&p.ID, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return err
@@ -279,6 +290,7 @@ func (s *ProjectStore) Update(ctx context.Context, p *models.Project) error {
 			total_tasks = @total_tasks, completed_tasks = @completed_tasks, failed_tasks = @failed_tasks,
 			schedule_enabled = @schedule_enabled, schedule_interval = @schedule_interval,
 			schedule_unit = @schedule_unit, next_run_at = @next_run_at,
+			reviewer_strategy = @reviewer_strategy,
 			completed_at = @completed_at, updated_at = now()
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
@@ -305,6 +317,7 @@ func (s *ProjectStore) Update(ctx context.Context, p *models.Project) error {
 		"schedule_enabled":    p.ScheduleEnabled,
 		"schedule_interval":   p.ScheduleInterval,
 		"schedule_unit":       p.ScheduleUnit,
+		"reviewer_strategy":   p.ReviewerStrategy,
 		"next_run_at":         p.NextRunAt,
 		"completed_at":        p.CompletedAt,
 	})

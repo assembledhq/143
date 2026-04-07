@@ -23,6 +23,7 @@ import (
 	"github.com/assembledhq/143/internal/services/feedback"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
+	"github.com/assembledhq/143/internal/services/output"
 	"github.com/assembledhq/143/internal/services/pm"
 	"github.com/assembledhq/143/internal/services/prioritization"
 	"github.com/assembledhq/143/internal/services/validation"
@@ -127,6 +128,7 @@ type Services struct {
 	PM              pmService
 	Memory          MemoryReinforcer // optional — enables memory reinforcement on PR approval
 	SlackSummarizer *ingestion.SlackSummarizer // nil-safe: Slack summarization disabled if nil
+	OutputDelivery  *output.Service  // nil-safe: output delivery disabled if nil
 	LLM             llmClient        // nil-safe: needed for eval LLM judge grading
 	GitHub          agent.GitHubTokenProvider // nil-safe: needed for eval repo cloning
 }
@@ -262,7 +264,29 @@ func newProjectCycleHandler(services *Services, logger zerolog.Logger) JobHandle
 		}
 
 		logger.Info().Str("org_id", orgID.String()).Str("project_id", projectID.String()).Msg("running project_cycle job")
-		return services.PM.AnalyzeProject(ctx, orgID, projectID)
+		if err := services.PM.AnalyzeProject(ctx, orgID, projectID); err != nil {
+			return err
+		}
+
+		// Deliver outputs to configured destinations (best-effort).
+		if services.OutputDelivery != nil {
+			cycleOutput := output.CycleOutput{
+				ProjectID: projectID,
+				Timestamp: time.Now().UTC(),
+			}
+			results := services.OutputDelivery.DeliverCycleOutput(ctx, orgID, cycleOutput)
+			for _, r := range results {
+				if !r.Success {
+					logger.Warn().
+						Str("destination_id", r.DestinationID.String()).
+						Str("type", string(r.Type)).
+						Str("error", r.Error).
+						Msg("output delivery failed for project cycle")
+				}
+			}
+		}
+
+		return nil
 	}
 }
 

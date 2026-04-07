@@ -174,6 +174,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	}
 	teamHandler := handlers.NewTeamHandler(userStore, authSessionStore, invitationStore, orgStore, cfg.FrontendURL, emailSender)
 
+	outputDestinationStore := db.NewOutputDestinationStore(pool)
+	outputDestinationHandler := handlers.NewOutputDestinationHandler(outputDestinationStore)
+
 	projectHandler := handlers.NewProjectHandler(projectStore, projectTaskStore, projectCycleStore, projectAttachmentStore, projectSpecStore)
 	projectHandler.SetJobStore(jobStore)
 
@@ -444,6 +447,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Post("/api/v1/projects/{id}/specs", projectSpecHandler.Create)
 			r.Patch("/api/v1/projects/{id}/specs/{specId}", projectSpecHandler.Update)
 			r.Delete("/api/v1/projects/{id}/specs/{specId}", projectSpecHandler.Delete)
+			r.Get("/api/v1/projects/{id}/outputs", outputDestinationHandler.List)
+			r.Post("/api/v1/projects/{id}/outputs", outputDestinationHandler.Create)
+			r.Patch("/api/v1/projects/{id}/outputs/{destId}", outputDestinationHandler.Update)
+			r.Delete("/api/v1/projects/{id}/outputs/{destId}", outputDestinationHandler.Delete)
 			r.Post("/api/v1/projects/ai/generate", projectGenerateHandler.Generate)
 			r.Post("/api/v1/projects/{id}/ai/improve", projectAnalysisHandler.Improve)
 			r.Post("/api/v1/pm/documents", pmDocumentHandler.Create)

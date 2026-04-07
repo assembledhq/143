@@ -11,6 +11,11 @@ import {
   Wrench,
   ChevronDown,
   Loader2,
+  FileSearch,
+  PackageCheck,
+  Gauge,
+  BookOpen,
+  GitPullRequest,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
@@ -96,6 +101,51 @@ const SCHEDULED_TEMPLATES: ScheduledTemplate[] = [
     scheduleInterval: 1,
     scheduleUnit: "days",
     icon: Bot,
+  },
+  {
+    id: "dead-code-cleanup",
+    name: "Dead code cleanup",
+    goal: "Find unused exports, unreachable code paths, deprecated functions with no callers, and orphaned files. Remove dead code and verify tests still pass. Focus on high-confidence removals only.",
+    description: "Remove dead code to reduce complexity and bundle size.",
+    scheduleInterval: 7,
+    scheduleUnit: "days",
+    icon: FileSearch,
+  },
+  {
+    id: "dependency-audit",
+    name: "Dependency audit",
+    goal: "Check all dependencies for known CVEs, outdated major versions, and deprecated packages. Propose safe version bumps with a focus on security patches. Run tests after each upgrade to verify compatibility.",
+    description: "Keep dependencies secure and up to date automatically.",
+    scheduleInterval: 7,
+    scheduleUnit: "days",
+    icon: PackageCheck,
+  },
+  {
+    id: "test-coverage",
+    name: "Improve test coverage",
+    goal: "Identify the most critical untested or under-tested code paths — especially in business logic, error handling, and edge cases. Write focused unit and integration tests that catch real bugs, not just inflate coverage numbers.",
+    description: "Add meaningful tests to the least-covered critical paths.",
+    scheduleInterval: 3,
+    scheduleUnit: "days",
+    icon: Gauge,
+  },
+  {
+    id: "api-docs-sync",
+    name: "API docs sync",
+    goal: "Compare API endpoint implementations against their documentation (OpenAPI specs, README, inline docs). Fix discrepancies: missing parameters, wrong types, undocumented endpoints, stale examples. Ensure docs match the actual behavior.",
+    description: "Keep API documentation accurate and in sync with code.",
+    scheduleInterval: 7,
+    scheduleUnit: "days",
+    icon: BookOpen,
+  },
+  {
+    id: "pr-review-backlog",
+    name: "PR review assist",
+    goal: "Review open pull requests that have been waiting for review for more than 24 hours. Provide constructive code review comments focusing on correctness, performance, and security. Flag any PRs that may have merge conflicts with the main branch.",
+    description: "Accelerate code review by providing AI-assisted PR feedback.",
+    scheduleInterval: 1,
+    scheduleUnit: "days",
+    icon: GitPullRequest,
   },
 ];
 

@@ -448,6 +448,15 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').AIImprovementResponse>>(`/api/v1/projects/${projectId}/ai/improve`, body),
     aiGenerate: (body: { description: string }) =>
       post<{ data: import('./types').GeneratedProject }>('/api/v1/projects/ai/generate', body),
+    // Output destinations
+    listOutputs: (projectId: string) =>
+      get<{ data: import('./types').OutputDestination[] }>(`/api/v1/projects/${projectId}/outputs`),
+    createOutput: (projectId: string, body: { destination_type: string; label: string; config: Record<string, unknown>; enabled?: boolean }) =>
+      post<{ data: import('./types').OutputDestination }>(`/api/v1/projects/${projectId}/outputs`, body),
+    updateOutput: (projectId: string, destId: string, body: { destination_type: string; label: string; config: Record<string, unknown>; enabled?: boolean }) =>
+      patch<{ data: import('./types').OutputDestination }>(`/api/v1/projects/${projectId}/outputs/${destId}`, body),
+    deleteOutput: (projectId: string, destId: string) =>
+      del(`/api/v1/projects/${projectId}/outputs/${destId}`),
   },
   auditLogs: {
     list: (params?: {

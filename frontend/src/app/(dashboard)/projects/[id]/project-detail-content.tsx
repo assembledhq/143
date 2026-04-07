@@ -7,6 +7,7 @@ import {
   GitPullRequest,
   Play,
   Settings,
+  Send,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -29,6 +30,7 @@ import { ProgressBar } from "./shared";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { PlanTab } from "./plan-tab";
 import { WorkTab } from "./work-tab";
+import { OutputsTab } from "./outputs-tab";
 
 const PRIORITY_OPTIONS = [
   { value: "low", label: "Low", numeric: 75 },
@@ -338,6 +340,10 @@ export function ProjectDetailContent({ id }: { id: string }) {
             <GitPullRequest className="h-3 w-3" />
             Work
           </TabsTrigger>
+          <TabsTrigger value="outputs" className="gap-1.5">
+            <Send className="h-3 w-3" />
+            Outputs
+          </TabsTrigger>
           <TabsTrigger value="settings" className="gap-1.5">
             <Settings className="h-3 w-3" />
             Settings
@@ -350,6 +356,10 @@ export function ProjectDetailContent({ id }: { id: string }) {
 
         <TabsContent value="work">
           <WorkTab project={project} tasks={tasks} cycles={recent_cycles} />
+        </TabsContent>
+
+        <TabsContent value="outputs">
+          <OutputsTab projectId={project.id} />
         </TabsContent>
 
         <TabsContent value="settings">

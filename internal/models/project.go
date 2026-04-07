@@ -38,6 +38,7 @@ type Project struct {
 	ScheduleInterval   int              `db:"schedule_interval" json:"schedule_interval"`
 	ScheduleUnit       string           `db:"schedule_unit" json:"schedule_unit"`
 	NextRunAt          *time.Time       `db:"next_run_at" json:"next_run_at,omitempty"`
+	ReviewerStrategy   string           `db:"reviewer_strategy" json:"reviewer_strategy"`
 	CreatedBy          *uuid.UUID       `db:"created_by" json:"created_by,omitempty"`
 	DeletedAt          *time.Time       `db:"deleted_at" json:"-"`
 	CreatedAt          time.Time        `db:"created_at" json:"created_at"`

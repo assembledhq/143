@@ -343,6 +343,9 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		}
 	}
 
+	// 6b. Auto-assign reviewers from CODEOWNERS (best-effort).
+	s.autoAssignReviewers(ctx, token, owner, repoName, prNumber, files)
+
 	// 7. Store PR in DB.
 	authoredBy := "app"
 	if resolution.IsUserToken {
@@ -377,6 +380,49 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	}
 
 	return pr, nil
+}
+
+// autoAssignReviewers fetches CODEOWNERS from the repo and requests reviewers
+// for the PR based on which files were changed. Best-effort: failures are logged
+// but do not block PR creation.
+func (s *PRService) autoAssignReviewers(ctx context.Context, token, owner, repoName string, prNumber int, files []diffFile) {
+	codeownersContent, err := FetchCodeowners(ctx, token, owner, repoName, s.httpClient, s.baseURL)
+	if err != nil {
+		s.logger.Debug().Err(err).Msg("no CODEOWNERS file found, skipping auto-reviewer assignment")
+		return
+	}
+
+	rules := ParseCodeowners(codeownersContent)
+	if len(rules) == 0 {
+		return
+	}
+
+	changedPaths := make([]string, 0, len(files))
+	for _, f := range files {
+		changedPaths = append(changedPaths, f.Path)
+	}
+
+	reviewers := ResolveReviewers(rules, changedPaths)
+	if len(reviewers) == 0 {
+		return
+	}
+
+	// Cap at 3 reviewers to avoid excessive review requests.
+	if len(reviewers) > 3 {
+		reviewers = reviewers[:3]
+	}
+
+	if err := s.RequestReviewers(ctx, token, owner, repoName, prNumber, reviewers); err != nil {
+		s.logger.Warn().Err(err).
+			Int("pr_number", prNumber).
+			Strs("reviewers", reviewers).
+			Msg("failed to auto-assign reviewers from CODEOWNERS")
+	} else {
+		s.logger.Info().
+			Int("pr_number", prNumber).
+			Strs("reviewers", reviewers).
+			Msg("auto-assigned reviewers from CODEOWNERS")
+	}
 }
 
 // PullRequestEvent represents a GitHub pull_request webhook event.

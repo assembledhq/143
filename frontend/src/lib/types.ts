@@ -602,10 +602,23 @@ export interface Project {
   schedule_interval: number;
   schedule_unit: 'hours' | 'days' | 'weeks';
   next_run_at?: string;
+  reviewer_strategy: string;
   created_by?: string;
   created_at: string;
   updated_at: string;
   completed_at?: string;
+}
+
+export interface OutputDestination {
+  id: string;
+  project_id: string;
+  org_id: string;
+  destination_type: 'slack' | 'email' | 'notion' | 'webhook';
+  label: string;
+  config: Record<string, unknown>;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface ProposalOverlap {
