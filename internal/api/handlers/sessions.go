@@ -937,6 +937,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		Description:  &description,
 		RawData:      rawData,
 		Status:       "open",
+		Severity:     "medium",
 		FirstSeenAt:  now,
 		LastSeenAt:   now,
 		Fingerprint:  fingerprint,
