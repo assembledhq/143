@@ -74,7 +74,7 @@ describe('AcceptInvitationPage', () => {
     });
   });
 
-  it('redirects to /autopilot when no action is returned', async () => {
+  it('redirects to /onboarding when no action is returned', async () => {
     searchParamsMock.set('token', 'auto-token');
     vi.spyOn(global, 'fetch').mockResolvedValue({
       ok: true,
@@ -84,7 +84,7 @@ describe('AcceptInvitationPage', () => {
     renderWithProviders(<AcceptInvitationPage />);
 
     await waitFor(() => {
-      expect(replaceMock).toHaveBeenCalledWith('/autopilot');
+      expect(replaceMock).toHaveBeenCalledWith('/onboarding');
     });
   });
 
