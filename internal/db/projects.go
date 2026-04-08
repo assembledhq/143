@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,6 +26,7 @@ type ProjectFilters struct {
 	Limit        int
 	Cursor       string
 	RepositoryID uuid.UUID
+	Search       string // When non-empty, filter projects by title or goal (case-insensitive substring match).
 }
 
 // projectColumns is the column list shared across all project queries.
@@ -216,6 +218,11 @@ func (s *ProjectStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters P
 	if filters.RepositoryID != uuid.Nil {
 		query += ` AND repository_id = @repository_id`
 		args["repository_id"] = &filters.RepositoryID
+	}
+	if filters.Search != "" {
+		query += ` AND (title ILIKE @search OR goal ILIKE @search)`
+		escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(filters.Search)
+		args["search"] = "%" + escaped + "%"
 	}
 	if filters.Cursor != "" {
 		cursorID, err := uuid.Parse(filters.Cursor)
