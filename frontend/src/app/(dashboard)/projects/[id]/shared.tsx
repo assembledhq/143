@@ -95,7 +95,7 @@ export function CollapsibleSection({
         <Icon className="h-3.5 w-3.5 text-muted-foreground" />
         <span className="text-sm font-semibold">{title}</span>
         {count != null && count > 0 && (
-          <Badge variant="secondary" className="text-[9px] px-1.5 py-0">
+          <Badge variant="secondary" className="text-xs px-1.5 py-0">
             {count}
           </Badge>
         )}

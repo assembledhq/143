@@ -142,7 +142,7 @@ export default function StorySection({ isDark }: StorySectionProps) {
             <Reveal inView={inView} delay={0}>
               <div className="space-y-2">
                 <p
-                  className="text-xs font-mono tracking-widest uppercase"
+                  className="text-xs font-mono tracking-wider uppercase"
                   style={{
                     color: isDark
                       ? "rgba(255,255,255,0.25)"

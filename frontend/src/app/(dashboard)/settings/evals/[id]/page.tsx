@@ -168,7 +168,7 @@ export default function EvalTaskDetailPage() {
                 <div>
                   <span className="text-xs text-muted-foreground">Complexity</span>
                   <div className="mt-1">
-                    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${complexityStyle.color}`}>
+                    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${complexityStyle.color}`}>
                       {complexityStyle.label}
                     </span>
                   </div>
@@ -194,7 +194,7 @@ export default function EvalTaskDetailPage() {
                   <span className="text-xs text-muted-foreground">Tags</span>
                   <div className="mt-1 flex flex-wrap gap-1">
                     {task.tags.map((tag) => (
-                      <Badge key={tag} variant="secondary" className="text-[11px]">{tag}</Badge>
+                      <Badge key={tag} variant="secondary" className="text-xs">{tag}</Badge>
                     ))}
                   </div>
                 </div>
@@ -228,11 +228,11 @@ export default function EvalTaskDetailPage() {
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
                       <span className="text-[13px] font-medium">{criterion.name}</span>
-                      <Badge variant="secondary" className="text-[11px]">
+                      <Badge variant="secondary" className="text-xs">
                         {criterion.grader_type === "code_check" ? "Code check" : "LLM judge"}
                       </Badge>
                       {criterion.required && (
-                        <Badge variant="destructive" className="text-[11px]">Required</Badge>
+                        <Badge variant="destructive" className="text-xs">Required</Badge>
                       )}
                     </div>
                     <p className="mt-0.5 text-xs text-muted-foreground">{criterion.notes}</p>
@@ -285,7 +285,7 @@ function EvalRunRow({ run }: { run: EvalRun }) {
   return (
     <div className="flex items-center py-3 px-4 border-b border-border last:border-b-0 hover:bg-muted/50 transition-colors">
       <span className="w-24">
-        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${statusStyle.color}`}>
+        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${statusStyle.color}`}>
           {statusStyle.label}
         </span>
       </span>

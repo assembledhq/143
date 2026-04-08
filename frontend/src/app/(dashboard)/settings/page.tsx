@@ -130,7 +130,7 @@ function PRAuthorshipSettings() {
                   />
                   <div>
                     <span className="text-[13px] font-medium">{option.label}</span>
-                    <p className="text-[12px] text-muted-foreground">{option.description}</p>
+                    <p className="text-xs text-muted-foreground">{option.description}</p>
                   </div>
                 </label>
               ))}

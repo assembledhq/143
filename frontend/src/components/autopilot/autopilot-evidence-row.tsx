@@ -10,7 +10,7 @@ export function AutopilotEvidenceRow({ evidence }: AutopilotEvidenceRowProps) {
       {evidence.map((item) => (
         <div key={item.label} className="space-y-1">
           <p className="text-xs uppercase tracking-[0.12em] text-muted-foreground">{item.label}</p>
-          <p className="text-base font-medium text-foreground">{item.value}</p>
+          <p className="text-sm font-medium text-foreground">{item.value}</p>
         </div>
       ))}
     </div>

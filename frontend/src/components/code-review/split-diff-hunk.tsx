@@ -161,7 +161,7 @@ const SplitLineCell = memo(function SplitLineCell({
       )}
       <div
         className={cn(
-          "w-[50px] shrink-0 text-right pr-2 select-none text-[11px] text-muted-foreground/60",
+          "w-[50px] shrink-0 text-right pr-2 select-none text-xs text-muted-foreground/60",
           gutterBg[type]
         )}
       >
@@ -202,7 +202,7 @@ export function SplitDiffHunk({
   return (
     <div>
       {/* Hunk header spans full width */}
-      <div data-hunk-header className="bg-muted/30 border-y border-border/50 px-3 py-1 text-[11px] text-muted-foreground font-mono select-none">
+      <div data-hunk-header className="bg-muted/30 border-y border-border/50 px-3 py-1 text-xs text-muted-foreground font-mono select-none">
         {hunk.header}
       </div>
       {/* Split rows */}

@@ -46,7 +46,7 @@ export function AutonomySlider({ value, onChange }: AutonomySliderProps) {
             )}>
               {level.label}
             </div>
-            <div className="text-[11px] text-muted-foreground mt-0.5">
+            <div className="text-xs text-muted-foreground mt-0.5">
               {level.description}
             </div>
           </button>

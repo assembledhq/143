@@ -96,7 +96,7 @@ export function ReviewToolbar({
           <button
             onClick={() => onViewModeChange("unified")}
             className={cn(
-              "flex items-center gap-1 px-2 py-1 text-[11px] rounded-l-md transition-colors",
+              "flex items-center gap-1 px-2 py-1 text-xs rounded-l-md transition-colors",
               viewMode === "unified"
                 ? "bg-background text-foreground shadow-sm"
                 : "text-muted-foreground hover:text-foreground"
@@ -108,7 +108,7 @@ export function ReviewToolbar({
           <button
             onClick={() => onViewModeChange("split")}
             className={cn(
-              "flex items-center gap-1 px-2 py-1 text-[11px] rounded-r-md transition-colors",
+              "flex items-center gap-1 px-2 py-1 text-xs rounded-r-md transition-colors",
               viewMode === "split"
                 ? "bg-background text-foreground shadow-sm"
                 : "text-muted-foreground hover:text-foreground"
@@ -123,7 +123,7 @@ export function ReviewToolbar({
           <Button
             variant="ghost"
             size="sm"
-            className="h-7 gap-1 text-[11px] px-2"
+            className="h-7 gap-1 text-xs px-2"
             onClick={onBrowseRepo}
             title="Browse repository (e)"
           >
@@ -164,7 +164,7 @@ export function ReviewToolbar({
               }
             }}
             placeholder="Search in diff..."
-            className="flex-1 bg-transparent text-[12px] text-foreground placeholder:text-muted-foreground/60 outline-none"
+            className="flex-1 bg-transparent text-xs text-foreground placeholder:text-muted-foreground/60 outline-none"
           />
           {searchQuery && (
             <button

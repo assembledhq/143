@@ -101,10 +101,10 @@ const validationChecks: { key: string; label: string }[] = [
 ];
 
 function checkResultBadge(result: string | null) {
-  if (!result) return <Badge variant="secondary" className="text-[11px]">skipped</Badge>;
-  if (result === "pass") return <Badge variant="secondary" className="bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400 border-emerald-200/50 dark:border-emerald-800/30 text-[11px]">pass</Badge>;
-  if (result === "fail") return <Badge variant="secondary" className="bg-destructive/10 text-destructive border-destructive/20 text-[11px]">fail</Badge>;
-  return <Badge variant="secondary" className="text-[11px]">{result}</Badge>;
+  if (!result) return <Badge variant="secondary" className="text-xs">skipped</Badge>;
+  if (result === "pass") return <Badge variant="secondary" className="bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400 border-emerald-200/50 dark:border-emerald-800/30 text-xs">pass</Badge>;
+  if (result === "fail") return <Badge variant="secondary" className="bg-destructive/10 text-destructive border-destructive/20 text-xs">fail</Badge>;
+  return <Badge variant="secondary" className="text-xs">{result}</Badge>;
 }
 
 // ---------------------------------------------------------------------------
@@ -158,7 +158,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
                 <XCircle className="h-3.5 w-3.5" />
                 Failure details
                 {session.failure_category && (
-                  <Badge variant="secondary" className="bg-destructive/10 text-destructive border-destructive/20 text-[11px]">
+                  <Badge variant="secondary" className="bg-destructive/10 text-destructive border-destructive/20 text-xs">
                     {session.failure_category}
                   </Badge>
                 )}
@@ -393,14 +393,14 @@ function PRCard({ sessionId }: { sessionId: string }) {
         <div className="flex items-center gap-3 text-sm">
           <div>
             <span className="text-muted-foreground">Status: </span>
-            <Badge variant="secondary" className={`text-[11px] ${prStatusColor[pr.status] || "bg-muted text-muted-foreground"}`}>
+            <Badge variant="secondary" className={`text-xs ${prStatusColor[pr.status] || "bg-muted text-muted-foreground"}`}>
               {pr.status}
             </Badge>
           </div>
           {pr.review_status && (
             <div>
               <span className="text-muted-foreground">Review: </span>
-              <Badge variant="secondary" className="text-[11px]">{pr.review_status}</Badge>
+              <Badge variant="secondary" className="text-xs">{pr.review_status}</Badge>
             </div>
           )}
           <div className="min-w-0">
@@ -483,7 +483,7 @@ function ChangesTab({
           <div className="px-4 py-3">
             <button
               onClick={() => onOpenReview()}
-              className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-md border border-border bg-background text-[12px] font-medium text-foreground hover:bg-muted/50 transition-colors"
+              className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-md border border-border bg-background text-xs font-medium text-foreground hover:bg-muted/50 transition-colors"
             >
               <FileCode2 className="h-3.5 w-3.5" />
               Review {filteredFiles.length} {filteredFiles.length === 1 ? "file" : "files"}
@@ -584,7 +584,7 @@ function ReviewCommentInput({
               return (
                 <div
                   key={c.id}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-[11px]"
+                  className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-xs"
                 >
                   <MessageSquare className="h-3 w-3 text-muted-foreground shrink-0" />
                   <span className="font-mono text-muted-foreground">
@@ -616,7 +616,7 @@ function ReviewCommentInput({
 
         <div className="flex items-center gap-1 px-2 pb-2">
           {openComments.length > 0 && (
-            <span className="text-[11px] text-muted-foreground">
+            <span className="text-xs text-muted-foreground">
               {openComments.length} comment{openComments.length > 1 ? "s" : ""} attached
             </span>
           )}
@@ -1010,7 +1010,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
           <div className="flex items-center gap-2 mb-2 px-1">
             <div className="flex items-center gap-1.5 rounded-full bg-amber-500/10 border border-amber-200 dark:border-amber-800/50 px-2.5 py-1">
               <ClipboardList className="h-3 w-3 text-amber-600 dark:text-amber-400" />
-              <span className="text-[11px] font-medium text-amber-700 dark:text-amber-400">Plan Mode</span>
+              <span className="text-xs font-medium text-amber-700 dark:text-amber-400">Plan Mode</span>
               <button
                 onClick={() => setPlanMode(false)}
                 className="ml-1 text-amber-600/60 hover:text-amber-600 dark:text-amber-400/60 dark:hover:text-amber-400 text-xs"
@@ -1019,7 +1019,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
                 &times;
               </button>
             </div>
-            <span className="text-[11px] text-muted-foreground">Agent will create a plan for review before making changes</span>
+            <span className="text-xs text-muted-foreground">Agent will create a plan for review before making changes</span>
           </div>
         )}
         <div className={cn("rounded-xl border bg-muted/30 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring", planMode ? "border-amber-200 dark:border-amber-800/50" : "border-border")}>
@@ -1134,7 +1134,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
             <div className="ml-auto flex items-center gap-1">
               {canCreatePR && (
                 <>
-                  <label className="flex items-center gap-1 text-[11px] text-muted-foreground cursor-pointer select-none" title="Create PR as a draft">
+                  <label className="flex items-center gap-1 text-xs text-muted-foreground cursor-pointer select-none" title="Create PR as a draft">
                     <input
                       type="checkbox"
                       checked={draftValue}
@@ -1356,7 +1356,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             <h1 className="text-sm font-semibold text-foreground truncate">
               {sessionTitle(session)}
             </h1>
-            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium shrink-0 ${status.color}`}>
+            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium shrink-0 ${status.color}`}>
               {status.label}
             </span>
             {diffStats && (
@@ -1452,7 +1452,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               <TabsTrigger value="changes">
                 Changes
                 {changesCount != null && changesCount > 0 && (
-                  <Badge variant="secondary" className="ml-1 min-w-[18px] h-[18px] rounded-full px-1 text-[10px] font-semibold leading-none">
+                  <Badge variant="secondary" className="ml-1 min-w-[18px] h-[18px] rounded-full px-1 text-xs font-semibold leading-none">
                     {changesCount}
                   </Badge>
                 )}

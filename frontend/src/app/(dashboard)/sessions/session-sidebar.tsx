@@ -66,7 +66,7 @@ function SessionDiffBadge({ diffStats }: { diffStats?: { added: number; removed:
   if (diffStats.added === 0 && diffStats.removed === 0) return null;
   return (
     <span className="inline-flex shrink-0 rounded-md border border-border/60 bg-muted/50 px-1.5 py-0.5">
-      <DiffStatsBadge added={diffStats.added} removed={diffStats.removed} className="text-[10px]" />
+      <DiffStatsBadge added={diffStats.added} removed={diffStats.removed} className="text-xs" />
     </span>
   );
 }
@@ -91,8 +91,8 @@ function OptimisticSessionRow({ session }: { session: OptimisticSession }) {
             {session.title}
           </p>
           <div className="flex items-center gap-3 mt-0.5">
-            <span className="text-[11px] text-muted-foreground shrink-0">{cfg.label}</span>
-            <span className="text-[11px] text-muted-foreground/50">just now</span>
+            <span className="text-xs text-muted-foreground shrink-0">{cfg.label}</span>
+            <span className="text-xs text-muted-foreground/50">just now</span>
           </div>
         </div>
       </div>
@@ -213,7 +213,7 @@ export function SessionSidebar() {
                   {tab.label}
                   {count > 0 && (
                     <span className={cn(
-                      "rounded-full text-white text-[9px] leading-none px-1.5 py-0.5",
+                      "rounded-full text-white text-xs leading-none px-1.5 py-0.5",
                       tab.value === "needs_attention" ? "bg-orange-500"
                       : "bg-primary"
                     )}>{count}</span>
@@ -248,13 +248,13 @@ export function SessionSidebar() {
           ))}
 
         {isLoading && (
-          <div className="px-2 py-8 text-center text-[12px] text-muted-foreground">
+          <div className="px-2 py-8 text-center text-xs text-muted-foreground">
             Loading...
           </div>
         )}
 
         {!isLoading && displayedSessions.length === 0 && (
-          <div className="px-2 py-8 text-center text-[12px] text-muted-foreground">
+          <div className="px-2 py-8 text-center text-xs text-muted-foreground">
             {allSessions.length === 0 ? "No sessions yet" : "No sessions match this filter."}
           </div>
         )}
@@ -295,22 +295,22 @@ export function SessionSidebar() {
                   </div>
                   <div className="flex items-center justify-between mt-0.5">
                     <div className="flex items-center gap-3 min-w-0">
-                      <span className="text-[11px] text-muted-foreground shrink-0">
+                      <span className="text-xs text-muted-foreground shrink-0">
                         {cfg.label}
                       </span>
                       {session.pm_plan_id && !session.triggered_by_user_id && (
-                        <span className="inline-flex items-center rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary shrink-0">
+                        <span className="inline-flex items-center rounded-full bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary shrink-0">
                           PM
                         </span>
                       )}
-                      <span className="text-[11px] text-muted-foreground/50 truncate">
+                      <span className="text-xs text-muted-foreground/50 truncate">
                         {formatTimeAgo(ts)}
                       </span>
                     </div>
                     <SessionDiffBadge diffStats={session.diff_stats} />
                   </div>
                   {session.status === "failed" && (session.failure_explanation || session.error) && (
-                    <p className="text-[11px] text-destructive/70 truncate mt-0.5">
+                    <p className="text-xs text-destructive/70 truncate mt-0.5">
                       {session.failure_explanation || session.error}
                     </p>
                   )}
