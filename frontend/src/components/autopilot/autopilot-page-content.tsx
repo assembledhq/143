@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
@@ -8,7 +8,6 @@ import { AutopilotControlStrip } from "./autopilot-control-strip";
 import { AutopilotDirectionSummary } from "./autopilot-direction-summary";
 import { AutopilotEvidenceRow } from "./autopilot-evidence-row";
 import { AutopilotHero } from "./autopilot-hero";
-import { AutopilotSetupChecklist } from "./autopilot-setup-checklist";
 import { useAutopilotPageData } from "./use-autopilot-page-data";
 import { DEFAULT_PRIORITY_WEIGHTS } from "./autopilot-helpers";
 import { useAnalyze } from "@/hooks/use-analyze";
@@ -24,6 +23,12 @@ export function AutopilotPageContent() {
   const [showWeightsEditor, setShowWeightsEditor] = useState(false);
   const { isLoading, pmStatus, setup, settings, viewModel } = useAutopilotPageData();
   const { handleAnalyze, isAnalyzing, isPending } = useAnalyze(pmStatus.is_running);
+
+  useEffect(() => {
+    if (!isLoading && (!setup.agentConnected || !setup.githubReady)) {
+      router.replace("/onboarding");
+    }
+  }, [isLoading, setup.agentConnected, setup.githubReady, router]);
 
   const secondaryText = viewModel.heroMode === "setup"
     ? `${setup.connectedCount} of ${setup.totalCount} connected`
@@ -62,7 +67,6 @@ export function AutopilotPageContent() {
 
             <AutopilotHero title={viewModel.heroTitle} body={viewModel.heroBody} />
             <AutopilotEvidenceRow evidence={viewModel.evidence} />
-            {viewModel.heroMode === "setup" && <AutopilotSetupChecklist />}
 
             <AutopilotDirectionSummary
               philosophySummary={viewModel.philosophySummary}

@@ -44,7 +44,7 @@ function LoginPageContent() {
 
   useEffect(() => {
     if (!authLoading && isAuthenticated) {
-      router.replace("/autopilot");
+      router.replace("/onboarding");
     }
   }, [authLoading, isAuthenticated, router]);
 
