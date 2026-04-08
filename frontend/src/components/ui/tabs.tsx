@@ -35,7 +35,7 @@ const tabsListVariants = cva(
       },
       size: {
         default: "",
-        sm: "group-data-[orientation=horizontal]/tabs:h-auto gap-0.5 p-0 rounded-none bg-transparent",
+        sm: "group-data-[orientation=horizontal]/tabs:h-auto gap-0.5 p-0 rounded-none bg-transparent flex w-full flex-wrap",
       },
     },
     defaultVariants: {
@@ -75,6 +75,7 @@ function TabsTrigger({
         "group-data-[variant=line]/tabs-list:bg-transparent group-data-[variant=line]/tabs-list:data-[state=active]:bg-transparent dark:group-data-[variant=line]/tabs-list:data-[state=active]:border-transparent dark:group-data-[variant=line]/tabs-list:data-[state=active]:bg-transparent",
         "data-[state=active]:bg-background dark:data-[state=active]:text-foreground dark:data-[state=active]:border-input dark:data-[state=active]:bg-input/30 data-[state=active]:text-foreground",
         "after:absolute after:opacity-0 after:transition-opacity after:bg-[image:var(--gradient-primary)] after:rounded-full group-data-[orientation=horizontal]/tabs:after:inset-x-0 group-data-[orientation=horizontal]/tabs:after:bottom-[-5px] group-data-[orientation=horizontal]/tabs:after:h-0.5 group-data-[orientation=vertical]/tabs:after:inset-y-0 group-data-[orientation=vertical]/tabs:after:-right-1 group-data-[orientation=vertical]/tabs:after:w-0.5 group-data-[variant=line]/tabs-list:data-[state=active]:after:opacity-100",
+        "group-data-[size=sm]/tabs-list:data-[state=active]:shadow-none group-data-[size=sm]/tabs-list:data-[state=active]:border-transparent group-data-[size=sm]/tabs-list:data-[state=active]:bg-accent dark:group-data-[size=sm]/tabs-list:data-[state=active]:border-transparent dark:group-data-[size=sm]/tabs-list:data-[state=active]:bg-accent",
         className
       )}
       {...props}
