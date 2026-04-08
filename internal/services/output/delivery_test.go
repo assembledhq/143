@@ -182,7 +182,7 @@ func TestValidateWebhookURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateWebhookURL(tt.url)
+			err := ValidateWebhookURL(tt.url)
 			if tt.wantErr && err == nil {
 				t.Errorf("expected error for URL %q", tt.url)
 			}

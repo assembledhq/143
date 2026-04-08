@@ -248,6 +248,9 @@ func (s *Service) deliverEmail(ctx context.Context, dest models.OutputDestinatio
 	deadline, ok := ctx.Deadline()
 	if ok {
 		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return fmt.Errorf("context deadline already exceeded")
+		}
 		if remaining < smtpTimeout {
 			smtpTimeout = remaining
 		}
@@ -363,8 +366,9 @@ func (s *Service) deliverNotion(ctx context.Context, orgID uuid.UUID, dest model
 	return nil
 }
 
-// validateWebhookURL checks that the URL is safe to call (HTTPS, no private IPs).
-func validateWebhookURL(rawURL string) error {
+// ValidateWebhookURL checks that the URL is safe to call (HTTPS, no private IPs).
+// Exported so that API handlers can validate at config creation time.
+func ValidateWebhookURL(rawURL string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("invalid URL: %w", err)
@@ -410,7 +414,7 @@ func (s *Service) deliverWebhook(ctx context.Context, dest models.OutputDestinat
 		return fmt.Errorf("parse webhook config: %w", err)
 	}
 
-	if err := validateWebhookURL(cfg.URL); err != nil {
+	if err := ValidateWebhookURL(cfg.URL); err != nil {
 		return fmt.Errorf("webhook URL validation failed: %w", err)
 	}
 

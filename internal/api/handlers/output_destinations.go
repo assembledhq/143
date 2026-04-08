@@ -2,14 +2,22 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
+	"net/mail"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/output"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
+
+// maxConfigFieldLen caps string fields in destination configs to prevent abuse.
+const maxConfigFieldLen = 2048
 
 type OutputDestinationHandler struct {
 	store        *db.OutputDestinationStore
@@ -154,8 +162,12 @@ func (h *OutputDestinationHandler) Update(w http.ResponseWriter, r *http.Request
 		enabled = *body.Enabled
 	}
 
-	dest, err := h.store.Update(r.Context(), orgID, destID, destType, body.Label, body.Config, enabled)
+	dest, err := h.store.Update(r.Context(), orgID, projectID, destID, destType, body.Label, body.Config, enabled)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "output destination not found")
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update output destination", err)
 		return
 	}
@@ -180,7 +192,11 @@ func (h *OutputDestinationHandler) Delete(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := h.store.Delete(r.Context(), orgID, destID); err != nil {
+	if err := h.store.Delete(r.Context(), orgID, projectID, destID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "output destination not found")
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "DELETE_FAILED", "failed to delete output destination", err)
 		return
 	}
@@ -190,8 +206,9 @@ func (h *OutputDestinationHandler) Delete(w http.ResponseWriter, r *http.Request
 // validateDestinationConfig verifies the config JSON matches the expected schema
 // for the given destination type. Returns an error for missing required fields.
 func validateDestinationConfig(destType models.OutputDestinationType, raw json.RawMessage) error {
-	if len(raw) == 0 {
-		return json.Unmarshal([]byte("{}"), new(json.RawMessage))
+	// Normalize empty/null config to empty object for consistent unmarshaling.
+	if len(raw) == 0 || string(raw) == "null" {
+		raw = json.RawMessage(`{}`)
 	}
 
 	switch destType {
@@ -203,6 +220,9 @@ func validateDestinationConfig(destType models.OutputDestinationType, raw json.R
 		if cfg.ChannelID == "" {
 			return errMissingField("channel_id")
 		}
+		if len(cfg.ChannelID) > maxConfigFieldLen {
+			return errFieldTooLong("channel_id", maxConfigFieldLen)
+		}
 	case models.OutputDestEmail:
 		var cfg models.EmailOutputConfig
 		if err := json.Unmarshal(raw, &cfg); err != nil {
@@ -210,6 +230,11 @@ func validateDestinationConfig(destType models.OutputDestinationType, raw json.R
 		}
 		if len(cfg.Recipients) == 0 {
 			return errMissingField("recipients")
+		}
+		for _, addr := range cfg.Recipients {
+			if _, err := mail.ParseAddress(addr); err != nil {
+				return fmt.Errorf("invalid email address %q: %w", addr, err)
+			}
 		}
 	case models.OutputDestNotion:
 		var cfg models.NotionOutputConfig
@@ -219,6 +244,9 @@ func validateDestinationConfig(destType models.OutputDestinationType, raw json.R
 		if cfg.PageID == "" {
 			return errMissingField("page_id")
 		}
+		if len(cfg.PageID) > maxConfigFieldLen {
+			return errFieldTooLong("page_id", maxConfigFieldLen)
+		}
 	case models.OutputDestWebhook:
 		var cfg models.WebhookOutputConfig
 		if err := json.Unmarshal(raw, &cfg); err != nil {
@@ -227,18 +255,29 @@ func validateDestinationConfig(destType models.OutputDestinationType, raw json.R
 		if cfg.URL == "" {
 			return errMissingField("url")
 		}
+		if len(cfg.URL) > maxConfigFieldLen {
+			return errFieldTooLong("url", maxConfigFieldLen)
+		}
+		if err := output.ValidateWebhookURL(cfg.URL); err != nil {
+			return fmt.Errorf("invalid webhook URL: %w", err)
+		}
 	}
 	return nil
 }
 
 func errMissingField(field string) error {
-	return &configError{Field: field}
+	return &configError{Field: field, Reason: "missing required config field: " + field}
+}
+
+func errFieldTooLong(field string, max int) error {
+	return &configError{Field: field, Reason: fmt.Sprintf("config field %q exceeds maximum length of %d", field, max)}
 }
 
 type configError struct {
-	Field string
+	Field  string
+	Reason string
 }
 
 func (e *configError) Error() string {
-	return "missing required config field: " + e.Field
+	return e.Reason
 }

@@ -281,7 +281,11 @@ function AddDestinationForm({ projectId }: { projectId: string }) {
         <Plus className="h-3 w-3 mr-1" />
         {createMutation.isPending ? "Adding..." : "Add destination"}
       </Button>
-      {createMutation.isError && <p className="text-xs text-destructive">Failed to add destination.</p>}
+      {createMutation.isError && (
+        <p className="text-xs text-destructive">
+          {createMutation.error?.message || "Failed to add destination."}
+        </p>
+      )}
     </div>
   );
 }

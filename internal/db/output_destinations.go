@@ -91,12 +91,18 @@ func (s *OutputDestinationStore) GetByID(ctx context.Context, orgID, id uuid.UUI
 	return scanOutputDest(s.db.QueryRow(ctx, query, orgID, id))
 }
 
-func (s *OutputDestinationStore) Update(ctx context.Context, orgID, id uuid.UUID, destType models.OutputDestinationType, label string, config []byte, enabled bool) (models.OutputDestination, error) {
-	query := fmt.Sprintf(`UPDATE project_output_destinations SET destination_type = $3, label = $4, config = $5, enabled = $6, updated_at = now() WHERE org_id = $1 AND id = $2 RETURNING %s`, outputDestColumns)
-	return scanOutputDest(s.db.QueryRow(ctx, query, orgID, id, destType, label, config, enabled))
+func (s *OutputDestinationStore) Update(ctx context.Context, orgID, projectID, id uuid.UUID, destType models.OutputDestinationType, label string, config []byte, enabled bool) (models.OutputDestination, error) {
+	query := fmt.Sprintf(`UPDATE project_output_destinations SET destination_type = $4, label = $5, config = $6, enabled = $7, updated_at = now() WHERE org_id = $1 AND project_id = $2 AND id = $3 RETURNING %s`, outputDestColumns)
+	return scanOutputDest(s.db.QueryRow(ctx, query, orgID, projectID, id, destType, label, config, enabled))
 }
 
-func (s *OutputDestinationStore) Delete(ctx context.Context, orgID, id uuid.UUID) error {
-	_, err := s.db.Exec(ctx, `DELETE FROM project_output_destinations WHERE org_id = $1 AND id = $2`, orgID, id)
-	return err
+func (s *OutputDestinationStore) Delete(ctx context.Context, orgID, projectID, id uuid.UUID) error {
+	tag, err := s.db.Exec(ctx, `DELETE FROM project_output_destinations WHERE org_id = $1 AND project_id = $2 AND id = $3`, orgID, projectID, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
 }
