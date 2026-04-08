@@ -20,11 +20,26 @@ func NewOutputDestinationHandler(store *db.OutputDestinationStore, projectStore 
 	return &OutputDestinationHandler{store: store, projectStore: projectStore}
 }
 
+// verifyProjectOwnership checks that the project exists and belongs to the authenticated org.
+func (h *OutputDestinationHandler) verifyProjectOwnership(w http.ResponseWriter, r *http.Request, orgID, projectID uuid.UUID) bool {
+	if h.projectStore != nil {
+		if _, err := h.projectStore.GetByID(r.Context(), orgID, projectID); err != nil {
+			writeError(w, r, http.StatusNotFound, "PROJECT_NOT_FOUND", "project not found")
+			return false
+		}
+	}
+	return true
+}
+
 func (h *OutputDestinationHandler) List(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project id")
+		return
+	}
+
+	if !h.verifyProjectOwnership(w, r, orgID, projectID) {
 		return
 	}
 
@@ -47,12 +62,8 @@ func (h *OutputDestinationHandler) Create(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Verify the project belongs to this org.
-	if h.projectStore != nil {
-		if _, err := h.projectStore.GetByID(r.Context(), orgID, projectID); err != nil {
-			writeError(w, r, http.StatusNotFound, "PROJECT_NOT_FOUND", "project not found")
-			return
-		}
+	if !h.verifyProjectOwnership(w, r, orgID, projectID) {
+		return
 	}
 
 	var body struct {
@@ -69,6 +80,12 @@ func (h *OutputDestinationHandler) Create(w http.ResponseWriter, r *http.Request
 	destType := models.OutputDestinationType(body.DestinationType)
 	if err := destType.Validate(); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_TYPE", err.Error())
+		return
+	}
+
+	// Validate that config matches the destination type.
+	if err := validateDestinationConfig(destType, body.Config); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_CONFIG", err.Error())
 		return
 	}
 
@@ -94,6 +111,16 @@ func (h *OutputDestinationHandler) Create(w http.ResponseWriter, r *http.Request
 
 func (h *OutputDestinationHandler) Update(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
+	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project id")
+		return
+	}
+
+	if !h.verifyProjectOwnership(w, r, orgID, projectID) {
+		return
+	}
+
 	destID, err := uuid.Parse(chi.URLParam(r, "destId"))
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid destination id")
@@ -117,6 +144,11 @@ func (h *OutputDestinationHandler) Update(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	if err := validateDestinationConfig(destType, body.Config); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_CONFIG", err.Error())
+		return
+	}
+
 	enabled := true
 	if body.Enabled != nil {
 		enabled = *body.Enabled
@@ -132,6 +164,16 @@ func (h *OutputDestinationHandler) Update(w http.ResponseWriter, r *http.Request
 
 func (h *OutputDestinationHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
+	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project id")
+		return
+	}
+
+	if !h.verifyProjectOwnership(w, r, orgID, projectID) {
+		return
+	}
+
 	destID, err := uuid.Parse(chi.URLParam(r, "destId"))
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid destination id")
@@ -143,4 +185,60 @@ func (h *OutputDestinationHandler) Delete(w http.ResponseWriter, r *http.Request
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// validateDestinationConfig verifies the config JSON matches the expected schema
+// for the given destination type. Returns an error for missing required fields.
+func validateDestinationConfig(destType models.OutputDestinationType, raw json.RawMessage) error {
+	if len(raw) == 0 {
+		return json.Unmarshal([]byte("{}"), new(json.RawMessage))
+	}
+
+	switch destType {
+	case models.OutputDestSlack:
+		var cfg models.SlackOutputConfig
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			return err
+		}
+		if cfg.ChannelID == "" {
+			return errMissingField("channel_id")
+		}
+	case models.OutputDestEmail:
+		var cfg models.EmailOutputConfig
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			return err
+		}
+		if len(cfg.Recipients) == 0 {
+			return errMissingField("recipients")
+		}
+	case models.OutputDestNotion:
+		var cfg models.NotionOutputConfig
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			return err
+		}
+		if cfg.PageID == "" {
+			return errMissingField("page_id")
+		}
+	case models.OutputDestWebhook:
+		var cfg models.WebhookOutputConfig
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			return err
+		}
+		if cfg.URL == "" {
+			return errMissingField("url")
+		}
+	}
+	return nil
+}
+
+func errMissingField(field string) error {
+	return &configError{Field: field}
+}
+
+type configError struct {
+	Field string
+}
+
+func (e *configError) Error() string {
+	return "missing required config field: " + e.Field
 }

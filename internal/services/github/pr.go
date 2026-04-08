@@ -25,6 +25,7 @@ const (
 	defaultGitHubAPI       = "https://api.github.com"
 	maxBranchSlugLen       = 60
 	maxLabelsToCreate      = 5
+	maxReviewersPerPR      = 3
 	prTemplateCacheTTL     = 24 * time.Hour // re-fetch repo PR template after this duration
 )
 
@@ -347,15 +348,15 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	// Use installation token for reviewer assignment — the PR author (which may
 	// be the user token) cannot request themselves as a reviewer, and the app
 	// token has the necessary repo permissions.
-	reviewerToken := token
 	if resolution.IsUserToken {
 		if appToken, err := s.tokenProvider.GetInstallationToken(ctx, repo.InstallationID); err == nil {
-			reviewerToken = appToken
+			s.autoAssignReviewers(ctx, appToken, owner, repoName, prNumber, files)
 		} else {
-			s.logger.Warn().Err(err).Msg("failed to get installation token for reviewer assignment, falling back to user token")
+			s.logger.Warn().Err(err).Msg("skipping auto-reviewer assignment: failed to get installation token")
 		}
+	} else {
+		s.autoAssignReviewers(ctx, token, owner, repoName, prNumber, files)
 	}
-	s.autoAssignReviewers(ctx, reviewerToken, owner, repoName, prNumber, files)
 
 	// 7. Store PR in DB.
 	authoredBy := "app"
@@ -418,9 +419,9 @@ func (s *PRService) autoAssignReviewers(ctx context.Context, token, owner, repoN
 		return
 	}
 
-	// Cap at 3 reviewers to avoid excessive review requests.
-	if len(reviewers) > 3 {
-		reviewers = reviewers[:3]
+	// Cap reviewers to avoid excessive review requests.
+	if len(reviewers) > maxReviewersPerPR {
+		reviewers = reviewers[:maxReviewersPerPR]
 	}
 
 	if err := s.RequestReviewers(ctx, token, owner, repoName, prNumber, reviewers); err != nil {

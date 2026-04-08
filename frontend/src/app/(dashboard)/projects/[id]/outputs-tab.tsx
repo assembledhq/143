@@ -147,6 +147,18 @@ function AddDestinationForm({ projectId }: { projectId: string }) {
   const [webhookUrl, setWebhookUrl] = useState("");
   const [webhookSecret, setWebhookSecret] = useState("");
 
+  const resetForm = () => {
+    setType("");
+    setLabel("");
+    setChannelId("");
+    setChannelName("");
+    setRecipients("");
+    setPageId("");
+    setPageTitle("");
+    setWebhookUrl("");
+    setWebhookSecret("");
+  };
+
   const createMutation = useMutation({
     mutationFn: () => {
       let config: Record<string, unknown> = {};
@@ -172,15 +184,7 @@ function AddDestinationForm({ projectId }: { projectId: string }) {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["project-outputs", projectId] });
-      setType("");
-      setLabel("");
-      setChannelId("");
-      setChannelName("");
-      setRecipients("");
-      setPageId("");
-      setPageTitle("");
-      setWebhookUrl("");
-      setWebhookSecret("");
+      resetForm();
     },
   });
 
@@ -217,7 +221,7 @@ function AddDestinationForm({ projectId }: { projectId: string }) {
         <span className="text-sm font-medium">
           New {DEST_TYPE_META[type]?.label} destination
         </span>
-        <button type="button" onClick={() => setType("")} className="text-xs text-muted-foreground hover:text-foreground">
+        <button type="button" onClick={resetForm} className="text-xs text-muted-foreground hover:text-foreground">
           Cancel
         </button>
       </div>

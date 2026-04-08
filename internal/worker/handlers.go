@@ -99,6 +99,7 @@ type Stores struct {
 	ComplexityEstimates *db.ComplexityEstimateStore
 	Projects            *db.ProjectStore      // nil-safe: projects feature disabled if nil
 	ProjectTasks        *db.ProjectTaskStore  // nil-safe
+	ProjectCycles       *db.ProjectCycleStore // nil-safe: needed for cycle output delivery
 	Credentials         *db.OrgCredentialStore // nil-safe: needed for sync_slack
 	AuditLogs           *db.AuditLogStore     // nil-safe: audit retention cleanup
 	Organizations       *db.OrganizationStore // nil-safe: needed for audit retention
@@ -285,6 +286,14 @@ func newProjectCycleHandler(stores *Stores, services *Services, logger zerolog.L
 					cycleOutput.Summary = project.Goal
 				} else {
 					logger.Warn().Err(err).Msg("failed to fetch project for cycle output")
+				}
+
+				// Fetch latest cycle number.
+				if stores.ProjectCycles != nil {
+					cycles, err := stores.ProjectCycles.ListByProject(ctx, orgID, projectID, 1)
+					if err == nil && len(cycles) > 0 {
+						cycleOutput.CycleNumber = cycles[0].CycleNumber
+					}
 				}
 
 				// Collect PR URLs from tasks.

@@ -188,8 +188,9 @@ func matchPattern(pattern, filePath string) bool {
 
 // matchDoublestar handles patterns containing ** which match zero or more path segments.
 // For example, "docs/**/*.md" matches "docs/foo.md" and "docs/a/b/c.md".
+// Supports multiple ** segments like "src/**/test/**/*.go".
 func matchDoublestar(pattern, filePath string) bool {
-	// Split pattern on "**" and match each segment.
+	// Split pattern on the first "**" occurrence.
 	parts := strings.SplitN(pattern, "**", 2)
 	prefix := parts[0]
 	suffix := strings.TrimPrefix(parts[1], "/")
@@ -207,20 +208,33 @@ func matchDoublestar(pattern, filePath string) bool {
 		return true
 	}
 
-	// Try matching suffix against every possible subpath.
-	// e.g. for "docs/**/*.md" and "docs/a/b/file.md", try *.md against
-	// "a/b/file.md", "b/file.md", and "file.md".
+	// Strip the matched prefix from the file path.
 	remaining := filePath
 	if prefix != "" {
 		remaining = strings.TrimPrefix(filePath, prefix+"/")
 	}
 
-	// Try suffix match against the full remaining path and each progressively shorter subpath.
+	// If the suffix itself contains **, recurse.
+	if strings.Contains(suffix, "**") {
+		// Try matching the suffix (which has its own **) against every possible subpath.
+		for {
+			if matchDoublestar(suffix, remaining) {
+				return true
+			}
+			idx := strings.Index(remaining, "/")
+			if idx < 0 {
+				break
+			}
+			remaining = remaining[idx+1:]
+		}
+		return false
+	}
+
+	// Simple suffix (no more **): try matching against every possible subpath.
 	for {
 		if matched, _ := filepath.Match(suffix, remaining); matched {
 			return true
 		}
-		// Also try against just the basename for simple suffix patterns.
 		idx := strings.Index(remaining, "/")
 		if idx < 0 {
 			break

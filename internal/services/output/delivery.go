@@ -172,7 +172,10 @@ func (s *Service) deliverSlack(ctx context.Context, orgID uuid.UUID, dest models
 		body["thread_ts"] = cfg.ThreadTS
 	}
 
-	jsonBody, _ := json.Marshal(body)
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal slack message: %w", err)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://slack.com/api/chat.postMessage", bytes.NewReader(jsonBody))
 	if err != nil {
 		return err
@@ -240,10 +243,51 @@ func (s *Service) deliverEmail(ctx context.Context, dest models.OutputDestinatio
 	addr := s.smtpCfg.Host + ":" + s.smtpCfg.Port
 	auth := smtp.PlainAuth("", s.smtpCfg.Username, s.smtpCfg.Password, s.smtpCfg.Host)
 
-	if err := smtp.SendMail(addr, auth, s.smtpCfg.From, cfg.Recipients, []byte(msg)); err != nil {
-		return fmt.Errorf("send email: %w", err)
+	// Use a context-aware dialer for SMTP to avoid hanging indefinitely.
+	smtpTimeout := 30 * time.Second
+	deadline, ok := ctx.Deadline()
+	if ok {
+		remaining := time.Until(deadline)
+		if remaining < smtpTimeout {
+			smtpTimeout = remaining
+		}
 	}
-	return nil
+	dialer := &net.Dialer{Timeout: smtpTimeout}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return fmt.Errorf("connect to SMTP server: %w", err)
+	}
+
+	client, err := smtp.NewClient(conn, s.smtpCfg.Host)
+	if err != nil {
+		conn.Close()
+		return fmt.Errorf("create SMTP client: %w", err)
+	}
+	defer client.Close()
+
+	if err := client.Auth(auth); err != nil {
+		return fmt.Errorf("SMTP auth: %w", err)
+	}
+	if err := client.Mail(s.smtpCfg.From); err != nil {
+		return fmt.Errorf("SMTP MAIL FROM: %w", err)
+	}
+	for _, rcpt := range cfg.Recipients {
+		if err := client.Rcpt(rcpt); err != nil {
+			return fmt.Errorf("SMTP RCPT TO %s: %w", rcpt, err)
+		}
+	}
+	wc, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("SMTP DATA: %w", err)
+	}
+	if _, err := wc.Write([]byte(msg)); err != nil {
+		wc.Close()
+		return fmt.Errorf("write email body: %w", err)
+	}
+	if err := wc.Close(); err != nil {
+		return fmt.Errorf("close SMTP data: %w", err)
+	}
+	return client.Quit()
 }
 
 // deliverNotion appends a block to a Notion page using the org's Notion token.
@@ -251,6 +295,13 @@ func (s *Service) deliverNotion(ctx context.Context, orgID uuid.UUID, dest model
 	var cfg models.NotionOutputConfig
 	if err := json.Unmarshal(dest.Config, &cfg); err != nil {
 		return fmt.Errorf("parse notion config: %w", err)
+	}
+
+	if cfg.DatabaseID != "" {
+		return fmt.Errorf("notion database delivery is not yet supported, use page_id instead")
+	}
+	if cfg.PageID == "" {
+		return fmt.Errorf("notion page_id is required")
 	}
 
 	cred, err := s.credentials.GetForOrg(ctx, orgID, models.ProviderNotion)
@@ -286,7 +337,10 @@ func (s *Service) deliverNotion(ctx context.Context, orgID uuid.UUID, dest model
 		},
 	}
 
-	jsonBody, _ := json.Marshal(block)
+	jsonBody, err := json.Marshal(block)
+	if err != nil {
+		return fmt.Errorf("marshal notion block: %w", err)
+	}
 	apiURL := fmt.Sprintf("https://api.notion.com/v1/blocks/%s/children", cfg.PageID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, apiURL, bytes.NewReader(jsonBody))
 	if err != nil {
@@ -325,10 +379,27 @@ func validateWebhookURL(rawURL string) error {
 			return fmt.Errorf("webhook URL must not point to a private or loopback address")
 		}
 	}
-	// Block localhost by name.
-	if host == "localhost" {
-		return fmt.Errorf("webhook URL must not point to localhost")
+	// Block localhost and cloud metadata endpoints by name.
+	blockedHosts := []string{"localhost", "metadata.google.internal"}
+	for _, blocked := range blockedHosts {
+		if strings.EqualFold(host, blocked) {
+			return fmt.Errorf("webhook URL must not point to %s", blocked)
+		}
 	}
+
+	// Resolve DNS and verify none of the resolved IPs are private.
+	if net.ParseIP(host) == nil {
+		ips, err := net.LookupIP(host)
+		if err != nil {
+			return fmt.Errorf("failed to resolve webhook hostname %q: %w", host, err)
+		}
+		for _, ip := range ips {
+			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+				return fmt.Errorf("webhook hostname %q resolves to private address %s", host, ip)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -343,7 +414,10 @@ func (s *Service) deliverWebhook(ctx context.Context, dest models.OutputDestinat
 		return fmt.Errorf("webhook URL validation failed: %w", err)
 	}
 
-	jsonBody, _ := json.Marshal(output)
+	jsonBody, err := json.Marshal(output)
+	if err != nil {
+		return fmt.Errorf("marshal webhook payload: %w", err)
+	}
 
 	method := cfg.Method
 	if method == "" {
