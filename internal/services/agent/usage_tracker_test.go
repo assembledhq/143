@@ -60,7 +60,8 @@ func TestUsageTracker_ContainerLifecycle(t *testing.T) {
 		MemoryLimitMB: 4096,
 	}
 
-	eventID := tracker.ContainerStarted(context.Background(), orgID, sessionID, sandbox, cfg)
+	startedAt := time.Now().Add(-2 * time.Minute)
+	eventID := tracker.ContainerStarted(context.Background(), orgID, sessionID, sandbox, cfg, startedAt)
 	require.Len(t, store.startCalls, 1)
 	require.Equal(t, orgID, store.startCalls[0].OrgID)
 	require.Equal(t, sessionID, store.startCalls[0].SessionID)
@@ -68,8 +69,8 @@ func TestUsageTracker_ContainerLifecycle(t *testing.T) {
 	require.Equal(t, "docker", store.startCalls[0].Provider)
 	require.Equal(t, 2.0, store.startCalls[0].CPULimit)
 	require.Equal(t, 4096, store.startCalls[0].MemoryLimitMB)
+	require.Equal(t, startedAt, store.startCalls[0].StartedAt, "DB and caller should use the same timestamp")
 
-	startedAt := time.Now().Add(-2 * time.Minute)
 	tracker.ContainerStopped(context.Background(), orgID, eventID, startedAt, "completed")
 	require.Len(t, store.stopCalls, 1)
 	require.Equal(t, eventID, store.stopCalls[0].EventID)
@@ -87,7 +88,8 @@ func TestUsageTracker_NilStoreAndMetrics(t *testing.T) {
 	sandbox := &agent.Sandbox{ID: "ctr-xyz", Provider: "docker", WorkDir: "/workspace"}
 	cfg := agent.DefaultSandboxConfig()
 
-	eventID := tracker.ContainerStarted(context.Background(), orgID, sessionID, sandbox, cfg)
-	tracker.ContainerStopped(context.Background(), orgID, eventID, time.Now(), "completed")
+	startedAt := time.Now()
+	eventID := tracker.ContainerStarted(context.Background(), orgID, sessionID, sandbox, cfg, startedAt)
+	tracker.ContainerStopped(context.Background(), orgID, eventID, startedAt, "completed")
 	// No panic = success.
 }

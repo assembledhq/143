@@ -4,7 +4,7 @@
 CREATE TABLE container_usage_events (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     org_id          UUID NOT NULL REFERENCES organizations(id),
-    session_id      UUID NOT NULL REFERENCES sessions(id),
+    session_id      UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     container_id    TEXT NOT NULL,
     provider        TEXT NOT NULL DEFAULT 'docker',
 
@@ -34,3 +34,7 @@ CREATE INDEX idx_container_usage_events_org_started
 -- Index for session-level lookups
 CREATE INDEX idx_container_usage_events_session
     ON container_usage_events (session_id);
+
+-- Partial index for orphan cleanup (stopped_at IS NULL) — avoids full table scan
+CREATE INDEX idx_container_usage_events_orphans
+    ON container_usage_events (started_at) WHERE stopped_at IS NULL;

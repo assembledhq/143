@@ -56,6 +56,12 @@ func (h *UsageHandler) GetSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	const maxRange = 90 * 24 * time.Hour
+	if end.Sub(start) > maxRange {
+		writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "time range must not exceed 90 days")
+		return
+	}
+
 	summary, err := h.usageStore.GetUsageSummary(r.Context(), orgID, start, end)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "INTERNAL", "failed to fetch usage summary", err)

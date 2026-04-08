@@ -105,7 +105,6 @@ func NewBillingMetrics() (*BillingMetrics, error) {
 var (
 	AttrOrgID      = attribute.Key("org.id")
 	AttrProvider   = attribute.Key("container.provider")
-	AttrImage      = attribute.Key("container.image")
 	AttrExitReason = attribute.Key("container.exit_reason")
 	AttrHTTPMethod = attribute.Key("http.request.method")
 	AttrHTTPRoute  = attribute.Key("http.route")
@@ -113,11 +112,12 @@ var (
 )
 
 // RecordStart records metrics when a container starts.
-func (m *BillingMetrics) RecordStart(ctx context.Context, orgID, provider, image string, cpuLimit float64, memoryMB int) {
+// NOTE: container.image is intentionally excluded from metric attributes to
+// avoid unbounded cardinality (tags/SHAs). Image data lives in the DB.
+func (m *BillingMetrics) RecordStart(ctx context.Context, orgID, provider string, cpuLimit float64, memoryMB int) {
 	attrs := otelmetric.WithAttributes(
 		AttrOrgID.String(orgID),
 		AttrProvider.String(provider),
-		AttrImage.String(image),
 	)
 	m.ContainerStartsTotal.Add(ctx, 1, attrs)
 	m.ContainersActive.Add(ctx, 1, otelmetric.WithAttributes(AttrOrgID.String(orgID)))

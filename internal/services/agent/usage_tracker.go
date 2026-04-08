@@ -33,14 +33,16 @@ func NewUsageTracker(store ContainerUsageStore, m *metrics.BillingMetrics, logge
 }
 
 // ContainerStarted records that a container was created and started.
+// The caller must pass the startedAt timestamp so the same value is used for
+// both the DB record and OTel duration computation, avoiding time skew.
 // Returns an event ID that must be passed to ContainerStopped.
-func (t *UsageTracker) ContainerStarted(ctx context.Context, orgID, sessionID uuid.UUID, sandbox *Sandbox, cfg SandboxConfig) uuid.UUID {
+func (t *UsageTracker) ContainerStarted(ctx context.Context, orgID, sessionID uuid.UUID, sandbox *Sandbox, cfg SandboxConfig, startedAt time.Time) uuid.UUID {
 	eventID := uuid.New()
 	orgIDStr := orgID.String()
 
 	// OTel metrics.
 	if t.metrics != nil {
-		t.metrics.RecordStart(ctx, orgIDStr, sandbox.Provider, cfg.Image, cfg.CPULimit, cfg.MemoryLimitMB)
+		t.metrics.RecordStart(ctx, orgIDStr, sandbox.Provider, cfg.CPULimit, cfg.MemoryLimitMB)
 	}
 
 	// DB persistence.
@@ -54,7 +56,7 @@ func (t *UsageTracker) ContainerStarted(ctx context.Context, orgID, sessionID uu
 			CPULimit:      cfg.CPULimit,
 			MemoryLimitMB: cfg.MemoryLimitMB,
 			Image:         cfg.Image,
-			StartedAt:     time.Now(),
+			StartedAt:     startedAt,
 		}
 		if err := t.store.RecordStart(ctx, event); err != nil {
 			t.logger.Error().Err(err).

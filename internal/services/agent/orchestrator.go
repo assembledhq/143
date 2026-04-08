@@ -105,6 +105,12 @@ type JobStore interface {
 	Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
 }
 
+// UsageRecorder tracks container lifecycle events for billing.
+type UsageRecorder interface {
+	ContainerStarted(ctx context.Context, orgID, sessionID uuid.UUID, sandbox *Sandbox, cfg SandboxConfig, startedAt time.Time) uuid.UUID
+	ContainerStopped(ctx context.Context, orgID uuid.UUID, eventID uuid.UUID, startedAt time.Time, exitReason string)
+}
+
 // MemoryService provides scored memory context for agent prompts.
 type MemoryService interface {
 	GetContextMemories(ctx context.Context, req MemoryContextRequest) (*MemoryContextResult, error)
@@ -151,7 +157,7 @@ type Orchestrator struct {
 	memory            MemoryService // can be nil
 	userCredentials   UserCredentialProvider // can be nil
 	snapshots         storage.SnapshotStore // can be nil — multi-turn disabled if nil
-	usageTracker      *UsageTracker         // can be nil — billing tracking disabled if nil
+	usageTracker      UsageRecorder         // can be nil — billing tracking disabled if nil
 	logger            zerolog.Logger
 	maxConcurrent     int
 }
@@ -176,7 +182,7 @@ type OrchestratorConfig struct {
 	Memory            MemoryService // optional — injects learned memories into agent prompts
 	UserCredentials   UserCredentialProvider // optional — enables personal/team credential resolution
 	Snapshots         storage.SnapshotStore // optional — enables multi-turn snapshot/restore
-	UsageTracker      *UsageTracker         // optional — enables billing observability
+	UsageTracker      UsageRecorder         // optional — enables billing observability
 	Logger            zerolog.Logger
 	MaxConcurrent     int
 }
@@ -382,7 +388,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	containerStartedAt := time.Now()
 	var usageEventID uuid.UUID
 	if o.usageTracker != nil {
-		usageEventID = o.usageTracker.ContainerStarted(ctx, run.OrgID, run.ID, sandbox, sandboxCfg)
+		usageEventID = o.usageTracker.ContainerStarted(ctx, run.OrgID, run.ID, sandbox, sandboxCfg, containerStartedAt)
 	}
 	defer func() {
 		exitReason := "completed"
@@ -666,7 +672,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	containerStartedAt := time.Now()
 	var usageEventID uuid.UUID
 	if o.usageTracker != nil {
-		usageEventID = o.usageTracker.ContainerStarted(ctx, session.OrgID, session.ID, sandbox, sandboxCfg)
+		usageEventID = o.usageTracker.ContainerStarted(ctx, session.OrgID, session.ID, sandbox, sandboxCfg, containerStartedAt)
 	}
 	defer func() {
 		exitReason := "completed"

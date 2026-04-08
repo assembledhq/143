@@ -45,8 +45,9 @@ func (s *ContainerUsageStore) RecordStart(ctx context.Context, event *models.Con
 
 // RecordStop updates a container usage event when the sandbox is destroyed.
 // It computes duration_ms and container_minutes from started_at → stoppedAt.
+// Returns an error if no matching event was found (e.g. RecordStart failed).
 func (s *ContainerUsageStore) RecordStop(ctx context.Context, eventID uuid.UUID, stoppedAt time.Time, exitReason string) error {
-	_, err := s.db.Exec(ctx, `
+	tag, err := s.db.Exec(ctx, `
 		UPDATE container_usage_events
 		SET stopped_at = @stopped_at,
 		    duration_ms = EXTRACT(EPOCH FROM (@stopped_at::timestamptz - started_at)) * 1000,
@@ -60,6 +61,9 @@ func (s *ContainerUsageStore) RecordStop(ctx context.Context, eventID uuid.UUID,
 		})
 	if err != nil {
 		return fmt.Errorf("record container stop: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("record container stop: no event found with id %s", eventID)
 	}
 	return nil
 }
@@ -101,7 +105,7 @@ func (s *ContainerUsageStore) GetUsageSummary(ctx context.Context, orgID uuid.UU
 	}
 	defer rows.Close()
 
-	var buckets []models.CapacityBucket
+	buckets := make([]models.CapacityBucket, 0)
 	for rows.Next() {
 		var b models.CapacityBucket
 		if err := rows.Scan(&b.CPULimit, &b.MemoryLimitMB, &b.ContainerMinutes, &b.SessionCount); err != nil {

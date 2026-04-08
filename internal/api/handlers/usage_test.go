@@ -31,7 +31,7 @@ func TestUsageHandler_GetSummary(t *testing.T) {
 	orgID := uuid.New()
 
 	// Totals
-	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(container_minutes\\)").
+	mock.ExpectQuery("SELECT COALESCE\\(SUM").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"total_minutes", "total_sessions"}).AddRow(42.5, 5))
 
