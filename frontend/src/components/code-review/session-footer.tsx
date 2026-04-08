@@ -51,7 +51,7 @@ export function SessionFooter({
   const isWorking = workingStatuses.has(status);
 
   return (
-    <div className="h-8 border-t border-border bg-background flex items-center px-4 gap-4 text-[11px] shrink-0">
+    <div className="h-8 border-t border-border bg-background flex items-center px-4 gap-4 text-xs shrink-0">
       <div className="flex items-center gap-1.5">
         {isWorking ? (
           <StatusDot color={statusDotColor[status] ?? "bg-primary"} animate pingColor="bg-primary/60" />

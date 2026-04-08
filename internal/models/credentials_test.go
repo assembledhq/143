@@ -513,6 +513,48 @@ func TestParseProviderConfig_Slack_Invalid(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestMaskedSummary_Notion(t *testing.T) {
+	t.Parallel()
+
+	cfg := NotionConfig{AccessToken: "ntn_test_token_12345"}
+	summary := cfg.MaskedSummary()
+
+	require.Equal(t, ProviderNotion, summary.Provider, "summary should have correct provider")
+	require.True(t, summary.Configured, "summary should be configured")
+	require.Empty(t, summary.MaskedKey, "notion summary should not include masked key")
+}
+
+func TestNotionConfig_Validate(t *testing.T) {
+	t.Parallel()
+
+	require.NoError(t, NotionConfig{AccessToken: "ntn_test"}.Validate())
+	require.Error(t, NotionConfig{AccessToken: ""}.Validate())
+}
+
+func TestNotionConfig_Provider(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, ProviderNotion, NotionConfig{}.Provider())
+}
+
+func TestParseProviderConfig_Notion(t *testing.T) {
+	t.Parallel()
+
+	input := `{"access_token":"ntn_test_token"}`
+	cfg, err := ParseProviderConfig(ProviderNotion, []byte(input))
+	require.NoError(t, err)
+
+	nc, ok := cfg.(NotionConfig)
+	require.True(t, ok, "config should be NotionConfig")
+	require.Equal(t, "ntn_test_token", nc.AccessToken)
+}
+
+func TestParseProviderConfig_Notion_Invalid(t *testing.T) {
+	t.Parallel()
+
+	_, err := ParseProviderConfig(ProviderNotion, []byte(`{bad json`))
+	require.Error(t, err)
+}
+
 func TestIsCodingAgentProvider(t *testing.T) {
 	t.Parallel()
 

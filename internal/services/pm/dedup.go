@@ -151,6 +151,11 @@ func titleSimilarity(a, b string) float64 {
 }
 
 // scopeSimilarity computes keyword overlap between two scope descriptions.
+// NOTE: The Jaccard computation was corrected to deduplicate both word lists
+// before computing set intersection. Previously, duplicate words inflated the
+// overlap count. Existing proposals already stored in the DB with old scores
+// are unaffected because dedup runs live at proposal time — scores are never
+// cached or persisted.
 func scopeSimilarity(a, b string) float64 {
 	wordsA := extractKeywords(a)
 	wordsB := extractKeywords(b)
@@ -158,20 +163,25 @@ func scopeSimilarity(a, b string) float64 {
 		return 0
 	}
 
+	// Deduplicate both sides to compute a correct Jaccard similarity.
+	setA := make(map[string]struct{}, len(wordsA))
+	for _, w := range wordsA {
+		setA[w] = struct{}{}
+	}
 	setB := make(map[string]struct{}, len(wordsB))
 	for _, w := range wordsB {
 		setB[w] = struct{}{}
 	}
 
 	var overlap int
-	for _, w := range wordsA {
+	for w := range setA {
 		if _, ok := setB[w]; ok {
 			overlap++
 		}
 	}
 
 	// Jaccard similarity
-	union := len(wordsA) + len(wordsB) - overlap
+	union := len(setA) + len(setB) - overlap
 	if union == 0 {
 		return 0
 	}

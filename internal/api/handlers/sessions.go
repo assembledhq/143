@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strings"
@@ -76,13 +77,40 @@ func NewSessionHandler(
 	}
 }
 
+// encodeSessionCursor produces an opaque cursor from the last row's created_at and id.
+func encodeSessionCursor(createdAt time.Time, id uuid.UUID) string {
+	return encodeCursor(createdAt, id.String())
+}
+
+// decodeSessionCursor is the inverse of encodeSessionCursor.
+func decodeSessionCursor(cursor string) (time.Time, uuid.UUID, error) {
+	t, rawID, err := decodeCursor(cursor)
+	if err != nil {
+		return time.Time{}, uuid.Nil, err
+	}
+	id, err := uuid.Parse(rawID)
+	if err != nil {
+		return time.Time{}, uuid.Nil, fmt.Errorf("invalid cursor id: %w", err)
+	}
+	return t, id, nil
+}
+
 func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
 	limit := queryInt(r, "limit", 50)
 	filters := db.SessionFilters{
-		Limit:  limit,
-		Cursor: r.URL.Query().Get("cursor"),
+		Limit: limit,
+	}
+
+	if cursor := r.URL.Query().Get("cursor"); cursor != "" {
+		t, id, err := decodeSessionCursor(cursor)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "invalid cursor")
+			return
+		}
+		filters.CursorTime = &t
+		filters.CursorID = &id
 	}
 
 	if statusParam := r.URL.Query().Get("status"); statusParam != "" {
@@ -128,8 +156,9 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var nextCursor string
-	if len(runs) > 0 && len(runs) == filters.Limit {
-		nextCursor = runs[len(runs)-1].ID.String()
+	if len(runs) > 0 && len(runs) == limit {
+		last := runs[len(runs)-1]
+		nextCursor = encodeSessionCursor(last.CreatedAt, last.ID)
 	}
 
 	writeJSON(w, http.StatusOK, models.ListResponse[models.Session]{
@@ -219,6 +248,7 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 	if autonomyLevel == "" {
 		autonomyLevel = "semi"
 	}
+	// These values are enforced by chk_sessions_autonomy_level CHECK constraint.
 	validAutonomyLevels := map[string]bool{"full": true, "semi": true, "supervised": true}
 	if !validAutonomyLevels[autonomyLevel] {
 		writeError(w, r, http.StatusBadRequest, "INVALID_AUTONOMY_LEVEL", "autonomy_level must be one of: full, semi, supervised")
@@ -469,9 +499,23 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	payload := map[string]string{
+	// Parse optional request body for per-PR overrides (e.g. draft).
+	var req struct {
+		Draft *bool `json:"draft,omitempty"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+			return
+		}
+	}
+
+	payload := map[string]any{
 		"session_id": sessionID.String(),
 		"org_id":     orgID.String(),
+	}
+	if req.Draft != nil {
+		payload["draft"] = *req.Draft
 	}
 	dedupeKey := fmt.Sprintf("open_pr:%s", sessionID)
 	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "open_pr", payload, 5, &dedupeKey); err != nil {
@@ -480,7 +524,8 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionIDStr := sessionID.String()
-	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionPRRequested, models.AuditResourceSession, &sessionIDStr, &session.ID, nil, nil)
+	draftDetails := auditDetailsDraft(req.Draft)
+	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionPRRequested, models.AuditResourceSession, &sessionIDStr, &session.ID, nil, draftDetails)
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
 }
 
@@ -854,6 +899,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	if autonomyLevel == "" {
 		autonomyLevel = "semi"
 	}
+	// These values are enforced by chk_sessions_autonomy_level CHECK constraint.
 	validAutonomyLevels := map[string]bool{"full": true, "semi": true, "supervised": true}
 	if !validAutonomyLevels[autonomyLevel] {
 		writeError(w, r, http.StatusBadRequest, "INVALID_AUTONOMY_LEVEL", "autonomy_level must be one of: full, semi, supervised")
@@ -891,6 +937,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		Description:  &description,
 		RawData:      rawData,
 		Status:       "open",
+		Severity:     "medium",
 		FirstSeenAt:  now,
 		LastSeenAt:   now,
 		Fingerprint:  fingerprint,

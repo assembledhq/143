@@ -470,6 +470,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	close(logCh)
 	logWg.Wait()
 
+	// 10b. Retry once on token expiration for Codex agents.
+	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.ID, run.CurrentTurn, sandbox, adapter, execCtx, prompt, result, err, log)
+
 	// 11. Handle result.
 	if err != nil {
 		o.failRun(ctx, run, err.Error())
@@ -802,6 +805,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	close(logCh)
 	logWg.Wait()
 
+	// 6b. Retry once on token expiration for Codex agents.
+	result, err = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.ID, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
+
 	if err != nil {
 		o.failRun(ctx, session, err.Error())
 		return fmt.Errorf("execute agent on continue: %w", err)
@@ -983,6 +989,7 @@ func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, t
 
 		log := &models.SessionLog{
 			SessionID:  runID,
+			OrgID:      orgID,
 			Level:      entry.Level,
 			Message:    entry.Message,
 			Metadata:   metadata,
@@ -1485,4 +1492,68 @@ func formatWorkingBranch(run *models.Session, issue *models.Issue) string {
 // shellEscapeSingleQuote escapes single quotes for safe use in shell commands.
 func shellEscapeSingleQuote(s string) string {
 	return strings.ReplaceAll(s, "'", "'\\''")
+}
+
+// isTokenExpiredError returns true if the error string indicates the Codex CLI
+// received a 401 token_expired response from ChatGPT's backend API. This is
+// used to trigger a single retry with a refreshed token.
+//
+// Note: these strings are intentionally NOT covered by isRefreshTokenError
+// in the Codex adapter (which filters refresh_token_reused, invalid_grant, etc.).
+// token_expired errors must flow through to result.Error so this retry can fire.
+func isTokenExpiredError(errMsg string) bool {
+	if errMsg == "" {
+		return false
+	}
+	return strings.Contains(errMsg, "token_expired") ||
+		strings.Contains(errMsg, "token is expired") ||
+		strings.Contains(errMsg, "Provided authentication token is expired")
+}
+
+// retryOnTokenExpired checks whether the Codex CLI failed with a token_expired
+// error and, if so, refreshes the token, re-injects auth.json, and retries
+// execution once. Returns the (possibly updated) result and error.
+func (o *Orchestrator) retryOnTokenExpired(
+	ctx context.Context,
+	agentType models.AgentType,
+	orgID uuid.UUID,
+	sessionID uuid.UUID,
+	turnNumber int,
+	sandbox *Sandbox,
+	adapter AgentAdapter,
+	execCtx context.Context,
+	prompt *AgentPrompt,
+	result *AgentResult,
+	err error,
+	log zerolog.Logger,
+) (*AgentResult, error) {
+	if agentType != models.AgentTypeCodex || result == nil || !isTokenExpiredError(result.Error) {
+		return result, err
+	}
+
+	log.Warn().Msg("codex CLI hit token_expired, refreshing token and retrying")
+
+	reinjected, reinjectErr := o.injectCodexAuth(ctx, orgID, sandbox)
+	if reinjectErr != nil {
+		log.Warn().Err(reinjectErr).Msg("failed to re-inject codex auth for retry")
+		return result, err
+	}
+	if !reinjected {
+		return result, err
+	}
+
+	retryLogCh := make(chan LogEntry, 100)
+	var retryLogWg sync.WaitGroup
+	retryLogWg.Add(1)
+	go func() {
+		defer retryLogWg.Done()
+		o.streamLogs(ctx, sessionID, orgID, turnNumber, retryLogCh)
+	}()
+
+	result, err = adapter.Execute(execCtx, sandbox, prompt, retryLogCh)
+	close(retryLogCh)
+	retryLogWg.Wait()
+
+	log.Info().Msg("codex CLI retry after token refresh completed")
+	return result, err
 }

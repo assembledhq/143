@@ -224,7 +224,7 @@ export function DirectionSection() {
                 if (rs.pm?.product_context?.avoid_areas?.length) overrides.push("avoid");
                 if (rs.pm?.pm_model) overrides.push("model");
                 return (
-                  <Badge key={repo.id} variant="secondary" className="text-[11px]">
+                  <Badge key={repo.id} variant="secondary" className="text-xs">
                     {repo.full_name}
                     {overrides.length > 0 && (
                       <span className="text-muted-foreground/60 ml-1">
@@ -235,7 +235,7 @@ export function DirectionSection() {
                 );
               })}
             </div>
-            <p className="text-[11px] text-muted-foreground/60">
+            <p className="text-xs text-muted-foreground/60">
               Org defaults apply to all other repos. Per-repo overrides take precedence.
             </p>
           </div>
@@ -364,7 +364,7 @@ export function DirectionSection() {
                   />
                   <div className="flex flex-wrap gap-2">
                     {focusAreas.map((area) => (
-                      <Badge key={area} variant="secondary" className="text-[11px]">
+                      <Badge key={area} variant="secondary" className="text-xs">
                         {area}
                         <Button
                           variant="ghost"
@@ -395,7 +395,7 @@ export function DirectionSection() {
                   />
                   <div className="flex flex-wrap gap-2">
                     {avoidAreas.map((area) => (
-                      <Badge key={area} variant="secondary" className="text-[11px]">
+                      <Badge key={area} variant="secondary" className="text-xs">
                         {area}
                         <Button
                           variant="ghost"

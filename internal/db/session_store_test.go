@@ -21,15 +21,15 @@ var sessionTestColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
-	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "created_at",
+	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "deleted_at", "created_at",
 }
 
 func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 	return []interface{}{
-		sessionID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
+		sessionID, issueID, orgID, "claude-code", "completed", "supervised", "low",
 		nil, nil, nil, nil,
 		nil, &now, &now, nil,
-		nil, nil, nil, nil,
+		nil, nil, nil, false,
 		nil, nil, nil, nil, nil,
 		nil, nil, nil, nil,
 		nil, nil, nil,
@@ -40,6 +40,7 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 		nil, // diff_stats
 		nil, // diff_history
 		nil, // input_manifest
+		nil, // deleted_at
 		now,
 	}
 }
@@ -337,4 +338,185 @@ func TestSessionStore_UpdatePMPlanID(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestSessionStore_SoftDelete(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+
+	mock.ExpectExec("UPDATE sessions SET deleted_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.SoftDelete(context.Background(), uuid.New(), uuid.New())
+	require.NoError(t, err, "SoftDelete should not return an error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_SoftDelete_NotFound(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+
+	mock.ExpectExec("UPDATE sessions SET deleted_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+	err = store.SoftDelete(context.Background(), uuid.New(), uuid.New())
+	require.Error(t, err, "SoftDelete should return an error when session not found")
+	require.Contains(t, err.Error(), "not found or already deleted")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func stringPtr(s string) *string { return &s }
+func float64Ptr(f float64) *float64 { return &f }
+
+// =============================================================================
+// Additional session store tests for coverage
+// =============================================================================
+
+func TestSessionStore_UpdateFailure(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+
+	mock.ExpectExec("UPDATE sessions.+SET failure_explanation").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdateFailure(context.Background(), uuid.New(), uuid.New(), "test failure", "runtime", []string{"retry"}, true)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionStore_UpdateSnapshotInfo(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+
+	mock.ExpectExec("UPDATE sessions.+SET.+agent_session_id.+snapshot_key").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdateSnapshotInfo(context.Background(), uuid.New(), uuid.New(), "agent-123", "snap-key")
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionStore_UpdateSandboxState(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+
+	mock.ExpectExec("UPDATE sessions SET sandbox_state").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdateSandboxState(context.Background(), uuid.New(), uuid.New(), "snapshotted")
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionStore_UpdateWorkingBranch(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+
+	mock.ExpectExec("UPDATE sessions SET working_branch").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdateWorkingBranch(context.Background(), uuid.New(), uuid.New(), "feature/my-branch")
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionStore_UpdateTurnComplete(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+
+	result := &models.SessionResult{
+		ConfidenceScore:     float64Ptr(0.85),
+		ConfidenceReasoning: stringPtr("good progress"),
+		RiskFactors:         []string{"none"},
+		TokenUsage:          json.RawMessage(`{"input":100,"output":200}`),
+		ResultSummary:       stringPtr("task done"),
+		Diff:                stringPtr("diff content"),
+	}
+
+	mock.ExpectExec("UPDATE sessions.+SET status = 'idle'").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdateTurnComplete(context.Background(), uuid.New(), uuid.New(), 2, result, "agent-123", "snap-key")
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionStore_ListStaleIdleSessions(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions.+WHERE status = 'idle'").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns))
+
+	sessions, err := store.ListStaleIdleSessions(context.Background(), time.Now().Add(-time.Hour))
+	require.NoError(t, err)
+	require.Len(t, sessions, 0)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionStore_ListExpiredSnapshots(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions.+sandbox_state = 'snapshotted'").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns))
+
+	sessions, err := store.ListExpiredSnapshots(context.Background(), time.Now().Add(-24*time.Hour))
+	require.NoError(t, err)
+	require.Len(t, sessions, 0)
+	require.NoError(t, mock.ExpectationsWereMet())
+}

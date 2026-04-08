@@ -1,0 +1,887 @@
+package db
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/assembledhq/143/internal/models"
+)
+
+// =============================================================================
+// PreviewStore
+// =============================================================================
+
+// PreviewStore manages preview_instances and related tables.
+// It uses TxStarter because stop operations need transactional consistency
+// (stop preview + revoke all access sessions atomically).
+type PreviewStore struct {
+	db TxStarter
+}
+
+// NewPreviewStore creates a new PreviewStore.
+func NewPreviewStore(db TxStarter) *PreviewStore {
+	return &PreviewStore{db: db}
+}
+
+// Begin starts a transaction.
+func (s *PreviewStore) Begin(ctx context.Context) (pgx.Tx, error) {
+	return s.db.Begin(ctx)
+}
+
+// WithTx returns a new PreviewStore that uses the given transaction.
+func (s *PreviewStore) WithTx(tx pgx.Tx) *PreviewStore {
+	return &PreviewStore{db: tx}
+}
+
+// activeStatusFilter is the SQL IN clause for active preview statuses.
+// Keep in sync with models.PreviewStatus.IsActive().
+// This is a constant interpolated via fmt.Sprintf — safe because it is never user input.
+const activeStatusFilter = `('starting', 'ready', 'partially_ready', 'unhealthy')`
+
+// --- Column lists ---
+
+const previewInstanceColumns = `id, session_id, org_id, user_id, profile_name, name, status,
+	provider, worker_node_id, preview_handle, primary_service, port,
+	config_digest, base_commit_sha, last_accessed_at, expires_at, stopped_at,
+	last_path, memory_limit_mb, cpu_limit_millis, error, created_at, updated_at`
+
+const previewServiceColumns = `id, preview_instance_id, service_name, role, status,
+	command, cwd, port, pid, error, created_at`
+
+const previewInfraColumns = `id, preview_instance_id, infra_name, template,
+	container_id, status, host, port, credentials_hash, error, created_at`
+
+const previewSnapshotColumns = `id, preview_instance_id, trigger, url_path, blob_ref,
+	viewport_width, viewport_height, console_errors, file_changes, created_at`
+
+const previewLogColumns = `id, preview_instance_id, org_id, level, step, message,
+	metadata, created_at`
+
+const previewAccessSessionColumns = `id, org_id, user_id, preview_instance_id,
+	session_token_hash, issued_at, expires_at, revoked_at, last_accessed_at, created_at`
+
+const previewStartupCacheColumns = `id, org_id, repo_id, snapshot_key, blob_path,
+	size_bytes, worker_node_id, last_used_at, created_at`
+
+const prPreviewStateColumns = `id, org_id, repo_id, pr_number, github_comment_id,
+	last_preview_instance_id, last_screenshot_blob_path, last_visual_diff_blob_path,
+	base_snapshot_key, status, created_at, updated_at`
+
+// =============================================================================
+// Preview Instance CRUD
+// =============================================================================
+
+// CreatePreviewInstance inserts a new preview instance.
+func (s *PreviewStore) CreatePreviewInstance(ctx context.Context, p *models.PreviewInstance) error {
+	query := fmt.Sprintf(`
+		INSERT INTO preview_instances (
+			session_id, org_id, user_id, profile_name, name, status, provider,
+			worker_node_id, preview_handle, primary_service, port,
+			config_digest, base_commit_sha, expires_at,
+			last_path, memory_limit_mb, cpu_limit_millis
+		) VALUES (
+			@session_id, @org_id, @user_id, @profile_name, @name, @status, @provider,
+			@worker_node_id, @preview_handle, @primary_service, @port,
+			@config_digest, @base_commit_sha, @expires_at,
+			@last_path, @memory_limit_mb, @cpu_limit_millis
+		) RETURNING %s`, previewInstanceColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"session_id":       p.SessionID,
+		"org_id":           p.OrgID,
+		"user_id":          p.UserID,
+		"profile_name":     p.ProfileName,
+		"name":             p.Name,
+		"status":           p.Status,
+		"provider":         p.Provider,
+		"worker_node_id":   p.WorkerNodeID,
+		"preview_handle":   p.PreviewHandle,
+		"primary_service":  p.PrimaryService,
+		"port":             p.Port,
+		"config_digest":    p.ConfigDigest,
+		"base_commit_sha":  p.BaseCommitSHA,
+		"expires_at":       p.ExpiresAt,
+		"last_path":        p.LastPath,
+		"memory_limit_mb":  p.MemoryLimitMB,
+		"cpu_limit_millis": p.CPULimitMillis,
+	})
+	if err != nil {
+		return fmt.Errorf("insert preview instance: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewInstance])
+	if err != nil {
+		return fmt.Errorf("scan preview instance: %w", err)
+	}
+	*p = row
+	return nil
+}
+
+// GetPreviewInstance returns a preview instance by ID, scoped to org.
+func (s *PreviewStore) GetPreviewInstance(ctx context.Context, orgID, id uuid.UUID) (*models.PreviewInstance, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_instances WHERE id = @id AND org_id = @org_id`, previewInstanceColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"id": id, "org_id": orgID})
+	if err != nil {
+		return nil, fmt.Errorf("query preview instance: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewInstance])
+	if err != nil {
+		return nil, fmt.Errorf("get preview instance: %w", err)
+	}
+	return &row, nil
+}
+
+// GetActivePreviewForSession returns the active preview for a session, if any.
+func (s *PreviewStore) GetActivePreviewForSession(ctx context.Context, orgID, sessionID uuid.UUID) (*models.PreviewInstance, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_instances
+		WHERE org_id = @org_id AND session_id = @session_id
+		AND status IN %s
+		LIMIT 1`, previewInstanceColumns, activeStatusFilter)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":     orgID,
+		"session_id": sessionID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query active preview: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewInstance])
+	if err != nil {
+		return nil, fmt.Errorf("get active preview: %w", err)
+	}
+	return &row, nil
+}
+
+// UpdatePreviewStatus updates the status and optional error of a preview.
+// For terminal statuses (stopped, failed, expired), it also sets stopped_at.
+func (s *PreviewStore) UpdatePreviewStatus(ctx context.Context, orgID, id uuid.UUID, status models.PreviewStatus, errMsg string) error {
+	var query string
+	if status.IsTerminal() {
+		query = `UPDATE preview_instances SET status = @status, error = @error, stopped_at = now(), updated_at = now()
+			WHERE id = @id AND org_id = @org_id`
+	} else {
+		query = `UPDATE preview_instances SET status = @status, error = @error, updated_at = now()
+			WHERE id = @id AND org_id = @org_id`
+	}
+	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id": id, "org_id": orgID, "status": status, "error": errMsg,
+	})
+	if err != nil {
+		return fmt.Errorf("update preview status: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("preview instance not found")
+	}
+	return nil
+}
+
+// UpdatePreviewAccess updates the last_accessed_at timestamp.
+func (s *PreviewStore) UpdatePreviewAccess(ctx context.Context, orgID, id uuid.UUID) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE preview_instances SET last_accessed_at = now(), updated_at = now() WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": id, "org_id": orgID},
+	)
+	if err != nil {
+		return fmt.Errorf("update preview access: %w", err)
+	}
+	return nil
+}
+
+// UpdatePreviewExpiry sets a new expires_at timestamp.
+func (s *PreviewStore) UpdatePreviewExpiry(ctx context.Context, orgID, id uuid.UUID, expiresAt time.Time) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE preview_instances SET expires_at = @expires_at, updated_at = now() WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": id, "org_id": orgID, "expires_at": expiresAt},
+	)
+	if err != nil {
+		return fmt.Errorf("update preview expiry: %w", err)
+	}
+	return nil
+}
+
+// UpdateLastPath updates the last proxied request path (for navigation restore on restart).
+func (s *PreviewStore) UpdateLastPath(ctx context.Context, orgID, id uuid.UUID, path string) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE preview_instances SET last_path = @path, updated_at = now() WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": id, "org_id": orgID, "path": path},
+	)
+	if err != nil {
+		return fmt.Errorf("update last path: %w", err)
+	}
+	return nil
+}
+
+// StopPreview sets status to stopped and records the stop time.
+// This should be called within a transaction that also revokes access sessions.
+func (s *PreviewStore) StopPreview(ctx context.Context, orgID, id uuid.UUID) error {
+	tag, err := s.db.Exec(ctx,
+		fmt.Sprintf(`UPDATE preview_instances SET status = @new_status, stopped_at = now(), updated_at = now()
+		 WHERE id = @id AND org_id = @org_id AND status IN %s`, activeStatusFilter),
+		pgx.NamedArgs{"id": id, "org_id": orgID, "new_status": models.PreviewStatusStopped},
+	)
+	if err != nil {
+		return fmt.Errorf("stop preview: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("preview instance not found or already stopped")
+	}
+	return nil
+}
+
+// CountActivePreviewsByOrg counts active previews for concurrency cap enforcement.
+func (s *PreviewStore) CountActivePreviewsByOrg(ctx context.Context, orgID uuid.UUID) (int, error) {
+	var count int
+	err := s.db.QueryRow(ctx,
+		fmt.Sprintf(`SELECT COUNT(*) FROM preview_instances WHERE org_id = @org_id
+		 AND status IN %s`, activeStatusFilter),
+		pgx.NamedArgs{"org_id": orgID},
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count active previews by org: %w", err)
+	}
+	return count, nil
+}
+
+// CountActivePreviewsByUser counts active previews for per-user cap enforcement.
+func (s *PreviewStore) CountActivePreviewsByUser(ctx context.Context, orgID, userID uuid.UUID) (int, error) {
+	var count int
+	err := s.db.QueryRow(ctx,
+		fmt.Sprintf(`SELECT COUNT(*) FROM preview_instances
+		 WHERE org_id = @org_id AND user_id = @user_id
+		 AND status IN %s`, activeStatusFilter),
+		pgx.NamedArgs{"org_id": orgID, "user_id": userID},
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count active previews by user: %w", err)
+	}
+	return count, nil
+}
+
+// CountActivePreviewsByWorker counts active previews on a worker node.
+func (s *PreviewStore) CountActivePreviewsByWorker(ctx context.Context, workerNodeID string) (int, error) {
+	var count int
+	err := s.db.QueryRow(ctx,
+		fmt.Sprintf(`SELECT COUNT(*) FROM preview_instances WHERE worker_node_id = @worker
+		 AND status IN %s`, activeStatusFilter),
+		pgx.NamedArgs{"worker": workerNodeID},
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count active previews by worker: %w", err)
+	}
+	return count, nil
+}
+
+// ListExpiredPreviews returns active previews whose hard TTL has passed.
+func (s *PreviewStore) ListExpiredPreviews(ctx context.Context, cutoff time.Time) ([]models.PreviewInstance, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_instances
+		WHERE status IN %s
+		AND expires_at < @cutoff
+		ORDER BY expires_at ASC`, previewInstanceColumns, activeStatusFilter)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"cutoff": cutoff})
+	if err != nil {
+		return nil, fmt.Errorf("query expired previews: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewInstance])
+}
+
+// ListIdlePreviews returns active previews with no activity since the cutoff.
+func (s *PreviewStore) ListIdlePreviews(ctx context.Context, idleSince time.Time) ([]models.PreviewInstance, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_instances
+		WHERE status IN %s
+		AND last_accessed_at < @idle_since
+		ORDER BY last_accessed_at ASC`, previewInstanceColumns, activeStatusFilter)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"idle_since": idleSince})
+	if err != nil {
+		return nil, fmt.Errorf("query idle previews: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewInstance])
+}
+
+// =============================================================================
+// Preview Services
+// =============================================================================
+
+// CreatePreviewService inserts a new preview service record.
+func (s *PreviewStore) CreatePreviewService(ctx context.Context, svc *models.PreviewService) error {
+	query := fmt.Sprintf(`
+		INSERT INTO preview_services (
+			preview_instance_id, service_name, role, status, command, cwd, port
+		) VALUES (
+			@preview_instance_id, @service_name, @role, @status, @command, @cwd, @port
+		) RETURNING %s`, previewServiceColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"preview_instance_id": svc.PreviewInstanceID,
+		"service_name":        svc.ServiceName,
+		"role":                svc.Role,
+		"status":              svc.Status,
+		"command":             svc.Command,
+		"cwd":                 svc.Cwd,
+		"port":                svc.Port,
+	})
+	if err != nil {
+		return fmt.Errorf("insert preview service: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewService])
+	if err != nil {
+		return fmt.Errorf("scan preview service: %w", err)
+	}
+	*svc = row
+	return nil
+}
+
+// UpdateServiceStatus updates a service's status and optional error, scoped through org.
+func (s *PreviewStore) UpdateServiceStatus(ctx context.Context, orgID, previewInstanceID uuid.UUID, serviceName string, status models.PreviewServiceStatus, errMsg string) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE preview_services SET status = @status, error = @error
+		 WHERE preview_instance_id = @pid AND service_name = @name
+		 AND preview_instance_id IN (SELECT id FROM preview_instances WHERE id = @pid AND org_id = @org_id)`,
+		pgx.NamedArgs{"pid": previewInstanceID, "name": serviceName, "status": status, "error": errMsg, "org_id": orgID},
+	)
+	if err != nil {
+		return fmt.Errorf("update service status: %w", err)
+	}
+	return nil
+}
+
+// UpdateServicePID records the OS process ID for a service, scoped through org.
+func (s *PreviewStore) UpdateServicePID(ctx context.Context, orgID, previewInstanceID uuid.UUID, serviceName string, pid int) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE preview_services SET pid = @pid
+		 WHERE preview_instance_id = @instance_id AND service_name = @name
+		 AND preview_instance_id IN (SELECT id FROM preview_instances WHERE id = @instance_id AND org_id = @org_id)`,
+		pgx.NamedArgs{"instance_id": previewInstanceID, "name": serviceName, "pid": pid, "org_id": orgID},
+	)
+	if err != nil {
+		return fmt.Errorf("update service pid: %w", err)
+	}
+	return nil
+}
+
+// ListServicesByPreview returns all services for a preview instance, scoped through org.
+func (s *PreviewStore) ListServicesByPreview(ctx context.Context, orgID, previewInstanceID uuid.UUID) ([]models.PreviewService, error) {
+	query := `SELECT ps.id, ps.preview_instance_id, ps.service_name, ps.role, ps.status,
+		ps.command, ps.cwd, ps.port, ps.pid, ps.error, ps.created_at
+		FROM preview_services ps
+		JOIN preview_instances pi ON pi.id = ps.preview_instance_id
+		WHERE ps.preview_instance_id = @pid AND pi.org_id = @org_id
+		ORDER BY ps.created_at ASC`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"pid": previewInstanceID, "org_id": orgID})
+	if err != nil {
+		return nil, fmt.Errorf("list preview services: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewService])
+}
+
+// =============================================================================
+// Preview Infrastructure
+// =============================================================================
+
+// CreatePreviewInfrastructure inserts a new infrastructure record.
+func (s *PreviewStore) CreatePreviewInfrastructure(ctx context.Context, infra *models.PreviewInfrastructure) error {
+	query := fmt.Sprintf(`
+		INSERT INTO preview_infrastructure (
+			preview_instance_id, infra_name, template, container_id, status,
+			host, port, credentials_hash
+		) VALUES (
+			@preview_instance_id, @infra_name, @template, @container_id, @status,
+			@host, @port, @credentials_hash
+		) RETURNING %s`, previewInfraColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"preview_instance_id": infra.PreviewInstanceID,
+		"infra_name":          infra.InfraName,
+		"template":            infra.Template,
+		"container_id":        infra.ContainerID,
+		"status":              infra.Status,
+		"host":                infra.Host,
+		"port":                infra.Port,
+		"credentials_hash":    infra.CredentialsHash,
+	})
+	if err != nil {
+		return fmt.Errorf("insert preview infrastructure: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewInfrastructure])
+	if err != nil {
+		return fmt.Errorf("scan preview infrastructure: %w", err)
+	}
+	*infra = row
+	return nil
+}
+
+// UpdateInfraStatus updates an infrastructure service's status, scoped through org.
+func (s *PreviewStore) UpdateInfraStatus(ctx context.Context, orgID, previewInstanceID uuid.UUID, infraName string, status models.PreviewInfraStatus, errMsg string) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE preview_infrastructure SET status = @status, error = @error
+		 WHERE preview_instance_id = @pid AND infra_name = @name
+		 AND preview_instance_id IN (SELECT id FROM preview_instances WHERE id = @pid AND org_id = @org_id)`,
+		pgx.NamedArgs{"pid": previewInstanceID, "name": infraName, "status": status, "error": errMsg, "org_id": orgID},
+	)
+	if err != nil {
+		return fmt.Errorf("update infra status: %w", err)
+	}
+	return nil
+}
+
+// ListInfraByPreview returns all infrastructure for a preview instance, scoped through org.
+func (s *PreviewStore) ListInfraByPreview(ctx context.Context, orgID, previewInstanceID uuid.UUID) ([]models.PreviewInfrastructure, error) {
+	query := `SELECT pi2.id, pi2.preview_instance_id, pi2.infra_name, pi2.template,
+		pi2.container_id, pi2.status, pi2.host, pi2.port, pi2.credentials_hash, pi2.error, pi2.created_at
+		FROM preview_infrastructure pi2
+		JOIN preview_instances pi ON pi.id = pi2.preview_instance_id
+		WHERE pi2.preview_instance_id = @pid AND pi.org_id = @org_id
+		ORDER BY pi2.created_at ASC`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"pid": previewInstanceID, "org_id": orgID})
+	if err != nil {
+		return nil, fmt.Errorf("list preview infrastructure: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewInfrastructure])
+}
+
+// =============================================================================
+// Preview Snapshots
+// =============================================================================
+
+// CreateSnapshot inserts a new screenshot snapshot.
+func (s *PreviewStore) CreateSnapshot(ctx context.Context, snap *models.PreviewSnapshot) error {
+	query := fmt.Sprintf(`
+		INSERT INTO preview_snapshots (
+			preview_instance_id, trigger, url_path, blob_ref,
+			viewport_width, viewport_height, console_errors, file_changes
+		) VALUES (
+			@preview_instance_id, @trigger, @url_path, @blob_ref,
+			@viewport_width, @viewport_height, @console_errors, @file_changes
+		) RETURNING %s`, previewSnapshotColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"preview_instance_id": snap.PreviewInstanceID,
+		"trigger":             snap.Trigger,
+		"url_path":            snap.URLPath,
+		"blob_ref":            snap.BlobRef,
+		"viewport_width":      snap.ViewportWidth,
+		"viewport_height":     snap.ViewportHeight,
+		"console_errors":      snap.ConsoleErrors,
+		"file_changes":        snap.FileChanges,
+	})
+	if err != nil {
+		return fmt.Errorf("insert preview snapshot: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewSnapshot])
+	if err != nil {
+		return fmt.Errorf("scan preview snapshot: %w", err)
+	}
+	*snap = row
+	return nil
+}
+
+// ListSnapshotsByPreview returns the screenshot timeline for a preview, scoped through org.
+func (s *PreviewStore) ListSnapshotsByPreview(ctx context.Context, orgID, previewInstanceID uuid.UUID) ([]models.PreviewSnapshot, error) {
+	query := `SELECT ps.id, ps.preview_instance_id, ps.trigger, ps.url_path, ps.blob_ref,
+		ps.viewport_width, ps.viewport_height, ps.console_errors, ps.file_changes, ps.created_at
+		FROM preview_snapshots ps
+		JOIN preview_instances pi ON pi.id = ps.preview_instance_id
+		WHERE ps.preview_instance_id = @pid AND pi.org_id = @org_id
+		ORDER BY ps.created_at ASC`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"pid": previewInstanceID, "org_id": orgID})
+	if err != nil {
+		return nil, fmt.Errorf("list preview snapshots: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewSnapshot])
+}
+
+// CountSnapshotsByPreview returns the snapshot count for limit enforcement, scoped through org.
+func (s *PreviewStore) CountSnapshotsByPreview(ctx context.Context, orgID, previewInstanceID uuid.UUID) (int, error) {
+	var count int
+	err := s.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM preview_snapshots ps
+		 JOIN preview_instances pi ON pi.id = ps.preview_instance_id
+		 WHERE ps.preview_instance_id = @pid AND pi.org_id = @org_id`,
+		pgx.NamedArgs{"pid": previewInstanceID, "org_id": orgID},
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count snapshots: %w", err)
+	}
+	return count, nil
+}
+
+// DeleteOldestSnapshots removes the oldest snapshots beyond a keep limit, scoped through org.
+func (s *PreviewStore) DeleteOldestSnapshots(ctx context.Context, orgID, previewInstanceID uuid.UUID, keepCount int) error {
+	_, err := s.db.Exec(ctx,
+		`DELETE FROM preview_snapshots WHERE id IN (
+			SELECT ps.id FROM preview_snapshots ps
+			JOIN preview_instances pi ON pi.id = ps.preview_instance_id
+			WHERE ps.preview_instance_id = @pid AND pi.org_id = @org_id
+			ORDER BY ps.created_at DESC
+			OFFSET @keep
+		)`,
+		pgx.NamedArgs{"pid": previewInstanceID, "org_id": orgID, "keep": keepCount},
+	)
+	if err != nil {
+		return fmt.Errorf("delete oldest snapshots: %w", err)
+	}
+	return nil
+}
+
+// =============================================================================
+// Preview Logs
+// =============================================================================
+
+// CreatePreviewLog inserts a new preview log entry.
+func (s *PreviewStore) CreatePreviewLog(ctx context.Context, log *models.PreviewLog) error {
+	query := fmt.Sprintf(`
+		INSERT INTO preview_logs (preview_instance_id, org_id, level, step, message, metadata)
+		VALUES (@preview_instance_id, @org_id, @level, @step, @message, @metadata)
+		RETURNING %s`, previewLogColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"preview_instance_id": log.PreviewInstanceID,
+		"org_id":              log.OrgID,
+		"level":               log.Level,
+		"step":                log.Step,
+		"message":             log.Message,
+		"metadata":            log.Metadata,
+	})
+	if err != nil {
+		return fmt.Errorf("insert preview log: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewLog])
+	if err != nil {
+		return fmt.Errorf("scan preview log: %w", err)
+	}
+	*log = row
+	return nil
+}
+
+// ListLogsByPreview returns logs for a preview, supporting cursor-based pagination.
+// Uses (created_at, id) for stable cursor ordering to avoid missing entries with
+// identical timestamps. Results are capped at 200 per page.
+func (s *PreviewStore) ListLogsByPreview(ctx context.Context, orgID, previewInstanceID uuid.UUID, afterID *uuid.UUID) ([]models.PreviewLog, error) {
+	var query string
+	args := pgx.NamedArgs{"pid": previewInstanceID, "org_id": orgID}
+
+	if afterID != nil {
+		query = fmt.Sprintf(`SELECT %s FROM preview_logs
+			WHERE preview_instance_id = @pid AND org_id = @org_id
+			AND (created_at, id) > (
+				SELECT created_at, id FROM preview_logs WHERE id = @after_id
+			)
+			ORDER BY created_at ASC, id ASC
+			LIMIT 200`, previewLogColumns)
+		args["after_id"] = *afterID
+	} else {
+		query = fmt.Sprintf(`SELECT %s FROM preview_logs
+			WHERE preview_instance_id = @pid AND org_id = @org_id
+			ORDER BY created_at ASC, id ASC
+			LIMIT 200`, previewLogColumns)
+	}
+
+	rows, err := s.db.Query(ctx, query, args)
+	if err != nil {
+		return nil, fmt.Errorf("list preview logs: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewLog])
+}
+
+// =============================================================================
+// Preview Access Sessions
+// =============================================================================
+
+// CreateAccessSession inserts a new preview access session.
+func (s *PreviewStore) CreateAccessSession(ctx context.Context, sess *models.PreviewAccessSession) error {
+	query := fmt.Sprintf(`
+		INSERT INTO preview_access_sessions (
+			org_id, user_id, preview_instance_id,
+			session_token_hash, expires_at
+		) VALUES (
+			@org_id, @user_id, @preview_instance_id,
+			@session_token_hash, @expires_at
+		) RETURNING %s`, previewAccessSessionColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":               sess.OrgID,
+		"user_id":              sess.UserID,
+		"preview_instance_id":  sess.PreviewInstanceID,
+		"session_token_hash":   sess.SessionTokenHash,
+		"expires_at":           sess.ExpiresAt,
+	})
+	if err != nil {
+		return fmt.Errorf("insert preview access session: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewAccessSession])
+	if err != nil {
+		return fmt.Errorf("scan preview access session: %w", err)
+	}
+	*sess = row
+	return nil
+}
+
+// GetAccessSessionByToken looks up an access session by token hash, scoped to org.
+func (s *PreviewStore) GetAccessSessionByToken(ctx context.Context, orgID uuid.UUID, tokenHash string) (*models.PreviewAccessSession, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_access_sessions
+		WHERE org_id = @org_id AND session_token_hash = @hash`, previewAccessSessionColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "hash": tokenHash})
+	if err != nil {
+		return nil, fmt.Errorf("query access session: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewAccessSession])
+	if err != nil {
+		return nil, fmt.Errorf("get access session: %w", err)
+	}
+	return &row, nil
+}
+
+// GetAccessSessionByTokenUnscoped looks up an access session by token hash
+// without org scoping. Used by the preview gateway during bootstrap exchange,
+// where the org is not yet known. Safe because token hashes are derived from
+// 32 cryptographically random bytes.
+func (s *PreviewStore) GetAccessSessionByTokenUnscoped(ctx context.Context, tokenHash string) (*models.PreviewAccessSession, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_access_sessions
+		WHERE session_token_hash = @hash`, previewAccessSessionColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"hash": tokenHash})
+	if err != nil {
+		return nil, fmt.Errorf("query access session: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewAccessSession])
+	if err != nil {
+		return nil, fmt.Errorf("get access session: %w", err)
+	}
+	return &row, nil
+}
+
+// RevokeAccessSession revokes a single access session, scoped to org.
+func (s *PreviewStore) RevokeAccessSession(ctx context.Context, orgID, id uuid.UUID) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE preview_access_sessions SET revoked_at = now() WHERE id = @id AND org_id = @org_id AND revoked_at IS NULL`,
+		pgx.NamedArgs{"id": id, "org_id": orgID},
+	)
+	if err != nil {
+		return fmt.Errorf("revoke access session: %w", err)
+	}
+	return nil
+}
+
+// RevokeAllForPreview revokes all access sessions for a preview instance, scoped through org.
+func (s *PreviewStore) RevokeAllForPreview(ctx context.Context, orgID, previewInstanceID uuid.UUID) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE preview_access_sessions SET revoked_at = now()
+		 WHERE preview_instance_id = @pid AND org_id = @org_id AND revoked_at IS NULL`,
+		pgx.NamedArgs{"pid": previewInstanceID, "org_id": orgID},
+	)
+	return err
+}
+
+// UpdateAccessSessionActivity updates the last_accessed_at for an access session, scoped to org.
+func (s *PreviewStore) UpdateAccessSessionActivity(ctx context.Context, orgID, id uuid.UUID) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE preview_access_sessions SET last_accessed_at = now() WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": id, "org_id": orgID},
+	)
+	if err != nil {
+		return fmt.Errorf("update access session activity: %w", err)
+	}
+	return nil
+}
+
+// =============================================================================
+// Preview Startup Cache
+// =============================================================================
+
+// UpsertStartupCache creates or updates a startup cache entry.
+func (s *PreviewStore) UpsertStartupCache(ctx context.Context, entry *models.PreviewStartupCache) error {
+	query := fmt.Sprintf(`
+		INSERT INTO preview_startup_cache (
+			org_id, repo_id, snapshot_key, blob_path, size_bytes, worker_node_id
+		) VALUES (
+			@org_id, @repo_id, @snapshot_key, @blob_path, @size_bytes, @worker_node_id
+		)
+		ON CONFLICT (org_id, repo_id, snapshot_key)
+		DO UPDATE SET blob_path = EXCLUDED.blob_path, size_bytes = EXCLUDED.size_bytes,
+			worker_node_id = EXCLUDED.worker_node_id, last_used_at = now()
+		RETURNING %s`, previewStartupCacheColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":         entry.OrgID,
+		"repo_id":        entry.RepoID,
+		"snapshot_key":   entry.SnapshotKey,
+		"blob_path":      entry.BlobPath,
+		"size_bytes":     entry.SizeBytes,
+		"worker_node_id": entry.WorkerNodeID,
+	})
+	if err != nil {
+		return fmt.Errorf("upsert startup cache: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewStartupCache])
+	if err != nil {
+		return fmt.Errorf("scan startup cache: %w", err)
+	}
+	*entry = row
+	return nil
+}
+
+// FindMatchingCache looks up a startup cache entry by snapshot key.
+func (s *PreviewStore) FindMatchingCache(ctx context.Context, orgID, repoID uuid.UUID, snapshotKey string) (*models.PreviewStartupCache, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_startup_cache
+		WHERE org_id = @org_id AND repo_id = @repo_id AND snapshot_key = @key`, previewStartupCacheColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id": orgID, "repo_id": repoID, "key": snapshotKey,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query startup cache: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewStartupCache])
+	if err != nil {
+		return nil, fmt.Errorf("get startup cache: %w", err)
+	}
+	return &row, nil
+}
+
+// TouchCache updates the last_used_at timestamp, scoped to org.
+func (s *PreviewStore) TouchCache(ctx context.Context, orgID, id uuid.UUID) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE preview_startup_cache SET last_used_at = now() WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": id, "org_id": orgID},
+	)
+	if err != nil {
+		return fmt.Errorf("touch cache: %w", err)
+	}
+	return nil
+}
+
+// ListCacheByWorker returns cache entries for a worker, ordered by last_used_at
+// for LRU eviction.
+func (s *PreviewStore) ListCacheByWorker(ctx context.Context, workerNodeID string) ([]models.PreviewStartupCache, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_startup_cache
+		WHERE worker_node_id = @worker ORDER BY last_used_at ASC`, previewStartupCacheColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"worker": workerNodeID})
+	if err != nil {
+		return nil, fmt.Errorf("list cache by worker: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewStartupCache])
+}
+
+// DeleteCache removes a cache entry by ID, scoped to org.
+func (s *PreviewStore) DeleteCache(ctx context.Context, orgID, id uuid.UUID) error {
+	_, err := s.db.Exec(ctx,
+		`DELETE FROM preview_startup_cache WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": id, "org_id": orgID},
+	)
+	if err != nil {
+		return fmt.Errorf("delete cache: %w", err)
+	}
+	return nil
+}
+
+// =============================================================================
+// PR Preview State
+// =============================================================================
+
+// UpsertPRPreviewState creates or updates PR preview state.
+func (s *PreviewStore) UpsertPRPreviewState(ctx context.Context, state *models.PRPreviewState) error {
+	query := fmt.Sprintf(`
+		INSERT INTO pr_preview_state (
+			org_id, repo_id, pr_number, github_comment_id,
+			last_preview_instance_id, last_screenshot_blob_path,
+			last_visual_diff_blob_path, base_snapshot_key, status
+		) VALUES (
+			@org_id, @repo_id, @pr_number, @github_comment_id,
+			@last_preview_instance_id, @last_screenshot_blob_path,
+			@last_visual_diff_blob_path, @base_snapshot_key, @status
+		)
+		ON CONFLICT (org_id, repo_id, pr_number) DO UPDATE SET
+			github_comment_id = COALESCE(EXCLUDED.github_comment_id, pr_preview_state.github_comment_id),
+			last_preview_instance_id = EXCLUDED.last_preview_instance_id,
+			last_screenshot_blob_path = EXCLUDED.last_screenshot_blob_path,
+			last_visual_diff_blob_path = EXCLUDED.last_visual_diff_blob_path,
+			base_snapshot_key = EXCLUDED.base_snapshot_key,
+			status = EXCLUDED.status,
+			updated_at = now()
+		RETURNING %s`, prPreviewStateColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":                      state.OrgID,
+		"repo_id":                     state.RepoID,
+		"pr_number":                   state.PRNumber,
+		"github_comment_id":           state.GitHubCommentID,
+		"last_preview_instance_id":    state.LastPreviewInstanceID,
+		"last_screenshot_blob_path":   state.LastScreenshotBlobPath,
+		"last_visual_diff_blob_path":  state.LastVisualDiffBlobPath,
+		"base_snapshot_key":           state.BaseSnapshotKey,
+		"status":                      state.Status,
+	})
+	if err != nil {
+		return fmt.Errorf("upsert pr preview state: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PRPreviewState])
+	if err != nil {
+		return fmt.Errorf("scan pr preview state: %w", err)
+	}
+	*state = row
+	return nil
+}
+
+// GetPRPreviewState returns the PR preview state for an org/repo/PR.
+func (s *PreviewStore) GetPRPreviewState(ctx context.Context, orgID, repoID uuid.UUID, prNumber int) (*models.PRPreviewState, error) {
+	query := fmt.Sprintf(`SELECT %s FROM pr_preview_state
+		WHERE org_id = @org_id AND repo_id = @repo_id AND pr_number = @pr_number`, prPreviewStateColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id": orgID, "repo_id": repoID, "pr_number": prNumber,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query pr preview state: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PRPreviewState])
+	if err != nil {
+		return nil, fmt.Errorf("get pr preview state: %w", err)
+	}
+	return &row, nil
+}
+
+// UpdatePRPreviewStatus updates just the status field of a PR preview state, scoped to org.
+func (s *PreviewStore) UpdatePRPreviewStatus(ctx context.Context, orgID, id uuid.UUID, status models.PRPreviewStatus) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE pr_preview_state SET status = @status, updated_at = now() WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": id, "org_id": orgID, "status": status},
+	)
+	if err != nil {
+		return fmt.Errorf("update pr preview status: %w", err)
+	}
+	return nil
+}
+
+// =============================================================================
+// Transactional operations
+// =============================================================================
+
+// StopPreviewWithRevocation atomically stops a preview and revokes all its
+// access sessions in a single transaction.
+func (s *PreviewStore) StopPreviewWithRevocation(ctx context.Context, orgID, previewID uuid.UUID) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	txStore := s.WithTx(tx)
+
+	if err := txStore.StopPreview(ctx, orgID, previewID); err != nil {
+		return err
+	}
+	if err := txStore.RevokeAllForPreview(ctx, orgID, previewID); err != nil {
+		return fmt.Errorf("revoke access sessions: %w", err)
+	}
+
+	return tx.Commit(ctx)
+}

@@ -29,6 +29,71 @@ func TestHealthz(t *testing.T) {
 	require.Equal(t, "application/json", w.Header().Get("Content-Type"), "should set JSON content type")
 }
 
+func TestVersion(t *testing.T) {
+	t.Parallel()
+
+	h := &HealthHandler{}
+	req := httptest.NewRequest(http.MethodGet, "/version", nil)
+	w := httptest.NewRecorder()
+
+	h.Version(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Contains(t, w.Body.String(), "deploy_sha")
+}
+
+func TestParseClientIP(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		xff        string
+		remoteAddr string
+		wantNil    bool
+	}{
+		{"from X-Forwarded-For", "1.2.3.4", "5.6.7.8:1234", false},
+		{"from X-Forwarded-For with chain", "1.2.3.4, 10.0.0.1", "", false},
+		{"from RemoteAddr with port", "", "192.168.1.1:8080", false},
+		{"from RemoteAddr without port", "", "192.168.1.1", false},
+		{"invalid address", "", "not-an-ip", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			if tt.xff != "" {
+				req.Header.Set("X-Forwarded-For", tt.xff)
+			}
+			if tt.remoteAddr != "" {
+				req.RemoteAddr = tt.remoteAddr
+			}
+			result := parseClientIP(req)
+			if tt.wantNil {
+				require.Nil(t, result)
+			} else {
+				require.NotNil(t, result)
+			}
+		})
+	}
+}
+
+func TestEmitUserAudit_NilEmitter(t *testing.T) {
+	t.Parallel()
+
+	// Nil emitter should be a no-op (no panic).
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	emitUserAudit(nil, req, "", "", nil, nil)
+}
+
+func TestEmitUserAuditWithSession_NilEmitter(t *testing.T) {
+	t.Parallel()
+
+	// Nil emitter should be a no-op.
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	emitUserAuditWithSession(nil, req, "", "", nil, nil, nil, nil)
+}
+
 func TestIsTerminalStatus(t *testing.T) {
 	t.Parallel()
 

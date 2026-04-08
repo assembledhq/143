@@ -8,9 +8,13 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
+
+// notionUUIDRe matches Notion-style UUIDs (with or without hyphens).
+var notionUUIDRe = regexp.MustCompile(`^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$`)
 
 // NotionDocumentStore implements DocumentStore for the Notion API.
 // It provides search and document retrieval using Notion's REST API,
@@ -67,9 +71,17 @@ func (n *NotionDocumentStore) Name() string { return "notion" }
 // SearchDocuments finds pages in Notion matching the text query.
 // An empty query returns all accessible pages (useful for discovery).
 //
-// TODO: Use filter.Workspace to scope search to a specific database
-// via the Notion search API's filter parameter.
+// When filter.Workspace is set, searches are scoped to a specific database.
+// The value can be a database UUID or a database name (case-insensitive match).
 func (n *NotionDocumentStore) SearchDocuments(ctx context.Context, query string, filter DocFilter) ([]DocSummary, error) {
+	if filter.Workspace != "" {
+		return n.searchInDatabase(ctx, query, filter)
+	}
+	return n.searchGeneric(ctx, query, filter)
+}
+
+// searchGeneric performs an unscoped search across the entire workspace.
+func (n *NotionDocumentStore) searchGeneric(ctx context.Context, query string, filter DocFilter) ([]DocSummary, error) {
 	limit := filter.Limit
 	if limit <= 0 {
 		limit = 10
@@ -97,6 +109,75 @@ func (n *NotionDocumentStore) SearchDocuments(ctx context.Context, query string,
 		summaries = append(summaries, pageToDocSummary(page))
 	}
 	return summaries, nil
+}
+
+// searchInDatabase queries pages within a specific Notion database.
+// It resolves filter.Workspace to a database ID (by UUID or name lookup),
+// then uses the POST /v1/databases/{id}/query endpoint.
+func (n *NotionDocumentStore) searchInDatabase(ctx context.Context, query string, filter DocFilter) ([]DocSummary, error) {
+	dbID, err := n.resolveDatabaseID(ctx, filter.Workspace)
+	if err != nil {
+		return nil, fmt.Errorf("resolve database: %w", err)
+	}
+
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > notionPageSize {
+		limit = notionPageSize
+	}
+
+	body := notionDatabaseQueryRequest{
+		PageSize: limit,
+	}
+
+	path := "/v1/databases/" + url.PathEscape(dbID) + "/query"
+	var resp notionSearchResponse
+	if err := n.doRequest(ctx, http.MethodPost, path, body, &resp); err != nil {
+		return nil, fmt.Errorf("notion query database: %w", err)
+	}
+
+	// The database query endpoint doesn't support full-text search, so
+	// filter results client-side when a text query is provided.
+	queryLower := strings.ToLower(query)
+	summaries := make([]DocSummary, 0, len(resp.Results))
+	for _, page := range resp.Results {
+		s := pageToDocSummary(page)
+		if query != "" && !strings.Contains(strings.ToLower(s.Title), queryLower) {
+			continue
+		}
+		summaries = append(summaries, s)
+	}
+	return summaries, nil
+}
+
+// resolveDatabaseID resolves a workspace filter value to a Notion database ID.
+// If the value looks like a UUID, it's used directly. Otherwise, the available
+// databases are listed and matched by name (case-insensitive).
+func (n *NotionDocumentStore) resolveDatabaseID(ctx context.Context, workspace string) (string, error) {
+	if notionUUIDRe.MatchString(strings.ToLower(workspace)) {
+		return workspace, nil
+	}
+
+	databases, err := n.ListDatabases(ctx)
+	if err != nil {
+		return "", fmt.Errorf("list databases for name lookup: %w", err)
+	}
+
+	target := strings.ToLower(workspace)
+	for _, db := range databases {
+		if strings.ToLower(db.Title) == target {
+			return db.ID, nil
+		}
+	}
+	return "", fmt.Errorf("no database found matching %q", workspace)
+}
+
+// notionDatabaseQueryRequest is the body for POST /v1/databases/{id}/query.
+type notionDatabaseQueryRequest struct {
+	PageSize    int    `json:"page_size,omitempty"`
+	StartCursor string `json:"start_cursor,omitempty"`
 }
 
 // GetDocument fetches a Notion page's metadata and full block content,

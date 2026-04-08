@@ -13,13 +13,13 @@ import (
 
 var prColumns = []string{
 	"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-	"title", "body", "status", "review_status", "merged_at", "created_at", "updated_at",
+	"title", "body", "status", "review_status", "authored_by", "merged_at", "created_at", "updated_at",
 }
 
 func newPRRow(id, sessionID, orgID uuid.UUID, now time.Time) []any {
 	return []any{
-		id, sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "org/repo",
-		"Fix bug", (*string)(nil), "open", "pending", (*time.Time)(nil), now, now,
+		id, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "org/repo",
+		"Fix bug", (*string)(nil), "open", "pending", "app", (*time.Time)(nil), now, now,
 	}
 }
 
@@ -33,8 +33,9 @@ func TestPullRequestStore_Create_Success(t *testing.T) {
 	now := time.Now()
 	generatedID := uuid.New()
 
+	sid := uuid.New()
 	pr := &models.PullRequest{
-		SessionID:     uuid.New(),
+		SessionID:     &sid,
 		OrgID:          uuid.New(),
 		GitHubPRNumber: 42,
 		GitHubPRURL:    "https://github.com/org/repo/pull/42",
@@ -47,7 +48,7 @@ func TestPullRequestStore_Create_Success(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
 				AddRow(generatedID, now, now),
@@ -82,7 +83,7 @@ func TestPullRequestStore_GetByID_Success(t *testing.T) {
 	pr, err := store.GetByID(context.Background(), orgID, id)
 	require.NoError(t, err, "should retrieve pull request by ID without error")
 	require.Equal(t, id, pr.ID, "should return the correct pull request ID")
-	require.Equal(t, sessionID, pr.SessionID, "should return the correct agent run ID")
+	require.Equal(t, &sessionID, pr.SessionID, "should return the correct agent run ID")
 	require.Equal(t, orgID, pr.OrgID, "should return the correct org ID")
 	require.Equal(t, 42, pr.GitHubPRNumber, "should return the correct GitHub PR number")
 	require.Equal(t, "https://github.com/org/repo/pull/42", pr.GitHubPRURL, "should return the correct GitHub PR URL")
@@ -132,7 +133,7 @@ func TestPullRequestStore_GetBySessionID_Success(t *testing.T) {
 	pr, err := store.GetBySessionID(context.Background(), orgID, sessionID)
 	require.NoError(t, err, "should retrieve pull request by agent run ID without error")
 	require.Equal(t, id, pr.ID, "should return the correct pull request ID")
-	require.Equal(t, sessionID, pr.SessionID, "should return the correct agent run ID")
+	require.Equal(t, &sessionID, pr.SessionID, "should return the correct agent run ID")
 	require.Equal(t, orgID, pr.OrgID, "should return the correct org ID")
 	require.Equal(t, 42, pr.GitHubPRNumber, "should return the correct GitHub PR number")
 	require.Equal(t, "open", pr.Status, "should return the correct status")
@@ -203,7 +204,7 @@ func TestPullRequestStore_ListByOrg_Success(t *testing.T) {
 	require.Len(t, prs, 2, "should return both pull requests for the org")
 	require.Equal(t, id1, prs[0].ID, "first pull request should have the correct ID")
 	require.Equal(t, id2, prs[1].ID, "second pull request should have the correct ID")
-	require.Equal(t, sessionID, prs[0].SessionID, "first pull request should have the correct agent run ID")
+	require.Equal(t, &sessionID, prs[0].SessionID, "first pull request should have the correct agent run ID")
 	require.Equal(t, orgID, prs[0].OrgID, "first pull request should have the correct org ID")
 	require.Equal(t, 42, prs[0].GitHubPRNumber, "first pull request should have the correct GitHub PR number")
 	require.Equal(t, "open", prs[0].Status, "first pull request should have the correct status")

@@ -91,6 +91,14 @@ const (
 	AuditActionAuthLogin    AuditAction = "auth.login"
 	AuditActionAuthLogout   AuditAction = "auth.logout"
 	AuditActionAuthRegister AuditAction = "auth.register"
+
+	// Eval actions
+	AuditActionEvalTaskCreated  AuditAction = "eval_task.created"
+	AuditActionEvalTaskUpdated  AuditAction = "eval_task.updated"
+	AuditActionEvalTaskArchived AuditAction = "eval_task.archived"
+	AuditActionEvalRunStarted   AuditAction = "eval_run.started"
+	AuditActionEvalRunCompleted AuditAction = "eval_run.completed"
+	AuditActionEvalBatchStarted AuditAction = "eval_batch.started"
 )
 
 // Validate checks that the action is a known value.
@@ -114,7 +122,9 @@ func (a AuditAction) Validate() error {
 		AuditActionSettingsUpdated, AuditActionTeamMemberInvited, AuditActionTeamMemberRoleChanged,
 		AuditActionTeamMemberRemoved, AuditActionTeamInvitationRevoked, AuditActionTeamInvitationAccepted,
 		AuditActionIntegrationConnected, AuditActionCredentialUpdated, AuditActionCredentialDeleted,
-		AuditActionAuthLogin, AuditActionAuthLogout, AuditActionAuthRegister:
+		AuditActionAuthLogin, AuditActionAuthLogout, AuditActionAuthRegister,
+		AuditActionEvalTaskCreated, AuditActionEvalTaskUpdated, AuditActionEvalTaskArchived,
+		AuditActionEvalRunStarted, AuditActionEvalRunCompleted, AuditActionEvalBatchStarted:
 		return nil
 	default:
 		return fmt.Errorf("invalid AuditAction: %q", a)
@@ -140,6 +150,9 @@ const (
 	AuditResourceSessionReviewComment AuditResourceType = "session_review_comment"
 	AuditResourcePMDocument           AuditResourceType = "pm_document"
 	AuditResourcePMDocumentSet        AuditResourceType = "pm_document_set"
+	AuditResourceEvalTask             AuditResourceType = "eval_task"
+	AuditResourceEvalRun              AuditResourceType = "eval_run"
+	AuditResourceEvalBatch            AuditResourceType = "eval_batch"
 )
 
 func (t AuditResourceType) Validate() error {
@@ -148,7 +161,8 @@ func (t AuditResourceType) Validate() error {
 		AuditResourceIssue, AuditResourcePMPlan, AuditResourcePMDecision,
 		AuditResourceSettings, AuditResourceTeamMember, AuditResourceInvitation,
 		AuditResourceIntegration, AuditResourceCredential, AuditResourceUser,
-		AuditResourceSessionReviewComment, AuditResourcePMDocument, AuditResourcePMDocumentSet:
+		AuditResourceSessionReviewComment, AuditResourcePMDocument, AuditResourcePMDocumentSet,
+		AuditResourceEvalTask, AuditResourceEvalRun, AuditResourceEvalBatch:
 		return nil
 	default:
 		return fmt.Errorf("invalid AuditResourceType: %q", t)

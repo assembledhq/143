@@ -119,7 +119,7 @@ export function RepoContextSwitcher() {
               {r.full_name}
             </span>
             {r.active_session_count > 0 && (
-              <span className="text-[10px] rounded-full bg-primary/10 text-primary px-1.5 py-0.5 font-medium tabular-nums">
+              <span className="text-xs rounded-full bg-primary/10 text-primary px-1.5 py-0.5 font-medium tabular-nums">
                 {r.active_session_count}
               </span>
             )}

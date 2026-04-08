@@ -31,7 +31,7 @@ export function PMStatusBanner({ hasActivePlanSession }: PMStatusBannerProps) {
         pmStatus={pmStatus}
         agentStatus={agentStatus}
       >
-        <Button size="sm" variant="outline" className="h-7 text-[12px]" asChild>
+        <Button size="sm" variant="outline" className="h-7 text-xs" asChild>
           <Link href="/sessions/new">
             <Plus className="mr-1 h-3 w-3" />
             Manual Session
@@ -39,7 +39,7 @@ export function PMStatusBanner({ hasActivePlanSession }: PMStatusBannerProps) {
         </Button>
         <Button
           size="sm"
-          className="h-7 text-[12px]"
+          className="h-7 text-xs"
           onClick={handleAnalyze}
           disabled={isPending || isAnalyzing}
           title="Run the PM agent now without waiting for the next scheduled run"

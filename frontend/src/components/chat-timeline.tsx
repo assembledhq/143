@@ -38,11 +38,11 @@ function ToolGroupEntry({ toolUse, toolResult }: { toolUse: SessionLog; toolResu
         <Wrench className="h-3 w-3 text-blue-600 dark:text-blue-400 shrink-0" />
         <Badge
           variant="secondary"
-          className="bg-blue-500/10 text-blue-700 dark:text-blue-400 text-[10px] px-1.5 py-0"
+          className="bg-blue-500/10 text-blue-700 dark:text-blue-400 text-xs px-1.5 py-0"
         >
           {toolName}
         </Badge>
-        <span className="ml-auto text-muted-foreground/60 text-[10px] tabular-nums shrink-0">
+        <span className="ml-auto text-muted-foreground/60 text-xs tabular-nums shrink-0">
           {formatTimestamp(toolUse.created_at)}
         </span>
       </button>
@@ -78,13 +78,13 @@ function ErrorEntry({ log }: { log: SessionLog }) {
           {isLong && (
             <button
               onClick={() => setExpanded(!expanded)}
-              className="text-[10px] text-red-600 dark:text-red-400 hover:underline mt-1"
+              className="text-xs text-red-600 dark:text-red-400 hover:underline mt-1"
             >
               {expanded ? "Show less" : "Show more"}
             </button>
           )}
         </div>
-        <span className="text-[10px] text-muted-foreground shrink-0">
+        <span className="text-xs text-muted-foreground shrink-0">
           {formatTimestamp(log.created_at)}
         </span>
       </div>
@@ -94,11 +94,11 @@ function ErrorEntry({ log }: { log: SessionLog }) {
 
 function HiddenLogEntry({ log }: { log: SessionLog }) {
   return (
-    <div className="flex items-start gap-2 px-2 py-0.5 text-[11px] font-mono text-muted-foreground/70">
+    <div className="flex items-start gap-2 px-2 py-0.5 text-xs font-mono text-muted-foreground/70">
       <span className="shrink-0 w-[52px]">{formatTimestamp(log.created_at)}</span>
       <Badge
         variant="secondary"
-        className="shrink-0 text-[9px] px-1 py-0 bg-muted text-muted-foreground/60"
+        className="shrink-0 text-xs px-1 py-0 bg-muted text-muted-foreground/60"
       >
         {log.level}
       </Badge>
@@ -122,7 +122,7 @@ function HiddenLogsGroup({ logs }: { logs: SessionLog[] }) {
         <span className="text-muted-foreground">
           {logs.length} log {logs.length === 1 ? "entry" : "entries"}
         </span>
-        <span className="ml-auto text-muted-foreground/60 text-[10px] tabular-nums shrink-0">
+        <span className="ml-auto text-muted-foreground/60 text-xs tabular-nums shrink-0">
           {formatTimestamp(logs[0].created_at)}
         </span>
       </button>
@@ -285,14 +285,14 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
           {isPlanModeUser && (
             <div className="flex items-center gap-1.5 mb-1.5">
               <ClipboardList className="h-3 w-3 text-white/80" />
-              <span className="text-[10px] font-medium text-white/80 uppercase tracking-wide">Plan Mode</span>
+              <span className="text-xs font-medium text-white/80 uppercase tracking-wide">Plan Mode</span>
             </div>
           )}
           {displayContent && <p className="whitespace-pre-wrap">{displayContent}</p>}
           {msg.attachments && msg.attachments.length > 0 && (
             <AttachmentGrid attachments={msg.attachments} />
           )}
-          <p className="text-[10px] mt-1 text-white/70">
+          <p className="text-xs mt-1 text-white/70">
             {formatMessageTime(msg.created_at)}
           </p>
         </div>
@@ -306,7 +306,7 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
       {msg.attachments && msg.attachments.length > 0 && (
         <AttachmentGrid attachments={msg.attachments} />
       )}
-      <p className="text-[10px] mt-1 text-muted-foreground">
+      <p className="text-xs mt-1 text-muted-foreground">
         {formatMessageTime(msg.created_at)}
       </p>
     </AssistantBubble>
@@ -459,7 +459,7 @@ export function ChatTimeline({ entries, isRunning, diffStats, onDiffClick, onApp
             isRunning={isRunning}
           >
             <MarkdownContent content={entry.data.content} />
-            <p className="text-[10px] mt-1 text-muted-foreground">
+            <p className="text-xs mt-1 text-muted-foreground">
               {formatMessageTime(entry.data.created_at)}
             </p>
           </PlanOutputBubble>

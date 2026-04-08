@@ -1,0 +1,5 @@
+-- No-op: org_id was included in the session_logs partitioned table schema
+-- in migration 000037 (partitioning_prep) to avoid a deployment gap where
+-- Go code expects the column but it doesn't exist yet.
+--
+-- This migration is kept as a placeholder to preserve migration numbering.

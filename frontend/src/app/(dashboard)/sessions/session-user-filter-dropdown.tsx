@@ -43,7 +43,7 @@ export function SessionUserFilterDropdown({
       <DropdownMenuTrigger asChild>
         <button
           className={cn(
-            "flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] font-medium rounded-md border border-border bg-muted/50 hover:bg-muted transition-colors text-foreground",
+            "flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-md border border-border bg-muted/50 hover:bg-muted transition-colors text-foreground",
             className,
           )}
         >
@@ -54,13 +54,13 @@ export function SessionUserFilterDropdown({
       </DropdownMenuTrigger>
       <DropdownMenuContent align={align} className="w-48">
         <DropdownMenuItem
-          className={cn("text-[12px]", currentUserFilter === "mine" && "font-semibold")}
+          className={cn("text-xs", currentUserFilter === "mine" && "font-semibold")}
           onClick={() => onFilterChange(null)}
         >
           Mine
         </DropdownMenuItem>
         <DropdownMenuItem
-          className={cn("text-[12px]", currentUserFilter === "all" && "font-semibold")}
+          className={cn("text-xs", currentUserFilter === "all" && "font-semibold")}
           onClick={() => onFilterChange("all")}
         >
           Everyone
@@ -68,18 +68,18 @@ export function SessionUserFilterDropdown({
         {members.length > 0 && (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuLabel className="text-[11px] text-muted-foreground font-normal">
+            <DropdownMenuLabel className="text-xs text-muted-foreground font-normal">
               Team members
             </DropdownMenuLabel>
             {members.map((member) => (
               <DropdownMenuItem
                 key={member.id}
-                className={cn("text-[12px]", currentUserFilter === member.id && "font-semibold")}
+                className={cn("text-xs", currentUserFilter === member.id && "font-semibold")}
                 onClick={() => onFilterChange(userFilterParamForMember(member.id, currentUser?.id))}
               >
                 {member.name}
                 {member.id === currentUser?.id && (
-                  <span className="text-[10px] text-muted-foreground ml-1">(you)</span>
+                  <span className="text-xs text-muted-foreground ml-1">(you)</span>
                 )}
               </DropdownMenuItem>
             ))}

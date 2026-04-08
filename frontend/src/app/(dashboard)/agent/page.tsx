@@ -496,12 +496,12 @@ export default function AgentPage() {
           badges: (
             <>
               {cred?.configured && (
-                <Badge variant="success" className="text-[10px] px-1.5 py-0">
+                <Badge variant="success" className="text-xs px-1.5 py-0">
                   <Check className="mr-0.5 h-3 w-3" />
                   Configured
                 </Badge>
               )}
-              <Badge variant={sourceBadgeVariant(source)} className="text-[10px] px-1.5 py-0">
+              <Badge variant={sourceBadgeVariant(source)} className="text-xs px-1.5 py-0">
                 {sourceLabel(source)}
               </Badge>
             </>
@@ -592,7 +592,7 @@ export default function AgentPage() {
           </Button>
         )}
         {cred?.is_team_default && (
-          <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+          <Badge variant="secondary" className="text-xs px-1.5 py-0">
             <Shield className="mr-0.5 h-3 w-3" />
             Team default
           </Badge>
@@ -620,12 +620,12 @@ export default function AgentPage() {
         {renderAgentConfigHeader({
           title: `${agent.label} settings`,
           badges: teamCred ? (
-            <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+            <Badge variant="secondary" className="text-xs px-1.5 py-0">
               <Shield className="mr-0.5 h-3 w-3" />
               Team default set
             </Badge>
           ) : (
-            <Badge variant={sourceBadgeVariant(source)} className="text-[10px] px-1.5 py-0">
+            <Badge variant={sourceBadgeVariant(source)} className="text-xs px-1.5 py-0">
               {sourceLabel(source)}
             </Badge>
           ),
@@ -668,7 +668,7 @@ export default function AgentPage() {
                   {envVar.label}
                 </Label>
                 {isServerDefault && (
-                  <span className="text-[10px] text-muted-foreground">server default</span>
+                  <span className="text-xs text-muted-foreground">server default</span>
                 )}
               </div>
               {envVar.options ? (

@@ -11,7 +11,7 @@ describe("PageContainer", () => {
     expect(container).toHaveClass("mx-auto");
   });
 
-  it("applies narrow width for narrow size and same default for wide", () => {
+  it("applies narrow width for narrow size and wider max for wide", () => {
     const { rerender } = render(<PageContainer size="narrow">Sized container</PageContainer>);
 
     let container = screen.getByText("Sized container");
@@ -19,6 +19,6 @@ describe("PageContainer", () => {
 
     rerender(<PageContainer size="wide">Sized container</PageContainer>);
     container = screen.getByText("Sized container");
-    expect(container).toHaveClass("max-w-5xl");
+    expect(container).toHaveClass("max-w-7xl");
   });
 });

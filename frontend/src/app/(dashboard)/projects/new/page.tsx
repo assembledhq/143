@@ -229,7 +229,7 @@ export default function NewProjectPage() {
     <div className="p-6 max-w-2xl mx-auto">
       <div className="space-y-6">
         <div>
-          <h1 className="text-xl font-bold text-foreground">New project</h1>
+          <h1 className="text-lg font-semibold text-foreground">New project</h1>
           <p className="text-sm text-muted-foreground mt-1">
             Describe what you want to build and we&apos;ll set it up for you.
           </p>
@@ -264,7 +264,7 @@ export default function NewProjectPage() {
               {generateMutation.isPending ? "Generating" : "Generate"}
             </Button>
           </div>
-          <p className="text-[11px] text-muted-foreground/60">
+          <p className="text-xs text-muted-foreground/60">
             {generateMutation.isPending
               ? "Generating project details..."
               : `Press ${isMac ? "⌘" : "Ctrl+"} Enter to generate, or fill in the form directly below.`}
@@ -281,7 +281,7 @@ export default function NewProjectPage() {
           <div className="absolute inset-0 flex items-center">
             <span className="w-full border-t" />
           </div>
-          <div className="relative flex justify-center text-[11px]">
+          <div className="relative flex justify-center text-xs">
             <span className="bg-background px-3 text-muted-foreground/50">
               project details
             </span>
@@ -432,7 +432,7 @@ export default function NewProjectPage() {
 
                 {/* Template quick-start pills */}
                 <div className="space-y-1.5">
-                  <p className="text-[11px] text-muted-foreground/60">
+                  <p className="text-xs text-muted-foreground/60">
                     Quick start from a template
                   </p>
                   <div className="flex flex-wrap gap-1.5">
@@ -441,7 +441,7 @@ export default function NewProjectPage() {
                         key={template.id}
                         type="button"
                         onClick={() => applyTemplate(template)}
-                        className="inline-flex items-center gap-1.5 rounded-full border border-border bg-background px-2.5 py-1 text-[11px] text-muted-foreground hover:border-primary/40 hover:text-foreground transition-colors"
+                        className="inline-flex items-center gap-1.5 rounded-full border border-border bg-background px-2.5 py-1 text-xs text-muted-foreground hover:border-primary/40 hover:text-foreground transition-colors"
                       >
                         <template.icon className="h-3 w-3" />
                         {template.name}
