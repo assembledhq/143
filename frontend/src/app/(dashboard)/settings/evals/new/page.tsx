@@ -152,7 +152,7 @@ export default function CreateEvalTaskPage() {
                 }}
                 disabled={!isCompleted && !isActive}
               >
-                <span className="text-[11px]">{stepNum}</span>
+                <span className="text-xs">{stepNum}</span>
                 {label}
               </button>
             );

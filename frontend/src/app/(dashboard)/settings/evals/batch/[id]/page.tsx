@@ -179,13 +179,13 @@ function ScoreCell({ run }: { run: EvalRun }) {
   if (run.status === "pending" || run.status === "running") {
     const statusStyle = evalRunStatusConfig[run.status];
     return (
-      <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${statusStyle.color}`}>
+      <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${statusStyle.color}`}>
         {statusStyle.label}
       </span>
     );
   }
   if (run.status === "failed") {
-    return <span className="text-red-600 dark:text-red-400 text-[11px]">Error</span>;
+    return <span className="text-red-600 dark:text-red-400 text-xs">Error</span>;
   }
   if (run.final_score == null) return <span className="text-muted-foreground">-</span>;
 
@@ -218,25 +218,25 @@ function BatchSummary({ batch }: { batch: EvalBatchDetail }) {
     <div className="grid gap-4 md:grid-cols-4">
       <Card>
         <CardContent className="py-3 text-center">
-          <p className="text-2xl font-bold">{completedCount}/{batch.run_count}</p>
+          <p className="text-2xl font-semibold">{completedCount}/{batch.run_count}</p>
           <p className="text-xs text-muted-foreground">Runs completed</p>
         </CardContent>
       </Card>
       <Card>
         <CardContent className="py-3 text-center">
-          <p className="text-2xl font-bold">{avgScore != null ? `${(avgScore * 100).toFixed(0)}%` : "-"}</p>
+          <p className="text-2xl font-semibold">{avgScore != null ? `${(avgScore * 100).toFixed(0)}%` : "-"}</p>
           <p className="text-xs text-muted-foreground">Average score</p>
         </CardContent>
       </Card>
       <Card>
         <CardContent className="py-3 text-center">
-          <p className="text-2xl font-bold text-emerald-600 dark:text-emerald-400">{passedCount}</p>
+          <p className="text-2xl font-semibold text-emerald-600 dark:text-emerald-400">{passedCount}</p>
           <p className="text-xs text-muted-foreground">Passed</p>
         </CardContent>
       </Card>
       <Card>
         <CardContent className="py-3 text-center">
-          <p className="text-2xl font-bold text-red-600 dark:text-red-400">{failedCount}</p>
+          <p className="text-2xl font-semibold text-red-600 dark:text-red-400">{failedCount}</p>
           <p className="text-xs text-muted-foreground">Errors</p>
         </CardContent>
       </Card>

@@ -68,7 +68,7 @@ function SlackChannelPicker() {
     return (
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Slack Channels</CardTitle>
+          <CardTitle className="text-sm">Slack Channels</CardTitle>
           <CardDescription>Loading channels...</CardDescription>
         </CardHeader>
       </Card>
@@ -80,7 +80,7 @@ function SlackChannelPicker() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Monitored Slack Channels</CardTitle>
+        <CardTitle className="text-sm">Monitored Slack Channels</CardTitle>
         <CardDescription>
           Select which channels the PM agent should monitor for actionable conversations.
         </CardDescription>

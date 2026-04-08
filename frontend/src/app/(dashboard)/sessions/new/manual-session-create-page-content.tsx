@@ -283,7 +283,7 @@ export function ManualSessionCreatePageContent() {
       {/* Centered hero + composer */}
       <div className="flex-1 flex flex-col items-center justify-center px-6 pb-4">
         <div className="text-center mb-8">
-          <p className="text-3xl font-bold tracking-tight bg-[image:var(--gradient-primary)] bg-clip-text text-transparent">Let&apos;s build</p>
+          <p className="text-3xl font-semibold tracking-tight bg-[image:var(--gradient-primary)] bg-clip-text text-transparent">Let&apos;s build</p>
           <p className="mt-2 text-sm text-muted-foreground">Start a manual session with text, files, photos, or dictation.</p>
         </div>
       </div>

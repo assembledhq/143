@@ -73,7 +73,7 @@ export function DiffLineRow({ line, filePath, highlightedContent, onAddComment, 
         type="button"
         onClick={() => handleLineNumberClick(line.oldLineNumber, "L")}
         className={cn(
-          "w-[50px] shrink-0 text-right pr-2 select-none text-[11px] text-muted-foreground/60 hover:text-primary cursor-pointer",
+          "w-[50px] shrink-0 text-right pr-2 select-none text-xs text-muted-foreground/60 hover:text-primary cursor-pointer",
           lineNumberStyles[line.type]
         )}
       >
@@ -84,7 +84,7 @@ export function DiffLineRow({ line, filePath, highlightedContent, onAddComment, 
         type="button"
         onClick={() => handleLineNumberClick(line.newLineNumber, "R")}
         className={cn(
-          "w-[50px] shrink-0 text-right pr-2 select-none text-[11px] text-muted-foreground/60 hover:text-primary cursor-pointer",
+          "w-[50px] shrink-0 text-right pr-2 select-none text-xs text-muted-foreground/60 hover:text-primary cursor-pointer",
           lineNumberStyles[line.type]
         )}
       >

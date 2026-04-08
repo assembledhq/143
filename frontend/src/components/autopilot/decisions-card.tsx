@@ -17,7 +17,7 @@ function DecisionBadge({ decision }: { decision: string }) {
     cluster: "bg-purple-500/10 text-purple-700 dark:text-purple-400",
   };
   return (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${styles[decision] ?? styles.skip}`}>
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${styles[decision] ?? styles.skip}`}>
       {decision === "delegate" ? "Delegated" : decision === "cluster" ? "Clustered" : "Skipped"}
     </span>
   );

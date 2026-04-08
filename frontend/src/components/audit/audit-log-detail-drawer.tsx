@@ -27,7 +27,7 @@ export function AuditLogDetailDrawer({ entry, onClose, members }: AuditLogDetail
     <Sheet open={!!entry} onOpenChange={(open) => !open && onClose()}>
       <SheetContent>
         <SheetHeader>
-          <SheetTitle className="text-base">Event details</SheetTitle>
+          <SheetTitle className="text-sm">Event details</SheetTitle>
           <SheetDescription>
             {actorName} {actionLabel}
           </SheetDescription>
@@ -38,10 +38,10 @@ export function AuditLogDetailDrawer({ entry, onClose, members }: AuditLogDetail
             <DetailRow label="Action" value={entry.action} />
             <DetailRow label="Actor" value={actorName} />
             <DetailRow label="Actor Type">
-              <Badge variant="secondary" className="text-[11px]">{entry.actor_type}</Badge>
+              <Badge variant="secondary" className="text-xs">{entry.actor_type}</Badge>
             </DetailRow>
             <DetailRow label="Resource Type">
-              <Badge variant="outline" className="text-[11px]">{entry.resource_type}</Badge>
+              <Badge variant="outline" className="text-xs">{entry.resource_type}</Badge>
             </DetailRow>
             {entry.resource_id && <DetailRow label="Resource ID" value={entry.resource_id} mono />}
             <DetailRow label="Time" value={new Date(entry.created_at).toLocaleString()} />
@@ -55,7 +55,7 @@ export function AuditLogDetailDrawer({ entry, onClose, members }: AuditLogDetail
                 {Object.entries(entry.details).map(([key, value]) => (
                   <div key={key} className="flex gap-2 text-xs">
                     <span className="font-medium text-muted-foreground min-w-[100px] shrink-0">{key}</span>
-                    <span className="text-foreground break-all font-mono text-[11px]">
+                    <span className="text-foreground break-all font-mono text-xs">
                       {typeof value === "object" ? JSON.stringify(value, null, 2) : String(value)}
                     </span>
                   </div>
@@ -109,7 +109,7 @@ function DetailRow({
     <div className={`flex items-start gap-3 ${small ? "text-xs" : "text-sm"}`}>
       <span className="text-muted-foreground min-w-[100px] shrink-0 text-xs font-medium">{label}</span>
       {children ?? (
-        <span className={`text-foreground break-all ${mono ? "font-mono text-[11px]" : ""}`}>
+        <span className={`text-foreground break-all ${mono ? "font-mono text-xs" : ""}`}>
           {value}
         </span>
       )}

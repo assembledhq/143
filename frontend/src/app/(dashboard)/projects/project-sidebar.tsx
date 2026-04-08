@@ -130,7 +130,7 @@ export function ProjectSidebar() {
                   {tab.label}
                   {count > 0 && (
                     <span className={cn(
-                      "rounded-full text-white text-[9px] leading-none px-1.5 py-0.5",
+                      "rounded-full text-white text-xs leading-none px-1.5 py-0.5",
                       tab.value === "active" ? "bg-primary"
                       : tab.value === "scheduled" ? "bg-purple-500"
                       : tab.value === "paused" ? "bg-orange-500"
@@ -172,13 +172,13 @@ export function ProjectSidebar() {
         )}
 
         {isLoading && (
-          <div className="px-2 py-8 text-center text-[12px] text-muted-foreground">
+          <div className="px-2 py-8 text-center text-xs text-muted-foreground">
             Loading...
           </div>
         )}
 
         {!isLoading && displayedProjects.length === 0 && (
-          <div className="px-2 py-8 text-center text-[12px] text-muted-foreground">
+          <div className="px-2 py-8 text-center text-xs text-muted-foreground">
             {allProjects.length === 0 ? (
               <div className="space-y-2">
                 <FolderKanban className="h-5 w-5 mx-auto text-muted-foreground/40" />
@@ -227,10 +227,10 @@ export function ProjectSidebar() {
                   </p>
 
                   <div className="flex items-center gap-3 mt-0.5">
-                    <span className="text-[11px] text-muted-foreground shrink-0">
+                    <span className="text-xs text-muted-foreground shrink-0">
                       {cfg.label}
                     </span>
-                    <span className="text-[11px] text-muted-foreground/50 truncate">
+                    <span className="text-xs text-muted-foreground/50 truncate">
                       {formatTimeAgo(ts)}
                     </span>
                   </div>
@@ -244,7 +244,7 @@ export function ProjectSidebar() {
                           style={{ width: `${pct}%` }}
                         />
                       </div>
-                      <span className="text-[10px] text-muted-foreground/60 tabular-nums">
+                      <span className="text-xs text-muted-foreground/60 tabular-nums">
                         {project.completed_tasks}/{project.total_tasks}
                       </span>
                     </div>
