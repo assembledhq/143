@@ -20,6 +20,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/logging"
+	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/agent/adapters"
@@ -32,6 +33,7 @@ import (
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/storage"
 	"github.com/assembledhq/143/internal/services/validation"
+	"github.com/assembledhq/143/internal/telemetry"
 	"github.com/assembledhq/143/internal/version"
 	"github.com/assembledhq/143/internal/worker"
 )
@@ -59,6 +61,30 @@ func main() {
 		logger.Fatal().Err(err).Msg("failed to connect to database")
 	}
 	defer pool.Close()
+
+	// Initialize OpenTelemetry meter provider.
+	// Enables Prometheus /metrics (always) + OTLP push (when OTEL_EXPORTER_OTLP_ENDPOINT is set).
+	_, otelShutdown, err := telemetry.InitMeterProvider(ctx, telemetry.Config{
+		ServiceName:       "143",
+		OTLPEndpoint:      cfg.OTLPEndpoint,
+		OTLPInsecure:      cfg.OTLPInsecure,
+		PrometheusEnabled: true,
+	})
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to initialize telemetry")
+	}
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := otelShutdown(shutdownCtx); err != nil {
+			logger.Error().Err(err).Msg("failed to shutdown telemetry")
+		}
+	}()
+
+	billingMetrics, err := metrics.NewBillingMetrics()
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to initialize billing metrics")
+	}
 
 	// Create codex auth service (shared between router and orchestrator).
 	var cryptoSvc *crypto.Service
@@ -294,7 +320,7 @@ func buildServices(
 	sessionQuestionStore := db.NewSessionQuestionStore(pool)
 	projectTaskUpdater := pm.NewProjectHooks(projectTaskStore, projectStore, logger)
 	containerUsageStore := db.NewContainerUsageStore(pool)
-	usageTracker := agent.NewUsageTracker(containerUsageStore, logger)
+	usageTracker := agent.NewUsageTracker(containerUsageStore, billingMetrics, logger)
 	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:         sandboxProvider,
 		Adapters:         agentAdapters,

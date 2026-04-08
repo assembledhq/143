@@ -99,6 +99,10 @@ type Config struct {
 	SessionMaxIdleAge     time.Duration `env:"SESSION_MAX_IDLE_AGE"    envDefault:"2h"`
 	SessionReaperInterval time.Duration `env:"SESSION_REAPER_INTERVAL" envDefault:"5m"`
 	SessionMaxSnapshotAge time.Duration `env:"SESSION_MAX_SNAPSHOT_AGE" envDefault:"720h"` // 30 days
+
+	// Telemetry (OpenTelemetry)
+	OTLPEndpoint string `env:"OTEL_EXPORTER_OTLP_ENDPOINT"` // e.g. "otel-collector:4318" or "https://otlp.grafana.net"
+	OTLPInsecure bool   `env:"OTEL_EXPORTER_OTLP_INSECURE" envDefault:"false"`
 }
 
 // Load reads configuration from env files and environment variables.

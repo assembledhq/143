@@ -18,17 +18,18 @@ type ContainerUsageStore interface {
 }
 
 // UsageTracker records container lifecycle events for billing observability.
-// It writes to both the database (for billing queries) and Prometheus (for
-// real-time dashboards and alerting).
+// It writes to both the database (for billing queries) and OTel metrics (for
+// real-time dashboards and alerting via any backend).
 type UsageTracker struct {
-	store  ContainerUsageStore // nil = tracking disabled
-	logger zerolog.Logger
+	store   ContainerUsageStore    // nil = DB tracking disabled
+	metrics *metrics.BillingMetrics // nil = metrics disabled
+	logger  zerolog.Logger
 }
 
-// NewUsageTracker creates a UsageTracker. Pass nil store to disable DB tracking
-// (Prometheus metrics will still be emitted).
-func NewUsageTracker(store ContainerUsageStore, logger zerolog.Logger) *UsageTracker {
-	return &UsageTracker{store: store, logger: logger}
+// NewUsageTracker creates a UsageTracker. Pass nil store to disable DB tracking,
+// nil metrics to disable metric emission.
+func NewUsageTracker(store ContainerUsageStore, m *metrics.BillingMetrics, logger zerolog.Logger) *UsageTracker {
+	return &UsageTracker{store: store, metrics: m, logger: logger}
 }
 
 // ContainerStarted records that a container was created and started.
@@ -37,11 +38,10 @@ func (t *UsageTracker) ContainerStarted(ctx context.Context, orgID, sessionID uu
 	eventID := uuid.New()
 	orgIDStr := orgID.String()
 
-	// Prometheus metrics (always emitted, even if store is nil).
-	metrics.ContainerStartsTotal.WithLabelValues(orgIDStr, sandbox.Provider, cfg.Image).Inc()
-	metrics.ContainersActive.WithLabelValues(orgIDStr).Inc()
-	metrics.ContainerCPUAllocated.WithLabelValues(orgIDStr).Observe(cfg.CPULimit)
-	metrics.ContainerMemoryAllocatedMB.WithLabelValues(orgIDStr).Observe(float64(cfg.MemoryLimitMB))
+	// OTel metrics.
+	if t.metrics != nil {
+		t.metrics.RecordStart(ctx, orgIDStr, sandbox.Provider, cfg.Image, cfg.CPULimit, cfg.MemoryLimitMB)
+	}
 
 	// DB persistence.
 	if t.store != nil {
@@ -75,11 +75,10 @@ func (t *UsageTracker) ContainerStopped(ctx context.Context, orgID uuid.UUID, ev
 	durationSec := stoppedAt.Sub(startedAt).Seconds()
 	durationMin := durationSec / 60.0
 
-	// Prometheus metrics.
-	metrics.ContainersActive.WithLabelValues(orgIDStr).Dec()
-	metrics.ContainerStopsTotal.WithLabelValues(orgIDStr, exitReason).Inc()
-	metrics.ContainerDurationSeconds.WithLabelValues(orgIDStr, exitReason).Observe(durationSec)
-	metrics.ContainerMinutesTotal.WithLabelValues(orgIDStr).Add(durationMin)
+	// OTel metrics.
+	if t.metrics != nil {
+		t.metrics.RecordStop(ctx, orgIDStr, exitReason, durationSec, durationMin)
+	}
 
 	// DB persistence.
 	if t.store != nil {

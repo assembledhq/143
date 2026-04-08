@@ -9,6 +9,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 )
@@ -35,11 +36,20 @@ func (m *mockContainerUsageStore) RecordStop(_ context.Context, eventID uuid.UUI
 	return nil
 }
 
+// testBillingMetrics creates BillingMetrics for testing. Uses the global
+// no-op MeterProvider which is the OTel default when no provider is configured.
+func testBillingMetrics(t *testing.T) *metrics.BillingMetrics {
+	t.Helper()
+	m, err := metrics.NewBillingMetrics()
+	require.NoError(t, err)
+	return m
+}
+
 func TestUsageTracker_ContainerLifecycle(t *testing.T) {
 	t.Parallel()
 
 	store := &mockContainerUsageStore{}
-	tracker := agent.NewUsageTracker(store, zerolog.Nop())
+	tracker := agent.NewUsageTracker(store, testBillingMetrics(t), zerolog.Nop())
 
 	orgID := uuid.New()
 	sessionID := uuid.New()
@@ -66,11 +76,11 @@ func TestUsageTracker_ContainerLifecycle(t *testing.T) {
 	require.Equal(t, "completed", store.stopCalls[0].ExitReason)
 }
 
-func TestUsageTracker_NilStore(t *testing.T) {
+func TestUsageTracker_NilStoreAndMetrics(t *testing.T) {
 	t.Parallel()
 
-	// Should not panic when store is nil (Prometheus metrics still fire).
-	tracker := agent.NewUsageTracker(nil, zerolog.Nop())
+	// Should not panic when both store and metrics are nil.
+	tracker := agent.NewUsageTracker(nil, nil, zerolog.Nop())
 
 	orgID := uuid.New()
 	sessionID := uuid.New()
