@@ -61,7 +61,7 @@ export function AgentStatusBar({ label, pmStatus, agentStatus, children }: Agent
 
       <span className="text-[13px] font-medium text-foreground">{label}</span>
 
-      <span className={`text-[11px] font-medium px-1.5 py-0.5 rounded ${
+      <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${
         isRunning ? "bg-primary/10 text-primary shadow-[var(--glow-primary-sm)]"
         : agentStatus === "completed" ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
         : agentStatus === "failed" ? "bg-destructive/10 text-destructive"
@@ -71,13 +71,13 @@ export function AgentStatusBar({ label, pmStatus, agentStatus, children }: Agent
       </span>
 
       {isRunning && (
-        <span className="text-[12px] text-primary">
+        <span className="text-xs text-primary">
           Analyzing issues and generating a plan...
         </span>
       )}
 
       {!isRunning && pmStatus && (
-        <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
+        <div className="flex items-center gap-3 text-xs text-muted-foreground">
           {pmStatus.total_delegated > 0 && (
             <span>{Math.round(pmStatus.success_rate)}% success</span>
           )}

@@ -489,7 +489,7 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
           <div className="flex flex-col md:flex-row items-center gap-12 md:gap-20">
             <div className="md:w-1/2 space-y-4">
               <p
-                className={`text-xs font-mono tracking-widest uppercase ${label}`}
+                className={`text-xs font-mono tracking-wider uppercase ${label}`}
               >
                 Step 01
               </p>
@@ -529,7 +529,7 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
           >
             <div className="md:w-1/2 space-y-4">
               <p
-                className={`text-xs font-mono tracking-widest uppercase ${label}`}
+                className={`text-xs font-mono tracking-wider uppercase ${label}`}
               >
                 Step 02
               </p>
@@ -588,7 +588,7 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
           >
             <div className="md:w-1/2 space-y-4">
               <p
-                className={`text-xs font-mono tracking-widest uppercase ${label}`}
+                className={`text-xs font-mono tracking-wider uppercase ${label}`}
               >
                 Step 03
               </p>
@@ -669,7 +669,7 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
           >
             <div className="md:w-1/2 space-y-4">
               <p
-                className={`text-xs font-mono tracking-widest uppercase ${label}`}
+                className={`text-xs font-mono tracking-wider uppercase ${label}`}
               >
                 Step 04
               </p>

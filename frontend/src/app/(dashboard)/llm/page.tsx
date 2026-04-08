@@ -235,13 +235,13 @@ export default function LLMPage() {
                           <div className="flex items-center gap-2">
                             <span className="text-sm font-medium">{info.name}</span>
                             {ps?.orgConfigured && (
-                              <Badge variant="success" className="text-[10px] px-1.5 py-0">
+                              <Badge variant="success" className="text-xs px-1.5 py-0">
                                 <Check className="mr-0.5 h-3 w-3" />
                                 Configured
                               </Badge>
                             )}
                             {!ps?.orgConfigured && ps?.platformAvailable && (
-                              <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+                              <Badge variant="secondary" className="text-xs px-1.5 py-0">
                                 Platform default
                               </Badge>
                             )}

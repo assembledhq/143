@@ -50,7 +50,7 @@ export function CurrentRecommendation({ recommendation }: CurrentRecommendationP
       </Card>
 
       {/* Context stats strip */}
-      <div className="flex flex-wrap gap-3 text-[11px] text-muted-foreground">
+      <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
         <span className="inline-flex items-center gap-1">
           <Search className="h-3 w-3" />
           {stats.issues_reviewed} issues reviewed
@@ -73,7 +73,7 @@ export function CurrentRecommendation({ recommendation }: CurrentRecommendationP
       <div className="space-y-3">
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-semibold">Priority tasks</h3>
-          <Badge variant="secondary" className="text-[11px]">
+          <Badge variant="secondary" className="text-xs">
             {recommendation.tasks.length} slots used
           </Badge>
         </div>
@@ -95,7 +95,7 @@ export function CurrentRecommendation({ recommendation }: CurrentRecommendationP
               <div key={`${cluster.root_cause}-${index}`} className="space-y-2">
                 <div className="flex flex-wrap gap-2">
                   {cluster.issue_ids.map((id) => (
-                    <Badge key={id} variant="secondary" className="text-[11px]">
+                    <Badge key={id} variant="secondary" className="text-xs">
                       {id.slice(0, 8)}
                     </Badge>
                   ))}
@@ -129,10 +129,10 @@ export function CurrentRecommendation({ recommendation }: CurrentRecommendationP
                 {recommendation.skipped_issues.map((skip, index) => (
                   <div key={`${skip.issue_id}-${index}`} className="space-y-2">
                     <div className="flex items-center gap-2">
-                      <Badge variant="outline" className="text-[11px]">
+                      <Badge variant="outline" className="text-xs">
                         {skip.issue_id.slice(0, 8)}
                       </Badge>
-                      <Badge variant="secondary" className="text-[11px]">
+                      <Badge variant="secondary" className="text-xs">
                         {SKIP_REASON_LABELS[skip.reason] ?? skip.reason.replace(/_/g, " ")}
                       </Badge>
                     </div>

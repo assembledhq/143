@@ -197,11 +197,11 @@ function EvalTaskRow({ task, repoName }: { task: EvalTask; repoName?: string }) 
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="text-[13px] font-medium text-foreground truncate">{task.name}</span>
-          <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${complexityStyle.color}`}>
+          <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${complexityStyle.color}`}>
             {complexityStyle.label}
           </span>
           {task.snapshot_broken && (
-            <span className="inline-flex items-center gap-1 rounded-full bg-orange-500/10 px-2 py-0.5 text-[11px] font-medium text-orange-700 dark:text-orange-400">
+            <span className="inline-flex items-center gap-1 rounded-full bg-orange-500/10 px-2 py-0.5 text-xs font-medium text-orange-700 dark:text-orange-400">
               <AlertTriangle className="h-3 w-3" />
               Snapshot broken
             </span>
@@ -249,7 +249,7 @@ function BatchHistory() {
                 <div className="flex items-center gap-2">
                   <Layers className="h-3.5 w-3.5 text-muted-foreground" />
                   <span className="text-[13px] font-medium">{batch.name || "Unnamed batch"}</span>
-                  <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${
+                  <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
                     batch.status === "completed"
                       ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
                       : batch.status === "running"
