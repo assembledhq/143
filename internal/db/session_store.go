@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -34,6 +35,7 @@ type SessionFilters struct {
 	AdHocOnly          bool       // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
 	RepositoryID       uuid.UUID  // When non-zero, filter sessions by repository via issues table.
 	TriggeredByUserID  uuid.UUID  // When non-zero, filter sessions to those triggered by this user.
+	Search             string     // When non-empty, filter sessions by title (case-insensitive prefix/substring match).
 }
 
 // sessionSelectColumns is used for single-session queries where we want all fields.
@@ -125,6 +127,11 @@ func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters S
 	if filters.TriggeredByUserID != uuid.Nil {
 		query += ` AND triggered_by_user_id = @triggered_by_user_id`
 		args["triggered_by_user_id"] = filters.TriggeredByUserID
+	}
+	if filters.Search != "" {
+		query += ` AND title ILIKE @search`
+		escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(filters.Search)
+		args["search"] = "%" + escaped + "%"
 	}
 	if filters.AdHocOnly {
 		query += ` AND pm_plan_id IS NULL`

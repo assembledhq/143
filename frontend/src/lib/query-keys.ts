@@ -22,7 +22,12 @@ export const queryKeys = {
   },
   repositories: {
     all: ["repositories"] as const,
+    summary: ["repositories", "summary"] as const,
     branches: (id: string) => ["repositories", id, "branches"] as const,
+  },
+  projects: {
+    all: ["projects"] as const,
+    list: (params?: { repo?: string | null; search?: string }) => ["projects", params] as const,
   },
   settings: {
     all: ["settings"] as const,
