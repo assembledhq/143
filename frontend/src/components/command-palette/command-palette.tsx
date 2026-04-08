@@ -147,17 +147,14 @@ function CommandPaletteContent({
     if (query) {
       params.set("prompt", query);
     }
-    if (repo) {
-      params.set("repo", repo);
-    }
     const qs = params.toString();
-    navigate(`/sessions/new${qs ? `?${qs}` : ""}`);
-  }, [navigate, query, repo]);
+    navigate(`/sessions/new${qs ? `?${qs}` : ""}`, true);
+  }, [navigate, query]);
 
   const normalizedQuery = query.trim().toLowerCase();
-  const navigationActions = actions.filter((action) => action.group === "navigation");
-  const settingsActions = actions.filter((action) => action.group === "settings");
-  const quickActions = actions.filter((action) => action.group === "quick-actions");
+  const navigationActions = useMemo(() => actions.filter((action) => action.group === "navigation"), [actions]);
+  const settingsActions = useMemo(() => actions.filter((action) => action.group === "settings"), [actions]);
+  const quickActions = useMemo(() => actions.filter((action) => action.group === "quick-actions"), [actions]);
   const hasQuery = query.length >= 2;
   const hasDynamicResults = sessions.length > 0 || projects.length > 0;
   const hasMatchingStaticItem = useMemo(() => {
