@@ -33,7 +33,7 @@ export function CommentsSummary({
             setExpanded(!expanded);
           }
         }}
-        className="flex items-center justify-between w-full px-3 py-2 text-[12px] hover:bg-muted/30 transition-colors cursor-pointer"
+        className="flex items-center justify-between w-full px-3 py-2 text-xs hover:bg-muted/30 transition-colors cursor-pointer"
       >
         <div className="flex items-center gap-2">
           {expanded ? (
@@ -60,7 +60,7 @@ export function CommentsSummary({
                 key={c.id}
                 onClick={() => onCommentClick(c.file_path)}
                 className={cn(
-                  "flex items-start gap-2 w-full text-left px-2 py-1 rounded text-[12px] hover:bg-muted/30 transition-colors",
+                  "flex items-start gap-2 w-full text-left px-2 py-1 rounded text-xs hover:bg-muted/30 transition-colors",
                   c.resolved && "text-muted-foreground"
                 )}
               >
@@ -72,11 +72,11 @@ export function CommentsSummary({
                   </span>
                 )}
                 <div className="min-w-0 flex-1">
-                  <span className="font-mono text-[11px] text-muted-foreground">
+                  <span className="font-mono text-xs text-muted-foreground">
                     {fileName}:{c.line_number}
                   </span>
                   {c.pass_number > 1 && (
-                    <span className="ml-1 inline-flex items-center rounded px-1 py-0 text-[10px] font-medium bg-muted text-muted-foreground">
+                    <span className="ml-1 inline-flex items-center rounded px-1 py-0 text-xs font-medium bg-muted text-muted-foreground">
                       P{c.pass_number}
                     </span>
                   )}

@@ -107,7 +107,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
       <aside className="w-64 border-r border-border bg-sidebar flex flex-col relative">
         <div className="absolute inset-0 bg-gradient-to-b from-primary/[0.03] to-transparent pointer-events-none" />
         <div className="relative px-5 py-5 flex items-center gap-2">
-          <Link href="/autopilot" className="text-base font-bold tracking-tight text-sidebar-foreground">
+          <Link href="/autopilot" className="text-sm font-semibold tracking-tight text-sidebar-foreground">
             143.dev
           </Link>
           <RepoContextSwitcher />
@@ -163,7 +163,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                       className="h-5 w-5 rounded-full"
                     />
                   ) : (
-                    <div className="flex h-5 w-5 items-center justify-center rounded-full bg-muted text-[10px] font-medium">
+                    <div className="flex h-5 w-5 items-center justify-center rounded-full bg-muted text-xs font-medium">
                       {user.name?.[0]?.toUpperCase() ?? "?"}
                     </div>
                   )}

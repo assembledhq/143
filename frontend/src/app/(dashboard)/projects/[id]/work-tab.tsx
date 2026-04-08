@@ -92,7 +92,7 @@ function BoardSection({
                 <div className={`border-t-2 ${col.accent} rounded-t-md bg-muted/30 px-3 py-2`}>
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-semibold">{col.label}</span>
-                    <Badge variant="outline" className="text-[10px] px-1 py-0">{colTasks.length}</Badge>
+                    <Badge variant="outline" className="text-xs px-1 py-0">{colTasks.length}</Badge>
                   </div>
                 </div>
                 <div className="space-y-2 min-h-[60px]">
@@ -107,25 +107,25 @@ function BoardSection({
                             <div className="min-w-0 flex-1">
                               <p className="text-xs font-medium truncate">{task.title}</p>
                               {task.description && (
-                                <p className="text-[10px] text-muted-foreground mt-0.5 line-clamp-2">{task.description}</p>
+                                <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2">{task.description}</p>
                               )}
                               <div className="mt-1.5 flex items-center gap-2 flex-wrap">
                                 {task.complexity && (
-                                  <Badge variant="outline" className="text-[9px] px-1 py-0">{task.complexity}</Badge>
+                                  <Badge variant="outline" className="text-xs px-1 py-0">{task.complexity}</Badge>
                                 )}
                                 {task.pr_url && (
-                                  <a href={task.pr_url} target="_blank" rel="noopener noreferrer" className="text-[10px] text-primary underline inline-flex items-center gap-0.5">
+                                  <a href={task.pr_url} target="_blank" rel="noopener noreferrer" className="text-xs text-primary underline inline-flex items-center gap-0.5">
                                     PR <ExternalLink className="h-2.5 w-2.5" />
                                   </a>
                                 )}
                                 {task.session_id && (
-                                  <Link href={`/sessions/${task.session_id}`} className="text-[10px] text-primary underline inline-flex items-center gap-0.5">
+                                  <Link href={`/sessions/${task.session_id}`} className="text-xs text-primary underline inline-flex items-center gap-0.5">
                                     Session <ExternalLink className="h-2.5 w-2.5" />
                                   </Link>
                                 )}
                               </div>
                               {task.status === "failed" && (
-                                <Button size="sm" variant="outline" className="h-5 text-[10px] mt-1.5" onClick={() => retryMutation.mutate({ taskId: task.id })} disabled={retryMutation.isPending}>
+                                <Button size="sm" variant="outline" className="h-5 text-xs mt-1.5" onClick={() => retryMutation.mutate({ taskId: task.id })} disabled={retryMutation.isPending}>
                                   <RotateCcw className="mr-0.5 h-2.5 w-2.5" /> Retry
                                 </Button>
                               )}
@@ -137,7 +137,7 @@ function BoardSection({
                   })}
                   {colTasks.length === 0 && (
                     <div className="rounded-md border border-dashed border-border p-3 text-center">
-                      <p className="text-[10px] text-muted-foreground">No tasks</p>
+                      <p className="text-xs text-muted-foreground">No tasks</p>
                     </div>
                   )}
                 </div>
@@ -162,17 +162,17 @@ function PRsSection({ tasks }: { tasks: ProjectTask[] }) {
           return (
             <div key={task.id} className="flex items-center justify-between py-2 border-b border-border last:border-b-0">
               <div className="flex items-center gap-2 min-w-0 flex-1">
-                <span className={`inline-flex items-center rounded-full px-1.5 py-0 text-[10px] font-medium ${cfg.color}`}>{cfg.label}</span>
+                <span className={`inline-flex items-center rounded-full px-1.5 py-0 text-xs font-medium ${cfg.color}`}>{cfg.label}</span>
                 <span className="text-xs font-medium truncate">{task.title}</span>
-                {task.branch_name && <span className="text-[10px] font-mono text-muted-foreground hidden md:inline">{task.branch_name}</span>}
+                {task.branch_name && <span className="text-xs font-mono text-muted-foreground hidden md:inline">{task.branch_name}</span>}
               </div>
               <div className="flex items-center gap-2 flex-shrink-0">
                 {task.session_id && (
-                  <Link href={`/sessions/${task.session_id}`} className="text-[10px] text-primary underline inline-flex items-center gap-0.5">
+                  <Link href={`/sessions/${task.session_id}`} className="text-xs text-primary underline inline-flex items-center gap-0.5">
                     Run <ExternalLink className="h-2.5 w-2.5" />
                   </Link>
                 )}
-                <a href={task.pr_url!} target="_blank" rel="noopener noreferrer" className="text-[10px] text-primary underline inline-flex items-center gap-0.5">
+                <a href={task.pr_url!} target="_blank" rel="noopener noreferrer" className="text-xs text-primary underline inline-flex items-center gap-0.5">
                   PR <ExternalLink className="h-2.5 w-2.5" />
                 </a>
               </div>
@@ -194,10 +194,10 @@ function TimelineSection({ cycles }: { cycles: ProjectCycle[] }) {
           <div key={cycle.id} className="border-l-2 border-muted pl-3 py-1">
             <div className="flex items-center gap-2">
               <span className="text-xs font-semibold">Cycle #{cycle.cycle_number}</span>
-              <span className="text-[10px] text-muted-foreground">{formatTimestamp(cycle.created_at)}</span>
+              <span className="text-xs text-muted-foreground">{formatTimestamp(cycle.created_at)}</span>
             </div>
             <p className="text-xs mt-1">{cycle.analysis}</p>
-            <div className="flex items-center gap-3 mt-1 text-[10px] text-muted-foreground">
+            <div className="flex items-center gap-3 mt-1 text-xs text-muted-foreground">
               {cycle.progress_pct != null && <span>{cycle.progress_pct}% done</span>}
               <span className="text-green-600">{cycle.tasks_completed_this_cycle} completed</span>
               {cycle.tasks_failed_this_cycle > 0 && <span className="text-red-600">{cycle.tasks_failed_this_cycle} failed</span>}

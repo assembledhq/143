@@ -95,7 +95,7 @@ export function KeyboardHelpOverlay({ open, onClose }: KeyboardHelpOverlayProps)
               {shortcuts.map((s) => (
                 <tr key={s.key} className="border-b border-border/30 last:border-0">
                   <td className="py-1.5 pr-4">
-                    <kbd className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-border bg-muted/50 font-mono text-[11px] text-muted-foreground">
+                    <kbd className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-border bg-muted/50 font-mono text-xs text-muted-foreground">
                       {s.key}
                     </kbd>
                   </td>

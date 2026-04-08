@@ -11,7 +11,7 @@ export function DiffStatsBadge({ added, removed, onClick, className }: DiffStats
   if (added === 0 && removed === 0) return null;
 
   const content = (
-    <span className={cn("inline-flex items-center gap-1 text-[11px] font-mono", className)}>
+    <span className={cn("inline-flex items-center gap-1 text-xs font-mono", className)}>
       <span className="text-green-600 dark:text-green-400">+{added}</span>
       <span className="text-red-600 dark:text-red-400">-{removed}</span>
     </span>

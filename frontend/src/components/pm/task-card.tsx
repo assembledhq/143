@@ -25,14 +25,14 @@ export function TaskCard({ task }: { task: PMTask }) {
           </Badge>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Badge variant="outline" className="text-[11px]">
+          <Badge variant="outline" className="text-xs">
             {task.complexity}
           </Badge>
-          <Badge variant="outline" className="text-[11px]">
+          <Badge variant="outline" className="text-xs">
             {task.confidence} confidence
           </Badge>
           {task.issue_ids.map((id) => (
-            <Badge key={id} variant="secondary" className="text-[11px]">
+            <Badge key={id} variant="secondary" className="text-xs">
               {id.slice(0, 8)}
             </Badge>
           ))}

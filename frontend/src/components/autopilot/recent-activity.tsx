@@ -65,7 +65,7 @@ export function RecentActivity({ plans, summary }: RecentActivityProps) {
           );
         })}
         {summary && summary.total_delegated > 0 && (
-          <div className="pt-1 border-t border-border mt-2 text-[12px] text-muted-foreground">
+          <div className="pt-1 border-t border-border mt-2 text-xs text-muted-foreground">
             Overall: {summary.succeeded}/{summary.total_delegated} sessions succeeded
           </div>
         )}

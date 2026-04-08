@@ -107,7 +107,7 @@ export function CodexDeviceCodeModal({
             <div className="space-y-2">
               <p className="text-sm text-muted-foreground">2. Enter this code:</p>
               <div className="flex items-center gap-2">
-                <code className="rounded-md border bg-muted px-4 py-2 text-2xl font-mono font-bold tracking-widest">{deviceAuth.user_code}</code>
+                <code className="rounded-md border bg-muted px-4 py-2 text-2xl font-mono font-semibold tracking-wider">{deviceAuth.user_code}</code>
                 <Button
                   size="sm"
                   variant="outline"
