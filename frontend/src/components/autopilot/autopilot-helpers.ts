@@ -29,14 +29,7 @@ export function isAgentConnected(
   }
 }
 
-export type AutopilotHeroMode = "setup" | "first_analysis" | "recommendation" | "attention";
-
-export interface AutopilotSetupState {
-  agentConnected: boolean;
-  githubReady: boolean;
-  connectedCount: number;
-  totalCount: number;
-}
+export type AutopilotHeroMode = "first_analysis" | "recommendation" | "attention";
 
 export interface AutopilotViewModel {
   heroMode: AutopilotHeroMode;
@@ -44,13 +37,13 @@ export interface AutopilotViewModel {
   heroBody: string;
   primaryActionLabel: string;
   autonomyLabel: string;
-  philosophySummary: string;
   directionSummary: string;
   focusAreas: string[];
-  avoidAreas: string[];
   weightsSummary: string;
   documentsSummary: string;
   evidence: Array<{ label: string; value: string }>;
+  hasEvidence: boolean;
+  statusLine: string;
 }
 
 function formatWeight(value?: number): string {
@@ -71,6 +64,7 @@ export function getAutonomyLabel(level?: OrgSettings["autonomy_level"]): string 
 
 function getDirection(settings: OrgSettings): string {
   return settings.product_context?.direction?.trim()
+    || settings.product_context?.philosophy?.trim()
     || settings.product_direction?.trim()
     || "";
 }
@@ -79,24 +73,37 @@ function getDocumentsSummary(documents: PMDocument[]): string {
   return `${documents.length} attached`;
 }
 
+export function formatFreshness(lastRunAt?: string, now = Date.now()): string {
+  if (!lastRunAt) return "No analysis yet";
+  const delta = now - new Date(lastRunAt).getTime();
+  const minutes = Math.floor(delta / 60_000);
+  if (minutes < 1) return "Analyzed just now";
+  if (minutes < 60) return `Analyzed ${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `Analyzed ${hours}h ago`;
+  return `Last analyzed ${new Date(lastRunAt).toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;
+}
+
+function formatNextRun(nextRunIn?: string): string {
+  if (!nextRunIn) return "";
+  const label = nextRunIn.replace(/^in\s+/i, "");
+  return `Next in ${label}`;
+}
+
 export function deriveAutopilotViewModel({
   settings,
   pmStatus,
   latestPlan,
   documents,
-  setup,
 }: {
   settings: OrgSettings;
   pmStatus: PMStatus;
   latestPlan: PMPlan | null;
   documents: PMDocument[];
-  setup: AutopilotSetupState;
 }): AutopilotViewModel {
   const autonomyLabel = getAutonomyLabel(settings.autonomy_level);
-  const directionSummary = getDirection(settings) || "Not set yet";
-  const philosophySummary = settings.product_context?.philosophy?.trim() || "Not set yet";
+  const directionSummary = getDirection(settings);
   const focusAreas = settings.product_context?.focus_areas ?? [];
-  const avoidAreas = settings.product_context?.avoid_areas ?? [];
   const weights = settings.priority_weights ?? {};
   const weightsSummary = [
     `Impact ${formatWeight(weights.customer_impact)}`,
@@ -106,34 +113,58 @@ export function deriveAutopilotViewModel({
   ].join(" · ");
   const documentsSummary = getDocumentsSummary(documents);
 
+  // Build status line: "{autonomy} · {freshness} · {next run}"
+  const freshness = formatFreshness(pmStatus.last_run_at);
+  const nextRun = formatNextRun(pmStatus.next_run_in);
+  const statusParts = [autonomyLabel, freshness];
+  if (nextRun) statusParts.push(nextRun);
+  const statusLine = statusParts.join(" \u00b7 ");
+
+  // Determine hero mode (setup is now handled by /onboarding redirect)
   let heroMode: AutopilotHeroMode = "recommendation";
-  let heroTitle = "Recommendation";
+  let heroTitle = "";
   let heroBody = latestPlan?.analysis?.trim()
     || "Autopilot will summarize what matters most after the next analysis.";
   let primaryActionLabel = "Run analysis";
 
-  if (!setup.agentConnected || !setup.githubReady) {
-    heroMode = "setup";
-    heroTitle = "Autopilot needs a few connections before it can start analyzing.";
-    heroBody = "Connect a coding agent and GitHub repositories, then run the first analysis.";
-    primaryActionLabel = "Complete setup";
-  } else if (pmStatus.last_error || pmStatus.last_run_status === "failed") {
+  if (pmStatus.last_error || pmStatus.last_run_status === "failed") {
     heroMode = "attention";
     heroTitle = "Attention needed";
     heroBody = pmStatus.last_error || "The last analysis failed. Review setup or rerun the PM agent.";
     primaryActionLabel = "Run analysis";
   } else if (!latestPlan) {
     heroMode = "first_analysis";
-    heroTitle = "Run the first analysis and Autopilot will tell you what matters next.";
-    heroBody = "Autopilot will group related issues, identify what is highest leverage, and suggest what your agents should work on first.";
+    heroTitle = "Ready for your first analysis";
+    heroBody = "Autopilot will review your open issues, group related ones together, and tell you what\u2019s highest leverage to work on.";
     primaryActionLabel = "Run first analysis";
+  } else {
+    // Extract headline from the first sentence of the analysis.
+    // Negative lookbehind avoids splitting on abbreviations like "e.g." or "Dr.".
+    // Requires at least 2 word-characters before a period to skip single-letter abbrevs.
+    const analysis = latestPlan.analysis?.trim() || "";
+    const firstSentenceEnd = analysis.search(/(?<=\w{2})[.!?]\s/);
+    if (firstSentenceEnd > 0 && firstSentenceEnd < 120) {
+      heroTitle = analysis.slice(0, firstSentenceEnd + 1);
+      heroBody = analysis.slice(firstSentenceEnd + 1).trim()
+        || "Review the analysis details above for more context.";
+    } else {
+      heroTitle = analysis.length > 80
+        ? analysis.slice(0, 80).trim() + "\u2026"
+        : analysis || "Analysis complete";
+      heroBody = analysis.length > 80 ? analysis : "";
+    }
   }
 
+  // Evidence: 3 metrics, hidden when all are zero
+  const successRate = Math.round(pmStatus.success_rate ?? 0);
+  const issuesReviewed = pmStatus.issues_reviewed ?? latestPlan?.issues_reviewed ?? 0;
+  const totalDelegated = pmStatus.total_delegated ?? 0;
+  const hasEvidence = successRate > 0 || issuesReviewed > 0 || totalDelegated > 0;
+
   const evidence: Array<{ label: string; value: string }> = [
-    { label: "Success rate", value: `${Math.round(pmStatus.success_rate ?? 0)}%` },
-    { label: "Issues reviewed", value: String(pmStatus.issues_reviewed ?? latestPlan?.issues_reviewed ?? 0) },
-    { label: "Delegated", value: String(pmStatus.total_delegated ?? 0) },
-    { label: "Next run", value: pmStatus.next_run_in ?? "Not scheduled" },
+    { label: "Success rate", value: `${successRate}%` },
+    { label: "Issues reviewed", value: String(issuesReviewed) },
+    { label: "Delegated", value: String(totalDelegated) },
   ];
 
   return {
@@ -142,12 +173,12 @@ export function deriveAutopilotViewModel({
     heroBody,
     primaryActionLabel,
     autonomyLabel,
-    philosophySummary,
     directionSummary,
     focusAreas,
-    avoidAreas,
     weightsSummary,
     documentsSummary,
     evidence,
+    hasEvidence,
+    statusLine,
   };
 }
