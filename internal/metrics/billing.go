@@ -101,12 +101,15 @@ func NewBillingMetrics() (*BillingMetrics, error) {
 	}, nil
 }
 
-// Common attribute keys.
+// Common attribute keys used across all metrics.
 var (
 	AttrOrgID      = attribute.Key("org.id")
 	AttrProvider   = attribute.Key("container.provider")
 	AttrImage      = attribute.Key("container.image")
 	AttrExitReason = attribute.Key("container.exit_reason")
+	AttrHTTPMethod = attribute.Key("http.request.method")
+	AttrHTTPRoute  = attribute.Key("http.route")
+	AttrHTTPStatus = attribute.Key("http.response.status_code")
 )
 
 // RecordStart records metrics when a container starts.

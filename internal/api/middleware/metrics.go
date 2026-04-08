@@ -6,62 +6,50 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
+
+	"github.com/assembledhq/143/internal/metrics"
 )
 
-var (
-	httpRequestsTotal = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "http_requests_total",
-			Help: "Total number of HTTP requests",
-		},
-		[]string{"method", "path", "status"},
-	)
+// httpMetrics is the package-level metrics instance, set via SetHTTPMetrics.
+// When nil (e.g. in tests), the middleware is a no-op pass-through.
+var httpMetrics *metrics.HTTPMetrics
 
-	httpRequestDuration = promauto.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "http_request_duration_seconds",
-			Help:    "Duration of HTTP requests in seconds",
-			Buckets: prometheus.DefBuckets,
-		},
-		[]string{"method", "path"},
-	)
+// SetHTTPMetrics injects the OTel HTTP metrics instance. Call once at startup
+// after telemetry.InitMeterProvider.
+func SetHTTPMetrics(m *metrics.HTTPMetrics) {
+	httpMetrics = m
+}
 
-	httpRequestsInFlight = promauto.NewGauge(
-		prometheus.GaugeOpts{
-			Name: "http_requests_in_flight",
-			Help: "Number of HTTP requests currently being processed",
-		},
-	)
-)
-
-// Metrics returns middleware that records Prometheus metrics for HTTP requests.
+// Metrics returns middleware that records OTel metrics for HTTP requests.
 func Metrics(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if httpMetrics == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		start := time.Now()
-		httpRequestsInFlight.Inc()
-		defer httpRequestsInFlight.Dec()
+		httpMetrics.RequestsInFlight.Add(r.Context(), 1)
 
 		ww := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(ww, r)
 
 		duration := time.Since(start).Seconds()
+		httpMetrics.RequestsInFlight.Add(r.Context(), -1)
 
-		// Use the chi route pattern for consistent path labels
+		// Use the chi route pattern for consistent path labels.
 		routePattern := chi.RouteContext(r.Context()).RoutePattern()
 		if routePattern == "" {
 			routePattern = r.URL.Path
 		}
 
-		httpRequestsTotal.WithLabelValues(r.Method, routePattern, strconv.Itoa(ww.status)).Inc()
-		httpRequestDuration.WithLabelValues(r.Method, routePattern).Observe(duration)
+		httpMetrics.RecordRequest(r.Context(), r.Method, routePattern, strconv.Itoa(ww.status), duration)
 	})
 }
 
 type statusWriter struct {
 	http.ResponseWriter
-	status int
+	status  int
 	written bool
 }
 

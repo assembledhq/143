@@ -14,6 +14,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/api"
+	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/cluster"
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/crypto"
@@ -85,6 +86,12 @@ func main() {
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize billing metrics")
 	}
+
+	httpMetrics, err := metrics.NewHTTPMetrics()
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to initialize HTTP metrics")
+	}
+	middleware.SetHTTPMetrics(httpMetrics)
 
 	// Create codex auth service (shared between router and orchestrator).
 	var cryptoSvc *crypto.Service
@@ -171,7 +178,7 @@ func main() {
 				jobStore, orgStore, repoStore, validationStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
-				sessionMessageStore, snapshotStore)
+				sessionMessageStore, snapshotStore, billingMetrics)
 		}
 		retentionCfg := worker.DataRetentionConfig{
 			WebhookDays: cfg.DataRetentionWebhookDays,
@@ -272,6 +279,7 @@ func buildServices(
 	integrationStore *db.IntegrationStore,
 	sessionMessageStore *db.SessionMessageStore,
 	snapshotStore storage.SnapshotStore,
+	billingMetrics *metrics.BillingMetrics,
 ) *worker.Services {
 	// GitHub App service (for installation tokens, PR creation).
 	ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)

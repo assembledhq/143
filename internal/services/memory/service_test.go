@@ -119,7 +119,7 @@ func TestGetContextMemories_EmptyStore(t *testing.T) {
 	t.Parallel()
 
 	store := &mockMemoryStore{memories: nil}
-	svc := NewService(store)
+	svc := NewService(store, nil)
 
 	result, err := svc.GetContextMemories(context.Background(), ContextRequest{
 		OrgID: uuid.New(),
@@ -145,7 +145,7 @@ func TestGetContextMemories_SelectsWithinBudget(t *testing.T) {
 	}
 
 	store := &mockMemoryStore{memories: memories}
-	svc := NewService(store)
+	svc := NewService(store, nil)
 
 	result, err := svc.GetContextMemories(context.Background(), ContextRequest{
 		OrgID: orgID,
@@ -174,7 +174,7 @@ func TestGetContextMemories_TightBudget(t *testing.T) {
 	}
 
 	store := &mockMemoryStore{memories: memories}
-	svc := NewService(store)
+	svc := NewService(store, nil)
 
 	// Very tight budget — should still fit at least the short rule.
 	result, err := svc.GetContextMemoriesWithBudget(context.Background(), ContextRequest{
@@ -199,7 +199,7 @@ func TestGetContextMemories_ScoreOrdering(t *testing.T) {
 	}
 
 	store := &mockMemoryStore{memories: memories}
-	svc := NewService(store)
+	svc := NewService(store, nil)
 
 	result, err := svc.GetContextMemories(context.Background(), ContextRequest{
 		OrgID: orgID,
@@ -215,7 +215,7 @@ func TestReinforceMemories(t *testing.T) {
 	t.Parallel()
 
 	store := &mockMemoryStore{}
-	svc := NewService(store)
+	svc := NewService(store, nil)
 
 	ids := []uuid.UUID{uuid.New(), uuid.New()}
 	err := svc.ReinforceMemories(context.Background(), uuid.New(), ids)
@@ -227,7 +227,7 @@ func TestReinforceMemories_Empty(t *testing.T) {
 	t.Parallel()
 
 	store := &mockMemoryStore{}
-	svc := NewService(store)
+	svc := NewService(store, nil)
 
 	err := svc.ReinforceMemories(context.Background(), uuid.New(), nil)
 	require.NoError(t, err)
