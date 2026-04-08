@@ -4,6 +4,7 @@ import { withSentryConfig } from "@sentry/nextjs";
 const apiTarget = process.env.API_PROXY_TARGET || "http://localhost:8080";
 
 const nextConfig: NextConfig = {
+  allowedDevOrigins: ["*.ngrok.dev"],
   async rewrites() {
     return [
       {
