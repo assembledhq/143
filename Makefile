@@ -145,7 +145,7 @@ frontend-check:
 	cd frontend && npm run typecheck && npm run lint && npm run build
 
 server-dev:
-	go run cmd/server/main.go
+	go run -ldflags "$(LDFLAGS)" cmd/server/main.go
 
 lint:
 	@$(MAKE) lint-bootstrap
