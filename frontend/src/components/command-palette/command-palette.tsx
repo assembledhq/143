@@ -216,7 +216,7 @@ function CommandPaletteContent({
                 </span>
                 <Badge
                   variant="secondary"
-                  className="ml-auto px-1.5 py-0 text-[10px]"
+                  className="ml-auto px-1.5 py-0 text-xs"
                 >
                   {session.status}
                 </Badge>
@@ -237,7 +237,7 @@ function CommandPaletteContent({
                 <span className="flex-1 truncate">{project.title}</span>
                 <Badge
                   variant="secondary"
-                  className="ml-auto px-1.5 py-0 text-[10px]"
+                  className="ml-auto px-1.5 py-0 text-xs"
                 >
                   {project.status}
                 </Badge>
@@ -300,7 +300,7 @@ function CommandPaletteContent({
                   {repoSummary.full_name}
                 </span>
                 {repoSummary.active_session_count > 0 && (
-                  <span className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-primary">
+                  <span className="rounded-full bg-primary/10 px-1.5 py-0.5 text-xs font-medium tabular-nums text-primary">
                     {repoSummary.active_session_count}
                   </span>
                 )}
