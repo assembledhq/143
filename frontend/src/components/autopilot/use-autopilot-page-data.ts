@@ -36,7 +36,7 @@ function isNotFoundError(error: unknown): boolean {
 }
 
 export function useAutopilotPageData() {
-  const { isLoading: setupLoading, agentConnected, githubReady } = useSetupStatus();
+  const { isLoading: setupLoading, isSetupComplete } = useSetupStatus();
 
   const { data: settingsResponse, isLoading: settingsLoading } = useQuery<SingleResponse<Organization>>({
     queryKey: queryKeys.settings.all,
@@ -90,9 +90,6 @@ export function useAutopilotPageData() {
     };
   }, [rawSettings]);
 
-  const connectedCount = Number(agentConnected) + Number(githubReady);
-  const totalCount = 2;
-
   const pmStatus = pmStatusResponse?.data ?? DEFAULT_PM_STATUS;
   const documents = useMemo(() => documentsResponse?.data ?? [], [documentsResponse?.data]);
 
@@ -101,26 +98,13 @@ export function useAutopilotPageData() {
     pmStatus,
     latestPlan: latestPlan ?? null,
     documents,
-    setup: {
-      agentConnected,
-      githubReady,
-      connectedCount,
-      totalCount,
-    },
-  }), [agentConnected, connectedCount, documents, githubReady, latestPlan, mergedSettings, pmStatus, totalCount]);
+  }), [documents, latestPlan, mergedSettings, pmStatus]);
 
   return {
     isLoading: setupLoading || settingsLoading || statusLoading || latestPlanLoading || documentsLoading,
+    isSetupComplete,
     settings: mergedSettings,
     pmStatus,
-    latestPlan,
-    documents,
-    setup: {
-      agentConnected,
-      githubReady,
-      connectedCount,
-      totalCount,
-    },
     viewModel,
   };
 }
