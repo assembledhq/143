@@ -98,6 +98,11 @@ func TestValidateDestinationConfig_Webhook(t *testing.T) {
 		{"localhost rejected", `{"url":"https://localhost/hook"}`, true},
 		{"private IP rejected", `{"url":"https://10.0.0.1/hook"}`, true},
 		{"loopback rejected", `{"url":"https://127.0.0.1/hook"}`, true},
+		{"DELETE method rejected", `{"url":"https://8.8.8.8/hook","method":"DELETE"}`, true},
+		{"GET method rejected", `{"url":"https://8.8.8.8/hook","method":"GET"}`, true},
+		{"POST method allowed", `{"url":"https://8.8.8.8/hook","method":"POST"}`, false},
+		{"PUT method allowed", `{"url":"https://8.8.8.8/hook","method":"PUT"}`, false},
+		{"PATCH method allowed", `{"url":"https://8.8.8.8/hook","method":"PATCH"}`, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

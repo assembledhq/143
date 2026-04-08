@@ -3,10 +3,14 @@ package models
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+// NotionIDPattern matches Notion UUIDs (with or without dashes).
+var NotionIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$`)
 
 // OutputDestinationType identifies where a project's outputs are delivered.
 type OutputDestinationType string
@@ -38,6 +42,20 @@ type OutputDestination struct {
 	Enabled         bool                  `db:"enabled" json:"enabled"`
 	CreatedAt       time.Time             `db:"created_at" json:"created_at"`
 	UpdatedAt       time.Time             `db:"updated_at" json:"updated_at"`
+}
+
+// RedactSecrets removes sensitive fields (like webhook HMAC secrets) from the
+// config before returning to API clients.
+func (d *OutputDestination) RedactSecrets() {
+	if d.DestinationType == OutputDestWebhook {
+		var cfg WebhookOutputConfig
+		if err := json.Unmarshal(d.Config, &cfg); err == nil && cfg.Secret != "" {
+			cfg.Secret = "**redacted**"
+			if redacted, err := json.Marshal(cfg); err == nil {
+				d.Config = redacted
+			}
+		}
+	}
 }
 
 // Per-destination config structs — stored as JSON in the config column.

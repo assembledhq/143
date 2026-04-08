@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -26,16 +27,29 @@ func scanOutputDest(row pgx.Row) (models.OutputDestination, error) {
 	return d, err
 }
 
-func (s *OutputDestinationStore) Create(ctx context.Context, d *models.OutputDestination) error {
+// ErrDestinationLimitReached is returned when a project already has the maximum
+// number of output destinations.
+var ErrDestinationLimitReached = fmt.Errorf("destination limit reached")
+
+func (s *OutputDestinationStore) Create(ctx context.Context, d *models.OutputDestination, maxPerProject int) error {
 	if d.ID == uuid.Nil {
 		d.ID = uuid.New()
 	}
-	query := fmt.Sprintf(`INSERT INTO project_output_destinations (%s) VALUES ($1,$2,$3,$4,$5,$6,$7,now(),now()) RETURNING %s`, outputDestColumns, outputDestColumns)
+	// Atomic insert with a count guard to prevent race conditions between
+	// concurrent requests both passing a count check.
+	query := fmt.Sprintf(`
+		INSERT INTO project_output_destinations (%s)
+		SELECT $1,$2,$3,$4,$5,$6,$7,now(),now()
+		WHERE (SELECT COUNT(*) FROM project_output_destinations WHERE org_id = $3 AND project_id = $2) < $8
+		RETURNING %s`, outputDestColumns, outputDestColumns)
 	row := s.db.QueryRow(ctx, query,
-		d.ID, d.ProjectID, d.OrgID, d.DestinationType, d.Label, d.Config, d.Enabled,
+		d.ID, d.ProjectID, d.OrgID, d.DestinationType, d.Label, d.Config, d.Enabled, maxPerProject,
 	)
 	result, err := scanOutputDest(row)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrDestinationLimitReached
+		}
 		return fmt.Errorf("create output destination: %w", err)
 	}
 	*d = result
@@ -43,7 +57,19 @@ func (s *OutputDestinationStore) Create(ctx context.Context, d *models.OutputDes
 }
 
 func (s *OutputDestinationStore) ListByProject(ctx context.Context, orgID, projectID uuid.UUID) ([]models.OutputDestination, error) {
-	query := fmt.Sprintf(`SELECT %s FROM project_output_destinations WHERE org_id = $1 AND project_id = $2 ORDER BY created_at ASC`, outputDestColumns)
+	return s.listByProject(ctx, orgID, projectID, false)
+}
+
+func (s *OutputDestinationStore) ListEnabledByProject(ctx context.Context, orgID, projectID uuid.UUID) ([]models.OutputDestination, error) {
+	return s.listByProject(ctx, orgID, projectID, true)
+}
+
+func (s *OutputDestinationStore) listByProject(ctx context.Context, orgID, projectID uuid.UUID, enabledOnly bool) ([]models.OutputDestination, error) {
+	where := `WHERE org_id = $1 AND project_id = $2`
+	if enabledOnly {
+		where += ` AND enabled = true`
+	}
+	query := fmt.Sprintf(`SELECT %s FROM project_output_destinations %s ORDER BY created_at ASC`, outputDestColumns, where)
 	rows, err := s.db.Query(ctx, query, orgID, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("list output destinations: %w", err)
@@ -64,38 +90,9 @@ func (s *OutputDestinationStore) ListByProject(ctx context.Context, orgID, proje
 	return dests, nil
 }
 
-func (s *OutputDestinationStore) ListEnabledByProject(ctx context.Context, orgID, projectID uuid.UUID) ([]models.OutputDestination, error) {
-	query := fmt.Sprintf(`SELECT %s FROM project_output_destinations WHERE org_id = $1 AND project_id = $2 AND enabled = true ORDER BY created_at ASC`, outputDestColumns)
-	rows, err := s.db.Query(ctx, query, orgID, projectID)
-	if err != nil {
-		return nil, fmt.Errorf("list enabled output destinations: %w", err)
-	}
-	defer rows.Close()
-
-	var dests []models.OutputDestination
-	for rows.Next() {
-		d, err := scanOutputDest(rows)
-		if err != nil {
-			return nil, fmt.Errorf("scan output destination: %w", err)
-		}
-		dests = append(dests, d)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate enabled output destinations: %w", err)
-	}
-	return dests, nil
-}
-
 func (s *OutputDestinationStore) GetByID(ctx context.Context, orgID, projectID, id uuid.UUID) (models.OutputDestination, error) {
 	query := fmt.Sprintf(`SELECT %s FROM project_output_destinations WHERE org_id = $1 AND project_id = $2 AND id = $3`, outputDestColumns)
 	return scanOutputDest(s.db.QueryRow(ctx, query, orgID, projectID, id))
-}
-
-// CountByProject returns the number of output destinations for a project.
-func (s *OutputDestinationStore) CountByProject(ctx context.Context, orgID, projectID uuid.UUID) (int, error) {
-	var count int
-	err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM project_output_destinations WHERE org_id = $1 AND project_id = $2`, orgID, projectID).Scan(&count)
-	return count, err
 }
 
 func (s *OutputDestinationStore) Update(ctx context.Context, orgID, projectID, id uuid.UUID, destType models.OutputDestinationType, label string, config []byte, enabled bool) (models.OutputDestination, error) {

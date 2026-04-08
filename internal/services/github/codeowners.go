@@ -118,7 +118,14 @@ func FetchCodeowners(ctx context.Context, token, owner, repo string, httpClient 
 }
 
 func fetchFileContent(ctx context.Context, token, owner, repo, path string, httpClient *http.Client, baseURL string) (string, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/contents/%s", baseURL, url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(path))
+	// Encode each path segment individually to preserve '/' separators
+	// (url.PathEscape would encode "/" as "%2F", breaking the API call).
+	segments := strings.Split(path, "/")
+	for i, s := range segments {
+		segments[i] = url.PathEscape(s)
+	}
+	encodedPath := strings.Join(segments, "/")
+	url := fmt.Sprintf("%s/repos/%s/%s/contents/%s", baseURL, url.PathEscape(owner), url.PathEscape(repo), encodedPath)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err

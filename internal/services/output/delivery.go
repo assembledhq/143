@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -16,9 +17,9 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/mail"
 	"net/smtp"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
@@ -29,9 +30,6 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
-// notionIDPattern matches Notion UUIDs (with or without dashes).
-var notionIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$`)
-
 // blockedWebhookHeaders are headers that custom webhook configs must not override.
 var blockedWebhookHeaders = map[string]bool{
 	"host":             true,
@@ -41,6 +39,9 @@ var blockedWebhookHeaders = map[string]bool{
 	"authorization":    true,
 	"transfer-encoding": true,
 }
+
+// maxResponseBodySize limits how much of an external API response we'll read.
+const maxResponseBodySize = 1 << 20 // 1 MB
 
 // allowedWebhookMethods restricts which HTTP methods webhooks may use.
 var allowedWebhookMethods = map[string]bool{
@@ -210,7 +211,7 @@ func (s *Service) deliverSlack(ctx context.Context, orgID uuid.UUID, dest models
 	}
 	defer resp.Body.Close()
 
-	respBody, readErr := io.ReadAll(resp.Body)
+	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize))
 	if readErr != nil {
 		return fmt.Errorf("read slack response body: %w", readErr)
 	}
@@ -254,9 +255,21 @@ func (s *Service) deliverEmail(ctx context.Context, dest models.OutputDestinatio
 
 	body := formatEmailHTML(output)
 
+	// Build the To header using canonical addresses from mail.ParseAddress
+	// to ensure properly formatted SMTP headers.
+	canonicalRecipients := make([]string, 0, len(cfg.Recipients))
+	for _, addr := range cfg.Recipients {
+		parsed, err := mail.ParseAddress(addr)
+		if err != nil {
+			canonicalRecipients = append(canonicalRecipients, addr)
+		} else {
+			canonicalRecipients = append(canonicalRecipients, parsed.Address)
+		}
+	}
+
 	msg := strings.Join([]string{
 		"From: " + s.smtpCfg.From,
-		"To: " + strings.Join(cfg.Recipients, ","),
+		"To: " + strings.Join(canonicalRecipients, ","),
 		"Subject: " + encodedSubject,
 		"MIME-Version: 1.0",
 		"Content-Type: text/html; charset=UTF-8",
@@ -291,6 +304,13 @@ func (s *Service) deliverEmail(ctx context.Context, dest models.OutputDestinatio
 		return fmt.Errorf("create SMTP client: %w", err)
 	}
 	defer client.Close()
+
+	// Upgrade to TLS if the server supports STARTTLS.
+	if ok, _ := client.Extension("STARTTLS"); ok {
+		if err := client.StartTLS(&tls.Config{ServerName: s.smtpCfg.Host}); err != nil {
+			return fmt.Errorf("SMTP STARTTLS: %w", err)
+		}
+	}
 
 	if err := client.Auth(auth); err != nil {
 		return fmt.Errorf("SMTP auth: %w", err)
@@ -330,7 +350,7 @@ func (s *Service) deliverNotion(ctx context.Context, orgID uuid.UUID, dest model
 	if cfg.PageID == "" {
 		return fmt.Errorf("notion page_id is required")
 	}
-	if !notionIDPattern.MatchString(cfg.PageID) {
+	if !models.NotionIDPattern.MatchString(cfg.PageID) {
 		return fmt.Errorf("notion page_id must be a valid UUID")
 	}
 
@@ -387,7 +407,7 @@ func (s *Service) deliverNotion(ctx context.Context, orgID uuid.UUID, dest model
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		respBody, readErr := io.ReadAll(resp.Body)
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize))
 		if readErr != nil {
 			return fmt.Errorf("notion API error: %s (could not read body: %v)", resp.Status, readErr)
 		}
@@ -502,8 +522,9 @@ func (s *Service) deliverWebhook(ctx context.Context, dest models.OutputDestinat
 	}
 
 	// Pin the request to the resolved IP to prevent DNS rebinding between
-	// validation and actual connection.
-	transport := s.pinnedTransport(resolvedIP)
+	// validation and actual connection. Pass the hostname for TLS SNI.
+	u, _ := url.Parse(cfg.URL) // already validated above
+	transport := s.pinnedTransport(resolvedIP, u.Hostname())
 	client := &http.Client{Timeout: s.httpClient.Timeout, Transport: transport}
 
 	resp, err := client.Do(req)
@@ -513,7 +534,7 @@ func (s *Service) deliverWebhook(ctx context.Context, dest models.OutputDestinat
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		respBody, readErr := io.ReadAll(resp.Body)
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize))
 		if readErr != nil {
 			return fmt.Errorf("webhook error: %s (could not read body: %v)", resp.Status, readErr)
 		}
@@ -524,8 +545,10 @@ func (s *Service) deliverWebhook(ctx context.Context, dest models.OutputDestinat
 
 // pinnedTransport returns an http.Transport that resolves all hostnames to the
 // given IP, preventing DNS rebinding attacks between validation and request.
-func (s *Service) pinnedTransport(pinnedIP net.IP) *http.Transport {
+// The hostname is used for TLS SNI so certificate validation works correctly.
+func (s *Service) pinnedTransport(pinnedIP net.IP, hostname string) *http.Transport {
 	return &http.Transport{
+		TLSClientConfig: &tls.Config{ServerName: hostname},
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			_, port, err := net.SplitHostPort(addr)
 			if err != nil {

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/mail"
-	"regexp"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
@@ -16,8 +15,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
-
-var notionIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$`)
 
 // maxConfigFieldLen caps string fields in destination configs to prevent abuse.
 const maxConfigFieldLen = 2048
@@ -65,6 +62,9 @@ func (h *OutputDestinationHandler) List(w http.ResponseWriter, r *http.Request) 
 	if dests == nil {
 		dests = []models.OutputDestination{}
 	}
+	for i := range dests {
+		dests[i].RedactSecrets()
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"data": dests})
 }
 
@@ -77,17 +77,6 @@ func (h *OutputDestinationHandler) Create(w http.ResponseWriter, r *http.Request
 	}
 
 	if !h.verifyProjectOwnership(w, r, orgID, projectID) {
-		return
-	}
-
-	// Enforce per-project destination cap.
-	count, err := h.store.CountByProject(r.Context(), orgID, projectID)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "COUNT_FAILED", "failed to count destinations", err)
-		return
-	}
-	if count >= maxDestinationsPerProject {
-		writeError(w, r, http.StatusBadRequest, "LIMIT_REACHED", fmt.Sprintf("maximum of %d output destinations per project", maxDestinationsPerProject))
 		return
 	}
 
@@ -127,10 +116,15 @@ func (h *OutputDestinationHandler) Create(w http.ResponseWriter, r *http.Request
 		Config:          body.Config,
 		Enabled:         enabled,
 	}
-	if err := h.store.Create(r.Context(), dest); err != nil {
+	if err := h.store.Create(r.Context(), dest, maxDestinationsPerProject); err != nil {
+		if errors.Is(err, db.ErrDestinationLimitReached) {
+			writeError(w, r, http.StatusBadRequest, "LIMIT_REACHED", fmt.Sprintf("maximum of %d output destinations per project", maxDestinationsPerProject))
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create output destination", err)
 		return
 	}
+	dest.RedactSecrets()
 	writeJSON(w, http.StatusCreated, map[string]interface{}{"data": dest})
 }
 
@@ -188,6 +182,7 @@ func (h *OutputDestinationHandler) Update(w http.ResponseWriter, r *http.Request
 		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update output destination", err)
 		return
 	}
+	dest.RedactSecrets()
 	writeJSON(w, http.StatusOK, map[string]interface{}{"data": dest})
 }
 
@@ -267,7 +262,7 @@ func validateDestinationConfig(destType models.OutputDestinationType, raw json.R
 		if len(cfg.PageID) > maxConfigFieldLen {
 			return errFieldTooLong("page_id", maxConfigFieldLen)
 		}
-		if !notionIDPattern.MatchString(cfg.PageID) {
+		if !models.NotionIDPattern.MatchString(cfg.PageID) {
 			return fmt.Errorf("page_id must be a valid Notion UUID")
 		}
 	case models.OutputDestWebhook:

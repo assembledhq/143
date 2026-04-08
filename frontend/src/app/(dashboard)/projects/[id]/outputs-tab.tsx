@@ -134,6 +134,8 @@ function DestinationCard({
   );
 }
 
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 function isFormValid(
   type: string,
   fields: { channelId: string; recipients: string; pageId: string; webhookUrl: string },
@@ -141,8 +143,10 @@ function isFormValid(
   switch (type) {
     case "slack":
       return fields.channelId.trim().length > 0;
-    case "email":
-      return fields.recipients.split(",").some((s) => s.trim().length > 0);
+    case "email": {
+      const addrs = fields.recipients.split(",").map((s) => s.trim()).filter(Boolean);
+      return addrs.length > 0 && addrs.every((a) => EMAIL_PATTERN.test(a));
+    }
     case "notion":
       return fields.pageId.trim().length > 0;
     case "webhook":
