@@ -445,6 +445,31 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	close(logCh)
 	logWg.Wait()
 
+	// 10b. Retry once on token expiration for Codex agents.
+	// When the Codex CLI gets a 401 token_expired from ChatGPT's backend,
+	// force-refresh the token, re-inject auth.json, and retry execution.
+	if run.AgentType == models.AgentTypeCodex && result != nil && isTokenExpiredError(result.Error) {
+		log.Warn().Msg("codex CLI hit token_expired, refreshing token and retrying")
+
+		if reinjected, reinjectErr := o.injectCodexAuth(ctx, run.OrgID, sandbox); reinjectErr == nil && reinjected {
+			retryLogCh := make(chan LogEntry, 100)
+			var retryLogWg sync.WaitGroup
+			retryLogWg.Add(1)
+			go func() {
+				defer retryLogWg.Done()
+				o.streamLogs(ctx, run.ID, run.OrgID, run.CurrentTurn, retryLogCh)
+			}()
+
+			result, err = adapter.Execute(execCtx, sandbox, prompt, retryLogCh)
+			close(retryLogCh)
+			retryLogWg.Wait()
+
+			log.Info().Msg("codex CLI retry after token refresh completed")
+		} else if reinjectErr != nil {
+			log.Warn().Err(reinjectErr).Msg("failed to re-inject codex auth for retry")
+		}
+	}
+
 	// 11. Handle result.
 	if err != nil {
 		o.failRun(ctx, run, err.Error())
@@ -762,6 +787,29 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	result, err := adapter.Execute(execCtx, sandbox, prompt, logCh)
 	close(logCh)
 	logWg.Wait()
+
+	// 6b. Retry once on token expiration for Codex agents.
+	if session.AgentType == models.AgentTypeCodex && result != nil && isTokenExpiredError(result.Error) {
+		log.Warn().Msg("codex CLI hit token_expired on continue, refreshing token and retrying")
+
+		if reinjected, reinjectErr := o.injectCodexAuth(ctx, session.OrgID, sandbox); reinjectErr == nil && reinjected {
+			retryLogCh := make(chan LogEntry, 100)
+			var retryLogWg sync.WaitGroup
+			retryLogWg.Add(1)
+			go func() {
+				defer retryLogWg.Done()
+				o.streamLogs(ctx, session.ID, session.OrgID, turnNumber, retryLogCh)
+			}()
+
+			result, err = adapter.Execute(execCtx, sandbox, prompt, retryLogCh)
+			close(retryLogCh)
+			retryLogWg.Wait()
+
+			log.Info().Msg("codex CLI retry after token refresh completed")
+		} else if reinjectErr != nil {
+			log.Warn().Err(reinjectErr).Msg("failed to re-inject codex auth for retry on continue")
+		}
+	}
 
 	if err != nil {
 		o.failRun(ctx, session, err.Error())
@@ -1447,4 +1495,16 @@ func formatWorkingBranch(run *models.Session, issue *models.Issue) string {
 // shellEscapeSingleQuote escapes single quotes for safe use in shell commands.
 func shellEscapeSingleQuote(s string) string {
 	return strings.ReplaceAll(s, "'", "'\\''")
+}
+
+// isTokenExpiredError returns true if the error string indicates the Codex CLI
+// received a 401 token_expired response from ChatGPT's backend API. This is
+// used to trigger a single retry with a refreshed token.
+func isTokenExpiredError(errMsg string) bool {
+	if errMsg == "" {
+		return false
+	}
+	return strings.Contains(errMsg, "token_expired") ||
+		strings.Contains(errMsg, "token is expired") ||
+		strings.Contains(errMsg, "Provided authentication token is expired")
 }

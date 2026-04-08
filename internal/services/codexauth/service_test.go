@@ -985,3 +985,128 @@ func TestIsNotFoundError(t *testing.T) {
 		})
 	}
 }
+
+func TestRefreshToken_ConcurrentRefreshesAreSerialized(t *testing.T) {
+	t.Parallel()
+
+	refreshCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		refreshCount++
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token":  fmt.Sprintf("cha_refreshed_%d", refreshCount),
+			"refresh_token": fmt.Sprintf("chr_new_%d", refreshCount),
+			"expires_in":    3600,
+		})
+	}))
+	defer server.Close()
+
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+	svc.SetHTTPClient(server.Client())
+	svc.SetIssuer(server.URL)
+
+	orgID := uuid.New()
+	store.Upsert(context.Background(), orgID, models.OpenAIChatGPTConfig{
+		AccessToken:  "cha_old",
+		RefreshToken: "chr_old",
+		ExpiresAt:    time.Now().Add(-1 * time.Minute), // Expired.
+	})
+
+	// Fire two concurrent refreshes.
+	done := make(chan *models.OpenAIChatGPTConfig, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			cfg, _ := svc.RefreshToken(context.Background(), orgID)
+			done <- cfg
+		}()
+	}
+
+	cfg1 := <-done
+	cfg2 := <-done
+
+	// The mutex should cause the second goroutine to see the already-refreshed
+	// token (within the refresh window check) and skip the HTTP call.
+	// Only 1 HTTP call should have been made.
+	if refreshCount != 1 {
+		t.Errorf("expected exactly 1 HTTP refresh call (serialized), got %d", refreshCount)
+	}
+
+	// Both should return a valid token.
+	if cfg1 == nil || cfg2 == nil {
+		t.Fatal("expected both goroutines to return a valid config")
+	}
+}
+
+func TestGetValidToken_RefreshTokenReused_ExpiredToken(t *testing.T) {
+	t.Parallel()
+
+	// Simulate refresh_token_reused error from OpenAI.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error": "refresh_token_reused"}`))
+	}))
+	defer server.Close()
+
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+	svc.SetHTTPClient(server.Client())
+	svc.SetIssuer(server.URL)
+
+	orgID := uuid.New()
+	// Store a credential that is ALREADY EXPIRED and needs refresh.
+	store.Upsert(context.Background(), orgID, models.OpenAIChatGPTConfig{
+		AccessToken:  "cha_expired",
+		RefreshToken: "chr_reused",
+		ExpiresAt:    time.Now().Add(-10 * time.Minute), // Already expired.
+		AccountType:  "plus",
+	})
+
+	// GetValidToken should NOT return the expired token.
+	// Previously this was a bug: it returned the expired token on
+	// refresh_token_reused errors regardless of expiry.
+	cfg, err := svc.GetValidToken(context.Background(), orgID)
+	if err == nil {
+		t.Fatal("expected error when token is expired and refresh fails with refresh_token_reused")
+	}
+	if cfg != nil {
+		t.Errorf("expected nil config for expired token, got access_token=%s", cfg.AccessToken)
+	}
+}
+
+func TestGetValidToken_RefreshTokenReused_ValidToken(t *testing.T) {
+	t.Parallel()
+
+	// Simulate refresh_token_reused error from OpenAI.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error": "refresh_token_reused"}`))
+	}))
+	defer server.Close()
+
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+	svc.SetHTTPClient(server.Client())
+	svc.SetIssuer(server.URL)
+
+	orgID := uuid.New()
+	// Store a credential within the refresh window but NOT yet expired.
+	store.Upsert(context.Background(), orgID, models.OpenAIChatGPTConfig{
+		AccessToken:  "cha_still_valid",
+		RefreshToken: "chr_reused",
+		ExpiresAt:    time.Now().Add(3 * time.Minute), // Within 5-min window but still valid.
+		AccountType:  "plus",
+	})
+
+	// GetValidToken should return the still-valid token even though refresh failed.
+	cfg, err := svc.GetValidToken(context.Background(), orgID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected non-nil config when token still valid despite refresh_token_reused")
+	}
+	if cfg.AccessToken != "cha_still_valid" {
+		t.Errorf("expected original token, got %s", cfg.AccessToken)
+	}
+}
