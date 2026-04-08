@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { Card, CardContent } from "@/components/ui/card";
-import { AutopilotSetupChecklist } from "@/components/autopilot/autopilot-setup-checklist";
+import { SetupChecklist } from "@/components/setup-checklist";
 import { useSetupStatus } from "@/hooks/use-setup-status";
 
 export function OnboardingPageContent() {
@@ -26,7 +26,7 @@ export function OnboardingPageContent() {
             title="Welcome to 143"
             description="Set up your connections to get started with Autopilot."
           />
-          <p className="text-sm text-muted-foreground">Loading...</p>
+          <p className="text-sm text-muted-foreground">Loading setup status...</p>
         </div>
       </PageContainer>
     );
@@ -57,7 +57,7 @@ export function OnboardingPageContent() {
           </CardContent>
         </Card>
 
-        <AutopilotSetupChecklist />
+        <SetupChecklist />
       </div>
     </PageContainer>
   );
