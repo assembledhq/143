@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -989,13 +990,13 @@ func TestIsNotFoundError(t *testing.T) {
 func TestRefreshToken_ConcurrentRefreshesAreSerialized(t *testing.T) {
 	t.Parallel()
 
-	refreshCount := 0
+	var refreshCount atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		refreshCount++
+		n := refreshCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"access_token":  fmt.Sprintf("cha_refreshed_%d", refreshCount),
-			"refresh_token": fmt.Sprintf("chr_new_%d", refreshCount),
+			"access_token":  fmt.Sprintf("cha_refreshed_%d", n),
+			"refresh_token": fmt.Sprintf("chr_new_%d", n),
 			"expires_in":    3600,
 		})
 	}))
@@ -1028,8 +1029,8 @@ func TestRefreshToken_ConcurrentRefreshesAreSerialized(t *testing.T) {
 	// The mutex should cause the second goroutine to see the already-refreshed
 	// token (within the refresh window check) and skip the HTTP call.
 	// Only 1 HTTP call should have been made.
-	if refreshCount != 1 {
-		t.Errorf("expected exactly 1 HTTP refresh call (serialized), got %d", refreshCount)
+	if got := refreshCount.Load(); got != 1 {
+		t.Errorf("expected exactly 1 HTTP refresh call (serialized), got %d", got)
 	}
 
 	// Both should return a valid token.

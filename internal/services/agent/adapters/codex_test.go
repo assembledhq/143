@@ -932,6 +932,12 @@ func TestIsRefreshTokenError(t *testing.T) {
 		{"command not found", false},
 		{`"error": { "type": "invalid_request_error" }`, false},
 		{"", false},
+		// token_expired errors must NOT be filtered here — they need to reach
+		// result.Error so the orchestrator's retryOnTokenExpired can detect and
+		// retry them. If these are accidentally caught, the retry path breaks.
+		{"auth error code: token_expired", false},
+		{"Provided authentication token is expired. Please try signing in again.", false},
+		{"token is expired", false},
 	}
 	for _, tt := range tests {
 		require.Equal(t, tt.want, isRefreshTokenError(tt.msg), "isRefreshTokenError(%q)", tt.msg)

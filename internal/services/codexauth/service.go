@@ -84,8 +84,8 @@ type Service struct {
 	logger      zerolog.Logger
 	issuer      string
 	clientID    string
-	pending     sync.Map // orgID string -> *PendingAuth
-	refreshMu   sync.Map // orgID string -> *sync.Mutex (per-org refresh lock)
+	pending   sync.Map // orgID string -> *PendingAuth
+	refreshMu sync.Map // orgID string -> *sync.Mutex (per-org refresh lock; entries are tiny and bounded by org count)
 }
 
 // NewService creates a new Device Code Auth service.
@@ -635,6 +635,7 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.O
 // Disconnect removes the ChatGPT OAuth credential for the given org.
 func (s *Service) Disconnect(ctx context.Context, orgID uuid.UUID) error {
 	s.pending.Delete(orgID.String())
+	s.refreshMu.Delete(orgID.String())
 	if s.credentials == nil {
 		return nil
 	}
