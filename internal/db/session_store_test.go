@@ -101,6 +101,34 @@ func TestSessionStore_ListByOrg_WithoutRepositoryID(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionStore_ListByOrg_WithSearch(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id .+ title ILIKE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionTestColumns).
+				AddRow(newAgentSessionRow(sessionID, issueID, orgID, now)...),
+		)
+
+	sessions, err := store.ListByOrg(context.Background(), orgID, SessionFilters{
+		Search: "fix bug",
+	})
+	require.NoError(t, err, "ListByOrg with Search should not return an error")
+	require.Len(t, sessions, 1, "should return one session")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionStore_UpdateTitle(t *testing.T) {
 	t.Parallel()
 
