@@ -12,13 +12,13 @@ import (
 )
 
 // migrateLogger implements migrate.Logger to surface verbose migration output.
-type migrateLogger struct{}
+type migrateLogger struct{ verbose bool }
 
 func (l migrateLogger) Printf(format string, v ...interface{}) {
 	fmt.Printf("[migrate] "+format, v...)
 }
 
-func (l migrateLogger) Verbose() bool { return true }
+func (l migrateLogger) Verbose() bool { return l.verbose }
 
 func main() {
 	dbURL := os.Getenv("DATABASE_URL")
@@ -38,7 +38,7 @@ func main() {
 	}
 	defer m.Close()
 
-	m.Log = migrateLogger{}
+	m.Log = migrateLogger{verbose: os.Getenv("LOG_LEVEL") == "debug"}
 
 	switch os.Args[1] {
 	case "up":
@@ -85,7 +85,7 @@ func logMigrationError(direction string, m *migrate.Migrate, err error) {
 		fmt.Fprintf(os.Stderr, "     UPDATE schema_migrations SET version = %d, dirty = false;\n", dirtyErr.Version-1)
 		fmt.Fprintln(os.Stderr, "  3. Re-run migrations.")
 		fmt.Fprintln(os.Stderr, "========================================")
-		os.Exit(1)
+		return
 	}
 
 	// Check for database.Error — contains the SQL query excerpt and line number.
