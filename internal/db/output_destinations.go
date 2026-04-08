@@ -86,9 +86,16 @@ func (s *OutputDestinationStore) ListEnabledByProject(ctx context.Context, orgID
 	return dests, nil
 }
 
-func (s *OutputDestinationStore) GetByID(ctx context.Context, orgID, id uuid.UUID) (models.OutputDestination, error) {
-	query := fmt.Sprintf(`SELECT %s FROM project_output_destinations WHERE org_id = $1 AND id = $2`, outputDestColumns)
-	return scanOutputDest(s.db.QueryRow(ctx, query, orgID, id))
+func (s *OutputDestinationStore) GetByID(ctx context.Context, orgID, projectID, id uuid.UUID) (models.OutputDestination, error) {
+	query := fmt.Sprintf(`SELECT %s FROM project_output_destinations WHERE org_id = $1 AND project_id = $2 AND id = $3`, outputDestColumns)
+	return scanOutputDest(s.db.QueryRow(ctx, query, orgID, projectID, id))
+}
+
+// CountByProject returns the number of output destinations for a project.
+func (s *OutputDestinationStore) CountByProject(ctx context.Context, orgID, projectID uuid.UUID) (int, error) {
+	var count int
+	err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM project_output_destinations WHERE org_id = $1 AND project_id = $2`, orgID, projectID).Scan(&count)
+	return count, err
 }
 
 func (s *OutputDestinationStore) Update(ctx context.Context, orgID, projectID, id uuid.UUID, destType models.OutputDestinationType, label string, config []byte, enabled bool) (models.OutputDestination, error) {

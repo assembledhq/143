@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -117,7 +118,7 @@ func FetchCodeowners(ctx context.Context, token, owner, repo string, httpClient 
 }
 
 func fetchFileContent(ctx context.Context, token, owner, repo, path string, httpClient *http.Client, baseURL string) (string, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/contents/%s", baseURL, owner, repo, path)
+	url := fmt.Sprintf("%s/repos/%s/%s/contents/%s", baseURL, url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(path))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
@@ -166,15 +167,18 @@ func matchPattern(pattern, filePath string) bool {
 	}
 
 	if anchored {
-		matched, _ := filepath.Match(cleanPattern, filePath)
+		matched, err := filepath.Match(cleanPattern, filePath)
+		if err != nil {
+			return false // malformed pattern
+		}
 		return matched
 	}
 
 	// Unanchored pattern: match against basename or full path.
-	if matched, _ := filepath.Match(cleanPattern, filePath); matched {
+	if matched, err := filepath.Match(cleanPattern, filePath); err == nil && matched {
 		return true
 	}
-	if matched, _ := filepath.Match(cleanPattern, filepath.Base(filePath)); matched {
+	if matched, err := filepath.Match(cleanPattern, filepath.Base(filePath)); err == nil && matched {
 		return true
 	}
 
@@ -232,7 +236,7 @@ func matchDoublestar(pattern, filePath string) bool {
 
 	// Simple suffix (no more **): try matching against every possible subpath.
 	for {
-		if matched, _ := filepath.Match(suffix, remaining); matched {
+		if matched, err := filepath.Match(suffix, remaining); err == nil && matched {
 			return true
 		}
 		idx := strings.Index(remaining, "/")
@@ -271,10 +275,13 @@ func (s *PRService) RequestReviewers(ctx context.Context, token, owner, repo str
 		body["team_reviewers"] = teams
 	}
 
-	jsonBody, _ := json.Marshal(body)
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal reviewers request: %w", err)
+	}
 
-	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/requested_reviewers", s.baseURL, owner, repo, prNumber)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(jsonBody)))
+	reqURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/requested_reviewers", s.baseURL, url.PathEscape(owner), url.PathEscape(repo), prNumber)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, strings.NewReader(string(jsonBody)))
 	if err != nil {
 		return err
 	}

@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/smtp"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -27,6 +28,26 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 )
+
+// notionIDPattern matches Notion UUIDs (with or without dashes).
+var notionIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$`)
+
+// blockedWebhookHeaders are headers that custom webhook configs must not override.
+var blockedWebhookHeaders = map[string]bool{
+	"host":             true,
+	"content-type":     true,
+	"content-length":   true,
+	"x-signature-256":  true,
+	"authorization":    true,
+	"transfer-encoding": true,
+}
+
+// allowedWebhookMethods restricts which HTTP methods webhooks may use.
+var allowedWebhookMethods = map[string]bool{
+	http.MethodPost:  true,
+	http.MethodPut:   true,
+	http.MethodPatch: true,
+}
 
 // DeliveryResult captures the outcome of a single delivery attempt.
 type DeliveryResult struct {
@@ -189,7 +210,10 @@ func (s *Service) deliverSlack(ctx context.Context, orgID uuid.UUID, dest models
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return fmt.Errorf("read slack response body: %w", readErr)
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("slack API HTTP error: %s %s", resp.Status, string(respBody))
@@ -306,6 +330,9 @@ func (s *Service) deliverNotion(ctx context.Context, orgID uuid.UUID, dest model
 	if cfg.PageID == "" {
 		return fmt.Errorf("notion page_id is required")
 	}
+	if !notionIDPattern.MatchString(cfg.PageID) {
+		return fmt.Errorf("notion page_id must be a valid UUID")
+	}
 
 	cred, err := s.credentials.GetForOrg(ctx, orgID, models.ProviderNotion)
 	if err != nil {
@@ -360,7 +387,10 @@ func (s *Service) deliverNotion(ctx context.Context, orgID uuid.UUID, dest model
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return fmt.Errorf("notion API error: %s (could not read body: %v)", resp.Status, readErr)
+		}
 		return fmt.Errorf("notion API error: %s %s", resp.Status, string(respBody))
 	}
 	return nil
@@ -369,42 +399,57 @@ func (s *Service) deliverNotion(ctx context.Context, orgID uuid.UUID, dest model
 // ValidateWebhookURL checks that the URL is safe to call (HTTPS, no private IPs).
 // Exported so that API handlers can validate at config creation time.
 func ValidateWebhookURL(rawURL string) error {
+	_, err := validateAndResolveWebhookURL(rawURL)
+	return err
+}
+
+// validateAndResolveWebhookURL validates the URL and returns the first safe
+// resolved IP address. The caller can pin the HTTP connection to this IP
+// to prevent DNS rebinding between validation and the actual request.
+func validateAndResolveWebhookURL(rawURL string) (net.IP, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Errorf("invalid URL: %w", err)
+		return nil, fmt.Errorf("invalid URL: %w", err)
 	}
 	if u.Scheme != "https" {
-		return fmt.Errorf("webhook URL must use HTTPS (got %q)", u.Scheme)
+		return nil, fmt.Errorf("webhook URL must use HTTPS (got %q)", u.Scheme)
 	}
 	host := u.Hostname()
-	// Block obviously private/loopback addresses.
-	if ip := net.ParseIP(host); ip != nil {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-			return fmt.Errorf("webhook URL must not point to a private or loopback address")
-		}
-	}
+
 	// Block localhost and cloud metadata endpoints by name.
 	blockedHosts := []string{"localhost", "metadata.google.internal"}
 	for _, blocked := range blockedHosts {
 		if strings.EqualFold(host, blocked) {
-			return fmt.Errorf("webhook URL must not point to %s", blocked)
+			return nil, fmt.Errorf("webhook URL must not point to %s", blocked)
 		}
+	}
+
+	// If the host is already an IP, validate it directly.
+	if ip := net.ParseIP(host); ip != nil {
+		if isPrivateIP(ip) {
+			return nil, fmt.Errorf("webhook URL must not point to a private or loopback address")
+		}
+		return ip, nil
 	}
 
 	// Resolve DNS and verify none of the resolved IPs are private.
-	if net.ParseIP(host) == nil {
-		ips, err := net.LookupIP(host)
-		if err != nil {
-			return fmt.Errorf("failed to resolve webhook hostname %q: %w", host, err)
-		}
-		for _, ip := range ips {
-			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-				return fmt.Errorf("webhook hostname %q resolves to private address %s", host, ip)
-			}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve webhook hostname %q: %w", host, err)
+	}
+	for _, ip := range ips {
+		if isPrivateIP(ip) {
+			return nil, fmt.Errorf("webhook hostname %q resolves to private address %s", host, ip)
 		}
 	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("webhook hostname %q resolved to no addresses", host)
+	}
+	return ips[0], nil
+}
 
-	return nil
+func isPrivateIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
 }
 
 // deliverWebhook POSTs the cycle output as JSON to a configured URL.
@@ -414,7 +459,10 @@ func (s *Service) deliverWebhook(ctx context.Context, dest models.OutputDestinat
 		return fmt.Errorf("parse webhook config: %w", err)
 	}
 
-	if err := ValidateWebhookURL(cfg.URL); err != nil {
+	// Re-validate and resolve the webhook URL at delivery time to prevent
+	// TOCTOU attacks where DNS changes between config creation and delivery.
+	resolvedIP, err := validateAndResolveWebhookURL(cfg.URL)
+	if err != nil {
 		return fmt.Errorf("webhook URL validation failed: %w", err)
 	}
 
@@ -427,13 +475,21 @@ func (s *Service) deliverWebhook(ctx context.Context, dest models.OutputDestinat
 	if method == "" {
 		method = http.MethodPost
 	}
+	if !allowedWebhookMethods[method] {
+		return fmt.Errorf("webhook method %q is not allowed; use POST, PUT, or PATCH", method)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, method, cfg.URL, bytes.NewReader(jsonBody))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+
+	// Apply custom headers, skipping any that could override security-critical headers.
 	for k, v := range cfg.Headers {
+		if blockedWebhookHeaders[strings.ToLower(k)] {
+			continue
+		}
 		req.Header.Set(k, v)
 	}
 
@@ -445,17 +501,40 @@ func (s *Service) deliverWebhook(ctx context.Context, dest models.OutputDestinat
 		req.Header.Set("X-Signature-256", "sha256="+sig)
 	}
 
-	resp, err := s.httpClient.Do(req)
+	// Pin the request to the resolved IP to prevent DNS rebinding between
+	// validation and actual connection.
+	transport := s.pinnedTransport(resolvedIP)
+	client := &http.Client{Timeout: s.httpClient.Timeout, Transport: transport}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("webhook request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return fmt.Errorf("webhook error: %s (could not read body: %v)", resp.Status, readErr)
+		}
 		return fmt.Errorf("webhook error: %s %s", resp.Status, string(respBody))
 	}
 	return nil
+}
+
+// pinnedTransport returns an http.Transport that resolves all hostnames to the
+// given IP, preventing DNS rebinding attacks between validation and request.
+func (s *Service) pinnedTransport(pinnedIP net.IP) *http.Transport {
+	return &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			_, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			pinnedAddr := net.JoinHostPort(pinnedIP.String(), port)
+			return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, pinnedAddr)
+		},
+	}
 }
 
 // formatSlackMessage builds a plain-text Slack message for a cycle output.

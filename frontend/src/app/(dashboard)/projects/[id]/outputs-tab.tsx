@@ -134,6 +134,24 @@ function DestinationCard({
   );
 }
 
+function isFormValid(
+  type: string,
+  fields: { channelId: string; recipients: string; pageId: string; webhookUrl: string },
+): boolean {
+  switch (type) {
+    case "slack":
+      return fields.channelId.trim().length > 0;
+    case "email":
+      return fields.recipients.split(",").some((s) => s.trim().length > 0);
+    case "notion":
+      return fields.pageId.trim().length > 0;
+    case "webhook":
+      return fields.webhookUrl.trim().length > 0;
+    default:
+      return false;
+  }
+}
+
 function AddDestinationForm({ projectId }: { projectId: string }) {
   const queryClient = useQueryClient();
   const [type, setType] = useState<string>("");
@@ -277,7 +295,11 @@ function AddDestinationForm({ projectId }: { projectId: string }) {
         </div>
       )}
 
-      <Button size="sm" onClick={() => createMutation.mutate()} disabled={createMutation.isPending}>
+      <Button
+        size="sm"
+        onClick={() => createMutation.mutate()}
+        disabled={createMutation.isPending || !isFormValid(type, { channelId, recipients, pageId, webhookUrl })}
+      >
         <Plus className="h-3 w-3 mr-1" />
         {createMutation.isPending ? "Adding..." : "Add destination"}
       </Button>

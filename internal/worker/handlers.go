@@ -277,6 +277,8 @@ func newProjectCycleHandler(stores *Stores, services *Services, logger zerolog.L
 			}
 
 			// Populate project details for richer output messages.
+			// If the project can't be fetched, skip delivery — recipients
+			// would get an empty/confusing message.
 			if stores != nil && stores.Projects != nil {
 				project, err := stores.Projects.GetByID(ctx, orgID, projectID)
 				if err == nil {
@@ -285,7 +287,8 @@ func newProjectCycleHandler(stores *Stores, services *Services, logger zerolog.L
 					cycleOutput.TasksFailed = project.FailedTasks
 					cycleOutput.Summary = project.Goal
 				} else {
-					logger.Warn().Err(err).Msg("failed to fetch project for cycle output")
+					logger.Warn().Err(err).Msg("failed to fetch project for cycle output, skipping delivery")
+					return nil
 				}
 
 				// Fetch latest cycle number.

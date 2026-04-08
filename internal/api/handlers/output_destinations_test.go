@@ -66,7 +66,9 @@ func TestValidateDestinationConfig_Notion(t *testing.T) {
 		config  string
 		wantErr bool
 	}{
-		{"valid", `{"page_id":"abc123"}`, false},
+		{"valid UUID with dashes", `{"page_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890"}`, false},
+		{"valid UUID without dashes", `{"page_id":"a1b2c3d4e5f67890abcdef1234567890"}`, false},
+		{"invalid page_id format", `{"page_id":"abc123"}`, true},
 		{"missing page_id", `{"page_title":"Report"}`, true},
 		{"empty config", `{}`, true},
 	}

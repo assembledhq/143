@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/mail"
+	"regexp"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
@@ -16,8 +17,13 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+var notionIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$`)
+
 // maxConfigFieldLen caps string fields in destination configs to prevent abuse.
 const maxConfigFieldLen = 2048
+
+// maxDestinationsPerProject prevents unbounded destination creation.
+const maxDestinationsPerProject = 20
 
 type OutputDestinationHandler struct {
 	store        *db.OutputDestinationStore
@@ -71,6 +77,17 @@ func (h *OutputDestinationHandler) Create(w http.ResponseWriter, r *http.Request
 	}
 
 	if !h.verifyProjectOwnership(w, r, orgID, projectID) {
+		return
+	}
+
+	// Enforce per-project destination cap.
+	count, err := h.store.CountByProject(r.Context(), orgID, projectID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "COUNT_FAILED", "failed to count destinations", err)
+		return
+	}
+	if count >= maxDestinationsPerProject {
+		writeError(w, r, http.StatusBadRequest, "LIMIT_REACHED", fmt.Sprintf("maximum of %d output destinations per project", maxDestinationsPerProject))
 		return
 	}
 
@@ -236,6 +253,9 @@ func validateDestinationConfig(destType models.OutputDestinationType, raw json.R
 				return fmt.Errorf("invalid email address %q: %w", addr, err)
 			}
 		}
+		if len(cfg.Subject) > maxConfigFieldLen {
+			return errFieldTooLong("subject", maxConfigFieldLen)
+		}
 	case models.OutputDestNotion:
 		var cfg models.NotionOutputConfig
 		if err := json.Unmarshal(raw, &cfg); err != nil {
@@ -246,6 +266,9 @@ func validateDestinationConfig(destType models.OutputDestinationType, raw json.R
 		}
 		if len(cfg.PageID) > maxConfigFieldLen {
 			return errFieldTooLong("page_id", maxConfigFieldLen)
+		}
+		if !notionIDPattern.MatchString(cfg.PageID) {
+			return fmt.Errorf("page_id must be a valid Notion UUID")
 		}
 	case models.OutputDestWebhook:
 		var cfg models.WebhookOutputConfig
@@ -260,6 +283,9 @@ func validateDestinationConfig(destType models.OutputDestinationType, raw json.R
 		}
 		if err := output.ValidateWebhookURL(cfg.URL); err != nil {
 			return fmt.Errorf("invalid webhook URL: %w", err)
+		}
+		if cfg.Method != "" && cfg.Method != http.MethodPost && cfg.Method != http.MethodPut && cfg.Method != http.MethodPatch {
+			return fmt.Errorf("webhook method must be POST, PUT, or PATCH")
 		}
 	}
 	return nil
