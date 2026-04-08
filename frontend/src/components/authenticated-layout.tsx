@@ -28,10 +28,12 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/hooks/use-auth";
-import { useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { RepoContextSwitcher } from "@/components/repo-context-switcher";
+import { CommandPalette } from "@/components/command-palette/command-palette";
+import { CommandPaletteTrigger } from "@/components/command-palette/command-palette-trigger";
 
 const navItems = [
   { label: "Autopilot", icon: Zap, href: "/autopilot", showProposalBadge: false },
@@ -51,6 +53,23 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
     enabled: isAuthenticated,
   });
   const proposalCount = proposalSummary?.data?.count ?? 0;
+
+  const [paletteOpen, setPaletteOpen] = useState(false);
+
+  // Global Cmd+K / Ctrl+K shortcut — registered independently of other
+  // keyboard nav so it works even when focus is inside an input or textarea.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        setPaletteOpen((prev) => !prev);
+      }
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, []);
+
+  const handlePaletteOpen = useCallback(() => setPaletteOpen(true), []);
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated) {
@@ -111,6 +130,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
             143.dev
           </Link>
           <RepoContextSwitcher />
+          <CommandPaletteTrigger onClick={handlePaletteOpen} />
         </div>
         <nav className="relative flex-1 px-2.5 space-y-0.5">
           {navItems.map((item) => {
@@ -222,6 +242,14 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
           {children}
         </div>
       </main>
+      {user && (
+        <CommandPalette
+          open={paletteOpen}
+          onOpenChange={setPaletteOpen}
+          userRole={user.role}
+          logout={logout}
+        />
+      )}
     </div>
   );
 }

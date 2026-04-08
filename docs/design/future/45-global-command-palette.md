@@ -1,6 +1,6 @@
 # Design: Global Command Palette
 
-> **Status:** Not Started | **Last reviewed:** 2026-04-06
+> **Status:** Implemented (Phases 1–3) | **Last reviewed:** 2026-04-06
 >
 > **Depends on:** [03-frontend.md](03-frontend.md), [34-repo-ribbons-nav.md](34-repo-ribbons-nav.md)
 
