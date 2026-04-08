@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { renderWithProviders, screen } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
@@ -13,6 +13,8 @@ import type {
   Repository,
   SingleResponse,
 } from "@/lib/types";
+
+const mockReplace = vi.fn();
 
 vi.mock("@/hooks/use-analyze", () => ({
   useAnalyze: () => ({
@@ -30,7 +32,7 @@ vi.mock("next/navigation", async () => {
     ...actual,
     useRouter: () => ({
       push: vi.fn(),
-      replace: vi.fn(),
+      replace: mockReplace,
       back: vi.fn(),
     }),
   };
@@ -120,7 +122,11 @@ function buildPlan(overrides: Partial<PMPlan> = {}): PMPlan {
 }
 
 describe("AutopilotPage", () => {
-  it("shows setup guidance when prerequisites are incomplete", async () => {
+  beforeEach(() => {
+    mockReplace.mockClear();
+  });
+
+  it("redirects to onboarding when prerequisites are incomplete", async () => {
     mockSettings({
       default_agent_type: "codex",
       product_context: {
@@ -145,10 +151,10 @@ describe("AutopilotPage", () => {
 
     renderWithProviders(<AutopilotPage />);
 
-    expect(await screen.findByText("Complete setup")).toBeInTheDocument();
-    expect(screen.getByText("Coding agent")).toBeInTheDocument();
-    expect(screen.getByText("Connect integrations")).toBeInTheDocument();
-    expect(screen.getByText("Your Direction")).toBeInTheDocument();
+    // Should redirect to onboarding, not render setup UI inline
+    await vi.waitFor(() => {
+      expect(mockReplace).toHaveBeenCalledWith("/onboarding");
+    });
   });
 
   it("shows the first-analysis state when setup is complete but no plan exists", async () => {
@@ -201,11 +207,12 @@ describe("AutopilotPage", () => {
     renderWithProviders(<AutopilotPage />);
 
     expect(await screen.findByText("Run first analysis")).toBeInTheDocument();
-    expect(screen.getByText("Ship reliability first.")).toBeInTheDocument();
-    expect(screen.getByText("Payments hardening this quarter.")).toBeInTheDocument();
+    expect(screen.getByText("Ready for your first analysis")).toBeInTheDocument();
+    // Direction shows in config footer
+    expect(screen.getByText(/Payments hardening this quarter/)).toBeInTheDocument();
   });
 
-  it("shows the current recommendation and summary rows when a PM plan exists", async () => {
+  it("shows the analysis headline and config footer when a PM plan exists", async () => {
     mockSettings({
       autonomy_level: "auto_simple",
       default_agent_type: "codex",
@@ -276,12 +283,14 @@ describe("AutopilotPage", () => {
 
     renderWithProviders(<AutopilotPage />);
 
-    expect(await screen.findByText("Recommendation")).toBeInTheDocument();
-    expect(screen.getByText("3 payment failures appear linked by one auth middleware issue.")).toBeInTheDocument();
-    expect(screen.getByText("Your Direction")).toBeInTheDocument();
+    // Analysis headline (full analysis as title since it's < 80 chars with no sentence break)
+    expect(await screen.findByText("3 payment failures appear linked by one auth middleware issue.")).toBeInTheDocument();
+    // Config footer rows
     expect(screen.getByText("Impact 35 · Severity 25 · Recency 20 · Revenue 20")).toBeInTheDocument();
     expect(screen.getByText("1 attached")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Edit direction" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Customize weights" })).toBeInTheDocument();
+    // Evidence metrics
+    expect(screen.getByText("84%")).toBeInTheDocument();
+    expect(screen.getByText("14")).toBeInTheDocument();
+    expect(screen.getByText("3")).toBeInTheDocument();
   });
 });

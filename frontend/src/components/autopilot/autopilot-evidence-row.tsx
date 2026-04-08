@@ -6,11 +6,11 @@ interface AutopilotEvidenceRowProps {
 
 export function AutopilotEvidenceRow({ evidence }: AutopilotEvidenceRowProps) {
   return (
-    <div className="grid gap-3 rounded-2xl border border-border/60 bg-muted/20 px-5 py-4 sm:grid-cols-2 xl:grid-cols-4">
+    <div className="grid grid-cols-3 gap-4">
       {evidence.map((item) => (
-        <div key={item.label} className="space-y-1">
-          <p className="text-xs uppercase tracking-[0.12em] text-muted-foreground">{item.label}</p>
-          <p className="text-sm font-medium text-foreground">{item.value}</p>
+        <div key={item.label} className="rounded-xl border border-border/60 bg-muted/20 px-5 py-4 text-center">
+          <p className="text-2xl font-semibold tracking-tight text-foreground">{item.value}</p>
+          <p className="mt-1 text-xs uppercase tracking-[0.12em] text-muted-foreground">{item.label}</p>
         </div>
       ))}
     </div>
