@@ -85,6 +85,12 @@ const eslintConfig = defineConfig([
       "custom/no-banned-typography": "error",
     },
   },
+  {
+    files: ["eslint.config.mjs"],
+    rules: {
+      "custom/no-banned-typography": "off",
+    },
+  },
   // Override default ignores of eslint-config-next.
   globalIgnores([
     // Default ignores of eslint-config-next:
