@@ -134,6 +134,9 @@ ALTER TABLE repositories VALIDATE CONSTRAINT chk_repositories_status;
 -- =============================================================================
 -- issues
 -- =============================================================================
+-- Backfill empty severity values to the schema default before adding constraint.
+UPDATE issues SET severity = 'medium' WHERE severity = '' OR severity IS NULL;
+
 ALTER TABLE issues
     ADD CONSTRAINT chk_issues_status CHECK (status IN (
         'open', 'triaged', 'in_progress', 'fixed', 'wont_fix', 'duplicate'
