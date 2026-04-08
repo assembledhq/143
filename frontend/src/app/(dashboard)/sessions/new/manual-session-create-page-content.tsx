@@ -318,7 +318,7 @@ export function ManualSessionCreatePageContent() {
               }}
               placeholder="Tell the agent what to do..."
               rows={1}
-              className="min-h-[44px] resize-none border-none bg-transparent px-0 py-2 text-[15px] shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0"
+              className="min-h-[44px] resize-none border-none bg-transparent px-0 py-2 text-sm shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0"
               aria-label="Manual session prompt"
             />
 
