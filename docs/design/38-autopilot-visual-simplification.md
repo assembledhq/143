@@ -7,15 +7,21 @@
 > and left empty states (zero stats, "Not set yet" rows) visible by default.
 > This revision takes a more aggressive stance: the page should feel like a briefing,
 > not a dashboard.
+>
+> **Prerequisite:** Setup/onboarding has been extracted to a dedicated `/onboarding`
+> route (see `OnboardingPageContent` and `useSetupStatus`). Users who have not
+> connected a coding agent and GitHub are redirected there. This document covers
+> only the post-setup `/autopilot` page.
 
 ## Problem
 
-The Autopilot page is the first thing a user sees when they open 143.
-In its current form it overwhelms new users and under-serves returning ones:
+The Autopilot page is the first thing a user sees when they open 143
+(after completing onboarding). In its current form it under-serves returning
+users and overwhelms first-time post-setup visitors:
 
-1. **Empty-state overload.** Setup mode shows a control strip, hero card, evidence row
-   (all zeros), setup checklist, and a direction summary (eight rows of "Not set yet").
-   Six competing sections before the user has done anything.
+1. **Empty-state overload.** Before the first analysis, the page shows a control
+   strip, hero card, evidence row (all zeros), and a direction summary (eight rows
+   of "Not set yet"). Six competing sections before anything useful has happened.
 2. **Redundant messaging.** The page header description, control strip secondary text,
    and hero card body all explain what Autopilot does.
 3. **No progressive disclosure.** Every section is always visible regardless of whether
@@ -32,10 +38,13 @@ The page should answer one question per visit:
 
 | Visit type | Question | Answer |
 |---|---|---|
-| First visit | "What is this and what do I do?" | A single setup card |
-| Post-setup | "What happens when I press the button?" | A brief promise + CTA |
+| First visit (post-onboarding) | "What happens when I press the button?" | A brief promise + CTA |
 | Returning (90% of visits) | "What should I pay attention to?" | The analysis headline |
 | Error | "What went wrong?" | Clear error + retry |
+
+Setup ("What is this and what do I do?") is handled by the `/onboarding` page,
+which redirects to `/autopilot` once the coding agent and GitHub are connected.
+The autopilot page never needs to render setup UI.
 
 Everything else is secondary. Configuration should be available but quiet.
 
@@ -49,8 +58,9 @@ meaningful to display, it does not render.
 
 ### 2. One hero per state
 
-Each state has exactly one dominant element. In setup, it is the setup card.
-In active mode, it is the analysis headline. Nothing else competes.
+Each state has exactly one dominant element. Before the first analysis, it is
+the prompt to run. After analysis, it is the analysis headline. Nothing else
+competes.
 
 ### 3. The reading order is the priority order
 
@@ -87,52 +97,14 @@ between "what Autopilot thinks" (machine output) and "how you steer it"
 
 ## Page States
 
-### State 1: Setup
+Note: Setup (agent + GitHub connection) is handled entirely by the `/onboarding`
+page. Users are redirected to `/autopilot` only after setup is complete. The
+autopilot page has three states:
 
-Shown when the coding agent or GitHub is not connected.
-
-**What renders:**
-- Page title ("Autopilot") — no description subtitle
-- A single centered card with:
-  - Heading: "Set up Autopilot"
-  - Subheading: "Connect a coding agent and your repos. Autopilot handles triage from there."
-  - Step 1: Coding agent selector + connect/configure button
-  - Step 2: GitHub connect button
-  - Optional integrations line: Sentry · Linear · Slack
-- Nothing else. No evidence row, no direction summary, no control strip.
-
-**What is hidden:**
-- Evidence row (would show all zeros)
-- Direction summary (would show all "Not set yet")
-- Control strip (no analysis to control yet)
-- Proposals card (no analysis has run)
-
-```
-┌──────────────────────────────────────────────────┐
-│                                                  │
-│  Autopilot                                       │
-│                                                  │
-│  ┌────────────────────────────────────────────┐  │
-│  │                                            │  │
-│  │  Set up Autopilot                          │  │
-│  │  Connect a coding agent and your repos.    │  │
-│  │  Autopilot handles triage from there.      │  │
-│  │                                            │  │
-│  │  ① Coding agent                 [Set up]   │  │
-│  │  ② GitHub repos                [Connect]   │  │
-│  │                                            │  │
-│  │  Optional: Sentry · Linear · Slack         │  │
-│  │                                            │  │
-│  └────────────────────────────────────────────┘  │
-│                                                  │
-│            (nothing else on the page)            │
-│                                                  │
-└──────────────────────────────────────────────────┘
-```
-
-### State 2: First analysis
+### State 1: First analysis
 
 Shown when setup is complete but no analysis has been run yet.
+This is the first thing a user sees after completing onboarding.
 
 **What renders:**
 - Page header with CTA: "Autopilot" + [Run first analysis] button
@@ -166,7 +138,7 @@ Shown when setup is complete but no analysis has been run yet.
 └──────────────────────────────────────────────────┘
 ```
 
-### State 3: Active (post-analysis)
+### State 2: Active (post-analysis)
 
 This is the primary state. 90% of page visits land here.
 
@@ -209,7 +181,7 @@ This is the primary state. 90% of page visits land here.
 └──────────────────────────────────────────────────┘
 ```
 
-### State 4: Attention needed (error)
+### State 3: Attention needed (error)
 
 Shown when the last analysis failed or there is a blocking issue.
 
@@ -244,7 +216,22 @@ Shown when the last analysis failed or there is a blocking issue.
 
 ## Component Changes
 
-### What gets removed
+### Existing infrastructure (from onboarding separation)
+
+The following components already exist and are not changed by this design:
+
+| Component | Location | Purpose |
+|---|---|---|
+| `OnboardingPageContent` | `components/onboarding/` | Dedicated `/onboarding` page with setup hero + checklist |
+| `SetupChecklist` | `components/setup-checklist.tsx` | Shared checklist (agent + GitHub + optional integrations) |
+| `useSetupStatus` | `hooks/use-setup-status.ts` | Reusable hook: `isSetupComplete`, `agentConnected`, `githubReady` |
+
+The autopilot page's `useAutopilotPageData` already uses `useSetupStatus` for
+its setup state checks. The `AutopilotSetupChecklist` wrapper in
+`components/autopilot/` re-exports `SetupChecklist` for backwards compatibility
+and can be removed once setup rendering is fully removed from the autopilot page.
+
+### What gets removed from the autopilot page
 
 | Current component | Action | Reason |
 |---|---|---|
@@ -253,6 +240,8 @@ Shown when the last analysis failed or there is a blocking issue.
 | `AutopilotHero` (generic card) | Replace | Becomes a styled headline + body, not a boxed card |
 | `AutopilotEvidenceRow` (4-column grid) | Replace with 3-column | Drop "Next run" (moves to status line); hide when all values are zero |
 | Direction summary (8 rows with separators) | Replace with compact footer | 4 key-value rows replace 8 separated rows |
+| `AutopilotSetupChecklist` usage | Remove | Setup lives on `/onboarding`; autopilot page no longer renders setup UI |
+| `heroMode === "setup"` branch | Remove | The autopilot page is never shown in setup state |
 
 ### What gets added
 
@@ -260,8 +249,8 @@ Shown when the last analysis failed or there is a blocking issue.
 |---|---|
 | Status subtitle | Single line: `{autonomy} · {freshness} · {next run}` under the page title |
 | Analysis headline | Bold `text-lg font-semibold` line — extracted from or summarizing the analysis |
-| Setup card | Self-contained card for setup state — replaces hero + checklist + evidence combo |
 | Direction nudge | Single-line prompt in first-analysis state: "Set your direction for better results →" |
+| Redirect guard | If `!isSetupComplete`, redirect to `/onboarding` (using existing `useSetupStatus` hook) |
 
 ### What stays (but moves)
 
@@ -289,7 +278,8 @@ viewport widths.
 ### Visibility rule
 
 The evidence row is only rendered when at least one metric has a non-zero
-value. In setup and first-analysis states, it is hidden entirely.
+value. In the first-analysis state (before any analysis has run), it is
+hidden entirely.
 
 ## Config Footer
 
@@ -329,8 +319,8 @@ Examples:
 - `Operate broadly · Analyzed Apr 8, 2:34 PM · Next in 30m`
 - `Act on low-risk · Last analyzed Apr 7` (no next run scheduled)
 
-The status line is always visible in states 2–4. In setup state, it is hidden
-(replaced by the setup card's own messaging).
+The status line is always visible in all states of the autopilot page
+(first-analysis, active, and error).
 
 ## Analysis Headline
 
@@ -350,28 +340,27 @@ format evolves to include structured output, option 2 is better long-term.
 **Styling:** `text-lg font-semibold text-foreground` — noticeably bolder than
 the brief body text below it.
 
-## Setup Card Design
+## Onboarding / Autopilot Boundary
 
-The setup card consolidates the current `AutopilotHero` + `AutopilotSetupChecklist`
-into a single self-contained component. It should feel like an onboarding moment,
-not a broken dashboard.
+Setup has been extracted to a dedicated `/onboarding` route
+(`OnboardingPageContent`). The boundary works as follows:
 
-### Content
+1. **`/onboarding`** uses `useSetupStatus` to check agent + GitHub connection.
+   Once both are connected, it redirects to `/autopilot`.
+2. **`/autopilot`** should also check `useSetupStatus`. If setup is not
+   complete, redirect to `/onboarding`. This prevents users from landing on
+   an autopilot page that cannot function.
+3. The shared `SetupChecklist` component lives at `components/setup-checklist.tsx`
+   and is used by the onboarding page. The autopilot page no longer needs it.
+4. The `AutopilotSetupChecklist` re-export in `components/autopilot/` can be
+   deleted once the `heroMode === "setup"` branch is removed from the autopilot
+   page content.
 
-- **Heading:** "Set up Autopilot"
-- **Subheading:** "Connect a coding agent and your repos. Autopilot handles triage from there."
-- **Step 1:** Coding agent — agent type selector + connect/configure action
-- **Step 2:** GitHub repos — connect button
-- **Optional line:** Links to connect Sentry, Linear, Slack (de-emphasized)
+This separation means the autopilot page never needs to render onboarding UI,
+setup steps, or empty-state messaging for unconnected integrations. It can
+assume that a coding agent and GitHub are available.
 
-### Behavior
-
-- Steps show a checkmark when completed
-- When both required steps are done, the card transitions to the first-analysis
-  state on the next render (no manual "continue" button needed)
-- The card does not show evidence, direction, or any other page section
-
-## Relationship to Existing Documents
+## Relationship to Existing Documents and Code
 
 - Aligns with the operator workspace model in
   [37-pm-agent-top-level-review.md](./37-pm-agent-top-level-review.md)
@@ -379,13 +368,16 @@ not a broken dashboard.
   steering vs. output distinction from doc 37
 - Settings placement (contextual steering on-page, admin settings in Settings)
   carries forward unchanged from the prior version of this document
+- Builds on the onboarding/autopilot separation implemented in PR #239
+  (`OnboardingPageContent`, `SetupChecklist`, `useSetupStatus`)
 
 ## Implementation Sequence
 
-1. **Restructure the page shell.** Remove `PageHeader` description, remove
+1. **Add redirect guard.** Use `useSetupStatus` in `AutopilotPageContent` to
+   redirect to `/onboarding` if setup is not complete. Remove the
+   `heroMode === "setup"` branch and `AutopilotSetupChecklist` usage.
+2. **Restructure the page shell.** Remove `PageHeader` description, remove
    `AutopilotControlStrip` as a card, add status subtitle and CTA to header.
-2. **Build the setup card.** Consolidate hero + checklist into one component.
-   Hide evidence row and direction summary in setup state.
 3. **Build the analysis headline + brief.** Replace `AutopilotHero` with
    headline (bold) + body (normal) rendering. No card wrapper needed.
 4. **Reduce evidence to 3 metrics.** Remove "Next run" from evidence, add it
@@ -394,15 +386,19 @@ not a broken dashboard.
    with 4 compact key-value rows below a separator.
 6. **Wire up first-analysis state.** Show the direction nudge line instead of
    the full direction summary.
-7. **Polish.** Spacing, typography, empty-state transitions.
+7. **Clean up.** Remove `AutopilotSetupChecklist` re-export from
+   `components/autopilot/`. Remove `setup` fields from `AutopilotViewModel`
+   and `deriveAutopilotViewModel` that are no longer needed.
+8. **Polish.** Spacing, typography, empty-state transitions.
 
-## What To Remove From The Default View
+## What To Remove From The Autopilot Page
 
 - Page header description text
 - Control strip as a separate bordered card
 - Evidence row when all values are zero
 - "Next run" as a stat card (moves to status line)
-- Direction summary during setup state
+- All setup/onboarding UI (now lives at `/onboarding`)
+- `AutopilotSetupChecklist` import and `heroMode === "setup"` branch
 - Separate rows for Philosophy, Direction, Focus, Avoid, Autonomy, Documents,
   Weights, and Advanced (8 rows → 4 rows)
 - All instances of "Not set yet" / "None set" visible by default — if nothing
