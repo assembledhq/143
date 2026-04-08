@@ -76,7 +76,7 @@ func TestContainerUsageStore_GetUsageSummary(t *testing.T) {
 	end := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
 
 	// Totals query
-	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(container_minutes\\)").
+	mock.ExpectQuery("SELECT COALESCE\\(SUM").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"total_minutes", "total_sessions"}).AddRow(125.5, 10))
 

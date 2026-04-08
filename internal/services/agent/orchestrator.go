@@ -396,7 +396,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			exitReason = "failed"
 		}
 		if o.usageTracker != nil {
-			o.usageTracker.ContainerStopped(ctx, run.OrgID, usageEventID, containerStartedAt, exitReason)
+			// Use a detached context so the billing write succeeds even if
+			// the parent ctx was cancelled (timeout, shutdown).
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer stopCancel()
+			o.usageTracker.ContainerStopped(stopCtx, run.OrgID, usageEventID, containerStartedAt, exitReason)
 		}
 		if destroyErr := o.provider.Destroy(ctx, sandbox); destroyErr != nil {
 			log.Error().Err(destroyErr).Msg("failed to destroy sandbox")
@@ -680,7 +684,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			exitReason = "failed"
 		}
 		if o.usageTracker != nil {
-			o.usageTracker.ContainerStopped(ctx, session.OrgID, usageEventID, containerStartedAt, exitReason)
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer stopCancel()
+			o.usageTracker.ContainerStopped(stopCtx, session.OrgID, usageEventID, containerStartedAt, exitReason)
 		}
 		if destroyErr := o.provider.Destroy(ctx, sandbox); destroyErr != nil {
 			log.Error().Err(destroyErr).Msg("failed to destroy sandbox")

@@ -140,7 +140,9 @@ func (s *ContainerUsageStore) GetUsageSummary(ctx context.Context, orgID uuid.UU
 		return nil, fmt.Errorf("query peak concurrent: %w", err)
 	}
 	// The self-join counts overlapping peers; add 1 for the container itself.
-	if peakConcurrent > 0 {
+	// Use totalSessions > 0 (not peakConcurrent > 0) so that a single
+	// non-overlapping container correctly reports peak = 1.
+	if totalSessions > 0 {
 		peakConcurrent++
 	}
 
@@ -189,7 +191,7 @@ func (s *ContainerUsageStore) ListBySession(ctx context.Context, orgID, sessionI
 	}
 	defer rows.Close()
 
-	var events []models.ContainerUsageEvent
+	events := make([]models.ContainerUsageEvent, 0)
 	for rows.Next() {
 		var e models.ContainerUsageEvent
 		if err := rows.Scan(
