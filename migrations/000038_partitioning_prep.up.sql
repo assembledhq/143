@@ -134,7 +134,7 @@ CREATE INDEX IF NOT EXISTS idx_session_logs_org_created ON session_logs (org_id,
 
 -- 5. Add the CHECK constraint from migration 034.
 ALTER TABLE session_logs
-    ADD CONSTRAINT chk_session_logs_level CHECK (level IN ('debug', 'info', 'warn', 'error'));
+    ADD CONSTRAINT chk_session_logs_level CHECK (level IN ('debug', 'info', 'warn', 'error', 'output', 'tool_use', 'question'));
 
 -- 6. Create partitions: from 2025-01 through 3 months from now.
 SELECT create_monthly_partitions('session_logs',
