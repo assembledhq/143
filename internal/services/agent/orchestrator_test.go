@@ -134,7 +134,15 @@ type mockSessionStore struct {
 	statusUpdates   []string
 	resultUpdates   []resultUpdate
 	turnUpdates     []turnUpdate
+	failureUpdates  []failureUpdate
 	countRunningErr error
+}
+
+type failureUpdate struct {
+	explanation  string
+	category     string
+	nextSteps    []string
+	retryAdvised bool
 }
 
 type resultUpdate struct {
@@ -194,6 +202,14 @@ func (m *mockSessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessi
 }
 
 func (m *mockSessionStore) UpdateFailure(ctx context.Context, orgID, runID uuid.UUID, explanation, category string, nextSteps []string, retryAdvised bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.failureUpdates = append(m.failureUpdates, failureUpdate{
+		explanation:  explanation,
+		category:     category,
+		nextSteps:    nextSteps,
+		retryAdvised: retryAdvised,
+	})
 	return nil
 }
 

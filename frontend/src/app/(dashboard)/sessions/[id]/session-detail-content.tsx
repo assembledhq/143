@@ -59,6 +59,8 @@ import { useDiffViewState } from "@/hooks/use-diff-view-state";
 import { useReviewedFiles } from "@/hooks/use-reviewed-files";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 
+const FAILURE_CATEGORY_CODEX_AUTH = "codex_auth_expired";
+
 const statusConfig: Record<string, { color: string; label: string }> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
   running: { color: "bg-primary/10 text-primary", label: "Running" },
@@ -190,7 +192,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
                 </ul>
               </div>
             )}
-            {session.failure_category === "codex_auth_expired" && (
+            {session.failure_category === FAILURE_CATEGORY_CODEX_AUTH && (
               <Button
                 size="sm"
                 variant="outline"
@@ -209,6 +211,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
           onConnected={() => {
             setShowDeviceCodeModal(false);
             queryClient.invalidateQueries({ queryKey: ["codex-auth-status"] });
+            queryClient.invalidateQueries({ queryKey: ["session", session.id] });
           }}
         />
       )}
