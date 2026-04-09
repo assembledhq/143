@@ -23,7 +23,7 @@ func TestSandboxImageWiring(t *testing.T) {
 			patterns: []string{
 				"sandbox:",
 				"image: 143-sandbox:latest",
-				"context: ./sandbox",
+				"dockerfile: sandbox/Dockerfile",
 			},
 		},
 		{
@@ -40,7 +40,7 @@ func TestSandboxImageWiring(t *testing.T) {
 			path: ".github/workflows/ci.yml",
 			patterns: []string{
 				"name: Build sandbox Docker image",
-				"context: ./sandbox",
+				"file: sandbox/Dockerfile",
 				"tags: 143-sandbox:latest",
 			},
 		},
