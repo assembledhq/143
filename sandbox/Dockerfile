@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     jq \
+    sudo \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js 24 LTS via NodeSource.
@@ -48,7 +49,9 @@ RUN --mount=type=cache,target=/root/.npm \
 # Copy 143-tools binary from Go builder.
 COPY --from=go-builder /bin/143-tools /usr/local/bin/143-tools
 
-# Non-root user for sandbox execution.
-RUN useradd -m -s /bin/bash sandbox
+# Non-root user for sandbox execution with passwordless sudo.
+RUN useradd -m -s /bin/bash sandbox \
+    && echo 'sandbox ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/sandbox \
+    && chmod 0440 /etc/sudoers.d/sandbox
 USER sandbox
 WORKDIR /workspace

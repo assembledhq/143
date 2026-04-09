@@ -142,12 +142,14 @@ func (d *DockerProvider) Name() string {
 }
 
 // Create spins up a new Docker container with the given resource limits and
-// security hardening (dropped capabilities, read-only rootfs, non-root user).
+// security hardening (dropped capabilities, gVisor runtime, non-root user).
+// The rootfs is writable so agents can install packages via sudo apt-get.
 func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
 	d.logger.Info().
 		Str("image", cfg.Image).
 		Float64("cpu_limit", cfg.CPULimit).
 		Int("memory_limit_mb", cfg.MemoryLimitMB).
+		Int("disk_limit_gb", cfg.DiskLimitGB).
 		Str("runtime", d.runtime).
 		Msg("creating sandbox container")
 
@@ -178,12 +180,17 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 		},
 		NetworkMode:    container.NetworkMode(d.network),
 		CapDrop:        []string{"ALL"},
-		SecurityOpt:    []string{"no-new-privileges:true"},
-		ReadonlyRootfs: true,
+		CapAdd:         []string{"SETUID", "SETGID", "DAC_OVERRIDE"}, // minimum caps for sudo
+		ReadonlyRootfs: false,
 		Tmpfs: map[string]string{
-			"/tmp":      "rw,noexec,nosuid,size=1073741824",
-			cfg.WorkDir: "rw,nosuid,mode=1777,size=5368709120", // 5GB writable workspace
+			"/tmp": "rw,noexec,nosuid,size=1073741824",
 		},
+	}
+
+	if cfg.DiskLimitGB > 0 {
+		hostCfg.StorageOpt = map[string]string{
+			"size": fmt.Sprintf("%dG", cfg.DiskLimitGB),
+		}
 	}
 
 	networkCfg := &network.NetworkingConfig{}
@@ -191,7 +198,16 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 
 	resp, err := d.client.ContainerCreate(ctx, containerCfg, hostCfg, networkCfg, platform, "")
 	if err != nil {
-		return nil, fmt.Errorf("create container: %w", err)
+		// StorageOpt requires overlay2 with XFS+pquota. Fall back gracefully
+		// on hosts that don't support it (e.g. dev machines with ext4).
+		if strings.Contains(err.Error(), "storage-opt") || strings.Contains(err.Error(), "pquota") {
+			d.logger.Warn().Err(err).Msg("storage quota not supported by Docker storage driver; creating container without disk limit")
+			hostCfg.StorageOpt = nil
+			resp, err = d.client.ContainerCreate(ctx, containerCfg, hostCfg, networkCfg, platform, "")
+		}
+		if err != nil {
+			return nil, fmt.Errorf("create container: %w", err)
+		}
 	}
 
 	if err := d.client.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
