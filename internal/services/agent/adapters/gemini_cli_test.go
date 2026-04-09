@@ -392,8 +392,9 @@ func TestParseGeminiStreamOutput(t *testing.T) {
 {"type":"usage","stats":{"inputTokens":1200,"outputTokens":350}}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
 				t.Helper()
-				require.Contains(t, result.Summary, "Let me look at the code...")
-				require.Contains(t, result.Summary, "Fixed the null pointer issue.")
+				// Assistant text blocks stay as separate logs; summary has last one.
+				require.NotContains(t, result.Summary, "Let me look at the code...")
+				require.Equal(t, "Fixed the null pointer issue.", result.Summary)
 				require.Equal(t, 1200, result.TokenUsage.InputTokens)
 				require.Equal(t, 350, result.TokenUsage.OutputTokens)
 
@@ -595,7 +596,8 @@ func TestParseGeminiStreamOutput(t *testing.T) {
 			output: `{"type":"assistant","message":"Using message field."}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
 				t.Helper()
-				require.Contains(t, result.Summary, "Using message field.")
+				// Falls back to last assistant text when no result event.
+				require.Equal(t, "Using message field.", result.Summary)
 			},
 		},
 	}
