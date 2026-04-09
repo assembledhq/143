@@ -82,7 +82,7 @@ describe("AuthenticatedLayout", () => {
     expect(screen.getByRole("link", { name: "Integrations" })).toHaveAttribute("href", "/settings/integrations");
     expect(screen.getByRole("link", { name: "Coding agents" })).toHaveAttribute("href", "/settings/agent");
     expect(screen.getByRole("link", { name: "LLM" })).toHaveAttribute("href", "/settings/llm");
-    expect(screen.getByRole("link", { name: "Autopilot" })).toHaveAttribute("href", "/settings/autopilot");
+    expect(screen.getByRole("link", { name: "Autopilot settings" })).toHaveAttribute("href", "/settings/autopilot");
     expect(screen.getByRole("link", { name: "Evals" })).toHaveAttribute("href", "/settings/evals");
     expect(screen.getByRole("link", { name: "Team" })).toHaveAttribute("href", "/settings/team");
     expect(screen.getByRole("link", { name: "Audit log" })).toHaveAttribute("href", "/settings/audit-log");

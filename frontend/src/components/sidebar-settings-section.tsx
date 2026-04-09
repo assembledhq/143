@@ -46,7 +46,7 @@ const settingsGroups: SettingsGroup[] = [
       { label: "Integrations", icon: Plug, href: "/settings/integrations" },
       { label: "Coding agents", icon: Bot, href: "/settings/agent" },
       { label: "LLM", icon: Sparkles, href: "/settings/llm" },
-      { label: "Autopilot", icon: Target, href: "/settings/autopilot" },
+      { label: "Autopilot settings", icon: Target, href: "/settings/autopilot" },
       { label: "Evals", icon: FlaskConical, href: "/settings/evals" },
     ],
   },
@@ -144,7 +144,7 @@ export function SidebarSettingsSection({
             return (
               <div key={groupIndex}>
                 {group.label && (
-                  <div className="px-7 pt-3 pb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                  <div className="px-7 pt-3 pb-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">
                     {group.label}
                   </div>
                 )}
