@@ -61,6 +61,7 @@ type SessionStore interface {
 	UpdateSnapshotInfo(ctx context.Context, orgID, sessionID uuid.UUID, agentSessionID, snapshotKey string) error
 	UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state string) error
 	UpdateWorkingBranch(ctx context.Context, orgID, sessionID uuid.UUID, branch string) error
+	UpdateFailure(ctx context.Context, orgID, runID uuid.UUID, explanation, category string, nextSteps []string, retryAdvised bool) error
 	GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 }
 
@@ -415,14 +416,8 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	//    auth.json is the primary auth mechanism (uses ChatGPT backend).
 	//    Done after clone so the workspace is available.
 	if run.AgentType == models.AgentTypeCodex {
-		injected, err := o.injectCodexAuth(ctx, run.OrgID, sandbox)
-		if err != nil {
-			o.failRun(ctx, run, fmt.Sprintf("codex auth injection failed: %s", err))
-			return fmt.Errorf("codex auth injection: %w", err)
-		}
-		if !injected {
-			o.failRun(ctx, run, "no credentials configured for codex: connect ChatGPT from the Overview page")
-			return fmt.Errorf("no credentials for codex agent")
+		if err := o.ensureCodexAuth(ctx, run, sandbox); err != nil {
+			return err
 		}
 	}
 
@@ -685,14 +680,8 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 
 		// Re-inject Codex auth.json if needed.
 		if session.AgentType == models.AgentTypeCodex {
-			injected, err := o.injectCodexAuth(ctx, session.OrgID, sandbox)
-			if err != nil {
-				o.failRun(ctx, session, fmt.Sprintf("codex auth injection failed: %s", err))
-				return fmt.Errorf("codex auth injection: %w", err)
-			}
-			if !injected {
-				o.failRun(ctx, session, "no credentials configured for codex: connect ChatGPT from the Overview page")
-				return fmt.Errorf("no credentials for codex agent")
+			if err := o.ensureCodexAuth(ctx, session, sandbox); err != nil {
+				return err
 			}
 		}
 
@@ -1020,6 +1009,41 @@ func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg 
 			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update project task on run failure")
 		}
 	}
+}
+
+// failRunWithCategory marks a run as failed with a structured failure category,
+// explanation, and next steps. Used for well-known failure modes (e.g. auth expiry)
+// where we can provide actionable guidance in the UI.
+func (o *Orchestrator) failRunWithCategory(ctx context.Context, run *models.Session, errMsg, category, explanation string, nextSteps []string) {
+	o.failRun(ctx, run, errMsg)
+	if err := o.sessions.UpdateFailure(ctx, run.OrgID, run.ID, explanation, category, nextSteps, true); err != nil {
+		o.logger.Error().Err(err).Str("run_id", run.ID.String()).Msg("failed to update run failure details")
+	}
+}
+
+// ensureCodexAuth injects Codex auth credentials into the sandbox, failing the
+// run with a codex_auth_expired category if injection fails or no creds exist.
+func (o *Orchestrator) ensureCodexAuth(ctx context.Context, run *models.Session, sandbox *Sandbox) error {
+	injected, err := o.injectCodexAuth(ctx, run.OrgID, sandbox)
+	if err != nil {
+		o.failRunWithCategory(ctx, run,
+			fmt.Sprintf("codex auth injection failed: %s", err),
+			FailureCategoryCodexAuth,
+			"Your ChatGPT authentication has expired or was revoked. Please re-authenticate to continue using Codex.",
+			[]string{"Re-authenticate with ChatGPT from the session page to sign in again"},
+		)
+		return fmt.Errorf("codex auth injection: %w", err)
+	}
+	if !injected {
+		o.failRunWithCategory(ctx, run,
+			"no credentials configured for codex: connect ChatGPT from the Overview page",
+			FailureCategoryCodexAuth,
+			"No ChatGPT credentials are configured. Please connect your ChatGPT account to use Codex.",
+			[]string{"Re-authenticate with ChatGPT from the session page to sign in"},
+		)
+		return fmt.Errorf("no credentials for codex agent")
+	}
+	return nil
 }
 
 // buildRunResult converts an AgentResult into the DB update struct.
