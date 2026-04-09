@@ -49,7 +49,7 @@ import { SSE_EVENT, addSSEListener } from "@/lib/sse";
 import { buildTimeline } from "@/lib/timeline";
 import { parseDiffStats, type DiffFile } from "@/lib/diff-parser";
 import { formatReviewMessage } from "@/lib/format-review-message";
-import type { Session, SessionLog, SessionMessage, SessionReviewComment, User, Validation } from "@/lib/types";
+import type { Session, SessionLog, SessionMessage, SessionReviewComment, User, Validation, CodexAuthStatus, SingleResponse } from "@/lib/types";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
 import { cn, sessionTitle, isImageURL, fileNameFromURL, formatTimeAgo } from "@/lib/utils";
@@ -119,8 +119,18 @@ type DetailTab = "overview" | "changes" | "validation";
 function OverviewTab({ session, members }: { session: Session; members: User[] }) {
   const queryClient = useQueryClient();
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
+
+  const isCodexAuthFailure = session.failure_category === FAILURE_CATEGORY_CODEX_AUTH;
+
+  const { data: codexAuthResponse } = useQuery<SingleResponse<CodexAuthStatus>>({
+    queryKey: ["codex-auth-status"],
+    queryFn: () => api.codexAuth.status(),
+    enabled: isCodexAuthFailure,
+  });
+  const isCodexAuthenticated = codexAuthResponse?.data?.status === "completed";
+
   const retryMutation = useMutation({
-    mutationFn: () => api.issues.triggerFix(session.issue_id),
+    mutationFn: () => api.sessions.retry(session.id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["session", session.id] });
     },
@@ -182,7 +192,8 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
           </CardHeader>
           <CardContent className="space-y-3">
             <p className="text-sm">{session.failure_explanation || session.error}</p>
-            {session.failure_next_steps && session.failure_next_steps.length > 0 && (
+            {/* Show next steps only for non-codex-auth failures (codex auth has the reauth button instead) */}
+            {!isCodexAuthFailure && session.failure_next_steps && session.failure_next_steps.length > 0 && (
               <div>
                 <p className="text-xs font-medium text-muted-foreground mb-1">Next steps</p>
                 <ul className="list-disc list-inside text-sm space-y-1">
@@ -192,7 +203,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
                 </ul>
               </div>
             )}
-            {session.failure_category === FAILURE_CATEGORY_CODEX_AUTH && (
+            {isCodexAuthFailure && !isCodexAuthenticated && (
               <Button
                 size="sm"
                 variant="outline"
@@ -201,6 +212,12 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
               >
                 Re-authenticate with ChatGPT
               </Button>
+            )}
+            {isCodexAuthFailure && isCodexAuthenticated && (
+              <p className="text-sm text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                ChatGPT connected — click Retry to re-run this session.
+              </p>
             )}
           </CardContent>
         </Card>
@@ -211,7 +228,6 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
           onConnected={() => {
             setShowDeviceCodeModal(false);
             queryClient.invalidateQueries({ queryKey: ["codex-auth-status"] });
-            queryClient.invalidateQueries({ queryKey: ["session", session.id] });
           }}
         />
       )}

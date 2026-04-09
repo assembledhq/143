@@ -342,6 +342,76 @@ func (s *SessionStore) UpdateFailure(ctx context.Context, orgID, runID uuid.UUID
 	return err
 }
 
+var (
+	// ErrSessionNotFound is returned when the session does not exist.
+	ErrSessionNotFound = fmt.Errorf("session not found")
+	// ErrSessionNotFailed is returned when trying to retry a session that is not in failed status.
+	ErrSessionNotFailed = fmt.Errorf("session is not in failed status")
+)
+
+// ResetForRetry resets a failed session back to pending so it can be re-run.
+// It clears failure fields, result fields, timestamps, and error state.
+func (s *SessionStore) ResetForRetry(ctx context.Context, orgID, sessionID uuid.UUID) error {
+	// First check if the session exists and its current status.
+	var currentStatus string
+	err := s.db.QueryRow(ctx,
+		`SELECT status FROM sessions WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`,
+		pgx.NamedArgs{"id": sessionID, "org_id": orgID},
+	).Scan(&currentStatus)
+	if err != nil {
+		return ErrSessionNotFound
+	}
+	if currentStatus != "failed" {
+		return ErrSessionNotFailed
+	}
+
+	query := `
+		UPDATE sessions
+		SET status = 'pending',
+		    started_at = NULL,
+		    completed_at = NULL,
+		    error = NULL,
+		    failure_explanation = NULL,
+		    failure_category = NULL,
+		    failure_next_steps = NULL,
+		    failure_retry_advised = false,
+		    result_summary = NULL,
+		    confidence_score = NULL,
+		    confidence_reasoning = NULL,
+		    risk_factors = NULL,
+		    token_usage = NULL,
+		    diff = NULL,
+		    diff_stats = NULL,
+		    sandbox_state = NULL
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+
+	_, err = s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	})
+	return err
+}
+
+// UndoResetForRetry reverts a session back to failed status after a retry enqueue failure.
+func (s *SessionStore) UndoResetForRetry(ctx context.Context, orgID, sessionID uuid.UUID, explanation, category string) error {
+	query := `
+		UPDATE sessions
+		SET status = 'failed',
+		    completed_at = now(),
+		    failure_explanation = @failure_explanation,
+		    failure_category = @failure_category,
+		    failure_retry_advised = true
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":                  sessionID,
+		"org_id":              orgID,
+		"failure_explanation": explanation,
+		"failure_category":    category,
+	})
+	return err
+}
+
 func (s *SessionStore) UpdateTitle(ctx context.Context, orgID, sessionID uuid.UUID, title string) error {
 	query := `UPDATE sessions SET title = @title WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
