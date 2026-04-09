@@ -1,36 +1,49 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { AuthenticatedLayout } from "./authenticated-layout";
 import { http, HttpResponse } from "msw";
 import { server } from "@/test/mocks/server";
 
-const { pushMock, replaceMock, logoutMock } = vi.hoisted(() => ({
-  pushMock: vi.fn(),
+const { replaceMock, logoutMock, useAuthMock } = vi.hoisted(() => ({
   replaceMock: vi.fn(),
   logoutMock: vi.fn(),
+  useAuthMock: vi.fn(),
 }));
 
 vi.mock("next/navigation", () => ({
   usePathname: () => "/autopilot",
   useRouter: () => ({
-    push: pushMock,
+    push: vi.fn(),
     replace: replaceMock,
   }),
 }));
 
 vi.mock("@/hooks/use-auth", () => ({
-  useAuth: () => ({
-    user: {
-      id: "user-1",
-      name: "Alex Doe",
-      email: "alex@example.com",
-      role: "admin",
-    },
+  useAuth: useAuthMock,
+}));
+
+const adminUser = {
+  id: "user-1",
+  name: "Alex Doe",
+  email: "alex@example.com",
+  role: "admin",
+};
+
+const memberUser = {
+  id: "user-2",
+  name: "Member User",
+  email: "member@example.com",
+  role: "member",
+};
+
+beforeEach(() => {
+  useAuthMock.mockReturnValue({
+    user: adminUser,
     isLoading: false,
     isAuthenticated: true,
     logout: logoutMock,
-  }),
-}));
+  });
+});
 
 describe("AuthenticatedLayout", () => {
   it("shows projects in the primary navigation", () => {
@@ -100,6 +113,30 @@ describe("AuthenticatedLayout", () => {
     await user.click(screen.getByRole("button", { name: /Alex Doe/ }));
 
     expect(await screen.findByRole("menuitem", { name: "Log out" })).toBeInTheDocument();
+  });
+
+  it("hides audit log from non-admin users", async () => {
+    useAuthMock.mockReturnValue({
+      user: memberUser,
+      isLoading: false,
+      isAuthenticated: true,
+      logout: logoutMock,
+    });
+
+    const user = userEvent.setup();
+
+    renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
+
+    // Expand the settings section
+    await user.click(screen.getByRole("button", { name: /Settings/ }));
+
+    expect(screen.getByRole("link", { name: "General" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Team" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Audit log" })).not.toBeInTheDocument();
   });
 
   it("does not show repo context switcher when org has only 1 repo", async () => {

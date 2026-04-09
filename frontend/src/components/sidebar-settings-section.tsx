@@ -133,43 +133,48 @@ export function SidebarSettingsSection({
           />
         </button>
       </CollapsibleTrigger>
-      <CollapsibleContent>
-        <div className="mt-0.5 space-y-0.5">
-          {settingsGroups.map((group, groupIndex) => {
-            const visibleItems = group.items.filter(
-              (item) => !item.adminOnly || userRole === "admin"
-            );
-            if (visibleItems.length === 0) return null;
+      <CollapsibleContent forceMount className={cn(
+        "overflow-hidden transition-all duration-200",
+        isOpen ? "grid grid-rows-[1fr] opacity-100" : "grid grid-rows-[0fr] opacity-0"
+      )}>
+        <div className="min-h-0">
+          <div className="mt-0.5 space-y-0.5">
+            {settingsGroups.map((group, groupIndex) => {
+              const visibleItems = group.items.filter(
+                (item) => !item.adminOnly || userRole === "admin"
+              );
+              if (visibleItems.length === 0) return null;
 
-            return (
-              <div key={groupIndex}>
-                {group.label && (
-                  <div className="px-7 pt-3 pb-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                    {group.label}
-                  </div>
-                )}
-                {visibleItems.map((item) => {
-                  const active = isItemActive(pathname, item.href);
-                  const Icon = item.icon;
-                  return (
-                    <Link
-                      key={item.href}
-                      href={item.href}
-                      className={cn(
-                        "relative flex items-center gap-2 rounded-lg py-1.5 pl-7 pr-2.5 text-[13px] font-medium transition-colors duration-150",
-                        active
-                          ? "bg-sidebar-accent text-sidebar-accent-foreground before:absolute before:left-1.5 before:top-1/2 before:h-4 before:-translate-y-1/2 before:w-[3px] before:rounded-full before:bg-primary"
-                          : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-                      )}
-                    >
-                      <Icon className="h-3.5 w-3.5 shrink-0" />
-                      {item.label}
-                    </Link>
-                  );
-                })}
-              </div>
-            );
-          })}
+              return (
+                <div key={groupIndex}>
+                  {group.label && (
+                    <div className="px-7 pt-3 pb-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                      {group.label}
+                    </div>
+                  )}
+                  {visibleItems.map((item) => {
+                    const active = isItemActive(pathname, item.href);
+                    const Icon = item.icon;
+                    return (
+                      <Link
+                        key={item.href}
+                        href={item.href}
+                        className={cn(
+                          "relative flex items-center gap-2 rounded-lg py-1.5 pl-7 pr-2.5 text-[13px] font-medium transition-colors duration-150",
+                          active
+                            ? "bg-sidebar-accent text-sidebar-accent-foreground before:absolute before:left-1.5 before:top-1/2 before:h-4 before:-translate-y-1/2 before:w-[3px] before:rounded-full before:bg-primary"
+                            : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                        )}
+                      >
+                        <Icon className="h-3.5 w-3.5 shrink-0" />
+                        {item.label}
+                      </Link>
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </div>
         </div>
       </CollapsibleContent>
     </Collapsible>
