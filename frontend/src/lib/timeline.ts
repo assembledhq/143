@@ -21,25 +21,10 @@ export function buildTimeline(
   messages: SessionMessage[],
   logs: SessionLog[]
 ): TimelineEntry[] {
-  const persistedAssistantTurns = new Set(
-    messages
-      .filter((message) => message.role === "assistant")
-      .map((message) => message.turn_number)
-  );
-
-  // Filter out streamed assistant output only after the assistant message for
-  // that turn has been persisted. Until then, the output log is the only
-  // visible copy of the in-flight response.
-  const filteredLogs = logs.filter((log) => {
-    if (
-      log.level === "output" &&
-      (!log.metadata || !log.metadata.type) &&
-      persistedAssistantTurns.has(log.turn_number)
-    ) {
-      return false;
-    }
-    return true;
-  });
+  // Output logs are kept as-is — the backend no longer merges individual
+  // assistant text blocks into the SessionMessage, so each output log is a
+  // unique piece of content that should be displayed as its own bubble.
+  const filteredLogs = logs;
 
   // Detect which turn numbers are plan mode turns by checking user messages
   // for the plan mode prefix.

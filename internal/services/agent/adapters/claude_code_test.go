@@ -157,7 +157,8 @@ func TestClaudeCodeAdapter_Execute(t *testing.T) {
 				require.Equal(t, 0, result.ExitCode)
 				require.Empty(t, result.Error)
 				require.Contains(t, result.Diff, "diff --git")
-				require.Contains(t, result.Summary, "Analyzing the issue...")
+				// Assistant text blocks are kept as separate logs, not merged into summary.
+				require.NotContains(t, result.Summary, "Analyzing the issue...")
 				require.Contains(t, result.Summary, "Fixed the bug.")
 			},
 		},
@@ -356,13 +357,18 @@ func TestParseStreamOutput(t *testing.T) {
 		checkResult func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry)
 	}{
 		{
-			name: "assistant events build summary",
+			name: "assistant events stay as separate logs, not merged into summary",
 			output: `{"type":"assistant","content":"Investigating..."}
 {"type":"assistant","content":"Found the bug."}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
 				t.Helper()
-				require.Contains(t, result.Summary, "Investigating...")
-				require.Contains(t, result.Summary, "Found the bug.")
+				// Assistant text blocks are kept as individual output logs.
+				require.Len(t, logs, 2)
+				require.Equal(t, "output", logs[0].Level)
+				require.Equal(t, "Investigating...", logs[0].Message)
+				require.Equal(t, "Found the bug.", logs[1].Message)
+				// Summary only contains result events, not assistant events.
+				require.Empty(t, result.Summary)
 			},
 		},
 		{

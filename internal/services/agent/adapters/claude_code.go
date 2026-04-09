@@ -144,7 +144,9 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 				Level:     "output",
 				Message:   event.Content,
 			}
-			summaryParts = append(summaryParts, event.Content)
+			// Individual assistant text blocks are persisted as separate output
+			// logs — don't merge them into the summary. The summary only
+			// contains the final "result" event content.
 			tryExtractConfidence(event.Content, result)
 
 		case "tool_use":
@@ -533,8 +535,8 @@ func parseStreamOutput(output []byte, result *agent.AgentResult, logCh chan<- ag
 				Level:     "output",
 				Message:   event.Content,
 			}
-			summaryParts = append(summaryParts, event.Content)
-			// Look for confidence JSON in output.
+			// Individual assistant text blocks are persisted as separate output
+			// logs — don't merge them into the summary.
 			tryExtractConfidence(event.Content, result)
 
 		case "tool_use":
