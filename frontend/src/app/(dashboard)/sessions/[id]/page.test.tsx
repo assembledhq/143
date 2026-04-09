@@ -327,25 +327,23 @@ describe('SessionDetailPage', () => {
     expect(screen.queryByRole('tab', { name: 'Validation' })).not.toBeInTheDocument();
   });
 
-  it('shows changes tab with PR info and diff', async () => {
+  it('shows View PR button in tab bar when PR exists', async () => {
     const sessionWithDiff: Session = {
       ...mockSessions[0],
       diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
     };
 
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
       }),
+      // Default handler returns mockPR for GET /sessions/:id/pr
     );
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
-    const user = userEvent.setup();
-    const changesTab = screen.getByRole('tab', { name: 'Changes' });
-    await user.click(changesTab);
-    expect(await screen.findByText('GitHub')).toBeInTheDocument();
-    expect(screen.getByText('example/repo #42')).toBeInTheDocument();
+    expect(await screen.findByText('View PR')).toBeInTheDocument();
   });
 
   it('shows failure next steps and retry button', async () => {
@@ -431,8 +429,8 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
-    expect(screen.getByTitle('Create PR')).toBeInTheDocument();
-    expect(screen.getByTitle('Create PR')).not.toBeDisabled();
+    expect(await screen.findByRole('button', { name: /Create PR/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Create PR/ })).not.toBeDisabled();
   });
 
   it('does not show Create PR button when PR already exists', async () => {
@@ -454,7 +452,7 @@ describe('SessionDetailPage', () => {
     await screen.findAllByText('Fixed TypeError by adding null check');
     // Wait for the PR query to resolve before asserting
     await waitFor(() => {
-      expect(screen.queryByTitle('Create PR')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /Create PR/ })).not.toBeInTheDocument();
     });
   });
 
@@ -462,7 +460,7 @@ describe('SessionDetailPage', () => {
     // Default mockSessions[0] has no diff_stats
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
-    expect(screen.queryByTitle('Create PR')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Create PR/ })).not.toBeInTheDocument();
   });
 
   it('does not show Create PR button when session is running', async () => {
@@ -489,7 +487,7 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findByText('Agent is working...');
-    expect(screen.queryByTitle('Create PR')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Create PR/ })).not.toBeInTheDocument();
   });
 
   it('calls createPR API when Create PR button is clicked', async () => {
@@ -522,7 +520,7 @@ describe('SessionDetailPage', () => {
     await screen.findAllByText('Fixed TypeError by adding null check');
 
     const user = userEvent.setup();
-    const createPRButton = screen.getByTitle('Create PR');
+    const createPRButton = await screen.findByRole('button', { name: /Create PR/ });
     await user.click(createPRButton);
 
     await waitFor(() => {
