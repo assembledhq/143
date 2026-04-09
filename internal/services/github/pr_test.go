@@ -1117,3 +1117,35 @@ func TestFormatBranchName_ResultSummaryFallback(t *testing.T) {
 	result := formatBranchName(session, nil)
 	require.Equal(t, "143/abcdef01/changes", result)
 }
+
+func TestPRServiceSetters(t *testing.T) {
+	t.Parallel()
+
+	logger := zerolog.Nop()
+	svc := NewPRService(nil, nil, nil, nil, nil, nil, nil, nil, logger)
+
+	t.Run("SetUserCredentialStore", func(t *testing.T) {
+		svc.SetUserCredentialStore(nil)
+		require.Nil(t, svc.userCredentials)
+	})
+
+	t.Run("SetLLMClient", func(t *testing.T) {
+		svc.SetLLMClient(nil)
+		require.Nil(t, svc.llmClient)
+	})
+
+	t.Run("SetUserStore", func(t *testing.T) {
+		svc.SetUserStore(nil)
+		require.Nil(t, svc.users)
+	})
+
+	t.Run("SetOrgStore", func(t *testing.T) {
+		svc.SetOrgStore(nil)
+		require.Nil(t, svc.orgs)
+	})
+
+	t.Run("SetPRTemplateStore", func(t *testing.T) {
+		svc.SetPRTemplateStore(nil)
+		require.Nil(t, svc.prTemplates)
+	})
+}
