@@ -139,6 +139,36 @@ func ProjectCycleSystemPrompt(data ProjectCycleSystemPromptData) string {
 	return render("project_cycle_system_prompt.template", data)
 }
 
+// ─── PR Content ──────────────────────────────────────────────────────────────
+
+// PRContentPromptData holds the dynamic values for the PR content system prompt.
+type PRContentPromptData struct {
+	HasTemplate bool // whether a repo PR template is available
+}
+
+// PRContentPrompt renders the system prompt for PR title and body generation.
+func PRContentPrompt(data PRContentPromptData) string {
+	return render("pr_content_prompt.template", data)
+}
+
+// PRContentUserPromptData holds the dynamic values for the PR content user prompt.
+type PRContentUserPromptData struct {
+	RepoTemplate     string   // the repo's PR template (if any)
+	ResultSummary    string   // what the agent did
+	SessionTitle     string   // session title (for manual sessions)
+	IssueTitle       string   // issue title
+	IssueSource      string   // issue source (e.g. "linear", "sentry")
+	IssueSeverity    string   // issue severity
+	ValidationChecks []string // e.g. ["Regression tests passed", "CI/CD passed"]
+	FileSummary      string   // file-level diff summary
+	Diff             string   // truncated raw diff
+}
+
+// PRContentUserPrompt renders the user prompt for PR title and body generation.
+func PRContentUserPrompt(data PRContentUserPromptData) string {
+	return render("pr_content_user_prompt.template", data)
+}
+
 // ─── User Prompts ────────────────────────────────────────────────────────────
 
 // DirectionCheckUserPromptData holds the dynamic values for the direction check user prompt.
