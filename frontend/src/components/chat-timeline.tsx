@@ -376,9 +376,10 @@ function CodeDiffSummary({
 }) {
   return (
     <div className="flex justify-start">
-      <button
+      <Button
+        variant="ghost"
         onClick={onClick}
-        className="flex items-center gap-3 rounded-lg border border-border bg-muted/50 px-4 py-2.5 text-sm hover:bg-muted transition-colors group text-left"
+        className="flex items-center gap-3 rounded-lg border border-border bg-muted/50 px-4 py-2.5 text-sm hover:bg-muted group text-left h-auto"
       >
         <FileCode2 className="h-4 w-4 text-muted-foreground shrink-0" />
         <span className="font-mono text-xs flex items-center gap-1.5">
@@ -390,7 +391,7 @@ function CodeDiffSummary({
           {filesChanged} {filesChanged === 1 ? "file" : "files"} changed
         </span>
         <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/50 group-hover:text-muted-foreground transition-colors ml-1" />
-      </button>
+      </Button>
     </div>
   );
 }
