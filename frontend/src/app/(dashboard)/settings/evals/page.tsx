@@ -92,11 +92,28 @@ export default function EvalsSettingsPage() {
   const tasks = tasksResponse?.data ?? [];
   const repos = reposResponse?.data ?? [];
 
+  // On mount, detect any in-progress bootstrap run from the latest run query.
+  const firstRepoId = repos[0]?.id;
+  const { data: latestBootstrapResponse } = useQuery({
+    queryKey: queryKeys.evals.bootstrapCandidates,
+    queryFn: () => api.evals.getBootstrapCandidates({ repo_id: firstRepoId }),
+    enabled: !!firstRepoId,
+    retry: false,
+  });
+
+  // Derive the effective bootstrap run ID: prefer explicitly started run, fall back to
+  // an in-progress run detected from the latest query (avoids setState-in-effect).
+  const latestActiveId = (() => {
+    const latest = latestBootstrapResponse?.data;
+    return latest && isBootstrapActive(latest.status) ? latest.id : null;
+  })();
+  const effectiveBootstrapRunId = activeBootstrapRunId ?? latestActiveId;
+
   // Poll for active bootstrap run status.
   const { data: activeBootstrapResponse } = useQuery({
-    queryKey: queryKeys.evals.bootstrapRun(activeBootstrapRunId ?? ""),
-    queryFn: () => api.evals.getBootstrapCandidates({ bootstrap_run_id: activeBootstrapRunId! }),
-    enabled: !!activeBootstrapRunId,
+    queryKey: queryKeys.evals.bootstrapRun(effectiveBootstrapRunId ?? ""),
+    queryFn: () => api.evals.getBootstrapCandidates({ bootstrap_run_id: effectiveBootstrapRunId! }),
+    enabled: !!effectiveBootstrapRunId,
     refetchInterval: (query) => {
       const status = query.state.data?.data?.status;
       return status && isBootstrapActive(status) ? 3000 : false;
@@ -116,21 +133,6 @@ export default function EvalsSettingsPage() {
       queryClient.invalidateQueries({ queryKey: queryKeys.evals.tasks() });
     }
   }, [activeBootstrap?.status, queryClient]);
-
-  // On mount, detect any in-progress bootstrap run from the latest run query.
-  const firstRepoId = repos[0]?.id;
-  const { data: latestBootstrapResponse } = useQuery({
-    queryKey: queryKeys.evals.bootstrapCandidates,
-    queryFn: () => api.evals.getBootstrapCandidates({ repo_id: firstRepoId }),
-    enabled: !!firstRepoId && !activeBootstrapRunId,
-    retry: false,
-  });
-  useEffect(() => {
-    const latest = latestBootstrapResponse?.data;
-    if (latest && isBootstrapActive(latest.status) && !activeBootstrapRunId) {
-      setActiveBootstrapRunId(latest.id);
-    }
-  }, [latestBootstrapResponse, activeBootstrapRunId]);
 
   const bootstrapMutation = useMutation({
     mutationFn: (repoId: string) => api.evals.bootstrap({ repo_id: repoId }),
