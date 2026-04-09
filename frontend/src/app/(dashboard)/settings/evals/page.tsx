@@ -14,7 +14,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { SettingsPageFrame } from "@/components/settings-page-frame";
+import { PageContainer } from "@/components/page-container";
+import { PageHeader } from "@/components/page-header";
 import { EmptyState } from "@/components/empty-state";
 import {
   AlertDialog,
@@ -73,10 +74,9 @@ export default function EvalsSettingsPage() {
   ];
 
   return (
-    <SettingsPageFrame
-      title="Evals"
-      description="Create, manage, and run eval tasks to measure agent quality."
-    >
+    <PageContainer size="default">
+      <div className="space-y-6">
+        <PageHeader title="Evals" description="Create, manage, and run eval tasks to measure agent quality." />
       {/* Actions */}
       <div className="flex items-center gap-3">
         <Button size="sm" asChild>
@@ -180,7 +180,8 @@ export default function EvalsSettingsPage() {
 
       {/* Bootstrap candidates banner */}
       <BootstrapCandidatesBanner repoIds={repos.map((r) => r.id)} />
-    </SettingsPageFrame>
+      </div>
+    </PageContainer>
   );
 }
 
