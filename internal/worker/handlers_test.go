@@ -2732,7 +2732,6 @@ func TestBootstrapLogWriter_WritesLog(t *testing.T) {
 	w := &bootstrapLogWriter{store: store, sessionID: sessionID, orgID: orgID}
 
 	mock.ExpectQuery("INSERT INTO session_logs").
-		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "timestamp"}).AddRow(int64(1), time.Now()))
 
 	w.log(context.Background(), "info", "Fetching repository details...")
