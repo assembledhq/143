@@ -2,8 +2,8 @@ services:
   sandbox:
     image: 143-sandbox:latest
     build:
-      context: ./sandbox
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: sandbox/Dockerfile
     profiles:
       - sandbox
 
