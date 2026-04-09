@@ -14,17 +14,37 @@ export type TimelineEntry =
 
 /**
  * Merges SessionMessage and SessionLog arrays into a unified timeline
- * sorted by created_at, with tool_use/tool_result pairing and deduplication
- * of output-level logs that duplicate assistant message content.
+ * sorted by created_at, with tool_use/tool_result pairing. Legacy merged
+ * assistant messages are filtered out when individual output logs exist.
  */
 export function buildTimeline(
   messages: SessionMessage[],
   logs: SessionLog[]
 ): TimelineEntry[] {
-  // Output logs are kept as-is — the backend no longer merges individual
-  // assistant text blocks into the SessionMessage, so each output log is a
-  // unique piece of content that should be displayed as its own bubble.
-  const filteredLogs = logs;
+  // For backward compatibility with older sessions where the backend merged
+  // all assistant text blocks into one SessionMessage: if the message content
+  // equals the concatenation of the turn's output logs, filter out the message
+  // to avoid showing duplicate content. For new sessions (where the message
+  // only contains the result event text), both are kept.
+  const outputLogsByTurn = new Map<number, string[]>();
+  for (const log of logs) {
+    if (log.level === "output" && (!log.metadata || !log.metadata.type)) {
+      const parts = outputLogsByTurn.get(log.turn_number) ?? [];
+      parts.push(log.message);
+      outputLogsByTurn.set(log.turn_number, parts);
+    }
+  }
+
+  const filteredMessages = messages.filter((msg) => {
+    if (msg.role !== "assistant") return true;
+    const parts = outputLogsByTurn.get(msg.turn_number);
+    if (!parts || parts.length === 0) return true;
+    // If the message content is the concatenation of all output logs for this
+    // turn, it's a legacy merged message — filter it out so the individual
+    // logs show instead.
+    const merged = parts.join("\n");
+    return msg.content !== merged;
+  });
 
   // Detect which turn numbers are plan mode turns by checking user messages
   // for the plan mode prefix.
@@ -41,10 +61,10 @@ export function buildTimeline(
     | { source: "log"; ts: string; data: SessionLog };
 
   const items: Tagged[] = [
-    ...messages.map(
+    ...filteredMessages.map(
       (m) => ({ source: "message" as const, ts: m.created_at, data: m })
     ),
-    ...filteredLogs.map(
+    ...logs.map(
       (l) => ({ source: "log" as const, ts: l.created_at, data: l })
     ),
   ];

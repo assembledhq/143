@@ -208,8 +208,9 @@ func TestParseCodexStreamOutput(t *testing.T) {
 {"type":"usage","stats":{"inputTokens":900,"outputTokens":400}}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
 				t.Helper()
-				require.Contains(t, result.Summary, "Let me investigate the issue...")
-				require.Contains(t, result.Summary, "Fixed the null pointer issue.")
+				// Assistant text blocks stay as separate logs; summary has last one.
+				require.NotContains(t, result.Summary, "Let me investigate the issue...")
+				require.Equal(t, "Fixed the null pointer issue.", result.Summary)
 				require.Equal(t, 900, result.TokenUsage.InputTokens)
 				require.Equal(t, 400, result.TokenUsage.OutputTokens)
 
@@ -382,7 +383,8 @@ func TestParseCodexStreamOutput(t *testing.T) {
 			output: `{"type":"assistant","content":"Working on it..."}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
 				t.Helper()
-				require.Contains(t, result.Summary, "Working on it...")
+				// Falls back to last assistant text when no result event.
+				require.Equal(t, "Working on it...", result.Summary)
 			},
 		},
 		{
@@ -390,7 +392,7 @@ func TestParseCodexStreamOutput(t *testing.T) {
 			output: `{"type":"text","content":"Some text output"}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
 				t.Helper()
-				require.Contains(t, result.Summary, "Some text output")
+				require.Equal(t, "Some text output", result.Summary)
 			},
 		},
 		{
@@ -421,7 +423,7 @@ func TestParseCodexStreamOutput(t *testing.T) {
 				require.Len(t, logs, 1)
 				require.Equal(t, "output", logs[0].Level)
 				require.Contains(t, logs[0].Message, "I found the bug and fixed it.")
-				require.Contains(t, result.Summary, "I found the bug and fixed it.")
+				require.Equal(t, "I found the bug and fixed it.", result.Summary)
 			},
 		},
 		{
@@ -473,8 +475,9 @@ func TestParseCodexStreamOutput(t *testing.T) {
 {"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":500,"output_tokens":200}}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
 				t.Helper()
-				require.Contains(t, result.Summary, "I'm going to inspect the workspace.")
-				require.Contains(t, result.Summary, "I found the issue and applied a fix.")
+				// Summary only has the last assistant text (fallback).
+				require.NotContains(t, result.Summary, "I'm going to inspect the workspace.")
+				require.Equal(t, "I found the issue and applied a fix.", result.Summary)
 				require.Equal(t, 1000, result.TokenUsage.InputTokens)
 				require.Equal(t, 200, result.TokenUsage.OutputTokens)
 
@@ -521,7 +524,7 @@ func TestParseCodexStreamOutput(t *testing.T) {
 			output: `{"type":"message","message":"from message field"}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
 				t.Helper()
-				require.Contains(t, result.Summary, "from message field")
+				require.Equal(t, "from message field", result.Summary)
 			},
 		},
 	}
@@ -574,8 +577,9 @@ func TestCodexAdapter_Execute(t *testing.T) {
 				require.Equal(t, 0, result.ExitCode)
 				require.Empty(t, result.Error)
 				require.Contains(t, result.Diff, "diff --git")
-				require.Contains(t, result.Summary, "Investigating the issue...")
-				require.Contains(t, result.Summary, "Applied the fix.")
+				// Summary has last assistant text only (fallback, no result event).
+				require.NotContains(t, result.Summary, "Investigating the issue...")
+				require.Equal(t, "Applied the fix.", result.Summary)
 				require.Equal(t, 800, result.TokenUsage.InputTokens)
 				require.Equal(t, 300, result.TokenUsage.OutputTokens)
 			},
