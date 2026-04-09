@@ -66,7 +66,7 @@ describe("AuthenticatedLayout", () => {
     expect(contentWrapper).toHaveClass("py-6");
   });
 
-  it("shows all settings entries in the user menu", async () => {
+  it("shows settings entries in the collapsible sidebar section", async () => {
     const user = userEvent.setup();
 
     renderWithProviders(
@@ -75,16 +75,20 @@ describe("AuthenticatedLayout", () => {
       </AuthenticatedLayout>
     );
 
-    await user.click(screen.getByRole("button", { name: /Alex Doe/ }));
+    // Expand the settings section
+    await user.click(screen.getByRole("button", { name: /Settings/ }));
 
-    expect(await screen.findByRole("menuitem", { name: "General" })).toBeInTheDocument();
-    expect(await screen.findByRole("menuitem", { name: "Integrations" })).toBeInTheDocument();
-    expect(await screen.findByRole("menuitem", { name: "Coding agents" })).toBeInTheDocument();
-    expect(await screen.findByRole("menuitem", { name: "Autopilot settings" })).toBeInTheDocument();
-    expect(await screen.findByRole("menuitem", { name: "Team" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "General" })).toHaveAttribute("href", "/settings");
+    expect(screen.getByRole("link", { name: "Integrations" })).toHaveAttribute("href", "/settings/integrations");
+    expect(screen.getByRole("link", { name: "Coding agents" })).toHaveAttribute("href", "/settings/agent");
+    expect(screen.getByRole("link", { name: "LLM" })).toHaveAttribute("href", "/settings/llm");
+    expect(screen.getByRole("link", { name: "Autopilot" })).toHaveAttribute("href", "/settings/autopilot");
+    expect(screen.getByRole("link", { name: "Evals" })).toHaveAttribute("href", "/settings/evals");
+    expect(screen.getByRole("link", { name: "Team" })).toHaveAttribute("href", "/settings/team");
+    expect(screen.getByRole("link", { name: "Audit log" })).toHaveAttribute("href", "/settings/audit-log");
   });
 
-  it("routes to settings pages from the user menu", async () => {
+  it("shows only log out in the user menu", async () => {
     const user = userEvent.setup();
 
     renderWithProviders(
@@ -94,24 +98,8 @@ describe("AuthenticatedLayout", () => {
     );
 
     await user.click(screen.getByRole("button", { name: /Alex Doe/ }));
-    await user.click(await screen.findByRole("menuitem", { name: "Team" }));
 
-    expect(pushMock).toHaveBeenCalledWith("/team");
-
-    await user.click(screen.getByRole("button", { name: /Alex Doe/ }));
-    await user.click(await screen.findByRole("menuitem", { name: "General" }));
-
-    expect(pushMock).toHaveBeenCalledWith("/settings");
-
-    await user.click(screen.getByRole("button", { name: /Alex Doe/ }));
-    await user.click(await screen.findByRole("menuitem", { name: "Coding agents" }));
-
-    expect(pushMock).toHaveBeenCalledWith("/agent");
-
-    await user.click(screen.getByRole("button", { name: /Alex Doe/ }));
-    await user.click(await screen.findByRole("menuitem", { name: "Autopilot settings" }));
-
-    expect(pushMock).toHaveBeenCalledWith("/settings/autopilot");
+    expect(await screen.findByRole("menuitem", { name: "Log out" })).toBeInTheDocument();
   });
 
   it("does not show repo context switcher when org has only 1 repo", async () => {
