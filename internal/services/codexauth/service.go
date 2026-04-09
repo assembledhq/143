@@ -84,7 +84,8 @@ type Service struct {
 	logger      zerolog.Logger
 	issuer      string
 	clientID    string
-	pending     sync.Map // orgID string -> *PendingAuth
+	pending   sync.Map // orgID string -> *PendingAuth
+	refreshMu sync.Map // orgID string -> *sync.Mutex (per-org refresh lock; entries are tiny and bounded by org count)
 }
 
 // NewService creates a new Device Code Auth service.
@@ -456,8 +457,31 @@ func parsePollInterval(raw any) (int, error) {
 	}
 }
 
+// orgRefreshMu returns a per-org mutex for serializing token refreshes.
+// This prevents concurrent requests from both consuming the same refresh
+// token at OpenAI, which would cause refresh_token_reused errors.
+func (s *Service) orgRefreshMu(orgID uuid.UUID) *sync.Mutex {
+	val, _ := s.refreshMu.LoadOrStore(orgID.String(), &sync.Mutex{})
+	return val.(*sync.Mutex)
+}
+
 // RefreshToken refreshes an expired access token using the refresh token.
+// It serializes refreshes per-org to prevent concurrent calls from consuming
+// the same refresh token at OpenAI (which causes refresh_token_reused errors).
 func (s *Service) RefreshToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
+	mu := s.orgRefreshMu(orgID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	// After acquiring the lock, check if another goroutine already refreshed
+	// the token while we were waiting. If the token is fresh (not within the
+	// refresh window), return it directly without hitting OpenAI.
+	if cred, err := s.credentials.Get(ctx, orgID, models.ProviderOpenAIChatGPT); err == nil {
+		if cfg, ok := cred.Config.(models.OpenAIChatGPTConfig); ok && !cfg.NeedsRefresh(refreshWindow) && cfg.AccessToken != "" {
+			return &cfg, nil
+		}
+	}
+
 	cred, err := s.credentials.Get(ctx, orgID, models.ProviderOpenAIChatGPT)
 	if err != nil {
 		return nil, fmt.Errorf("get credential: %w", err)
@@ -593,15 +617,10 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.O
 		refreshed, err := s.RefreshToken(ctx, orgID)
 		if err != nil {
 			s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("token refresh failed")
-			// If refresh token was already consumed by another client
-			// (e.g. user's local Codex CLI), return the existing config
-			// regardless of expiry. The access token may still work, and
-			// even if it doesn't, Codex CLI can handle 401s at runtime.
-			// This is better than blocking session creation entirely.
-			if strings.Contains(err.Error(), "refresh token already used by another client") {
-				return &cfg, nil
-			}
-			// For other refresh failures, use the token if not expired.
+			// For any refresh failure, use the cached token only if it
+			// hasn't actually expired yet. Previously we returned expired
+			// tokens on refresh_token_reused errors, which caused 401s
+			// downstream. Now we consistently check expiry for all error types.
 			if !cfg.IsExpired() {
 				return &cfg, nil
 			}
@@ -616,6 +635,7 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.O
 // Disconnect removes the ChatGPT OAuth credential for the given org.
 func (s *Service) Disconnect(ctx context.Context, orgID uuid.UUID) error {
 	s.pending.Delete(orgID.String())
+	s.refreshMu.Delete(orgID.String())
 	if s.credentials == nil {
 		return nil
 	}

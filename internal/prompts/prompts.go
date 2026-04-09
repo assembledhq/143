@@ -213,3 +213,42 @@ type ComplexityEstimateUserPromptData struct {
 func ComplexityEstimateUserPrompt(data ComplexityEstimateUserPromptData) string {
 	return render("complexity_estimate_user_prompt.template", data)
 }
+
+// ─── Eval ─────────────────────────────────────────────────────────────────────
+
+// EvalJudgePromptData holds the dynamic values for the eval judge system prompt.
+type EvalJudgePromptData struct {
+	OutputMode string // "pass_fail" (default) or "score"
+}
+
+// EvalJudgePrompt renders the system prompt for the LLM judge grader.
+func EvalJudgePrompt(data EvalJudgePromptData) string {
+	if data.OutputMode == "" {
+		data.OutputMode = "pass_fail"
+	}
+	return render("eval_judge_prompt.template", data)
+}
+
+// EvalJudgeUserPromptData holds the dynamic values for the eval judge user prompt.
+type EvalJudgeUserPromptData struct {
+	IssueDescription string
+	AgentDiff        string
+	CriterionName    string
+	CriterionNotes   string
+	SolutionDiff     string // optional
+}
+
+// EvalJudgeUserPrompt renders the user prompt for the LLM judge grader.
+func EvalJudgeUserPrompt(data EvalJudgeUserPromptData) string {
+	return render("eval_judge_user_prompt.template", data)
+}
+
+// EvalBootstrapPromptData holds the dynamic values for the eval bootstrap prompt.
+type EvalBootstrapPromptData struct {
+	RepoFullName string
+}
+
+// EvalBootstrapPrompt renders the system prompt for the PR history bootstrap agent.
+func EvalBootstrapPrompt(data EvalBootstrapPromptData) string {
+	return render("eval_bootstrap_prompt.template", data)
+}

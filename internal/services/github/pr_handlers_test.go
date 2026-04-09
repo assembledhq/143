@@ -18,13 +18,19 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
-// prColumns matches the SELECT columns from pull_requests queries.
+// handlerPRColumns matches the SELECT columns from PullRequestStore.GetByRepoAndNumber
+// (internal/db/pull_requests.go). pgxmock requires column names to match the query,
+// but order need not match the struct because pgx.RowToStructByName maps by name.
+// If the store query changes its SELECT list, update this slice to match.
 var handlerPRColumns = []string{
 	"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-	"title", "body", "status", "review_status", "merged_at", "created_at", "updated_at",
+	"title", "body", "status", "review_status", "authored_by", "merged_at", "created_at", "updated_at",
 }
 
-// sessionColumns matches the SELECT columns from sessions queries (must match sessionSelectColumns in session_store.go).
+// sessionColumns matches the SELECT columns from SessionStore queries
+// (internal/db/session_store.go — sessionSelectColumns). pgx maps by name so
+// column order is not critical, but the set of names must match the query.
+// If session_store.go changes its SELECT list, update this slice to match.
 var sessionColumns = []string{
 	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
@@ -34,7 +40,7 @@ var sessionColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning", "project_task_id",
 	"model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
-	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "created_at",
+	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "deleted_at", "created_at",
 }
 
 // newMockPool creates a pgxmock pool and returns it with a cleanup.
@@ -111,8 +117,8 @@ func TestHandlePullRequestEvent_MergedFlow(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(handlerPRColumns).
-				AddRow(prID, sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
-					"Fix bug", (*string)(nil), "open", "pending", (*time.Time)(nil), now, now),
+				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
+					"Fix bug", (*string)(nil), "open", "pending", "app", (*time.Time)(nil), now, now),
 		)
 
 	// Mock: UpdateStatus to merged.
@@ -125,10 +131,10 @@ func TestHandlePullRequestEvent_MergedFlow(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(sessionColumns).
-				AddRow(sessionID, issueID, orgID, "claude-code", "completed", "full", "standard",
+				AddRow(sessionID, issueID, orgID, "claude-code", "completed", "full", "low",
 					nil, nil, nil, nil,
 					nil, nil, nil, nil,
-					nil, nil, nil, nil,
+					nil, nil, nil, false,
 					nil, nil, nil, nil, nil,
 					nil, nil, nil, nil, nil,
 					nil, // model_override
@@ -140,6 +146,7 @@ func TestHandlePullRequestEvent_MergedFlow(t *testing.T) {
 					nil, // diff_stats
 					nil, // diff_history
 					nil, // input_manifest
+					nil, // deleted_at
 					now),
 		)
 
@@ -181,6 +188,75 @@ func TestHandlePullRequestEvent_MergedFlow(t *testing.T) {
 	require.NoError(t, jobMock.ExpectationsWereMet(), "all job store expectations should be met")
 }
 
+func TestHandlePullRequestEvent_MergedWithNilSessionID(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	now := time.Now()
+
+	prMock := newMockPool(t)
+	deployMock := newMockPool(t)
+	jobMock := newMockPool(t)
+
+	prStore := db.NewPullRequestStore(prMock)
+	deployStore := db.NewDeployStore(deployMock)
+	jobStore := db.NewJobStore(jobMock)
+
+	svc := &PRService{
+		pullRequests: prStore,
+		sessions:     db.NewSessionStore(newMockPool(t)),
+		issues:       db.NewIssueStore(newMockPool(t)),
+		deploys:      deployStore,
+		jobs:         jobStore,
+		logger:       zerolog.Nop(),
+	}
+
+	// Mock: GetByRepoAndNumber returns a PR with nil session_id.
+	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE github_repo").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(handlerPRColumns).
+				AddRow(prID, (*uuid.UUID)(nil), orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
+					"Fix bug", (*string)(nil), "open", "pending", "app", (*time.Time)(nil), now, now),
+		)
+
+	// Mock: UpdateStatus to merged.
+	prMock.ExpectExec("UPDATE pull_requests SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	// Mock: Create deploy.
+	deployMock.ExpectQuery("INSERT INTO deploys").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "deployed_at", "created_at"}).
+				AddRow(uuid.New(), now, now),
+		)
+
+	// Mock: Enqueue job.
+	jobMock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()),
+		)
+
+	event := PullRequestEvent{
+		Action: "closed",
+		Number: 42,
+	}
+	event.PR.Merged = true
+	event.PR.Head.SHA = "abc123commit"
+	event.Repository.FullName = "testorg/testrepo"
+
+	err := svc.HandlePullRequestEvent(context.Background(), event)
+	require.NoError(t, err, "HandlePullRequestEvent should not return an error for a merged PR with nil session_id")
+	require.NoError(t, prMock.ExpectationsWereMet(), "all PR store expectations should be met")
+	require.NoError(t, deployMock.ExpectationsWereMet(), "all deploy store expectations should be met")
+	require.NoError(t, jobMock.ExpectationsWereMet(), "all job store expectations should be met")
+}
+
 func TestHandlePullRequestEvent_ClosedWithoutMergeFlow(t *testing.T) {
 	t.Parallel()
 
@@ -202,8 +278,8 @@ func TestHandlePullRequestEvent_ClosedWithoutMergeFlow(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(handlerPRColumns).
-				AddRow(prID, sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
-					"Fix bug", (*string)(nil), "open", "pending", (*time.Time)(nil), now, now),
+				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
+					"Fix bug", (*string)(nil), "open", "pending", "app", (*time.Time)(nil), now, now),
 		)
 
 	// Mock: UpdateStatus to closed.
@@ -244,8 +320,8 @@ func TestHandlePullRequestEvent_NonClosedAction(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(handlerPRColumns).
-				AddRow(prID, sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
-					"Fix bug", (*string)(nil), "open", "pending", (*time.Time)(nil), now, now),
+				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
+					"Fix bug", (*string)(nil), "open", "pending", "app", (*time.Time)(nil), now, now),
 		)
 
 	event := PullRequestEvent{
@@ -308,8 +384,8 @@ func TestHandlePullRequestReviewEvent_ApprovedFlow(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(handlerPRColumns).
-				AddRow(prID, sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
-					"Fix bug", (*string)(nil), "open", "pending", (*time.Time)(nil), now, now),
+				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
+					"Fix bug", (*string)(nil), "open", "pending", "app", (*time.Time)(nil), now, now),
 		)
 
 	// Mock: UpdateReviewStatus.
@@ -367,8 +443,8 @@ func TestHandlePullRequestReviewEvent_ChangesRequestedWithBody(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(handlerPRColumns).
-				AddRow(prID, sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
-					"Fix bug", (*string)(nil), "open", "pending", (*time.Time)(nil), now, now),
+				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
+					"Fix bug", (*string)(nil), "open", "pending", "app", (*time.Time)(nil), now, now),
 		)
 
 	// Mock: UpdateReviewStatus.
@@ -433,8 +509,8 @@ func TestHandlePullRequestReviewEvent_ChangesRequestedNoReviewStore(t *testing.T
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(handlerPRColumns).
-				AddRow(prID, sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
-					"Fix bug", (*string)(nil), "open", "pending", (*time.Time)(nil), now, now),
+				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
+					"Fix bug", (*string)(nil), "open", "pending", "app", (*time.Time)(nil), now, now),
 		)
 
 	// Mock: UpdateReviewStatus.
@@ -488,8 +564,8 @@ func TestHandlePullRequestReviewEvent_UnknownReviewState(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(handlerPRColumns).
-				AddRow(prID, sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
-					"Fix bug", (*string)(nil), "open", "pending", (*time.Time)(nil), now, now),
+				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
+					"Fix bug", (*string)(nil), "open", "pending", "app", (*time.Time)(nil), now, now),
 		)
 
 	event := PullRequestReviewEvent{
@@ -557,8 +633,8 @@ func TestHandlePullRequestReviewCommentEvent_Created(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(handlerPRColumns).
-				AddRow(prID, sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
-					"Fix bug", (*string)(nil), "open", "pending", (*time.Time)(nil), now, now),
+				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
+					"Fix bug", (*string)(nil), "open", "pending", "app", (*time.Time)(nil), now, now),
 		)
 
 	// Mock: Create review comment.
@@ -658,8 +734,8 @@ func TestHandlePullRequestReviewCommentEvent_NilReviewCommentStore(t *testing.T)
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(handlerPRColumns).
-				AddRow(prID, sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
-					"Fix bug", (*string)(nil), "open", "pending", (*time.Time)(nil), now, now),
+				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
+					"Fix bug", (*string)(nil), "open", "pending", "app", (*time.Time)(nil), now, now),
 		)
 
 	event := PullRequestReviewCommentEvent{
@@ -920,8 +996,8 @@ func TestHandlePullRequestEvent_MergedWithUpdateStatusError(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(handlerPRColumns).
-				AddRow(prID, sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
-					"Fix bug", (*string)(nil), "open", "pending", (*time.Time)(nil), now, now),
+				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
+					"Fix bug", (*string)(nil), "open", "pending", "app", (*time.Time)(nil), now, now),
 		)
 
 	// Mock: UpdateStatus fails.
@@ -947,7 +1023,7 @@ var handlerIssueColumns = []string{
 	"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
 	"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
 	"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
-	"created_at", "updated_at",
+	"created_at", "updated_at", "deleted_at",
 }
 
 // repoColumns for mock repository queries.
@@ -1058,7 +1134,7 @@ func TestCreatePR_Success(t *testing.T) {
 				AddRow(issueID, orgID, "ENG-123", "linear", nil, &repoID,
 					"Fix null pointer", nil, json.RawMessage(`{}`), "open", now, now,
 					5, 2, "high", []string{"bug"}, "fp-1",
-					now, now),
+					now, now, (*time.Time)(nil)),
 		)
 
 	// Mock: repo GetByID.
@@ -1075,7 +1151,7 @@ func TestCreatePR_Success(t *testing.T) {
 	prMock.ExpectQuery("INSERT INTO pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
 				AddRow(uuid.New(), now, now),
@@ -1161,7 +1237,7 @@ func TestCreatePR_NoRepositoryOnIssue(t *testing.T) {
 				AddRow(issueID, orgID, "ENG-123", "linear", nil, nil, // nil repository_id
 					"Fix null pointer", nil, json.RawMessage(`{}`), "open", now, now,
 					5, 2, "high", []string{}, "fp-1",
-					now, now),
+					now, now, (*time.Time)(nil)),
 		)
 
 	diff := "diff --git a/main.go b/main.go\n+++ b/main.go\n+package main\n"
@@ -1208,10 +1284,11 @@ func TestPushRevision_Success(t *testing.T) {
 		ResultSummary: &resultSummary,
 	}
 
+	sid := uuid.New()
 	pr := &models.PullRequest{
 		ID:             prID,
 		OrgID:          orgID,
-		SessionID:     uuid.New(),
+		SessionID:     &sid,
 		GitHubPRNumber: 42,
 		GitHubRepo:     "testorg/testrepo",
 	}
@@ -1271,7 +1348,7 @@ func TestPushRevision_Success(t *testing.T) {
 				AddRow(issueID, orgID, "ENG-123", "linear", nil, &repoID,
 					"Fix null pointer", nil, json.RawMessage(`{}`), "open", now, now,
 					5, 2, "high", []string{"bug"}, "fp-1",
-					now, now),
+					now, now, (*time.Time)(nil)),
 		)
 
 	// Mock: repo GetByID.
@@ -1404,7 +1481,7 @@ func TestPushRevision_WithParentSessionID(t *testing.T) {
 				AddRow(issueID, orgID, "ENG-123", "linear", nil, &repoID,
 					"Fix null pointer", nil, json.RawMessage(`{}`), "open", now, now,
 					5, 2, "high", []string{}, "fp-1",
-					now, now),
+					now, now, (*time.Time)(nil)),
 		)
 	repoMock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).

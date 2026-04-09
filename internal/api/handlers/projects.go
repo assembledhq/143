@@ -87,6 +87,10 @@ func (h *ProjectHandler) List(w http.ResponseWriter, r *http.Request) {
 		Cursor: r.URL.Query().Get("cursor"),
 	}
 
+	if search := r.URL.Query().Get("search"); search != "" {
+		filters.Search = search
+	}
+
 	if repoIDStr := r.URL.Query().Get("repository_id"); repoIDStr != "" {
 		repoID, err := uuid.Parse(repoIDStr)
 		if err != nil {
@@ -293,7 +297,7 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	project := models.Project{
 		OrgID:              orgID,
-		RepositoryID:       repoID,
+		RepositoryID:       &repoID,
 		Title:              req.Title,
 		Goal:               req.Goal,
 		Scope:              req.Scope,

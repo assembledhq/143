@@ -62,6 +62,7 @@ type GitHubStatusResponse struct {
 	HasRepoScope     bool   `json:"has_repo_scope"`
 	GitHubLogin      string `json:"github_login,omitempty"`
 	PRAuthorshipMode string `json:"pr_authorship_mode"`
+	PRDraftDefault   bool   `json:"pr_draft_default"`
 }
 
 // GetStatus returns the user's GitHub connection status and the org's PR authorship mode.
@@ -83,6 +84,7 @@ func (h *GitHubStatusHandler) GetStatus(w http.ResponseWriter, r *http.Request) 
 		settings, parseErr := models.ParseOrgSettings(org.Settings)
 		if parseErr == nil {
 			resp.PRAuthorshipMode = string(settings.PRAuthorship)
+			resp.PRDraftDefault = settings.PRDraftDefault
 		}
 	}
 
@@ -138,6 +140,7 @@ func (h *GitHubStatusHandler) HandleConnectCallback(w http.ResponseWriter, r *ht
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "not authenticated")
 		return
 	}
+	orgID := middleware.OrgIDFromContext(r.Context())
 
 	// Exchange code for token using the shared helper.
 	tokenResp, err := exchangeGitHubOAuthCode(h.githubClientID, h.githubSecret, code)
@@ -152,7 +155,7 @@ func (h *GitHubStatusHandler) HandleConnectCallback(w http.ResponseWriter, r *ht
 		TokenType:   tokenResp.TokenType,
 		Scope:       tokenResp.Scope,
 	}
-	if err := h.credentials.Upsert(r.Context(), user.ID, user.OrgID, cfg, false); err != nil {
+	if err := h.credentials.Upsert(r.Context(), user.ID, orgID, cfg, false); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to store credential", err)
 		return
 	}

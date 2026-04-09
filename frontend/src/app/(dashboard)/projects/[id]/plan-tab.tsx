@@ -162,7 +162,7 @@ export function SpecsSection({
               <CardHeader className="pb-2">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${typeCfg.color}`}>
+                    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${typeCfg.color}`}>
                       {typeCfg.label}
                     </span>
                     {isEditing ? (
@@ -176,7 +176,7 @@ export function SpecsSection({
                     )}
                   </div>
                   <div className="flex items-center gap-1">
-                    <span className="text-[10px] text-muted-foreground mr-2">v{spec.version}</span>
+                    <span className="text-xs text-muted-foreground mr-2">v{spec.version}</span>
                     {isEditing ? (
                       <>
                         <Button
@@ -197,10 +197,10 @@ export function SpecsSection({
                         </Button>
                         {pendingDeleteId === spec.id ? (
                           <span className="flex items-center gap-1">
-                            <Button size="sm" variant="destructive" className="h-6 text-[10px] px-2" onClick={() => deleteMutation.mutate(spec.id)}>
+                            <Button size="sm" variant="destructive" className="h-6 text-xs px-2" onClick={() => deleteMutation.mutate(spec.id)}>
                               Confirm
                             </Button>
-                            <Button size="sm" variant="ghost" className="h-6 text-[10px] px-2" onClick={() => setPendingDeleteId(null)}>
+                            <Button size="sm" variant="ghost" className="h-6 text-xs px-2" onClick={() => setPendingDeleteId(null)}>
                               Cancel
                             </Button>
                           </span>
@@ -222,7 +222,7 @@ export function SpecsSection({
                     {spec.content || "(empty)"}
                   </pre>
                 )}
-                <p className="text-[10px] text-muted-foreground mt-2">Updated {formatTimeAgo(spec.updated_at)}</p>
+                <p className="text-xs text-muted-foreground mt-2">Updated {formatTimeAgo(spec.updated_at)}</p>
               </CardContent>
             </Card>
           );
@@ -345,15 +345,15 @@ export function DesignsSection({
               <CardContent className="p-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2 min-w-0">
-                    <span className={`inline-flex items-center rounded-full px-1.5 py-0 text-[10px] font-medium ${catCfg.color}`}>{catCfg.label}</span>
+                    <span className={`inline-flex items-center rounded-full px-1.5 py-0 text-xs font-medium ${catCfg.color}`}>{catCfg.label}</span>
                     <span className="text-xs font-medium truncate">{attachment.file_name}</span>
                   </div>
                   {pendingDeleteId === attachment.id ? (
                     <span className="flex items-center gap-1">
-                      <Button size="sm" variant="destructive" className="h-6 text-[10px] px-2" onClick={() => deleteMutation.mutate(attachment.id)}>
+                      <Button size="sm" variant="destructive" className="h-6 text-xs px-2" onClick={() => deleteMutation.mutate(attachment.id)}>
                         Confirm
                       </Button>
-                      <Button size="sm" variant="ghost" className="h-6 text-[10px] px-2" onClick={() => setPendingDeleteId(null)}>
+                      <Button size="sm" variant="ghost" className="h-6 text-xs px-2" onClick={() => setPendingDeleteId(null)}>
                         Cancel
                       </Button>
                     </span>
@@ -413,18 +413,18 @@ export function AnalysisSection({ project }: { project: Project }) {
         </div>
 
         {summary && (
-          <div className="text-[11px] text-muted-foreground bg-muted/30 rounded-md px-3 py-2">{summary}</div>
+          <div className="text-xs text-muted-foreground bg-muted/30 rounded-md px-3 py-2">{summary}</div>
         )}
 
         {suggestions.map((s, i) => (
           <div key={i} className="flex items-start gap-2 text-xs border-l-2 border-muted pl-3 py-1">
-            <span className="flex-shrink-0 w-5 h-5 rounded-full bg-muted flex items-center justify-center font-mono font-bold text-[10px]">
+            <span className="flex-shrink-0 w-5 h-5 rounded-full bg-muted flex items-center justify-center font-mono font-semibold text-xs">
               {typeIcons[s.type] || "?"}
             </span>
             <div>
               <div className="flex items-center gap-1.5">
                 <span className="font-medium">{s.title}</span>
-                <span className={`inline-flex items-center rounded-full px-1 py-0 text-[9px] font-medium ${priorityColors[s.priority] || priorityColors.medium}`}>{s.priority}</span>
+                <span className={`inline-flex items-center rounded-full px-1 py-0 text-xs font-medium ${priorityColors[s.priority] || priorityColors.medium}`}>{s.priority}</span>
               </div>
               <p className="text-muted-foreground mt-0.5">{s.description}</p>
             </div>

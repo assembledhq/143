@@ -21,19 +21,19 @@ var projectTestColumns = []string{
 	"proposed_by_pm", "source_issue_ids", "proposal_reasoning", "similar_projects",
 	"agent_type", "model_override",
 	"schedule_enabled", "schedule_interval", "schedule_unit", "next_run_at",
-	"created_by", "created_at", "updated_at", "completed_at",
+	"created_by", "deleted_at", "created_at", "updated_at", "completed_at",
 }
 
 func newProjectRow(projectID, orgID, repoID uuid.UUID, now time.Time) []interface{} {
 	return []interface{}{
-		projectID, orgID, repoID, "Test Project", "Build a thing", nil, nil,
+		projectID, orgID, &repoID, "Test Project", "Build a thing", nil, nil,
 		"draft", 50, "sequential", 2, false, "main",
 		nil, json.RawMessage(`[]`), json.RawMessage(`[]`),
 		0, 0, 0,
 		false, []uuid.UUID{}, nil, json.RawMessage(`[]`),
 		nil, nil,
 		false, 1, "days", nil,
-		nil, now, now, nil,
+		nil, (*time.Time)(nil), now, now, nil,
 	}
 }
 
@@ -57,15 +57,18 @@ func TestProjectStore_Create(t *testing.T) {
 	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
+	// Create wraps insert + join-table writes in a transaction.
+	mock.ExpectBegin()
 	// Create has 26 named args (including agent_type, model_override, schedule, and similar_projects fields)
 	mock.ExpectQuery("INSERT INTO projects").
 		WithArgs(anyArgs(26)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(projectID, now, now))
+	mock.ExpectCommit()
 
 	store := NewProjectStore(mock)
 	project := &models.Project{
 		OrgID:         orgID,
-		RepositoryID:  repoID,
+		RepositoryID:  &repoID,
 		Title:         "Test Project",
 		Goal:          "Build a thing",
 		Status:        models.ProjectStatusDraft,
@@ -436,6 +439,133 @@ func TestProjectStore_ListByOrg_WithRepositoryID(t *testing.T) {
 		RepositoryID: repoID,
 	})
 	require.NoError(t, err, "ListByOrg with RepositoryID should not return an error")
+	require.Len(t, projects, 1, "should return one project")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestProjectStore_ListByOrg_WithSearch(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	mock.ExpectQuery("SELECT .+ FROM projects WHERE org_id .+ AND \\(title ILIKE .+ OR goal ILIKE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(projectTestColumns).
+				AddRow(newProjectRow(uuid.New(), orgID, repoID, now)...),
+		)
+
+	store := NewProjectStore(mock)
+	projects, err := store.ListByOrg(context.Background(), orgID, ProjectFilters{
+		Search: "build",
+	})
+	require.NoError(t, err, "ListByOrg with Search should not return an error")
+	require.Len(t, projects, 1, "should return one project")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestProjectStore_SoftDelete(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewProjectStore(mock)
+
+	mock.ExpectExec("UPDATE projects SET deleted_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.SoftDelete(context.Background(), uuid.New(), uuid.New())
+	require.NoError(t, err, "SoftDelete should not return an error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestProjectStore_SoftDelete_NotFound(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewProjectStore(mock)
+
+	mock.ExpectExec("UPDATE projects SET deleted_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+	err = store.SoftDelete(context.Background(), uuid.New(), uuid.New())
+	require.Error(t, err, "SoftDelete should return an error when project not found")
+	require.Contains(t, err.Error(), "not found or already deleted")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestProjectStore_CountByOrgStatus(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewProjectStore(mock)
+
+	mock.ExpectQuery("SELECT count").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(3))
+
+	count, err := store.CountByOrgStatus(context.Background(), uuid.New(), []string{"active", "proposed"})
+	require.NoError(t, err, "CountByOrgStatus should not return an error")
+	require.Equal(t, 3, count, "should return count of 3")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestProjectStore_CountByOrgRepoStatus(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewProjectStore(mock)
+
+	mock.ExpectQuery("SELECT count").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(2))
+
+	count, err := store.CountByOrgRepoStatus(context.Background(), uuid.New(), uuid.New(), []string{"active"})
+	require.NoError(t, err, "CountByOrgRepoStatus should not return an error")
+	require.Equal(t, 2, count, "should return count of 2")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestProjectStore_ListByOrgRepoStatuses(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewProjectStore(mock)
+	orgID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM projects WHERE org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(projectTestColumns).
+				AddRow(newProjectRow(uuid.New(), orgID, repoID, now)...),
+		)
+
+	projects, err := store.ListByOrgRepoStatuses(context.Background(), orgID, repoID, []string{"active"})
+	require.NoError(t, err, "ListByOrgRepoStatuses should not return an error")
 	require.Len(t, projects, 1, "should return one project")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

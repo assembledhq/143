@@ -2,7 +2,7 @@ root = "."
 tmp_dir = "tmp"
 
 [build]
-  cmd = "go build -o ./tmp/server ./cmd/server"
+  cmd = "go build -ldflags \"-X github.com/assembledhq/143/internal/version.BuildSHA=$(git rev-parse HEAD 2>/dev/null || echo dev)\" -o ./tmp/server ./cmd/server"
   bin = "./tmp/server"
   delay = 1000
   include_ext = ["go"]

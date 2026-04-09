@@ -112,6 +112,7 @@ export interface Session {
   sandbox_state: string;
   snapshot_key?: string;
   target_branch?: string;
+  repository_id?: string;
   error?: string;
   result_summary?: string;
   diff?: string;
@@ -302,6 +303,8 @@ export interface OrgSettings {
   llm_reasoning_effort?: 'low' | 'medium' | 'high' | '';
   agent_config?: Record<string, Record<string, string>>;
   default_agent_type?: 'codex' | 'claude_code' | 'gemini_cli';
+  pr_authorship?: 'user_preferred' | 'app_only' | 'user_required';
+  pr_draft_default?: boolean;
 }
 
 export interface ProductContext {
@@ -800,3 +803,147 @@ export interface FileLine {
 export interface FileContextResponse {
   lines: FileLine[];
 }
+
+// --- Eval types ---
+
+export type EvalTaskSource = 'manual' | 'pr_bootstrap' | 'failure_derived';
+export type EvalComplexity = 'trivial' | 'simple' | 'moderate' | 'complex';
+export type GraderType = 'code_check' | 'llm_judge';
+export type EvalRunStatus = 'pending' | 'running' | 'completed' | 'failed';
+export type EvalBatchStatus = 'pending' | 'running' | 'completed' | 'failed';
+export type EvalBootstrapStatus = 'pending' | 'running' | 'completed' | 'failed';
+
+export interface ScoringCriterion {
+  name: string;
+  notes: string;
+  grader_type: GraderType;
+  grader_config?: Record<string, unknown>;
+  weight: number;
+  required: boolean;
+}
+
+export interface CriterionResult {
+  name: string;
+  score: number;
+  pass: boolean;
+  details?: string;
+  reasoning?: string;
+}
+
+export interface EvalTask {
+  id: string;
+  org_id: string;
+  repo_id: string;
+  name: string;
+  description: string;
+  base_commit_sha: string;
+  solution_commit_sha?: string;
+  solution_diff?: string;
+  issue_description: string;
+  issue_context?: Record<string, unknown>;
+  server_deploy_sha?: string;
+  pm_document_set_pin_id?: string;
+  org_settings_version_id?: string;
+  memory_snapshot?: Record<string, unknown>;
+  sandbox_image_digest?: string;
+  context_overrides?: Record<string, unknown>;
+  scoring_criteria: ScoringCriterion[];
+  pass_threshold: number;
+  source: EvalTaskSource;
+  source_pr_number?: number;
+  complexity: EvalComplexity;
+  snapshot_broken: boolean;
+  tags?: string[];
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
+  archived_at?: string;
+}
+
+export interface EvalRun {
+  id: string;
+  task_id: string;
+  org_id: string;
+  batch_id?: string;
+  input_manifest?: Record<string, unknown>;
+  model: string;
+  server_deploy_sha?: string;
+  pm_document_set_pin_id?: string;
+  config_ref?: string;
+  context_overrides?: Record<string, unknown>;
+  agent_diff?: string;
+  agent_trace?: Record<string, unknown>;
+  token_usage?: Record<string, unknown>;
+  criterion_results?: CriterionResult[];
+  final_score?: number;
+  passed?: boolean;
+  status: EvalRunStatus;
+  duration_seconds?: number;
+  sandbox_id?: string;
+  started_at?: string;
+  completed_at?: string;
+  error_message?: string;
+  created_at: string;
+}
+
+export interface EvalBatch {
+  id: string;
+  org_id: string;
+  name: string;
+  status: EvalBatchStatus;
+  task_count: number;
+  run_count: number;
+  created_by?: string;
+  created_at: string;
+  completed_at?: string;
+}
+
+export interface EvalBatchDetail extends EvalBatch {
+  runs: EvalRun[];
+}
+
+export interface EvalBootstrapCandidate {
+  pr_number: number;
+  pr_title: string;
+  base_commit_sha: string;
+  solution_commit_sha: string;
+  solution_diff: string;
+  issue_description: string;
+  scoring_criteria: ScoringCriterion[];
+  complexity: EvalComplexity;
+  fitness_score: number;
+  fitness_reasoning: string;
+}
+
+export interface EvalBootstrapRun {
+  id: string;
+  org_id: string;
+  repo_id: string;
+  status: EvalBootstrapStatus;
+  candidates?: EvalBootstrapCandidate[];
+  session_id?: string;
+  created_by?: string;
+  created_at: string;
+  completed_at?: string;
+  error_message?: string;
+}
+
+export const evalComplexityConfig: Record<EvalComplexity, { color: string; label: string }> = {
+  trivial: { color: "bg-muted text-muted-foreground", label: "Trivial" },
+  simple: { color: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400", label: "Simple" },
+  moderate: { color: "bg-yellow-500/10 text-yellow-700 dark:text-yellow-400", label: "Moderate" },
+  complex: { color: "bg-red-500/10 text-red-700 dark:text-red-400", label: "Complex" },
+};
+
+export const evalRunStatusConfig: Record<EvalRunStatus, { color: string; label: string }> = {
+  pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
+  running: { color: "bg-blue-500/10 text-blue-700 dark:text-blue-400", label: "Running" },
+  completed: { color: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400", label: "Completed" },
+  failed: { color: "bg-red-500/10 text-red-700 dark:text-red-400", label: "Failed" },
+};
+
+export const evalSourceConfig: Record<EvalTaskSource, { label: string }> = {
+  manual: { label: "Manual" },
+  pr_bootstrap: { label: "PR bootstrap" },
+  failure_derived: { label: "Failure derived" },
+};

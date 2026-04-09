@@ -62,7 +62,7 @@ export function ContextExpander({
     <button
       onClick={handleClick}
       disabled={loading || !canExpand}
-      className="flex items-center justify-center w-full py-1 text-[11px] text-muted-foreground/70 hover:text-muted-foreground hover:bg-muted/30 transition-colors font-mono select-none gap-1 disabled:opacity-40"
+      className="flex items-center justify-center w-full py-1 text-xs text-muted-foreground/70 hover:text-muted-foreground hover:bg-muted/30 transition-colors font-mono select-none gap-1 disabled:opacity-40"
       title={canExpand ? `Show ${hiddenLineCount} hidden lines` : "Context expansion unavailable (sandbox not running)"}
     >
       {loading ? (

@@ -53,8 +53,10 @@ func (s *PMDecisionLogStore) ListRecentByOrg(ctx context.Context, orgID uuid.UUI
 }
 
 type PMDecisionFilters struct {
-	Limit  int
-	Cursor string
+	Limit        int
+	Cursor       string
+	DecisionType *models.PMDecisionType
+	Outcome      *models.PMDecisionOutcome
 }
 
 // ListDecisionViews returns enriched decisions joined with issue and project data.
@@ -71,6 +73,20 @@ func (s *PMDecisionLogStore) ListDecisionViews(ctx context.Context, orgID uuid.U
 		WHERE d.org_id = @org_id`
 
 	args := pgx.NamedArgs{"org_id": orgID}
+
+	if filters.DecisionType != nil {
+		query += ` AND d.decision = @decision_type`
+		args["decision_type"] = *filters.DecisionType
+	}
+
+	if filters.Outcome != nil {
+		if *filters.Outcome == models.PMDecisionOutcomeStillOpen {
+			query += ` AND (d.outcome = 'still_open' OR d.outcome IS NULL OR d.outcome = '')`
+		} else {
+			query += ` AND d.outcome = @outcome`
+			args["outcome"] = *filters.Outcome
+		}
+	}
 
 	if filters.Cursor != "" {
 		cursorID, err := uuid.Parse(filters.Cursor)

@@ -45,6 +45,9 @@ vi.mock("lucide-react", () => {
     RotateCcw: icon("RotateCcw"),
     CircleIcon: icon("CircleIcon"),
     Play: icon("Play"),
+    AlertTriangle: icon("AlertTriangle"),
+    Clock: icon("Clock"),
+    Target: icon("Target"),
   };
 });
 

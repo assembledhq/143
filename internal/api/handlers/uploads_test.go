@@ -111,6 +111,9 @@ func TestUploadHandler_ServeUpload_PathTraversal(t *testing.T) {
 	h := NewUploadHandler(store)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/uploads/files/../../etc/passwd", nil)
+	orgID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 
 	h.ServeUpload(w, req)
@@ -126,12 +129,34 @@ func TestUploadHandler_ServeUpload_EmptyKey(t *testing.T) {
 	h := NewUploadHandler(store)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/uploads/files/", nil)
+	orgID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 
 	h.ServeUpload(w, req)
 
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	require.Contains(t, w.Body.String(), "INVALID_KEY")
+}
+
+func TestUploadHandler_ServeUpload_CrossOrgDenied(t *testing.T) {
+	t.Parallel()
+
+	store := storage.NewFileUploadStore(t.TempDir(), "/api/v1/uploads/files")
+	h := NewUploadHandler(store)
+
+	otherOrgID := uuid.MustParse("00000000-0000-0000-0000-000000000099")
+	// Request a file keyed under a different org.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/uploads/files/00000000-0000-0000-0000-000000000001/2025-01/file.png", nil)
+	ctx := middleware.WithOrgID(req.Context(), otherOrgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.ServeUpload(w, req)
+
+	require.Equal(t, http.StatusForbidden, w.Code)
+	require.Contains(t, w.Body.String(), "FORBIDDEN")
 }
 
 func TestUploadHandler_ServeUpload_S3Mode(t *testing.T) {

@@ -297,11 +297,11 @@ export function DocumentsManager() {
                         >
                           {doc.title}
                         </button>
-                        <Badge variant="secondary" className={`text-[10px] ${DOC_TYPE_COLORS[doc.doc_type] ?? DOC_TYPE_COLORS.reference}`}>
+                        <Badge variant="secondary" className={`text-xs ${DOC_TYPE_COLORS[doc.doc_type] ?? DOC_TYPE_COLORS.reference}`}>
                           {DOC_TYPE_LABELS[doc.doc_type] ?? doc.doc_type}
                         </Badge>
                         {doc.source_type !== "manual" && (
-                          <Badge variant="outline" className="text-[10px] gap-0.5">
+                          <Badge variant="outline" className="text-xs gap-0.5">
                             <LinkIcon className="h-2.5 w-2.5" />
                             {SOURCE_TYPE_LABELS[doc.source_type] ?? doc.source_type}
                           </Badge>
@@ -329,7 +329,7 @@ export function DocumentsManager() {
                             <Button
                               variant="destructive"
                               size="sm"
-                              className="h-7 text-[11px] px-2"
+                              className="h-7 text-xs px-2"
                               onClick={() => deleteDocMutation.mutate(doc.id)}
                               disabled={deleteDocMutation.isPending}
                             >
@@ -355,17 +355,17 @@ export function DocumentsManager() {
                     {expandedDocId === doc.id && (
                       <div className="mt-2 border-t pt-2">
                         {isSafeUrl(doc.source_url) && (
-                          <p className="text-[11px] text-muted-foreground mb-1.5">
+                          <p className="text-xs text-muted-foreground mb-1.5">
                             Source: <a href={doc.source_url} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">{doc.source_url}</a>
                             {doc.last_synced_at && <span className="ml-1.5">(synced {new Date(doc.last_synced_at).toLocaleDateString()})</span>}
                           </p>
                         )}
-                        <pre className="text-[11px] text-muted-foreground whitespace-pre-wrap font-mono leading-relaxed max-h-72 overflow-auto">
+                        <pre className="text-xs text-muted-foreground whitespace-pre-wrap font-mono leading-relaxed max-h-72 overflow-auto">
                           {doc.content || "(empty)"}
                         </pre>
                       </div>
                     )}
-                    <p className="mt-0.5 text-[11px] text-muted-foreground ml-5.5">
+                    <p className="mt-0.5 text-xs text-muted-foreground ml-5.5">
                       Updated {new Date(doc.updated_at).toLocaleDateString()}
                       {doc.content && ` \u00b7 ${doc.content.length.toLocaleString()} chars`}
                     </p>

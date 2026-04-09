@@ -35,18 +35,50 @@ This file applies to the entire `frontend/` tree. Follow these patterns strictly
 
 ### Typography Scale
 
-The base font size is `text-[13px]` (set globally). Use these specific sizes:
+The base font size is `text-[13px]` (set globally on `body`). The project uses a strict 7-level type scale. **Do NOT introduce arbitrary pixel sizes** — only `text-[13px]` is permitted as an arbitrary value (it is the body default).
 
-| Element | Classes |
+| Token | Tailwind | Pixels | Role |
+|-------|----------|--------|------|
+| Micro | `text-xs` | 12px | Badges, timestamps, table headers, notification counters, helper text |
+| Body | _(inherited)_ | 13px | Default — descriptions, card content, inputs, nav items. Never set explicitly unless overriding a parent. |
+| Label | `text-sm` | 14px | Card titles, form labels, emphasized text |
+| Subhead | `text-lg` | 18px | Dialog/sheet titles, section headings |
+| Title | `text-2xl` | 24px | Page headings (via `PageHeader`) |
+| Display | `text-3xl` | 30px | Landing section headings only |
+| Hero | `text-[2.75rem]` → `text-6xl` | 44–60px | Landing hero only |
+
+**Allowed font weights (dashboard):**
+
+| Weight | Tailwind | Use for |
+|--------|----------|---------|
+| Regular | `font-normal` (400) | Body text, descriptions |
+| Medium | `font-medium` (500) | Buttons, links, nav items, form labels, badges |
+| Semibold | `font-semibold` (600) | All headings — page titles, card titles, dialog titles |
+
+**Banned classes (enforced by ESLint `custom/no-banned-typography`):**
+
+- `text-[9px]`, `text-[10px]`, `text-[11px]`, `text-[12px]`, `text-[14px]`, `text-[15px]`, `text-[16px]` — use `text-xs` or `text-sm` instead
+- `font-bold` — use `font-semibold`
+- `tracking-widest` — use `tracking-wider`
+- `text-xl` — use `text-lg`
+
+#### Common typography recipes
+
+| Context | Classes |
 |---------|---------|
-| Page title | `text-xl font-semibold tracking-tight text-foreground` (via `PageHeader`) |
+| Page title | `text-2xl font-semibold tracking-tight text-foreground` (via `PageHeader`) |
 | Page description | `text-sm text-muted-foreground` (via `PageHeader`) |
-| Section label | `text-xs font-semibold uppercase tracking-wider text-muted-foreground` |
+| Section label | `text-xs font-medium uppercase tracking-wider text-muted-foreground` |
 | Card title | `text-sm font-semibold` (via `CardTitle`) |
-| Body text | `text-[13px]` (default) |
-| Small metadata | `text-[11px]` (badges, timestamps, counts) |
+| Dialog/sheet title | `text-lg font-semibold` |
+| Body text | _(inherited 13px — no class needed)_ |
+| Badge text | `text-xs font-medium` |
+| Metric number | `text-2xl font-semibold tabular-nums` |
+| Table header | `text-xs font-medium tracking-wider text-muted-foreground` |
+| Small metadata | `text-xs text-muted-foreground` |
 | Helper/hint text | `text-xs text-muted-foreground` |
 | Labels | `text-[13px]` (via `<Label>` component) |
+| Code/mono text | `font-mono text-xs` |
 
 ### Spacing System
 
@@ -84,14 +116,14 @@ Use `PageContainer` (`src/components/page-container.tsx`) for ALL dashboard page
 </PageContainer>
 ```
 
-**All pages MUST use the same `size="default"` (max-w-5xl)** to ensure consistent margins across the app. This is critical — using different sizes creates jarring layout shifts when navigating between pages.
+Available sizes:
 
 - `narrow` (max-w-3xl): Only for focused single-column forms/modals
-- `default` (max-w-5xl): **Standard for all dashboard pages** — use this
-- `wide` (max-w-5xl): Alias for default (kept for backwards compat)
+- `default` (max-w-5xl): **Standard for most dashboard pages** — use this
+- `wide` (max-w-7xl): For data-heavy pages (tables, logs) that benefit from extra horizontal space
 - `full` (max-w-none): Only for true full-bleed layouts
 
-**NEVER use `size="wide"` or `size="narrow"` for regular dashboard pages.** The outer `<div className="space-y-6">` is mandatory for consistent vertical rhythm.
+Use `size="default"` for most pages. Use `size="wide"` for pages dominated by data tables or tabular content. The outer `<div className="space-y-6">` is mandatory for consistent vertical rhythm.
 
 ### Page Header
 
@@ -150,7 +182,7 @@ Use `Button` components with variant toggling for filter tabs. **NEVER** use cus
     >
       {tab.label}
       {tab.value === "active" && activeCount > 0 && (
-        <span className="ml-1.5 rounded-full bg-blue-500 text-white text-[10px] px-1.5 py-0.5 font-normal">
+        <span className="ml-1.5 rounded-full bg-blue-500 text-white text-xs px-1.5 py-0.5 font-normal">
           {activeCount}
         </span>
       )}
@@ -209,7 +241,7 @@ Static status dots: `<span className="inline-flex rounded-full h-2 w-2 bg-{color
 
 Use `<span>` with inline status colors for row status indicators:
 ```tsx
-<span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${status.color}`}>
+<span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${status.color}`}>
   {status.label}
 </span>
 ```
@@ -423,7 +455,7 @@ Use the `tags` parameter to add searchable context (feature name, endpoint, comp
 3. **Ad-hoc page headers** — Never use `<h1>` directly. Use `PageHeader` component.
 4. **Non-responsive grids** — Never `grid grid-cols-2` without `md:` breakpoint.
 5. **Missing PageContainer** — Every dashboard page must be wrapped in `PageContainer`.
-6. **Inconsistent container sizes** — All dashboard pages MUST use `size="default"`. Never use `size="wide"` or `size="narrow"` for regular pages — this creates different margins between pages.
+6. **Inconsistent container sizes** — Use `size="default"` for most pages and `size="wide"` for data-table-heavy pages. Never use `size="narrow"` for regular dashboard pages.
 7. **Inconsistent row padding** — Always `py-3.5 px-4` for list rows.
 8. **Missing dark mode** — Banners/alerts using hardcoded Tailwind colors (e.g., `bg-blue-50`, `border-green-200`) need `dark:` variant classes. Semantic tokens (`bg-destructive/10`, `bg-primary/10`) adapt automatically.
 9. **Flat cards** — Cards should always have `shadow-sm` (provided by the Card component). Don't override with `shadow-none`.

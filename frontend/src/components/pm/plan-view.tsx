@@ -21,7 +21,7 @@ export function PlanView({ plan }: { plan: PMPlan }) {
       <div className="space-y-3">
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-semibold">Priority tasks</h3>
-          <Badge variant="secondary" className="text-[11px]">
+          <Badge variant="secondary" className="text-xs">
             {plan.tasks.length} tasks
           </Badge>
         </div>
@@ -42,7 +42,7 @@ export function PlanView({ plan }: { plan: PMPlan }) {
               <div key={`${cluster.root_cause}-${index}`} className="space-y-2">
                 <div className="flex flex-wrap gap-2">
                   {cluster.issue_ids.map((id) => (
-                    <Badge key={id} variant="secondary" className="text-[11px]">
+                    <Badge key={id} variant="secondary" className="text-xs">
                       {id.slice(0, 8)}
                     </Badge>
                   ))}
@@ -69,10 +69,10 @@ export function PlanView({ plan }: { plan: PMPlan }) {
             {plan.skipped_issues.map((skip, index) => (
               <div key={`${skip.issue_id}-${index}`} className="space-y-2">
                 <div className="flex items-center gap-2">
-                  <Badge variant="outline" className="text-[11px]">
+                  <Badge variant="outline" className="text-xs">
                     {skip.issue_id.slice(0, 8)}
                   </Badge>
-                  <Badge variant="secondary" className="text-[11px]">
+                  <Badge variant="secondary" className="text-xs">
                     {skip.reason.replace("_", " ")}
                   </Badge>
                 </div>

@@ -30,7 +30,7 @@ export function ControlStrip({ pmStatus, isAnalyzing, isPending, onAnalyze, anal
       >
         <Button
           size="sm"
-          className="h-7 text-[12px]"
+          className="h-7 text-xs"
           onClick={onAnalyze}
           disabled={isPending || isAnalyzing}
           title="Run the PM agent now without waiting for the next scheduled run"

@@ -301,7 +301,7 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
                     />
                     <div className="flex flex-wrap gap-2">
                       {focusAreas.map((area) => (
-                        <Badge key={area} variant="secondary" className="text-[11px]">
+                        <Badge key={area} variant="secondary" className="text-xs">
                           {area}
                           <Button
                             variant="ghost"
@@ -332,7 +332,7 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
                     />
                     <div className="flex flex-wrap gap-2">
                       {avoidAreas.map((area) => (
-                        <Badge key={area} variant="secondary" className="text-[11px]">
+                        <Badge key={area} variant="secondary" className="text-xs">
                           {area}
                           <Button
                             variant="ghost"

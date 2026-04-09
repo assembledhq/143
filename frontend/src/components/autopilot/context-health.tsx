@@ -12,7 +12,7 @@ interface ContextHealthProps {
 
 function HealthIndicator({ set, label, detail }: { set: boolean; label: string; detail?: string }) {
   return (
-    <div className="flex items-center gap-2 text-[12px]">
+    <div className="flex items-center gap-2 text-xs">
       {set ? (
         <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
       ) : (
@@ -63,8 +63,8 @@ export function ContextHealth({ productContext, settingsUpdatedAt, documents }: 
   return (
     <div className="rounded-md border border-border bg-muted/30 px-4 py-3 space-y-2">
       <div className="flex items-center justify-between">
-        <span className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Context health</span>
-        <span className={`text-[11px] font-medium ${scoreColor}`}>{scoreLabel}</span>
+        <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Context health</span>
+        <span className={`text-xs font-medium ${scoreColor}`}>{scoreLabel}</span>
       </div>
       <div className="space-y-1.5">
         <HealthIndicator set={philosophySet} label="Philosophy" detail={philosophySet ? "Active" : "Not set"} />
@@ -80,7 +80,7 @@ export function ContextHealth({ productContext, settingsUpdatedAt, documents }: 
           }
         />
         {directionSet && directionAge && (
-          <div className="flex items-center gap-2 text-[12px] ml-6">
+          <div className="flex items-center gap-2 text-xs ml-6">
             <AlertTriangle className="h-3 w-3 text-amber-500 shrink-0" />
             <span className="text-amber-600 dark:text-amber-400">Consider refreshing your direction</span>
           </div>

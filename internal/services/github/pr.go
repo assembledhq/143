@@ -176,10 +176,17 @@ func (s *PRService) SetBaseURL(url string) {
 	s.baseURL = url
 }
 
+// CreatePRParams holds optional parameters for PR creation that come from the
+// API request (as opposed to org-level defaults). Fields use pointers to
+// distinguish "caller explicitly set this" from "use org default".
+type CreatePRParams struct {
+	Draft *bool `json:"draft,omitempty"`
+}
+
 // CreatePR creates a GitHub PR from a completed agent run.
 // The session may or may not have an associated issue — issueless sessions
 // (e.g. manually created) derive PR metadata from the session itself.
-func (s *PRService) CreatePR(ctx context.Context, run *models.Session) (*models.PullRequest, error) {
+func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ...CreatePRParams) (*models.PullRequest, error) {
 	if run.Diff == nil || *run.Diff == "" {
 		return nil, fmt.Errorf("agent run %s has no diff", run.ID)
 	}
@@ -313,8 +320,13 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session) (*models.
 	title := formatPRTitle(run, issue)
 	body := s.generatePRBody(ctx, token, owner, repoName, defaultBranch, *repoID, run.OrgID, run, issue)
 
+	// Resolve draft: explicit request param > org default.
+	draft := orgSettings.PRDraftDefault
+	if len(params) > 0 && params[0].Draft != nil {
+		draft = *params[0].Draft
+	}
 	var prOpts []prCreateOption
-	if orgSettings.PRDraftDefault {
+	if draft {
 		prOpts = append(prOpts, withDraft(true))
 	}
 
@@ -332,8 +344,12 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session) (*models.
 	}
 
 	// 7. Store PR in DB.
+	authoredBy := "app"
+	if resolution.IsUserToken {
+		authoredBy = "user"
+	}
 	pr := &models.PullRequest{
-		SessionID:      run.ID,
+		SessionID:      &run.ID,
 		OrgID:          run.OrgID,
 		GitHubPRNumber: prNumber,
 		GitHubPRURL:    prURL,
@@ -342,6 +358,7 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session) (*models.
 		Body:           &body,
 		Status:         "open",
 		ReviewStatus:   "pending",
+		AuthoredBy:     authoredBy,
 	}
 	if err := s.pullRequests.Create(ctx, pr); err != nil {
 		return nil, fmt.Errorf("store pull request: %w", err)
@@ -397,15 +414,17 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 			return fmt.Errorf("update PR status to merged: %w", err)
 		}
 
-		// Get the agent run to find the issue.
-		run, err := s.sessions.GetByID(ctx, pr.OrgID, pr.SessionID)
-		if err != nil {
-			return fmt.Errorf("get agent run: %w", err)
-		}
+		// Get the agent run to find the issue (only if PR is linked to a session).
+		if pr.SessionID != nil {
+			run, err := s.sessions.GetByID(ctx, pr.OrgID, *pr.SessionID)
+			if err != nil {
+				return fmt.Errorf("get agent run: %w", err)
+			}
 
-		// Update issue status to fixed.
-		if err := s.issues.UpdateStatus(ctx, pr.OrgID, run.IssueID, "fixed"); err != nil {
-			s.logger.Warn().Err(err).Str("issue_id", run.IssueID.String()).Msg("failed to update issue status to fixed")
+			// Update issue status to fixed.
+			if err := s.issues.UpdateStatus(ctx, pr.OrgID, run.IssueID, "fixed"); err != nil {
+				s.logger.Warn().Err(err).Str("issue_id", run.IssueID.String()).Msg("failed to update issue status to fixed")
+			}
 		}
 
 		// Create deploy record.
@@ -1077,26 +1096,95 @@ var prTemplatePaths = []string{
 
 // fetchPRTemplate retrieves the repo's PR template via the GitHub Contents API.
 // Returns (content, path) — both empty if no template is found.
+// Checks well-known single-file paths first, then falls back to listing
+// .github/PULL_REQUEST_TEMPLATE/ for repos that use multiple templates.
 func (s *PRService) fetchPRTemplate(ctx context.Context, token, owner, repo, ref string) (string, string) {
+	// 1. Try well-known single-file paths.
 	for _, path := range prTemplatePaths {
-		url := fmt.Sprintf("/repos/%s/%s/contents/%s?ref=%s", owner, repo, path, ref)
-		body, err := s.doGitHubRequest(ctx, token, http.MethodGet, url, nil)
-		if err != nil {
+		if content, ok := s.fetchFileContent(ctx, token, owner, repo, ref, path); ok {
+			return content, path
+		}
+	}
+
+	// 2. Try listing the multi-template directory.
+	templateDir := ".github/PULL_REQUEST_TEMPLATE"
+	if content, path := s.fetchTemplateFromDirectory(ctx, token, owner, repo, ref, templateDir); content != "" {
+		return content, path
+	}
+
+	return "", ""
+}
+
+// fetchFileContent retrieves a single file's decoded content from GitHub.
+func (s *PRService) fetchFileContent(ctx context.Context, token, owner, repo, ref, path string) (string, bool) {
+	url := fmt.Sprintf("/repos/%s/%s/contents/%s?ref=%s", owner, repo, path, ref)
+	body, err := s.doGitHubRequest(ctx, token, http.MethodGet, url, nil)
+	if err != nil {
+		return "", false
+	}
+	var content struct {
+		Content  string `json:"content"`
+		Encoding string `json:"encoding"`
+	}
+	if err := json.Unmarshal(body, &content); err != nil {
+		return "", false
+	}
+	if content.Encoding == "base64" && content.Content != "" {
+		decoded, err := decodeBase64Content(content.Content)
+		if err == nil && decoded != "" {
+			return decoded, true
+		}
+	}
+	return "", false
+}
+
+// fetchTemplateFromDirectory lists a GitHub directory and returns the best
+// template file found. Prefers "default.md"; otherwise uses the first .md file.
+// Returns (content, path) matching fetchPRTemplate's convention.
+func (s *PRService) fetchTemplateFromDirectory(ctx context.Context, token, owner, repo, ref, dir string) (string, string) {
+	url := fmt.Sprintf("/repos/%s/%s/contents/%s?ref=%s", owner, repo, dir, ref)
+	body, err := s.doGitHubRequest(ctx, token, http.MethodGet, url, nil)
+	if err != nil {
+		return "", ""
+	}
+	var entries []struct {
+		Name string `json:"name"`
+		Path string `json:"path"`
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(body, &entries); err != nil {
+		return "", ""
+	}
+
+	// Collect .md files, preferring default.md.
+	var defaultPath, firstMDPath string
+	for _, entry := range entries {
+		if entry.Type != "file" {
 			continue
 		}
-		var content struct {
-			Content  string `json:"content"`
-			Encoding string `json:"encoding"`
-		}
-		if err := json.Unmarshal(body, &content); err != nil {
+		lower := strings.ToLower(entry.Name)
+		if !strings.HasSuffix(lower, ".md") {
 			continue
 		}
-		if content.Encoding == "base64" && content.Content != "" {
-			decoded, err := decodeBase64Content(content.Content)
-			if err == nil && decoded != "" {
-				return decoded, path
-			}
+		if lower == "default.md" {
+			defaultPath = entry.Path
+			break
 		}
+		if firstMDPath == "" {
+			firstMDPath = entry.Path
+		}
+	}
+
+	target := defaultPath
+	if target == "" {
+		target = firstMDPath
+	}
+	if target == "" {
+		return "", ""
+	}
+
+	if content, ok := s.fetchFileContent(ctx, token, owner, repo, ref, target); ok {
+		return content, target
 	}
 	return "", ""
 }

@@ -1,0 +1,2 @@
+-- No-op: org_id is managed by migration 000037 (partitioning_prep).
+-- See 000040 up migration for details.

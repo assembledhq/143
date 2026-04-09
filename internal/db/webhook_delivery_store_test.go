@@ -93,6 +93,25 @@ func TestWebhookDeliveryStore_MarkProcessed(t *testing.T) {
 	}
 }
 
+func TestWebhookDeliveryStore_DeleteExpired(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewWebhookDeliveryStore(mock)
+
+	mock.ExpectQuery("SELECT delete_expired_webhook_deliveries").
+		WithArgs(90).
+		WillReturnRows(pgxmock.NewRows([]string{"delete_expired_webhook_deliveries"}).AddRow(int64(15)))
+
+	deleted, err := store.DeleteExpired(context.Background(), 90)
+	require.NoError(t, err, "DeleteExpired should not return an error")
+	require.Equal(t, int64(15), deleted, "should return the count of deleted deliveries")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func strPtr(s string) *string {
 	return &s
 }

@@ -19,9 +19,11 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/services/codexauth"
+	"github.com/assembledhq/143/internal/services/email"
 	"github.com/assembledhq/143/internal/services/storage"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
+	"github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	threadservice "github.com/assembledhq/143/internal/services/thread"
 )
@@ -56,7 +58,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	projectAttachmentStore := db.NewProjectAttachmentStore(pool)
 	projectSpecStore := db.NewProjectSpecStore(pool)
 	pmDocumentStore := db.NewPMDocumentStore(pool)
+	evalTaskStore := db.NewEvalTaskStore(pool)
+	evalRunStore := db.NewEvalRunStore(pool)
+	evalBatchStore := db.NewEvalBatchStore(pool)
+	evalBootstrapStore := db.NewEvalBootstrapStore(pool)
 	sessionReviewCommentStore := db.NewSessionReviewCommentStore(pool)
+	previewStore := db.NewPreviewStore(pool)
 	auditLogStore := db.NewAuditLogStore(pool)
 	auditEmitter := db.NewAuditEmitter(auditLogStore, logger)
 
@@ -158,7 +165,18 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	credentialHandler := handlers.NewCredentialHandler(credentialStore)
 	memoryHandler := handlers.NewMemoryHandler(memoryStore, reviewCommentStore)
 	userCredentialHandler := handlers.NewUserCredentialHandler(userCredentialStore, credentialStore, userStore)
-	teamHandler := handlers.NewTeamHandler(userStore, authSessionStore, invitationStore, orgStore, cfg.FrontendURL)
+	var emailSender email.Sender
+	if cfg.SMTPHost != "" && cfg.SMTPFrom != "" {
+		emailSender = email.NewSMTPSender(email.SMTPConfig{
+			Host:     cfg.SMTPHost,
+			Port:     cfg.SMTPPort,
+			Username: cfg.SMTPUsername,
+			Password: cfg.SMTPPassword,
+			From:     cfg.SMTPFrom,
+		})
+		logger.Info().Str("smtp_host", cfg.SMTPHost).Msg("SMTP email sender configured")
+	}
+	teamHandler := handlers.NewTeamHandler(userStore, authSessionStore, invitationStore, orgStore, cfg.FrontendURL, emailSender)
 
 	projectHandler := handlers.NewProjectHandler(projectStore, projectTaskStore, projectCycleStore, projectAttachmentStore, projectSpecStore)
 	projectHandler.SetJobStore(jobStore)
@@ -198,11 +216,22 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	codexAuthHandler := handlers.NewCodexAuthHandler(codexAuthSvc, logger)
 	pmDocumentHandler := handlers.NewPMDocumentHandler(pmDocumentStore, credentialStore)
 	pmDocumentHandler.SetAuditEmitter(auditEmitter)
+	evalHandler := handlers.NewEvalHandler(evalTaskStore, evalRunStore, evalBatchStore, evalBootstrapStore, jobStore, pool)
+	evalHandler.SetAuditEmitter(auditEmitter)
 	auditLogHandler := handlers.NewAuditLogHandler(auditLogStore)
 	sessionReviewCommentHandler := handlers.NewSessionReviewCommentHandler(sessionReviewCommentStore, sessionStore, logger)
 	sessionReviewCommentHandler.SetAuditEmitter(auditEmitter)
 	sessionReviewCommentHandler.SetMessageAndJobStores(sessionMessageStore, jobStore)
 	sessionFileHandler := handlers.NewSessionFileHandler(sessionStore, fileReader, logger)
+
+	// Preview manager and handler.
+	previewManager := preview.NewManager(preview.ManagerConfig{
+		Store:        previewStore,
+		Logger:       logger,
+		WorkerNodeID: "local", // MODE=all: single-node
+	})
+	previewHandler := handlers.NewPreviewHandler(previewManager, previewStore, logger)
+	previewHandler.SetAuditEmitter(auditEmitter)
 
 	// Upload store: use S3 if configured, otherwise fall back to local filesystem.
 	var uploadStore storage.UploadStore
@@ -321,6 +350,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.List)
 			r.Get("/api/v1/sessions/{id}/usage", usageHandler.ListBySession)
 			r.Get("/api/v1/usage", usageHandler.GetSummary)
+			r.Get("/api/v1/sessions/{id}/preview", previewHandler.GetPreview)
+			r.Get("/api/v1/sessions/{id}/preview/logs", previewHandler.GetLogs)
+			r.Get("/api/v1/sessions/{id}/preview/services", previewHandler.GetServices)
+			r.Get("/api/v1/sessions/{id}/preview/console", previewHandler.ReadConsole)
+			r.Get("/api/v1/sessions/{id}/preview/snapshots", previewHandler.GetSnapshots)
+			r.Get("/api/v1/repos/{owner}/{repo}/preview/detect", previewHandler.DetectReadiness)
 			r.Get("/api/v1/uploads/files/*", uploadHandler.ServeUpload)
 			r.Get("/api/v1/sessions/{id}/files", sessionFileHandler.ListFiles)
 			r.Get("/api/v1/sessions/{id}/files/content", sessionFileHandler.GetFileContent)
@@ -348,6 +383,15 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/pm/documents/{docId}/versions", pmDocumentHandler.ListVersions)
 			r.Get("/api/v1/pm/document-set-pins", pmDocumentHandler.ListDocumentSetPins)
 			r.Get("/api/v1/pm/document-set-pins/{pinId}", pmDocumentHandler.GetDocumentSetPin)
+
+			// Eval read-only routes
+			r.Get("/api/v1/evals/tasks", evalHandler.ListTasks)
+			r.Get("/api/v1/evals/tasks/{id}", evalHandler.GetTask)
+			r.Get("/api/v1/evals/tasks/{id}/runs", evalHandler.ListRuns)
+			r.Get("/api/v1/evals/runs/{runId}", evalHandler.GetRun)
+			r.Get("/api/v1/evals/batch", evalHandler.ListBatches)
+			r.Get("/api/v1/evals/batch/{batchId}", evalHandler.GetBatch)
+			r.Get("/api/v1/evals/bootstrap/candidates", evalHandler.GetBootstrapCandidates)
 		})
 
 		// Write routes (admin and member only)
@@ -399,6 +443,18 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Post("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.SendThreadMessage)
 			r.Post("/api/v1/sessions/{id}/threads/{tid}/end", sessionThreadHandler.EndThread)
 			r.Post("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.Create)
+			r.Post("/api/v1/sessions/{id}/preview", previewHandler.StartPreview)
+			r.Delete("/api/v1/sessions/{id}/preview", previewHandler.StopPreview)
+			r.Post("/api/v1/sessions/{id}/preview/restart", previewHandler.RestartPreview)
+			r.Post("/api/v1/sessions/{id}/preview/bootstrap", previewHandler.MintBootstrapToken)
+			r.Post("/api/v1/sessions/{id}/preview/extend", previewHandler.ExtendTTL)
+			r.Post("/api/v1/sessions/{id}/preview/screenshot", previewHandler.CaptureScreenshot)
+			r.Post("/api/v1/sessions/{id}/preview/inspect", previewHandler.InspectElement)
+			r.Post("/api/v1/sessions/{id}/preview/design-feedback", previewHandler.SubmitDesignFeedback)
+			r.Post("/api/v1/sessions/{id}/preview/interact", previewHandler.ExecuteInteraction)
+			r.Post("/api/v1/sessions/{id}/preview/multi-viewport", previewHandler.CaptureMultiViewport)
+			r.Post("/api/v1/sessions/{id}/preview/visual-diff", previewHandler.ComputeVisualDiff)
+			r.Post("/api/v1/sessions/{id}/preview/assert", previewHandler.RunAssertions)
 			r.Post("/api/v1/sessions/{id}/review-comments/send", sessionReviewCommentHandler.SendToAgent)
 			r.Patch("/api/v1/sessions/{id}/review-comments/{commentId}", sessionReviewCommentHandler.Update)
 			r.Delete("/api/v1/sessions/{id}/review-comments/{commentId}", sessionReviewCommentHandler.Delete)
@@ -430,6 +486,15 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Post("/api/v1/pm/documents/{docId}/sync", pmDocumentHandler.SyncFromNotion)
 			r.Post("/api/v1/pm/documents/{docId}/restore", pmDocumentHandler.RestoreVersion)
 			r.Post("/api/v1/pm/document-set-pins", pmDocumentHandler.CreateDocumentSetPin)
+
+			// Eval write routes
+			r.Post("/api/v1/evals/tasks", evalHandler.CreateTask)
+			r.Patch("/api/v1/evals/tasks/{id}", evalHandler.UpdateTask)
+			r.Delete("/api/v1/evals/tasks/{id}", evalHandler.ArchiveTask)
+			r.Post("/api/v1/evals/tasks/{id}/runs", evalHandler.StartRun)
+			r.Post("/api/v1/evals/batch", evalHandler.StartBatch)
+			r.Post("/api/v1/evals/bootstrap", evalHandler.Bootstrap)
+			r.Post("/api/v1/evals/bootstrap/accept", evalHandler.AcceptBootstrapCandidates)
 		})
 
 		// Admin-only routes

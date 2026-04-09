@@ -25,7 +25,7 @@ type PMPlanFilters struct {
 }
 
 // pmPlanSelectColumns is the column list shared across all pm_plans queries.
-const pmPlanSelectColumns = `id, org_id, status, analysis, tasks, clusters, skipped_issues,
+const pmPlanSelectColumns = `id, org_id, repository_id, status, analysis, tasks, clusters, skipped_issues,
 	issues_reviewed, in_flight_runs_checked, past_outcomes_reviewed,
 	recent_prs_checked, past_decisions_reviewed, commits_analyzed,
 	product_context_snapshot, token_usage, triggered_by,
@@ -57,13 +57,13 @@ func parsePMPlanCursor(cursor string) (time.Time, uuid.UUID, error) {
 func (s *PMPlanStore) Create(ctx context.Context, plan *models.PMPlan) error {
 	query := `
 		INSERT INTO pm_plans (
-			org_id, status, analysis, tasks, clusters, skipped_issues,
+			org_id, repository_id, status, analysis, tasks, clusters, skipped_issues,
 			issues_reviewed, in_flight_runs_checked, past_outcomes_reviewed,
 			recent_prs_checked, past_decisions_reviewed, commits_analyzed,
 			product_context_snapshot, token_usage, triggered_by
 		)
 		VALUES (
-			@org_id, @status, @analysis, @tasks, @clusters, @skipped_issues,
+			@org_id, @repository_id, @status, @analysis, @tasks, @clusters, @skipped_issues,
 			@issues_reviewed, @in_flight_runs_checked, @past_outcomes_reviewed,
 			@recent_prs_checked, @past_decisions_reviewed, @commits_analyzed,
 			@product_context_snapshot, @token_usage, @triggered_by
@@ -72,6 +72,7 @@ func (s *PMPlanStore) Create(ctx context.Context, plan *models.PMPlan) error {
 
 	args := pgx.NamedArgs{
 		"org_id":                   plan.OrgID,
+		"repository_id":            plan.RepositoryID,
 		"status":                   plan.Status,
 		"analysis":                 plan.Analysis,
 		"tasks":                    plan.Tasks,
@@ -96,6 +97,7 @@ func (s *PMPlanStore) Update(ctx context.Context, plan *models.PMPlan) error {
 	query := `
 		UPDATE pm_plans
 		SET status = @status,
+		    repository_id = @repository_id,
 		    analysis = @analysis,
 		    tasks = @tasks,
 		    clusters = @clusters,
@@ -121,6 +123,7 @@ func (s *PMPlanStore) Update(ctx context.Context, plan *models.PMPlan) error {
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":                      plan.ID,
 		"org_id":                  plan.OrgID,
+		"repository_id":           plan.RepositoryID,
 		"status":                  plan.Status,
 		"analysis":                plan.Analysis,
 		"tasks":                   plan.Tasks,

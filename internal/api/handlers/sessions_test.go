@@ -41,6 +41,8 @@ func newSessionHandler(t *testing.T, mock pgxmock.PgxPoolIface) *SessionHandler 
 }
 
 // sessionColumns is the standard column set for sessions queries.
+// Must match sessionSelectColumns in session_store.go. Update all inline
+// AddRow calls in this file when adding/removing/reordering columns.
 var sessionColumns = []string{
 	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
@@ -50,7 +52,7 @@ var sessionColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
-	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "created_at",
+	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "deleted_at", "created_at",
 }
 
 func TestSessionHandler_List(t *testing.T) {
@@ -75,7 +77,7 @@ func TestSessionHandler_List(t *testing.T) {
 							runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 							nil, nil, nil, nil,
 							nil, &now, &now, nil,
-							nil, nil, nil, nil,
+							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
 							nil,                      // project_task_id
@@ -88,6 +90,7 @@ func TestSessionHandler_List(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, // deleted_at
 							now,
 						),
 					)
@@ -158,7 +161,7 @@ func TestSessionHandler_List_WithRepositoryID(t *testing.T) {
 				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 				nil, nil, nil, nil,
 				nil, &now, &now, nil,
-				nil, nil, nil, nil,
+				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil,
@@ -170,6 +173,7 @@ func TestSessionHandler_List_WithRepositoryID(t *testing.T) {
 				nil, // diff_stats
 				nil, // diff_history
 				nil, // input_manifest
+				nil, // deleted_at
 				now,
 			),
 		)
@@ -251,7 +255,7 @@ func TestSessionHandler_List_CommaSeparatedStatuses(t *testing.T) {
 				runID, issueID, orgID, "claude-code", "pending", "supervised", "standard",
 				nil, nil, nil, nil,
 				nil, &now, nil, nil,
-				nil, nil, nil, nil,
+				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil,
@@ -263,6 +267,7 @@ func TestSessionHandler_List_CommaSeparatedStatuses(t *testing.T) {
 				nil, // diff_stats
 				nil, // diff_history
 				nil, // input_manifest
+				nil, // deleted_at
 				now,
 			),
 		)
@@ -279,6 +284,108 @@ func TestSessionHandler_List_CommaSeparatedStatuses(t *testing.T) {
 	err = json.Unmarshal(w.Body.Bytes(), &resp)
 	require.NoError(t, err, "response body should be valid JSON")
 	require.Equal(t, 1, len(resp.Data), "should return filtered sessions")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionCursorRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC().Truncate(time.Nanosecond)
+	id := uuid.New()
+
+	encoded := encodeSessionCursor(now, id)
+	decodedTime, decodedID, err := decodeSessionCursor(encoded)
+	require.NoError(t, err)
+	require.True(t, now.Equal(decodedTime), "decoded time should match")
+	require.Equal(t, id, decodedID, "decoded ID should match")
+}
+
+func TestDecodeSessionCursor_Invalid(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		cursor string
+	}{
+		{name: "not base64", cursor: "!!!invalid!!!"},
+		{name: "missing comma", cursor: "bm9jb21tYQ=="},                                                     // "nocomma"
+		{name: "bad timestamp", cursor: "YmFkdGltZSwwMTIzNDU2Ny04OWFiLWNkZWYtMDEyMy00NTY3ODlhYmNkZWY="}, // "badtime,..."
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, _, err := decodeSessionCursor(tt.cursor)
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestSessionHandler_List_WithCursor(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	now := time.Now()
+	runID := uuid.New()
+	issueID := uuid.New()
+	cursorTime := now.Add(-time.Hour)
+	cursorID := uuid.New()
+	cursor := encodeSessionCursor(cursorTime, cursorID)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id .+ AND \\(created_at, id\\) <").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).AddRow(
+				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
+				nil, nil, nil, nil,
+				nil, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil, nil,
+				nil, 0, nil, "none", nil,
+				nil, nil, nil, nil, nil, nil, nil, now,
+			),
+		)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions?cursor="+cursor, nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.List(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "should return 200 with cursor")
+
+	var resp models.ListResponse[models.Session]
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err, "response body should be valid JSON")
+	require.Equal(t, 1, len(resp.Data), "should return sessions after cursor")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_List_InvalidCursor(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions?cursor=invalid", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.List(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "should return 400 for invalid cursor")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -306,7 +413,7 @@ func TestSessionHandler_Get(t *testing.T) {
 							runID, issueID, orgID, "claude-code", "running", "supervised", "standard",
 							nil, nil, nil, nil,
 							nil, &now, nil, nil,
-							nil, nil, nil, nil,
+							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
 							nil,                      // project_task_id
@@ -319,6 +426,7 @@ func TestSessionHandler_Get(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, // deleted_at
 							now,
 						),
 					)
@@ -383,12 +491,12 @@ func triggerFixIssueMock(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
 				"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
 				"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
 				"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
-				"created_at", "updated_at",
+				"created_at", "updated_at", "deleted_at",
 			}).AddRow(
 				issueID, orgID, "ISSUE-1", "sentry", nil, nil,
 				"Test issue", nil, nil, "open", now, now,
 				1, 0, "medium", nil, "fp-1",
-				now, now,
+				now, now, nil,
 			),
 		)
 
@@ -423,12 +531,12 @@ func triggerFixIssueAndOrgDefaultMock(mock pgxmock.PgxPoolIface, orgID uuid.UUID
 				"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
 				"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
 				"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
-				"created_at", "updated_at",
+				"created_at", "updated_at", "deleted_at",
 			}).AddRow(
 				issueID, orgID, "ISSUE-1", "sentry", nil, nil,
 				"Test issue", nil, nil, "open", now, now,
 				1, 0, "medium", nil, "fp-1",
-				now, now,
+				now, now, nil,
 			),
 		)
 
@@ -527,12 +635,12 @@ func TestSessionHandler_TriggerFix(t *testing.T) {
 							"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
 							"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
 							"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
-							"created_at", "updated_at",
+							"created_at", "updated_at", "deleted_at",
 						}).AddRow(
 							issueID, orgID, "ISSUE-1", "sentry", nil, nil,
 							"Test issue", nil, nil, "open", now, now,
 							1, 0, "medium", nil, "fp-1",
-							now, now,
+							now, now, nil,
 						),
 					)
 			},
@@ -553,12 +661,12 @@ func TestSessionHandler_TriggerFix(t *testing.T) {
 							"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
 							"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
 							"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
-							"created_at", "updated_at",
+							"created_at", "updated_at", "deleted_at",
 						}).AddRow(
 							issueID, orgID, "ISSUE-1", "sentry", nil, nil,
 							"Test issue", nil, nil, "open", now, now,
 							1, 0, "medium", nil, "fp-1",
-							now, now,
+							now, now, nil,
 						),
 					)
 			},
@@ -809,11 +917,11 @@ func TestSessionHandler_GetPullRequest_Success(t *testing.T) {
 			pgxmock.NewRows([]string{
 				"id", "session_id", "org_id", "github_pr_number", "github_pr_url",
 				"github_repo", "title", "body", "status", "review_status",
-				"merged_at", "created_at", "updated_at",
+				"authored_by", "merged_at", "created_at", "updated_at",
 			}).AddRow(
-				prID, runID, orgID, 42, "https://github.com/org/repo/pull/42",
+				prID, &runID, orgID, 42, "https://github.com/org/repo/pull/42",
 				"org/repo", "Fix bug", nil, "open", "pending",
-				nil, now, now,
+				"app", nil, now, now,
 			),
 		)
 
@@ -975,12 +1083,12 @@ func TestSessionHandler_TriggerFix_InvalidAutonomyLevel(t *testing.T) {
 				"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
 				"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
 				"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
-				"created_at", "updated_at",
+				"created_at", "updated_at", "deleted_at",
 			}).AddRow(
 				issueID, orgID, "ISSUE-1", "sentry", nil, nil,
 				"Test issue", nil, nil, "open", now, now,
 				1, 0, "medium", nil, "fp-1",
-				now, now,
+				now, now, nil,
 			),
 		)
 
@@ -1020,7 +1128,7 @@ func TestSessionHandler_GetLogs_Success(t *testing.T) {
 				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 				nil, nil, nil, nil,
 				nil, &now, &now, nil,
-				nil, nil, nil, nil,
+				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil,
@@ -1032,6 +1140,7 @@ func TestSessionHandler_GetLogs_Success(t *testing.T) {
 				nil, // diff_stats
 				nil, // diff_history
 				nil, // input_manifest
+				nil, // deleted_at
 				now,
 			),
 		)
@@ -1040,9 +1149,9 @@ func TestSessionHandler_GetLogs_Success(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM session_logs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "session_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}).
-				AddRow(int64(1), runID, nil, now, "info", "Starting agent", nil, nil).
-				AddRow(int64(2), runID, nil, now, "info", "Agent completed", nil, nil),
+			pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}).
+				AddRow(int64(1), runID, orgID, nil, now, "info", "Starting agent", nil, nil).
+				AddRow(int64(2), runID, orgID, nil, now, "info", "Agent completed", nil, nil),
 		)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+runID.String()+"/logs", nil)
@@ -1107,7 +1216,7 @@ func TestSessionHandler_GetLogs_EmptyLogs(t *testing.T) {
 				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 				nil, nil, nil, nil,
 				nil, &now, &now, nil,
-				nil, nil, nil, nil,
+				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil,
@@ -1119,6 +1228,7 @@ func TestSessionHandler_GetLogs_EmptyLogs(t *testing.T) {
 				nil, // diff_stats
 				nil, // diff_history
 				nil, // input_manifest
+				nil, // deleted_at
 				now,
 			),
 		)
@@ -1167,7 +1277,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 				nil, nil, nil, nil,
 				nil, &now, &now, nil,
-				nil, nil, nil, nil,
+				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil,
@@ -1179,6 +1289,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil, // diff_stats
 				nil, // diff_history
 				nil, // input_manifest
+				nil, // deleted_at
 				now,
 			),
 		)
@@ -1191,7 +1302,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 				nil, nil, nil, nil,
 				nil, &now, &now, nil,
-				nil, nil, nil, nil,
+				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil,
@@ -1203,6 +1314,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil, // diff_stats
 				nil, // diff_history
 				nil, // input_manifest
+				nil, // deleted_at
 				now,
 			),
 		)
@@ -1210,8 +1322,8 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM session_logs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "session_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}).
-				AddRow(int64(1), runID, nil, now, "info", "Done", nil, nil),
+			pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}).
+				AddRow(int64(1), runID, orgID, nil, now, "info", "Done", nil, nil),
 		)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+runID.String()+"/logs/stream", nil)
@@ -1484,7 +1596,7 @@ func TestSessionHandler_EndSession_EnqueuesValidation(t *testing.T) {
 				sessionID, issueID, orgID, "claude_code", "idle", "semi", "low",
 				nil, nil, nil, nil,
 				nil, &now, nil, nil,
-				nil, nil, nil, nil,
+				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil,
@@ -1496,6 +1608,7 @@ func TestSessionHandler_EndSession_EnqueuesValidation(t *testing.T) {
 				nil, // diff_stats
 				nil, // diff_history
 				nil, // input_manifest
+				nil, // deleted_at
 				now,
 			),
 		)
@@ -1543,7 +1656,7 @@ func TestSessionHandler_EndSession_ManualSkipsValidation(t *testing.T) {
 				sessionID, issueID, orgID, "claude_code", "idle", "semi", "low",
 				nil, nil, nil, nil,
 				nil, &now, nil, nil,
-				nil, nil, nil, nil,
+				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil,
@@ -1555,6 +1668,7 @@ func TestSessionHandler_EndSession_ManualSkipsValidation(t *testing.T) {
 				nil, // diff_stats
 				nil, // diff_history
 				nil, // input_manifest
+				nil, // deleted_at
 				now,
 			),
 		)
@@ -1723,7 +1837,7 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							sessionID, uuid.New(), orgID, "claude-code", "idle", "semi", "low",
 							nil, nil, nil, nil,
 							nil, &now, nil, nil,
-							nil, nil, nil, nil,
+							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil,
@@ -1735,6 +1849,7 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, // deleted_at
 							now,
 						),
 					)
@@ -1762,7 +1877,7 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							sessionID, uuid.New(), orgID, "claude-code", "completed", "semi", "low",
 							nil, nil, nil, nil,
 							nil, &now, &now, nil,
-							nil, nil, nil, nil,
+							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil,
@@ -1774,6 +1889,7 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, // deleted_at
 							now,
 						),
 					)
@@ -1843,7 +1959,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							sessionID, uuid.New(), orgID, "claude-code", "idle", "semi", "low",
 							nil, nil, nil, nil,
 							nil, &now, nil, nil,
-							nil, nil, nil, nil,
+							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil,
@@ -1855,6 +1971,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, // deleted_at
 							now,
 						),
 					)
@@ -1866,7 +1983,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
 							nil, nil, nil, nil,
 							nil, &now, nil, nil,
-							nil, nil, nil, nil,
+							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil,
@@ -1878,6 +1995,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, // deleted_at
 							now,
 						),
 					)
@@ -1906,7 +2024,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
 							nil, nil, nil, nil,
 							nil, &now, nil, nil,
-							nil, nil, nil, nil,
+							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil,
@@ -1918,6 +2036,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, // deleted_at
 							now,
 						),
 					)
@@ -1950,7 +2069,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							sessionID, uuid.New(), orgID, "claude-code", "pending", "semi", "low",
 							nil, nil, nil, nil,
 							nil, &now, nil, nil,
-							nil, nil, nil, nil,
+							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil,
@@ -1962,6 +2081,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, // deleted_at
 							now,
 						),
 					)
@@ -1989,7 +2109,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							sessionID, uuid.New(), orgID, "claude-code", "completed", "semi", "low",
 							nil, nil, nil, nil,
 							nil, &now, nil, nil,
-							nil, nil, nil, nil,
+							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil,
@@ -1997,6 +2117,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, 3, &now, "destroyed", nil,
 							nil, nil, nil, nil, nil,
 							nil, // input_manifest
+							nil, // deleted_at
 							now,
 						),
 					)
@@ -2016,7 +2137,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							sessionID, uuid.New(), orgID, "claude-code", "idle", "semi", "low",
 							nil, nil, nil, nil,
 							nil, &now, nil, nil,
-							nil, nil, nil, nil,
+							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil,
@@ -2024,6 +2145,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, 2, &now, "destroyed", nil,
 							nil, nil, nil, nil, nil,
 							nil, // input_manifest
+							nil, // deleted_at
 							now,
 						),
 					)
@@ -2044,7 +2166,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							sessionID, uuid.New(), orgID, "claude-code", "completed", "semi", "low",
 							nil, nil, nil, nil,
 							nil, &now, nil, nil,
-							nil, nil, nil, nil,
+							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil,
@@ -2056,6 +2178,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, // deleted_at
 							now,
 						),
 					)
@@ -2071,7 +2194,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
 							nil, nil, nil, nil,
 							nil, &now, nil, nil,
-							nil, nil, nil, nil,
+							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
 							nil, nil,
@@ -2083,6 +2206,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, // deleted_at
 							now,
 						),
 					)
@@ -2398,7 +2522,7 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
 				nil, &now, &now, nil,
-				nil, nil, nil, nil,
+				nil, nil, nil, false,
 				nil, nil, nil, nil, &diff,
 				nil, nil, nil, nil,
 				nil, nil,
@@ -2410,6 +2534,7 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 				nil, // diff_stats
 				nil, // diff_history
 				nil, // input_manifest
+				nil, // deleted_at
 				now,
 			),
 		)
@@ -2463,7 +2588,7 @@ func TestSessionHandler_CreatePR_NoDiff(t *testing.T) {
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
 				nil, &now, &now, nil,
-				nil, nil, nil, nil,
+				nil, nil, nil, false,
 				nil, nil, nil, nil, nil, // diff is nil
 				nil, nil, nil, nil,
 				nil, nil,
@@ -2471,6 +2596,7 @@ func TestSessionHandler_CreatePR_NoDiff(t *testing.T) {
 				nil, 0, nil, "none", nil,
 				nil, nil, nil, nil, nil,
 				nil, // input_manifest
+				nil, // deleted_at
 				now,
 			),
 		)
@@ -2514,7 +2640,7 @@ func TestSessionHandler_CreatePR_AlreadyExists(t *testing.T) {
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
 				nil, &now, &now, nil,
-				nil, nil, nil, nil,
+				nil, nil, nil, false,
 				nil, nil, nil, nil, &diff,
 				nil, nil, nil, nil,
 				nil, nil,
@@ -2522,6 +2648,7 @@ func TestSessionHandler_CreatePR_AlreadyExists(t *testing.T) {
 				nil, 0, nil, "none", nil,
 				nil, nil, nil, nil, nil,
 				nil, // input_manifest
+				nil, // deleted_at
 				now,
 			),
 		)
@@ -2532,10 +2659,10 @@ func TestSessionHandler_CreatePR_AlreadyExists(t *testing.T) {
 		WillReturnRows(
 			pgxmock.NewRows([]string{
 				"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-				"title", "body", "status", "review_status", "merged_at", "created_at", "updated_at",
+				"title", "body", "status", "review_status", "authored_by", "merged_at", "created_at", "updated_at",
 			}).AddRow(
-				prID, sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "org/repo",
-				"Fix bug", (*string)(nil), "open", "pending", (*time.Time)(nil), now, now,
+				prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "org/repo",
+				"Fix bug", (*string)(nil), "open", "pending", "app", (*time.Time)(nil), now, now,
 			),
 		)
 
@@ -2608,7 +2735,7 @@ func TestSessionHandler_CreatePR_PRLookupDBError(t *testing.T) {
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
 				nil, &now, &now, nil,
-				nil, nil, nil, nil,
+				nil, nil, nil, false,
 				nil, nil, nil, nil, &diff,
 				nil, nil, nil, nil,
 				nil, nil,
@@ -2616,6 +2743,7 @@ func TestSessionHandler_CreatePR_PRLookupDBError(t *testing.T) {
 				nil, 0, nil, "none", nil,
 				nil, nil, nil, nil, nil,
 				nil, // input_manifest
+				nil, // deleted_at
 				now,
 			),
 		)

@@ -1,481 +1,405 @@
-# 38 - Autopilot Visual Simplification
+# 38 - Autopilot Page Redesign
 
-> **Status:** Proposed | **Last reviewed:** 2026-03-23
+> **Status:** Proposed | **Last reviewed:** 2026-04-08
+>
+> **Supersedes:** Previous version of this document (4-zone architecture from 2026-03-23).
+> The earlier design reduced density but still showed too many sections simultaneously
+> and left empty states (zero stats, "Not set yet" rows) visible by default.
+> This revision takes a more aggressive stance: the page should feel like a briefing,
+> not a dashboard.
+>
+> **Prerequisite:** Setup/onboarding has been extracted to a dedicated `/onboarding`
+> route (see `OnboardingPageContent` and `useSetupStatus`). Users who have not
+> connected a coding agent and GitHub are redirected there. This document covers
+> only the post-setup `/autopilot` page.
 
 ## Problem
 
-The current Autopilot surface is visually dense because too many interface elements compete at the same hierarchy level:
+The Autopilot page is the first thing a user sees when they open 143
+(after completing onboarding). In its current form it under-serves returning
+users and overwhelms first-time post-setup visitors:
 
-- status, setup, controls, and empty states all appear as peers
-- the page asks users to parse configuration before they understand system state
-- borders, cards, inputs, and section labels are repeated so frequently that nothing feels primary
-- large empty-state boxes create visual mass without adding meaning
+1. **Empty-state overload.** Before the first analysis, the page shows a control
+   strip, hero card, evidence row (all zeros), and a direction summary (eight rows
+   of "Not set yet"). Six competing sections before anything useful has happened.
+2. **Redundant messaging.** The page header description, control strip secondary text,
+   and hero card body all explain what Autopilot does.
+3. **No progressive disclosure.** Every section is always visible regardless of whether
+   it has meaningful content. Zeros and placeholder text look broken, not empty.
+4. **Flat hierarchy.** Every section carries equal visual weight. There is no clear
+   answer to "what should I look at first?"
 
-The result is a page that feels like a settings console instead of a calm product surface.
+The page should feel like an Apple or Stripe product surface: calm, confident, and
+focused on exactly one thing at a time.
 
 ## Design Goal
 
-Make Autopilot feel like a clear instrument panel:
+The page should answer one question per visit:
 
-- first understand what the system is doing
-- then understand what needs attention
-- only then adjust direction
+| Visit type | Question | Answer |
+|---|---|---|
+| First visit (post-onboarding) | "What happens when I press the button?" | A brief promise + CTA |
+| Returning (90% of visits) | "What should I pay attention to?" | The analysis headline |
+| Error | "What went wrong?" | Clear error + retry |
 
-The page should present one dominant idea per screenful, with secondary controls revealed progressively.
+Setup ("What is this and what do I do?") is handled by the `/onboarding` page,
+which redirects to `/autopilot` once the coding agent and GitHub are connected.
+The autopilot page never needs to render setup UI.
+
+Everything else is secondary. Configuration should be available but quiet.
 
 ## Core Principles
 
-### 1. State before settings
+### 1. State-driven rendering
 
-The first question on entry is not "what can I configure?" but "what is Autopilot doing right now?"
+The page should only show sections relevant to the current state.
+No zeros, no "Not set yet", no empty grids. If a section has nothing
+meaningful to display, it does not render.
 
-The page should lead with:
+### 2. One hero per state
 
-- current system state
-- latest recommendation or next action
-- one primary CTA
+Each state has exactly one dominant element. Before the first analysis, it is
+the prompt to run. After analysis, it is the analysis headline. Nothing else
+competes.
 
-Settings should sit below the fold or behind progressive disclosure.
+### 3. The reading order is the priority order
 
-### 2. One hero, not many peers
+A user who glances for 2 seconds should get the headline.
+A user who reads for 10 seconds should get headline + brief + metrics.
+Only users who scroll past the separator reach configuration.
 
-There should be exactly one dominant element near the top of the page. Today the run button, status pill, empty analysis state, direction label, autonomy selector, PM settings card, documents card, and weights card all fight for attention.
+### 4. Silence is design
 
-Autopilot needs a single hero panel that answers:
+White space, hidden sections, and absent elements are intentional.
+The page communicates confidence by showing less, not more.
 
-- what Autopilot sees
-- what it recommends
-- what you should do next
+## Information Architecture
 
-### 3. Progressive disclosure for complexity
+```
+┌─────────────────────────────────────────────┐
+│  Page header     Title + CTA button         │  ← always visible
+│  Status line     Autonomy · Freshness · Next│
+├─────────────────────────────────────────────┤
+│  Headline        Bold one-line "so what"    │  ← the thing you see
+│  Brief           2-3 sentences of context   │
+│  Evidence        3 metric cards             │  ← hidden when empty
+├─────────────────────────────────────────────┤
+│  Proposals       (conditional, only if > 0) │
+├──────────────── separator ──────────────────┤
+│  Config footer   Direction · Focus · Docs   │  ← quiet, scannable
+│                  Weights & more              │
+└─────────────────────────────────────────────┘
+```
 
-Not every operator needs every control every visit.
+The reading order matches priority. The separator creates an explicit boundary
+between "what Autopilot thinks" (machine output) and "how you steer it"
+(human input).
 
-Default view:
+## Page States
 
-- recommendation
-- recent status
-- concise direction summary
+Note: Setup (agent + GitHub connection) is handled entirely by the `/onboarding`
+page. Users are redirected to `/autopilot` only after setup is complete. The
+autopilot page has three states:
 
-Secondary view:
+### State 1: First analysis
 
-- edit direction
-- upload documents
-- customize weights
-- advanced PM settings like model and schedule
+Shown when setup is complete but no analysis has been run yet.
+This is the first thing a user sees after completing onboarding.
 
-### 4. Distinguish human input from machine output
+**What renders:**
+- Page header with CTA: "Autopilot" + [Run first analysis] button
+- Status line: `Suggest · No analysis yet`
+- A single card explaining what the analysis will do
+- One optional nudge to set product direction (single text line, not a full section)
 
-The interface should visually separate:
+**What is hidden:**
+- Evidence row (no data yet)
+- Full direction summary (premature — user hasn't seen value yet)
 
-- machine output: recommendation, analysis, recent decisions, system status
-- human steering: philosophy, direction, focus areas, autonomy
+```
+┌──────────────────────────────────────────────────┐
+│                                                  │
+│  Autopilot                  [Run first analysis] │
+│  Suggest · No analysis yet                       │
+│                                                  │
+│  ┌────────────────────────────────────────────┐  │
+│  │                                            │  │
+│  │  Ready for your first analysis             │  │
+│  │                                            │  │
+│  │  Autopilot will review your open issues,   │  │
+│  │  group related ones together, and tell     │  │
+│  │  you what's highest leverage to work on.   │  │
+│  │                                            │  │
+│  └────────────────────────────────────────────┘  │
+│                                                  │
+│  Set your product direction for better      [→]  │
+│  results.                                        │
+│                                                  │
+└──────────────────────────────────────────────────┘
+```
 
-That boundary is essential for trust. Users need to instantly know what the system inferred versus what they told it.
+### State 2: Active (post-analysis)
 
-### 5. Use silence as a design material
+This is the primary state. 90% of page visits land here.
 
-White space is not empty. It is how the product thinks clearly.
+**What renders:**
+- Page header: "Autopilot" + [Run analysis] button
+- Status line: `Act on low-risk · Analyzed 2h ago · Next in 2h`
+- **Headline:** Bold, one-line summary — the "so what" (e.g. "Auth token rotation is highest leverage")
+- **Brief:** 2-3 sentence analysis body explaining the why and what-to-do
+- **Evidence:** Three metric cards in a row — Success rate, Issues reviewed, Tasks delegated
+- **Proposals:** Conditional — only if proposed project count > 0
+- Separator
+- **Config footer:** Key-value rows for Direction, Focus, Documents, Weights & more
 
-Reduce:
+```
+┌──────────────────────────────────────────────────┐
+│                                                  │
+│  Autopilot                       [Run analysis]  │
+│  Act on low-risk · Analyzed 2h ago · Next in 2h  │
+│                                                  │
+│  Auth token rotation is highest leverage         │
+│                                                  │
+│  Three related issues affecting 12 customers     │
+│  share a root cause in the session middleware.   │
+│  Agents should prioritize this cluster first.    │
+│                                                  │
+│  ┌──────────────┐ ┌──────────────┐ ┌──────────┐ │
+│  │     94%      │ │     47       │ │    12    │ │
+│  │   success    │ │   reviewed   │ │ delegated│ │
+│  └──────────────┘ └──────────────┘ └──────────┘ │
+│                                                  │
+│  3 proposed projects               [Review →]    │
+│                                                  │
+│  ──────────────────────────────────────────────  │
+│                                                  │
+│  Direction        Ship fast, fix fast    [Edit]  │
+│  Focus            Auth · API · Billing           │
+│  Documents        3 attached           [Manage]  │
+│  Weights & more                     [Settings]   │
+│                                                  │
+└──────────────────────────────────────────────────┘
+```
 
-- stacked outlined boxes
-- long placeholder copy inside large empty containers
-- repeated micro-labels
-- parallel controls exposed at once
+### State 3: Attention needed (error)
 
-## Proposed Information Architecture
+Shown when the last analysis failed or there is a blocking issue.
 
-Autopilot should be organized into four vertical zones.
+**What renders:**
+- Same header and status line as active state
+- Warning headline: "Attention needed"
+- Error message body with suggested action
+- Evidence row with last-known stats (if any exist)
+- Config footer (unchanged)
 
-### Zone 1: Control Strip
+```
+┌──────────────────────────────────────────────────┐
+│                                                  │
+│  Autopilot                       [Run analysis]  │
+│  Act on low-risk · Last analyzed Apr 7           │
+│                                                  │
+│  ⚠ Attention needed                              │
+│                                                  │
+│  The last analysis failed: rate limit exceeded   │
+│  on GitHub API. This usually resolves itself —   │
+│  try running again.                              │
+│                                                  │
+│  ──────────────────────────────────────────────  │
+│                                                  │
+│  Direction        Ship fast, fix fast    [Edit]  │
+│  Focus            Auth · API · Billing           │
+│  Documents        3 attached           [Manage]  │
+│  Weights & more                     [Settings]   │
+│                                                  │
+└──────────────────────────────────────────────────┘
+```
 
-A compact strip at the top with:
+## Component Changes
 
-- current mode: `Suggest`, `Act on low-risk`, or `Operate broadly`
-- last analysis timestamp
-- health summary or attention state
-- one primary action: `Run analysis`
+### Existing infrastructure (from onboarding separation)
 
-This replaces the current feeling of a disconnected status bar plus hero empty state.
+The following components already exist and are not changed by this design:
 
-### Zone 2: Recommendation Hero
+| Component | Location | Purpose |
+|---|---|---|
+| `OnboardingPageContent` | `components/onboarding/` | Dedicated `/onboarding` page with setup hero + checklist |
+| `SetupChecklist` | `components/setup-checklist.tsx` | Shared checklist (agent + GitHub + optional integrations) |
+| `useSetupStatus` | `hooks/use-setup-status.ts` | Reusable hook: `isSetupComplete`, `agentConnected`, `githubReady` |
 
-This is the focal point of the page.
+The autopilot page's `useAutopilotPageData` already uses `useSetupStatus` for
+its setup state checks. The `AutopilotSetupChecklist` wrapper in
+`components/autopilot/` re-exports `SetupChecklist` for backwards compatibility
+and can be removed once setup rendering is fully removed from the autopilot page.
 
-It should show:
+### What gets removed from the autopilot page
 
-- a one-sentence system read of the situation
-- the single most important next action or cluster
-- optionally 2-4 supporting items below it
+| Current component | Action | Reason |
+|---|---|---|
+| `PageHeader` description prop | Remove description text | Title is sufficient; analysis demonstrates value |
+| `AutopilotControlStrip` (as a separate card) | Remove | CTA moves to page header; autonomy + timestamp become a status subtitle |
+| `AutopilotHero` (generic card) | Replace | Becomes a styled headline + body, not a boxed card |
+| `AutopilotEvidenceRow` (4-column grid) | Replace with 3-column | Drop "Next run" (moves to status line); hide when all values are zero |
+| Direction summary (8 rows with separators) | Replace with compact footer | 4 key-value rows replace 8 separated rows |
+| `AutopilotSetupChecklist` usage | Remove | Setup lives on `/onboarding`; autopilot page no longer renders setup UI |
+| `heroMode === "setup"` branch | Remove | The autopilot page is never shown in setup state |
+
+### What gets added
+
+| New element | Purpose |
+|---|---|
+| Status subtitle | Single line: `{autonomy} · {freshness} · {next run}` under the page title |
+| Analysis headline | Bold `text-lg font-semibold` line — extracted from or summarizing the analysis |
+| Direction nudge | Single-line prompt in first-analysis state: "Set your direction for better results →" |
+| Redirect guard | If `!isSetupComplete`, redirect to `/onboarding` (using existing `useSetupStatus` hook) |
+
+### What stays (but moves)
+
+| Element | Change |
+|---|---|
+| CTA button ("Run analysis") | Moves into `PageHeader` action slot |
+| Proposals card | Stays conditional, moves below evidence row |
+| Side sheets (steering, weights, documents) | No change — triggered from config footer |
+
+## Evidence: Three Metrics, Not Four
+
+The current evidence row shows four stats: Success rate, Issues reviewed,
+Delegated, and Next run. This revision reduces to three:
+
+| Metric | Keep? | Reason |
+|---|---|---|
+| **Success rate** | Yes | Trust signal — "Is Autopilot working?" |
+| **Issues reviewed** | Yes | Scope signal — "How much did it cover?" |
+| **Tasks delegated** | Yes | Output signal — "What did it actually do?" |
+| **Next run** | Move to status line | This is scheduling metadata, not a performance metric |
+
+Three cards are also visually cleaner — they divide evenly across common
+viewport widths.
+
+### Visibility rule
+
+The evidence row is only rendered when at least one metric has a non-zero
+value. In the first-analysis state (before any analysis has run), it is
+hidden entirely.
+
+## Config Footer
+
+The config footer replaces the current `AutopilotDirectionSummary` component.
+It is a flat list of key-value rows below a separator, each with an optional
+action button.
+
+| Row | Value | Action |
+|---|---|---|
+| Direction | Philosophy or direction text (whichever is set) | [Edit] → opens steering sheet |
+| Focus | Focus area tags, or "None set" | (included in Edit sheet) |
+| Documents | "{n} attached" | [Manage] → opens documents sheet |
+| Weights & more | Weight summary or "Using defaults" | [Settings] → opens weights sheet or navigates to settings page |
+
+### What the footer does NOT show
+
+- Autonomy level (already in the status line)
+- Avoid areas as a separate row (included in the Edit sheet)
+- Philosophy and Direction as separate rows (combine into one "Direction" row
+  showing whichever has content, with full detail in the sheet)
+- Advanced/model/cadence (lives in Settings page, linked from "Weights & more")
+
+This reduces the footer from 8 rows to 4.
+
+## Status Line
+
+The status line replaces the `AutopilotControlStrip` card. It renders as a
+single muted text line directly below the page title:
+
+```
+{autonomy_label} · {freshness} · {next_run}
+```
 
 Examples:
-
-- `3 payment failures appear to share one auth root cause.`
-- `Autopilot recommends addressing this cluster before broadening scope.`
-
-This zone should feel editorial, not form-driven.
-
-### Zone 3: Evidence Row
-
-A calm horizontal band of supporting evidence:
-
-- recent decisions
-- success rate
-- issues reviewed
-- last run outcome
-
-This lets the user validate trust without scanning a giant dashboard.
-
-### Zone 4: Your Direction
-
-All steering controls live here, explicitly labeled as human-authored direction.
-
-The default presentation should be summary-first:
-
-- philosophy: short sentence
-- current direction: short sentence
-- focus areas: tags
-- avoid areas: tags
-
-Each block should have an `Edit` affordance instead of exposing full textareas at all times.
-
-Under that, progressively reveal:
-
-- documents
-- weights
-- advanced agent settings
-
-## Visual Hierarchy Recommendations
-
-### Make one thing visually loud
-
-Only the recommendation hero and its primary CTA should carry strong contrast. Everything else should be quieter.
-
-### Flatten the chrome
-
-The page currently uses too many bordered containers. Reduce card count and let spacing create structure.
-
-Preferred pattern:
-
-- one major hero surface
-- one subtle divider before `Your Direction`
-- lightweight rows instead of separate boxed empty states
-
-### Replace form density with summaries
-
-Instead of always-open controls:
-
-- show autonomy as a segmented control with one supporting sentence
-- show weights as a compact summary line like `Impact 35 · Severity 25 · Recency 20 · Revenue 20`
-- open sliders only when the user selects `Customize`
-- show PM schedule and model in an `Advanced` disclosure, not in the primary read path
-
-### Reduce empty-state mass
-
-Large empty rectangles are visually expensive and make the page feel unfinished.
-
-Replace them with concise inline empty states:
-
-- `No documents yet. Add roadmap or product docs.`
-- `No decisions yet. They will appear after the first analysis.`
-
-### Reserve color for meaning
-
-Use color sparingly and semantically:
-
-- neutral for structure
-- one accent color for primary action
-- amber or red only for attention states
-
-Avoid multiple competing colored pills in the same first screenful.
-
-## Recommended Layout
-
-```text
-Autopilot                                            [Run analysis]
-Act on low-risk · Last analyzed 2h ago · Attention needed
-
-┌─────────────────────────────────────────────────────────────────┐
-│ Recommendation                                                 │
-│                                                                 │
-│ 3 payment issues appear linked by auth middleware failure.      │
-│ Prioritize this cluster before expanding scope.                 │
-│                                                                 │
-│ [Review cluster]                                 84% confidence │
-└─────────────────────────────────────────────────────────────────┘
-
-Success rate 84%    14 issues reviewed    3 delegated    4 skipped
-
-Your Direction                                            [Edit]
-Ship reliability first
-Payments hardening this quarter
-Focus: auth, incidents, checkout
-Avoid: redesigns, onboarding polish
-
-Documents                 Weights                  Advanced
-2 attached                Impact 35 / Sev 25       PM model, cadence
-```
-
-## What To Remove From The Default View
-
-- always-open textareas for philosophy and direction
-- always-visible document upload dropzone when there are zero documents
-- always-visible weight sliders
-- PM model and schedule controls in the primary page body
-- repeated section cards for every small control group
-- multiple primary-looking buttons in the same viewport
-
-## States
-
-### Pre-first-analysis
-
-The hero should explain value, not show a blank dashboard.
-
-- one calm message about what analysis will produce
-- one primary CTA
-- direction summary visible beneath, even if partially unset
-
-### Healthy recurring use
-
-The hero should show the current recommendation, not configuration.
-
-### Needs attention
-
-The hero should switch to a clear issue:
-
-- missing context
-- stale direction
-- analysis failure
-- low-confidence cluster requiring review
-
-But the page structure should remain the same. Only the hero content changes.
-
-## Immediate Product Recommendations
-
-### 1. Collapse the page into summary mode by default
-
-The top viewport should fit:
-
-- control strip
-- recommendation hero
-- one row of evidence
-- the first lines of `Your Direction`
-
-If the first screen contains more than this, it is still too dense.
-
-### 2. Move advanced PM controls behind disclosure
-
-Model selection, schedule, and low-frequency admin controls should not compete with the main task of understanding Autopilot.
-
-### 3. Convert form sections into readable product copy
-
-Autopilot should read like a collaborator, not like a settings schema.
-
-### 4. Make `Your Direction` feel intentionally authored
-
-Treat it like a brief, not a form. Short summaries with edit affordances will feel much more premium and legible.
-
-### 5. Use a single persistent save model
-
-If edits remain inline, save behavior should be quiet and local. Avoid a large sticky save bar unless the user is actively editing multiple fields.
-
-## Settings Placement
-
-The product should use a simple rule:
-
-- **contextual steering settings** stay on the Autopilot page
-- **administrative and low-frequency settings** live in the Settings area
-
-This keeps the main workflow coherent while preserving consistency with the existing page-based settings model.
-
-### Keep on Autopilot
-
-These directly affect what the PM/autopilot decides next and are part of the operator's active loop:
-
-- philosophy
-- current direction
-- focus areas
-- avoid areas
-- reference documents
-- priority weights
-- autonomy level
-
-These should be visible as summaries on the page and edited contextually.
-
-### Edit via side sheet from Autopilot
-
-Use a side sheet for edits that benefit from keeping the recommendation visible in the background:
-
-- edit direction and philosophy
-- manage focus and avoid areas
-- adjust weights
-- add or review documents
-
-The side sheet is the right pattern here because the user is making a steering adjustment in response to what they are seeing on the page. They should not lose the surrounding context.
-
-### Move to Settings page
-
-These are lower-frequency admin controls and should not compete with the product surface:
-
-- PM model
-- PM schedule / cadence
-- coding agent credentials and provider setup
-- organization-wide defaults that are not part of the recommendation loop
-- team, audit, integration administration
-
-These belong in page-based settings because they are administrative, not interpretive.
-
-### Consistency rule
-
-The user should feel one coherent pattern across the app:
-
-- **Settings pages** are for system configuration
-- **Autopilot** is for operating and steering the system
-- **side sheets** are for contextual edits inside an operating workflow
-
-This avoids building a second hidden settings center inside Autopilot while still keeping the most important steering inputs close to the work.
-
-## Wireframes
-
-### Wireframe A: Default Autopilot view
-
-```text
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ Autopilot                                               [Run analysis]      │
-│ Act on low-risk · Last analyzed 2h ago · Attention needed                   │
-│                                                                              │
-│ ┌──────────────────────────────────────────────────────────────────────────┐ │
-│ │ Recommendation                                                           │ │
-│ │                                                                          │ │
-│ │ 3 payment failures appear linked by one auth middleware issue.           │ │
-│ │ Prioritize this cluster before expanding scope.                          │ │
-│ │                                                                          │ │
-│ │ [Review cluster]                                        84% confidence   │ │
-│ └──────────────────────────────────────────────────────────────────────────┘ │
-│                                                                              │
-│ Success rate 84%     14 issues reviewed     3 delegated     4 skipped       │
-│                                                                              │
-│ ─────────────────────────────── Your Direction ────────────────────────────  │
-│                                                                              │
-│ Philosophy                                               [Edit]             │
-│ Ship reliability first, then broaden automation.                            │
-│                                                                              │
-│ Current direction                                         [Edit]            │
-│ Payments hardening this quarter.                                             │
-│                                                                              │
-│ Focus                                                    [Edit]             │
-│ [auth] [checkout] [incidents]                                              │
-│                                                                              │
-│ Avoid                                                    [Edit]             │
-│ [redesigns] [onboarding polish]                                             │
-│                                                                              │
-│ Documents                 Weights                  Advanced                  │
-│ 2 attached                Impact 35 · Sev 25       Model, cadence           │
-│ [Manage]                  [Customize]              [Open settings]          │
-└──────────────────────────────────────────────────────────────────────────────┘
-```
-
-### Wireframe B: Direction editing side sheet
-
-```text
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ Autopilot                                               [Run analysis]      │
-│                                                                              │
-│ Recommendation hero remains visible but dimmed in the background             │
-│                                                                              │
-│                                              ┌────────────────────────────┐  │
-│                                              │ Edit direction             │  │
-│                                              │                            │  │
-│                                              │ Philosophy                 │  │
-│                                              │ [textarea]                 │  │
-│                                              │                            │  │
-│                                              │ Current direction          │  │
-│                                              │ [textarea]                 │  │
-│                                              │                            │  │
-│                                              │ Focus areas                │  │
-│                                              │ [tag editor]               │  │
-│                                              │                            │  │
-│                                              │ Avoid areas                │  │
-│                                              │ [tag editor]               │  │
-│                                              │                            │  │
-│                                              │          [Cancel] [Save]   │  │
-│                                              └────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────────────────────┘
-```
-
-### Wireframe C: Advanced settings stay page-based
-
-```text
-User menu
-  General settings
-  Integrations
-  Agent
-  Team
-  Audit log
-  Autopilot settings
-
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ Autopilot settings                                                          │
-│ Configure PM model, cadence, and system-wide automation defaults.           │
-│                                                                              │
-│ PM model                                                                    │
-│ [select]                                                                    │
-│                                                                              │
-│ Analysis cadence                                                            │
-│ [every 4 hours]                                                             │
-│                                                                              │
-│ Organization defaults                                                       │
-│ [controls]                                                                  │
-│                                                                              │
-│                                                          [Save settings]    │
-└──────────────────────────────────────────────────────────────────────────────┘
-```
-
-### Wireframe D: First-analysis empty state
-
-```text
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ Autopilot                                          [Run first analysis]     │
-│ Suggest · GitHub connected · 23 open issues detected                         │
-│                                                                              │
-│ ┌──────────────────────────────────────────────────────────────────────────┐ │
-│ │ Recommendation                                                           │ │
-│ │                                                                          │ │
-│ │ Run the first analysis and Autopilot will tell you:                      │ │
-│ │ which issues matter most, which issues cluster together, and             │ │
-│ │ what your agents should work on first.                                   │ │
-│ │                                                                          │ │
-│ │ [Run first analysis]                                                     │ │
-│ └──────────────────────────────────────────────────────────────────────────┘ │
-│                                                                              │
-│ ─────────────────────────────── Your Direction ────────────────────────────  │
-│ Philosophy                                               [Edit]             │
-│ Not set yet                                                               │
-│                                                                              │
-│ Current direction                                         [Edit]            │
-│ Payments hardening this quarter.                                             │
-│                                                                              │
-│ Documents                 Weights                  Advanced                  │
-│ 0 attached                Using defaults            [Open settings]         │
-│ [Manage]                  [Customize]                                      │
-└──────────────────────────────────────────────────────────────────────────────┘
-```
-
-## Implementation Guidance
-
-Suggested sequence:
-
-1. Rework the above-the-fold area into control strip + recommendation hero.
-2. Convert open-ended settings into summary cards with edit dialogs or disclosures.
-3. Hide weights and PM advanced settings behind secondary actions.
-4. Replace empty-state boxes with inline rows and concise copy.
-5. Tune spacing, typography, and color restraint last.
-
-## Relationship To Existing Design Work
-
-This proposal aligns with the split between AI output and human steering described in [35-pm-agent-top-level-review.md](./35-pm-agent-top-level-review.md), but sharpens the visual rule:
-
-- AI output should dominate the top half of the page
-- human controls should be quieter and more compressed
-- complexity should open only when requested
+- `Suggest · No analysis yet`
+- `Act on low-risk · Analyzed 2h ago · Next in 2h`
+- `Operate broadly · Analyzed Apr 8, 2:34 PM · Next in 30m`
+- `Act on low-risk · Last analyzed Apr 7` (no next run scheduled)
+
+The status line is always visible in all states of the autopilot page
+(first-analysis, active, and error).
+
+## Analysis Headline
+
+The headline is the single most important element on the active page.
+It should be a bold, one-line summary answering "what should I pay attention to?"
+
+**Source:** The headline is derived from the latest PM plan analysis. Options:
+
+1. **First sentence of the analysis** — simplest, often works well
+2. **Dedicated field** — the PM agent produces a `title` or `headline` field
+   in its output (requires backend change)
+3. **Truncated analysis** — first ~80 characters of the analysis, ellipsized
+
+Option 1 is recommended for the initial implementation. If the PM analysis
+format evolves to include structured output, option 2 is better long-term.
+
+**Styling:** `text-lg font-semibold text-foreground` — noticeably bolder than
+the brief body text below it.
+
+## Onboarding / Autopilot Boundary
+
+Setup has been extracted to a dedicated `/onboarding` route
+(`OnboardingPageContent`). The boundary works as follows:
+
+1. **`/onboarding`** uses `useSetupStatus` to check agent + GitHub connection.
+   Once both are connected, it redirects to `/autopilot`.
+2. **`/autopilot`** should also check `useSetupStatus`. If setup is not
+   complete, redirect to `/onboarding`. This prevents users from landing on
+   an autopilot page that cannot function.
+3. The shared `SetupChecklist` component lives at `components/setup-checklist.tsx`
+   and is used by the onboarding page. The autopilot page no longer needs it.
+4. The `AutopilotSetupChecklist` re-export in `components/autopilot/` can be
+   deleted once the `heroMode === "setup"` branch is removed from the autopilot
+   page content.
+
+This separation means the autopilot page never needs to render onboarding UI,
+setup steps, or empty-state messaging for unconnected integrations. It can
+assume that a coding agent and GitHub are available.
+
+## Relationship to Existing Documents and Code
+
+- Aligns with the operator workspace model in
+  [37-pm-agent-top-level-review.md](./37-pm-agent-top-level-review.md)
+- The human/machine boundary (config footer vs. analysis) follows the
+  steering vs. output distinction from doc 37
+- Settings placement (contextual steering on-page, admin settings in Settings)
+  carries forward unchanged from the prior version of this document
+- Builds on the onboarding/autopilot separation implemented in PR #239
+  (`OnboardingPageContent`, `SetupChecklist`, `useSetupStatus`)
+
+## Implementation Sequence
+
+1. **Add redirect guard.** Use `useSetupStatus` in `AutopilotPageContent` to
+   redirect to `/onboarding` if setup is not complete. Remove the
+   `heroMode === "setup"` branch and `AutopilotSetupChecklist` usage.
+2. **Restructure the page shell.** Remove `PageHeader` description, remove
+   `AutopilotControlStrip` as a card, add status subtitle and CTA to header.
+3. **Build the analysis headline + brief.** Replace `AutopilotHero` with
+   headline (bold) + body (normal) rendering. No card wrapper needed.
+4. **Reduce evidence to 3 metrics.** Remove "Next run" from evidence, add it
+   to status line. Add visibility rule: hide when all zeros.
+5. **Build the config footer.** Replace `AutopilotDirectionSummary` (8 rows)
+   with 4 compact key-value rows below a separator.
+6. **Wire up first-analysis state.** Show the direction nudge line instead of
+   the full direction summary.
+7. **Clean up.** Remove `AutopilotSetupChecklist` re-export from
+   `components/autopilot/`. Remove `setup` fields from `AutopilotViewModel`
+   and `deriveAutopilotViewModel` that are no longer needed.
+8. **Polish.** Spacing, typography, empty-state transitions.
+
+## What To Remove From The Autopilot Page
+
+- Page header description text
+- Control strip as a separate bordered card
+- Evidence row when all values are zero
+- "Next run" as a stat card (moves to status line)
+- All setup/onboarding UI (now lives at `/onboarding`)
+- `AutopilotSetupChecklist` import and `heroMode === "setup"` branch
+- Separate rows for Philosophy, Direction, Focus, Avoid, Autonomy, Documents,
+  Weights, and Advanced (8 rows → 4 rows)
+- All instances of "Not set yet" / "None set" visible by default — if nothing
+  is set, the row either shows a brief prompt or is hidden

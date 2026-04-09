@@ -13,6 +13,7 @@ import {
   Sparkles,
   ScrollText,
   Target,
+  FlaskConical,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
@@ -27,10 +28,12 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/hooks/use-auth";
-import { useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { RepoContextSwitcher } from "@/components/repo-context-switcher";
+import { CommandPalette } from "@/components/command-palette/command-palette";
+import { CommandPaletteTrigger } from "@/components/command-palette/command-palette-trigger";
 
 const navItems = [
   { label: "Autopilot", icon: Zap, href: "/autopilot", showProposalBadge: false },
@@ -50,6 +53,23 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
     enabled: isAuthenticated,
   });
   const proposalCount = proposalSummary?.data?.count ?? 0;
+
+  const [paletteOpen, setPaletteOpen] = useState(false);
+
+  // Global Cmd+K / Ctrl+K shortcut — registered independently of other
+  // keyboard nav so it works even when focus is inside an input or textarea.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        setPaletteOpen((prev) => !prev);
+      }
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, []);
+
+  const handlePaletteOpen = useCallback(() => setPaletteOpen(true), []);
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated) {
@@ -106,10 +126,11 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
       <aside className="w-64 border-r border-border bg-sidebar flex flex-col relative">
         <div className="absolute inset-0 bg-gradient-to-b from-primary/[0.03] to-transparent pointer-events-none" />
         <div className="relative px-5 py-5 flex items-center gap-2">
-          <Link href="/autopilot" className="text-base font-bold tracking-tight text-sidebar-foreground">
+          <Link href="/autopilot" className="text-sm font-semibold tracking-tight text-sidebar-foreground">
             143.dev
           </Link>
           <RepoContextSwitcher />
+          <CommandPaletteTrigger onClick={handlePaletteOpen} />
         </div>
         <nav className="relative flex-1 px-2.5 space-y-0.5">
           {navItems.map((item) => {
@@ -162,7 +183,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                       className="h-5 w-5 rounded-full"
                     />
                   ) : (
-                    <div className="flex h-5 w-5 items-center justify-center rounded-full bg-muted text-[10px] font-medium">
+                    <div className="flex h-5 w-5 items-center justify-center rounded-full bg-muted text-xs font-medium">
                       {user.name?.[0]?.toUpperCase() ?? "?"}
                     </div>
                   )}
@@ -191,6 +212,10 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                   <Target className="h-4 w-4" />
                   Autopilot settings
                 </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => router.push("/settings/evals")}>
+                  <FlaskConical className="h-4 w-4" />
+                  Evals
+                </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => router.push("/team")}>
                   <Users className="h-4 w-4" />
                   Team
@@ -217,6 +242,14 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
           {children}
         </div>
       </main>
+      {user && (
+        <CommandPalette
+          open={paletteOpen}
+          onOpenChange={setPaletteOpen}
+          userRole={user.role}
+          logout={logout}
+        />
+      )}
     </div>
   );
 }

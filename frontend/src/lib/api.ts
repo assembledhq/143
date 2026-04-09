@@ -182,10 +182,12 @@ export const api = {
     },
     latest: () => get<import('./types').SingleResponse<import('./types').PMPlan>>('/api/v1/pm/plans/latest'),
     get: (id: string) => get<import('./types').SingleResponse<import('./types').PMPlan>>(`/api/v1/pm/plans/${id}`),
-    decisions: (params?: { cursor?: string; limit?: number }) => {
+    decisions: (params?: { cursor?: string; limit?: number; decision_type?: string; outcome?: string }) => {
       const searchParams = new URLSearchParams();
       if (params?.cursor) searchParams.set('cursor', params.cursor);
       if (params?.limit != null) searchParams.set('limit', String(params.limit));
+      if (params?.decision_type) searchParams.set('decision_type', params.decision_type);
+      if (params?.outcome) searchParams.set('outcome', params.outcome);
       const qs = searchParams.toString();
       return get<import('./types').PMDecisionsResponse>(`/api/v1/pm/decisions${qs ? `?${qs}` : ''}`);
     },
@@ -203,13 +205,14 @@ export const api = {
       del(`/api/v1/pm/documents/${docId}`),
   },
   sessions: {
-    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; triggered_by_user_id?: string }) => {
+    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; triggered_by_user_id?: string; search?: string }) => {
       const searchParams = new URLSearchParams();
       if (params?.status) searchParams.set('status', params.status);
       if (params?.cursor) searchParams.set('cursor', params.cursor);
       if (params?.limit) searchParams.set('limit', String(params.limit));
       if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
       if (params?.triggered_by_user_id) searchParams.set('triggered_by_user_id', params.triggered_by_user_id);
+      if (params?.search) searchParams.set('search', params.search);
       const qs = searchParams.toString();
       return get<import('./types').ListResponse<import('./types').Session>>(`/api/v1/sessions${qs ? `?${qs}` : ''}`);
     },
@@ -217,7 +220,8 @@ export const api = {
     getLogs: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/logs`),
     getValidation: (sessionId: string) => get<import('./types').SingleResponse<import('./types').Validation>>(`/api/v1/sessions/${sessionId}/validation`),
     getPR: (sessionId: string) => get<import('./types').SingleResponse<import('./types').PullRequest>>(`/api/v1/sessions/${sessionId}/pr`),
-    createPR: (sessionId: string) => post<{ status: string }>(`/api/v1/sessions/${sessionId}/pr`),
+    createPR: (sessionId: string, options?: { draft?: boolean }) =>
+      post<{ status: string }>(`/api/v1/sessions/${sessionId}/pr`, options),
     getQuestions: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions`),
     answerQuestion: (sessionId: string, questionId: string, answer: string) =>
       post<import('./types').SingleResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions/${questionId}/answer`, { answer }),
@@ -335,7 +339,7 @@ export const api = {
     disconnect: () => post('/api/v1/settings/codex-auth/disconnect'),
   },
   githubStatus: {
-    get: () => get<{ connected: boolean; has_repo_scope: boolean; github_login?: string; pr_authorship_mode: string }>('/api/v1/users/me/github-status'),
+    get: () => get<{ connected: boolean; has_repo_scope: boolean; github_login?: string; pr_authorship_mode: string; pr_draft_default: boolean }>('/api/v1/users/me/github-status'),
     connect: () => { window.location.href = `${API_BASE}/api/v1/users/me/github/connect`; },
     disconnect: () => post('/api/v1/users/me/github/disconnect'),
   },
@@ -382,12 +386,13 @@ export const api = {
     revokeInvitation: (id: string) => del<void>(`/api/v1/team/invitations/${id}`),
   },
   projects: {
-    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string }) => {
+    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; search?: string }) => {
       const searchParams = new URLSearchParams();
       if (params?.status) searchParams.set('status', params.status);
       if (params?.cursor) searchParams.set('cursor', params.cursor);
       if (params?.limit) searchParams.set('limit', String(params.limit));
       if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
+      if (params?.search) searchParams.set('search', params.search);
       const qs = searchParams.toString();
       return get<import('./types').ListResponse<import('./types').Project>>(`/api/v1/projects${qs ? `?${qs}` : ''}`);
     },
@@ -478,6 +483,73 @@ export const api = {
       return get<import('./types').ListResponse<import('./types').AuditLog>>(`/api/v1/audit-logs${qs ? `?${qs}` : ''}`);
     },
     get: (id: number) => get<import('./types').SingleResponse<import('./types').AuditLog>>(`/api/v1/audit-logs/${id}`),
+  },
+  evals: {
+    // Tasks
+    listTasks: (params?: { source?: string; complexity?: string; archived?: string; tags?: string; cursor?: string; limit?: number }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.source) searchParams.set('source', params.source);
+      if (params?.complexity) searchParams.set('complexity', params.complexity);
+      if (params?.archived) searchParams.set('archived', params.archived);
+      if (params?.tags) searchParams.set('tags', params.tags);
+      if (params?.cursor) searchParams.set('cursor', params.cursor);
+      if (params?.limit) searchParams.set('limit', String(params.limit));
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').EvalTask>>(`/api/v1/evals/tasks${qs ? `?${qs}` : ''}`);
+    },
+    getTask: (id: string) => get<import('./types').SingleResponse<import('./types').EvalTask>>(`/api/v1/evals/tasks/${id}`),
+    createTask: (body: {
+      repo_id: string;
+      name: string;
+      description: string;
+      base_commit_sha: string;
+      solution_commit_sha?: string;
+      solution_diff?: string;
+      issue_description: string;
+      issue_context?: Record<string, unknown>;
+      scoring_criteria: import('./types').ScoringCriterion[];
+      pass_threshold: number;
+      source?: string;
+      source_pr_number?: number;
+      complexity: string;
+      tags?: string[];
+    }) => post<import('./types').SingleResponse<import('./types').EvalTask>>('/api/v1/evals/tasks', body),
+    updateTask: (id: string, body: Record<string, unknown>) =>
+      patch<import('./types').SingleResponse<import('./types').EvalTask>>(`/api/v1/evals/tasks/${id}`, body),
+    archiveTask: (id: string) => del(`/api/v1/evals/tasks/${id}`),
+    // Runs
+    startRun: (taskId: string, body: { model: string; config_ref?: string; context_overrides?: Record<string, unknown> }) =>
+      post<import('./types').SingleResponse<import('./types').EvalRun>>(`/api/v1/evals/tasks/${taskId}/runs`, body),
+    listRuns: (taskId: string, params?: { cursor?: string; limit?: number }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.cursor) searchParams.set('cursor', params.cursor);
+      if (params?.limit) searchParams.set('limit', String(params.limit));
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').EvalRun>>(`/api/v1/evals/tasks/${taskId}/runs${qs ? `?${qs}` : ''}`);
+    },
+    getRun: (id: string) => get<import('./types').SingleResponse<import('./types').EvalRun>>(`/api/v1/evals/runs/${id}`),
+    // Batch
+    listBatches: (params?: { limit?: number }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.limit) searchParams.set('limit', String(params.limit));
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').EvalBatch>>(`/api/v1/evals/batch${qs ? `?${qs}` : ''}`);
+    },
+    startBatch: (body: { name: string; task_ids: string[]; configs: Array<{ model: string; config_ref?: string }> }) =>
+      post<import('./types').SingleResponse<import('./types').EvalBatch>>('/api/v1/evals/batch', body),
+    getBatch: (id: string) => get<import('./types').SingleResponse<import('./types').EvalBatchDetail>>(`/api/v1/evals/batch/${id}`),
+    // Bootstrap
+    bootstrap: (body: { repo_id: string }) =>
+      post<import('./types').SingleResponse<import('./types').EvalBootstrapRun>>('/api/v1/evals/bootstrap', body),
+    getBootstrapCandidates: (params?: { repo_id?: string; bootstrap_run_id?: string }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.repo_id) searchParams.set('repo_id', params.repo_id);
+      if (params?.bootstrap_run_id) searchParams.set('bootstrap_run_id', params.bootstrap_run_id);
+      const qs = searchParams.toString();
+      return get<import('./types').SingleResponse<import('./types').EvalBootstrapRun>>(`/api/v1/evals/bootstrap/candidates${qs ? `?${qs}` : ''}`);
+    },
+    acceptBootstrapCandidates: (body: { bootstrap_run_id: string; candidate_indices: number[] }) =>
+      post<import('./types').ListResponse<import('./types').EvalTask>>('/api/v1/evals/bootstrap/accept', body),
   },
   reviewComments: {
     list: (params?: { pull_request_id?: string; filter_status?: string; cursor?: string }) => {

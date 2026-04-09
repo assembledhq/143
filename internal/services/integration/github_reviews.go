@@ -6,9 +6,20 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"time"
+
+	"github.com/rs/zerolog"
 )
+
+// maxPaginationPages caps how many pages we follow when paginating GitHub
+// API results. 10 pages * 100 per_page = 1000 items max.
+const maxPaginationPages = 10
+
+// linkNextRe extracts the URL from a GitHub Link header rel="next" entry.
+// Example: <https://api.github.com/repos/...?page=2>; rel="next"
+var linkNextRe = regexp.MustCompile(`<([^>]+)>;\s*rel="next"`)
 
 // GitHubCodeReviewSource implements CodeReviewSource for GitHub pull requests.
 // It uses the GitHub REST API to list recent PRs and their review comments.
@@ -120,13 +131,12 @@ func (g *GitHubCodeReviewSource) GetPRReviews(ctx context.Context, prNumber int)
 		return nil, fmt.Errorf("get reviews: %w", err)
 	}
 
-	// Fetch inline review comments (capped at 100; pagination not implemented —
-	// PRs with >100 inline comments are rare and the PM agent only needs themes).
+	// Fetch all inline review comments, paginating via Link headers.
 	commentsEndpoint := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/comments?per_page=100",
 		g.baseURL, g.owner, g.repo, prNumber)
 
-	var ghComments []ghReviewComment
-	if err := g.doGet(ctx, commentsEndpoint, &ghComments); err != nil {
+	ghComments, err := doGetPaginated[ghReviewComment](ctx, g, commentsEndpoint)
+	if err != nil {
 		return nil, fmt.Errorf("get review comments: %w", err)
 	}
 
@@ -179,6 +189,81 @@ func (g *GitHubCodeReviewSource) doGet(ctx context.Context, url string, target a
 	}
 
 	return json.NewDecoder(resp.Body).Decode(target)
+}
+
+// doGetPaginated fetches all pages of a GitHub API list endpoint by following
+// Link rel="next" headers. It stops after maxPaginationPages to prevent
+// runaway pagination. On mid-pagination errors it returns whatever was
+// collected so far along with a nil error (logging a warning instead).
+func doGetPaginated[T any](ctx context.Context, g *GitHubCodeReviewSource, initialURL string) ([]T, error) {
+	var all []T
+	nextURL := initialURL
+
+	for page := 0; page < maxPaginationPages; page++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, nextURL, nil)
+		if err != nil {
+			if len(all) > 0 {
+				zerolog.Ctx(ctx).Warn().Err(err).Int("pages_fetched", page).Msg("pagination stopped: failed to create request")
+				return all, nil
+			}
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+g.token)
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+		resp, err := g.httpClient.Do(req)
+		if err != nil {
+			if len(all) > 0 {
+				zerolog.Ctx(ctx).Warn().Err(err).Int("pages_fetched", page).Msg("pagination stopped: request failed")
+				return all, nil
+			}
+			return nil, err
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+			if len(all) > 0 {
+				zerolog.Ctx(ctx).Warn().Int("status", resp.StatusCode).Int("pages_fetched", page).Msg("pagination stopped: non-200 status")
+				return all, nil
+			}
+			return nil, fmt.Errorf("GitHub API returned %d", resp.StatusCode)
+		}
+
+		var items []T
+		decodeErr := json.NewDecoder(resp.Body).Decode(&items)
+		_ = resp.Body.Close()
+		if decodeErr != nil {
+			if len(all) > 0 {
+				zerolog.Ctx(ctx).Warn().Err(decodeErr).Int("pages_fetched", page).Msg("pagination stopped: decode error")
+				return all, nil
+			}
+			return nil, decodeErr
+		}
+
+		all = append(all, items...)
+
+		// Check for next page.
+		nextURL = parseLinkNext(resp.Header.Get("Link"))
+		if nextURL == "" {
+			break
+		}
+	}
+
+	return all, nil
+}
+
+// parseLinkNext extracts the URL for rel="next" from a GitHub Link header.
+// Returns "" if no next link is found.
+func parseLinkNext(header string) string {
+	if header == "" {
+		return ""
+	}
+	matches := linkNextRe.FindStringSubmatch(header)
+	if len(matches) < 2 {
+		return ""
+	}
+	return matches[1]
 }
 
 // reviewDecision returns a simple summary based on review comment count.

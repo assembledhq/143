@@ -22,7 +22,12 @@ export const queryKeys = {
   },
   repositories: {
     all: ["repositories"] as const,
+    summary: ["repositories", "summary"] as const,
     branches: (id: string) => ["repositories", id, "branches"] as const,
+  },
+  projects: {
+    all: ["projects"] as const,
+    list: (params?: { repo?: string | null; search?: string }) => ["projects", params] as const,
   },
   settings: {
     all: ["settings"] as const,
@@ -41,5 +46,14 @@ export const queryKeys = {
   },
   team: {
     members: ["team", "members"] as const,
+  },
+  evals: {
+    tasks: (params?: Record<string, string | undefined>) => ["evals", "tasks", params] as const,
+    taskDetail: (id: string) => ["evals", "task", id] as const,
+    runs: (taskId: string) => ["evals", "task", taskId, "runs"] as const,
+    runDetail: (id: string) => ["evals", "run", id] as const,
+    batches: ["evals", "batches"] as const,
+    batch: (id: string) => ["evals", "batch", id] as const,
+    bootstrapCandidates: ["evals", "bootstrap", "candidates"] as const,
   },
 } as const;

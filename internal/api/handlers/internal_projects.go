@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -40,8 +42,12 @@ type InternalProjectHandler struct {
 	// reset on server restart, which is acceptable because PM run tokens are
 	// short-lived and a restart mid-run is rare. The hard cap per repo
 	// (maxOpenProposalsPerRepo, checked via DB) provides durable protection.
+	//
+	// Eviction is time-bucketed: entries older than rateLimiterWindow are
+	// dropped on each access rather than clearing the entire map at a size
+	// threshold, avoiding thundering-herd cache misses.
 	perTokenMu        sync.Mutex
-	perTokenRepoCount map[string]int
+	perTokenRepoCount map[string]rateLimiterEntry
 }
 
 // NewInternalProjectHandler creates a handler for internal project proposal creation.
@@ -60,9 +66,18 @@ func NewInternalProjectHandler(
 		repoStore:         repoStore,
 		signingSecret:     signingSecret,
 		logger:            logger,
-		perTokenRepoCount: make(map[string]int),
+		perTokenRepoCount: make(map[string]rateLimiterEntry),
 	}
 }
+
+// rateLimiterEntry pairs a count with a timestamp for time-bucketed eviction.
+type rateLimiterEntry struct {
+	count     int
+	createdAt time.Time
+}
+
+// rateLimiterWindow is how long rate limiter entries survive before eviction.
+const rateLimiterWindow = 10 * time.Minute
 
 type proposeProjectRequest struct {
 	RepositoryID       string             `json:"repository_id"`
@@ -106,7 +121,7 @@ func (h *InternalProjectHandler) Propose(w http.ResponseWriter, r *http.Request)
 	}
 
 	var req proposeProjectRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
 		return
 	}
@@ -172,7 +187,7 @@ func (h *InternalProjectHandler) Propose(w http.ResponseWriter, r *http.Request)
 			writeError(w, r, http.StatusBadRequest, "INVALID_SIMILAR_PROJECT", fmt.Sprintf("similar project %s not found", spID))
 			return
 		}
-		if sp.RepositoryID != repoID {
+		if sp.RepositoryID == nil || *sp.RepositoryID != repoID {
 			writeError(w, r, http.StatusBadRequest, "INVALID_SIMILAR_PROJECT", fmt.Sprintf("similar project %s belongs to a different repository", spID))
 			return
 		}
@@ -258,7 +273,7 @@ func (h *InternalProjectHandler) Propose(w http.ResponseWriter, r *http.Request)
 	// 10. Create project row.
 	project := models.Project{
 		OrgID:              claims.OrgID,
-		RepositoryID:       repoID,
+		RepositoryID:       &repoID,
 		Title:              req.Title,
 		Goal:               req.Goal,
 		Scope:              req.Scope,
@@ -334,14 +349,36 @@ func (h *InternalProjectHandler) Propose(w http.ResponseWriter, r *http.Request)
 
 // incrementAndCheckProposal atomically increments the per-token-repo proposal count
 // and returns true if the count is within the allowed limit.
+// Entries older than rateLimiterWindow are evicted on each call, keeping memory
+// bounded without a hard cap that clears everything at once.
 func (h *InternalProjectHandler) incrementAndCheckProposal(key string) bool {
 	h.perTokenMu.Lock()
 	defer h.perTokenMu.Unlock()
-	count := h.perTokenRepoCount[key]
-	if count >= maxProposalsPerRepoPerRun {
+
+	now := time.Now()
+	cutoff := now.Add(-rateLimiterWindow)
+
+	// Evict stale entries. Collect keys first to avoid modifying the map
+	// during iteration, which can cause unpredictable behavior.
+	var stale []string
+	for k, v := range h.perTokenRepoCount {
+		if v.createdAt.Before(cutoff) {
+			stale = append(stale, k)
+		}
+	}
+	for _, k := range stale {
+		delete(h.perTokenRepoCount, k)
+	}
+
+	entry, ok := h.perTokenRepoCount[key]
+	if !ok {
+		entry = rateLimiterEntry{createdAt: now}
+	}
+	if entry.count >= maxProposalsPerRepoPerRun {
 		return false
 	}
-	h.perTokenRepoCount[key] = count + 1
+	entry.count++
+	h.perTokenRepoCount[key] = entry
 	return true
 }
 

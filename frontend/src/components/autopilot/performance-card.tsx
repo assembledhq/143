@@ -31,18 +31,18 @@ export function PerformanceCard({ summary }: PerformanceCardProps) {
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="flex items-baseline gap-2">
-          <span className="text-2xl font-bold tabular-nums">{rate}%</span>
+          <span className="text-2xl font-semibold tabular-nums">{rate}%</span>
           <span className="text-sm text-muted-foreground">success rate</span>
         </div>
         <div className="flex flex-wrap gap-2 text-xs">
-          <Badge variant="secondary" className="text-[11px]">
+          <Badge variant="secondary" className="text-xs">
             {summary.succeeded} succeeded
           </Badge>
-          <Badge variant="secondary" className="text-[11px]">
+          <Badge variant="secondary" className="text-xs">
             {summary.failed} failed
           </Badge>
           {summary.still_open > 0 && (
-            <Badge variant="outline" className="text-[11px]">
+            <Badge variant="outline" className="text-xs">
               {summary.still_open} still open
             </Badge>
           )}
