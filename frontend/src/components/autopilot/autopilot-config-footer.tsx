@@ -11,7 +11,6 @@ interface AutopilotConfigFooterProps {
   weightsSummary: string;
   onEditDirection: () => void;
   onManageDocuments: () => void;
-  onCustomizeWeights: () => void;
   onOpenSettings: () => void;
 }
 
@@ -53,7 +52,6 @@ export function AutopilotConfigFooter({
   weightsSummary,
   onEditDirection,
   onManageDocuments,
-  onCustomizeWeights,
   onOpenSettings,
 }: AutopilotConfigFooterProps) {
   const focusDisplay = focusAreas.length > 0
@@ -64,7 +62,7 @@ export function AutopilotConfigFooter({
         ))}
       </span>
     )
-    : "None set";
+    : "Add focus areas to narrow analysis";
 
   return (
     <section>
@@ -72,7 +70,7 @@ export function AutopilotConfigFooter({
       <div className="divide-y divide-border/60">
         <ConfigRow
           label="Direction"
-          value={directionSummary || "Not set yet"}
+          value={directionSummary || "Set a direction to guide analysis"}
           actionLabel="Edit"
           onAction={onEditDirection}
         />
@@ -89,14 +87,8 @@ export function AutopilotConfigFooter({
           onAction={onManageDocuments}
         />
         <ConfigRow
-          label="Weights"
+          label="Weights & more"
           value={weightsSummary || "Using defaults"}
-          actionLabel="Customize"
-          onAction={onCustomizeWeights}
-        />
-        <ConfigRow
-          label="Advanced"
-          value="Model, cadence, and more"
           actionLabel="Settings"
           onAction={onOpenSettings}
         />
