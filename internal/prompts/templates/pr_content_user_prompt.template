@@ -1,0 +1,45 @@
+{{ if .RepoTemplate }}
+<pr_template>
+{{ .RepoTemplate }}
+</pr_template>
+
+{{ end }}
+{{ if .ResultSummary }}
+<agent_summary>
+{{ .ResultSummary }}
+</agent_summary>
+
+{{ end }}
+{{ if .SessionTitle }}
+<session_title>
+{{ .SessionTitle }}
+</session_title>
+
+{{ end }}
+{{ if .IssueTitle }}
+<issue>
+- Title: {{ .IssueTitle }}
+- Source: {{ .IssueSource }}
+{{ if .IssueSeverity }}- Severity: {{ .IssueSeverity }}
+{{ end }}
+</issue>
+
+{{ end }}
+{{ if .ValidationChecks }}
+<validation_results>
+{{ range .ValidationChecks }}- {{ . }}
+{{ end }}
+</validation_results>
+
+{{ end }}
+{{ if .FileSummary }}
+<files_changed>
+{{ .FileSummary }}
+</files_changed>
+
+{{ end }}
+{{ if .Diff }}
+<code_diff>
+{{ .Diff }}
+</code_diff>
+{{ end }}

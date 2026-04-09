@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,18 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 )
+
+// mockLLMClient implements llm.Client for testing.
+type mockLLMClient struct {
+	response       string
+	err            error
+	lastUserPrompt string
+}
+
+func (m *mockLLMClient) Complete(_ context.Context, _, userPrompt string) (string, error) {
+	m.lastUserPrompt = userPrompt
+	return m.response, m.err
+}
 
 func TestFormatPRTitle(t *testing.T) {
 	t.Parallel()
@@ -857,14 +870,8 @@ func TestGetOrFetchPRTemplate_NilCache(t *testing.T) {
 	require.Empty(t, content, "should return empty when no template and no cache")
 }
 
-func TestGeneratePRBody_FallsBackToDefault(t *testing.T) {
+func TestGeneratePRContent_NoLLMClient(t *testing.T) {
 	t.Parallel()
-
-	// Server returns 404 for template lookup.
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer server.Close()
 
 	summary := "Fixed the auth bug"
 	run := &models.Session{
@@ -875,14 +882,191 @@ func TestGeneratePRBody_FallsBackToDefault(t *testing.T) {
 	}
 
 	svc := &PRService{
+		logger: zerolog.Nop(),
+	}
+
+	_, err := svc.generatePRContent(context.Background(), "token", "owner", "repo", "main", uuid.New(), uuid.New(), run, nil)
+	require.Error(t, err, "should fail without LLM client")
+	require.Contains(t, err.Error(), "no LLM client")
+}
+
+func TestGeneratePRContent_WithLLM(t *testing.T) {
+	t.Parallel()
+
+	// Server returns 404 for template lookup (no repo template).
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	summary := "Fixed the auth bug by adding null check"
+	diff := "+++ b/auth.go\n+if user == nil {\n+  return ErrUnauthorized\n+}\n"
+	run := &models.Session{
+		ID:            uuid.New(),
+		OrgID:         uuid.New(),
+		AgentType:     "claude-code",
+		ResultSummary: &summary,
+		Diff:          &diff,
+	}
+
+	mockLLM := &mockLLMClient{
+		response: "<pr_title>Fix null pointer in auth middleware</pr_title>\n<pr_body>\n## Summary\n\nAdded a nil check for the user object in the auth middleware to prevent panics when unauthenticated requests hit protected endpoints.\n\n## Changes\n\n- Added nil guard in auth.go\n\n## Test plan\n\n- Validated by automated agent run\n</pr_body>",
+	}
+
+	svc := &PRService{
 		baseURL:    server.URL,
 		httpClient: server.Client(),
+		llmClient:  mockLLM,
 		logger:     zerolog.Nop(),
 	}
 
-	body := svc.generatePRBody(context.Background(), "token", "owner", "repo", "main", uuid.New(), uuid.New(), run, nil)
-	require.Contains(t, body, "## Summary", "should fall back to default body")
-	require.Contains(t, body, "Fixed the auth bug", "should contain session summary")
+	result, err := svc.generatePRContent(context.Background(), "token", "owner", "repo", "main", uuid.New(), uuid.New(), run, nil)
+	require.NoError(t, err)
+	require.Equal(t, "Fix null pointer in auth middleware", result.Title)
+	require.Contains(t, result.Body, "## Summary")
+	require.Contains(t, result.Body, "nil check")
+	require.Contains(t, result.Body, "143.dev", "should contain attribution footer")
+}
+
+func TestGeneratePRContent_WithRepoTemplate(t *testing.T) {
+	t.Parallel()
+
+	templateContent := "## What\n\n## Why\n\n## Testing\n"
+	encodedTemplate := base64.StdEncoding.EncodeToString([]byte(templateContent))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "pull_request_template") {
+			resp, _ := json.Marshal(map[string]string{
+				"content":  encodedTemplate,
+				"encoding": "base64",
+			})
+			_, _ = w.Write(resp)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	summary := "Refactored the login flow"
+	run := &models.Session{
+		ID:            uuid.New(),
+		OrgID:         uuid.New(),
+		AgentType:     "claude-code",
+		ResultSummary: &summary,
+	}
+
+	mockLLM := &mockLLMClient{
+		response: "<pr_title>Refactor login flow for clarity</pr_title>\n<pr_body>\n## What\n\nSimplified the login handler.\n\n## Why\n\nReduce complexity and improve readability.\n\n## Testing\n\nUnit tests pass.\n</pr_body>",
+	}
+
+	svc := &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		llmClient:  mockLLM,
+		logger:     zerolog.Nop(),
+	}
+
+	result, err := svc.generatePRContent(context.Background(), "token", "owner", "repo", "main", uuid.New(), uuid.New(), run, nil)
+	require.NoError(t, err)
+	require.Equal(t, "Refactor login flow for clarity", result.Title)
+	require.Contains(t, result.Body, "## What")
+
+	// Verify the template was passed to the LLM.
+	require.Contains(t, mockLLM.lastUserPrompt, "## What", "LLM prompt should contain the repo template")
+	require.Contains(t, mockLLM.lastUserPrompt, "<pr_template>", "LLM prompt should wrap template in pr_template tags")
+}
+
+func TestParsePRContentResponse(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		response  string
+		wantTitle string
+		wantBody  string
+	}{
+		{
+			name:      "valid XML tags",
+			response:  "<pr_title>Fix auth bug</pr_title>\n<pr_body>\n## Summary\nFixed it.\n</pr_body>",
+			wantTitle: "Fix auth bug",
+			wantBody:  "## Summary\nFixed it.",
+		},
+		{
+			name:      "XML with extra whitespace",
+			response:  "  <pr_title>  Fix auth bug  </pr_title>\n<pr_body>\n  Body here.\n</pr_body>  ",
+			wantTitle: "Fix auth bug",
+			wantBody:  "Body here.",
+		},
+		{
+			name:      "empty response",
+			response:  "",
+			wantTitle: "",
+			wantBody:  "",
+		},
+		{
+			name:      "title only",
+			response:  "<pr_title>Just a title</pr_title>",
+			wantTitle: "Just a title",
+			wantBody:  "",
+		},
+		{
+			name:      "body only",
+			response:  "<pr_body>## Summary\nJust a body.</pr_body>",
+			wantTitle: "",
+			wantBody:  "## Summary\nJust a body.",
+		},
+		{
+			name:      "no tags fallback treats as body",
+			response:  "## Summary\nJust a body.",
+			wantTitle: "",
+			wantBody:  "## Summary\nJust a body.",
+		},
+		{
+			name:      "multiline body with markdown",
+			response:  "<pr_title>Add user validation</pr_title>\n<pr_body>\n## Summary\n\nAdded validation.\n\n## Changes\n\n- Added `validateUser()` in `auth.go`\n- Updated tests\n\n## Test plan\n\nUnit tests pass.\n</pr_body>",
+			wantTitle: "Add user validation",
+			wantBody:  "## Summary\n\nAdded validation.\n\n## Changes\n\n- Added `validateUser()` in `auth.go`\n- Updated tests\n\n## Test plan\n\nUnit tests pass.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := parsePRContentResponse(tt.response)
+			require.Equal(t, tt.wantTitle, result.Title, "title mismatch")
+			require.Equal(t, tt.wantBody, result.Body, "body mismatch")
+		})
+	}
+}
+
+func TestSummarizeDiff(t *testing.T) {
+	t.Parallel()
+
+	diff := `diff --git a/auth.go b/auth.go
+--- a/auth.go
++++ b/auth.go
+@@ -10,6 +10,9 @@
++if user == nil {
++  return ErrUnauthorized
++}
+-old line removed
+diff --git a/handler.go b/handler.go
+--- a/handler.go
++++ b/handler.go
+@@ -5,3 +5,4 @@
++newLine`
+
+	summary, truncated := summarizeDiff(diff, 10000)
+	require.Contains(t, summary, "auth.go")
+	require.Contains(t, summary, "handler.go")
+	require.Contains(t, summary, "4 additions")
+	require.Contains(t, summary, "1 deletions")
+	require.Equal(t, diff, truncated, "diff under maxChars should not be truncated")
+
+	// Test truncation.
+	_, truncatedShort := summarizeDiff(diff, 50)
+	require.Contains(t, truncatedShort, "... (truncated)")
+	require.LessOrEqual(t, len(truncatedShort), 70)
 }
 
 func TestResolveToken_AppOnly(t *testing.T) {
