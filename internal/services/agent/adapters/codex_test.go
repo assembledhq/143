@@ -827,8 +827,8 @@ func TestParseCodexStreamLine_DeduplicatesConsecutiveOutput(t *testing.T) {
 	line := []byte(`{"type":"message","content":"Hello world"}`)
 
 	// Send the same line twice — only one log entry should be emitted.
-	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType)
-	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType)
+	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType, new(string))
+	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType, new(string))
 	close(logCh)
 
 	var logs []agent.LogEntry
@@ -852,9 +852,9 @@ func TestParseCodexStreamLine_AllowsNonConsecutiveDuplicates(t *testing.T) {
 	lineB := []byte(`{"type":"message","content":"B"}`)
 
 	// A, B, A — all 3 should pass through because A is non-consecutive.
-	parseCodexStreamLine(lineA, result, logCh, &summaryParts, lastByType)
-	parseCodexStreamLine(lineB, result, logCh, &summaryParts, lastByType)
-	parseCodexStreamLine(lineA, result, logCh, &summaryParts, lastByType)
+	parseCodexStreamLine(lineA, result, logCh, &summaryParts, lastByType, new(string))
+	parseCodexStreamLine(lineB, result, logCh, &summaryParts, lastByType, new(string))
+	parseCodexStreamLine(lineA, result, logCh, &summaryParts, lastByType, new(string))
 	close(logCh)
 
 	var logs []agent.LogEntry
@@ -879,8 +879,8 @@ func TestParseCodexStreamLine_DeduplicatesItemCompleted(t *testing.T) {
 	line := []byte(`{"type":"item.completed","item":{"type":"agent_message","text":"Final answer"}}`)
 
 	// Same item.completed agent_message twice.
-	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType)
-	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType)
+	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType, new(string))
+	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType, new(string))
 	close(logCh)
 
 	var logs []agent.LogEntry
@@ -906,7 +906,7 @@ func TestParseCodexStreamLine_SuppressesRefreshTokenFromStdout(t *testing.T) {
 		[]byte(`2026-03-20T04:36:19.827634Z ERROR codex_core::auth: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.`),
 	}
 	for _, line := range lines {
-		parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType)
+		parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType, new(string))
 	}
 	close(logCh)
 
@@ -994,7 +994,7 @@ func TestParseCodexStreamLine_SuppressesRefreshTokenError(t *testing.T) {
 	lastByType := make(map[string]string)
 
 	line := []byte(`{"type":"error","error":"401 Unauthorized: refresh_token_reused"}`)
-	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType)
+	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType, new(string))
 	close(logCh)
 
 	var logs []agent.LogEntry
