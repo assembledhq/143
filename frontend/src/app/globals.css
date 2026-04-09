@@ -123,6 +123,19 @@
   --glow-primary-sm: 0 0 10px oklch(0.6 0.18 270 / 15%);
 }
 
+@utility scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+@utility mask-fade-r {
+  mask-image: linear-gradient(to right, black calc(100% - 24px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, black calc(100% - 24px), transparent 100%);
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
