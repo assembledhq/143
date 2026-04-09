@@ -2768,6 +2768,197 @@ func TestSessionHandler_CreatePR_PRLookupDBError(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+// mockCanceller implements SessionCanceller for testing.
+type mockCanceller struct {
+	called    bool
+	sessionID uuid.UUID
+	result    bool
+}
+
+func (m *mockCanceller) CancelSession(sessionID uuid.UUID) bool {
+	m.called = true
+	m.sessionID = sessionID
+	return m.result
+}
+
+func TestSessionHandler_CancelSession_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	handler := newSessionHandler(t, mock)
+	canceller := &mockCanceller{result: true}
+	handler.SetCanceller(canceller)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).AddRow(
+				sessionID, issueID, orgID, "claude_code", "running", "semi", "low",
+				nil, nil, nil, nil,
+				nil, &now, nil, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil, // triggered_by_user_id
+				nil, 1, &now, "running", nil,
+				nil, nil, nil, nil, nil,
+				nil, // input_manifest
+				nil, // deleted_at
+				now,
+			),
+		)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/cancel", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CancelSession(w, req)
+
+	require.Equal(t, http.StatusAccepted, w.Code, "cancel should return 202 Accepted")
+	require.Contains(t, w.Body.String(), `"status":"running"`, "response should still show running status")
+	require.True(t, canceller.called, "canceller should have been called")
+	require.Equal(t, sessionID, canceller.sessionID, "canceller should receive correct session ID")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionHandler_CancelSession_NotRunning(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	handler := newSessionHandler(t, mock)
+	canceller := &mockCanceller{result: true}
+	handler.SetCanceller(canceller)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).AddRow(
+				sessionID, issueID, orgID, "claude_code", "idle", "semi", "low",
+				nil, nil, nil, nil,
+				nil, &now, nil, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil, // triggered_by_user_id
+				nil, 1, &now, "snapshotted", stringPtr("snapshots/test.tar"),
+				nil, nil, nil, nil, nil,
+				nil, // input_manifest
+				nil, // deleted_at
+				now,
+			),
+		)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/cancel", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CancelSession(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "cancelling non-running session should return 409")
+	require.Contains(t, w.Body.String(), "NOT_RUNNING")
+	require.False(t, canceller.called, "canceller should not be called for non-running sessions")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionHandler_CancelSession_InvalidID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := newSessionHandler(t, mock)
+	canceller := &mockCanceller{result: true}
+	handler.SetCanceller(canceller)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/not-a-uuid/cancel", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "not-a-uuid")
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, uuid.New())
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CancelSession(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "INVALID_ID")
+	require.False(t, canceller.called)
+}
+
+func TestSessionHandler_CancelSession_NoCanceller(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	handler := newSessionHandler(t, mock)
+	// Don't set canceller — leave it nil.
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).AddRow(
+				sessionID, issueID, orgID, "claude_code", "running", "semi", "low",
+				nil, nil, nil, nil,
+				nil, &now, nil, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil, // triggered_by_user_id
+				nil, 1, &now, "running", nil,
+				nil, nil, nil, nil, nil,
+				nil, // input_manifest
+				nil, // deleted_at
+				now,
+			),
+		)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/cancel", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CancelSession(w, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, w.Code)
+	require.Contains(t, w.Body.String(), "CANCEL_UNAVAILABLE")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func stringPtr(s string) *string {
 	return &s
 }

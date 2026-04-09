@@ -235,6 +235,8 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${sessionId}/end`),
     retry: (sessionId: string) =>
       post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${sessionId}/retry`),
+    cancelSession: (sessionId: string) =>
+      post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${sessionId}/cancel`),
     // Thread endpoints
     listThreads: (sessionId: string) =>
       get<import('./types').ListResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads`),

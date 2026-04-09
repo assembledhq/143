@@ -655,7 +655,7 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id={runningSession.id} />);
     await screen.findByText('Agent is working...');
-    expect(screen.getByTitle('Stop session')).toBeInTheDocument();
+    expect(screen.getByTitle('Cancel session')).toBeInTheDocument();
     expect(screen.queryByTitle('Send message')).not.toBeInTheDocument();
   });
 
@@ -677,18 +677,18 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id={idleSession.id} />);
     await screen.findByPlaceholderText('Send a follow-up message...');
     expect(screen.getByTitle('Send message')).toBeInTheDocument();
-    expect(screen.queryByTitle('Stop session')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('Cancel session')).not.toBeInTheDocument();
   });
 
   it('shows send button for completed session (not stop)', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
     expect(screen.getByTitle('Send message')).toBeInTheDocument();
-    expect(screen.queryByTitle('Stop session')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('Cancel session')).not.toBeInTheDocument();
   });
 
-  it('calls end session API when stop button is clicked during running state', async () => {
-    let endSessionCalled = false;
+  it('calls cancel session API when cancel button is clicked during running state', async () => {
+    let cancelSessionCalled = false;
 
     const runningSession: Session = {
       ...mockSessions[0],
@@ -702,9 +702,9 @@ describe('SessionDetailPage', () => {
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({ data: runningSession } satisfies SingleResponse<Session>);
       }),
-      http.post('/api/v1/sessions/:id/end', () => {
-        endSessionCalled = true;
-        return HttpResponse.json({ data: { ...runningSession, status: 'idle' } });
+      http.post('/api/v1/sessions/:id/cancel', () => {
+        cancelSessionCalled = true;
+        return HttpResponse.json({ data: { ...runningSession, status: 'cancelled' } });
       }),
     );
 
@@ -712,11 +712,11 @@ describe('SessionDetailPage', () => {
     await screen.findByText('Agent is working...');
 
     const user = userEvent.setup();
-    const stopButton = screen.getByTitle('Stop session');
-    await user.click(stopButton);
+    const cancelButton = screen.getByTitle('Cancel session');
+    await user.click(cancelButton);
 
     await waitFor(() => {
-      expect(endSessionCalled).toBe(true);
+      expect(cancelSessionCalled).toBe(true);
     });
   });
 
