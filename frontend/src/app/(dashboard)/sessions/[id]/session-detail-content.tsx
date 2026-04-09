@@ -513,9 +513,6 @@ function ChangesTab({
         />
       )}
 
-      {/* PR Card */}
-      <PRCard sessionId={sessionId} />
-
       {/* Main content: file tree or empty state */}
       {hasDiff ? (
         <div className="flex flex-col flex-1 min-h-0">
@@ -1194,40 +1191,6 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
             )}
 
             <div className="ml-auto flex items-center gap-1">
-              {canCreatePR && (
-                <>
-                  <label className="flex items-center gap-1 text-xs text-muted-foreground cursor-pointer select-none" title="Create PR as a draft">
-                    <input
-                      type="checkbox"
-                      checked={draftValue}
-                      onChange={(e) => setPRDraftOverride(e.target.checked)}
-                      className="h-3 w-3"
-                    />
-                    Draft
-                  </label>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
-                    title={
-                      ghStatus?.connected && ghStatus?.has_repo_scope
-                        ? `Create PR as @${ghStatus.github_login}`
-                        : ghStatus?.connected && !ghStatus?.has_repo_scope
-                          ? "Create PR (app token — reconnect GitHub with repo access for user-authored PRs)"
-                          : ghStatus?.pr_authorship_mode === "user_required"
-                            ? "Connect GitHub to create PRs"
-                            : "Create PR"
-                    }
-                    disabled={
-                      createPRMutation.isPending ||
-                      (ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected)
-                    }
-                    onClick={() => createPRMutation.mutate()}
-                  >
-                    <GitPullRequest className="h-3.5 w-3.5" />
-                  </Button>
-                </>
-              )}
               {isRunning ? (
                 <Button
                   size="icon"
@@ -1315,6 +1278,37 @@ export function SessionDetailContent({ id }: { id: string }) {
   const session = data?.data;
   const members = membersData?.data ?? [];
   const isActive = session ? !terminalStatuses.has(session.status) : false;
+  const isRunning = session?.status === "running";
+
+  const queryClient = useQueryClient();
+
+  // PR state for the detail-panel header button
+  const { data: prData } = useQuery({
+    queryKey: ["session", id, "pr"],
+    queryFn: () => api.sessions.getPR(id).catch((err) => {
+      if (err?.code === "NOT_FOUND") return { data: null };
+      throw err;
+    }),
+  });
+  const hasPR = !!prData?.data;
+  const hasDiff = !!session?.diff_stats;
+  const canCreatePR = hasDiff && !hasPR && !isRunning;
+
+  const { data: ghStatus } = useQuery({
+    queryKey: ["github-status"],
+    queryFn: () => api.githubStatus.get(),
+    enabled: canCreatePR,
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const createPRMutation = useMutation({
+    mutationFn: () => api.sessions.createPR(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["session", id] });
+      queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
+    },
+  });
+
   const sessionDiff = session?.diff;
   const diffStats = useMemo(() => {
     if (!sessionDiff) return null;
@@ -1322,7 +1316,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [sessionDiff]);
 
   // --- Shared review state (lifted from old ChangesTab) ---
-  const queryClient = useQueryClient();
 
   // Hooks can't be called conditionally, so provide a stub when session hasn't loaded yet.
   // useDiffViewState only reads `diff` and `diff_history` — the stub satisfies that contract.
@@ -1509,20 +1502,44 @@ export function SessionDetailContent({ id }: { id: string }) {
             onValueChange={(v) => handleDetailTabClick(v as DetailTab)}
             className="flex flex-col flex-1 min-h-0 gap-0"
           >
-            <TabsList variant="line" size="sm" className="border-b border-border px-2 shrink-0 w-full">
-              <TabsTrigger value="overview">Overview</TabsTrigger>
-              <TabsTrigger value="changes">
-                Changes
-                {changesCount != null && changesCount > 0 && (
-                  <Badge variant="secondary" className="ml-1 min-w-[18px] h-[18px] rounded-full px-1 text-xs font-semibold leading-none">
-                    {changesCount}
-                  </Badge>
+            <div className="flex items-center border-b border-border px-2 shrink-0">
+              <TabsList variant="line" size="sm" className="border-b-0 flex-1">
+                <TabsTrigger value="overview">Overview</TabsTrigger>
+                <TabsTrigger value="changes">
+                  Changes
+                  {changesCount != null && changesCount > 0 && (
+                    <Badge variant="secondary" className="ml-1 min-w-[18px] h-[18px] rounded-full px-1 text-xs font-semibold leading-none">
+                      {changesCount}
+                    </Badge>
+                  )}
+                </TabsTrigger>
+                {showValidationTab && (
+                  <TabsTrigger value="validation">Validation</TabsTrigger>
                 )}
-              </TabsTrigger>
-              {showValidationTab && (
-                <TabsTrigger value="validation">Validation</TabsTrigger>
-              )}
-            </TabsList>
+              </TabsList>
+              {hasPR && prData?.data?.github_pr_url ? (
+                <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
+                  <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5">
+                    <ExternalLink className="h-3 w-3" />
+                    View PR
+                  </Button>
+                </a>
+              ) : canCreatePR ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs gap-1.5"
+                  disabled={
+                    createPRMutation.isPending ||
+                    (ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected)
+                  }
+                  onClick={() => createPRMutation.mutate()}
+                >
+                  <GitPullRequest className="h-3 w-3" />
+                  {createPRMutation.isPending ? "Creating…" : "Create PR"}
+                </Button>
+              ) : null}
+            </div>
 
             <TabsContent value="changes" className="flex-1 min-h-0">
               <ChangesTab
