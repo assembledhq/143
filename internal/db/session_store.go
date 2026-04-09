@@ -381,8 +381,7 @@ func (s *SessionStore) ResetForRetry(ctx context.Context, orgID, sessionID uuid.
 		    risk_factors = NULL,
 		    token_usage = NULL,
 		    diff = NULL,
-		    diff_stats = NULL,
-		    sandbox_state = NULL
+		    diff_stats = NULL
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
 	_, err = s.db.Exec(ctx, query, pgx.NamedArgs{
