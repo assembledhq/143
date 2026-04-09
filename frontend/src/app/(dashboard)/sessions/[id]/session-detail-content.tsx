@@ -57,6 +57,9 @@ import { DiffStatsBadge, FileTree, SessionFooter, CommentsSummary, ReviewDiffVie
 import { useReviewComments } from "@/hooks/use-review-comments";
 import { useDiffViewState } from "@/hooks/use-diff-view-state";
 import { useReviewedFiles } from "@/hooks/use-reviewed-files";
+import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
+
+const FAILURE_CATEGORY_CODEX_AUTH = "codex_auth_expired";
 
 const statusConfig: Record<string, { color: string; label: string }> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
@@ -115,6 +118,7 @@ type DetailTab = "overview" | "changes" | "validation";
 
 function OverviewTab({ session, members }: { session: Session; members: User[] }) {
   const queryClient = useQueryClient();
+  const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
   const retryMutation = useMutation({
     mutationFn: () => api.issues.triggerFix(session.issue_id),
     onSuccess: () => {
@@ -188,8 +192,28 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
                 </ul>
               </div>
             )}
+            {session.failure_category === FAILURE_CATEGORY_CODEX_AUTH && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="mt-1"
+                onClick={() => setShowDeviceCodeModal(true)}
+              >
+                Re-authenticate with ChatGPT
+              </Button>
+            )}
           </CardContent>
         </Card>
+      )}
+      {showDeviceCodeModal && (
+        <CodexDeviceCodeModal
+          onClose={() => setShowDeviceCodeModal(false)}
+          onConnected={() => {
+            setShowDeviceCodeModal(false);
+            queryClient.invalidateQueries({ queryKey: ["codex-auth-status"] });
+            queryClient.invalidateQueries({ queryKey: ["session", session.id] });
+          }}
+        />
       )}
 
       {/* Session vitals — primary info row */}
