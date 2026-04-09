@@ -1122,29 +1122,38 @@ func TestPRServiceSetters(t *testing.T) {
 	t.Parallel()
 
 	logger := zerolog.Nop()
-	svc := NewPRService(nil, nil, nil, nil, nil, nil, nil, nil, logger)
 
 	t.Run("SetUserCredentialStore", func(t *testing.T) {
+		t.Parallel()
+		svc := NewPRService(nil, nil, nil, nil, nil, nil, nil, nil, logger)
 		svc.SetUserCredentialStore(nil)
 		require.Nil(t, svc.userCredentials)
 	})
 
 	t.Run("SetLLMClient", func(t *testing.T) {
+		t.Parallel()
+		svc := NewPRService(nil, nil, nil, nil, nil, nil, nil, nil, logger)
 		svc.SetLLMClient(nil)
 		require.Nil(t, svc.llmClient)
 	})
 
 	t.Run("SetUserStore", func(t *testing.T) {
+		t.Parallel()
+		svc := NewPRService(nil, nil, nil, nil, nil, nil, nil, nil, logger)
 		svc.SetUserStore(nil)
 		require.Nil(t, svc.users)
 	})
 
 	t.Run("SetOrgStore", func(t *testing.T) {
+		t.Parallel()
+		svc := NewPRService(nil, nil, nil, nil, nil, nil, nil, nil, logger)
 		svc.SetOrgStore(nil)
 		require.Nil(t, svc.orgs)
 	})
 
 	t.Run("SetPRTemplateStore", func(t *testing.T) {
+		t.Parallel()
+		svc := NewPRService(nil, nil, nil, nil, nil, nil, nil, nil, logger)
 		svc.SetPRTemplateStore(nil)
 		require.Nil(t, svc.prTemplates)
 	})

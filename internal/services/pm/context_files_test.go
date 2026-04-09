@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"strings"
 	"testing"
 
 	"github.com/assembledhq/143/internal/models"
@@ -84,12 +83,7 @@ func TestSanitizeFilename(t *testing.T) {
 		{name: "lowercases and replaces spaces", input: "Hello World", expect: "hello-world"},
 		{name: "strips special chars", input: "feat: add login (v2)", expect: "feat-add-login-v2"},
 		{name: "preserves hyphens and underscores", input: "my_feature-name", expect: "my_feature-name"},
-		{name: "truncates to 60 chars", input: "a" + string(make([]byte, 100)), expect: func() string {
-			s := "a" + string(make([]byte, 100))
-			s = strings.ToLower(s)
-			// null bytes get stripped; only the 'a' remains
-			return "a"
-		}()},
+		{name: "strips null bytes", input: "a" + string(make([]byte, 100)), expect: "a"},
 		{name: "truncates long alphanumeric input", input: func() string {
 			b := make([]byte, 80)
 			for i := range b {
