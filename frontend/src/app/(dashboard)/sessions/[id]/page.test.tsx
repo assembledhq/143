@@ -84,6 +84,14 @@ describe('SessionDetailPage', () => {
     expect(screen.getByRole('tab', { name: 'Validation' })).toBeInTheDocument();
   });
 
+  it('does not hide vertical overflow on the detail tablist', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const tabList = screen.getByRole('tablist');
+    expect(tabList.className).not.toContain('overflow-y-hidden');
+  });
+
   it('renders failed session with failure details', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {
