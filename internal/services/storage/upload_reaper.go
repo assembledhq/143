@@ -58,6 +58,11 @@ func (r *UploadReaper) Run(ctx context.Context) {
 }
 
 func (r *UploadReaper) reapFiles(_ context.Context, store *FileUploadStore) {
+	// Skip if the upload directory hasn't been created yet (no uploads have occurred).
+	if _, err := os.Stat(store.baseDir); os.IsNotExist(err) {
+		return
+	}
+
 	cutoff := time.Now().Add(-r.maxAge)
 	var deleted, errors int
 
