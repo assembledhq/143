@@ -283,23 +283,29 @@ func newProjectCycleHandler(stores *Stores, services *Services, logger zerolog.L
 				project, err := stores.Projects.GetByID(ctx, orgID, projectID)
 				if err == nil {
 					cycleOutput.ProjectName = project.Title
-					cycleOutput.TasksCompleted = project.CompletedTasks
-					cycleOutput.TasksFailed = project.FailedTasks
 					cycleOutput.Summary = project.Goal
 				} else {
 					logger.Warn().Err(err).Msg("failed to fetch project for cycle output, skipping delivery")
 					return nil
 				}
 
-				// Fetch latest cycle number.
+				// Use per-cycle task counts from the latest cycle for accurate
+				// reporting (avoids counting tasks from all previous cycles).
 				if stores.ProjectCycles != nil {
 					cycles, err := stores.ProjectCycles.ListByProject(ctx, orgID, projectID, 1)
 					if err == nil && len(cycles) > 0 {
-						cycleOutput.CycleNumber = cycles[0].CycleNumber
+						cycle := cycles[0]
+						cycleOutput.CycleNumber = cycle.CycleNumber
+						cycleOutput.TasksCreated = cycle.TasksCreatedThisCycle
+						cycleOutput.TasksCompleted = cycle.TasksCompletedThisCycle
+						cycleOutput.TasksFailed = cycle.TasksFailedThisCycle
+						if cycle.Analysis != "" {
+							cycleOutput.Analysis = cycle.Analysis
+						}
 					}
 				}
 
-				// Collect PR URLs from tasks.
+				// Collect PR URLs from tasks (best-effort, all tasks).
 				if stores.ProjectTasks != nil {
 					tasks, err := stores.ProjectTasks.ListByProject(ctx, orgID, projectID, db.ProjectTaskFilters{})
 					if err == nil {
@@ -308,7 +314,6 @@ func newProjectCycleHandler(stores *Stores, services *Services, logger zerolog.L
 								cycleOutput.PRURLs = append(cycleOutput.PRURLs, *t.PRURL)
 							}
 						}
-						cycleOutput.TasksCreated = len(tasks)
 					}
 				}
 			}

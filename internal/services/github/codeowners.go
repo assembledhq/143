@@ -125,8 +125,8 @@ func fetchFileContent(ctx context.Context, token, owner, repo, path string, http
 		segments[i] = url.PathEscape(s)
 	}
 	encodedPath := strings.Join(segments, "/")
-	url := fmt.Sprintf("%s/repos/%s/%s/contents/%s", baseURL, url.PathEscape(owner), url.PathEscape(repo), encodedPath)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	reqURL := fmt.Sprintf("%s/repos/%s/%s/contents/%s", baseURL, url.PathEscape(owner), url.PathEscape(repo), encodedPath)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return "", err
 	}
@@ -146,7 +146,7 @@ func fetchFileContent(ctx context.Context, token, owner, repo, path string, http
 		return "", fmt.Errorf("unexpected status: %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1MB cap
 	if err != nil {
 		return "", err
 	}
@@ -300,7 +300,10 @@ func (s *PRService) RequestReviewers(ctx context.Context, token, owner, repo str
 	if err != nil {
 		return fmt.Errorf("request reviewers API call failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("request reviewers failed with status %d", resp.StatusCode)

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -114,13 +115,13 @@ func TestDeliverSlack_OkFalse(t *testing.T) {
 	if msg == "" {
 		t.Fatal("expected non-empty slack message")
 	}
-	if !contains(msg, "*Test Project*") {
+	if !strings.Contains(msg, "*Test Project*") {
 		t.Error("expected project name in slack message")
 	}
-	if !contains(msg, "Cycle #5") {
+	if !strings.Contains(msg, "Cycle #5") {
 		t.Error("expected cycle number in slack message")
 	}
-	if !contains(msg, "https://github.com/org/repo/pull/42") {
+	if !strings.Contains(msg, "https://github.com/org/repo/pull/42") {
 		t.Error("expected PR URL in slack message")
 	}
 	_ = svc
@@ -210,7 +211,7 @@ func TestDeliverNotion_DatabaseIDRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when database_id is set")
 	}
-	if !contains(err.Error(), "not yet supported") {
+	if !strings.Contains(err.Error(), "not yet supported") {
 		t.Errorf("expected 'not yet supported' error, got: %v", err)
 	}
 }
@@ -249,7 +250,7 @@ func TestDeliverEmail_NoSMTP(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when SMTP not configured")
 	}
-	if !contains(err.Error(), "SMTP not configured") {
+	if !strings.Contains(err.Error(), "SMTP not configured") {
 		t.Errorf("expected SMTP not configured error, got: %v", err)
 	}
 }
@@ -270,7 +271,7 @@ func TestDeliverEmail_NoRecipients(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error with no recipients")
 	}
-	if !contains(err.Error(), "no email recipients") {
+	if !strings.Contains(err.Error(), "no email recipients") {
 		t.Errorf("expected 'no email recipients' error, got: %v", err)
 	}
 }
@@ -282,17 +283,17 @@ func TestFormatEmailHTML(t *testing.T) {
 	if html == "" {
 		t.Fatal("expected non-empty HTML")
 	}
-	if !contains(html, "Test Project") {
+	if !strings.Contains(html, "Test Project") {
 		t.Error("expected project name in HTML")
 	}
-	if !contains(html, "Cycle #5") {
+	if !strings.Contains(html, "Cycle #5") {
 		t.Error("expected cycle number in HTML")
 	}
-	if !contains(html, "https://github.com/org/repo/pull/42") {
+	if !strings.Contains(html, "https://github.com/org/repo/pull/42") {
 		t.Error("expected PR URL in HTML")
 	}
 	// Verify HTML escaping works (safe name should be present)
-	if !contains(html, "Test Project") {
+	if !strings.Contains(html, "Test Project") {
 		t.Error("expected escaped project name")
 	}
 }
@@ -305,14 +306,14 @@ func TestFormatEmailHTML_XSS(t *testing.T) {
 	o.Summary = `<img src=x>`
 
 	result := formatEmailHTML(o)
-	if contains(result, "<script>") {
+	if strings.Contains(result, "<script>") {
 		t.Error("HTML should not contain unescaped script tags")
 	}
-	if contains(result, "<img src=") {
+	if strings.Contains(result, "<img src=") {
 		t.Error("HTML should not contain unescaped img tags")
 	}
 	// Verify the escaped versions are present.
-	if !contains(result, "&lt;script&gt;") {
+	if !strings.Contains(result, "&lt;script&gt;") {
 		t.Error("expected escaped script tag in output")
 	}
 }
@@ -321,32 +322,21 @@ func TestFormatSlackMessage(t *testing.T) {
 	t.Parallel()
 
 	msg := formatSlackMessage(sampleOutput())
-	if !contains(msg, "*Test Project*") {
+	if !strings.Contains(msg, "*Test Project*") {
 		t.Error("expected bold project name")
 	}
-	if !contains(msg, "Cycle #5") {
+	if !strings.Contains(msg, "Cycle #5") {
 		t.Error("expected cycle number")
 	}
-	if !contains(msg, "4 created") {
+	if !strings.Contains(msg, "4 created") {
 		t.Error("expected tasks created count")
 	}
-	if !contains(msg, "3 completed") {
+	if !strings.Contains(msg, "3 completed") {
 		t.Error("expected tasks completed count")
 	}
-	if !contains(msg, "1 failed") {
+	if !strings.Contains(msg, "1 failed") {
 		t.Error("expected tasks failed count")
 	}
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
-}
 
-func containsHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}

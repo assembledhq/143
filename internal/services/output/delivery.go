@@ -318,7 +318,7 @@ func (s *Service) deliverEmail(ctx context.Context, dest models.OutputDestinatio
 	if err := client.Mail(s.smtpCfg.From); err != nil {
 		return fmt.Errorf("SMTP MAIL FROM: %w", err)
 	}
-	for _, rcpt := range cfg.Recipients {
+	for _, rcpt := range canonicalRecipients {
 		if err := client.Rcpt(rcpt); err != nil {
 			return fmt.Errorf("SMTP RCPT TO %s: %w", rcpt, err)
 		}
