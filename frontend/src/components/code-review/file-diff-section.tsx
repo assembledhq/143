@@ -82,7 +82,7 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
       return contents;
     }, [file.hunks]);
 
-    const highlighted = useFileHighlighting(allLineContents, file.language, "github-dark", isActive);
+    const highlighted = useFileHighlighting(allLineContents, file.language, undefined, isActive);
 
     // Build per-hunk Maps of line index → highlighted HTML
     const hunkHighlightMaps = useMemo(() => {
