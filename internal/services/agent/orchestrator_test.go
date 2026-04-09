@@ -193,6 +193,10 @@ func (m *mockSessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessi
 	return nil
 }
 
+func (m *mockSessionStore) UpdateFailure(ctx context.Context, orgID, runID uuid.UUID, explanation, category string, nextSteps []string, retryAdvised bool) error {
+	return nil
+}
+
 func (m *mockSessionStore) GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
 	return models.Session{}, nil
 }

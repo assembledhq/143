@@ -61,6 +61,7 @@ type SessionStore interface {
 	UpdateSnapshotInfo(ctx context.Context, orgID, sessionID uuid.UUID, agentSessionID, snapshotKey string) error
 	UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state string) error
 	UpdateWorkingBranch(ctx context.Context, orgID, sessionID uuid.UUID, branch string) error
+	UpdateFailure(ctx context.Context, orgID, runID uuid.UUID, explanation, category string, nextSteps []string, retryAdvised bool) error
 	GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 }
 
@@ -417,11 +418,21 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if run.AgentType == models.AgentTypeCodex {
 		injected, err := o.injectCodexAuth(ctx, run.OrgID, sandbox)
 		if err != nil {
-			o.failRun(ctx, run, fmt.Sprintf("codex auth injection failed: %s", err))
+			o.failRunWithCategory(ctx, run,
+				fmt.Sprintf("codex auth injection failed: %s", err),
+				"codex_auth_expired",
+				"Your ChatGPT authentication has expired or was revoked. Please re-authenticate to continue using Codex.",
+				[]string{"Click 'Re-authenticate with ChatGPT' below to sign in again"},
+			)
 			return fmt.Errorf("codex auth injection: %w", err)
 		}
 		if !injected {
-			o.failRun(ctx, run, "no credentials configured for codex: connect ChatGPT from the Overview page")
+			o.failRunWithCategory(ctx, run,
+				"no credentials configured for codex: connect ChatGPT from the Overview page",
+				"codex_auth_expired",
+				"No ChatGPT credentials are configured. Please connect your ChatGPT account to use Codex.",
+				[]string{"Click 'Re-authenticate with ChatGPT' below to sign in"},
+			)
 			return fmt.Errorf("no credentials for codex agent")
 		}
 	}
@@ -687,11 +698,21 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if session.AgentType == models.AgentTypeCodex {
 			injected, err := o.injectCodexAuth(ctx, session.OrgID, sandbox)
 			if err != nil {
-				o.failRun(ctx, session, fmt.Sprintf("codex auth injection failed: %s", err))
+				o.failRunWithCategory(ctx, session,
+					fmt.Sprintf("codex auth injection failed: %s", err),
+					"codex_auth_expired",
+					"Your ChatGPT authentication has expired or was revoked. Please re-authenticate to continue using Codex.",
+					[]string{"Click 'Re-authenticate with ChatGPT' below to sign in again"},
+				)
 				return fmt.Errorf("codex auth injection: %w", err)
 			}
 			if !injected {
-				o.failRun(ctx, session, "no credentials configured for codex: connect ChatGPT from the Overview page")
+				o.failRunWithCategory(ctx, session,
+					"no credentials configured for codex: connect ChatGPT from the Overview page",
+					"codex_auth_expired",
+					"No ChatGPT credentials are configured. Please connect your ChatGPT account to use Codex.",
+					[]string{"Click 'Re-authenticate with ChatGPT' below to sign in"},
+				)
 				return fmt.Errorf("no credentials for codex agent")
 			}
 		}
@@ -1019,6 +1040,16 @@ func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg 
 		if err := o.projectTasks.OnSessionComplete(ctx, run, "failed"); err != nil {
 			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update project task on run failure")
 		}
+	}
+}
+
+// failRunWithCategory marks a run as failed with a structured failure category,
+// explanation, and next steps. Used for well-known failure modes (e.g. auth expiry)
+// where we can provide actionable guidance in the UI.
+func (o *Orchestrator) failRunWithCategory(ctx context.Context, run *models.Session, errMsg, category, explanation string, nextSteps []string) {
+	o.failRun(ctx, run, errMsg)
+	if err := o.sessions.UpdateFailure(ctx, run.OrgID, run.ID, explanation, category, nextSteps, true); err != nil {
+		o.logger.Error().Err(err).Str("run_id", run.ID.String()).Msg("failed to update run failure details")
 	}
 }
 
