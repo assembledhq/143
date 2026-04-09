@@ -35,7 +35,7 @@ const tabsListVariants = cva(
       },
       size: {
         default: "",
-        sm: "group-data-[orientation=horizontal]/tabs:h-auto gap-0.5 py-0.5 px-0 rounded-none bg-transparent flex w-full flex-nowrap overflow-x-auto",
+        sm: "group-data-[orientation=horizontal]/tabs:h-auto gap-0.5 py-0.5 px-0 rounded-none bg-transparent flex w-full flex-nowrap justify-start overflow-x-auto",
       },
     },
     defaultVariants: {

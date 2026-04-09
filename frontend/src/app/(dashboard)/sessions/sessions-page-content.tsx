@@ -293,7 +293,7 @@ export function SessionsPageContent() {
 
       {/* ── Tab filters ────────────────────────────────────────────── */}
       <div className="relative flex items-center border-b border-border">
-        <div ref={tabsRef} className={`flex flex-nowrap items-center overflow-x-auto scrollbar-hide min-w-0 ${tabsOverflow ? "mask-fade-r" : ""}`}>
+        <div ref={tabsRef} className={`flex flex-nowrap items-center overflow-x-auto overflow-y-hidden scrollbar-hide min-w-0 ${tabsOverflow ? "mask-fade-r" : ""}`}>
           {filterTabs.map((tab) => {
             const isSelected = currentFilter === tab.value;
             const count =
