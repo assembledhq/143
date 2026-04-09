@@ -12,7 +12,7 @@ import {
 import { ArrowUpDown, CalendarClock, Plus } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { PageHeader } from "@/components/page-header";
 import { PMStatusBanner } from "@/components/pm/pm-status-banner";
@@ -53,7 +53,7 @@ const statusConfig: Record<string, { dot: string; text: string; bg: string; labe
 
 const filterTabs = [
   { value: "all", label: "All" },
-  { value: "needs_attention", label: "Needs attention" },
+  { value: "needs_attention", label: "Action needed" },
   { value: "working", label: "Working" },
   { value: "done", label: "Done" },
   { value: "decisions", label: "Decisions" },
@@ -212,6 +212,19 @@ export function SessionsPageContent() {
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
   const [repo] = useQueryState("repo");
   const [sorting, setSorting] = useState<SortingState>([]);
+  const tabsRef = useRef<HTMLDivElement>(null);
+  const [tabsOverflow, setTabsOverflow] = useState(false);
+
+  const checkOverflow = useCallback(() => {
+    const el = tabsRef.current;
+    if (el) setTabsOverflow(el.scrollWidth > el.clientWidth);
+  }, []);
+
+  useEffect(() => {
+    checkOverflow();
+    window.addEventListener("resize", checkOverflow);
+    return () => window.removeEventListener("resize", checkOverflow);
+  }, [checkOverflow]);
 
   const currentFilter = activeFilter ?? "all";
   const showDecisions = currentFilter === "decisions";
@@ -279,8 +292,8 @@ export function SessionsPageContent() {
       <PMStatusBanner hasActivePlanSession={workingSessions.length > 0} />
 
       {/* ── Tab filters ────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between border-b border-border">
-        <div className="flex items-center gap-0">
+      <div className="relative flex items-center border-b border-border">
+        <div ref={tabsRef} className={`flex flex-nowrap items-center overflow-x-auto scrollbar-hide min-w-0 ${tabsOverflow ? "mask-fade-r" : ""}`}>
           {filterTabs.map((tab) => {
             const isSelected = currentFilter === tab.value;
             const count =
@@ -290,7 +303,7 @@ export function SessionsPageContent() {
             return (
               <button
                 key={tab.value}
-                className={`relative px-3 py-2.5 text-[13px] font-medium transition-colors duration-150 ${
+                className={`relative shrink-0 px-2.5 py-2.5 text-[13px] font-medium transition-colors duration-150 ${
                   isSelected
                     ? "text-foreground"
                     : "text-muted-foreground hover:text-foreground/80"
@@ -307,7 +320,7 @@ export function SessionsPageContent() {
                   )}
                 </span>
                 {isSelected && (
-                  <span className="absolute bottom-0 left-3 right-3 h-0.5 bg-[image:var(--gradient-primary)] rounded-full" />
+                  <span className="absolute bottom-0 left-2.5 right-2.5 h-0.5 bg-[image:var(--gradient-primary)] rounded-full" />
                 )}
               </button>
             );
@@ -318,7 +331,7 @@ export function SessionsPageContent() {
         <SessionOwnerToggle
           currentUserFilter={currentUserFilter}
           onFilterChange={setUserFilter}
-          className="mr-2"
+          className="ml-auto shrink-0 mr-2"
         />
       </div>
 
