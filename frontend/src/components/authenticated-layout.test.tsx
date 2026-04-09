@@ -1,36 +1,49 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { AuthenticatedLayout } from "./authenticated-layout";
 import { http, HttpResponse } from "msw";
 import { server } from "@/test/mocks/server";
 
-const { pushMock, replaceMock, logoutMock } = vi.hoisted(() => ({
-  pushMock: vi.fn(),
+const { replaceMock, logoutMock, useAuthMock } = vi.hoisted(() => ({
   replaceMock: vi.fn(),
   logoutMock: vi.fn(),
+  useAuthMock: vi.fn(),
 }));
 
 vi.mock("next/navigation", () => ({
   usePathname: () => "/autopilot",
   useRouter: () => ({
-    push: pushMock,
+    push: vi.fn(),
     replace: replaceMock,
   }),
 }));
 
 vi.mock("@/hooks/use-auth", () => ({
-  useAuth: () => ({
-    user: {
-      id: "user-1",
-      name: "Alex Doe",
-      email: "alex@example.com",
-      role: "admin",
-    },
+  useAuth: useAuthMock,
+}));
+
+const adminUser = {
+  id: "user-1",
+  name: "Alex Doe",
+  email: "alex@example.com",
+  role: "admin",
+};
+
+const memberUser = {
+  id: "user-2",
+  name: "Member User",
+  email: "member@example.com",
+  role: "member",
+};
+
+beforeEach(() => {
+  useAuthMock.mockReturnValue({
+    user: adminUser,
     isLoading: false,
     isAuthenticated: true,
     logout: logoutMock,
-  }),
-}));
+  });
+});
 
 describe("AuthenticatedLayout", () => {
   it("shows projects in the primary navigation", () => {
@@ -66,7 +79,7 @@ describe("AuthenticatedLayout", () => {
     expect(contentWrapper).toHaveClass("py-6");
   });
 
-  it("shows all settings entries in the user menu", async () => {
+  it("shows settings entries in the collapsible sidebar section", async () => {
     const user = userEvent.setup();
 
     renderWithProviders(
@@ -75,16 +88,20 @@ describe("AuthenticatedLayout", () => {
       </AuthenticatedLayout>
     );
 
-    await user.click(screen.getByRole("button", { name: /Alex Doe/ }));
+    // Expand the settings section
+    await user.click(screen.getByRole("button", { name: /Settings/ }));
 
-    expect(await screen.findByRole("menuitem", { name: "General" })).toBeInTheDocument();
-    expect(await screen.findByRole("menuitem", { name: "Integrations" })).toBeInTheDocument();
-    expect(await screen.findByRole("menuitem", { name: "Coding agents" })).toBeInTheDocument();
-    expect(await screen.findByRole("menuitem", { name: "Autopilot settings" })).toBeInTheDocument();
-    expect(await screen.findByRole("menuitem", { name: "Team" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "General" })).toHaveAttribute("href", "/settings");
+    expect(screen.getByRole("link", { name: "Integrations" })).toHaveAttribute("href", "/settings/integrations");
+    expect(screen.getByRole("link", { name: "Coding agents" })).toHaveAttribute("href", "/settings/agent");
+    expect(screen.getByRole("link", { name: "LLM" })).toHaveAttribute("href", "/settings/llm");
+    expect(screen.getByRole("link", { name: "Autopilot settings" })).toHaveAttribute("href", "/settings/autopilot");
+    expect(screen.getByRole("link", { name: "Evals" })).toHaveAttribute("href", "/settings/evals");
+    expect(screen.getByRole("link", { name: "Team" })).toHaveAttribute("href", "/settings/team");
+    expect(screen.getByRole("link", { name: "Audit log" })).toHaveAttribute("href", "/settings/audit-log");
   });
 
-  it("routes to settings pages from the user menu", async () => {
+  it("shows only log out in the user menu", async () => {
     const user = userEvent.setup();
 
     renderWithProviders(
@@ -94,24 +111,32 @@ describe("AuthenticatedLayout", () => {
     );
 
     await user.click(screen.getByRole("button", { name: /Alex Doe/ }));
-    await user.click(await screen.findByRole("menuitem", { name: "Team" }));
 
-    expect(pushMock).toHaveBeenCalledWith("/team");
+    expect(await screen.findByRole("menuitem", { name: "Log out" })).toBeInTheDocument();
+  });
 
-    await user.click(screen.getByRole("button", { name: /Alex Doe/ }));
-    await user.click(await screen.findByRole("menuitem", { name: "General" }));
+  it("hides audit log from non-admin users", async () => {
+    useAuthMock.mockReturnValue({
+      user: memberUser,
+      isLoading: false,
+      isAuthenticated: true,
+      logout: logoutMock,
+    });
 
-    expect(pushMock).toHaveBeenCalledWith("/settings");
+    const user = userEvent.setup();
 
-    await user.click(screen.getByRole("button", { name: /Alex Doe/ }));
-    await user.click(await screen.findByRole("menuitem", { name: "Coding agents" }));
+    renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
 
-    expect(pushMock).toHaveBeenCalledWith("/agent");
+    // Expand the settings section
+    await user.click(screen.getByRole("button", { name: /Settings/ }));
 
-    await user.click(screen.getByRole("button", { name: /Alex Doe/ }));
-    await user.click(await screen.findByRole("menuitem", { name: "Autopilot settings" }));
-
-    expect(pushMock).toHaveBeenCalledWith("/settings/autopilot");
+    expect(screen.getByRole("link", { name: "General" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Team" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Audit log" })).not.toBeInTheDocument();
   });
 
   it("does not show repo context switcher when org has only 1 repo", async () => {

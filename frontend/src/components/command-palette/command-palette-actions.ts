@@ -37,12 +37,12 @@ export const staticActions: PaletteAction[] = [
 
   // Settings & admin
   { id: "settings-general", label: "General", icon: Settings, href: "/settings", group: "settings" },
-  { id: "settings-integrations", label: "Integrations", icon: Plug, href: "/integrations", group: "settings" },
-  { id: "settings-agents", label: "Coding agents", icon: Bot, href: "/agent", group: "settings" },
-  { id: "settings-llm", label: "LLM", icon: Sparkles, href: "/llm", group: "settings" },
+  { id: "settings-integrations", label: "Integrations", icon: Plug, href: "/settings/integrations", group: "settings" },
+  { id: "settings-agents", label: "Coding agents", icon: Bot, href: "/settings/agent", group: "settings" },
+  { id: "settings-llm", label: "LLM", icon: Sparkles, href: "/settings/llm", group: "settings" },
   { id: "settings-autopilot", label: "Autopilot settings", icon: Target, href: "/settings/autopilot", group: "settings" },
   { id: "settings-evals", label: "Evals", icon: FlaskConical, href: "/settings/evals", group: "settings" },
-  { id: "settings-team", label: "Team", icon: Users, href: "/team", group: "settings" },
+  { id: "settings-team", label: "Team", icon: Users, href: "/settings/team", group: "settings" },
   { id: "settings-audit-log", label: "Audit log", icon: ScrollText, href: "/settings/audit-log", requiredRole: "admin", group: "settings" },
 
   // Quick actions

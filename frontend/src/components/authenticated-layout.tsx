@@ -4,16 +4,8 @@ import {
   Zap,
   Play,
   FolderKanban,
-  Settings,
-  Users,
   LogOut,
   ChevronsUpDown,
-  Plug,
-  Bot,
-  Sparkles,
-  ScrollText,
-  Target,
-  FlaskConical,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
@@ -22,7 +14,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
@@ -34,6 +25,7 @@ import { api } from "@/lib/api";
 import { RepoContextSwitcher } from "@/components/repo-context-switcher";
 import { CommandPalette } from "@/components/command-palette/command-palette";
 import { CommandPaletteTrigger } from "@/components/command-palette/command-palette-trigger";
+import { SidebarSettingsSection } from "@/components/sidebar-settings-section";
 
 const navItems = [
   { label: "Autopilot", icon: Zap, href: "/autopilot", showProposalBadge: false },
@@ -132,7 +124,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
           <RepoContextSwitcher />
           <CommandPaletteTrigger onClick={handlePaletteOpen} />
         </div>
-        <nav className="relative flex-1 px-2.5 space-y-0.5">
+        <nav className="relative flex-1 px-2.5 space-y-0.5 overflow-y-auto">
           {navItems.map((item) => {
             const isActive = pathname === item.href || pathname.startsWith(item.href + "/");
             return (
@@ -156,6 +148,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
               </Link>
             );
           })}
+          <SidebarSettingsSection pathname={pathname} userRole={user?.role} />
         </nav>
         <div className="relative px-2.5 pb-3.5">
           {user && (
@@ -164,16 +157,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                 <Button
                   variant="ghost"
                   size="sm"
-                  className={cn(
-                    "h-8 w-full justify-start gap-2 rounded-lg px-2.5 text-[13px] font-medium transition-colors duration-150",
-                    pathname.startsWith("/settings") ||
-                    pathname.startsWith("/team") ||
-                    pathname.startsWith("/integrations") ||
-                    pathname.startsWith("/agent") ||
-                    pathname.startsWith("/llm")
-                      ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                      : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-                  )}
+                  className="h-8 w-full justify-start gap-2 rounded-lg px-2.5 text-[13px] font-medium transition-colors duration-150 text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
                 >
                   {user.avatar_url ? (
                     /* eslint-disable-next-line @next/next/no-img-element */
@@ -192,41 +176,6 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" side="top" className="w-48">
-                <DropdownMenuItem onClick={() => router.push("/settings")}>
-                  <Settings className="h-4 w-4" />
-                  General
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => router.push("/integrations")}>
-                  <Plug className="h-4 w-4" />
-                  Integrations
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => router.push("/agent")}>
-                  <Bot className="h-4 w-4" />
-                  Coding agents
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => router.push("/llm")}>
-                  <Sparkles className="h-4 w-4" />
-                  LLM
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => router.push("/settings/autopilot")}>
-                  <Target className="h-4 w-4" />
-                  Autopilot settings
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => router.push("/settings/evals")}>
-                  <FlaskConical className="h-4 w-4" />
-                  Evals
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => router.push("/team")}>
-                  <Users className="h-4 w-4" />
-                  Team
-                </DropdownMenuItem>
-                {user.role === "admin" && (
-                  <DropdownMenuItem onClick={() => router.push("/settings/audit-log")}>
-                    <ScrollText className="h-4 w-4" />
-                    Audit log
-                  </DropdownMenuItem>
-                )}
-                <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={logout}>
                   <LogOut className="h-4 w-4" />
                   Log out
