@@ -40,7 +40,7 @@ func (m *mockContainerUsageStore) RecordStop(_ context.Context, eventID uuid.UUI
 // no-op MeterProvider which is the OTel default when no provider is configured.
 func testBillingMetrics(t *testing.T) *metrics.BillingMetrics {
 	t.Helper()
-	m, err := metrics.NewBillingMetrics()
+	m, err := metrics.NewBillingMetrics(nil)
 	require.NoError(t, err)
 	return m
 }

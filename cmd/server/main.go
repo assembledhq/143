@@ -82,7 +82,8 @@ func main() {
 		}
 	}()
 
-	billingMetrics, err := metrics.NewBillingMetrics()
+	containerUsageStore := db.NewContainerUsageStore(pool)
+	billingMetrics, err := metrics.NewBillingMetrics(containerUsageStore.CountActive)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize billing metrics")
 	}

@@ -89,7 +89,7 @@ func TestUsageHandler_ListBySession(t *testing.T) {
 		"exit_reason", "created_at",
 	}
 	mock.ExpectQuery("SELECT .+ FROM container_usage_events WHERE org_id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(cols).AddRow(
 				eventID, orgID, sessionID, "ctr-1", "docker",

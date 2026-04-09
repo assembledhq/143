@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"sync/atomic"
@@ -31,13 +32,15 @@ func Metrics(next http.Handler) http.Handler {
 		}
 
 		start := time.Now()
-		m.RequestsInFlight.Add(r.Context(), 1)
+		// Use context.Background() for gauge adjustments so they succeed
+		// even if the client disconnects and r.Context() is cancelled.
+		m.RequestsInFlight.Add(context.Background(), 1)
 
 		ww := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(ww, r)
 
 		duration := time.Since(start).Seconds()
-		m.RequestsInFlight.Add(r.Context(), -1)
+		m.RequestsInFlight.Add(context.Background(), -1)
 
 		// Use the chi route pattern for consistent path labels.
 		routePattern := chi.RouteContext(r.Context()).RoutePattern()

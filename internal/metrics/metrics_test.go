@@ -10,12 +10,11 @@ import (
 func TestNewBillingMetrics(t *testing.T) {
 	t.Parallel()
 
-	m, err := NewBillingMetrics()
+	m, err := NewBillingMetrics(nil)
 	require.NoError(t, err)
 	require.NotNil(t, m)
 	require.NotNil(t, m.ContainerStartsTotal)
 	require.NotNil(t, m.ContainerStopsTotal)
-	require.NotNil(t, m.ContainersActive)
 	require.NotNil(t, m.ContainerDurationSec)
 	require.NotNil(t, m.ContainerCPUAllocated)
 	require.NotNil(t, m.ContainerMemAllocated)
@@ -25,7 +24,7 @@ func TestNewBillingMetrics(t *testing.T) {
 func TestBillingMetrics_RecordStartStop(t *testing.T) {
 	t.Parallel()
 
-	m, err := NewBillingMetrics()
+	m, err := NewBillingMetrics(nil)
 	require.NoError(t, err)
 
 	ctx := context.Background()

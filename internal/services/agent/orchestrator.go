@@ -391,10 +391,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		usageEventID = o.usageTracker.ContainerStarted(ctx, run.OrgID, run.ID, sandbox, sandboxCfg, containerStartedAt)
 	}
 	defer func() {
-		exitReason := "completed"
-		if err != nil {
-			exitReason = "failed"
-		}
+		exitReason := containerExitReason(ctx, err)
 		if o.usageTracker != nil {
 			// Use a detached context so the billing write succeeds even if
 			// the parent ctx was cancelled (timeout, shutdown).
@@ -682,10 +679,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		usageEventID = o.usageTracker.ContainerStarted(ctx, session.OrgID, session.ID, sandbox, sandboxCfg, containerStartedAt)
 	}
 	defer func() {
-		exitReason := "completed"
-		if err != nil {
-			exitReason = "failed"
-		}
+		exitReason := containerExitReason(ctx, err)
 		if o.usageTracker != nil {
 			stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer stopCancel()
@@ -1556,4 +1550,21 @@ func (o *Orchestrator) retryOnTokenExpired(
 
 	log.Info().Msg("codex CLI retry after token refresh completed")
 	return result, err
+}
+
+// containerExitReason determines a granular exit reason for billing metadata
+// based on the parent context state and the error returned from execution.
+func containerExitReason(ctx context.Context, err error) string {
+	if err == nil {
+		return "completed"
+	}
+	// Check context first — a cancelled/timed-out context is the most
+	// specific signal we have.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if ctxErr == context.DeadlineExceeded {
+			return "timeout"
+		}
+		return "cancelled"
+	}
+	return "failed"
 }

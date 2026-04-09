@@ -130,6 +130,7 @@ func (s *ContainerUsageStore) GetUsageSummary(ctx context.Context, orgID uuid.UU
 			  ON e2.org_id = e1.org_id
 			 AND e2.started_at <= COALESCE(e1.stopped_at, now())
 			 AND COALESCE(e2.stopped_at, now()) >= e1.started_at
+			 AND e2.started_at < @end
 			 AND e2.id != e1.id
 			WHERE e1.org_id = @org_id AND e1.started_at >= @start AND e1.started_at < @end
 			GROUP BY e1.id
@@ -176,15 +177,28 @@ func (s *ContainerUsageStore) CloseOrphans(ctx context.Context, startedBefore ti
 	return tag.RowsAffected(), nil
 }
 
+// CountActive returns the number of container usage events that have not been
+// stopped yet. Used by the observable gauge to report the true active count.
+func (s *ContainerUsageStore) CountActive(ctx context.Context) (int64, error) {
+	var count int64
+	err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM container_usage_events WHERE stopped_at IS NULL`).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count active containers: %w", err)
+	}
+	return count, nil
+}
+
 // ListBySession returns all container usage events for a given session.
 func (s *ContainerUsageStore) ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.ContainerUsageEvent, error) {
+	const maxResults = 500
 	rows, err := s.db.Query(ctx, `
 		SELECT id, org_id, session_id, container_id, provider, cpu_limit, memory_limit_mb, image,
 		       started_at, stopped_at, duration_ms, container_minutes, exit_reason, created_at
 		FROM container_usage_events
 		WHERE org_id = @org_id AND session_id = @session_id
-		ORDER BY started_at DESC`,
-		pgx.NamedArgs{"org_id": orgID, "session_id": sessionID},
+		ORDER BY started_at DESC
+		LIMIT @limit`,
+		pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "limit": maxResults},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list usage by session: %w", err)

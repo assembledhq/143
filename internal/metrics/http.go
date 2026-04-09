@@ -4,7 +4,15 @@ import (
 	"context"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	otelmetric "go.opentelemetry.io/otel/metric"
+)
+
+// HTTP attribute keys.
+var (
+	AttrHTTPMethod = attribute.Key("http.request.method")
+	AttrHTTPRoute  = attribute.Key("http.route")
+	AttrHTTPStatus = attribute.Key("http.response.status_code")
 )
 
 // HTTPMetrics holds OTel instruments for HTTP request observability.

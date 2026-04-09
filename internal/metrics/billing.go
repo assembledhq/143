@@ -8,6 +8,11 @@ import (
 	otelmetric "go.opentelemetry.io/otel/metric"
 )
 
+// ActiveContainerCounter is a callback that returns the current number of
+// active (running) containers. Used by the async observable gauge so the
+// metric always reflects the true DB state rather than drifting on crash.
+type ActiveContainerCounter func(ctx context.Context) (int64, error)
+
 const meterName = "github.com/assembledhq/143/billing"
 
 // BillingMetrics holds OTel instruments for container usage observability.
@@ -19,16 +24,22 @@ const meterName = "github.com/assembledhq/143/billing"
 type BillingMetrics struct {
 	ContainerStartsTotal   otelmetric.Int64Counter
 	ContainerStopsTotal    otelmetric.Int64Counter
-	ContainersActive       otelmetric.Int64UpDownCounter
 	ContainerDurationSec   otelmetric.Float64Histogram
 	ContainerCPUAllocated  otelmetric.Float64Histogram
 	ContainerMemAllocated  otelmetric.Float64Histogram
 	ContainerMinutesTotal  otelmetric.Float64Counter
+	// containersActiveReg holds the registration so it can be cleaned up.
+	containersActiveReg otelmetric.Registration
 }
 
 // NewBillingMetrics creates and registers all billing OTel instruments against
 // the global MeterProvider. Call after telemetry.InitMeterProvider.
-func NewBillingMetrics() (*BillingMetrics, error) {
+//
+// If activeCounter is non-nil, an async observable gauge is registered that
+// queries the true active container count (e.g. from the DB). This avoids
+// gauge drift if the server crashes between start and stop events.
+// Pass nil to skip the active gauge (e.g. in tests).
+func NewBillingMetrics(activeCounter ActiveContainerCounter) (*BillingMetrics, error) {
 	meter := otel.Meter(meterName)
 
 	starts, err := meter.Int64Counter("container.starts",
@@ -47,12 +58,26 @@ func NewBillingMetrics() (*BillingMetrics, error) {
 		return nil, err
 	}
 
-	active, err := meter.Int64UpDownCounter("container.active",
-		otelmetric.WithDescription("Number of sandbox containers currently running"),
-		otelmetric.WithUnit("{container}"),
-	)
-	if err != nil {
-		return nil, err
+	var activeReg otelmetric.Registration
+	if activeCounter != nil {
+		gauge, gErr := meter.Int64ObservableGauge("container.active",
+			otelmetric.WithDescription("Number of sandbox containers currently running"),
+			otelmetric.WithUnit("{container}"),
+		)
+		if gErr != nil {
+			return nil, gErr
+		}
+		activeReg, err = meter.RegisterCallback(func(ctx context.Context, o otelmetric.Observer) error {
+			count, cbErr := activeCounter(ctx)
+			if cbErr != nil {
+				return cbErr
+			}
+			o.ObserveInt64(gauge, count)
+			return nil
+		}, gauge)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	duration, err := meter.Float64Histogram("container.duration",
@@ -93,22 +118,19 @@ func NewBillingMetrics() (*BillingMetrics, error) {
 	return &BillingMetrics{
 		ContainerStartsTotal:  starts,
 		ContainerStopsTotal:   stops,
-		ContainersActive:      active,
 		ContainerDurationSec:  duration,
 		ContainerCPUAllocated: cpu,
 		ContainerMemAllocated: mem,
 		ContainerMinutesTotal: minutes,
+		containersActiveReg:   activeReg,
 	}, nil
 }
 
-// Common attribute keys used across all metrics.
+// Billing attribute keys.
 var (
 	AttrOrgID      = attribute.Key("org.id")
 	AttrProvider   = attribute.Key("container.provider")
 	AttrExitReason = attribute.Key("container.exit_reason")
-	AttrHTTPMethod = attribute.Key("http.request.method")
-	AttrHTTPRoute  = attribute.Key("http.route")
-	AttrHTTPStatus = attribute.Key("http.response.status_code")
 )
 
 // RecordStart records metrics when a container starts.
@@ -120,7 +142,6 @@ func (m *BillingMetrics) RecordStart(ctx context.Context, orgID, provider string
 		AttrProvider.String(provider),
 	)
 	m.ContainerStartsTotal.Add(ctx, 1, attrs)
-	m.ContainersActive.Add(ctx, 1, otelmetric.WithAttributes(AttrOrgID.String(orgID)))
 	m.ContainerCPUAllocated.Record(ctx, cpuLimit, otelmetric.WithAttributes(AttrOrgID.String(orgID)))
 	m.ContainerMemAllocated.Record(ctx, float64(memoryMB), otelmetric.WithAttributes(AttrOrgID.String(orgID)))
 }
@@ -130,7 +151,6 @@ func (m *BillingMetrics) RecordStop(ctx context.Context, orgID, exitReason strin
 	orgAttr := otelmetric.WithAttributes(AttrOrgID.String(orgID))
 	reasonAttrs := otelmetric.WithAttributes(AttrOrgID.String(orgID), AttrExitReason.String(exitReason))
 
-	m.ContainersActive.Add(ctx, -1, orgAttr)
 	m.ContainerStopsTotal.Add(ctx, 1, reasonAttrs)
 	m.ContainerDurationSec.Record(ctx, durationSec, reasonAttrs)
 	m.ContainerMinutesTotal.Add(ctx, durationMin, orgAttr)
