@@ -141,12 +141,15 @@ Use `PageHeader` (`src/components/page-header.tsx`) for ALL page titles:
 
 ### Settings Pages
 
-Use `SettingsPageFrame` for settings-style pages that combine PageContainer + PageHeader:
+Settings pages must use `PageContainer size="default"` with `PageHeader`, matching all other dashboard pages. Do **not** use `SettingsPageFrame` — it wraps content in `size="narrow"` which is inconsistent with the rest of the settings UI.
 
 ```tsx
-<SettingsPageFrame title="Settings" description="...">
-  {/* sections */}
-</SettingsPageFrame>
+<PageContainer size="default">
+  <div className="space-y-6">
+    <PageHeader title="Settings" description="..." />
+    {/* sections */}
+  </div>
+</PageContainer>
 ```
 
 ### Section Pattern
@@ -387,7 +390,6 @@ Always include `dark:` variants for banners that use **hardcoded Tailwind color 
 |-----------|----------|---------|
 | `PageContainer` | `src/components/page-container.tsx` | Page width constraint |
 | `PageHeader` | `src/components/page-header.tsx` | Standard page title + description + action |
-| `SettingsPageFrame` | `src/components/settings-page-frame.tsx` | Settings page wrapper (PageContainer + PageHeader) |
 | `EmptyState` | `src/components/empty-state.tsx` | Empty list/data placeholder |
 | `AuthenticatedLayout` | `src/components/authenticated-layout.tsx` | Sidebar + main content shell |
 

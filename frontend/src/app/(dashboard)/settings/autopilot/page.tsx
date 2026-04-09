@@ -17,7 +17,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { SettingsPageFrame } from "@/components/settings-page-frame";
+import { PageContainer } from "@/components/page-container";
+import { PageHeader } from "@/components/page-header";
 import { DEFAULT_PM_MODEL, PM_MODELS_BY_PROVIDER } from "@/lib/model-constants";
 import { queryKeys } from "@/lib/query-keys";
 import type { ListResponse, Organization, OrgSettings, RepoSettings, Repository, SingleResponse } from "@/lib/types";
@@ -74,10 +75,9 @@ export default function AutopilotSettingsPage() {
   });
 
   return (
-    <SettingsPageFrame
-      title="Autopilot settings"
-      description="Configure PM model, cadence, and organization-wide automation defaults."
-    >
+    <PageContainer size="default">
+      <div className="space-y-6">
+        <PageHeader title="Autopilot settings" description="Configure PM model, cadence, and organization-wide automation defaults." />
       <section className="space-y-3">
         <h2 className="text-[13px] font-medium text-foreground">PM configuration</h2>
         <Card>
@@ -157,6 +157,7 @@ export default function AutopilotSettingsPage() {
           </CardContent>
         </Card>
       </section>
-    </SettingsPageFrame>
+      </div>
+    </PageContainer>
   );
 }
