@@ -121,6 +121,7 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 	result := &agent.AgentResult{}
 	var stderr bytes.Buffer
 	var summaryParts []string
+	var lastAssistantContent string
 
 	exitCode, err := provider.ExecStream(ctx, sandbox, cmd, func(line []byte) {
 		if len(bytes.TrimSpace(line)) == 0 {
@@ -144,7 +145,10 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 				Level:     "output",
 				Message:   event.Content,
 			}
-			summaryParts = append(summaryParts, event.Content)
+			// Individual assistant text blocks are persisted as separate output
+			// logs — don't merge them into the summary. Track the last one as
+			// a fallback in case no "result" event arrives.
+			lastAssistantContent = event.Content
 			tryExtractConfidence(event.Content, result)
 
 		case "tool_use":
@@ -206,7 +210,13 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 	}
 
 	result.ExitCode = exitCode
-	result.Summary = strings.Join(summaryParts, "\n")
+	if len(summaryParts) > 0 {
+		result.Summary = strings.Join(summaryParts, "\n")
+	} else if lastAssistantContent != "" {
+		// Fallback: if no "result" event arrived, use the last assistant text
+		// so that ResultSummary (used for PR titles, etc.) is not empty.
+		result.Summary = lastAssistantContent
+	}
 
 	if stderr.Len() > 0 {
 		logCh <- agent.LogEntry{
@@ -508,6 +518,7 @@ type claudeStreamEvent struct {
 func parseStreamOutput(output []byte, result *agent.AgentResult, logCh chan<- agent.LogEntry) {
 	scanner := bufio.NewScanner(bytes.NewReader(output))
 	var summaryParts []string
+	var lastAssistantContent string
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -533,8 +544,10 @@ func parseStreamOutput(output []byte, result *agent.AgentResult, logCh chan<- ag
 				Level:     "output",
 				Message:   event.Content,
 			}
-			summaryParts = append(summaryParts, event.Content)
-			// Look for confidence JSON in output.
+			// Individual assistant text blocks are persisted as separate output
+			// logs — don't merge them into the summary. Track the last one as
+			// a fallback in case no "result" event arrives.
+			lastAssistantContent = event.Content
 			tryExtractConfidence(event.Content, result)
 
 		case "tool_use":
@@ -589,7 +602,11 @@ func parseStreamOutput(output []byte, result *agent.AgentResult, logCh chan<- ag
 		}
 	}
 
-	result.Summary = strings.Join(summaryParts, "\n")
+	if len(summaryParts) > 0 {
+		result.Summary = strings.Join(summaryParts, "\n")
+	} else if lastAssistantContent != "" {
+		result.Summary = lastAssistantContent
+	}
 }
 
 // tryExtractConfidence attempts to find and parse a confidence JSON block
