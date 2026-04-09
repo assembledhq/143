@@ -680,6 +680,7 @@ function ReviewCommentInput({
 const MAX_SSE_RECONNECT_ATTEMPTS = 5;
 const BASE_SSE_RECONNECT_DELAY_MS = 1000;
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
+const SCROLL_NEAR_BOTTOM_THRESHOLD = 100;
 
 function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Session; sessionId: string; isActive: boolean; onDiffClick?: () => void }) {
   const queryClient = useQueryClient();
@@ -693,6 +694,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const isNearBottomRef = useRef(false);
   const seenLogIds = useRef<Set<number>>(new Set());
   const reconnectAttempts = useRef(0);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(null);
@@ -884,6 +886,11 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
       if (textareaRef.current) {
         textareaRef.current.style.height = "auto";
       }
+      // Scroll to bottom after sending a message so the user sees the response.
+      isNearBottomRef.current = true;
+      if (scrollRef.current) {
+        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      }
       queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
       queryClient.invalidateQueries({ queryKey: ["session", sessionId, "messages"] });
     },
@@ -938,9 +945,17 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
   }, [message]);
 
-  // Scroll to bottom when timeline updates
+  // Track whether the user is scrolled near the bottom.
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    isNearBottomRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_NEAR_BOTTOM_THRESHOLD;
+  }, []);
+
+  // Only auto-scroll to bottom when new entries arrive if the user is already near the bottom.
   useEffect(() => {
-    if (scrollRef.current) {
+    if (scrollRef.current && isNearBottomRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [timelineEntries.length]);
@@ -976,7 +991,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
   return (
     <div className="flex flex-col h-full">
       {/* Unified timeline */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto space-y-2 p-4">
+      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto space-y-2 p-4">
         {timelineEntries.length === 0 && !isRunning && (
           <div className="flex items-center justify-center py-12">
             <div className="text-center space-y-2 max-w-[280px]">
