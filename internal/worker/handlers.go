@@ -1573,6 +1573,28 @@ func truncateString(s string, maxLen int) string {
 	return s[:maxLen] + "...(truncated)"
 }
 
+// bootstrapLogWriter is a helper that writes session log entries for a bootstrap run.
+type bootstrapLogWriter struct {
+	store     *db.SessionLogStore
+	sessionID uuid.UUID
+	orgID     uuid.UUID
+}
+
+func (w *bootstrapLogWriter) log(ctx context.Context, level, message string) {
+	if w.store == nil || w.sessionID == uuid.Nil {
+		return
+	}
+	entry := &models.SessionLog{
+		SessionID:  w.sessionID,
+		OrgID:      w.orgID,
+		Level:      level,
+		Message:    message,
+		TurnNumber: 0,
+	}
+	// Best-effort: don't fail the bootstrap if logging fails.
+	_ = w.store.Create(ctx, entry)
+}
+
 // run_eval_bootstrap handler scans PR history to discover eval task candidates.
 func newRunEvalBootstrapHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
@@ -1603,15 +1625,44 @@ func newRunEvalBootstrapHandler(stores *Stores, services *Services, logger zerol
 			Str("repo_id", repoID.String()).
 			Msg("starting eval bootstrap scan")
 
-		// Mark as running
-		if err := stores.EvalBootstraps.UpdateStatus(ctx, orgID, bootstrapRunID, models.EvalBootstrapStatusRunning, nil); err != nil {
+		// Create a lightweight session to store bootstrap logs.
+		title := "Bootstrap: scanning PR history"
+		session := &models.Session{
+			OrgID:         orgID,
+			AgentType:     models.AgentTypeClaudeCode,
+			Status:        "running",
+			AutonomyLevel: "full",
+			TokenMode:     "low",
+			Title:         &title,
+			RepositoryID:  &repoID,
+		}
+		if err := stores.Sessions.Create(ctx, session); err != nil {
+			logger.Warn().Err(err).Msg("failed to create bootstrap session for logging, continuing without logs")
+		}
+
+		// Mark as running and link the session.
+		var sessionIDPtr *uuid.UUID
+		if session.ID != uuid.Nil {
+			sessionIDPtr = &session.ID
+		}
+		if err := stores.EvalBootstraps.UpdateStatus(ctx, orgID, bootstrapRunID, models.EvalBootstrapStatusRunning, sessionIDPtr); err != nil {
 			return fmt.Errorf("update bootstrap status to running: %w", err)
 		}
 
-		candidates, scanErr := executeBootstrapScan(ctx, stores, services, orgID, repoID, logger)
+		logWriter := &bootstrapLogWriter{
+			store:     stores.SessionLogs,
+			sessionID: session.ID,
+			orgID:     orgID,
+		}
+
+		candidates, scanErr := executeBootstrapScan(ctx, stores, services, orgID, repoID, logWriter, logger)
 
 		if scanErr != nil {
 			errMsg := scanErr.Error()
+			logWriter.log(ctx, "error", fmt.Sprintf("Bootstrap scan failed: %s", errMsg))
+			if session.ID != uuid.Nil {
+				_ = stores.Sessions.UpdateStatus(ctx, orgID, session.ID, "failed")
+			}
 			if updateErr := stores.EvalBootstraps.UpdateResult(ctx, orgID, bootstrapRunID,
 				models.EvalBootstrapStatusFailed, nil, &errMsg); updateErr != nil {
 				logger.Warn().Err(updateErr).Msg("failed to update bootstrap run with error")
@@ -1625,6 +1676,11 @@ func newRunEvalBootstrapHandler(stores *Stores, services *Services, logger zerol
 			return fmt.Errorf("update bootstrap result: %w", err)
 		}
 
+		logWriter.log(ctx, "info", fmt.Sprintf("Bootstrap scan completed successfully. Found %d candidates.", len(candidates)))
+		if session.ID != uuid.Nil {
+			_ = stores.Sessions.UpdateStatus(ctx, orgID, session.ID, "completed")
+		}
+
 		logger.Info().
 			Int("candidates", len(candidates)).
 			Msg("eval bootstrap scan completed")
@@ -1634,24 +1690,28 @@ func newRunEvalBootstrapHandler(stores *Stores, services *Services, logger zerol
 }
 
 // executeBootstrapScan runs the PR history scan using an agent in a sandbox.
-func executeBootstrapScan(ctx context.Context, stores *Stores, services *Services, orgID, repoID uuid.UUID, logger zerolog.Logger) ([]models.EvalBootstrapCandidate, error) {
+func executeBootstrapScan(ctx context.Context, stores *Stores, services *Services, orgID, repoID uuid.UUID, logWriter *bootstrapLogWriter, logger zerolog.Logger) ([]models.EvalBootstrapCandidate, error) {
 	if stores.Repositories == nil {
 		return nil, fmt.Errorf("repository store not configured")
 	}
+	logWriter.log(ctx, "info", "Fetching repository details...")
 	repo, err := stores.Repositories.GetByID(ctx, orgID, repoID)
 	if err != nil {
 		return nil, fmt.Errorf("fetch repository: %w", err)
 	}
+	logWriter.log(ctx, "info", fmt.Sprintf("Repository: %s", repo.FullName))
 
 	if services.GitHub == nil {
 		return nil, fmt.Errorf("github token provider not configured")
 	}
+	logWriter.log(ctx, "info", "Obtaining GitHub access token...")
 	ghToken, err := services.GitHub.GetInstallationToken(ctx, repo.InstallationID)
 	if err != nil {
 		return nil, fmt.Errorf("get installation token: %w", err)
 	}
 
 	// Create sandbox with longer timeout for bootstrap
+	logWriter.log(ctx, "info", "Creating sandbox environment...")
 	sandboxCfg := agent.DefaultSandboxConfig()
 	sandboxCfg.Timeout = 15 * time.Minute
 	sb, err := services.SandboxProvider.Create(ctx, sandboxCfg)
@@ -1665,18 +1725,32 @@ func executeBootstrapScan(ctx context.Context, stores *Stores, services *Service
 	}()
 
 	// Clone repo at HEAD (need full history for git log analysis)
+	logWriter.log(ctx, "info", fmt.Sprintf("Cloning repository %s (full history for git log analysis)...", repo.FullName))
 	if err := services.SandboxProvider.CloneRepo(ctx, sb, repo.CloneURL, repo.DefaultBranch, ghToken); err != nil {
 		return nil, fmt.Errorf("clone repo: %w", err)
 	}
+	logWriter.log(ctx, "info", "Repository cloned successfully.")
 
 	// Run the bootstrap agent using Claude Code CLI
+	logWriter.log(ctx, "info", "Starting bootstrap analysis — scanning merged PRs for eval candidates...")
 	bootstrapPrompt := prompts.EvalBootstrapPrompt(prompts.EvalBootstrapPromptData{
 		RepoFullName: repo.FullName,
 	})
 
-	var stdout, stderr bytes.Buffer
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
 	cmd := fmt.Sprintf("claude --print %q 2>&1", bootstrapPrompt)
-	exitCode, execErr := services.SandboxProvider.Exec(ctx, sb, cmd, &stdout, &stderr)
+	exitCode, execErr := services.SandboxProvider.ExecStream(ctx, sb, cmd, func(line []byte) {
+		trimmed := strings.TrimSpace(string(line))
+		if trimmed == "" {
+			return
+		}
+		// Write each output line as a log entry so the user can follow along.
+		logWriter.log(ctx, "assistant", trimmed)
+		// Also accumulate the full output for JSON parsing.
+		stdout.Write(line)
+		stdout.WriteByte('\n')
+	}, &stderr)
 	if execErr != nil {
 		return nil, fmt.Errorf("execute bootstrap agent: %w", execErr)
 	}
@@ -1688,6 +1762,8 @@ func executeBootstrapScan(ctx context.Context, stores *Stores, services *Service
 		Int("exit_code", exitCode).
 		Int("stdout_len", stdout.Len()).
 		Msg("bootstrap agent execution completed")
+
+	logWriter.log(ctx, "info", "Analysis complete. Parsing candidates...")
 
 	// Parse the agent's structured output
 	var candidates []models.EvalBootstrapCandidate
