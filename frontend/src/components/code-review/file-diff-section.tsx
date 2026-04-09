@@ -150,6 +150,7 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
           onBrowseFile={onBrowseFile}
         />
         <div className="overflow-x-auto">
+        <div className="min-w-fit">
         {file.hunks.map((hunk, i) => {
           const hunkEl =
             viewMode === "split" ? (
@@ -208,6 +209,7 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
             </div>
           );
         })}
+        </div>
         </div>
       </div>
     );
