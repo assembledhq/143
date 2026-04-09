@@ -72,6 +72,42 @@ func (m *pmSandboxMock) ExecStream(ctx context.Context, sb *agent.Sandbox, cmd s
 	return 0, nil
 }
 
+func TestSanitizeFilename(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		input  string
+		expect string
+	}{
+		{name: "lowercases and replaces spaces", input: "Hello World", expect: "hello-world"},
+		{name: "strips special chars", input: "feat: add login (v2)", expect: "feat-add-login-v2"},
+		{name: "preserves hyphens and underscores", input: "my_feature-name", expect: "my_feature-name"},
+		{name: "strips null bytes", input: "a" + string(make([]byte, 100)), expect: "a"},
+		{name: "truncates long alphanumeric input", input: func() string {
+			b := make([]byte, 80)
+			for i := range b {
+				b[i] = 'x'
+			}
+			return string(b)
+		}(), expect: func() string {
+			b := make([]byte, 60)
+			for i := range b {
+				b[i] = 'x'
+			}
+			return string(b)
+		}()},
+		{name: "empty string", input: "", expect: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expect, sanitizeFilename(tt.input))
+		})
+	}
+}
+
 func TestWriteProductContextToAgentsMD(t *testing.T) {
 	t.Parallel()
 

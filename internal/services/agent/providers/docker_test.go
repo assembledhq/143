@@ -271,15 +271,15 @@ func TestDockerProvider_Create(t *testing.T) {
 		// Verify security hardening
 		require.Equal(t, "runsc", capturedHostConfig.Runtime, "container should use gVisor runtime")
 		require.Equal(t, []string(capturedHostConfig.CapDrop), []string{"ALL"}, "container should drop all capabilities")
-		require.Equal(t, []string(capturedHostConfig.SecurityOpt), []string{"no-new-privileges:true"}, "container should set no-new-privileges")
-		require.True(t, capturedHostConfig.ReadonlyRootfs, "container should have read-only rootfs")
+		require.Equal(t, []string(capturedHostConfig.CapAdd), []string{"SETUID", "SETGID", "DAC_OVERRIDE"}, "container should add minimum caps for sudo")
+		require.Empty(t, capturedHostConfig.SecurityOpt, "container should not set security options (no-new-privileges blocks sudo)")
+		require.False(t, capturedHostConfig.ReadonlyRootfs, "container should have writable rootfs for package installation")
 		require.Contains(t, capturedHostConfig.Tmpfs, "/tmp", "container should have tmpfs at /tmp")
-		require.Contains(t, capturedHostConfig.Tmpfs, "/workspace", "container should have writable tmpfs at /workspace")
+		require.NotContains(t, capturedHostConfig.Tmpfs, "/workspace", "workspace should not be a tmpfs (lives on writable rootfs)")
+		require.Equal(t, "10G", capturedHostConfig.StorageOpt["size"], "container should have 10GB disk quota")
 
 		// Verify tmpfs mount options
 		require.Contains(t, capturedHostConfig.Tmpfs["/tmp"], "noexec", "/tmp tmpfs should be noexec")
-		require.Contains(t, capturedHostConfig.Tmpfs["/workspace"], "mode=1777", "workspace tmpfs should be world-writable (mode=1777)")
-		require.NotContains(t, capturedHostConfig.Tmpfs["/workspace"], "noexec", "workspace tmpfs should allow exec for agent binaries")
 
 		// Verify resource limits
 		require.Equal(t, int64(2e9), capturedHostConfig.Resources.NanoCPUs, "container should have 2 CPU cores")
@@ -294,7 +294,31 @@ func TestDockerProvider_Create(t *testing.T) {
 		require.Equal(t, "runsc", sb.Metadata["runtime"], "sandbox metadata should include runtime")
 	})
 
-	t.Run("workspace tmpfs uses configured WorkDir", func(t *testing.T) {
+	t.Run("falls back when StorageOpt unsupported", func(t *testing.T) {
+		t.Parallel()
+
+		callCount := 0
+		var lastHostConfig container.HostConfig
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			callCount++
+			lastHostConfig = *hostConfig
+			if callCount == 1 {
+				return container.CreateResponse{}, fmt.Errorf("--storage-opt is supported only for overlay over xfs with 'pquota' mount option")
+			}
+			return container.CreateResponse{ID: "fallback-ok"}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+
+		sb, err := p.Create(context.Background(), agent.DefaultSandboxConfig())
+		require.NoError(t, err, "Create should succeed after fallback")
+		require.Equal(t, "fallback-ok", sb.ID)
+		require.Equal(t, 2, callCount, "should have retried without StorageOpt")
+		require.Empty(t, lastHostConfig.StorageOpt, "retry should not include StorageOpt")
+	})
+
+	t.Run("skips StorageOpt when DiskLimitGB is zero", func(t *testing.T) {
 		t.Parallel()
 
 		var capturedHostConfig *container.HostConfig
@@ -302,18 +326,15 @@ func TestDockerProvider_Create(t *testing.T) {
 		mock := &mockDockerClient{}
 		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
 			capturedHostConfig = hostConfig
-			return container.CreateResponse{ID: "custom-workdir"}, nil
+			return container.CreateResponse{ID: "no-disk-limit"}, nil
 		}
 		p := NewDockerProvider(mock, newTestLogger())
 
 		cfg := agent.DefaultSandboxConfig()
-		cfg.WorkDir = "/custom/work"
+		cfg.DiskLimitGB = 0
 		_, err := p.Create(context.Background(), cfg)
 		require.NoError(t, err)
-
-		require.Contains(t, capturedHostConfig.Tmpfs, "/custom/work", "tmpfs should be mounted at the configured WorkDir")
-		require.Contains(t, capturedHostConfig.Tmpfs["/custom/work"], "mode=1777", "custom WorkDir tmpfs should be world-writable")
-		require.NotContains(t, capturedHostConfig.Tmpfs, "/workspace", "default /workspace should not appear when WorkDir is customized")
+		require.Empty(t, capturedHostConfig.StorageOpt, "StorageOpt should not be set when DiskLimitGB is 0")
 	})
 
 	t.Run("injects env vars into container", func(t *testing.T) {
@@ -757,6 +778,7 @@ func TestDefaultSandboxConfig(t *testing.T) {
 	require.Equal(t, 4096, cfg.MemoryLimitMB, "default memory limit should be 4096 MB")
 	require.Equal(t, "/workspace", cfg.WorkDir, "default work dir should be '/workspace'")
 	require.Equal(t, "restricted", cfg.NetworkPolicy, "default network policy should be 'restricted'")
+	require.Equal(t, 10, cfg.DiskLimitGB, "default disk limit should be 10GB")
 }
 
 func TestShellEscape(t *testing.T) {
