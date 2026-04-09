@@ -47,9 +47,9 @@ func TestCancelRegistry_CancelSession_SendsSIGINT(t *testing.T) {
 	id := uuid.New()
 
 	provider := testutil.NewMockSandboxProvider()
-	var execCmd string
+	var execCmd atomic.Value
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-		execCmd = cmd
+		execCmd.Store(cmd)
 		return 0, nil
 	}
 
@@ -60,10 +60,11 @@ func TestCancelRegistry_CancelSession_SendsSIGINT(t *testing.T) {
 
 	// Give the goroutine a moment to execute.
 	require.Eventually(t, func() bool {
-		return execCmd != ""
+		v, _ := execCmd.Load().(string)
+		return v != ""
 	}, 2*time.Second, 10*time.Millisecond)
 
-	require.Contains(t, execCmd, "pkill -INT")
+	require.Contains(t, execCmd.Load().(string), "pkill -INT")
 	require.True(t, reg.WasCancelled(id))
 }
 
