@@ -23,6 +23,12 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// SessionCanceller can cancel a running agent session. The Orchestrator
+// implements this interface; it is injected after construction via SetCanceller.
+type SessionCanceller interface {
+	CancelSession(sessionID uuid.UUID) bool
+}
+
 type SessionHandler struct {
 	runStore         *db.SessionStore
 	logStore         *db.SessionLogStore
@@ -38,11 +44,17 @@ type SessionHandler struct {
 	llmClient        llm.Client // optional, used for generating manual session titles
 	logger           zerolog.Logger
 	audit            *db.AuditEmitter
+	canceller        SessionCanceller // optional — enables cancelling running sessions
 }
 
 // SetAuditEmitter injects the audit emitter for logging session events.
 func (h *SessionHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 	h.audit = audit
+}
+
+// SetCanceller injects the session canceller for stopping running agent sessions.
+func (h *SessionHandler) SetCanceller(c SessionCanceller) {
+	h.canceller = c
 }
 
 func NewSessionHandler(
@@ -853,6 +865,54 @@ func (h *SessionHandler) EndSession(w http.ResponseWriter, r *http.Request) {
 
 	session.Status = string(models.SessionStatusCompleted)
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Session]{Data: session})
+}
+
+// CancelSession handles POST /sessions/{id}/cancel — cancels a running session
+// by signalling the orchestrator to send SIGINT to the agent process.
+//
+// The response returns the session in its current state (still "running").
+// The orchestrator updates the status asynchronously once the agent exits —
+// typically to "idle" (if snapshot succeeds) or "cancelled" (if not).
+// The frontend should poll for the final status.
+func (h *SessionHandler) CancelSession(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+
+	session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+		return
+	}
+
+	if session.Status != string(models.SessionStatusRunning) {
+		writeError(w, r, http.StatusConflict, "NOT_RUNNING", "only running sessions can be cancelled")
+		return
+	}
+
+	if h.canceller == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "CANCEL_UNAVAILABLE", "session cancellation is not available")
+		return
+	}
+
+	// Signal the orchestrator to send SIGINT to the agent.
+	// The orchestrator will update the session status asynchronously when the
+	// agent execution terminates (to idle or cancelled).
+	if !h.canceller.CancelSession(sessionID) {
+		// The session is marked as running but isn't tracked in the cancel
+		// registry. This can happen if the session just finished or the worker
+		// is on a different node. Return 202 Accepted — the client should poll.
+		h.logger.Warn().
+			Str("session_id", sessionID.String()).
+			Msg("cancel requested but session not found in local cancel registry")
+	}
+
+	// Return the session as-is (still "running"). The status will be updated
+	// asynchronously by the orchestrator once the agent exits.
+	writeJSON(w, http.StatusAccepted, models.SingleResponse[models.Session]{Data: session})
 }
 
 func isTerminalStatus(status string) bool {

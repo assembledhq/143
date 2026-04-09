@@ -919,6 +919,13 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
     },
   });
 
+  const cancelMutation = useMutation({
+    mutationFn: () => api.sessions.cancelSession(sessionId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+    },
+  });
+
   const { data: prData } = useQuery({
     queryKey: ["session", sessionId, "pr"],
     queryFn: () => api.sessions.getPR(sessionId).catch((err) => {
@@ -1037,7 +1044,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
 
       {/* Error display */}
       {(() => {
-        const firstError = uploadError || [sendMutation, endMutation, createPRMutation].find(m => m.error)?.error;
+        const firstError = uploadError || [sendMutation, endMutation, cancelMutation, createPRMutation].find(m => m.error)?.error;
         if (!firstError) return null;
         const msg = typeof firstError === "string" ? firstError : (firstError instanceof Error ? firstError.message : "An error occurred");
         return (
@@ -1226,9 +1233,9 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
                   size="icon"
                   variant="outline"
                   className="h-8 w-8 shrink-0 rounded-lg"
-                  title="Stop session"
-                  disabled={endMutation.isPending}
-                  onClick={() => endMutation.mutate()}
+                  title="Cancel session"
+                  disabled={cancelMutation.isPending}
+                  onClick={() => cancelMutation.mutate()}
                 >
                   <Square className="h-3 w-3" />
                 </Button>
