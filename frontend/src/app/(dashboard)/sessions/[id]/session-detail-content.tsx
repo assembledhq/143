@@ -1271,6 +1271,37 @@ export function SessionDetailContent({ id }: { id: string }) {
   const session = data?.data;
   const members = membersData?.data ?? [];
   const isActive = session ? !terminalStatuses.has(session.status) : false;
+  const isRunning = session?.status === "running";
+
+  const queryClient = useQueryClient();
+
+  // PR state for the detail-panel header button
+  const { data: prData } = useQuery({
+    queryKey: ["session", id, "pr"],
+    queryFn: () => api.sessions.getPR(id).catch((err) => {
+      if (err?.code === "NOT_FOUND") return { data: null };
+      throw err;
+    }),
+  });
+  const hasPR = !!prData?.data;
+  const hasDiff = !!session?.diff_stats;
+  const canCreatePR = hasDiff && !hasPR && !isRunning;
+
+  const { data: ghStatus } = useQuery({
+    queryKey: ["github-status"],
+    queryFn: () => api.githubStatus.get(),
+    enabled: canCreatePR,
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const createPRMutation = useMutation({
+    mutationFn: () => api.sessions.createPR(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["session", id] });
+      queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
+    },
+  });
+
   const sessionDiff = session?.diff;
   const diffStats = useMemo(() => {
     if (!sessionDiff) return null;
@@ -1278,7 +1309,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [sessionDiff]);
 
   // --- Shared review state (lifted from old ChangesTab) ---
-  const queryClient = useQueryClient();
 
   // Hooks can't be called conditionally, so provide a stub when session hasn't loaded yet.
   // useDiffViewState only reads `diff` and `diff_history` — the stub satisfies that contract.
