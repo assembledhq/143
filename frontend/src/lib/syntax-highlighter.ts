@@ -1,6 +1,9 @@
 // syntax-highlighter.ts — Thin wrapper around Shiki for lazy-loaded syntax highlighting.
 
 import { useEffect, useMemo, useState } from "react";
+import { useTheme } from "next-themes";
+
+export type SyntaxTheme = "github-dark" | "github-light";
 
 type Highlighter = Awaited<ReturnType<typeof import("shiki")["createHighlighter"]>>;
 
@@ -26,7 +29,7 @@ async function getHighlighter(): Promise<Highlighter> {
 export async function highlightLines(
   lines: string[],
   lang: string,
-  theme: "github-dark" | "github-light" = "github-dark"
+  theme: SyntaxTheme = "github-dark"
 ): Promise<string[]> {
   if (lines.length === 0) return [];
 
@@ -78,6 +81,14 @@ function escapeHtml(str: string): string {
 }
 
 /**
+ * Returns the Shiki theme name matching the current app theme (light/dark).
+ */
+export function useSyntaxTheme(): SyntaxTheme {
+  const { resolvedTheme } = useTheme();
+  return resolvedTheme === "light" ? "github-light" : "github-dark";
+}
+
+/**
  * React hook that highlights all lines in a file's diff at once.
  * Returns a flat array of highlighted HTML strings, one per line across all hunks.
  * The caller maps these back to hunk/line positions using the hunk structure.
@@ -85,9 +96,11 @@ function escapeHtml(str: string): string {
 export function useFileHighlighting(
   allLineContents: string[],
   lang: string,
-  theme: "github-dark" | "github-light" = "github-dark",
+  theme?: SyntaxTheme,
   enabled: boolean = true
 ): string[] | null {
+  const autoTheme = useSyntaxTheme();
+  const resolvedTheme = theme ?? autoTheme;
   const [highlighted, setHighlighted] = useState<string[] | null>(null);
 
   // Compute a lightweight content key using a simple hash instead of joining
@@ -112,7 +125,7 @@ export function useFileHighlighting(
 
     let cancelled = false;
 
-    highlightLines(allLineContents, lang, theme).then((result) => {
+    highlightLines(allLineContents, lang, resolvedTheme).then((result) => {
       if (!cancelled) {
         setHighlighted(result);
       }
@@ -122,7 +135,7 @@ export function useFileHighlighting(
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- contentKey is a stable digest
-  }, [contentKey, lang, theme, enabled]);
+  }, [contentKey, lang, resolvedTheme, enabled]);
 
   return highlighted;
 }
