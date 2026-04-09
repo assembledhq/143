@@ -318,6 +318,25 @@ func TestDockerProvider_Create(t *testing.T) {
 		require.Empty(t, lastHostConfig.StorageOpt, "retry should not include StorageOpt")
 	})
 
+	t.Run("skips StorageOpt when DiskLimitGB is zero", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedHostConfig *container.HostConfig
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			capturedHostConfig = hostConfig
+			return container.CreateResponse{ID: "no-disk-limit"}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+
+		cfg := agent.DefaultSandboxConfig()
+		cfg.DiskLimitGB = 0
+		_, err := p.Create(context.Background(), cfg)
+		require.NoError(t, err)
+		require.Empty(t, capturedHostConfig.StorageOpt, "StorageOpt should not be set when DiskLimitGB is 0")
+	})
+
 	t.Run("injects env vars into container", func(t *testing.T) {
 		t.Parallel()
 
