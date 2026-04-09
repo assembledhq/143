@@ -529,6 +529,7 @@ type testDeps struct {
 	codexAuth agent.CodexAuthProvider
 	creds     *mockCredentialProvider
 	snapshots *mockSnapshotStore
+	cancels   *agent.CancelRegistry
 }
 
 func defaultDeps() testDeps {
@@ -569,6 +570,7 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		CodexAuth:        d.codexAuth,
 		Credentials:      d.creds,
 		Snapshots:        d.snapshots,
+		Cancels:          d.cancels,
 		Logger:           zerolog.Nop(),
 		MaxConcurrent:    3,
 	})
@@ -1522,5 +1524,61 @@ func TestRunAgent_CodexAuthRefreshFallsBackToGetValidToken(t *testing.T) {
 	tokens, ok := authJSON["tokens"].(map[string]interface{})
 	require.True(t, ok, "auth.json should have tokens object")
 	require.Equal(t, "fallback-access-token", tokens["access_token"], "auth.json should contain the fallback token from GetValidToken")
+}
+
+func TestRunAgent_CancelReturnsToIdle(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	cancelReg := agent.NewCancelRegistry(zerolog.Nop())
+
+	d := defaultDeps()
+	d.cancels = cancelReg
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("cancel-snapshot"))), nil
+	}
+	// Make Exec fail so doCancel falls back to immediate context cancel
+	// (avoids 30s timer wait in tests).
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		return 1, errors.New("exec not available in test")
+	}
+
+	// The adapter blocks until the cancel registry fires, then returns an error
+	// simulating the agent being interrupted.
+	adapterStarted := make(chan struct{})
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		close(adapterStarted)
+		// Wait for the context to be cancelled (by the cancel registry fallback).
+		<-ctx.Done()
+		return &agent.AgentResult{
+			Summary:        "partial work",
+			ExitCode:       1,
+			AgentSessionID: "agent-sess-123",
+		}, ctx.Err()
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- buildOrchestrator(d).RunAgent(context.Background(), run)
+	}()
+
+	// Wait for the adapter to start executing, then trigger cancel.
+	<-adapterStarted
+	require.True(t, cancelReg.CancelSession(run.ID), "cancel should find registered session")
+
+	err := <-done
+	require.Error(t, err, "RunAgent should return an error when cancelled")
+	require.Contains(t, err.Error(), "cancelled")
+
+	// handleCancelledSession should have snapshot'd and returned to idle.
+	turnUpdates := d.sessions.getTurnUpdates()
+	require.Len(t, turnUpdates, 1, "cancelled session should have a turn update (returned to idle)")
+	require.NotEmpty(t, turnUpdates[0].snapshotKey, "cancelled session should have a snapshot key")
+
+	// Sandbox should be destroyed.
+	require.Equal(t, 1, d.provider.GetDestroyCalls())
 }
 
