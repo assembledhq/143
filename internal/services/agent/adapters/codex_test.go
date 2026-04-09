@@ -823,12 +823,13 @@ func TestParseCodexStreamLine_DeduplicatesConsecutiveOutput(t *testing.T) {
 	logCh := make(chan agent.LogEntry, 100)
 	var summaryParts []string
 	lastByType := make(map[string]string)
+	var lastAssistant string
 
 	line := []byte(`{"type":"message","content":"Hello world"}`)
 
 	// Send the same line twice — only one log entry should be emitted.
-	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType, new(string))
-	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType, new(string))
+	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType, &lastAssistant)
+	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType, &lastAssistant)
 	close(logCh)
 
 	var logs []agent.LogEntry
@@ -837,7 +838,7 @@ func TestParseCodexStreamLine_DeduplicatesConsecutiveOutput(t *testing.T) {
 	}
 
 	require.Len(t, logs, 1, "consecutive duplicate messages should be deduplicated to 1 log entry")
-	require.Len(t, summaryParts, 1, "summary should only contain 1 entry for deduplicated output")
+	require.Equal(t, "Hello world", lastAssistant, "lastAssistant should track the deduplicated output")
 }
 
 func TestParseCodexStreamLine_AllowsNonConsecutiveDuplicates(t *testing.T) {
@@ -875,12 +876,13 @@ func TestParseCodexStreamLine_DeduplicatesItemCompleted(t *testing.T) {
 	logCh := make(chan agent.LogEntry, 100)
 	var summaryParts []string
 	lastByType := make(map[string]string)
+	var lastAssistant string
 
 	line := []byte(`{"type":"item.completed","item":{"type":"agent_message","text":"Final answer"}}`)
 
 	// Same item.completed agent_message twice.
-	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType, new(string))
-	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType, new(string))
+	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType, &lastAssistant)
+	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType, &lastAssistant)
 	close(logCh)
 
 	var logs []agent.LogEntry
@@ -889,7 +891,7 @@ func TestParseCodexStreamLine_DeduplicatesItemCompleted(t *testing.T) {
 	}
 
 	require.Len(t, logs, 1, "consecutive duplicate item.completed agent_message should be deduplicated")
-	require.Len(t, summaryParts, 1, "summary should only contain 1 entry for deduplicated item.completed")
+	require.Equal(t, "Final answer", lastAssistant, "lastAssistant should track the deduplicated item.completed")
 }
 
 func TestParseCodexStreamLine_SuppressesRefreshTokenFromStdout(t *testing.T) {
