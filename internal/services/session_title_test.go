@@ -53,6 +53,7 @@ func (m *mockTitleMessageStore) ListBySession(_ context.Context, _, _ uuid.UUID)
 // --- tests ---
 
 func TestMaybeRegenerateTitle_SkipsWhenNotDue(t *testing.T) {
+	t.Parallel()
 	llm := &mockLLM{response: "New Title"}
 	for _, turn := range []int{0, 1, 2, 4, 5} {
 		sessions := &mockTitleSessionStore{
@@ -67,6 +68,7 @@ func TestMaybeRegenerateTitle_SkipsWhenNotDue(t *testing.T) {
 }
 
 func TestMaybeRegenerateTitle_RunsOnThirdTurn(t *testing.T) {
+	t.Parallel()
 	title := "Old title"
 	llm := &mockLLM{response: "New title from LLM"}
 	sessions := &mockTitleSessionStore{
@@ -91,6 +93,7 @@ func TestMaybeRegenerateTitle_RunsOnThirdTurn(t *testing.T) {
 }
 
 func TestMaybeRegenerateTitle_SkipsUpdateWhenTitleUnchanged(t *testing.T) {
+	t.Parallel()
 	title := "Same title"
 	llm := &mockLLM{response: "Same title"}
 	sessions := &mockTitleSessionStore{
@@ -110,6 +113,7 @@ func TestMaybeRegenerateTitle_SkipsUpdateWhenTitleUnchanged(t *testing.T) {
 }
 
 func TestMaybeRegenerateTitle_SkipsEmptyOrTooLong(t *testing.T) {
+	t.Parallel()
 	title := "Old"
 	llm := &mockLLM{}
 	sessions := &mockTitleSessionStore{session: models.Session{Title: &title, CurrentTurn: 3}}
@@ -135,6 +139,7 @@ func TestMaybeRegenerateTitle_SkipsEmptyOrTooLong(t *testing.T) {
 }
 
 func TestMaybeRegenerateTitle_LLMError(t *testing.T) {
+	t.Parallel()
 	title := "Old"
 	llm := &mockLLM{err: errors.New("timeout")}
 	sessions := &mockTitleSessionStore{session: models.Session{Title: &title, CurrentTurn: 3}}
@@ -151,6 +156,7 @@ func TestMaybeRegenerateTitle_LLMError(t *testing.T) {
 }
 
 func TestMaybeRegenerateTitle_NoMessages(t *testing.T) {
+	t.Parallel()
 	title := "Old"
 	llm := &mockLLM{response: "New"}
 	sessions := &mockTitleSessionStore{session: models.Session{Title: &title, CurrentTurn: 3}}
@@ -163,6 +169,7 @@ func TestMaybeRegenerateTitle_NoMessages(t *testing.T) {
 }
 
 func TestCleanTitle(t *testing.T) {
+	t.Parallel()
 	title, ok := CleanTitle("  \"Fix auth bug\"  ")
 	assert.True(t, ok)
 	assert.Equal(t, "Fix auth bug", title)
@@ -175,6 +182,7 @@ func TestCleanTitle(t *testing.T) {
 }
 
 func TestBuildTitleUserPrompt(t *testing.T) {
+	t.Parallel()
 	msgs := []models.SessionMessage{
 		{Role: models.MessageRoleUser, Content: "Fix the login bug in auth service"},
 		{Role: models.MessageRoleAssistant, Content: "I found the issue in auth.go"},
@@ -191,6 +199,7 @@ func TestBuildTitleUserPrompt(t *testing.T) {
 }
 
 func TestBuildTitleUserPrompt_TruncatesLongMessages(t *testing.T) {
+	t.Parallel()
 	longContent := ""
 	for i := 0; i < 300; i++ {
 		longContent += "a"
@@ -205,6 +214,7 @@ func TestBuildTitleUserPrompt_TruncatesLongMessages(t *testing.T) {
 }
 
 func TestRecentMessages(t *testing.T) {
+	t.Parallel()
 	msgs := make([]models.SessionMessage, 10)
 	for i := range msgs {
 		msgs[i] = models.SessionMessage{TurnNumber: i}
@@ -221,6 +231,7 @@ func TestRecentMessages(t *testing.T) {
 }
 
 func TestTruncate(t *testing.T) {
+	t.Parallel()
 	assert.Equal(t, "hello", truncate("hello", 10))
 	assert.Equal(t, "hel...", truncate("hello world", 3))
 	assert.Equal(t, "hello", truncate("  hello  ", 10))
