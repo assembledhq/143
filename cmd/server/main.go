@@ -378,7 +378,7 @@ func buildServices(
 	// Session title service (optional — only if LLM client is available).
 	var titleService *services.SessionTitleService
 	if llmClient != nil {
-		titleService = services.NewSessionTitleService(llmClient, sessionStore, sessionMessageStore, logger)
+		titleService = services.NewSessionTitleService(llmClient, sessionStore, sessionMessageStore)
 	}
 
 	return &worker.Services{

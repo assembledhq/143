@@ -17,6 +17,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -1166,16 +1167,16 @@ func (h *SessionHandler) generateSessionTitle(parent context.Context, session *m
 	if err != nil {
 		return fmt.Errorf("llm completion: %w", err)
 	}
-	generated = strings.TrimSpace(generated)
-	generated = strings.Trim(generated, "\"'")
-	if len(generated) == 0 || len(generated) > 120 {
+
+	title, ok := services.CleanTitle(generated)
+	if !ok {
 		return nil
 	}
 
-	if err := h.runStore.UpdateTitle(ctx, orgID, session.ID, generated); err != nil {
+	if err := h.runStore.UpdateTitle(ctx, orgID, session.ID, title); err != nil {
 		return fmt.Errorf("update title: %w", err)
 	}
-	session.Title = &generated
+	session.Title = &title
 	return nil
 }
 

@@ -7,33 +7,27 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/prompts"
 )
 
-// regenerateEveryN controls how often we regenerate the title (every N turns).
-const regenerateEveryN = 3
+const (
+	regenerateEveryN = 3
+	maxMessageChars  = 200
+	maxRecentPairs   = 3
+	maxTitleLen      = 120
+)
 
-// maxMessageChars is the maximum characters per message included in the prompt.
-const maxMessageChars = 200
-
-// maxRecentPairs is how many recent user+assistant message pairs to include.
-const maxRecentPairs = 3
-
-// llmClient is the interface for LLM completion calls.
 type llmClient interface {
 	Complete(ctx context.Context, systemPrompt, userPrompt string) (string, error)
 }
 
-// titleSessionStore defines the session DB operations needed by the title service.
 type titleSessionStore interface {
 	GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	UpdateTitle(ctx context.Context, orgID, sessionID uuid.UUID, title string) error
 }
 
-// titleMessageStore defines the message DB operations needed by the title service.
 type titleMessageStore interface {
 	ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionMessage, error)
 }
@@ -43,30 +37,27 @@ type SessionTitleService struct {
 	llm      llmClient
 	sessions titleSessionStore
 	messages titleMessageStore
-	logger   zerolog.Logger
 }
 
-// NewSessionTitleService creates a new SessionTitleService.
-func NewSessionTitleService(llm llmClient, sessions titleSessionStore, messages titleMessageStore, logger zerolog.Logger) *SessionTitleService {
+func NewSessionTitleService(llm llmClient, sessions titleSessionStore, messages titleMessageStore) *SessionTitleService {
 	return &SessionTitleService{
 		llm:      llm,
 		sessions: sessions,
 		messages: messages,
-		logger:   logger,
 	}
 }
 
 // MaybeRegenerateTitle regenerates the session title if the current turn is
 // a multiple of regenerateEveryN (3, 6, 9, ...). It is safe to call on every
 // turn — it will no-op when regeneration is not due.
-func (s *SessionTitleService) MaybeRegenerateTitle(ctx context.Context, orgID, sessionID uuid.UUID, currentTurn int) error {
-	if currentTurn < regenerateEveryN || currentTurn%regenerateEveryN != 0 {
-		return nil
-	}
-
+func (s *SessionTitleService) MaybeRegenerateTitle(ctx context.Context, orgID, sessionID uuid.UUID) error {
 	session, err := s.sessions.GetByID(ctx, orgID, sessionID)
 	if err != nil {
 		return fmt.Errorf("fetch session: %w", err)
+	}
+
+	if session.CurrentTurn < regenerateEveryN || session.CurrentTurn%regenerateEveryN != 0 {
+		return nil
 	}
 
 	msgs, err := s.messages.ListBySession(ctx, orgID, sessionID)
@@ -95,21 +86,26 @@ func (s *SessionTitleService) MaybeRegenerateTitle(ctx context.Context, orgID, s
 		return fmt.Errorf("llm completion: %w", err)
 	}
 
-	generated = strings.TrimSpace(generated)
-	generated = strings.Trim(generated, "\"'")
-	if len(generated) == 0 || len(generated) > 120 {
+	title, ok := CleanTitle(generated)
+	if !ok || title == currentTitle {
 		return nil
 	}
 
-	// Skip update if the title hasn't changed.
-	if generated == currentTitle {
-		return nil
-	}
-
-	if err := s.sessions.UpdateTitle(ctx, orgID, sessionID, generated); err != nil {
+	if err := s.sessions.UpdateTitle(ctx, orgID, sessionID, title); err != nil {
 		return fmt.Errorf("update title: %w", err)
 	}
 	return nil
+}
+
+// CleanTitle trims whitespace and surrounding quotes from a generated title,
+// returning false if the result is empty or exceeds maxTitleLen.
+func CleanTitle(s string) (string, bool) {
+	s = strings.TrimSpace(s)
+	s = strings.Trim(s, "\"'")
+	if len(s) == 0 || len(s) > maxTitleLen {
+		return "", false
+	}
+	return s, true
 }
 
 // buildTitleUserPrompt constructs a compressed conversation summary for title generation.

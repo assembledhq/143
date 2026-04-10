@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -55,11 +54,13 @@ func (m *mockTitleMessageStore) ListBySession(_ context.Context, _, _ uuid.UUID)
 
 func TestMaybeRegenerateTitle_SkipsWhenNotDue(t *testing.T) {
 	llm := &mockLLM{response: "New Title"}
-	svc := NewSessionTitleService(llm, &mockTitleSessionStore{}, &mockTitleMessageStore{}, zerolog.Nop())
-
-	// Turns 0, 1, 2 should all be skipped.
 	for _, turn := range []int{0, 1, 2, 4, 5} {
-		err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New(), turn)
+		sessions := &mockTitleSessionStore{
+			session: models.Session{CurrentTurn: turn},
+		}
+		svc := NewSessionTitleService(llm, sessions, &mockTitleMessageStore{})
+
+		err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New())
 		require.NoError(t, err)
 		assert.Equal(t, 0, llm.calls, "should not call LLM on turn %d", turn)
 	}
@@ -69,7 +70,7 @@ func TestMaybeRegenerateTitle_RunsOnThirdTurn(t *testing.T) {
 	title := "Old title"
 	llm := &mockLLM{response: "New title from LLM"}
 	sessions := &mockTitleSessionStore{
-		session: models.Session{Title: &title},
+		session: models.Session{Title: &title, CurrentTurn: 3},
 	}
 	messages := &mockTitleMessageStore{
 		messages: []models.SessionMessage{
@@ -81,9 +82,9 @@ func TestMaybeRegenerateTitle_RunsOnThirdTurn(t *testing.T) {
 			{TurnNumber: 2, Role: models.MessageRoleAssistant, Content: "Refactored"},
 		},
 	}
-	svc := NewSessionTitleService(llm, sessions, messages, zerolog.Nop())
+	svc := NewSessionTitleService(llm, sessions, messages)
 
-	err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New(), 3)
+	err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New())
 	require.NoError(t, err)
 	assert.Equal(t, 1, llm.calls)
 	assert.Equal(t, "New title from LLM", sessions.updatedTitle)
@@ -93,16 +94,16 @@ func TestMaybeRegenerateTitle_SkipsUpdateWhenTitleUnchanged(t *testing.T) {
 	title := "Same title"
 	llm := &mockLLM{response: "Same title"}
 	sessions := &mockTitleSessionStore{
-		session: models.Session{Title: &title},
+		session: models.Session{Title: &title, CurrentTurn: 3},
 	}
 	messages := &mockTitleMessageStore{
 		messages: []models.SessionMessage{
 			{TurnNumber: 0, Role: models.MessageRoleUser, Content: "Do something"},
 		},
 	}
-	svc := NewSessionTitleService(llm, sessions, messages, zerolog.Nop())
+	svc := NewSessionTitleService(llm, sessions, messages)
 
-	err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New(), 3)
+	err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New())
 	require.NoError(t, err)
 	assert.Equal(t, 1, llm.calls)
 	assert.Empty(t, sessions.updatedTitle, "should not update when title unchanged")
@@ -111,23 +112,24 @@ func TestMaybeRegenerateTitle_SkipsUpdateWhenTitleUnchanged(t *testing.T) {
 func TestMaybeRegenerateTitle_SkipsEmptyOrTooLong(t *testing.T) {
 	title := "Old"
 	llm := &mockLLM{}
-	sessions := &mockTitleSessionStore{session: models.Session{Title: &title}}
+	sessions := &mockTitleSessionStore{session: models.Session{Title: &title, CurrentTurn: 3}}
 	messages := &mockTitleMessageStore{
 		messages: []models.SessionMessage{
 			{TurnNumber: 0, Role: models.MessageRoleUser, Content: "task"},
 		},
 	}
-	svc := NewSessionTitleService(llm, sessions, messages, zerolog.Nop())
+	svc := NewSessionTitleService(llm, sessions, messages)
 
 	// Empty response
 	llm.response = "   "
-	err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New(), 3)
+	err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New())
 	require.NoError(t, err)
 	assert.Empty(t, sessions.updatedTitle)
 
-	// Too long response
+	// Too long response — reset for next call
+	sessions.session.CurrentTurn = 6
 	llm.response = string(make([]byte, 121))
-	err = svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New(), 6)
+	err = svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New())
 	require.NoError(t, err)
 	assert.Empty(t, sessions.updatedTitle)
 }
@@ -135,15 +137,15 @@ func TestMaybeRegenerateTitle_SkipsEmptyOrTooLong(t *testing.T) {
 func TestMaybeRegenerateTitle_LLMError(t *testing.T) {
 	title := "Old"
 	llm := &mockLLM{err: errors.New("timeout")}
-	sessions := &mockTitleSessionStore{session: models.Session{Title: &title}}
+	sessions := &mockTitleSessionStore{session: models.Session{Title: &title, CurrentTurn: 3}}
 	messages := &mockTitleMessageStore{
 		messages: []models.SessionMessage{
 			{TurnNumber: 0, Role: models.MessageRoleUser, Content: "task"},
 		},
 	}
-	svc := NewSessionTitleService(llm, sessions, messages, zerolog.Nop())
+	svc := NewSessionTitleService(llm, sessions, messages)
 
-	err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New(), 3)
+	err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "llm completion")
 }
@@ -151,13 +153,25 @@ func TestMaybeRegenerateTitle_LLMError(t *testing.T) {
 func TestMaybeRegenerateTitle_NoMessages(t *testing.T) {
 	title := "Old"
 	llm := &mockLLM{response: "New"}
-	sessions := &mockTitleSessionStore{session: models.Session{Title: &title}}
+	sessions := &mockTitleSessionStore{session: models.Session{Title: &title, CurrentTurn: 3}}
 	messages := &mockTitleMessageStore{messages: nil}
-	svc := NewSessionTitleService(llm, sessions, messages, zerolog.Nop())
+	svc := NewSessionTitleService(llm, sessions, messages)
 
-	err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New(), 3)
+	err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New())
 	require.NoError(t, err)
 	assert.Equal(t, 0, llm.calls, "should not call LLM with no messages")
+}
+
+func TestCleanTitle(t *testing.T) {
+	title, ok := CleanTitle("  \"Fix auth bug\"  ")
+	assert.True(t, ok)
+	assert.Equal(t, "Fix auth bug", title)
+
+	_, ok = CleanTitle("   ")
+	assert.False(t, ok)
+
+	_, ok = CleanTitle(string(make([]byte, 121)))
+	assert.False(t, ok)
 }
 
 func TestBuildTitleUserPrompt(t *testing.T) {
@@ -187,7 +201,6 @@ func TestBuildTitleUserPrompt_TruncatesLongMessages(t *testing.T) {
 
 	result := buildTitleUserPrompt(msgs)
 	assert.Contains(t, result, "...")
-	// The truncated message (200 chars + "...") plus prefix should be well under the original 300
 	assert.NotContains(t, result, longContent, "should not contain the full 300-char string")
 }
 
