@@ -207,9 +207,25 @@ type PullRequest struct {
 	Status         string     `db:"status" json:"status"`
 	ReviewStatus   string     `db:"review_status" json:"review_status"`
 	AuthoredBy     string     `db:"authored_by" json:"authored_by"`
+	CIStatus       string     `db:"ci_status" json:"ci_status"`
 	MergedAt       *time.Time `db:"merged_at" json:"merged_at,omitempty"`
 	CreatedAt      time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt      time.Time  `db:"updated_at" json:"updated_at"`
+}
+
+// PRSummary is a lightweight view of a PR for inclusion in session list responses.
+type PRSummary struct {
+	Status   string `json:"status"`
+	CIStatus string `json:"ci_status"`
+	Number   int    `json:"number"`
+	URL      string `json:"url"`
+}
+
+// SessionListItem wraps a Session with enrichment data for list views.
+type SessionListItem struct {
+	Session
+	LastViewedAt *time.Time `json:"last_viewed_at,omitempty"`
+	PRSummary    *PRSummary `json:"pr_summary,omitempty"`
 }
 
 // SessionLog represents a log line emitted during an agent run.

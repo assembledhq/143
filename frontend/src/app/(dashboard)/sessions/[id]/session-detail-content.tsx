@@ -1290,6 +1290,15 @@ export function SessionDetailContent({ id }: { id: string }) {
       throw err;
     }),
   });
+  // Record that the user has viewed this session (for unread tracking).
+  useEffect(() => {
+    if (id) {
+      api.sessions.recordView(id).then(() => {
+        queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      }).catch(() => {});
+    }
+  }, [id, queryClient]);
+
   const hasPR = !!prData?.data;
   const hasDiff = !!session?.diff_stats;
   const canCreatePR = hasDiff && !hasPR && !isRunning;

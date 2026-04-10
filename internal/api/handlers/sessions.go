@@ -41,6 +41,7 @@ type SessionHandler struct {
 	jobStore         *db.JobStore
 	messageStore     *db.SessionMessageStore
 	threadStore      *db.SessionThreadStore
+	viewStore        *db.SessionViewStore
 	llmClient        llm.Client // optional, used for generating manual session titles
 	logger           zerolog.Logger
 	audit            *db.AuditEmitter
@@ -55,6 +56,11 @@ func (h *SessionHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 // SetCanceller injects the session canceller for stopping running agent sessions.
 func (h *SessionHandler) SetCanceller(c SessionCanceller) {
 	h.canceller = c
+}
+
+// SetViewStore injects the session view store for tracking unread sessions.
+func (h *SessionHandler) SetViewStore(vs *db.SessionViewStore) {
+	h.viewStore = vs
 }
 
 func NewSessionHandler(
@@ -177,8 +183,48 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 		nextCursor = encodeSessionCursor(last.CreatedAt, last.ID)
 	}
 
-	writeJSON(w, http.StatusOK, models.ListResponse[models.Session]{
-		Data: runs,
+	// Enrich sessions with last_viewed_at and PR summaries.
+	items := make([]models.SessionListItem, len(runs))
+	sessionIDs := make([]uuid.UUID, len(runs))
+	for i, s := range runs {
+		items[i] = models.SessionListItem{Session: s}
+		sessionIDs[i] = s.ID
+	}
+
+	user := middleware.UserFromContext(r.Context())
+	if user != nil && h.viewStore != nil && len(sessionIDs) > 0 {
+		viewTimes, err := h.viewStore.BatchGetLastViewed(r.Context(), user.ID, sessionIDs)
+		if err != nil {
+			h.logger.Warn().Err(err).Msg("failed to fetch session view times")
+		} else {
+			for i, s := range runs {
+				if t, ok := viewTimes[s.ID]; ok {
+					items[i].LastViewedAt = &t
+				}
+			}
+		}
+	}
+
+	if h.pullRequestStore != nil && len(sessionIDs) > 0 {
+		prMap, err := h.pullRequestStore.BatchGetBySessionIDs(r.Context(), orgID, sessionIDs)
+		if err != nil {
+			h.logger.Warn().Err(err).Msg("failed to fetch PR summaries")
+		} else {
+			for i, s := range runs {
+				if pr, ok := prMap[s.ID]; ok {
+					items[i].PRSummary = &models.PRSummary{
+						Status:   pr.Status,
+						CIStatus: pr.CIStatus,
+						Number:   pr.GitHubPRNumber,
+						URL:      pr.GitHubPRURL,
+					}
+				}
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, models.ListResponse[models.SessionListItem]{
+		Data: items,
 		Meta: models.PaginationMeta{NextCursor: nextCursor},
 	})
 }
@@ -212,6 +258,33 @@ func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionDetail]{Data: detail})
+}
+
+// RecordView records that the current user has viewed a session (for unread tracking).
+func (h *SessionHandler) RecordView(w http.ResponseWriter, r *http.Request) {
+	if h.viewStore == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+
+	orgID := middleware.OrgIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user not found in context")
+		return
+	}
+
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+
+	if err := h.viewStore.Upsert(r.Context(), user.ID, sessionID, orgID); err != nil {
+		h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to record session view")
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // TriggerFix creates a new agent run for an issue and enqueues a run_agent job.

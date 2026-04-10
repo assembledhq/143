@@ -108,6 +108,7 @@ export const mockPR: PullRequest = {
   status: 'open',
   branch_name: 'fix/type-error-null-check',
   review_status: 'pending',
+  ci_status: '',
   merged_at: null,
   closed_at: null,
   created_at: '2026-02-17T07:06:00Z',
