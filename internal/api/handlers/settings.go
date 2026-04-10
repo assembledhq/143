@@ -13,6 +13,7 @@ type SettingsHandler struct {
 	orgStore      *db.OrganizationStore
 	agentDefaults map[string]map[string]string
 	llmDefaults   map[string]string // provider name → masked key (from server env)
+	platformModel string            // cheap model used for internal features (e.g. "gpt-5-nano")
 	audit         *db.AuditEmitter
 }
 
@@ -21,8 +22,8 @@ func (h *SettingsHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 	h.audit = audit
 }
 
-func NewSettingsHandler(orgStore *db.OrganizationStore, agentDefaults map[string]map[string]string, llmDefaults map[string]string) *SettingsHandler {
-	return &SettingsHandler{orgStore: orgStore, agentDefaults: agentDefaults, llmDefaults: llmDefaults}
+func NewSettingsHandler(orgStore *db.OrganizationStore, agentDefaults map[string]map[string]string, llmDefaults map[string]string, platformModel string) *SettingsHandler {
+	return &SettingsHandler{orgStore: orgStore, agentDefaults: agentDefaults, llmDefaults: llmDefaults, platformModel: platformModel}
 }
 
 func (h *SettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
@@ -45,7 +46,10 @@ func (h *SettingsHandler) GetAgentDefaults(w http.ResponseWriter, r *http.Reques
 // configured, with keys masked. This lets the frontend show whether a platform
 // fallback is available when the org hasn't configured their own key.
 func (h *SettingsHandler) GetLLMDefaults(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"data": h.llmDefaults})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data":           h.llmDefaults,
+		"platform_model": h.platformModel,
+	})
 }
 
 // GetLLMModels returns the available LLM models grouped by provider.
