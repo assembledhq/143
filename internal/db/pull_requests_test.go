@@ -23,7 +23,7 @@ func TestPullRequestStore_GetByRepoAndNumber(t *testing.T) {
 
 	cols := []string{
 		"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-		"title", "body", "status", "review_status", "authored_by", "merged_at", "created_at", "updated_at",
+		"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
 	}
 
 	prID := uuid.New()
@@ -36,7 +36,7 @@ func TestPullRequestStore_GetByRepoAndNumber(t *testing.T) {
 		WillReturnRows(
 			pgxmock.NewRows(cols).
 				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "org/repo",
-					"Fix bug", ptrStr("Description"), "open", "pending", "user1", nil, now, now),
+					"Fix bug", ptrStr("Description"), "open", "pending", "user1", "", nil, now, now),
 		)
 
 	pr, err := store.GetByRepoAndNumber(context.Background(), "org/repo", 42)

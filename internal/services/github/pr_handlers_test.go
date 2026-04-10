@@ -24,7 +24,7 @@ import (
 // If the store query changes its SELECT list, update this slice to match.
 var handlerPRColumns = []string{
 	"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-	"title", "body", "status", "review_status", "authored_by", "merged_at", "created_at", "updated_at",
+	"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
 }
 
 // sessionColumns matches the SELECT columns from SessionStore queries
@@ -118,7 +118,7 @@ func TestHandlePullRequestEvent_MergedFlow(t *testing.T) {
 		WillReturnRows(
 			pgxmock.NewRows(handlerPRColumns).
 				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
-					"Fix bug", (*string)(nil), "open", "pending", "app", (*time.Time)(nil), now, now),
+					"Fix bug", (*string)(nil), "open", "pending", "app", "", (*time.Time)(nil), now, now),
 		)
 
 	// Mock: UpdateStatus to merged.
@@ -218,7 +218,7 @@ func TestHandlePullRequestEvent_MergedWithNilSessionID(t *testing.T) {
 		WillReturnRows(
 			pgxmock.NewRows(handlerPRColumns).
 				AddRow(prID, (*uuid.UUID)(nil), orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
-					"Fix bug", (*string)(nil), "open", "pending", "app", (*time.Time)(nil), now, now),
+					"Fix bug", (*string)(nil), "open", "pending", "app", "", (*time.Time)(nil), now, now),
 		)
 
 	// Mock: UpdateStatus to merged.
@@ -279,7 +279,7 @@ func TestHandlePullRequestEvent_ClosedWithoutMergeFlow(t *testing.T) {
 		WillReturnRows(
 			pgxmock.NewRows(handlerPRColumns).
 				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
-					"Fix bug", (*string)(nil), "open", "pending", "app", (*time.Time)(nil), now, now),
+					"Fix bug", (*string)(nil), "open", "pending", "app", "", (*time.Time)(nil), now, now),
 		)
 
 	// Mock: UpdateStatus to closed.
@@ -321,7 +321,7 @@ func TestHandlePullRequestEvent_NonClosedAction(t *testing.T) {
 		WillReturnRows(
 			pgxmock.NewRows(handlerPRColumns).
 				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
-					"Fix bug", (*string)(nil), "open", "pending", "app", (*time.Time)(nil), now, now),
+					"Fix bug", (*string)(nil), "open", "pending", "app", "", (*time.Time)(nil), now, now),
 		)
 
 	event := PullRequestEvent{
@@ -385,7 +385,7 @@ func TestHandlePullRequestReviewEvent_ApprovedFlow(t *testing.T) {
 		WillReturnRows(
 			pgxmock.NewRows(handlerPRColumns).
 				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
-					"Fix bug", (*string)(nil), "open", "pending", "app", (*time.Time)(nil), now, now),
+					"Fix bug", (*string)(nil), "open", "pending", "app", "", (*time.Time)(nil), now, now),
 		)
 
 	// Mock: UpdateReviewStatus.
@@ -444,7 +444,7 @@ func TestHandlePullRequestReviewEvent_ChangesRequestedWithBody(t *testing.T) {
 		WillReturnRows(
 			pgxmock.NewRows(handlerPRColumns).
 				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
-					"Fix bug", (*string)(nil), "open", "pending", "app", (*time.Time)(nil), now, now),
+					"Fix bug", (*string)(nil), "open", "pending", "app", "", (*time.Time)(nil), now, now),
 		)
 
 	// Mock: UpdateReviewStatus.
@@ -510,7 +510,7 @@ func TestHandlePullRequestReviewEvent_ChangesRequestedNoReviewStore(t *testing.T
 		WillReturnRows(
 			pgxmock.NewRows(handlerPRColumns).
 				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
-					"Fix bug", (*string)(nil), "open", "pending", "app", (*time.Time)(nil), now, now),
+					"Fix bug", (*string)(nil), "open", "pending", "app", "", (*time.Time)(nil), now, now),
 		)
 
 	// Mock: UpdateReviewStatus.
@@ -565,7 +565,7 @@ func TestHandlePullRequestReviewEvent_UnknownReviewState(t *testing.T) {
 		WillReturnRows(
 			pgxmock.NewRows(handlerPRColumns).
 				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
-					"Fix bug", (*string)(nil), "open", "pending", "app", (*time.Time)(nil), now, now),
+					"Fix bug", (*string)(nil), "open", "pending", "app", "", (*time.Time)(nil), now, now),
 		)
 
 	event := PullRequestReviewEvent{
@@ -634,7 +634,7 @@ func TestHandlePullRequestReviewCommentEvent_Created(t *testing.T) {
 		WillReturnRows(
 			pgxmock.NewRows(handlerPRColumns).
 				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
-					"Fix bug", (*string)(nil), "open", "pending", "app", (*time.Time)(nil), now, now),
+					"Fix bug", (*string)(nil), "open", "pending", "app", "", (*time.Time)(nil), now, now),
 		)
 
 	// Mock: Create review comment.
@@ -735,7 +735,7 @@ func TestHandlePullRequestReviewCommentEvent_NilReviewCommentStore(t *testing.T)
 		WillReturnRows(
 			pgxmock.NewRows(handlerPRColumns).
 				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
-					"Fix bug", (*string)(nil), "open", "pending", "app", (*time.Time)(nil), now, now),
+					"Fix bug", (*string)(nil), "open", "pending", "app", "", (*time.Time)(nil), now, now),
 		)
 
 	event := PullRequestReviewCommentEvent{
@@ -997,7 +997,7 @@ func TestHandlePullRequestEvent_MergedWithUpdateStatusError(t *testing.T) {
 		WillReturnRows(
 			pgxmock.NewRows(handlerPRColumns).
 				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
-					"Fix bug", (*string)(nil), "open", "pending", "app", (*time.Time)(nil), now, now),
+					"Fix bug", (*string)(nil), "open", "pending", "app", "", (*time.Time)(nil), now, now),
 		)
 
 	// Mock: UpdateStatus fails.
