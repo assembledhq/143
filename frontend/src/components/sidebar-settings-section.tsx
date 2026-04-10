@@ -114,7 +114,7 @@ export function SidebarSettingsSection({
 
   return (
     <Collapsible open={isOpen} onOpenChange={setIsOpen}>
-      <div className="mt-4 mb-1 mx-0 border-t border-border" />
+      <div className="mt-4 mb-1 mx-0 border-t border-border/50" />
       <CollapsibleTrigger asChild>
         <button
           type="button"
