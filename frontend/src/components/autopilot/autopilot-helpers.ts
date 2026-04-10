@@ -76,7 +76,8 @@ function getDocumentsSummary(documents: PMDocument[]): string {
 function truncateError(error?: string): string | undefined {
   if (!error) return undefined;
   if (error.length <= 150) return error;
-  return error.slice(0, 150).trim() + "...";
+  const cut = error.lastIndexOf(" ", 150);
+  return error.slice(0, cut > 80 ? cut : 150).trim() + "...";
 }
 
 export function formatFreshness(lastRunAt?: string, now = Date.now()): string {

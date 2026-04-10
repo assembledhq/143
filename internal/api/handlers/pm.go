@@ -23,8 +23,8 @@ type PMHandler struct {
 	decisionLogStore *db.PMDecisionLogStore
 	jobStore         *db.JobStore
 	orgStore         *db.OrganizationStore
-	pmDocStore *db.PMDocumentStore // nil-safe: context endpoints disabled if nil
-	audit      *db.AuditEmitter
+	pmDocStore       *db.PMDocumentStore // nil-safe: context endpoints disabled if nil
+	audit            *db.AuditEmitter
 }
 
 // SetAuditEmitter injects the audit emitter for logging PM events.
