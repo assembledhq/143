@@ -257,7 +257,7 @@ export function FileTree({
           />
         </div>
       </div>
-      <div className="flex-1 overflow-y-auto px-3 pb-2">
+      <div className="flex-1 overflow-y-auto scrollbar-hide px-3 pb-2">
         <TreeDirectory
           node={tree}
           activeFileIndex={sortedActiveIndex}
