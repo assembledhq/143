@@ -62,6 +62,7 @@ type Config struct {
 	// LLM
 	LLMModel           string `env:"LLM_MODEL"`
 	LLMReasoningEffort string `env:"LLM_REASONING_EFFORT"`
+	PlatformLLMModel   string `env:"PLATFORM_LLM_MODEL"    envDefault:"gpt-5-nano"`
 	AnthropicAPIKey    string `env:"ANTHROPIC_API_KEY"`
 	AnthropicBaseURL  string `env:"ANTHROPIC_BASE_URL"`
 	AnthropicModel    string `env:"ANTHROPIC_MODEL"`
@@ -157,6 +158,26 @@ func Load() *Config {
 func (c *Config) LLMConfig() llm.Config {
 	return llm.Config{
 		Model:             llm.ModelName(c.LLMModel),
+		ReasoningEffort:   llm.ReasoningEffort(c.LLMReasoningEffort),
+		AnthropicAPIKey:   c.AnthropicAPIKey,
+		AnthropicBaseURL:  c.AnthropicBaseURL,
+		OpenAIAPIKey:      c.OpenAIAPIKey,
+		OpenAIBaseURL:     c.OpenAIBaseURL,
+		OpenAIAPIType:     c.OpenAIAPIType,
+		OpenRouterAPIKey:  c.OpenRouterAPIKey,
+		OpenRouterBaseURL: c.OpenRouterBaseURL,
+		OpenRouterAppName: c.OpenRouterAppName,
+		OpenRouterSiteURL: c.OpenRouterSiteURL,
+	}
+}
+
+// PlatformLLMConfig returns the llm.Config for platform-internal features
+// (titles, PR descriptions, project generation, validation, prioritization).
+// Uses the cheap PLATFORM_LLM_MODEL (default: gpt-5-nano) regardless of what
+// LLM_MODEL is set to, keeping internal feature costs low.
+func (c *Config) PlatformLLMConfig() llm.Config {
+	return llm.Config{
+		Model:             llm.ModelName(c.PlatformLLMModel),
 		ReasoningEffort:   llm.ReasoningEffort(c.LLMReasoningEffort),
 		AnthropicAPIKey:   c.AnthropicAPIKey,
 		AnthropicBaseURL:  c.AnthropicBaseURL,
