@@ -917,11 +917,11 @@ func TestSessionHandler_GetPullRequest_Success(t *testing.T) {
 			pgxmock.NewRows([]string{
 				"id", "session_id", "org_id", "github_pr_number", "github_pr_url",
 				"github_repo", "title", "body", "status", "review_status",
-				"authored_by", "merged_at", "created_at", "updated_at",
+				"authored_by", "ci_status", "merged_at", "created_at", "updated_at",
 			}).AddRow(
 				prID, &runID, orgID, 42, "https://github.com/org/repo/pull/42",
 				"org/repo", "Fix bug", nil, "open", "pending",
-				"app", nil, now, now,
+				"app", "", nil, now, now,
 			),
 		)
 
@@ -2544,7 +2544,7 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-			"title", "body", "status", "review_status", "merged_at", "created_at", "updated_at",
+			"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
 		}))
 
 	// Mock job enqueue.
@@ -2659,10 +2659,10 @@ func TestSessionHandler_CreatePR_AlreadyExists(t *testing.T) {
 		WillReturnRows(
 			pgxmock.NewRows([]string{
 				"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-				"title", "body", "status", "review_status", "authored_by", "merged_at", "created_at", "updated_at",
+				"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
 			}).AddRow(
 				prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "org/repo",
-				"Fix bug", (*string)(nil), "open", "pending", "app", (*time.Time)(nil), now, now,
+				"Fix bug", (*string)(nil), "open", "pending", "app", "", (*time.Time)(nil), now, now,
 			),
 		)
 

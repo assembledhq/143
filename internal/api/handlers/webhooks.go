@@ -62,6 +62,8 @@ func (h *WebhookHandler) HandleGitHub(w http.ResponseWriter, r *http.Request) {
 		h.handlePullRequestReview(w, r, body)
 	case "pull_request_review_comment":
 		h.handlePullRequestReviewComment(w, r, body)
+	case "check_suite":
+		h.handleCheckSuite(w, r, body)
 	default:
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "event": event})
 	}
@@ -321,6 +323,26 @@ func (h *WebhookHandler) handlePullRequestReviewComment(w http.ResponseWriter, r
 
 	if err := h.prService.HandlePullRequestReviewCommentEvent(r.Context(), event); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "REVIEW_COMMENT_EVENT_FAILED", "failed to process pull_request_review_comment event", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
+}
+
+func (h *WebhookHandler) handleCheckSuite(w http.ResponseWriter, r *http.Request, body []byte) {
+	if h.prService == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "pr_service_not_configured"})
+		return
+	}
+
+	var event ghservice.CheckSuiteEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse check_suite event")
+		return
+	}
+
+	if err := h.prService.HandleCheckSuiteEvent(r.Context(), event); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CHECK_SUITE_FAILED", "failed to process check_suite event", err)
 		return
 	}
 

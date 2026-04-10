@@ -15,6 +15,7 @@ import { SessionOwnerToggle } from "./session-owner-toggle";
 import { queryKeys } from "@/lib/query-keys";
 import { useOptimisticSessions, type OptimisticSession } from "@/contexts/optimistic-sessions";
 import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
+import type { SessionListItem } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
 // Status config
@@ -55,6 +56,57 @@ function filterToStatusParam(filter: string | null): string | undefined {
   if (filter === "working") return workingStatuses.join(",");
   if (filter === "done") return doneStatuses.join(",");
   return filter;
+}
+
+// ---------------------------------------------------------------------------
+// Unread indicator logic
+// ---------------------------------------------------------------------------
+
+/** Returns true if the session has activity the current user hasn't seen yet. */
+function isUnread(session: SessionListItem): boolean {
+  // Sessions that are actively working are always "live" — show an animated dot instead.
+  if (workingSet.has(session.status)) return false;
+
+  const lastActivity = session.last_activity_at;
+  if (!lastActivity) return false;
+
+  // Never viewed → unread if there's been any activity.
+  if (!session.last_viewed_at) return true;
+
+  return new Date(lastActivity) > new Date(session.last_viewed_at);
+}
+
+// ---------------------------------------------------------------------------
+// PR status badge for sidebar rows
+// ---------------------------------------------------------------------------
+
+function PRStatusBadge({ prSummary }: { prSummary?: SessionListItem["pr_summary"] }) {
+  if (!prSummary) return null;
+
+  let dotColor: string;
+  let label: string;
+
+  if (prSummary.status === "merged") {
+    dotColor = "bg-violet-500";
+    label = "Merged";
+  } else if (prSummary.ci_status === "success") {
+    dotColor = "bg-emerald-500";
+    label = "CI passed";
+  } else if (prSummary.ci_status === "failure") {
+    dotColor = "bg-destructive";
+    label = "CI failed";
+  } else {
+    // pending / unknown CI status
+    dotColor = "bg-muted-foreground/40";
+    label = "CI pending";
+  }
+
+  return (
+    <span className="inline-flex items-center gap-1 shrink-0 rounded-md border border-border/60 bg-muted/50 px-1.5 py-0.5" title={label}>
+      <span className={cn("inline-flex rounded-full h-1.5 w-1.5", dotColor)} />
+      <span className="text-xs text-muted-foreground">PR</span>
+    </span>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +315,7 @@ export function SessionSidebar() {
           const isSelected = selectedId === session.id;
           const cfg = statusConfig[session.status] || statusConfig.pending;
           const isWorkingSession = workingSet.has(session.status);
+          const hasUnread = isUnread(session);
           const ts = session.completed_at || session.started_at || session.created_at;
 
           return (
@@ -277,19 +330,24 @@ export function SessionSidebar() {
               )}
             >
               <div className="flex items-start gap-2.5 min-w-0">
-                {/* Status dot */}
+                {/* Unread / working indicator */}
                 <div className="mt-1.5 shrink-0">
                   {isWorkingSession ? (
                     <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />
+                  ) : hasUnread ? (
+                    <StatusDot color="bg-primary" />
                   ) : (
-                    <StatusDot color={cfg.dot} />
+                    <span className="inline-flex rounded-full h-2 w-2" />
                   )}
                 </div>
 
                 {/* Content */}
                 <div className="min-w-0 flex-1">
                   <div className="flex items-start justify-between gap-2">
-                    <p className="text-[13px] font-medium text-foreground truncate leading-snug">
+                    <p className={cn(
+                      "text-[13px] font-medium truncate leading-snug",
+                      hasUnread || isWorkingSession ? "text-foreground" : "text-muted-foreground"
+                    )}>
                       {sessionTitle(session)}
                     </p>
                   </div>
@@ -307,7 +365,10 @@ export function SessionSidebar() {
                         {formatTimeAgo(ts)}
                       </span>
                     </div>
-                    <SessionDiffBadge diffStats={session.diff_stats} />
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <PRStatusBadge prSummary={session.pr_summary} />
+                      <SessionDiffBadge diffStats={session.diff_stats} />
+                    </div>
                   </div>
                   {session.status === "failed" && (session.failure_explanation || session.error) && (
                     <p className="text-xs text-destructive/70 truncate mt-0.5">

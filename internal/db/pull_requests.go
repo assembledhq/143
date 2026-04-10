@@ -51,10 +51,12 @@ func (s *PullRequestStore) Create(ctx context.Context, pr *models.PullRequest) e
 	return row.Scan(&pr.ID, &pr.CreatedAt, &pr.UpdatedAt)
 }
 
+const prSelectColumns = `id, session_id, org_id, github_pr_number, github_pr_url, github_repo,
+		       title, body, status, review_status, authored_by, ci_status, merged_at, created_at, updated_at`
+
 func (s *PullRequestStore) GetByID(ctx context.Context, orgID, id uuid.UUID) (models.PullRequest, error) {
 	query := `
-		SELECT id, session_id, org_id, github_pr_number, github_pr_url, github_repo,
-		       title, body, status, review_status, authored_by, merged_at, created_at, updated_at
+		SELECT ` + prSelectColumns + `
 		FROM pull_requests
 		WHERE id = @id AND org_id = @org_id`
 
@@ -70,8 +72,7 @@ func (s *PullRequestStore) GetByID(ctx context.Context, orgID, id uuid.UUID) (mo
 
 func (s *PullRequestStore) GetBySessionID(ctx context.Context, orgID, sessionID uuid.UUID) (models.PullRequest, error) {
 	query := `
-		SELECT id, session_id, org_id, github_pr_number, github_pr_url, github_repo,
-		       title, body, status, review_status, authored_by, merged_at, created_at, updated_at
+		SELECT ` + prSelectColumns + `
 		FROM pull_requests
 		WHERE session_id = @session_id AND org_id = @org_id`
 
@@ -104,8 +105,7 @@ func (s *PullRequestStore) UpdateStatus(ctx context.Context, orgID, id uuid.UUID
 // subsequent org-scoped operations.
 func (s *PullRequestStore) GetByRepoAndNumber(ctx context.Context, repo string, number int) (models.PullRequest, error) {
 	query := `
-		SELECT id, session_id, org_id, github_pr_number, github_pr_url, github_repo,
-		       title, body, status, review_status, authored_by, merged_at, created_at, updated_at
+		SELECT ` + prSelectColumns + `
 		FROM pull_requests
 		WHERE github_repo = @github_repo AND github_pr_number = @github_pr_number`
 
@@ -131,8 +131,7 @@ func (s *PullRequestStore) UpdateReviewStatus(ctx context.Context, orgID, id uui
 
 func (s *PullRequestStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters PullRequestFilters) ([]models.PullRequest, error) {
 	query := `
-		SELECT id, session_id, org_id, github_pr_number, github_pr_url, github_repo,
-		       title, body, status, review_status, authored_by, merged_at, created_at, updated_at
+		SELECT ` + prSelectColumns + `
 		FROM pull_requests
 		WHERE org_id = @org_id`
 
@@ -163,4 +162,46 @@ func (s *PullRequestStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filte
 		return nil, fmt.Errorf("query pull requests: %w", err)
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PullRequest])
+}
+
+// BatchGetBySessionIDs returns PRs keyed by session_id for the given session IDs.
+func (s *PullRequestStore) BatchGetBySessionIDs(ctx context.Context, orgID uuid.UUID, sessionIDs []uuid.UUID) (map[uuid.UUID]models.PullRequest, error) {
+	if len(sessionIDs) == 0 {
+		return nil, nil
+	}
+
+	query := `
+		SELECT ` + prSelectColumns + `
+		FROM pull_requests
+		WHERE org_id = @org_id AND session_id = ANY(@session_ids)`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":      orgID,
+		"session_ids": sessionIDs,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("batch query pull requests: %w", err)
+	}
+	prs, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.PullRequest])
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[uuid.UUID]models.PullRequest, len(prs))
+	for _, pr := range prs {
+		if pr.SessionID != nil {
+			result[*pr.SessionID] = pr
+		}
+	}
+	return result, nil
+}
+
+// UpdateCIStatus updates the CI status of a pull request.
+func (s *PullRequestStore) UpdateCIStatus(ctx context.Context, orgID, id uuid.UUID, ciStatus string) error {
+	query := `UPDATE pull_requests SET ci_status = @ci_status, updated_at = now() WHERE id = @id AND org_id = @org_id`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":        id,
+		"org_id":    orgID,
+		"ci_status": ciStatus,
+	})
+	return err
 }
