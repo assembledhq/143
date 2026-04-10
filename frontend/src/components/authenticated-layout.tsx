@@ -140,7 +140,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
               href="/autopilot"
               className="flex items-center gap-1.5 min-w-0 rounded-md px-1.5 py-1 -ml-1.5 hover:bg-sidebar-accent transition-colors"
             >
-              <div className="flex h-5 w-5 items-center justify-center rounded bg-foreground text-background text-[10px] font-bold shrink-0">
+              <div className="flex h-5 w-5 items-center justify-center rounded bg-foreground text-background text-xs font-semibold shrink-0">
                 {orgName[0]?.toUpperCase() ?? "1"}
               </div>
               <span className="text-sm font-semibold text-sidebar-foreground truncate">
@@ -201,7 +201,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                 <item.icon className="h-4 w-4 shrink-0" />
                 {item.label}
                 {item.showProposalBadge && proposalCount > 0 && (
-                  <Badge variant="secondary" className="ml-auto text-[11px] px-1.5 py-0 h-5 bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300">
+                  <Badge variant="secondary" className="ml-auto text-xs px-1.5 py-0 h-5 bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300">
                     {proposalCount}
                   </Badge>
                 )}
@@ -229,7 +229,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                       className="h-5 w-5 rounded-full"
                     />
                   ) : (
-                    <div className="flex h-5 w-5 items-center justify-center rounded-full bg-muted text-[10px] font-medium">
+                    <div className="flex h-5 w-5 items-center justify-center rounded-full bg-muted text-xs font-medium">
                       {user.name?.[0]?.toUpperCase() ?? "?"}
                     </div>
                   )}
