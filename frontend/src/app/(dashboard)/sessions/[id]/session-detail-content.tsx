@@ -1562,11 +1562,11 @@ export function SessionDetailContent({ id }: { id: string }) {
                 }
               />
             </TabsContent>
-            <TabsContent value="overview" className="flex-1 overflow-y-auto p-4">
+            <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
               <OverviewTab session={session} members={members} />
             </TabsContent>
             {showValidationTab && (
-              <TabsContent value="validation" className="flex-1 overflow-y-auto p-4">
+              <TabsContent value="validation" className="flex-1 overflow-y-auto scrollbar-hide p-4">
                 <ValidationTab sessionId={id} />
               </TabsContent>
             )}
