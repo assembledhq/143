@@ -58,3 +58,18 @@ export function useOptimisticSessions() {
   }
   return ctx;
 }
+
+const EMPTY_SESSIONS: OptimisticSession[] = [];
+const noopAdd = () => `optimistic-${Date.now()}`;
+const noopRemove = () => {};
+const FALLBACK: OptimisticSessionsContextValue = {
+  optimisticSessions: EMPTY_SESSIONS,
+  addOptimisticSession: noopAdd,
+  removeOptimisticSession: noopRemove,
+};
+
+/** Same as useOptimisticSessions but returns no-op stubs when outside a provider. */
+export function useOptimisticSessionsSafe(): OptimisticSessionsContextValue {
+  const ctx = useContext(OptimisticSessionsContext);
+  return ctx ?? FALLBACK;
+}
