@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import {
   Select,
   SelectContent,
@@ -61,8 +62,12 @@ export default function AutopilotSettingsPage() {
 
   const [scheduleHoursOverride, setScheduleHoursOverride] = useState<string | null>(null);
   const [pmModelOverride, setPmModelOverride] = useState<string | null>(null);
+  const [autonomyOverride, setAutonomyOverride] = useState<string | null>(null);
+  const [maxConcurrentOverride, setMaxConcurrentOverride] = useState<string | null>(null);
   const scheduleHours = scheduleHoursOverride ?? String(settings.pm_schedule_hours ?? 4);
   const pmModel = pmModelOverride ?? settings.pm_model ?? DEFAULT_PM_MODEL;
+  const autonomyLevel = autonomyOverride ?? settings.autonomy_level ?? "auto_simple";
+  const maxConcurrentRuns = maxConcurrentOverride ?? String(settings.max_concurrent_runs ?? 3);
 
   const mutation = useMutation({
     mutationFn: (payload: Record<string, unknown>) => api.settings.update(payload),
@@ -100,62 +105,113 @@ export default function AutopilotSettingsPage() {
                   <SelectValue placeholder="Select a model" />
                 </SelectTrigger>
                 <SelectContent>
-                  {enabledPmModelGroups.length === 0 ? (
-                    <SelectItem value={DEFAULT_PM_MODEL} disabled>
-                      No providers configured
-                    </SelectItem>
-                  ) : (
-                    enabledPmModelGroups.map((group) => (
+                  <SelectItem value={DEFAULT_PM_MODEL}>
+                    Auto ({DEFAULT_PM_MODEL})
+                  </SelectItem>
+                  {enabledPmModelGroups.map((group) => {
+                    const models = group.models.filter((m) => m !== DEFAULT_PM_MODEL);
+                    if (models.length === 0) return null;
+                    return (
                       <SelectGroup key={group.label}>
                         <SelectLabel>{group.label}</SelectLabel>
-                        {group.models.map((model) => (
+                        {models.map((model) => (
                           <SelectItem key={model} value={model}>
                             {model}
                           </SelectItem>
                         ))}
                       </SelectGroup>
-                    ))
-                  )}
+                    );
+                  })}
                 </SelectContent>
               </Select>
-            </div>
-            <div className="flex justify-end">
-              <Button
-                onClick={() => mutation.mutate({
-                  settings: {
-                    pm_schedule_hours: parseInt(scheduleHours, 10),
-                    pm_model: pmModel,
-                  },
-                })}
-                disabled={mutation.isPending}
-              >
-                {mutation.isPending ? "Saving..." : "Save settings"}
-              </Button>
             </div>
           </CardContent>
         </Card>
       </section>
 
       <section className="space-y-3">
-        <h2 className="text-[13px] font-medium text-foreground">Repository overrides</h2>
+        <h2 className="text-[13px] font-medium text-foreground">Execution</h2>
         <Card>
-          <CardContent className="space-y-3">
-            <p className="text-sm text-muted-foreground">
-              Individual repositories can override Autopilot settings from their repository settings page.
-            </p>
-            {reposWithCustomPM.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No repository overrides yet.</p>
-            ) : (
-              <div className="flex flex-wrap gap-2">
-                {reposWithCustomPM.map((repository) => (
-                  <Badge key={repository.id} variant="secondary">
-                    {repository.full_name}
-                  </Badge>
-                ))}
-              </div>
-            )}
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <Label>Autonomy level</Label>
+              <p className="text-[13px] text-muted-foreground">
+                Controls how much autonomy the autopilot has when executing tasks.
+              </p>
+              <RadioGroup value={autonomyLevel} onValueChange={setAutonomyOverride}>
+                <label className="flex items-center gap-3 rounded-lg border p-3">
+                  <RadioGroupItem value="manual" aria-label="Suggest" />
+                  <div>
+                    <span className="text-[13px] font-medium">Suggest</span>
+                    <p className="text-xs text-muted-foreground">Autopilot recommends, you decide.</p>
+                  </div>
+                </label>
+                <label className="flex items-center gap-3 rounded-lg border p-3">
+                  <RadioGroupItem value="auto_simple" aria-label="Act on low-risk" />
+                  <div>
+                    <span className="text-[13px] font-medium">Act on low-risk</span>
+                    <p className="text-xs text-muted-foreground">Auto-create sessions for bounded work.</p>
+                  </div>
+                </label>
+                <label className="flex items-center gap-3 rounded-lg border p-3">
+                  <RadioGroupItem value="auto_all" aria-label="Operate broadly" />
+                  <div>
+                    <span className="text-[13px] font-medium">Operate broadly</span>
+                    <p className="text-xs text-muted-foreground">Autopilot runs automatically on eligible work.</p>
+                  </div>
+                </label>
+              </RadioGroup>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="max-concurrent-runs">Max concurrent runs</Label>
+              <p className="text-[13px] text-muted-foreground">
+                Maximum number of sessions the autopilot can run at the same time.
+              </p>
+              <Input
+                id="max-concurrent-runs"
+                type="number"
+                min={1}
+                max={20}
+                value={maxConcurrentRuns}
+                onChange={(event) => setMaxConcurrentOverride(event.target.value)}
+              />
+            </div>
           </CardContent>
         </Card>
+      </section>
+
+      <div className="flex justify-end">
+        <Button
+          onClick={() => mutation.mutate({
+            settings: {
+              pm_schedule_hours: parseInt(scheduleHours, 10),
+              pm_model: pmModel,
+              autonomy_level: autonomyLevel,
+              max_concurrent_runs: parseInt(maxConcurrentRuns, 10),
+            },
+          })}
+          disabled={mutation.isPending}
+        >
+          {mutation.isPending ? "Saving..." : "Save settings"}
+        </Button>
+      </div>
+
+      <section className="space-y-3">
+        <h2 className="text-[13px] font-medium text-foreground">Repository overrides</h2>
+        <p className="text-[13px] text-muted-foreground">
+          Individual repositories can override Autopilot settings from their repository settings page.
+        </p>
+        {reposWithCustomPM.length === 0 ? (
+          <p className="text-[13px] text-muted-foreground italic">No repository overrides yet.</p>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {reposWithCustomPM.map((repository) => (
+              <Badge key={repository.id} variant="secondary">
+                {repository.full_name}
+              </Badge>
+            ))}
+          </div>
+        )}
       </section>
       </div>
     </PageContainer>
