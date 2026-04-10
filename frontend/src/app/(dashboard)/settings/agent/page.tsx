@@ -2,16 +2,17 @@
 
 import { type ReactNode, useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, KeyRound, Sparkles, Check, Eye, EyeOff, Shield } from "lucide-react";
+import { CheckCircle2, KeyRound, Sparkles, Shield } from "lucide-react";
 import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
 import { useAuth } from "@/hooks/use-auth";
+import { AGENT_TYPES, sourceLabel, sourceBadgeVariant, providerDisplayName } from "@/lib/agent-constants";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { RadioGroup } from "@/components/ui/radio-group";
 import {
   Select,
   SelectContent,
@@ -31,8 +32,8 @@ import {
 } from "@/components/ui/alert-dialog";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
+import { RadioCard } from "@/components/radio-card";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
-import { AVAILABLE_CLAUDE_CODE_MODELS, AVAILABLE_CODEX_MODELS, AVAILABLE_GEMINI_CLI_MODELS } from "@/lib/model-constants";
 import type {
   UserCredentialSummary,
   ResolvedCredential,
@@ -41,61 +42,6 @@ import type {
   OrgSettings,
   SingleResponse,
 } from "@/lib/types";
-
-/* ------------------------------------------------------------------ */
-/*  Constants                                                         */
-/* ------------------------------------------------------------------ */
-
-/** Key placeholder strings keyed by provider. */
-const KEY_PLACEHOLDERS: Record<string, string> = {
-  anthropic: "sk-ant-...",
-  openai: "sk-...",
-  gemini: "AIza...",
-};
-
-interface AgentEnvVar {
-  name: string;
-  label: string;
-  sensitive?: boolean;
-  placeholder?: string;
-  options?: string[];
-  advanced?: boolean;
-}
-
-const ORG_AGENT_TYPES: { key: string; label: string; description: string; providerKey: string; envVars: AgentEnvVar[] }[] = [
-  {
-    key: "codex",
-    label: "Codex",
-    description: "OpenAI Codex (GPT-5 models)",
-    providerKey: "openai",
-    envVars: [
-      { name: "OPENAI_API_KEY", label: "API Key", sensitive: true },
-      { name: "OPENAI_MODEL", label: "Default model", options: [...AVAILABLE_CODEX_MODELS] },
-      { name: "OPENAI_BASE_URL", label: "Base URL", placeholder: "Custom API endpoint (optional)", advanced: true },
-    ],
-  },
-  {
-    key: "claude_code",
-    label: "Claude Code",
-    description: "Anthropic Claude (Opus, Sonnet, Haiku)",
-    providerKey: "anthropic",
-    envVars: [
-      { name: "ANTHROPIC_API_KEY", label: "API Key", sensitive: true },
-      { name: "ANTHROPIC_MODEL", label: "Default model", options: [...AVAILABLE_CLAUDE_CODE_MODELS] },
-      { name: "ANTHROPIC_BASE_URL", label: "Base URL", placeholder: "Custom API endpoint (optional)", advanced: true },
-    ],
-  },
-  {
-    key: "gemini_cli",
-    label: "Gemini CLI",
-    description: "Google Gemini (Pro, Flash)",
-    providerKey: "gemini",
-    envVars: [
-      { name: "GEMINI_API_KEY", label: "API Key", sensitive: true },
-      { name: "GEMINI_MODEL", label: "Default model", options: [...AVAILABLE_GEMINI_CLI_MODELS] },
-    ],
-  },
-];
 
 const DEFAULT_EXECUTION_SETTINGS: Pick<
   Required<OrgSettings>,
@@ -107,76 +53,6 @@ const DEFAULT_EXECUTION_SETTINGS: Pick<
 };
 
 /* ------------------------------------------------------------------ */
-/*  Shared RadioCard component                                        */
-/* ------------------------------------------------------------------ */
-
-function RadioCard({
-  value,
-  label,
-  description,
-  selected,
-  icon,
-  ariaLabel,
-}: {
-  value: string;
-  label: string;
-  description?: string;
-  selected: boolean;
-  icon?: ReactNode;
-  ariaLabel?: string;
-}) {
-  const indent = icon ? "pl-10" : "pl-6";
-  return (
-    <label
-      className={`relative flex cursor-pointer flex-col rounded-lg border p-3 shadow-sm transition-all duration-150 ${
-        selected
-          ? "border-primary bg-primary/5 ring-1 ring-primary/20 dark:shadow-[var(--glow-primary-sm)]"
-          : "border-input hover:bg-muted/40 hover:border-border"
-      }`}
-    >
-      <div className="flex items-center gap-2">
-        <RadioGroupItem value={value} {...(ariaLabel ? { "aria-label": ariaLabel } : {})} />
-        {icon}
-        <span className="text-[13px] font-medium">{label}</span>
-      </div>
-      {description && (
-        <span className={`mt-1 ${indent} text-xs text-muted-foreground`}>
-          {description}
-        </span>
-      )}
-    </label>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/*  Helpers                                                           */
-/* ------------------------------------------------------------------ */
-
-function sourceLabel(source: string): string {
-  switch (source) {
-    case "personal": return "Your key";
-    case "team_default": return "Team default";
-    case "org": return "Organization";
-    default: return "Not configured";
-  }
-}
-
-function sourceBadgeVariant(source: string): "success" | "secondary" | "outline" | "destructive" {
-  switch (source) {
-    case "personal": return "success";
-    case "team_default":
-    case "org": return "secondary";
-    default: return "outline";
-  }
-}
-
-/** Resolve a provider key to a display name. */
-function providerDisplayName(providerKey: string): string {
-  const agent = ORG_AGENT_TYPES.find((a) => a.providerKey === providerKey);
-  return agent?.label ?? providerKey;
-}
-
-/* ------------------------------------------------------------------ */
 /*  Page                                                              */
 /* ------------------------------------------------------------------ */
 
@@ -185,13 +61,7 @@ export default function AgentPage() {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
 
-  /* ---------- Personal credentials queries ---------- */
-
-  const { data: personalResp, isSuccess: personalCredsLoaded } = useQuery<ListResponse<UserCredentialSummary>>({
-    queryKey: ["user-credentials", "personal"],
-    queryFn: () => api.userCredentials.listPersonal(),
-  });
-  const personalCreds = useMemo(() => personalResp?.data ?? [], [personalResp?.data]);
+  /* ---------- Credentials queries ---------- */
 
   const { data: resolvedResp } = useQuery<ListResponse<ResolvedCredential>>({
     queryKey: ["user-credentials", "resolved"],
@@ -206,53 +76,7 @@ export default function AgentPage() {
   });
   const teamDefaults = useMemo(() => teamResp?.data ?? [], [teamResp?.data]);
 
-  /* ---------- Personal credentials state ---------- */
-
-  // Default to the first agent that already has a configured key, or claude_code.
-  // Returns null until credentials have loaded to avoid a flash of the wrong agent.
-  const initialPersonalAgent = useMemo(() => {
-    if (!personalCredsLoaded) return null;
-    const configured = ORG_AGENT_TYPES.find((a) =>
-      personalCreds.some((c) => c.provider === a.providerKey && c.configured),
-    );
-    return configured?.key ?? "codex";
-  }, [personalCreds, personalCredsLoaded]);
-
-  const [personalAgentType, setPersonalAgentType] = useState<string | null>(null);
-  const effectivePersonalAgentType = personalAgentType ?? initialPersonalAgent ?? "codex";
-  const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
-  const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
-  const [keySaveStatus, setKeySaveStatus] = useState<Record<string, "idle" | "saving" | "success" | "error">>({});
-  const [removingProvider, setRemovingProvider] = useState<string | null>(null);
   const [removingTeamProvider, setRemovingTeamProvider] = useState<string | null>(null);
-  const [personalCodexMethodOverride, setPersonalCodexMethodOverride] = useState<"chatgpt" | "api_key" | null>(null);
-
-  const upsertMutation = useMutation({
-    mutationFn: ({ provider, apiKey }: { provider: string; apiKey: string }) =>
-      api.userCredentials.upsertPersonal(provider, { api_key: apiKey }),
-    onSuccess: (_data, variables) => {
-      queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
-      setKeySaveStatus((prev) => ({ ...prev, [variables.provider]: "success" }));
-      setApiKeys((prev) => ({ ...prev, [variables.provider]: "" }));
-      setTimeout(() => setKeySaveStatus((prev) => ({ ...prev, [variables.provider]: "idle" })), 2000);
-    },
-    onError: (err, variables) => {
-      captureError(err, { feature: "agent-key-save" });
-      setKeySaveStatus((prev) => ({ ...prev, [variables.provider]: "error" }));
-      setTimeout(() => setKeySaveStatus((prev) => ({ ...prev, [variables.provider]: "idle" })), 3000);
-    },
-  });
-
-  const deleteMutation = useMutation({
-    mutationFn: (provider: string) => api.userCredentials.deletePersonal(provider),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
-      setRemovingProvider(null);
-    },
-    onError: (error) => {
-      captureError(error, { feature: "agent-key-delete" });
-    },
-  });
 
   const removeTeamMutation = useMutation({
     mutationFn: (provider: string) => api.userCredentials.removeTeamDefault(provider),
@@ -265,32 +89,12 @@ export default function AgentPage() {
     },
   });
 
-  const setTeamDefaultMutation = useMutation({
-    mutationFn: ({ provider, userId }: { provider: string; userId: string }) =>
-      api.userCredentials.setTeamDefault(provider, userId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
-    },
-  });
-
   const { data: codexAuthStatusResp } = useQuery({
     queryKey: ["codex-auth-status"],
     queryFn: () => api.codexAuth.status(),
     refetchInterval: false,
   });
   const codexAuthStatus = codexAuthStatusResp?.data;
-
-  const hasCodexChatGPTConnection = codexAuthStatus?.status === "completed";
-  const inferredPersonalCodexMethod: "chatgpt" | "api_key" =
-    hasCodexChatGPTConnection ? "chatgpt" : "api_key";
-  const personalCodexMethod = personalCodexMethodOverride ?? inferredPersonalCodexMethod;
-
-  function handleSavePersonalKey(provider: string) {
-    const key = apiKeys[provider]?.trim();
-    if (!key) return;
-    setKeySaveStatus((prev) => ({ ...prev, [provider]: "saving" }));
-    upsertMutation.mutate({ provider, apiKey: key });
-  }
 
   /* ---------- Org settings queries (admin-gated) ---------- */
 
@@ -479,130 +283,8 @@ export default function AgentPage() {
     );
   }
 
-  function renderPersonalCredentialCard(): ReactNode {
-    const agent = ORG_AGENT_TYPES.find((a) => a.key === effectivePersonalAgentType) ?? ORG_AGENT_TYPES[0];
-    const providerKey = agent.providerKey;
-    const cred = personalCreds.find((c) => c.provider === providerKey);
-    const status = keySaveStatus[providerKey] ?? "idle";
-    const r = resolved.find((c) => c.provider === providerKey);
-    const source = r?.source ?? "none";
-    const isCodex = agent.key === "codex";
-    const hideApiKey = isCodex && personalCodexMethod === "chatgpt";
-
-    return (
-      <div className="space-y-3 border-t pt-3 mt-1">
-        {renderAgentConfigHeader({
-          title: agent.label,
-          badges: (
-            <>
-              {cred?.configured && (
-                <Badge variant="success" className="text-xs px-1.5 py-0">
-                  <Check className="mr-0.5 h-3 w-3" />
-                  Configured
-                </Badge>
-              )}
-              <Badge variant={sourceBadgeVariant(source)} className="text-xs px-1.5 py-0">
-                {sourceLabel(source)}
-              </Badge>
-            </>
-          ),
-          action: cred?.configured ? (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="text-xs text-muted-foreground"
-              onClick={() => setRemovingProvider(providerKey)}
-              disabled={deleteMutation.isPending}
-            >
-              Remove
-            </Button>
-          ) : undefined,
-        })}
-
-        {isCodex && renderCodexCredentialToggle({
-          method: personalCodexMethod,
-          onMethodChange: setPersonalCodexMethodOverride,
-        })}
-
-        {cred?.configured && cred.masked_key && !hideApiKey && (
-          <p className="text-xs text-muted-foreground font-mono">
-            Key: {cred.masked_key}
-          </p>
-        )}
-
-        {!hideApiKey && (
-          <div className="flex gap-2">
-            <div className="relative flex-1">
-              <Input
-                type={showKeys[providerKey] ? "text" : "password"}
-                placeholder={cred?.configured ? "Replace existing key..." : KEY_PLACEHOLDERS[providerKey] ?? "API key"}
-                value={apiKeys[providerKey] ?? ""}
-                onChange={(e) =>
-                  setApiKeys((prev) => ({ ...prev, [providerKey]: e.target.value }))
-                }
-                className="pr-9 font-mono text-xs"
-              />
-              <button
-                type="button"
-                onClick={() =>
-                  setShowKeys((prev) => ({ ...prev, [providerKey]: !prev[providerKey] }))
-                }
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-              >
-                {showKeys[providerKey] ? (
-                  <EyeOff className="h-3.5 w-3.5" />
-                ) : (
-                  <Eye className="h-3.5 w-3.5" />
-                )}
-              </button>
-            </div>
-            <Button
-              size="sm"
-              onClick={() => handleSavePersonalKey(providerKey)}
-              disabled={!apiKeys[providerKey]?.trim() || status === "saving"}
-            >
-              {status === "saving" ? "Saving..." : "Save key"}
-            </Button>
-          </div>
-        )}
-
-        {hideApiKey && (
-          <p className="text-xs text-muted-foreground">
-            API key fields are hidden while ChatGPT sign-in is selected.
-          </p>
-        )}
-
-        {status === "success" && (
-          <p className="text-xs text-emerald-600 dark:text-emerald-400">Key saved successfully.</p>
-        )}
-        {status === "error" && (
-          <p className="text-xs text-destructive">Failed to save key.</p>
-        )}
-
-        {isAdmin && cred?.configured && !cred.is_team_default && user && (
-          <Button
-            variant="outline"
-            size="sm"
-            className="text-xs"
-            onClick={() => setTeamDefaultMutation.mutate({ provider: providerKey, userId: user.id })}
-            disabled={setTeamDefaultMutation.isPending}
-          >
-            <Shield className="mr-1 h-3 w-3" />
-            Set as team default
-          </Button>
-        )}
-        {cred?.is_team_default && (
-          <Badge variant="secondary" className="text-xs px-1.5 py-0">
-            <Shield className="mr-0.5 h-3 w-3" />
-            Team default
-          </Badge>
-        )}
-      </div>
-    );
-  }
-
   function renderOrgAgentConfigCard(): ReactNode {
-    const agent = ORG_AGENT_TYPES.find((a) => a.key === defaultAgentType) ?? ORG_AGENT_TYPES[0];
+    const agent = AGENT_TYPES.find((a) => a.key === defaultAgentType) ?? AGENT_TYPES[0];
     const serverVars = (agentDefaultsResponse?.data ?? {})[agent.key] ?? {};
     const teamCred = teamDefaults.find((c) => c.provider === agent.providerKey);
     const r = resolved.find((c) => c.provider === agent.providerKey);
@@ -748,53 +430,11 @@ export default function AgentPage() {
       <div className="space-y-8">
         <PageHeader
           title="Coding agents"
-          description="Configure coding agent credentials and execution behavior."
+          description="Configure organization agent defaults and execution behavior."
         />
 
         {/* ============================================================ */}
-        {/*  SECTION 1 — My coding agents (personal credentials)        */}
-        {/* ============================================================ */}
-        <section className="space-y-3">
-          <div>
-            <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-              My coding agents
-            </h2>
-            <p className="text-xs text-muted-foreground mt-1">
-              Your personal API keys. Personal keys are used first, falling back to organization defaults.
-            </p>
-          </div>
-
-          <Card>
-            <CardContent>
-              <div className="space-y-3">
-                <RadioGroup
-                  value={effectivePersonalAgentType}
-                  onValueChange={setPersonalAgentType}
-                  className="grid grid-cols-3 gap-3"
-                >
-                  {ORG_AGENT_TYPES.map((agent) => {
-                    const cred = personalCreds.find((c) => c.provider === agent.providerKey);
-                    return (
-                      <RadioCard
-                        key={agent.key}
-                        value={agent.key}
-                        label={agent.label}
-                        selected={effectivePersonalAgentType === agent.key}
-                        icon={cred?.configured ? <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" /> : undefined}
-                      />
-                    );
-                  })}
-                </RadioGroup>
-
-                {/* Credential details for the selected personal agent */}
-                {personalCredsLoaded && renderPersonalCredentialCard()}
-              </div>
-            </CardContent>
-          </Card>
-        </section>
-
-        {/* ============================================================ */}
-        {/*  SECTION 2 — Organization coding agents (admin only)        */}
+        {/*  SECTION 1 — Organization coding agents (admin only)        */}
         {/* ============================================================ */}
         {isAdmin && (
           <section className="space-y-3">
@@ -816,7 +456,7 @@ export default function AgentPage() {
                     onValueChange={(value) => setDefaultAgentTypeOverride(value as OrgSettings["default_agent_type"])}
                     className="grid grid-cols-3 gap-3"
                   >
-                    {ORG_AGENT_TYPES.map((agent) => (
+                    {AGENT_TYPES.map((agent) => (
                       <RadioCard
                         key={agent.key}
                         value={agent.key}
@@ -933,30 +573,6 @@ export default function AgentPage() {
           </div>
         </div>
       )}
-
-      {/* Remove Personal Key Dialog */}
-      <AlertDialog open={!!removingProvider} onOpenChange={(open) => !open && setRemovingProvider(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Remove API key</AlertDialogTitle>
-            <AlertDialogDescription>
-              Are you sure you want to remove your {providerDisplayName(removingProvider ?? "")} API key?
-              Sessions will fall back to the team default or organization key.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                if (removingProvider) deleteMutation.mutate(removingProvider);
-              }}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            >
-              Remove
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
 
       {/* Remove Team Default Dialog */}
       <AlertDialog open={!!removingTeamProvider} onOpenChange={(open) => !open && setRemovingTeamProvider(null)}>
