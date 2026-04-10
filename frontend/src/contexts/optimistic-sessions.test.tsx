@@ -3,6 +3,7 @@ import { renderHook, act } from "@testing-library/react";
 import {
   OptimisticSessionsProvider,
   useOptimisticSessions,
+  useOptimisticSessionsSafe,
 } from "./optimistic-sessions";
 
 function wrapper({ children }: { children: React.ReactNode }) {
@@ -81,5 +82,54 @@ describe("OptimisticSessionsProvider", () => {
     expect(() => {
       renderHook(() => useOptimisticSessions());
     }).toThrow("useOptimisticSessions must be used within an OptimisticSessionsProvider");
+  });
+});
+
+describe("useOptimisticSessionsSafe", () => {
+  it("returns no-op stubs when used outside the provider", () => {
+    const { result } = renderHook(() => useOptimisticSessionsSafe());
+
+    expect(result.current.optimisticSessions).toEqual([]);
+    expect(typeof result.current.addOptimisticSession).toBe("function");
+    expect(typeof result.current.removeOptimisticSession).toBe("function");
+  });
+
+  it("returns a temporary id from addOptimisticSession stub", () => {
+    const { result } = renderHook(() => useOptimisticSessionsSafe());
+
+    let id: string;
+    act(() => {
+      id = result.current.addOptimisticSession("test");
+    });
+
+    expect(id!).toMatch(/^optimistic-/);
+    // The stub does not actually store sessions
+    expect(result.current.optimisticSessions).toEqual([]);
+  });
+
+  it("removeOptimisticSession stub does not throw", () => {
+    const { result } = renderHook(() => useOptimisticSessionsSafe());
+
+    act(() => {
+      result.current.removeOptimisticSession("nonexistent");
+    });
+
+    expect(result.current.optimisticSessions).toEqual([]);
+  });
+
+  it("delegates to real provider when inside one", () => {
+    const { result } = renderHook(() => useOptimisticSessionsSafe(), { wrapper });
+
+    let id: string;
+    act(() => {
+      id = result.current.addOptimisticSession("Real session");
+    });
+
+    expect(result.current.optimisticSessions).toHaveLength(1);
+    expect(result.current.optimisticSessions[0]).toMatchObject({
+      id: id!,
+      title: "Real session",
+      status: "pending",
+    });
   });
 });
