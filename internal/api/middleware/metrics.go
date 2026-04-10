@@ -1,67 +1,60 @@
 package middleware
 
 import (
+	"context"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
+
+	"github.com/assembledhq/143/internal/metrics"
 )
 
-var (
-	httpRequestsTotal = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "http_requests_total",
-			Help: "Total number of HTTP requests",
-		},
-		[]string{"method", "path", "status"},
-	)
+// httpMetricsPtr is the package-level metrics instance, set via SetHTTPMetrics.
+// Uses atomic.Pointer for goroutine-safe reads without locks.
+var httpMetricsPtr atomic.Pointer[metrics.HTTPMetrics]
 
-	httpRequestDuration = promauto.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "http_request_duration_seconds",
-			Help:    "Duration of HTTP requests in seconds",
-			Buckets: prometheus.DefBuckets,
-		},
-		[]string{"method", "path"},
-	)
+// SetHTTPMetrics injects the OTel HTTP metrics instance. Call once at startup
+// after telemetry.InitMeterProvider.
+func SetHTTPMetrics(m *metrics.HTTPMetrics) {
+	httpMetricsPtr.Store(m)
+}
 
-	httpRequestsInFlight = promauto.NewGauge(
-		prometheus.GaugeOpts{
-			Name: "http_requests_in_flight",
-			Help: "Number of HTTP requests currently being processed",
-		},
-	)
-)
-
-// Metrics returns middleware that records Prometheus metrics for HTTP requests.
+// Metrics returns middleware that records OTel metrics for HTTP requests.
 func Metrics(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		m := httpMetricsPtr.Load()
+		if m == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		start := time.Now()
-		httpRequestsInFlight.Inc()
-		defer httpRequestsInFlight.Dec()
+		// Use context.Background() for gauge adjustments so they succeed
+		// even if the client disconnects and r.Context() is cancelled.
+		m.RequestsInFlight.Add(context.Background(), 1)
 
 		ww := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(ww, r)
 
 		duration := time.Since(start).Seconds()
+		m.RequestsInFlight.Add(context.Background(), -1)
 
-		// Use the chi route pattern for consistent path labels
+		// Use the chi route pattern for consistent path labels.
 		routePattern := chi.RouteContext(r.Context()).RoutePattern()
 		if routePattern == "" {
 			routePattern = r.URL.Path
 		}
 
-		httpRequestsTotal.WithLabelValues(r.Method, routePattern, strconv.Itoa(ww.status)).Inc()
-		httpRequestDuration.WithLabelValues(r.Method, routePattern).Observe(duration)
+		m.RecordRequest(r.Context(), r.Method, routePattern, strconv.Itoa(ww.status), duration)
 	})
 }
 
 type statusWriter struct {
 	http.ResponseWriter
-	status int
+	status  int
 	written bool
 }
 
