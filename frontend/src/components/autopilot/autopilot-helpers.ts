@@ -10,20 +10,16 @@ export const DEFAULT_PRIORITY_WEIGHTS: Required<NonNullable<OrgSettings["priorit
 export function isAgentConnected(
   agentType: NonNullable<OrgSettings["default_agent_type"]>,
   agentConfig: Record<string, Record<string, string>>,
-  agentDefaults: Record<string, Record<string, string>>,
   codexAuthStatus?: CodexAuthStatus | null,
 ): boolean {
   switch (agentType) {
     case "codex":
       return codexAuthStatus?.status === "completed"
-        || Boolean(agentConfig.codex?.OPENAI_API_KEY)
-        || Boolean(agentDefaults.codex?.OPENAI_API_KEY);
+        || Boolean(agentConfig.codex?.OPENAI_API_KEY);
     case "claude_code":
-      return Boolean(agentConfig.claude_code?.ANTHROPIC_API_KEY)
-        || Boolean(agentDefaults.claude_code?.ANTHROPIC_API_KEY);
+      return Boolean(agentConfig.claude_code?.ANTHROPIC_API_KEY);
     case "gemini_cli":
-      return Boolean(agentConfig.gemini_cli?.GEMINI_API_KEY)
-        || Boolean(agentDefaults.gemini_cli?.GEMINI_API_KEY);
+      return Boolean(agentConfig.gemini_cli?.GEMINI_API_KEY);
     default:
       return false;
   }

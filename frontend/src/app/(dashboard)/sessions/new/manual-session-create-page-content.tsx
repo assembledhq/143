@@ -30,8 +30,9 @@ import { captureError } from "@/lib/errors";
 import { queryKeys } from "@/lib/query-keys";
 import { AGENT_TYPE_OPTIONS, agentTypeForModel } from "@/lib/model-constants";
 import { NoReposWarning } from "@/components/no-repos-warning";
+import { AgentKeyRequiredBanner } from "@/components/agent-key-required-banner";
 import { useOptimisticSessions } from "@/contexts/optimistic-sessions";
-import type { OrgSettings, Organization, Repository, SingleResponse, ListResponse } from "@/lib/types";
+import type { OrgSettings, Organization, Repository, SingleResponse, ListResponse, ResolvedCredential } from "@/lib/types";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
@@ -98,6 +99,17 @@ export function ManualSessionCreatePageContent() {
   });
   const repositories = useMemo(() => reposResponse?.data ?? [], [reposResponse]);
 
+  const { data: resolvedCredsResponse } = useQuery<ListResponse<ResolvedCredential>>({
+    queryKey: queryKeys.credentials.resolved,
+    queryFn: () => api.userCredentials.listResolved(),
+  });
+  const resolvedCredentials = useMemo(() => resolvedCredsResponse?.data ?? [], [resolvedCredsResponse]);
+
+  const { data: codexAuthResponse } = useQuery({
+    queryKey: queryKeys.codexAuth.status,
+    queryFn: () => api.codexAuth.status(),
+  });
+
   // Auto-select the only repo for single-repo orgs; otherwise use user's choice.
   const selectedRepoId = useMemo(() => {
     if (userSelectedRepoId !== null) return userSelectedRepoId;
@@ -139,6 +151,18 @@ export function ManualSessionCreatePageContent() {
       return AGENT_TYPE_OPTIONS.indexOf(a) - AGENT_TYPE_OPTIONS.indexOf(b);
     });
   }, [defaultAgentType]);
+
+  // Determine which agent type would be used and whether credentials exist.
+  const effectiveAgentType = selectedModel ? agentTypeForModel(selectedModel) ?? defaultAgentType : defaultAgentType;
+  const AGENT_PROVIDER_MAP: Record<string, string> = {
+    codex: "openai",
+    claude_code: "anthropic",
+    gemini_cli: "gemini",
+  };
+  const requiredProvider = AGENT_PROVIDER_MAP[effectiveAgentType] ?? "";
+  const hasAgentCredentials =
+    resolvedCredentials.some((c) => c.provider === requiredProvider)
+    || (effectiveAgentType === "codex" && codexAuthResponse?.data?.status === "completed");
 
   const createManualSessionMutation = useMutation({
     mutationFn: () =>
@@ -293,6 +317,15 @@ export function ManualSessionCreatePageContent() {
         <div className="shrink-0 px-4">
           <div className="w-full max-w-3xl mx-auto">
             <NoReposWarning />
+          </div>
+        </div>
+      )}
+
+      {/* Agent credentials warning */}
+      {!hasAgentCredentials && (
+        <div className="shrink-0 px-4">
+          <div className="w-full max-w-3xl mx-auto">
+            <AgentKeyRequiredBanner agentType={effectiveAgentType} />
           </div>
         </div>
       )}
