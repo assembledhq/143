@@ -471,19 +471,74 @@ For a large org with 500 users, 3 capacity tiers, 90 days retention (skipping pe
 
 Manageable for Postgres. A periodic cleanup job drops rows older than 90 days (raw events remain for audit). For most orgs with <50 users, the total is ~110K rows / ~22 MB.
 
-## Migration plan
+## Implementation Phases
 
-1. **Migration 000061**: Create `usage_hourly` table and indexes
-2. **Backfill job**: One-time task that rolls up all existing `container_usage_events` + `sessions.token_usage` into `usage_hourly`
-3. **Periodic rollup**: Integrate into the reaper loop or a standalone ticker
-4. **API endpoints**: Add `/api/v1/usage/timeseries`, `/api/v1/usage/breakdown`, and `/api/v1/usage/export`
-5. **Frontend**: Add recharts dependency, create the settings/usage page and components
-6. **Sidebar**: Add "Usage" link to the ORGANIZATION settings group
+### Phase 1: Data foundation
 
-## Future Extensions
+Schema, rollup job, and backfill — no user-facing changes yet, but everything downstream depends on this.
 
-- **Cost projection**: Multiply container-minutes by a configurable per-minute rate to show estimated compute costs alongside LLM costs
-- **Alerts/budgets**: Set monthly container-minute and token budgets with email alerts at 80%/100%
-- **Per-model token breakdown**: The current `sessions.token_usage` doesn't include model name; adding a `model` field to the token JSON would enable per-model cost tracking (e.g., Opus vs Sonnet usage)
-- **JSON export**: Add `Accept: application/json` support to the export endpoint for programmatic integrations
-- **Intra-day charts**: Since the rollup is already hourly, add an option to view hour-by-hour charts when the date range is ≤ 3 days
+- [ ] **Migration 000061**: Create `usage_hourly` table with all columns, unique constraint, and indexes (including partial index for `user_id IS NOT NULL`)
+- [ ] **`UsageRollupStore`**: New store with `RollupHour(ctx, orgID, hour)` method that queries `container_usage_events` joined with `sessions`, computes aggregates at all dimensional levels (org-total, per-user, per-tier), and upserts into `usage_hourly`
+- [ ] **Token aggregation in rollup**: Join `sessions.token_usage` JSONB to populate `total_input_tokens`, `total_output_tokens`, `total_llm_cost_usd` columns
+- [ ] **Backfill command**: One-time CLI command (`go run cmd/backfill-usage/main.go`) that rolls up all historical `container_usage_events` + `sessions.token_usage` into `usage_hourly`
+- [ ] **Periodic rollup integration**: Add phase 4 to the `SessionReaper` loop that re-rolls the current hour every 5 minutes and catches up any missed hours
+- [ ] **Retention cleanup**: Add a step that drops `usage_hourly` rows older than 90 days (raw events remain for audit)
+- [ ] **Tests**: Unit tests for rollup store with pgxmock — verify multi-level aggregation, idempotent upserts, token parsing from JSONB, and NULL dimension handling
+
+### Phase 2: API endpoints
+
+Backend HTTP handlers that serve the dashboard. Can be tested with curl/Postman before the frontend exists.
+
+- [ ] **`GET /api/v1/usage/timeseries`**: Handler that reads `usage_hourly` for org-total level rows, returns hourly buckets with container + token metrics. Support `group_by`, `user_id`, and `capacity` query params
+- [ ] **`GET /api/v1/usage/breakdown`**: Handler that reads per-user or per-tier level rows, returns dimensional breakdown with percentage shares. Support `dimension`, `sort`, `limit` params
+- [ ] **`GET /api/v1/usage/export`**: Streaming CSV handler — sets `Content-Type: text/csv` and `Content-Disposition` headers, writes rows directly from DB cursor via `csv.NewWriter(w)`. Support `granularity`, `dimension`, and `tz` params for timezone-aware daily grouping
+- [ ] **Route registration**: Add all three routes to `router.go` within the authenticated org scope
+- [ ] **Tests**: Handler tests with mock store for each endpoint — verify param validation, response shape, CSV format, and error cases (invalid date range, >90 day range)
+
+### Phase 3: Core dashboard UI
+
+The minimum viable usage page — summary cards and the main timeseries chart.
+
+- [ ] **Install recharts**: Add `recharts` dependency to `frontend/package.json`
+- [ ] **Sidebar nav entry**: Add `{ label: "Usage", icon: BarChart3, href: "/settings/usage", adminOnly: true }` to the ORGANIZATION group in `sidebar-settings-section.tsx`
+- [ ] **`/settings/usage/page.tsx`**: Page shell with `PageContainer` and `PageHeader`, composes child components
+- [ ] **`usage-summary-cards.tsx`**: Four KPI cards (Container Minutes, Total Sessions, Peak Concurrent, LLM Tokens) using existing `GET /api/v1/usage` for totals
+- [ ] **`usage-date-picker.tsx`**: Date range selector with preset buttons (Last 7d, Last 30d, This month) and custom range via shadcn Calendar. State persisted in URL params via `nuqs`
+- [ ] **`usage-helpers.ts`**: `groupByLocalDay()` function that aggregates UTC hourly buckets into local-timezone days, plus `formatTokenCount()` and `formatCost()` utilities
+- [ ] **`usage-timeseries-chart.tsx`**: Recharts `BarChart` showing daily container minutes (default metric). Metric selector dropdown for switching between Container Minutes, Sessions, LLM Tokens, LLM Cost. Calls `GET /api/v1/usage/timeseries`
+- [ ] **Query key registration**: Add `queryKeys.usage.timeseries`, `queryKeys.usage.breakdown`, `queryKeys.usage.summary` to `lib/query-keys.ts`
+- [ ] **Empty/loading states**: Skeleton placeholders for cards and chart; "No usage data yet" empty state
+- [ ] **Tests**: Component tests for summary cards, date picker preset logic, and `groupByLocalDay` helper
+
+### Phase 4: Breakdown table and interactivity
+
+The detailed breakdown view and cross-filtering between chart and table.
+
+- [ ] **`usage-breakdown-table.tsx`**: TanStack React Table showing per-user breakdown with columns: User, Minutes, Sessions, Tokens, Est. Cost, % Share. Dimension toggle for "By User" / "By Capacity" / "By Exit Reason". Calls `GET /api/v1/usage/breakdown`
+- [ ] **`usage-capacity-bars.tsx`**: Horizontal stacked bar chart showing capacity tier distribution
+- [ ] **User filter on chart**: Dropdown populated from breakdown data — selecting a user filters the timeseries chart to that user's data via `user_id` query param
+- [ ] **Click-to-filter (table → chart)**: Clicking a row in the breakdown table filters the chart to that user/tier
+- [ ] **Click-to-filter (chart → table)**: Clicking a bar in the chart narrows the breakdown table to that specific day
+- [ ] **URL state sync**: All filter state (`start`, `end`, `group`, `user`, `metric`) persisted in URL search params via `nuqs` for shareability
+- [ ] **Tests**: Table rendering tests, filter interaction tests
+
+### Phase 5: CSV export and polish
+
+Export functionality and UX refinements.
+
+- [ ] **`usage-export-button.tsx`**: Button next to date range selector. Opens a popover with granularity (Hourly/Daily) and breakdown (None/By User/By Capacity) options. Triggers download via `GET /api/v1/usage/export` with current filters and browser timezone
+- [ ] **"Last updated" indicator**: Small timestamp below the chart showing when the rollup last ran, with "Data updates every ~5 minutes" tooltip
+- [ ] **Month-over-month comparison**: Summary cards show % change vs. equivalent prior period (e.g., "▲ 12% vs last 30d")
+- [ ] **Responsive layout**: Ensure cards stack on narrow viewports, chart has a minimum height, table scrolls horizontally
+- [ ] **Cost tooltip**: "Estimated API cost" tooltip on the Est. Cost column header explaining it reflects provider rates, not billing plan charges
+
+### Phase 6: Advanced features
+
+Post-launch improvements that add depth to the dashboard.
+
+- [ ] **Per-model token breakdown**: Add `model` field to the `TokenUsage` struct in `adapter.go` and persist in `sessions.token_usage` JSONB. Add `model` dimension to `usage_hourly` and the breakdown endpoint. Display model-level cost breakdown (e.g., Opus vs Sonnet)
+- [ ] **Alerts and budgets**: Configurable monthly container-minute and token budgets stored in `org_settings`. Background job checks usage against budget and sends email alerts at 80%/100% thresholds
+- [ ] **Compute cost projection**: Add a configurable per-minute container rate to org settings. Multiply container-minutes by rate to show estimated compute cost alongside LLM cost
+- [ ] **Intra-day charts**: When date range is ≤ 3 days, show hour-by-hour chart instead of daily (data already available at hourly granularity)
+- [ ] **JSON export**: Add `Accept: application/json` support to the export endpoint for programmatic integrations
+- [ ] **Per-user-tier drill-down**: Enable the 4th rollup level (per-user × per-tier) for orgs that need to see which users consume which capacity tiers
