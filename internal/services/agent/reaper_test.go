@@ -294,3 +294,49 @@ func TestReapPhase2_SnapshotDeleteError_SkipsSession(t *testing.T) {
 	// Sandbox state should NOT be updated because delete failed.
 	assert.Empty(t, mock.updatedSandboxes)
 }
+
+// mockOrphanCloser implements OrphanCloser for testing.
+type mockOrphanCloser struct {
+	closed    int64
+	closeErr  error
+	calledAt  time.Time
+}
+
+func (m *mockOrphanCloser) CloseOrphans(_ context.Context, startedBefore time.Time) (int64, error) {
+	m.calledAt = startedBefore
+	return m.closed, m.closeErr
+}
+
+func TestReapPhase3_ClosesOrphanedUsageEvents(t *testing.T) {
+	t.Parallel()
+
+	mock := &reaperMockSessionLister{
+		staleIdleSessions: nil,
+		expiredSnapshots:  nil,
+	}
+	snapStore := &reaperMockSnapshotStore{}
+	orphanCloser := &mockOrphanCloser{closed: 5}
+
+	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop(),
+		WithOrphanCloser(orphanCloser),
+	)
+	reaper.reap(context.Background())
+
+	// Phase 3 should have called CloseOrphans with the idle cutoff.
+	assert.False(t, orphanCloser.calledAt.IsZero(), "orphan closer should have been called")
+	assert.Equal(t, int64(5), orphanCloser.closed)
+}
+
+func TestReapPhase3_SkippedWhenOrphanCloserNil(t *testing.T) {
+	t.Parallel()
+
+	mock := &reaperMockSessionLister{
+		staleIdleSessions: nil,
+		expiredSnapshots:  nil,
+	}
+	snapStore := &reaperMockSnapshotStore{}
+
+	// No orphan closer — should not panic.
+	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop())
+	reaper.reap(context.Background())
+}

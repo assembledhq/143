@@ -129,10 +129,13 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		integrationOpts...,
 	)
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, userStore, repoStore, integrationStore, prService)
+	containerUsageStore := db.NewContainerUsageStore(pool)
+	usageHandler := handlers.NewUsageHandler(containerUsageStore)
 	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeAgentEnv(), cfg.SafeLLMEnv())
 	issueHandler := handlers.NewIssueHandler(issueStore)
 	sessionMessageStore := db.NewSessionMessageStore(pool)
 	sessionThreadStore := db.NewSessionThreadStore(pool)
+	sessionViewStore := db.NewSessionViewStore(pool)
 	sessionHandler := handlers.NewSessionHandler(
 		sessionStore,
 		sessionLogStore,
@@ -148,6 +151,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		llmClient,
 		logger,
 	)
+	sessionHandler.SetViewStore(sessionViewStore)
 	threadSvc := threadservice.NewService(
 		sessionThreadStore,
 		sessionStore,
@@ -349,6 +353,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.GetThreadMessages)
 			r.Get("/api/v1/sessions/{id}/threads/{tid}/logs", sessionThreadHandler.GetThreadLogs)
 			r.Get("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.List)
+			r.Get("/api/v1/sessions/{id}/usage", usageHandler.ListBySession)
+			r.Get("/api/v1/usage", usageHandler.GetSummary)
 			r.Get("/api/v1/sessions/{id}/preview", previewHandler.GetPreview)
 			r.Get("/api/v1/sessions/{id}/preview/logs", previewHandler.GetLogs)
 			r.Get("/api/v1/sessions/{id}/preview/services", previewHandler.GetServices)
@@ -433,6 +439,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			// File upload (higher body-size limit for multipart uploads).
 			r.With(middleware.MaxBodySize(11<<20)).Post("/api/v1/uploads", uploadHandler.Upload)
 
+			r.Post("/api/v1/sessions/{id}/view", sessionHandler.RecordView)
 			r.Post("/api/v1/sessions/manual", sessionHandler.CreateManual)
 			r.Post("/api/v1/sessions/{id}/questions/{qid}/answer", sessionHandler.AnswerQuestion)
 			r.Post("/api/v1/sessions/{id}/messages", sessionHandler.SendMessage)

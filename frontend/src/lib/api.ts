@@ -214,8 +214,9 @@ export const api = {
       if (params?.triggered_by_user_id) searchParams.set('triggered_by_user_id', params.triggered_by_user_id);
       if (params?.search) searchParams.set('search', params.search);
       const qs = searchParams.toString();
-      return get<import('./types').ListResponse<import('./types').Session>>(`/api/v1/sessions${qs ? `?${qs}` : ''}`);
+      return get<import('./types').ListResponse<import('./types').SessionListItem>>(`/api/v1/sessions${qs ? `?${qs}` : ''}`);
     },
+    recordView: (sessionId: string) => post<{ status: string }>(`/api/v1/sessions/${sessionId}/view`, {}),
     get: (id: string) => get<import('./types').SingleResponse<import('./types').SessionDetail>>(`/api/v1/sessions/${id}`),
     getLogs: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/logs`),
     getValidation: (sessionId: string) => get<import('./types').SingleResponse<import('./types').Validation>>(`/api/v1/sessions/${sessionId}/validation`),

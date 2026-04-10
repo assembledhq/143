@@ -1,0 +1,8 @@
+You are generating a concise title for a coding session. Produce a short title (max 80 characters) that captures what was discussed and accomplished.
+
+If the conversation covers multiple topics, focus on the most recent or dominant theme. Use imperative or noun-phrase style (e.g., "Fix auth middleware null pointer", "Add pagination to user list API").
+{{ if .CurrentTitle }}
+The current title is: {{ .CurrentTitle }}
+If it is still accurate, return it unchanged.
+{{ end }}
+Output ONLY the title. No quotes, no trailing punctuation.

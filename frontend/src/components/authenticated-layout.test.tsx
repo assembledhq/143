@@ -98,6 +98,7 @@ describe("AuthenticatedLayout", () => {
     // Expand the settings section
     await user.click(screen.getByRole("button", { name: /Settings/ }));
 
+    expect(screen.getByRole("link", { name: "Account" })).toHaveAttribute("href", "/settings/account");
     expect(screen.getByRole("link", { name: "General" })).toHaveAttribute("href", "/settings");
     expect(screen.getByRole("link", { name: "Integrations" })).toHaveAttribute("href", "/settings/integrations");
     expect(screen.getByRole("link", { name: "Coding agents" })).toHaveAttribute("href", "/settings/agent");

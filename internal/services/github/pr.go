@@ -1595,3 +1595,46 @@ func parseDiff(diff string) []diffFile {
 	}
 	return result
 }
+
+// CheckSuiteEvent represents a GitHub check_suite webhook payload.
+type CheckSuiteEvent struct {
+	Action     string `json:"action"`
+	CheckSuite struct {
+		Conclusion   *string `json:"conclusion"`
+		HeadBranch   string  `json:"head_branch"`
+		PullRequests []struct {
+			Number int `json:"number"`
+		} `json:"pull_requests"`
+	} `json:"check_suite"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+}
+
+// HandleCheckSuiteEvent processes check_suite webhook events to update PR CI status.
+func (s *PRService) HandleCheckSuiteEvent(ctx context.Context, event CheckSuiteEvent) error {
+	if event.Action != "completed" {
+		return nil
+	}
+
+	for _, prRef := range event.CheckSuite.PullRequests {
+		pr, err := s.pullRequests.GetByRepoAndNumber(ctx, event.Repository.FullName, prRef.Number)
+		if err != nil {
+			continue // Not a 143-managed PR.
+		}
+
+		ciStatus := "failure"
+		if event.CheckSuite.Conclusion != nil {
+			switch *event.CheckSuite.Conclusion {
+			case "success", "neutral", "skipped":
+				ciStatus = "success"
+			}
+		}
+
+		if err := s.pullRequests.UpdateCIStatus(ctx, pr.OrgID, pr.ID, ciStatus); err != nil {
+			s.logger.Warn().Err(err).Str("pr_id", pr.ID.String()).Msg("failed to update CI status")
+		}
+	}
+
+	return nil
+}

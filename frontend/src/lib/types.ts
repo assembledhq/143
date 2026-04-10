@@ -121,6 +121,18 @@ export interface Session {
   created_at: string;
 }
 
+export interface PRSummary {
+  status: string;
+  ci_status: string;
+  number: number;
+  url: string;
+}
+
+export interface SessionListItem extends Session {
+  last_viewed_at?: string;
+  pr_summary?: PRSummary;
+}
+
 export interface Validation {
   id: string;
   session_id: string;
@@ -223,6 +235,7 @@ export interface PullRequest {
   status: string;
   branch_name: string;
   review_status: string | null;
+  ci_status: string;
   merged_at: string | null;
   closed_at: string | null;
   created_at: string;
@@ -444,6 +457,7 @@ export interface PMStatus {
   next_run_at?: string;
   last_error?: string;
   last_failed_at?: string;
+  last_failed_session_id?: string;
 }
 
 export interface SessionsListResponse {

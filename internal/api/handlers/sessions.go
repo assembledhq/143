@@ -17,6 +17,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -41,6 +42,7 @@ type SessionHandler struct {
 	jobStore         *db.JobStore
 	messageStore     *db.SessionMessageStore
 	threadStore      *db.SessionThreadStore
+	viewStore        *db.SessionViewStore
 	llmClient        llm.Client // optional, used for generating manual session titles
 	logger           zerolog.Logger
 	audit            *db.AuditEmitter
@@ -55,6 +57,11 @@ func (h *SessionHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 // SetCanceller injects the session canceller for stopping running agent sessions.
 func (h *SessionHandler) SetCanceller(c SessionCanceller) {
 	h.canceller = c
+}
+
+// SetViewStore injects the session view store for tracking unread sessions.
+func (h *SessionHandler) SetViewStore(vs *db.SessionViewStore) {
+	h.viewStore = vs
 }
 
 func NewSessionHandler(
@@ -177,8 +184,48 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 		nextCursor = encodeSessionCursor(last.CreatedAt, last.ID)
 	}
 
-	writeJSON(w, http.StatusOK, models.ListResponse[models.Session]{
-		Data: runs,
+	// Enrich sessions with last_viewed_at and PR summaries.
+	items := make([]models.SessionListItem, len(runs))
+	sessionIDs := make([]uuid.UUID, len(runs))
+	for i, s := range runs {
+		items[i] = models.SessionListItem{Session: s}
+		sessionIDs[i] = s.ID
+	}
+
+	user := middleware.UserFromContext(r.Context())
+	if user != nil && h.viewStore != nil && len(sessionIDs) > 0 {
+		viewTimes, err := h.viewStore.BatchGetLastViewed(r.Context(), user.ID, sessionIDs)
+		if err != nil {
+			h.logger.Warn().Err(err).Msg("failed to fetch session view times")
+		} else {
+			for i, s := range runs {
+				if t, ok := viewTimes[s.ID]; ok {
+					items[i].LastViewedAt = &t
+				}
+			}
+		}
+	}
+
+	if h.pullRequestStore != nil && len(sessionIDs) > 0 {
+		prMap, err := h.pullRequestStore.BatchGetBySessionIDs(r.Context(), orgID, sessionIDs)
+		if err != nil {
+			h.logger.Warn().Err(err).Msg("failed to fetch PR summaries")
+		} else {
+			for i, s := range runs {
+				if pr, ok := prMap[s.ID]; ok {
+					items[i].PRSummary = &models.PRSummary{
+						Status:   pr.Status,
+						CIStatus: pr.CIStatus,
+						Number:   pr.GitHubPRNumber,
+						URL:      pr.GitHubPRURL,
+					}
+				}
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, models.ListResponse[models.SessionListItem]{
+		Data: items,
 		Meta: models.PaginationMeta{NextCursor: nextCursor},
 	})
 }
@@ -214,6 +261,33 @@ func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionDetail]{Data: detail})
 }
 
+// RecordView records that the current user has viewed a session (for unread tracking).
+func (h *SessionHandler) RecordView(w http.ResponseWriter, r *http.Request) {
+	if h.viewStore == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+
+	orgID := middleware.OrgIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user not found in context")
+		return
+	}
+
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+
+	if err := h.viewStore.Upsert(r.Context(), user.ID, sessionID, orgID); err != nil {
+		h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to record session view")
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 // TriggerFix creates a new agent run for an issue and enqueues a run_agent job.
 func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
@@ -224,7 +298,7 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify the issue exists.
-	_, err = h.issueStore.GetByID(r.Context(), orgID, issueID)
+	issue, err := h.issueStore.GetByID(r.Context(), orgID, issueID)
 	if err != nil {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "issue not found")
 		return
@@ -298,6 +372,21 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 	if err := h.runStore.Create(r.Context(), run); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create agent run", err)
 		return
+	}
+
+	// Generate a title from the issue for non-manual sessions.
+	if h.llmClient != nil {
+		titleInput := issue.Title
+		if issue.Description != nil && len(*issue.Description) > 0 {
+			desc := *issue.Description
+			if len(desc) > 500 {
+				desc = desc[:500] + "..."
+			}
+			titleInput += "\n\n" + desc
+		}
+		if err := h.generateSessionTitle(r.Context(), run, orgID, titleInput); err != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to generate title for issue session")
+		}
 	}
 
 	// Enqueue the run_agent job.
@@ -1151,16 +1240,16 @@ func (h *SessionHandler) generateSessionTitle(parent context.Context, session *m
 	if err != nil {
 		return fmt.Errorf("llm completion: %w", err)
 	}
-	generated = strings.TrimSpace(generated)
-	generated = strings.Trim(generated, "\"'")
-	if len(generated) == 0 || len(generated) > 120 {
+
+	title, ok := services.CleanTitle(generated)
+	if !ok {
 		return nil
 	}
 
-	if err := h.runStore.UpdateTitle(ctx, orgID, session.ID, generated); err != nil {
+	if err := h.runStore.UpdateTitle(ctx, orgID, session.ID, title); err != nil {
 		return fmt.Errorf("update title: %w", err)
 	}
-	session.Title = &generated
+	session.Title = &title
 	return nil
 }
 

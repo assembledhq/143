@@ -14,16 +14,19 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/api"
+	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/cluster"
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/logging"
+	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/agent/adapters"
 	"github.com/assembledhq/143/internal/services/agent/providers"
+	"github.com/assembledhq/143/internal/services"
 	"github.com/assembledhq/143/internal/services/codexauth"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
@@ -32,6 +35,7 @@ import (
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/storage"
 	"github.com/assembledhq/143/internal/services/validation"
+	"github.com/assembledhq/143/internal/telemetry"
 	"github.com/assembledhq/143/internal/version"
 	"github.com/assembledhq/143/internal/worker"
 )
@@ -59,6 +63,37 @@ func main() {
 		logger.Fatal().Err(err).Msg("failed to connect to database")
 	}
 	defer pool.Close()
+
+	// Initialize OpenTelemetry meter provider.
+	// Enables Prometheus /metrics (always) + OTLP push (when OTEL_EXPORTER_OTLP_ENDPOINT is set).
+	_, otelShutdown, err := telemetry.InitMeterProvider(ctx, telemetry.Config{
+		ServiceName:       "143",
+		OTLPEndpoint:      cfg.OTLPEndpoint,
+		OTLPInsecure:      cfg.OTLPInsecure,
+		PrometheusEnabled: true,
+	})
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to initialize telemetry")
+	}
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := otelShutdown(shutdownCtx); err != nil {
+			logger.Error().Err(err).Msg("failed to shutdown telemetry")
+		}
+	}()
+
+	containerUsageStore := db.NewContainerUsageStore(pool)
+	billingMetrics, err := metrics.NewBillingMetrics(containerUsageStore.CountActive)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to initialize billing metrics")
+	}
+
+	httpMetrics, err := metrics.NewHTTPMetrics()
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to initialize HTTP metrics")
+	}
+	middleware.SetHTTPMetrics(httpMetrics)
 
 	// Create codex auth service (shared between router and orchestrator).
 	var cryptoSvc *crypto.Service
@@ -142,6 +177,7 @@ func main() {
 			EvalBatches:         db.NewEvalBatchStore(pool),
 			EvalBootstraps:      db.NewEvalBootstrapStore(pool),
 			Repositories:        repoStore,
+			SessionMessages:     sessionMessageStore,
 		}
 
 		// Build Phase 3+ services if runtime dependencies are available.
@@ -151,7 +187,7 @@ func main() {
 				jobStore, orgStore, repoStore, validationStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
-				sessionMessageStore, snapshotStore, cancelRegistry)
+				sessionMessageStore, snapshotStore, billingMetrics, cancelRegistry)
 		}
 		retentionCfg := worker.DataRetentionConfig{
 			WebhookDays: cfg.DataRetentionWebhookDays,
@@ -162,7 +198,9 @@ func main() {
 		go w.Start(ctx)
 		logger.Info().Msg("worker started with registered handlers")
 
-		reaper := agent.NewSessionReaper(sessionStore, snapshotStore, cfg.SessionMaxIdleAge, cfg.SessionMaxSnapshotAge, cfg.SessionReaperInterval, logger)
+		reaper := agent.NewSessionReaper(sessionStore, snapshotStore, cfg.SessionMaxIdleAge, cfg.SessionMaxSnapshotAge, cfg.SessionReaperInterval, logger,
+			agent.WithOrphanCloser(db.NewContainerUsageStore(pool)),
+		)
 		go reaper.Run(ctx)
 
 		// Upload reaper: clean up old uploaded files (local mode only; use S3 lifecycle rules for S3).
@@ -250,6 +288,7 @@ func buildServices(
 	integrationStore *db.IntegrationStore,
 	sessionMessageStore *db.SessionMessageStore,
 	snapshotStore storage.SnapshotStore,
+	billingMetrics *metrics.BillingMetrics,
 	cancelRegistry *agent.CancelRegistry,
 ) *worker.Services {
 	// GitHub App service (for installation tokens, PR creation).
@@ -298,6 +337,8 @@ func buildServices(
 	sessionLogStore := db.NewSessionLogStore(pool)
 	sessionQuestionStore := db.NewSessionQuestionStore(pool)
 	projectTaskUpdater := pm.NewProjectHooks(projectTaskStore, projectStore, logger)
+	containerUsageStore := db.NewContainerUsageStore(pool)
+	usageTracker := agent.NewUsageTracker(containerUsageStore, billingMetrics, logger)
 	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:         sandboxProvider,
 		Adapters:         agentAdapters,
@@ -316,6 +357,7 @@ func buildServices(
 		Credentials:      credentialStore,
 		UserCredentials:  userCredentialStore,
 		Snapshots:        snapshotStore,
+		UsageTracker:     usageTracker,
 		Cancels:          cancelRegistry,
 		Logger:           logger,
 	})
@@ -373,6 +415,12 @@ func buildServices(
 		slackSummarizer = ingestion.NewSlackSummarizer(llmClient, cfg.SlackSummaryModel, logger)
 	}
 
+	// Session title service (optional — only if LLM client is available).
+	var titleService *services.SessionTitleService
+	if llmClient != nil {
+		titleService = services.NewSessionTitleService(llmClient, sessionStore, sessionMessageStore)
+	}
+
 	return &worker.Services{
 		Orchestrator:    orchestrator,
 		Validation:      validationSvc,
@@ -384,5 +432,6 @@ func buildServices(
 		SlackSummarizer: slackSummarizer,
 		LLM:             llmClient,
 		GitHub:          ghSvc,
+		TitleService:    titleService,
 	}
 }
