@@ -66,17 +66,17 @@ export function CommentInput({
         className="min-h-[60px] max-h-[160px] resize-none rounded-t-md rounded-b-none border-0 border-b px-3 py-2 bg-transparent focus-visible:ring-0 focus-visible:ring-offset-0 placeholder:text-muted-foreground/50"
       />
       <div className="flex items-center justify-end gap-2 px-3 py-2 border-t border-border/50 bg-muted/20 rounded-b-md">
-        <Button variant="ghost" size="sm" className="h-7 text-[12px]" onClick={onCancel}>
+        <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={onCancel}>
           Cancel
         </Button>
         <Button
           size="sm"
-          className="h-7 text-[12px]"
+          className="h-7 text-xs"
           disabled={!value.trim()}
           onClick={() => onSubmit(value.trim())}
         >
           {submitLabel}
-          <kbd className="ml-1.5 text-[10px] opacity-60">
+          <kbd className="ml-1.5 text-xs opacity-60">
             {typeof navigator !== "undefined" && /mac/i.test(navigator.userAgent) ? "⌘" : "Ctrl"}↵
           </kbd>
         </Button>

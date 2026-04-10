@@ -104,20 +104,25 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 	result := &agent.AgentResult{}
 	var stderr bytes.Buffer
 	var summaryParts []string
+	var lastAssistantContent string
 	lastOutputByType := make(map[string]string)
 
 	exitCode, err := provider.ExecStream(ctx, sandbox, cmd, func(line []byte) {
 		if len(bytes.TrimSpace(line)) == 0 {
 			return
 		}
-		parseCodexStreamLine(line, result, logCh, &summaryParts, lastOutputByType)
+		parseCodexStreamLine(line, result, logCh, &summaryParts, lastOutputByType, &lastAssistantContent)
 	}, &stderr)
 	if err != nil {
 		return nil, fmt.Errorf("exec codex CLI: %w", err)
 	}
 
 	result.ExitCode = exitCode
-	result.Summary = strings.Join(summaryParts, "\n")
+	if len(summaryParts) > 0 {
+		result.Summary = strings.Join(summaryParts, "\n")
+	} else if lastAssistantContent != "" {
+		result.Summary = lastAssistantContent
+	}
 
 	// Filter refresh-token errors once and reuse the result.
 	var filteredStderr string
@@ -175,7 +180,7 @@ func isDuplicateOutput(eventType, content string, lastByType map[string]string) 
 }
 
 // parseCodexStreamLine processes a single line of Codex streaming output.
-func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- agent.LogEntry, summaryParts *[]string, lastByType map[string]string) {
+func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- agent.LogEntry, summaryParts *[]string, lastByType map[string]string, lastAssistant *string) {
 	// Suppress refresh-token errors regardless of how they arrive (stdout or
 	// stderr). The Codex CLI sometimes writes these to stdout at shutdown.
 	if isRefreshTokenError(string(line)) {
@@ -235,7 +240,9 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 			Level:     "output",
 			Message:   content,
 		}
-		*summaryParts = append(*summaryParts, content)
+		// Individual text blocks are persisted as separate output logs —
+		// don't merge them into the summary. Track as fallback.
+		*lastAssistant = content
 		tryExtractConfidence(content, result)
 
 	case "function_call", "tool_use", "tool_call":
@@ -351,7 +358,8 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 						Level:     "output",
 						Message:   text,
 					}
-					*summaryParts = append(*summaryParts, text)
+					// Individual text blocks are persisted as separate output logs.
+					*lastAssistant = text
 					tryExtractConfidence(text, result)
 				}
 			case "command_execution":
@@ -524,6 +532,7 @@ func parseCodexStreamOutput(output []byte, result *agent.AgentResult, logCh chan
 	// output parsing that previously lacked it.
 	scanner := bufio.NewScanner(bytes.NewReader(output))
 	var summaryParts []string
+	var lastAssistantContent string
 	lastByType := make(map[string]string)
 
 	for scanner.Scan() {
@@ -531,10 +540,14 @@ func parseCodexStreamOutput(output []byte, result *agent.AgentResult, logCh chan
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
-		parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType)
+		parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType, &lastAssistantContent)
 	}
 
-	result.Summary = strings.Join(summaryParts, "\n")
+	if len(summaryParts) > 0 {
+		result.Summary = strings.Join(summaryParts, "\n")
+	} else if lastAssistantContent != "" {
+		result.Summary = lastAssistantContent
+	}
 }
 
 // isRefreshTokenError returns true if the message contains token-refresh error

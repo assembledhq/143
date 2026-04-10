@@ -29,7 +29,7 @@ export function AutonomyReadiness({ autonomyLevel, decisionSummary, totalCycles 
   // Not enough data to recommend
   if (!decisionSummary || decisionSummary.total_delegated === 0 || totalCycles < 3) {
     return (
-      <div className="rounded-md border border-border bg-muted/30 px-4 py-3 text-[12px] text-muted-foreground">
+      <div className="rounded-md border border-border bg-muted/30 px-4 py-3 text-xs text-muted-foreground">
         After a few more analysis cycles, readiness signals will appear here.
       </div>
     );
@@ -50,17 +50,17 @@ export function AutonomyReadiness({ autonomyLevel, decisionSummary, totalCycles 
         : "border-border bg-muted/30"
     }`}>
       <div className="flex items-center justify-between">
-        <span className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">
+        <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
           Autonomy readiness
         </span>
         {isReady && (
-          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-primary">
+          <span className="inline-flex items-center gap-1 text-xs font-medium text-primary">
             <ArrowUpRight className="h-3 w-3" />
             Ready to advance
           </span>
         )}
       </div>
-      <p className="text-[12px] text-foreground">
+      <p className="text-xs text-foreground">
         {successPct}% success rate over {totalCycles} analysis cycles
         {decisionSummary.total_delegated > 0 && (
           <span className="text-muted-foreground">
@@ -69,7 +69,7 @@ export function AutonomyReadiness({ autonomyLevel, decisionSummary, totalCycles 
         )}
       </p>
       {isReady ? (
-        <p className="text-[12px] text-primary">
+        <p className="text-xs text-primary">
           Consider advancing to <span className="font-medium">{AUTONOMY_LABELS[nextLevel]}</span>.
           This would let the PM {nextLevel === "auto_simple"
             ? "auto-create sessions for bounded work and handle routine issue actions"
@@ -77,7 +77,7 @@ export function AutonomyReadiness({ autonomyLevel, decisionSummary, totalCycles 
           }.
         </p>
       ) : (
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-xs text-muted-foreground">
           {successRate < 0.8
             ? `Success rate needs to reach 80% (currently ${successPct}%) before advancing to ${AUTONOMY_LABELS[nextLevel]}.`
             : `Need ${Math.max(1, 5 - totalCycles)} more analysis cycles before readiness assessment.`

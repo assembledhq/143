@@ -107,7 +107,7 @@ const TreeDirectory = memo(function TreeDirectory({
         <button
           onClick={() => setExpanded(!expanded)}
           aria-expanded={expanded}
-          className="flex items-center gap-1 w-full px-2 py-1 text-[12px] font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50 rounded transition-colors"
+          className="flex items-center gap-1 w-full px-2 py-1 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50 rounded transition-colors"
           style={{ paddingLeft: `${depth * 12 + 8}px` }}
         >
           {expanded ? (
@@ -137,7 +137,7 @@ const TreeDirectory = memo(function TreeDirectory({
               <div
                 key={fileNode.fullPath}
                 className={cn(
-                  "flex items-center gap-1.5 w-full px-2 py-1 text-[12px] rounded transition-colors",
+                  "flex items-center gap-1.5 w-full px-2 py-1 text-xs rounded transition-colors",
                   fileNode.fileIndex === activeFileIndex
                     ? "bg-primary/10 text-primary font-medium"
                     : "text-foreground hover:bg-muted/50"
@@ -174,7 +174,7 @@ const TreeDirectory = memo(function TreeDirectory({
                   {fileNode.name}
                 </button>
                 {fileNode.file && (
-                  <span className="shrink-0 text-[10px] font-mono text-muted-foreground">
+                  <span className="shrink-0 text-xs font-mono text-muted-foreground">
                     <span className="text-green-600 dark:text-green-400">+{fileNode.file.stats.added}</span>
                     {" "}
                     <span className="text-red-600 dark:text-red-400">-{fileNode.file.stats.removed}</span>
@@ -243,7 +243,7 @@ export function FileTree({
   return (
     <div className="flex flex-col h-full">
       <div className="px-4 pb-3">
-        <p className="text-[11px] font-medium text-muted-foreground/70 uppercase tracking-wider mb-2">
+        <p className="text-xs font-medium text-muted-foreground/70 uppercase tracking-wider mb-2">
           {files.length} files changed
         </p>
         <div className="relative">
@@ -253,7 +253,7 @@ export function FileTree({
             placeholder="Filter files..."
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
-            className="w-full h-7 pl-7 pr-2 rounded-md border border-border bg-background text-[12px] placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
+            className="w-full h-7 pl-7 pr-2 rounded-md border border-border bg-background text-xs placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
           />
         </div>
       </div>

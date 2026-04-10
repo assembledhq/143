@@ -24,6 +24,49 @@ func TestPMSystemPrompt(t *testing.T) {
 	assert.NotEmpty(t, result)
 }
 
+func TestPMBootstrapPrompt(t *testing.T) {
+	t.Parallel()
+
+	result := PMBootstrapPrompt(PMBootstrapPromptData{
+		SkillsDoc: "tool: list_issues",
+		HasNotion: true,
+		HasLinear: false,
+		HasSentry: true,
+		HasGitHub: true,
+	})
+	assert.Contains(t, result, "bootstrapping the PM context")
+	assert.Contains(t, result, "CONTEXT.md")
+	assert.NotEmpty(t, result)
+}
+
+func TestPMRefreshPrompt(t *testing.T) {
+	t.Parallel()
+
+	result := PMRefreshPrompt(PMRefreshPromptData{
+		SkillsDoc:    "tool: list_issues",
+		HasNotion:    false,
+		HasLinear:    true,
+		HasSentry:    false,
+		HasGitHub:    true,
+		LastSyncedAt: "2026-01-01T00:00:00Z",
+	})
+	assert.Contains(t, result, "refreshing the PM context")
+	assert.Contains(t, result, "2026-01-01T00:00:00Z")
+	assert.Contains(t, result, "CONTEXT.md")
+	assert.NotEmpty(t, result)
+}
+
+func TestSlackSummarizerPrompt(t *testing.T) {
+	t.Parallel()
+
+	result := SlackSummarizerPrompt()
+	assert.Contains(t, result, "Slack conversation")
+	assert.Contains(t, result, "actionable")
+	assert.Contains(t, result, "category")
+	assert.Contains(t, result, "JSON")
+	assert.NotEmpty(t, result)
+}
+
 func TestDirectionCheckPrompt(t *testing.T) {
 	t.Parallel()
 

@@ -3,6 +3,7 @@ package models
 import (
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/require"
 )
 
@@ -211,6 +212,80 @@ func TestPMDecisionOutcomeValidate(t *testing.T) {
 			require.NoError(t, err, "Validate should succeed for valid outcome")
 		})
 	}
+}
+
+func TestPMPlanStatus_TextValueAndScanText(t *testing.T) {
+	t.Parallel()
+
+	status := PMPlanStatusExecuting
+	tv, err := status.TextValue()
+	require.NoError(t, err)
+	require.True(t, tv.Valid)
+	require.Equal(t, "executing", tv.String)
+
+	var scanned PMPlanStatus
+	require.NoError(t, scanned.ScanText(pgtype.Text{String: "completed", Valid: true}))
+	require.Equal(t, PMPlanStatusCompleted, scanned)
+
+	require.NoError(t, scanned.ScanText(pgtype.Text{Valid: false}))
+	require.Equal(t, PMPlanStatus(""), scanned)
+}
+
+func TestPMDecisionType_TextValueAndScanText(t *testing.T) {
+	t.Parallel()
+
+	dt := PMDecisionTypeDelegate
+	tv, err := dt.TextValue()
+	require.NoError(t, err)
+	require.True(t, tv.Valid)
+	require.Equal(t, "delegate", tv.String)
+
+	var scanned PMDecisionType
+	require.NoError(t, scanned.ScanText(pgtype.Text{String: "skip", Valid: true}))
+	require.Equal(t, PMDecisionTypeSkip, scanned)
+
+	require.NoError(t, scanned.ScanText(pgtype.Text{Valid: false}))
+	require.Equal(t, PMDecisionType(""), scanned)
+}
+
+func TestPMDecisionOutcome_TextValueAndScanText(t *testing.T) {
+	t.Parallel()
+
+	outcome := PMDecisionOutcomeSucceeded
+	tv, err := outcome.TextValue()
+	require.NoError(t, err)
+	require.True(t, tv.Valid)
+	require.Equal(t, "succeeded", tv.String)
+
+	// Empty outcome returns invalid text.
+	empty := PMDecisionOutcome("")
+	tv, err = empty.TextValue()
+	require.NoError(t, err)
+	require.False(t, tv.Valid)
+
+	var scanned PMDecisionOutcome
+	require.NoError(t, scanned.ScanText(pgtype.Text{String: "failed", Valid: true}))
+	require.Equal(t, PMDecisionOutcomeFailed, scanned)
+
+	require.NoError(t, scanned.ScanText(pgtype.Text{Valid: false}))
+	require.Equal(t, PMDecisionOutcome(""), scanned)
+}
+
+func TestPMTrigger_TextValueAndScanText(t *testing.T) {
+	t.Parallel()
+
+	trigger := PMTriggerCron
+	tv, err := trigger.TextValue()
+	require.NoError(t, err)
+	require.True(t, tv.Valid)
+	require.Equal(t, "cron", tv.String)
+
+	var scanned PMTrigger
+	require.NoError(t, scanned.ScanText(pgtype.Text{String: "manual", Valid: true}))
+	require.Equal(t, PMTriggerManual, scanned)
+
+	require.NoError(t, scanned.ScanText(pgtype.Text{Valid: false}))
+	require.Equal(t, PMTrigger(""), scanned)
 }
 
 func TestPMTriggerValidate(t *testing.T) {

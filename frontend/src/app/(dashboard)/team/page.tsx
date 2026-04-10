@@ -1,5 +1,5 @@
-import TeamSettingsPage from "../settings/team/page";
+import { redirect } from "next/navigation";
 
 export default function TeamPage() {
-  return <TeamSettingsPage />;
+  redirect("/settings/team");
 }

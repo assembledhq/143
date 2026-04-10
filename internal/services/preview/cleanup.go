@@ -1,0 +1,122 @@
+package preview
+
+import (
+	"context"
+	"time"
+
+	"github.com/rs/zerolog"
+)
+
+// CleanupWorker periodically stops expired and idle previews.
+// It runs as a background goroutine and can be stopped via its Stop method.
+type CleanupWorker struct {
+	manager     *Manager
+	logger      zerolog.Logger
+	interval    time.Duration
+	idleTimeout time.Duration
+	stopCh      chan struct{}
+	doneCh      chan struct{}
+}
+
+// CleanupWorkerConfig holds initialization options.
+type CleanupWorkerConfig struct {
+	Manager     *Manager
+	Logger      zerolog.Logger
+	Interval    time.Duration // default 1 minute
+	IdleTimeout time.Duration // default 15 minutes
+}
+
+// NewCleanupWorker creates a new cleanup worker.
+func NewCleanupWorker(cfg CleanupWorkerConfig) *CleanupWorker {
+	interval := cfg.Interval
+	if interval <= 0 {
+		interval = 1 * time.Minute
+	}
+	idleTimeout := cfg.IdleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = DefaultIdleTimeout
+	}
+	return &CleanupWorker{
+		manager:     cfg.Manager,
+		logger:      cfg.Logger,
+		interval:    interval,
+		idleTimeout: idleTimeout,
+		stopCh:      make(chan struct{}),
+		doneCh:      make(chan struct{}),
+	}
+}
+
+// Start launches the cleanup loop in a background goroutine.
+func (w *CleanupWorker) Start() {
+	go w.run()
+}
+
+func (w *CleanupWorker) run() {
+	defer close(w.doneCh)
+	ticker := time.NewTicker(w.interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-w.stopCh:
+			return
+		case <-ticker.C:
+			w.cleanup()
+		}
+	}
+}
+
+func (w *CleanupWorker) cleanup() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var expiredCount, idleCount int
+
+	now := time.Now()
+
+	// Stop expired previews (hard TTL exceeded).
+	expired, err := w.manager.store.ListExpiredPreviews(ctx, now)
+	if err != nil {
+		w.logger.Warn().Err(err).Msg("cleanup: failed to list expired previews")
+	} else {
+		for _, p := range expired {
+			if stopErr := w.manager.StopPreview(ctx, p.OrgID, p.ID); stopErr != nil {
+				w.logger.Warn().Err(stopErr).
+					Str("preview_id", p.ID.String()).
+					Msg("cleanup: failed to stop expired preview")
+			} else {
+				expiredCount++
+			}
+		}
+	}
+
+	// Stop idle previews (no activity for idleTimeout).
+	idleSince := now.Add(-w.idleTimeout)
+	idle, err := w.manager.store.ListIdlePreviews(ctx, idleSince)
+	if err != nil {
+		w.logger.Warn().Err(err).Msg("cleanup: failed to list idle previews")
+	} else {
+		for _, p := range idle {
+			if stopErr := w.manager.StopPreview(ctx, p.OrgID, p.ID); stopErr != nil {
+				w.logger.Warn().Err(stopErr).
+					Str("preview_id", p.ID.String()).
+					Msg("cleanup: failed to stop idle preview")
+			} else {
+				idleCount++
+			}
+		}
+	}
+
+	if expiredCount > 0 || idleCount > 0 {
+		w.logger.Info().
+			Int("expired", expiredCount).
+			Int("idle", idleCount).
+			Msg("cleanup: stopped previews")
+	}
+}
+
+// Stop signals the worker to stop and waits for completion.
+func (w *CleanupWorker) Stop() {
+	close(w.stopCh)
+	<-w.doneCh
+}

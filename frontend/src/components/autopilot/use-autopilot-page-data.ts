@@ -4,8 +4,9 @@ import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
-import { deriveAutopilotViewModel, DEFAULT_PRIORITY_WEIGHTS, isAgentConnected } from "./autopilot-helpers";
-import type { OrgSettings, PMDocument, PMPlan, PMStatus, Organization, Repository, Integration, ListResponse, ProductContext, SingleResponse } from "@/lib/types";
+import { deriveAutopilotViewModel, DEFAULT_PRIORITY_WEIGHTS } from "./autopilot-helpers";
+import { useSetupStatus } from "@/hooks/use-setup-status";
+import type { OrgSettings, PMDocument, PMPlan, PMStatus, Organization, ListResponse, ProductContext, SingleResponse } from "@/lib/types";
 
 const DEFAULT_SETTINGS: OrgSettings = {
   autonomy_level: "auto_simple",
@@ -35,29 +36,11 @@ function isNotFoundError(error: unknown): boolean {
 }
 
 export function useAutopilotPageData() {
+  const { isLoading: setupLoading, isSetupComplete } = useSetupStatus();
+
   const { data: settingsResponse, isLoading: settingsLoading } = useQuery<SingleResponse<Organization>>({
     queryKey: queryKeys.settings.all,
     queryFn: () => api.settings.get(),
-  });
-
-  const { data: agentDefaultsResponse } = useQuery({
-    queryKey: queryKeys.settings.agentDefaults,
-    queryFn: () => api.settings.getAgentDefaults(),
-  });
-
-  const { data: codexAuthStatusResponse } = useQuery({
-    queryKey: queryKeys.codexAuth.status,
-    queryFn: () => api.codexAuth.status(),
-  });
-
-  const { data: integrationsResponse, isLoading: integrationsLoading } = useQuery<ListResponse<Integration>>({
-    queryKey: queryKeys.integrations.all,
-    queryFn: () => api.integrations.list(),
-  });
-
-  const { data: repositoriesResponse, isLoading: repositoriesLoading } = useQuery<ListResponse<Repository>>({
-    queryKey: queryKeys.repositories.all,
-    queryFn: () => api.repositories.list(),
   });
 
   const { data: pmStatusResponse, isLoading: statusLoading } = useQuery<SingleResponse<PMStatus>>({
@@ -107,18 +90,6 @@ export function useAutopilotPageData() {
     };
   }, [rawSettings]);
 
-  const agentDefaults = agentDefaultsResponse?.data ?? {};
-  const defaultAgent = mergedSettings.default_agent_type ?? "codex";
-  const agentConfig = mergedSettings.agent_config ?? {};
-  const agentConnected = isAgentConnected(defaultAgent, agentConfig, agentDefaults, codexAuthStatusResponse?.data);
-
-  const integrations = integrationsResponse?.data ?? [];
-  const repositories = repositoriesResponse?.data ?? [];
-  const githubReady = integrations.some((integration) => integration.provider === "github" && integration.status === "active")
-    && repositories.length > 0;
-  const connectedCount = Number(agentConnected) + Number(githubReady);
-  const totalCount = 2;
-
   const pmStatus = pmStatusResponse?.data ?? DEFAULT_PM_STATUS;
   const documents = useMemo(() => documentsResponse?.data ?? [], [documentsResponse?.data]);
 
@@ -127,26 +98,13 @@ export function useAutopilotPageData() {
     pmStatus,
     latestPlan: latestPlan ?? null,
     documents,
-    setup: {
-      agentConnected,
-      githubReady,
-      connectedCount,
-      totalCount,
-    },
-  }), [agentConnected, connectedCount, documents, githubReady, latestPlan, mergedSettings, pmStatus, totalCount]);
+  }), [documents, latestPlan, mergedSettings, pmStatus]);
 
   return {
-    isLoading: settingsLoading || integrationsLoading || repositoriesLoading || statusLoading || latestPlanLoading || documentsLoading,
+    isLoading: setupLoading || settingsLoading || statusLoading || latestPlanLoading || documentsLoading,
+    isSetupComplete,
     settings: mergedSettings,
     pmStatus,
-    latestPlan,
-    documents,
-    setup: {
-      agentConnected,
-      githubReady,
-      connectedCount,
-      totalCount,
-    },
     viewModel,
   };
 }

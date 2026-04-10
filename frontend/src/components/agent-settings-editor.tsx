@@ -183,7 +183,7 @@ export function AgentSettingsEditor({
   return (
     <div className="space-y-4">
       <div className="space-y-1">
-        <h3 className="text-base font-medium text-foreground">{title}</h3>
+        <h3 className="text-sm font-medium text-foreground">{title}</h3>
         <p className="text-sm text-muted-foreground">{description}</p>
       </div>
 
@@ -323,7 +323,7 @@ export function AgentSettingsEditor({
                     {envVar.label}
                   </Label>
                   {isServerDefault && (
-                    <span className="text-[10px] text-muted-foreground">server default</span>
+                    <span className="text-xs text-muted-foreground">server default</span>
                   )}
                 </div>
                 {envVar.options ? (

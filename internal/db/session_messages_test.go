@@ -92,3 +92,67 @@ func TestSessionMessageStore_ListBySession_QueryError(t *testing.T) {
 	require.Contains(t, err.Error(), "query session messages")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+func TestSessionMessageStore_Delete(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionMessageStore(mock)
+
+	mock.ExpectExec("DELETE FROM session_messages WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("DELETE", 1))
+
+	err = store.Delete(context.Background(), int64(42))
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionMessageStore_ListByThread(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionMessageStore(mock)
+	orgID := uuid.New()
+	threadID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM session_messages WHERE org_id .+ thread_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "user_id", "turn_number", "role", "content", "attachments", "token_usage", "created_at"}).
+				AddRow(int64(1), sessionID, orgID, &threadID, nil, 1, "user", "Hello thread", nil, nil, now),
+		)
+
+	msgs, err := store.ListByThread(context.Background(), orgID, threadID)
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	require.Equal(t, "Hello thread", msgs[0].Content)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionMessageStore_ListByThread_QueryError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionMessageStore(mock)
+
+	mock.ExpectQuery("SELECT .+ FROM session_messages WHERE org_id .+ thread_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(fmt.Errorf("connection reset"))
+
+	_, err = store.ListByThread(context.Background(), uuid.New(), uuid.New())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "query thread messages")
+	require.NoError(t, mock.ExpectationsWereMet())
+}

@@ -1,0 +1,59 @@
+import {
+  Zap,
+  Play,
+  FolderKanban,
+  Settings,
+  Users,
+  Plug,
+  Bot,
+  Sparkles,
+  Target,
+  FlaskConical,
+  ScrollText,
+  Plus,
+  LogOut,
+  type LucideIcon,
+} from "lucide-react";
+
+export interface PaletteAction {
+  id: string;
+  label: string;
+  icon: LucideIcon;
+  href?: string;
+  /** If true, preserve the current ?repo= param when navigating. */
+  preserveRepo?: boolean;
+  /** If set, only users with this role see the action. */
+  requiredRole?: string;
+  group: "navigation" | "settings" | "quick-actions";
+  /** If set, show this keyboard shortcut hint on the right. */
+  shortcut?: string;
+}
+
+export const staticActions: PaletteAction[] = [
+  // Navigation
+  { id: "nav-autopilot", label: "Autopilot", icon: Zap, href: "/autopilot", group: "navigation" },
+  { id: "nav-sessions", label: "Sessions", icon: Play, href: "/sessions", preserveRepo: true, group: "navigation" },
+  { id: "nav-projects", label: "Projects", icon: FolderKanban, href: "/projects", preserveRepo: true, group: "navigation" },
+
+  // Settings & admin
+  { id: "settings-general", label: "General", icon: Settings, href: "/settings", group: "settings" },
+  { id: "settings-integrations", label: "Integrations", icon: Plug, href: "/settings/integrations", group: "settings" },
+  { id: "settings-agents", label: "Coding agents", icon: Bot, href: "/settings/agent", group: "settings" },
+  { id: "settings-llm", label: "LLM", icon: Sparkles, href: "/settings/llm", group: "settings" },
+  { id: "settings-autopilot", label: "Autopilot settings", icon: Target, href: "/settings/autopilot", group: "settings" },
+  { id: "settings-evals", label: "Evals", icon: FlaskConical, href: "/settings/evals", group: "settings" },
+  { id: "settings-team", label: "Team", icon: Users, href: "/settings/team", group: "settings" },
+  { id: "settings-audit-log", label: "Audit log", icon: ScrollText, href: "/settings/audit-log", requiredRole: "admin", group: "settings" },
+
+  // Quick actions
+  { id: "action-new-session", label: "New session", icon: Plus, href: "/sessions/new", preserveRepo: true, group: "quick-actions" },
+  { id: "action-new-project", label: "New project", icon: Plus, href: "/projects/new", preserveRepo: true, group: "quick-actions" },
+  { id: "action-new-eval", label: "Create eval task", icon: Plus, href: "/settings/evals/new", group: "quick-actions" },
+  { id: "action-logout", label: "Log out", icon: LogOut, group: "quick-actions" },
+];
+
+export function getFilteredActions(userRole: string): PaletteAction[] {
+  return staticActions.filter(
+    (action) => !action.requiredRole || action.requiredRole === userRole
+  );
+}

@@ -114,12 +114,12 @@ func (h *InternalIssueHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	severity := req.Severity
 	if severity == "" {
-		severity = "info"
+		severity = "medium"
 	}
 	switch severity {
-	case "info", "warning", "error", "critical":
+	case "critical", "high", "medium", "low":
 	default:
-		writeError(w, r, http.StatusBadRequest, "INVALID_SEVERITY", "severity must be info, warning, error, or critical")
+		writeError(w, r, http.StatusBadRequest, "INVALID_SEVERITY", "severity must be critical, high, medium, or low")
 		return
 	}
 

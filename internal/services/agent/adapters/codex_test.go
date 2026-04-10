@@ -208,8 +208,9 @@ func TestParseCodexStreamOutput(t *testing.T) {
 {"type":"usage","stats":{"inputTokens":900,"outputTokens":400}}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
 				t.Helper()
-				require.Contains(t, result.Summary, "Let me investigate the issue...")
-				require.Contains(t, result.Summary, "Fixed the null pointer issue.")
+				// Assistant text blocks stay as separate logs; summary has last one.
+				require.NotContains(t, result.Summary, "Let me investigate the issue...")
+				require.Equal(t, "Fixed the null pointer issue.", result.Summary)
 				require.Equal(t, 900, result.TokenUsage.InputTokens)
 				require.Equal(t, 400, result.TokenUsage.OutputTokens)
 
@@ -382,7 +383,8 @@ func TestParseCodexStreamOutput(t *testing.T) {
 			output: `{"type":"assistant","content":"Working on it..."}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
 				t.Helper()
-				require.Contains(t, result.Summary, "Working on it...")
+				// Falls back to last assistant text when no result event.
+				require.Equal(t, "Working on it...", result.Summary)
 			},
 		},
 		{
@@ -390,7 +392,7 @@ func TestParseCodexStreamOutput(t *testing.T) {
 			output: `{"type":"text","content":"Some text output"}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
 				t.Helper()
-				require.Contains(t, result.Summary, "Some text output")
+				require.Equal(t, "Some text output", result.Summary)
 			},
 		},
 		{
@@ -421,7 +423,7 @@ func TestParseCodexStreamOutput(t *testing.T) {
 				require.Len(t, logs, 1)
 				require.Equal(t, "output", logs[0].Level)
 				require.Contains(t, logs[0].Message, "I found the bug and fixed it.")
-				require.Contains(t, result.Summary, "I found the bug and fixed it.")
+				require.Equal(t, "I found the bug and fixed it.", result.Summary)
 			},
 		},
 		{
@@ -473,8 +475,9 @@ func TestParseCodexStreamOutput(t *testing.T) {
 {"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":500,"output_tokens":200}}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
 				t.Helper()
-				require.Contains(t, result.Summary, "I'm going to inspect the workspace.")
-				require.Contains(t, result.Summary, "I found the issue and applied a fix.")
+				// Summary only has the last assistant text (fallback).
+				require.NotContains(t, result.Summary, "I'm going to inspect the workspace.")
+				require.Equal(t, "I found the issue and applied a fix.", result.Summary)
 				require.Equal(t, 1000, result.TokenUsage.InputTokens)
 				require.Equal(t, 200, result.TokenUsage.OutputTokens)
 
@@ -521,7 +524,7 @@ func TestParseCodexStreamOutput(t *testing.T) {
 			output: `{"type":"message","message":"from message field"}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
 				t.Helper()
-				require.Contains(t, result.Summary, "from message field")
+				require.Equal(t, "from message field", result.Summary)
 			},
 		},
 	}
@@ -574,8 +577,9 @@ func TestCodexAdapter_Execute(t *testing.T) {
 				require.Equal(t, 0, result.ExitCode)
 				require.Empty(t, result.Error)
 				require.Contains(t, result.Diff, "diff --git")
-				require.Contains(t, result.Summary, "Investigating the issue...")
-				require.Contains(t, result.Summary, "Applied the fix.")
+				// Summary has last assistant text only (fallback, no result event).
+				require.NotContains(t, result.Summary, "Investigating the issue...")
+				require.Equal(t, "Applied the fix.", result.Summary)
 				require.Equal(t, 800, result.TokenUsage.InputTokens)
 				require.Equal(t, 300, result.TokenUsage.OutputTokens)
 			},
@@ -819,12 +823,13 @@ func TestParseCodexStreamLine_DeduplicatesConsecutiveOutput(t *testing.T) {
 	logCh := make(chan agent.LogEntry, 100)
 	var summaryParts []string
 	lastByType := make(map[string]string)
+	var lastAssistant string
 
 	line := []byte(`{"type":"message","content":"Hello world"}`)
 
 	// Send the same line twice — only one log entry should be emitted.
-	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType)
-	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType)
+	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType, &lastAssistant)
+	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType, &lastAssistant)
 	close(logCh)
 
 	var logs []agent.LogEntry
@@ -833,7 +838,7 @@ func TestParseCodexStreamLine_DeduplicatesConsecutiveOutput(t *testing.T) {
 	}
 
 	require.Len(t, logs, 1, "consecutive duplicate messages should be deduplicated to 1 log entry")
-	require.Len(t, summaryParts, 1, "summary should only contain 1 entry for deduplicated output")
+	require.Equal(t, "Hello world", lastAssistant, "lastAssistant should track the deduplicated output")
 }
 
 func TestParseCodexStreamLine_AllowsNonConsecutiveDuplicates(t *testing.T) {
@@ -848,9 +853,9 @@ func TestParseCodexStreamLine_AllowsNonConsecutiveDuplicates(t *testing.T) {
 	lineB := []byte(`{"type":"message","content":"B"}`)
 
 	// A, B, A — all 3 should pass through because A is non-consecutive.
-	parseCodexStreamLine(lineA, result, logCh, &summaryParts, lastByType)
-	parseCodexStreamLine(lineB, result, logCh, &summaryParts, lastByType)
-	parseCodexStreamLine(lineA, result, logCh, &summaryParts, lastByType)
+	parseCodexStreamLine(lineA, result, logCh, &summaryParts, lastByType, new(string))
+	parseCodexStreamLine(lineB, result, logCh, &summaryParts, lastByType, new(string))
+	parseCodexStreamLine(lineA, result, logCh, &summaryParts, lastByType, new(string))
 	close(logCh)
 
 	var logs []agent.LogEntry
@@ -871,12 +876,13 @@ func TestParseCodexStreamLine_DeduplicatesItemCompleted(t *testing.T) {
 	logCh := make(chan agent.LogEntry, 100)
 	var summaryParts []string
 	lastByType := make(map[string]string)
+	var lastAssistant string
 
 	line := []byte(`{"type":"item.completed","item":{"type":"agent_message","text":"Final answer"}}`)
 
 	// Same item.completed agent_message twice.
-	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType)
-	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType)
+	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType, &lastAssistant)
+	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType, &lastAssistant)
 	close(logCh)
 
 	var logs []agent.LogEntry
@@ -885,7 +891,7 @@ func TestParseCodexStreamLine_DeduplicatesItemCompleted(t *testing.T) {
 	}
 
 	require.Len(t, logs, 1, "consecutive duplicate item.completed agent_message should be deduplicated")
-	require.Len(t, summaryParts, 1, "summary should only contain 1 entry for deduplicated item.completed")
+	require.Equal(t, "Final answer", lastAssistant, "lastAssistant should track the deduplicated item.completed")
 }
 
 func TestParseCodexStreamLine_SuppressesRefreshTokenFromStdout(t *testing.T) {
@@ -902,7 +908,7 @@ func TestParseCodexStreamLine_SuppressesRefreshTokenFromStdout(t *testing.T) {
 		[]byte(`2026-03-20T04:36:19.827634Z ERROR codex_core::auth: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.`),
 	}
 	for _, line := range lines {
-		parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType)
+		parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType, new(string))
 	}
 	close(logCh)
 
@@ -932,6 +938,12 @@ func TestIsRefreshTokenError(t *testing.T) {
 		{"command not found", false},
 		{`"error": { "type": "invalid_request_error" }`, false},
 		{"", false},
+		// token_expired errors must NOT be filtered here — they need to reach
+		// result.Error so the orchestrator's retryOnTokenExpired can detect and
+		// retry them. If these are accidentally caught, the retry path breaks.
+		{"auth error code: token_expired", false},
+		{"Provided authentication token is expired. Please try signing in again.", false},
+		{"token is expired", false},
 	}
 	for _, tt := range tests {
 		require.Equal(t, tt.want, isRefreshTokenError(tt.msg), "isRefreshTokenError(%q)", tt.msg)
@@ -984,7 +996,7 @@ func TestParseCodexStreamLine_SuppressesRefreshTokenError(t *testing.T) {
 	lastByType := make(map[string]string)
 
 	line := []byte(`{"type":"error","error":"401 Unauthorized: refresh_token_reused"}`)
-	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType)
+	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType, new(string))
 	close(logCh)
 
 	var logs []agent.LogEntry

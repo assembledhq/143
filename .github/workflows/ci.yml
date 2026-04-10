@@ -190,7 +190,8 @@ jobs:
       - name: Build sandbox Docker image
         uses: docker/build-push-action@v6
         with:
-          context: ./sandbox
+          context: .
+          file: sandbox/Dockerfile
           push: false
           tags: 143-sandbox:latest
           cache-from: type=gha

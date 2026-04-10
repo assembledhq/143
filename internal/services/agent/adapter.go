@@ -156,6 +156,7 @@ type SandboxConfig struct {
 	NetworkPolicy string            // "restricted" — allow only LLM API endpoints
 	WorkDir       string            // /workspace
 	Env           map[string]string // environment variables injected into the container (e.g. API keys)
+	DiskLimitGB   int               // max container rootfs size in GB (default: 10); requires overlay2+xfs backing store
 }
 
 // DefaultSandboxConfig returns a SandboxConfig populated with sensible defaults.
@@ -164,6 +165,7 @@ func DefaultSandboxConfig() SandboxConfig {
 		Image:         "143-sandbox:latest",
 		CPULimit:      2,
 		MemoryLimitMB: 4096,
+		DiskLimitGB:   10,
 		Timeout:       5 * time.Minute,
 		NetworkPolicy: "restricted",
 		WorkDir:       "/workspace",

@@ -12,7 +12,7 @@ import {
 import { ArrowUpDown, CalendarClock, Plus } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { PageHeader } from "@/components/page-header";
 import { PMStatusBanner } from "@/components/pm/pm-status-banner";
@@ -53,7 +53,7 @@ const statusConfig: Record<string, { dot: string; text: string; bg: string; labe
 
 const filterTabs = [
   { value: "all", label: "All" },
-  { value: "needs_attention", label: "Needs attention" },
+  { value: "needs_attention", label: "Action needed" },
   { value: "working", label: "Working" },
   { value: "done", label: "Done" },
   { value: "decisions", label: "Decisions" },
@@ -118,7 +118,7 @@ function buildColumns(members: User[]): ColumnDef<Session>[] {
         return (
           <div className="flex items-center gap-2">
             <SessionStatusDot status={status} />
-            <span className={`text-[12px] font-medium ${cfg.text}`}>{cfg.label}</span>
+            <span className={`text-xs font-medium ${cfg.text}`}>{cfg.label}</span>
           </div>
         );
       },
@@ -137,7 +137,7 @@ function buildColumns(members: User[]): ColumnDef<Session>[] {
               {sessionTitle(session)}
             </span>
             {failed && (session.failure_explanation || session.error) && (
-              <span className="text-[11px] text-destructive/80 truncate block max-w-[480px] mt-0.5">
+              <span className="text-xs text-destructive/80 truncate block max-w-[480px] mt-0.5">
                 {session.failure_explanation || session.error}
               </span>
             )}
@@ -151,7 +151,7 @@ function buildColumns(members: User[]): ColumnDef<Session>[] {
       header: ({ column }) => <SortableHeader label="Agent" column={column} />,
       size: 120,
       cell: ({ row }) => (
-        <span className="text-[12px] text-muted-foreground">
+        <span className="text-xs text-muted-foreground">
           {row.original.agent_type.replace(/_/g, " ")}
         </span>
       ),
@@ -163,10 +163,10 @@ function buildColumns(members: User[]): ColumnDef<Session>[] {
       size: 120,
       cell: ({ row }) => {
         const userId = row.original.triggered_by_user_id;
-        if (!userId) return <span className="text-[12px] text-muted-foreground/40">—</span>;
+        if (!userId) return <span className="text-xs text-muted-foreground/40">—</span>;
         const user = members.find((m) => m.id === userId);
         return (
-          <span className="text-[12px] text-muted-foreground truncate block max-w-[100px]">
+          <span className="text-xs text-muted-foreground truncate block max-w-[100px]">
             {user ? user.name.split(" ")[0] : "Unknown"}
           </span>
         );
@@ -179,10 +179,10 @@ function buildColumns(members: User[]): ColumnDef<Session>[] {
       size: 100,
       cell: ({ row }) => {
         const score = row.original.confidence_score;
-        if (score == null) return <span className="text-[12px] text-muted-foreground/40">—</span>;
+        if (score == null) return <span className="text-xs text-muted-foreground/40">—</span>;
         const pct = Math.round(score * 100);
         const color = pct >= 80 ? "text-emerald-600 dark:text-emerald-400" : pct >= 50 ? "text-amber-600 dark:text-amber-400" : "text-destructive";
-        return <span className={`text-[12px] font-medium tabular-nums ${color}`}>{pct}%</span>;
+        return <span className={`text-xs font-medium tabular-nums ${color}`}>{pct}%</span>;
       },
     },
     {
@@ -193,7 +193,7 @@ function buildColumns(members: User[]): ColumnDef<Session>[] {
       cell: ({ row }) => {
         const ts = row.original.completed_at || row.original.started_at || row.original.created_at;
         return (
-          <span className="text-[12px] text-muted-foreground tabular-nums">
+          <span className="text-xs text-muted-foreground tabular-nums">
             {formatTimeAgo(ts)}
           </span>
         );
@@ -212,6 +212,19 @@ export function SessionsPageContent() {
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
   const [repo] = useQueryState("repo");
   const [sorting, setSorting] = useState<SortingState>([]);
+  const tabsRef = useRef<HTMLDivElement>(null);
+  const [tabsOverflow, setTabsOverflow] = useState(false);
+
+  const checkOverflow = useCallback(() => {
+    const el = tabsRef.current;
+    if (el) setTabsOverflow(el.scrollWidth > el.clientWidth);
+  }, []);
+
+  useEffect(() => {
+    checkOverflow();
+    window.addEventListener("resize", checkOverflow);
+    return () => window.removeEventListener("resize", checkOverflow);
+  }, [checkOverflow]);
 
   const currentFilter = activeFilter ?? "all";
   const showDecisions = currentFilter === "decisions";
@@ -279,8 +292,8 @@ export function SessionsPageContent() {
       <PMStatusBanner hasActivePlanSession={workingSessions.length > 0} />
 
       {/* ── Tab filters ────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between border-b border-border">
-        <div className="flex items-center gap-0">
+      <div className="relative flex items-center border-b border-border">
+        <div ref={tabsRef} className={`flex flex-nowrap items-center overflow-x-auto overflow-y-hidden scrollbar-hide min-w-0 ${tabsOverflow ? "mask-fade-r" : ""}`}>
           {filterTabs.map((tab) => {
             const isSelected = currentFilter === tab.value;
             const count =
@@ -290,7 +303,7 @@ export function SessionsPageContent() {
             return (
               <button
                 key={tab.value}
-                className={`relative px-3 py-2.5 text-[13px] font-medium transition-colors duration-150 ${
+                className={`relative shrink-0 px-2.5 py-2.5 text-[13px] font-medium transition-colors duration-150 ${
                   isSelected
                     ? "text-foreground"
                     : "text-muted-foreground hover:text-foreground/80"
@@ -300,14 +313,14 @@ export function SessionsPageContent() {
                 <span className="flex items-center gap-1.5">
                   {tab.label}
                   {count > 0 && (
-                    <span className={`rounded-full text-white text-[10px] leading-none px-1.5 py-0.5 font-normal ${
+                    <span className={`rounded-full text-white text-xs leading-none px-1.5 py-0.5 font-normal ${
                       tab.value === "needs_attention" ? "bg-orange-500"
                       : "bg-primary"
                     }`}>{count}</span>
                   )}
                 </span>
                 {isSelected && (
-                  <span className="absolute bottom-0 left-3 right-3 h-0.5 bg-[image:var(--gradient-primary)] rounded-full" />
+                  <span className="absolute bottom-0 left-2.5 right-2.5 h-0.5 bg-[image:var(--gradient-primary)] rounded-full" />
                 )}
               </button>
             );
@@ -318,7 +331,7 @@ export function SessionsPageContent() {
         <SessionOwnerToggle
           currentUserFilter={currentUserFilter}
           onFilterChange={setUserFilter}
-          className="mr-2"
+          className="ml-auto shrink-0 mr-2"
         />
       </div>
 
@@ -365,7 +378,7 @@ export function SessionsPageContent() {
         <div className="rounded-lg border border-border bg-card overflow-hidden">
           {/* Count header */}
           <div className="flex items-center justify-between px-4 py-2.5 border-b border-border/50 bg-muted/30">
-            <span className="text-[11px] font-semibold text-muted-foreground/70 tracking-widest">
+            <span className="text-xs font-semibold text-muted-foreground/70 tracking-wider">
               {filteredSessions.length} session{filteredSessions.length !== 1 ? "s" : ""}
             </span>
           </div>

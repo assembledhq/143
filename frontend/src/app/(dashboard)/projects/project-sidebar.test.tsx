@@ -64,6 +64,16 @@ describe('ProjectSidebar', () => {
     expect(screen.getByRole('tab', { name: /Paused/ })).toBeInTheDocument();
   });
 
+  it('uses a left-aligned horizontal-only tab scroller', async () => {
+    renderWithProviders(<ProjectSidebar />);
+    await screen.findByText('Test Project');
+
+    const tabList = screen.getByRole('tablist');
+    expect(tabList.className).toContain('justify-start');
+    expect(tabList.className).toContain('overflow-x-auto');
+    expect(tabList.className).toContain('overflow-y-hidden');
+  });
+
   it('has search input', () => {
     renderWithProviders(<ProjectSidebar />);
     expect(screen.getByPlaceholderText('Search projects...')).toBeInTheDocument();

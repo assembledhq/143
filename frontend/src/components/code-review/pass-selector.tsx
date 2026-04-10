@@ -111,7 +111,7 @@ export function PassSelector({
       <button
         onClick={() => setOpen(!open)}
         className={cn(
-          "flex items-center gap-1.5 px-2 py-1 text-[11px] rounded-md border border-border transition-colors",
+          "flex items-center gap-1.5 px-2 py-1 text-xs rounded-md border border-border transition-colors",
           selectedRange
             ? "bg-primary/5 text-primary border-primary/20"
             : "bg-muted/30 text-muted-foreground hover:text-foreground"
@@ -125,7 +125,7 @@ export function PassSelector({
 
       {open && (
         <div className="absolute top-full left-0 mt-1 z-50 min-w-[240px] bg-background border border-border rounded-lg shadow-lg overflow-hidden">
-          <div className="px-3 py-1.5 text-[10px] font-medium text-muted-foreground uppercase tracking-wider border-b border-border/50">
+          <div className="px-3 py-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wider border-b border-border/50">
             Compare passes
           </div>
           <div className="max-h-[300px] overflow-y-auto py-1">
@@ -142,12 +142,12 @@ export function PassSelector({
                   key={i}
                   onClick={() => handleSelect(item.range)}
                   className={cn(
-                    "w-full text-left px-3 py-1.5 text-[12px] hover:bg-muted/50 transition-colors",
+                    "w-full text-left px-3 py-1.5 text-xs hover:bg-muted/50 transition-colors",
                     isActive && "bg-primary/5 text-primary"
                   )}
                 >
                   <div className="font-medium">{item.label}</div>
-                  <div className="text-[11px] text-muted-foreground">
+                  <div className="text-xs text-muted-foreground">
                     {item.description}
                   </div>
                 </button>

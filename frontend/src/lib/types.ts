@@ -112,6 +112,7 @@ export interface Session {
   sandbox_state: string;
   snapshot_key?: string;
   target_branch?: string;
+  repository_id?: string;
   error?: string;
   result_summary?: string;
   diff?: string;

@@ -27,7 +27,7 @@ const toggleGroupItemVariants = cva(
     variants: {
       size: {
         default: "px-2.5 py-1 text-xs",
-        sm: "px-2 py-0.5 text-[11px]",
+        sm: "px-2 py-0.5 text-xs",
       },
     },
     defaultVariants: {

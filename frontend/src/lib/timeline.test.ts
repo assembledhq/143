@@ -77,16 +77,36 @@ describe("buildTimeline", () => {
     expect(result[0].kind).toBe("assistant_output");
   });
 
-  it("filters duplicate output-level logs after the assistant message is persisted", () => {
+  it("shows both output logs and assistant message when they contain different content", () => {
     const messages = [
-      makeMessage({ id: 1, created_at: "2026-01-01T00:00:02Z", content: "assistant text" }),
+      makeMessage({ id: 1, created_at: "2026-01-01T00:00:03Z", content: "Fixed the bug." }),
     ];
     const logs = [
-      makeLog({ id: 1, created_at: "2026-01-01T00:00:01Z", level: "output", message: "assistant text" }),
+      makeLog({ id: 1, created_at: "2026-01-01T00:00:01Z", level: "output", message: "Analyzing..." }),
+      makeLog({ id: 2, created_at: "2026-01-01T00:00:02Z", level: "output", message: "Found the issue." }),
     ];
     const result = buildTimeline(messages, logs);
-    expect(result).toHaveLength(1);
-    expect(result[0].kind).toBe("message");
+    // Individual output logs + the final assistant message are all shown
+    expect(result).toHaveLength(3);
+    expect(result[0].kind).toBe("assistant_output");
+    expect(result[1].kind).toBe("assistant_output");
+    expect(result[2].kind).toBe("message");
+  });
+
+  it("filters legacy merged assistant message when it duplicates output logs", () => {
+    // Old sessions have a SessionMessage whose content is the join of all output logs.
+    const messages = [
+      makeMessage({ id: 1, created_at: "2026-01-01T00:00:03Z", content: "Analyzing...\nFound the issue." }),
+    ];
+    const logs = [
+      makeLog({ id: 1, created_at: "2026-01-01T00:00:01Z", level: "output", message: "Analyzing..." }),
+      makeLog({ id: 2, created_at: "2026-01-01T00:00:02Z", level: "output", message: "Found the issue." }),
+    ];
+    const result = buildTimeline(messages, logs);
+    // The merged message is filtered out; only individual logs are shown
+    expect(result).toHaveLength(2);
+    expect(result[0].kind).toBe("assistant_output");
+    expect(result[1].kind).toBe("assistant_output");
   });
 
   it("keeps output-level logs with metadata.type as log entries", () => {

@@ -19,7 +19,7 @@ function DecisionBadge({ decision }: { decision: string }) {
     cluster: "bg-purple-500/10 text-purple-700 dark:text-purple-400",
   };
   return (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${styles[decision] ?? styles.skip}`}>
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${styles[decision] ?? styles.skip}`}>
       {decision === "delegate" ? "Delegated" : decision === "cluster" ? "Clustered" : "Skipped"}
     </span>
   );
@@ -58,32 +58,32 @@ function SummaryBar({ summary }: { summary: PMDecisionSummary }) {
     <div className="grid grid-cols-4 gap-4">
       <Card>
         <CardContent className="pt-4 pb-3 text-center">
-          <p className="text-2xl font-bold tabular-nums">{rate}%</p>
-          <p className="text-[11px] text-muted-foreground mt-0.5">Success rate</p>
+          <p className="text-2xl font-semibold tabular-nums">{rate}%</p>
+          <p className="text-xs text-muted-foreground mt-0.5">Success rate</p>
         </CardContent>
       </Card>
       <Card>
         <CardContent className="pt-4 pb-3 text-center">
-          <p className="text-2xl font-bold tabular-nums text-emerald-600 dark:text-emerald-400">
+          <p className="text-2xl font-semibold tabular-nums text-emerald-600 dark:text-emerald-400">
             <TrendingUp className="h-4 w-4 inline mr-1" />
             {summary.succeeded}
           </p>
-          <p className="text-[11px] text-muted-foreground mt-0.5">Succeeded</p>
+          <p className="text-xs text-muted-foreground mt-0.5">Succeeded</p>
         </CardContent>
       </Card>
       <Card>
         <CardContent className="pt-4 pb-3 text-center">
-          <p className="text-2xl font-bold tabular-nums text-destructive">
+          <p className="text-2xl font-semibold tabular-nums text-destructive">
             <TrendingDown className="h-4 w-4 inline mr-1" />
             {summary.failed}
           </p>
-          <p className="text-[11px] text-muted-foreground mt-0.5">Failed</p>
+          <p className="text-xs text-muted-foreground mt-0.5">Failed</p>
         </CardContent>
       </Card>
       <Card>
         <CardContent className="pt-4 pb-3 text-center">
-          <p className="text-2xl font-bold tabular-nums text-muted-foreground">{summary.still_open}</p>
-          <p className="text-[11px] text-muted-foreground mt-0.5">Still open</p>
+          <p className="text-2xl font-semibold tabular-nums text-muted-foreground">{summary.still_open}</p>
+          <p className="text-xs text-muted-foreground mt-0.5">Still open</p>
         </CardContent>
       </Card>
     </div>
@@ -203,7 +203,7 @@ export function DecisionsView() {
             <button
               key={btn.value}
               onClick={() => setDecisionFilter(btn.value)}
-              className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors ${
+              className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
                 decisionFilter === btn.value
                   ? "bg-primary/10 text-primary"
                   : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
@@ -218,7 +218,7 @@ export function DecisionsView() {
             <button
               key={btn.value}
               onClick={() => setOutcomeFilter(btn.value)}
-              className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors ${
+              className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
                 outcomeFilter === btn.value
                   ? "bg-primary/10 text-primary"
                   : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
@@ -229,7 +229,7 @@ export function DecisionsView() {
           ))}
         </div>
         {(decisionFilter !== "all" || outcomeFilter !== "all") && (
-          <span className="text-[11px] text-muted-foreground self-center">
+          <span className="text-xs text-muted-foreground self-center">
             {decisions.length} decisions
           </span>
         )}
@@ -237,7 +237,7 @@ export function DecisionsView() {
 
       <Card>
         <CardContent className="p-0">
-          <div className="flex items-center gap-3 px-4 py-2.5 border-b border-border bg-muted/30 text-[11px] font-medium text-muted-foreground uppercase tracking-wider">
+          <div className="flex items-center gap-3 px-4 py-2.5 border-b border-border bg-muted/30 text-xs font-medium text-muted-foreground uppercase tracking-wider">
             <span className="w-16 shrink-0">Date</span>
             <span className="w-36 shrink-0">Project</span>
             <span className="flex-1 min-w-0">Issue</span>

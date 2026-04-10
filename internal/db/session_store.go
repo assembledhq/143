@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -29,10 +30,12 @@ func NewSessionStore(db DBTX) *SessionStore {
 type SessionFilters struct {
 	Statuses           []models.SessionStatus // When non-empty, filter to sessions matching any of these statuses.
 	Limit              int
-	Cursor             string
-	AdHocOnly          bool      // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
-	RepositoryID       uuid.UUID // When non-zero, filter sessions by repository via issues table.
-	TriggeredByUserID  uuid.UUID // When non-zero, filter sessions to those triggered by this user.
+	CursorTime         *time.Time // Cursor-based pagination: created_at of the last item.
+	CursorID           *uuid.UUID // Cursor-based pagination: id of the last item.
+	AdHocOnly          bool       // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
+	RepositoryID       uuid.UUID  // When non-zero, filter sessions by repository via issues table.
+	TriggeredByUserID  uuid.UUID  // When non-zero, filter sessions to those triggered by this user.
+	Search             string     // When non-empty, filter sessions by title (case-insensitive prefix/substring match).
 }
 
 // sessionSelectColumns is used for single-session queries where we want all fields.
@@ -125,20 +128,23 @@ func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters S
 		query += ` AND triggered_by_user_id = @triggered_by_user_id`
 		args["triggered_by_user_id"] = filters.TriggeredByUserID
 	}
+	if filters.Search != "" {
+		query += ` AND title ILIKE @search`
+		escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(filters.Search)
+		args["search"] = "%" + escaped + "%"
+	}
 	if filters.AdHocOnly {
 		query += ` AND pm_plan_id IS NULL`
 	}
-	if filters.Cursor != "" {
-		cursorID, err := uuid.Parse(filters.Cursor)
-		if err == nil {
-			query += ` AND id < @cursor_id`
-			args["cursor_id"] = cursorID
-		}
+	if filters.CursorTime != nil && filters.CursorID != nil {
+		query += ` AND (created_at, id) < (@cursor_time, @cursor_id)`
+		args["cursor_time"] = *filters.CursorTime
+		args["cursor_id"] = *filters.CursorID
 	}
 
-	// Uses partial index idx_sessions_deleted (org_id, created_at DESC)
+	// Uses partial index idx_sessions_deleted (org_id, created_at DESC, id DESC)
 	// WHERE deleted_at IS NULL for efficient filtering and sort.
-	query += ` ORDER BY created_at DESC`
+	query += ` ORDER BY created_at DESC, id DESC`
 
 	limit := filters.Limit
 	if limit <= 0 || limit > 100 {
@@ -332,6 +338,75 @@ func (s *SessionStore) UpdateFailure(ctx context.Context, orgID, runID uuid.UUID
 		"failure_category":      category,
 		"failure_next_steps":    nextSteps,
 		"failure_retry_advised": retryAdvised,
+	})
+	return err
+}
+
+var (
+	// ErrSessionNotFound is returned when the session does not exist.
+	ErrSessionNotFound = fmt.Errorf("session not found")
+	// ErrSessionNotFailed is returned when trying to retry a session that is not in failed status.
+	ErrSessionNotFailed = fmt.Errorf("session is not in failed status")
+)
+
+// ResetForRetry resets a failed session back to pending so it can be re-run.
+// It clears failure fields, result fields, timestamps, and error state.
+func (s *SessionStore) ResetForRetry(ctx context.Context, orgID, sessionID uuid.UUID) error {
+	// First check if the session exists and its current status.
+	var currentStatus string
+	err := s.db.QueryRow(ctx,
+		`SELECT status FROM sessions WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`,
+		pgx.NamedArgs{"id": sessionID, "org_id": orgID},
+	).Scan(&currentStatus)
+	if err != nil {
+		return ErrSessionNotFound
+	}
+	if currentStatus != "failed" {
+		return ErrSessionNotFailed
+	}
+
+	query := `
+		UPDATE sessions
+		SET status = 'pending',
+		    started_at = NULL,
+		    completed_at = NULL,
+		    error = NULL,
+		    failure_explanation = NULL,
+		    failure_category = NULL,
+		    failure_next_steps = NULL,
+		    failure_retry_advised = false,
+		    result_summary = NULL,
+		    confidence_score = NULL,
+		    confidence_reasoning = NULL,
+		    risk_factors = NULL,
+		    token_usage = NULL,
+		    diff = NULL,
+		    diff_stats = NULL
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+
+	_, err = s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	})
+	return err
+}
+
+// UndoResetForRetry reverts a session back to failed status after a retry enqueue failure.
+func (s *SessionStore) UndoResetForRetry(ctx context.Context, orgID, sessionID uuid.UUID, explanation, category string) error {
+	query := `
+		UPDATE sessions
+		SET status = 'failed',
+		    completed_at = now(),
+		    failure_explanation = @failure_explanation,
+		    failure_category = @failure_category,
+		    failure_retry_advised = true
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":                  sessionID,
+		"org_id":              orgID,
+		"failure_explanation": explanation,
+		"failure_category":    category,
 	})
 	return err
 }

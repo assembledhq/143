@@ -283,7 +283,7 @@ export function ManualSessionCreatePageContent() {
       {/* Centered hero + composer */}
       <div className="flex-1 flex flex-col items-center justify-center px-6 pb-4">
         <div className="text-center mb-8">
-          <p className="text-3xl font-bold tracking-tight bg-[image:var(--gradient-primary)] bg-clip-text text-transparent">Let&apos;s build</p>
+          <p className="text-3xl font-semibold tracking-tight bg-[image:var(--gradient-primary)] bg-clip-text text-transparent">Let&apos;s build</p>
           <p className="mt-2 text-sm text-muted-foreground">Start a manual session with text, files, photos, or dictation.</p>
         </div>
       </div>
@@ -318,7 +318,7 @@ export function ManualSessionCreatePageContent() {
               }}
               placeholder="Tell the agent what to do..."
               rows={1}
-              className="min-h-[44px] resize-none border-none bg-transparent px-0 py-2 text-[15px] shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0"
+              className="min-h-[44px] resize-none border-none bg-transparent px-0 py-2 text-sm shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0"
               aria-label="Manual session prompt"
             />
 

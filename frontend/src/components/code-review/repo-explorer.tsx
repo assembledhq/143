@@ -31,7 +31,7 @@ function FileBreadcrumb({
   const parts = path ? path.split("/") : [];
 
   return (
-    <div className="flex items-center gap-0.5 text-[12px] text-muted-foreground overflow-x-auto min-w-0">
+    <div className="flex items-center gap-0.5 text-xs text-muted-foreground overflow-x-auto min-w-0">
       <button
         onClick={() => onNavigate("")}
         className="shrink-0 hover:text-foreground transition-colors px-1 py-0.5 rounded hover:bg-muted/50"
@@ -86,7 +86,7 @@ function DirectoryTreeEntry({
     <button
       onClick={() => onSelect(entry)}
       className={cn(
-        "flex items-center gap-1.5 w-full px-2 py-1 text-[12px] rounded transition-colors text-left",
+        "flex items-center gap-1.5 w-full px-2 py-1 text-xs rounded transition-colors text-left",
         isActive
           ? "bg-primary/10 text-primary font-medium"
           : "text-foreground hover:bg-muted/50"
@@ -142,7 +142,7 @@ function DirectoryTree({
 
   if (error) {
     return (
-      <div className="flex items-center gap-1.5 px-2 py-3 text-[12px] text-muted-foreground">
+      <div className="flex items-center gap-1.5 px-2 py-3 text-xs text-muted-foreground">
         <AlertCircle className="h-3 w-3 shrink-0" />
         <span>Cannot read directory</span>
       </div>
@@ -151,7 +151,7 @@ function DirectoryTree({
 
   if (sortedEntries.length === 0) {
     return (
-      <div className="px-2 py-3 text-[12px] text-muted-foreground">
+      <div className="px-2 py-3 text-xs text-muted-foreground">
         Empty directory
       </div>
     );
@@ -215,7 +215,7 @@ function FileViewer({
   }
 
   return (
-    <div className="overflow-auto font-mono text-[12px] leading-[18px]">
+    <div className="overflow-auto font-mono text-xs leading-[18px]">
       <table className="w-full border-collapse">
         <tbody>
           {lines.map((line, i) => {
@@ -236,7 +236,7 @@ function FileViewer({
                   )}
                 </td>
                 {/* Line number */}
-                <td className="w-[50px] px-2 text-right text-[11px] text-muted-foreground/50 select-none align-top whitespace-nowrap">
+                <td className="w-[50px] px-2 text-right text-xs text-muted-foreground/50 select-none align-top whitespace-nowrap">
                   {lineNum}
                 </td>
                 {/* Content */}
@@ -362,7 +362,7 @@ export function RepoExplorer({
         <Button
           variant="ghost"
           size="sm"
-          className="h-7 gap-1 text-[12px] px-2"
+          className="h-7 gap-1 text-xs px-2"
           onClick={onBack}
         >
           <ArrowLeft className="h-3 w-3" />
@@ -383,7 +383,7 @@ export function RepoExplorer({
             {currentDir && (
               <button
                 onClick={handleGoUp}
-                className="flex items-center gap-1.5 w-full px-2 py-1 text-[12px] text-muted-foreground hover:text-foreground hover:bg-muted/50 rounded transition-colors mb-1"
+                className="flex items-center gap-1.5 w-full px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/50 rounded transition-colors mb-1"
               >
                 <FolderOpen className="h-3 w-3 shrink-0" />
                 <span>..</span>

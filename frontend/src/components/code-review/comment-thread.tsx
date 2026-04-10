@@ -18,7 +18,7 @@ function renderCommentMarkdown(text: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
   // `code` spans — bounded to 500 chars max to prevent ReDoS
-  html = html.replace(/`([^`]{1,500})`/g, '<code class="bg-muted px-1 py-0.5 rounded text-[12px] font-mono">$1</code>');
+  html = html.replace(/`([^`]{1,500})`/g, '<code class="bg-muted px-1 py-0.5 rounded text-xs font-mono">$1</code>');
   // **bold** — bounded
   html = html.replace(/\*\*([^*]{1,500})\*\*/g, "<strong>$1</strong>");
   // _italic_ — bounded
@@ -83,12 +83,12 @@ const SingleComment = memo(function SingleComment({
       )}
     >
       <div className="flex items-center justify-between mb-1">
-        <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <MessageSquare className="h-3 w-3" />
           <span className="font-medium text-foreground/80">You</span>
           <span>{formatRelativeTime(comment.created_at)}</span>
           {comment.pass_number > 0 && (
-            <span className="inline-flex items-center rounded-full px-1.5 py-0.5 bg-muted text-muted-foreground text-[10px] font-medium">
+            <span className="inline-flex items-center rounded-full px-1.5 py-0.5 bg-muted text-muted-foreground text-xs font-medium">
               Pass {comment.pass_number}
             </span>
           )}
@@ -178,7 +178,7 @@ export function CommentThread({ comments, onUpdate, onDelete }: CommentThreadPro
                 variant="ghost"
                 size="sm"
                 onClick={() => setShowResolved(false)}
-                className="h-auto text-[11px] text-muted-foreground/60 hover:text-muted-foreground px-3 py-0.5"
+                className="h-auto text-xs text-muted-foreground/60 hover:text-muted-foreground px-3 py-0.5"
               >
                 Hide resolved
               </Button>
@@ -188,7 +188,7 @@ export function CommentThread({ comments, onUpdate, onDelete }: CommentThreadPro
               variant="ghost"
               size="sm"
               onClick={() => setShowResolved(true)}
-              className="flex items-center gap-1 h-auto text-[11px] text-muted-foreground/60 hover:text-muted-foreground px-3 py-1"
+              className="flex items-center gap-1 h-auto text-xs text-muted-foreground/60 hover:text-muted-foreground px-3 py-1"
             >
               <Check className="h-3 w-3" />
               {resolvedComments.length} resolved comment{resolvedComments.length > 1 ? "s" : ""}

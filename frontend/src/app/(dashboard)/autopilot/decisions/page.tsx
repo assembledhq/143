@@ -18,7 +18,7 @@ export default function DecisionsPage() {
           </Link>
           <div className="flex items-center gap-2">
             <Zap className="h-5 w-5 text-primary" />
-            <h1 className="text-2xl font-bold tracking-tight text-foreground">Decision History</h1>
+            <h1 className="text-2xl font-semibold tracking-tight text-foreground">Decision History</h1>
           </div>
         </div>
         <DecisionsView />
