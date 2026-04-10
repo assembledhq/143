@@ -13,7 +13,7 @@ import { AutopilotDocumentsSheet } from "./autopilot-documents-sheet";
 import { AutopilotProposalCard } from "@/components/autopilot-proposal-card";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { ArrowRight, ExternalLink } from "lucide-react";
+import { ArrowRight, FileText } from "lucide-react";
 import Link from "next/link";
 
 export function AutopilotPageContent() {
@@ -99,7 +99,7 @@ export function AutopilotPageContent() {
                 href={`/sessions/${pmStatus.last_failed_session_id}`}
                 className="inline-flex items-center gap-1 text-sm text-primary hover:underline mt-1"
               >
-                <ExternalLink className="h-3 w-3" />
+                <FileText className="h-3 w-3" />
                 View agent logs
               </Link>
             )}

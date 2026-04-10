@@ -210,7 +210,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	projectHandler.SetAuditEmitter(auditEmitter)
 	pmHandler.SetAuditEmitter(auditEmitter)
 	pmHandler.SetPMDocumentStore(pmDocumentStore)
-	pmHandler.SetSessionStore(sessionStore)
 	projectAttachmentHandler := handlers.NewProjectAttachmentHandler(projectAttachmentStore, projectStore)
 	projectSpecHandler := handlers.NewProjectSpecHandler(projectSpecStore, projectStore)
 	projectAnalysisHandler := handlers.NewProjectAnalysisHandler(projectStore, projectSpecStore, projectAttachmentStore, projectTaskStore)

@@ -109,7 +109,7 @@ type PMStatus struct {
 	TotalDelegated int        `json:"total_delegated"`
 	NextRunIn      *string    `json:"next_run_in,omitempty"`
 	NextRunAt      *time.Time `json:"next_run_at,omitempty"`
-	LastError           *string    `json:"last_error,omitempty"`
-	LastFailedAt        *time.Time `json:"last_failed_at,omitempty"`
-	LastFailedSessionID *string    `json:"last_failed_session_id,omitempty"`
+	LastError      *string    `json:"last_error,omitempty"`
+	LastFailedAt   *time.Time `json:"last_failed_at,omitempty"`
+	LastFailedSessionID *string `json:"last_failed_session_id,omitempty"`
 }
