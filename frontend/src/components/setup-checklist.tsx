@@ -93,14 +93,14 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
     {
       value: "claude_code",
       label: "Claude Code",
-      description: "Use your Anthropic API key for Claude-powered fixes.",
+      description: "Your own Anthropic API key is required for agent sessions. Platform keys are used for internal features only.",
       configureLabel: "Configure",
       ctaLabel: "Configure",
     },
     {
       value: "gemini_cli",
       label: "Gemini CLI",
-      description: "Use your Google Gemini API key for Gemini-powered fixes.",
+      description: "Your own Google Gemini API key is required for agent sessions. Platform keys are used for internal features only.",
       configureLabel: "Configure",
       ctaLabel: "Configure",
     },
@@ -120,18 +120,12 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
     queryKey: queryKeys.settings.all,
     queryFn: () => api.settings.get(),
   });
-  const { data: agentDefaultsResponse } = useQuery({
-    queryKey: queryKeys.settings.agentDefaults,
-    queryFn: () => api.settings.getAgentDefaults(),
-  });
-
   const settings = settingsResponse?.data?.settings as OrgSettings | undefined;
   const agentConfig = settings?.agent_config ?? {};
-  const agentDefaults = agentDefaultsResponse?.data ?? {};
 
   const selectedAgentType: AgentType = selectedAgentTypeOverride ?? settings?.default_agent_type ?? "codex";
 
-  const isSelectedAgentConnected = isAgentConnected(selectedAgentType, agentConfig, agentDefaults, codexAuthResponse?.data);
+  const isSelectedAgentConnected = isAgentConnected(selectedAgentType, agentConfig, codexAuthResponse?.data);
 
   const selectedAgent = agentOptions.find((agent) => agent.value === selectedAgentType) ?? agentOptions[0];
 
