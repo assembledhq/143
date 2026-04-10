@@ -58,10 +58,10 @@ function setupRepoHandlers() {
 }
 
 describe("CreateSessionDialog", () => {
-  let onOpenChange: ReturnType<typeof vi.fn>;
+  let onOpenChange: (open: boolean) => void;
 
   beforeEach(() => {
-    onOpenChange = vi.fn();
+    onOpenChange = vi.fn<(open: boolean) => void>();
   });
 
   it("renders dialog with title when open", () => {
@@ -222,5 +222,236 @@ describe("CreateSessionDialog", () => {
 
     // Dialog should still be open, onOpenChange not called with false
     expect(onOpenChange).not.toHaveBeenCalledWith(false);
+  });
+
+  it("shows image URL input when Add image URL is clicked", async () => {
+    const user = userEvent.setup();
+
+    renderWithProviders(
+      <CreateSessionDialog open onOpenChange={onOpenChange} />,
+    );
+
+    // Open the attachment dropdown
+    await user.click(screen.getByRole("button", { name: /Add files or photos/ }));
+    // Click "Add image URL"
+    await user.click(screen.getByText("Add image URL"));
+
+    expect(screen.getByLabelText("Image URL")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add" })).toBeInTheDocument();
+  });
+
+  it("adds an image URL to attachments", async () => {
+    const user = userEvent.setup();
+
+    renderWithProviders(
+      <CreateSessionDialog open onOpenChange={onOpenChange} />,
+    );
+
+    // Open the attachment dropdown and show image URL input
+    await user.click(screen.getByRole("button", { name: /Add files or photos/ }));
+    await user.click(screen.getByText("Add image URL"));
+
+    await user.type(screen.getByLabelText("Image URL"), "https://example.com/screenshot.png");
+    await user.click(screen.getByRole("button", { name: "Add" }));
+
+    // Should show the image as an attachment with a remove button
+    expect(screen.getByAltText("screenshot.png")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Remove screenshot.png/ })).toBeInTheDocument();
+  });
+
+  it("removes an attachment when remove button is clicked", async () => {
+    const user = userEvent.setup();
+
+    renderWithProviders(
+      <CreateSessionDialog open onOpenChange={onOpenChange} />,
+    );
+
+    // Add an image URL attachment
+    await user.click(screen.getByRole("button", { name: /Add files or photos/ }));
+    await user.click(screen.getByText("Add image URL"));
+    await user.type(screen.getByLabelText("Image URL"), "https://example.com/shot.png");
+    await user.click(screen.getByRole("button", { name: "Add" }));
+
+    // Verify it's there
+    expect(screen.getByAltText("shot.png")).toBeInTheDocument();
+
+    // Remove it
+    await user.click(screen.getByRole("button", { name: /Remove shot.png/ }));
+
+    // Should be gone
+    expect(screen.queryByAltText("shot.png")).not.toBeInTheDocument();
+  });
+
+  it("shows selected repo name in repo button after selection", async () => {
+    const user = userEvent.setup();
+    setupRepoHandlers();
+
+    server.use(
+      http.get("/api/v1/repositories/:repoId/branches", () => {
+        return HttpResponse.json({
+          data: [
+            { name: "main", protected: true },
+            { name: "develop", protected: false },
+          ],
+          meta: {},
+        });
+      }),
+    );
+
+    renderWithProviders(
+      <CreateSessionDialog open onOpenChange={onOpenChange} />,
+    );
+
+    // Wait for repo selector to appear
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Repo/ })).toBeInTheDocument();
+    });
+
+    // Open repo dropdown and select a repo
+    await user.click(screen.getByRole("button", { name: /Repo/ }));
+    await user.click(screen.getByText("acme/api-server"));
+
+    // Should show the repo short name
+    await waitFor(() => {
+      expect(screen.getByText("api-server")).toBeInTheDocument();
+    });
+  });
+
+  it("shows branch selector after selecting a repo", async () => {
+    const user = userEvent.setup();
+    setupRepoHandlers();
+
+    server.use(
+      http.get("/api/v1/repositories/:repoId/branches", () => {
+        return HttpResponse.json({
+          data: [
+            { name: "main", protected: true },
+            { name: "feature-x", protected: false },
+          ],
+          meta: {},
+        });
+      }),
+    );
+
+    renderWithProviders(
+      <CreateSessionDialog open onOpenChange={onOpenChange} />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Repo/ })).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: /Repo/ }));
+    await user.click(screen.getByText("acme/api-server"));
+
+    // Should show a branch selector button with default branch
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Target branch/ })).toBeInTheDocument();
+    });
+  });
+
+  it("shows branch fallback input when branch fetch fails", async () => {
+    setupRepoHandlers();
+
+    server.use(
+      http.get("/api/v1/repositories/:repoId/branches", () => {
+        return HttpResponse.json(
+          { error: { code: "INTERNAL", message: "Failed" } },
+          { status: 500 },
+        );
+      }),
+    );
+
+    const user = userEvent.setup();
+
+    renderWithProviders(
+      <CreateSessionDialog open onOpenChange={onOpenChange} />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Repo/ })).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: /Repo/ }));
+    await user.click(screen.getByText("acme/web-app"));
+
+    // Should show a text input for branch instead of dropdown
+    await waitFor(() => {
+      expect(screen.getByLabelText("Target branch")).toBeInTheDocument();
+    });
+  });
+
+  it("does not add empty image URL", async () => {
+    const user = userEvent.setup();
+
+    renderWithProviders(
+      <CreateSessionDialog open onOpenChange={onOpenChange} />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Add files or photos/ }));
+    await user.click(screen.getByText("Add image URL"));
+
+    // Click Add without typing anything
+    await user.click(screen.getByRole("button", { name: "Add" }));
+
+    // No attachment area should appear
+    expect(screen.queryByRole("button", { name: /Remove/ })).not.toBeInTheDocument();
+  });
+
+  it("shows non-image attachment as badge", async () => {
+    const user = userEvent.setup();
+
+    renderWithProviders(
+      <CreateSessionDialog open onOpenChange={onOpenChange} />,
+    );
+
+    // Add a non-image URL as attachment
+    await user.click(screen.getByRole("button", { name: /Add files or photos/ }));
+    await user.click(screen.getByText("Add image URL"));
+    await user.type(screen.getByLabelText("Image URL"), "https://example.com/data.json");
+    await user.click(screen.getByRole("button", { name: "Add" }));
+
+    // Non-image URLs should render as a badge with filename, not as img
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+    expect(screen.getByText("data.json")).toBeInTheDocument();
+  });
+
+  it("submits with selected repo and model", async () => {
+    const user = userEvent.setup();
+    setupRepoHandlers();
+    setupManualSessionHandler();
+
+    server.use(
+      http.get("/api/v1/repositories/:repoId/branches", () => {
+        return HttpResponse.json({
+          data: [{ name: "main", protected: true }],
+          meta: {},
+        });
+      }),
+    );
+
+    renderWithProviders(
+      <CreateSessionDialog open onOpenChange={onOpenChange} />,
+    );
+
+    // Type a message
+    await user.type(
+      screen.getByPlaceholderText("Tell the agent what to do..."),
+      "Fix the bug",
+    );
+
+    // Wait for repo selector and select a repo
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Repo/ })).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: /Repo/ }));
+    await user.click(screen.getByText("acme/api-server"));
+
+    // Submit
+    await user.click(screen.getByRole("button", { name: /Create/ }));
+
+    await waitFor(() => {
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+    });
   });
 });
