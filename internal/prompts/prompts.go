@@ -244,6 +244,18 @@ func ComplexityEstimateUserPrompt(data ComplexityEstimateUserPromptData) string 
 	return render("complexity_estimate_user_prompt.template", data)
 }
 
+// ─── Session Title ────────────────────────────────────────────────────────────
+
+// SessionTitlePromptData holds the dynamic values for the session title prompt.
+type SessionTitlePromptData struct {
+	CurrentTitle string // empty on initial generation
+}
+
+// SessionTitlePrompt renders the system prompt for session title generation.
+func SessionTitlePrompt(data SessionTitlePromptData) string {
+	return render("session_title_prompt.template", data)
+}
+
 // ─── Eval ─────────────────────────────────────────────────────────────────────
 
 // EvalJudgePromptData holds the dynamic values for the eval judge system prompt.
