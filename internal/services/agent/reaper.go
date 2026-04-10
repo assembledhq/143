@@ -11,13 +11,20 @@ import (
 	"github.com/assembledhq/143/internal/services/storage"
 )
 
+// OrphanCloser closes container usage events that were never stopped.
+type OrphanCloser interface {
+	CloseOrphans(ctx context.Context, startedBefore time.Time) (int64, error)
+}
+
 // SessionReaper periodically cleans up stale sessions and expired snapshots
-// in two phases:
+// in three phases:
 //   - Phase 1: Transition idle sessions to completed (keep snapshots)
 //   - Phase 2: Delete snapshots that have exceeded the max snapshot age
+//   - Phase 3: Close orphaned container usage events for billing accuracy
 type SessionReaper struct {
 	sessions       StaleSessionLister
 	snapshotStore  storage.SnapshotStore
+	orphanCloser   OrphanCloser // nil-safe — billing orphan cleanup disabled if nil
 	maxIdleAge     time.Duration
 	maxSnapshotAge time.Duration
 	interval       time.Duration
@@ -32,10 +39,18 @@ type StaleSessionLister interface {
 	UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state string) error
 }
 
+// SessionReaperOption configures optional SessionReaper dependencies.
+type SessionReaperOption func(*SessionReaper)
+
+// WithOrphanCloser enables billing orphan cleanup in the reaper.
+func WithOrphanCloser(oc OrphanCloser) SessionReaperOption {
+	return func(r *SessionReaper) { r.orphanCloser = oc }
+}
+
 // NewSessionReaper creates a reaper that runs every interval, cleaning up
 // sessions idle for longer than maxIdleAge and snapshots older than maxSnapshotAge.
-func NewSessionReaper(sessions StaleSessionLister, snapshotStore storage.SnapshotStore, maxIdleAge, maxSnapshotAge, interval time.Duration, logger zerolog.Logger) *SessionReaper {
-	return &SessionReaper{
+func NewSessionReaper(sessions StaleSessionLister, snapshotStore storage.SnapshotStore, maxIdleAge, maxSnapshotAge, interval time.Duration, logger zerolog.Logger, opts ...SessionReaperOption) *SessionReaper {
+	r := &SessionReaper{
 		sessions:       sessions,
 		snapshotStore:  snapshotStore,
 		maxIdleAge:     maxIdleAge,
@@ -43,6 +58,10 @@ func NewSessionReaper(sessions StaleSessionLister, snapshotStore storage.Snapsho
 		interval:       interval,
 		logger:         logger,
 	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
 }
 
 // Run starts the reaper loop. It blocks until ctx is cancelled.
@@ -117,5 +136,18 @@ func (r *SessionReaper) reap(ctx context.Context) {
 			Str("session_id", s.ID.String()).
 			Str("status", s.Status).
 			Msg("reaper: cleaned up expired snapshot")
+	}
+
+	// Phase 3: Close orphaned container usage events.
+	// Any container_usage_event with stopped_at IS NULL that started before the
+	// idle cutoff is assumed to be from a crashed process. Close it so billing
+	// records are accurate.
+	if r.orphanCloser != nil {
+		closed, err := r.orphanCloser.CloseOrphans(ctx, idleCutoff)
+		if err != nil {
+			r.logger.Error().Err(err).Msg("reaper: failed to close orphaned container usage events")
+		} else if closed > 0 {
+			r.logger.Info().Int64("count", closed).Msg("reaper: closed orphaned container usage events")
+		}
 	}
 }

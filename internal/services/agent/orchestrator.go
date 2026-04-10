@@ -107,6 +107,12 @@ type JobStore interface {
 	Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
 }
 
+// UsageRecorder tracks container lifecycle events for billing.
+type UsageRecorder interface {
+	ContainerStarted(ctx context.Context, orgID, sessionID uuid.UUID, sandbox *Sandbox, cfg SandboxConfig, startedAt time.Time) uuid.UUID
+	ContainerStopped(ctx context.Context, orgID uuid.UUID, eventID uuid.UUID, startedAt time.Time, exitReason string)
+}
+
 // MemoryService provides scored memory context for agent prompts.
 type MemoryService interface {
 	GetContextMemories(ctx context.Context, req MemoryContextRequest) (*MemoryContextResult, error)
@@ -153,6 +159,7 @@ type Orchestrator struct {
 	memory            MemoryService // can be nil
 	userCredentials   UserCredentialProvider // can be nil
 	snapshots         storage.SnapshotStore // can be nil — multi-turn disabled if nil
+	usageTracker      UsageRecorder         // can be nil — billing tracking disabled if nil
 	logger            zerolog.Logger
 	maxConcurrent     int
 	cancels           *CancelRegistry
@@ -178,6 +185,7 @@ type OrchestratorConfig struct {
 	Memory            MemoryService // optional — injects learned memories into agent prompts
 	UserCredentials   UserCredentialProvider // optional — enables personal/team credential resolution
 	Snapshots         storage.SnapshotStore // optional — enables multi-turn snapshot/restore
+	UsageTracker      UsageRecorder         // optional — enables billing observability
 	Cancels           *CancelRegistry       // optional — enables session cancellation from API
 	Logger            zerolog.Logger
 	MaxConcurrent     int
@@ -209,6 +217,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		memory:            cfg.Memory,
 		userCredentials:   cfg.UserCredentials,
 		snapshots:         cfg.Snapshots,
+		usageTracker:      cfg.UsageTracker,
 		cancels:           cfg.Cancels,
 		logger:            cfg.Logger,
 		maxConcurrent:     maxConcurrent,
@@ -389,7 +398,20 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		o.failRun(ctx, run, fmt.Sprintf("create sandbox: %s", err))
 		return fmt.Errorf("create sandbox: %w", err)
 	}
+	containerStartedAt := time.Now()
+	var usageEventID uuid.UUID
+	if o.usageTracker != nil {
+		usageEventID = o.usageTracker.ContainerStarted(ctx, run.OrgID, run.ID, sandbox, sandboxCfg, containerStartedAt)
+	}
 	defer func() {
+		exitReason := containerExitReason(ctx, err)
+		if o.usageTracker != nil {
+			// Use a detached context so the billing write succeeds even if
+			// the parent ctx was cancelled (timeout, shutdown).
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer stopCancel()
+			o.usageTracker.ContainerStopped(stopCtx, run.OrgID, usageEventID, containerStartedAt, exitReason)
+		}
 		// Use a background context for cleanup since the run context may be cancelled.
 		destroyCtx := context.Background()
 		if destroyErr := o.provider.Destroy(destroyCtx, sandbox); destroyErr != nil {
@@ -690,7 +712,18 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		o.failRun(ctx, session, fmt.Sprintf("create sandbox: %s", err))
 		return fmt.Errorf("create sandbox: %w", err)
 	}
+	containerStartedAt := time.Now()
+	var usageEventID uuid.UUID
+	if o.usageTracker != nil {
+		usageEventID = o.usageTracker.ContainerStarted(ctx, session.OrgID, session.ID, sandbox, sandboxCfg, containerStartedAt)
+	}
 	defer func() {
+		exitReason := containerExitReason(ctx, err)
+		if o.usageTracker != nil {
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer stopCancel()
+			o.usageTracker.ContainerStopped(stopCtx, session.OrgID, usageEventID, containerStartedAt, exitReason)
+		}
 		destroyCtx := context.Background()
 		if destroyErr := o.provider.Destroy(destroyCtx, sandbox); destroyErr != nil {
 			log.Error().Err(destroyErr).Msg("failed to destroy sandbox")
@@ -1643,4 +1676,21 @@ func (o *Orchestrator) retryOnTokenExpired(
 
 	log.Info().Msg("codex CLI retry after token refresh completed")
 	return result, err
+}
+
+// containerExitReason determines a granular exit reason for billing metadata
+// based on the parent context state and the error returned from execution.
+func containerExitReason(ctx context.Context, err error) string {
+	if err == nil {
+		return "completed"
+	}
+	// Check context first — a cancelled/timed-out context is the most
+	// specific signal we have.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if ctxErr == context.DeadlineExceeded {
+			return "timeout"
+		}
+		return "cancelled"
+	}
+	return "failed"
 }

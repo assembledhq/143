@@ -13,31 +13,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 
+	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
-)
-
-var (
-	memoriesInjectedTotal = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "memory_context_injections_total",
-		Help: "Total number of times memories were injected into agent context",
-	})
-	memoriesInjectedCount = promauto.NewHistogram(prometheus.HistogramOpts{
-		Name:    "memory_context_injected_count",
-		Help:    "Number of memories selected per context injection",
-		Buckets: []float64{0, 1, 2, 5, 10, 20, 50},
-	})
-	memoriesReinforcedTotal = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "memory_reinforcements_total",
-		Help: "Total number of memory reinforcement operations (on PR approval)",
-	})
-	memoriesReinforcedCount = promauto.NewHistogram(prometheus.HistogramOpts{
-		Name:    "memory_reinforced_count",
-		Help:    "Number of memories reinforced per PR approval",
-		Buckets: []float64{0, 1, 2, 5, 10, 20, 50},
-	})
 )
 
 // MemoryStore defines the DB operations needed by the memory service.
@@ -48,12 +26,13 @@ type MemoryStore interface {
 
 // Service provides scored memory retrieval and reinforcement.
 type Service struct {
-	store MemoryStore
+	store   MemoryStore
+	metrics *metrics.MemoryMetrics // nil-safe
 }
 
 // NewService creates a new memory service.
-func NewService(store MemoryStore) *Service {
-	return &Service{store: store}
+func NewService(store MemoryStore, m *metrics.MemoryMetrics) *Service {
+	return &Service{store: store, metrics: m}
 }
 
 // ContextRequest describes the current agent context for memory selection.
@@ -159,8 +138,9 @@ func (s *Service) GetContextMemoriesWithBudget(ctx context.Context, req ContextR
 		return &ContextResult{}, nil
 	}
 
-	memoriesInjectedTotal.Inc()
-	memoriesInjectedCount.Observe(float64(len(selected)))
+	if s.metrics != nil {
+		s.metrics.RecordInjection(ctx, len(selected))
+	}
 
 	formatted := formatMemories(selected)
 	tokensUsed := tokenBudget - remaining
@@ -182,8 +162,9 @@ func (s *Service) ReinforceMemories(ctx context.Context, orgID uuid.UUID, memory
 	if err := s.store.ReinforceBatch(ctx, orgID, memoryIDs); err != nil {
 		return err
 	}
-	memoriesReinforcedTotal.Inc()
-	memoriesReinforcedCount.Observe(float64(len(memoryIDs)))
+	if s.metrics != nil {
+		s.metrics.RecordReinforcement(ctx, len(memoryIDs))
+	}
 	return nil
 }
 
