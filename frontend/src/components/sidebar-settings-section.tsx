@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Settings,
+  CircleUser,
   Plug,
   Bot,
   Sparkles,
@@ -35,16 +36,16 @@ interface SettingsGroup {
 
 const settingsGroups: SettingsGroup[] = [
   {
-    label: null,
+    label: "PERSONAL",
     items: [
-      { label: "General", icon: Settings, href: "/settings" },
+      { label: "Account", icon: CircleUser, href: "/settings/account" },
     ],
   },
   {
     label: "PLATFORM",
     items: [
       { label: "Integrations", icon: Plug, href: "/settings/integrations" },
-      { label: "Coding agents", icon: Bot, href: "/settings/agent" },
+      { label: "Coding agents", icon: Bot, href: "/settings/agent", adminOnly: true },
       { label: "LLM", icon: Sparkles, href: "/settings/llm" },
       { label: "Autopilot settings", icon: Target, href: "/settings/autopilot" },
       { label: "Evals", icon: FlaskConical, href: "/settings/evals" },
@@ -53,6 +54,7 @@ const settingsGroups: SettingsGroup[] = [
   {
     label: "ORGANIZATION",
     items: [
+      { label: "General", icon: Settings, href: "/settings" },
       { label: "Team", icon: Users, href: "/settings/team" },
       { label: "Audit log", icon: ScrollText, href: "/settings/audit-log", adminOnly: true },
     ],

@@ -3,6 +3,7 @@ import {
   Play,
   FolderKanban,
   Settings,
+  CircleUser,
   Users,
   Plug,
   Bot,
@@ -36,9 +37,10 @@ export const staticActions: PaletteAction[] = [
   { id: "nav-projects", label: "Projects", icon: FolderKanban, href: "/projects", preserveRepo: true, group: "navigation" },
 
   // Settings & admin
+  { id: "settings-account", label: "Account", icon: CircleUser, href: "/settings/account", group: "settings" },
   { id: "settings-general", label: "General", icon: Settings, href: "/settings", group: "settings" },
   { id: "settings-integrations", label: "Integrations", icon: Plug, href: "/settings/integrations", group: "settings" },
-  { id: "settings-agents", label: "Coding agents", icon: Bot, href: "/settings/agent", group: "settings" },
+  { id: "settings-agents", label: "Coding agents", icon: Bot, href: "/settings/agent", requiredRole: "admin", group: "settings" },
   { id: "settings-llm", label: "LLM", icon: Sparkles, href: "/settings/llm", group: "settings" },
   { id: "settings-autopilot", label: "Autopilot settings", icon: Target, href: "/settings/autopilot", group: "settings" },
   { id: "settings-evals", label: "Evals", icon: FlaskConical, href: "/settings/evals", group: "settings" },
