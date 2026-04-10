@@ -128,9 +128,12 @@ func TestSettingsHandler_GetLLMDefaults_Empty(t *testing.T) {
 	handler.GetLLMDefaults(w, req)
 	require.Equal(t, http.StatusOK, w.Code, "should return 200 OK")
 
-	var resp map[string]map[string]string
+	var resp map[string]any
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	require.Empty(t, resp["data"], "should return empty map when no providers configured")
+	dataMap, ok := resp["data"].(map[string]any)
+	require.True(t, ok, "data should be a map")
+	require.Empty(t, dataMap, "should return empty map when no providers configured")
+	require.Equal(t, "gpt-5-nano", resp["platform_model"], "should return platform model")
 }
 
 func TestSettingsHandler_GetLLMModels(t *testing.T) {

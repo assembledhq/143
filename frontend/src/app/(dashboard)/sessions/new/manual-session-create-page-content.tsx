@@ -101,7 +101,7 @@ export function ManualSessionCreatePageContent() {
 
   const { data: resolvedCredsResponse } = useQuery<ListResponse<ResolvedCredential>>({
     queryKey: queryKeys.credentials.resolved,
-    queryFn: () => api.credentials.listResolved(),
+    queryFn: () => api.userCredentials.listResolved(),
   });
   const resolvedCredentials = useMemo(() => resolvedCredsResponse?.data ?? [], [resolvedCredsResponse]);
 
