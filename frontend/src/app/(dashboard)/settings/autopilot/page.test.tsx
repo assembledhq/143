@@ -71,6 +71,83 @@ describe("AutopilotSettingsPage", () => {
         settings: {
           pm_schedule_hours: 6,
           pm_model: "claude-sonnet-4-5",
+          autonomy_level: "auto_simple",
+          max_concurrent_runs: 3,
+        },
+      });
+    });
+  });
+
+  it("renders execution settings with autonomy level and max concurrent runs", async () => {
+    server.use(
+      http.get("/api/v1/settings", () => HttpResponse.json({
+        data: {
+          id: "org-1",
+          name: "Org",
+          settings: {
+            pm_schedule_hours: 4,
+            pm_model: "claude-sonnet-4-5",
+            autonomy_level: "auto_simple",
+            max_concurrent_runs: 5,
+            default_agent_type: "codex",
+            agent_config: {},
+          },
+          created_at: "2026-03-20T00:00:00Z",
+          updated_at: "2026-03-20T00:00:00Z",
+        },
+      })),
+      http.get("/api/v1/settings/agent-defaults", () => HttpResponse.json({ data: {} })),
+      http.get("/api/v1/repositories", () => HttpResponse.json({ data: [], meta: {} }))
+    );
+
+    renderWithProviders(<AutopilotSettingsPage />);
+
+    expect(await screen.findByText("Execution")).toBeInTheDocument();
+    expect(screen.getByLabelText("Act on low-risk")).toBeChecked();
+    expect(screen.getByLabelText("Max concurrent runs")).toHaveValue(5);
+  });
+
+  it("saves changed autonomy level", async () => {
+    let capturedBody: unknown;
+    server.use(
+      http.get("/api/v1/settings", () => HttpResponse.json({
+        data: {
+          id: "org-1",
+          name: "Org",
+          settings: {
+            pm_schedule_hours: 4,
+            pm_model: "claude-sonnet-4-5",
+            autonomy_level: "auto_simple",
+            max_concurrent_runs: 3,
+            default_agent_type: "codex",
+            agent_config: {},
+          },
+          created_at: "2026-03-20T00:00:00Z",
+          updated_at: "2026-03-20T00:00:00Z",
+        },
+      })),
+      http.get("/api/v1/settings/agent-defaults", () => HttpResponse.json({ data: {} })),
+      http.get("/api/v1/repositories", () => HttpResponse.json({ data: [], meta: {} })),
+      http.patch("/api/v1/settings", async ({ request }) => {
+        capturedBody = await request.json();
+        return HttpResponse.json({ data: { id: "org-1", name: "Org", settings: {} } });
+      })
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<AutopilotSettingsPage />);
+
+    await screen.findByText("Execution");
+    await user.click(screen.getByLabelText("Operate broadly"));
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
+
+    await waitFor(() => {
+      expect(capturedBody).toEqual({
+        settings: {
+          pm_schedule_hours: 4,
+          pm_model: "claude-sonnet-4-5",
+          autonomy_level: "auto_all",
+          max_concurrent_runs: 3,
         },
       });
     });
