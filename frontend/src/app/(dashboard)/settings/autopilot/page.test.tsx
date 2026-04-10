@@ -104,7 +104,9 @@ describe("AutopilotSettingsPage", () => {
 
     expect(await screen.findByText("Execution")).toBeInTheDocument();
     expect(screen.getByLabelText("Act on low-risk")).toBeChecked();
-    expect(screen.getByLabelText("Max concurrent runs")).toHaveValue(5);
+    await waitFor(() => {
+      expect(screen.getByLabelText("Max concurrent runs")).toHaveValue(5);
+    });
   });
 
   it("saves changed autonomy level", async () => {
