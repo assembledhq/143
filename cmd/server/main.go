@@ -24,6 +24,7 @@ import (
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/agent/adapters"
 	"github.com/assembledhq/143/internal/services/agent/providers"
+	"github.com/assembledhq/143/internal/services"
 	"github.com/assembledhq/143/internal/services/codexauth"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
@@ -142,6 +143,7 @@ func main() {
 			EvalBatches:         db.NewEvalBatchStore(pool),
 			EvalBootstraps:      db.NewEvalBootstrapStore(pool),
 			Repositories:        repoStore,
+			SessionMessages:     sessionMessageStore,
 		}
 
 		// Build Phase 3+ services if runtime dependencies are available.
@@ -373,6 +375,12 @@ func buildServices(
 		slackSummarizer = ingestion.NewSlackSummarizer(llmClient, cfg.SlackSummaryModel, logger)
 	}
 
+	// Session title service (optional — only if LLM client is available).
+	var titleService *services.SessionTitleService
+	if llmClient != nil {
+		titleService = services.NewSessionTitleService(llmClient, sessionStore, sessionMessageStore)
+	}
+
 	return &worker.Services{
 		Orchestrator:    orchestrator,
 		Validation:      validationSvc,
@@ -384,5 +392,6 @@ func buildServices(
 		SlackSummarizer: slackSummarizer,
 		LLM:             llmClient,
 		GitHub:          ghSvc,
+		TitleService:    titleService,
 	}
 }
