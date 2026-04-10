@@ -151,6 +151,14 @@ describe('AgentPage', () => {
       http.get('/api/v1/settings/codex-auth/status', () => {
         return HttpResponse.json({ data: { status: 'completed' } });
       }),
+      http.get('/api/v1/settings', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockOrgSettings.data,
+            settings: { ...mockOrgSettings.data.settings, default_agent_type: 'codex' },
+          },
+        });
+      }),
     );
 
     renderWithProviders(<AgentPage />);
