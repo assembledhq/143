@@ -391,6 +391,22 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	plan, err := parsePlan(result.Summary)
 	if err != nil {
 		failSession()
+		logOutput := result.Summary
+		if len(logOutput) > 2000 {
+			logOutput = logOutput[:2000] + "...(truncated)"
+		}
+		sessionID := ""
+		if pmSession != nil {
+			sessionID = pmSession.ID.String()
+		}
+		s.logger.Error().
+			Str("session_id", sessionID).
+			Str("agent_output", logOutput).
+			Err(err).
+			Msg("failed to parse PM plan from agent output")
+		if sessionID != "" {
+			return nil, fmt.Errorf("parse plan [session_id=%s]: %w", sessionID, err)
+		}
 		return nil, fmt.Errorf("parse plan: %w", err)
 	}
 
