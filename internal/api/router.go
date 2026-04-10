@@ -28,7 +28,7 @@ import (
 	threadservice "github.com/assembledhq/143/internal/services/thread"
 )
 
-func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, codexAuthSvc *codexauth.Service, llmClient llm.Client, fileReader sandbox.FileReader) (*chi.Mux, error) {
+func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, codexAuthSvc *codexauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller) (*chi.Mux, error) {
 	// Create stores
 	orgStore := db.NewOrganizationStore(pool)
 	userStore := db.NewUserStore(pool)
@@ -203,6 +203,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	// Wire audit emitter into all handlers that perform state changes.
 	authHandler.SetAuditEmitter(auditEmitter)
 	sessionHandler.SetAuditEmitter(auditEmitter)
+	if canceller != nil {
+		sessionHandler.SetCanceller(canceller)
+	}
 	teamHandler.SetAuditEmitter(auditEmitter)
 	settingsHandler.SetAuditEmitter(auditEmitter)
 	credentialHandler.SetAuditEmitter(auditEmitter)
@@ -438,6 +441,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Post("/api/v1/sessions/{id}/questions/{qid}/answer", sessionHandler.AnswerQuestion)
 			r.Post("/api/v1/sessions/{id}/messages", sessionHandler.SendMessage)
 			r.Post("/api/v1/sessions/{id}/end", sessionHandler.EndSession)
+			r.Post("/api/v1/sessions/{id}/retry", sessionHandler.RetrySession)
+			r.Post("/api/v1/sessions/{id}/cancel", sessionHandler.CancelSession)
 			r.Post("/api/v1/sessions/{id}/pr", sessionHandler.CreatePR)
 			r.Post("/api/v1/sessions/{id}/threads", sessionThreadHandler.CreateThread)
 			r.Post("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.SendThreadMessage)

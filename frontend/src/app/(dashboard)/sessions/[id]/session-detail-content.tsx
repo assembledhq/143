@@ -49,7 +49,7 @@ import { SSE_EVENT, addSSEListener } from "@/lib/sse";
 import { buildTimeline } from "@/lib/timeline";
 import { parseDiffStats, type DiffFile } from "@/lib/diff-parser";
 import { formatReviewMessage } from "@/lib/format-review-message";
-import type { Session, SessionLog, SessionMessage, SessionReviewComment, User, Validation } from "@/lib/types";
+import type { Session, SessionLog, SessionMessage, SessionReviewComment, User, Validation, CodexAuthStatus, SingleResponse } from "@/lib/types";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
 import { cn, sessionTitle, isImageURL, fileNameFromURL, formatTimeAgo } from "@/lib/utils";
@@ -57,6 +57,9 @@ import { DiffStatsBadge, FileTree, SessionFooter, CommentsSummary, ReviewDiffVie
 import { useReviewComments } from "@/hooks/use-review-comments";
 import { useDiffViewState } from "@/hooks/use-diff-view-state";
 import { useReviewedFiles } from "@/hooks/use-reviewed-files";
+import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
+
+const FAILURE_CATEGORY_CODEX_AUTH = "codex_auth_expired";
 
 const statusConfig: Record<string, { color: string; label: string }> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
@@ -115,8 +118,19 @@ type DetailTab = "overview" | "changes" | "validation";
 
 function OverviewTab({ session, members }: { session: Session; members: User[] }) {
   const queryClient = useQueryClient();
+  const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
+
+  const isCodexAuthFailure = session.failure_category === FAILURE_CATEGORY_CODEX_AUTH;
+
+  const { data: codexAuthResponse } = useQuery<SingleResponse<CodexAuthStatus>>({
+    queryKey: ["codex-auth-status"],
+    queryFn: () => api.codexAuth.status(),
+    enabled: isCodexAuthFailure,
+  });
+  const isCodexAuthenticated = codexAuthResponse?.data?.status === "completed";
+
   const retryMutation = useMutation({
-    mutationFn: () => api.issues.triggerFix(session.issue_id),
+    mutationFn: () => api.sessions.retry(session.id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["session", session.id] });
     },
@@ -178,7 +192,8 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
           </CardHeader>
           <CardContent className="space-y-3">
             <p className="text-sm">{session.failure_explanation || session.error}</p>
-            {session.failure_next_steps && session.failure_next_steps.length > 0 && (
+            {/* Show next steps only for non-codex-auth failures (codex auth has the reauth button instead) */}
+            {!isCodexAuthFailure && session.failure_next_steps && session.failure_next_steps.length > 0 && (
               <div>
                 <p className="text-xs font-medium text-muted-foreground mb-1">Next steps</p>
                 <ul className="list-disc list-inside text-sm space-y-1">
@@ -188,8 +203,33 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
                 </ul>
               </div>
             )}
+            {isCodexAuthFailure && !isCodexAuthenticated && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="mt-1"
+                onClick={() => setShowDeviceCodeModal(true)}
+              >
+                Re-authenticate with ChatGPT
+              </Button>
+            )}
+            {isCodexAuthFailure && isCodexAuthenticated && (
+              <p className="text-sm text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                ChatGPT connected — click Retry to re-run this session.
+              </p>
+            )}
           </CardContent>
         </Card>
+      )}
+      {showDeviceCodeModal && (
+        <CodexDeviceCodeModal
+          onClose={() => setShowDeviceCodeModal(false)}
+          onConnected={() => {
+            setShowDeviceCodeModal(false);
+            queryClient.invalidateQueries({ queryKey: ["codex-auth-status"] });
+          }}
+        />
       )}
 
       {/* Session vitals — primary info row */}
@@ -473,9 +513,6 @@ function ChangesTab({
         />
       )}
 
-      {/* PR Card */}
-      <PRCard sessionId={sessionId} />
-
       {/* Main content: file tree or empty state */}
       {hasDiff ? (
         <div className="flex flex-col flex-1 min-h-0">
@@ -656,6 +693,7 @@ function ReviewCommentInput({
 const MAX_SSE_RECONNECT_ATTEMPTS = 5;
 const BASE_SSE_RECONNECT_DELAY_MS = 1000;
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
+const SCROLL_NEAR_BOTTOM_THRESHOLD = 100;
 
 function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Session; sessionId: string; isActive: boolean; onDiffClick?: () => void }) {
   const queryClient = useQueryClient();
@@ -669,6 +707,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const isNearBottomRef = useRef(false);
   const seenLogIds = useRef<Set<number>>(new Set());
   const reconnectAttempts = useRef(0);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(null);
@@ -860,6 +899,11 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
       if (textareaRef.current) {
         textareaRef.current.style.height = "auto";
       }
+      // Scroll to bottom after sending a message so the user sees the response.
+      isNearBottomRef.current = true;
+      if (scrollRef.current) {
+        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      }
       queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
       queryClient.invalidateQueries({ queryKey: ["session", sessionId, "messages"] });
     },
@@ -867,6 +911,13 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
 
   const endMutation = useMutation({
     mutationFn: () => api.sessions.endSession(sessionId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+    },
+  });
+
+  const cancelMutation = useMutation({
+    mutationFn: () => api.sessions.cancelSession(sessionId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
     },
@@ -914,9 +965,17 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
   }, [message]);
 
-  // Scroll to bottom when timeline updates
+  // Track whether the user is scrolled near the bottom.
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    isNearBottomRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_NEAR_BOTTOM_THRESHOLD;
+  }, []);
+
+  // Only auto-scroll to bottom when new entries arrive if the user is already near the bottom.
   useEffect(() => {
-    if (scrollRef.current) {
+    if (scrollRef.current && isNearBottomRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [timelineEntries.length]);
@@ -952,7 +1011,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
   return (
     <div className="flex flex-col h-full">
       {/* Unified timeline */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto space-y-2 p-4">
+      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto space-y-2 p-4">
         {timelineEntries.length === 0 && !isRunning && (
           <div className="flex items-center justify-center py-12">
             <div className="text-center space-y-2 max-w-[280px]">
@@ -982,7 +1041,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
 
       {/* Error display */}
       {(() => {
-        const firstError = uploadError || [sendMutation, endMutation, createPRMutation].find(m => m.error)?.error;
+        const firstError = uploadError || [sendMutation, endMutation, cancelMutation, createPRMutation].find(m => m.error)?.error;
         if (!firstError) return null;
         const msg = typeof firstError === "string" ? firstError : (firstError instanceof Error ? firstError.message : "An error occurred");
         return (
@@ -1132,48 +1191,14 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
             )}
 
             <div className="ml-auto flex items-center gap-1">
-              {canCreatePR && (
-                <>
-                  <label className="flex items-center gap-1 text-xs text-muted-foreground cursor-pointer select-none" title="Create PR as a draft">
-                    <input
-                      type="checkbox"
-                      checked={draftValue}
-                      onChange={(e) => setPRDraftOverride(e.target.checked)}
-                      className="h-3 w-3"
-                    />
-                    Draft
-                  </label>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
-                    title={
-                      ghStatus?.connected && ghStatus?.has_repo_scope
-                        ? `Create PR as @${ghStatus.github_login}`
-                        : ghStatus?.connected && !ghStatus?.has_repo_scope
-                          ? "Create PR (app token — reconnect GitHub with repo access for user-authored PRs)"
-                          : ghStatus?.pr_authorship_mode === "user_required"
-                            ? "Connect GitHub to create PRs"
-                            : "Create PR"
-                    }
-                    disabled={
-                      createPRMutation.isPending ||
-                      (ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected)
-                    }
-                    onClick={() => createPRMutation.mutate()}
-                  >
-                    <GitPullRequest className="h-3.5 w-3.5" />
-                  </Button>
-                </>
-              )}
               {isRunning ? (
                 <Button
                   size="icon"
                   variant="outline"
                   className="h-8 w-8 shrink-0 rounded-lg"
-                  title="Stop session"
-                  disabled={endMutation.isPending}
-                  onClick={() => endMutation.mutate()}
+                  title="Cancel session"
+                  disabled={cancelMutation.isPending}
+                  onClick={() => cancelMutation.mutate()}
                 >
                   <Square className="h-3 w-3" />
                 </Button>
@@ -1253,6 +1278,37 @@ export function SessionDetailContent({ id }: { id: string }) {
   const session = data?.data;
   const members = membersData?.data ?? [];
   const isActive = session ? !terminalStatuses.has(session.status) : false;
+  const isRunning = session?.status === "running";
+
+  const queryClient = useQueryClient();
+
+  // PR state for the detail-panel header button
+  const { data: prData } = useQuery({
+    queryKey: ["session", id, "pr"],
+    queryFn: () => api.sessions.getPR(id).catch((err) => {
+      if (err?.code === "NOT_FOUND") return { data: null };
+      throw err;
+    }),
+  });
+  const hasPR = !!prData?.data;
+  const hasDiff = !!session?.diff_stats;
+  const canCreatePR = hasDiff && !hasPR && !isRunning;
+
+  const { data: ghStatus } = useQuery({
+    queryKey: ["github-status"],
+    queryFn: () => api.githubStatus.get(),
+    enabled: canCreatePR,
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const createPRMutation = useMutation({
+    mutationFn: () => api.sessions.createPR(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["session", id] });
+      queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
+    },
+  });
+
   const sessionDiff = session?.diff;
   const diffStats = useMemo(() => {
     if (!sessionDiff) return null;
@@ -1260,7 +1316,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [sessionDiff]);
 
   // --- Shared review state (lifted from old ChangesTab) ---
-  const queryClient = useQueryClient();
 
   // Hooks can't be called conditionally, so provide a stub when session hasn't loaded yet.
   // useDiffViewState only reads `diff` and `diff_history` — the stub satisfies that contract.
@@ -1447,20 +1502,44 @@ export function SessionDetailContent({ id }: { id: string }) {
             onValueChange={(v) => handleDetailTabClick(v as DetailTab)}
             className="flex flex-col flex-1 min-h-0 gap-0"
           >
-            <TabsList variant="line" size="sm" className="border-b border-border px-2 shrink-0 w-full">
-              <TabsTrigger value="overview">Overview</TabsTrigger>
-              <TabsTrigger value="changes">
-                Changes
-                {changesCount != null && changesCount > 0 && (
-                  <Badge variant="secondary" className="ml-1 min-w-[18px] h-[18px] rounded-full px-1 text-xs font-semibold leading-none">
-                    {changesCount}
-                  </Badge>
+            <div className="flex items-center border-b border-border px-2 shrink-0">
+              <TabsList variant="line" size="sm" className="border-b-0 flex-1">
+                <TabsTrigger value="overview">Overview</TabsTrigger>
+                <TabsTrigger value="changes">
+                  Changes
+                  {changesCount != null && changesCount > 0 && (
+                    <Badge variant="secondary" className="ml-1 min-w-[18px] h-[18px] rounded-full px-1 text-xs font-semibold leading-none">
+                      {changesCount}
+                    </Badge>
+                  )}
+                </TabsTrigger>
+                {showValidationTab && (
+                  <TabsTrigger value="validation">Validation</TabsTrigger>
                 )}
-              </TabsTrigger>
-              {showValidationTab && (
-                <TabsTrigger value="validation">Validation</TabsTrigger>
-              )}
-            </TabsList>
+              </TabsList>
+              {hasPR && prData?.data?.github_pr_url ? (
+                <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
+                  <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5">
+                    <ExternalLink className="h-3 w-3" />
+                    View PR
+                  </Button>
+                </a>
+              ) : canCreatePR ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs gap-1.5"
+                  disabled={
+                    createPRMutation.isPending ||
+                    (ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected)
+                  }
+                  onClick={() => createPRMutation.mutate()}
+                >
+                  <GitPullRequest className="h-3 w-3" />
+                  {createPRMutation.isPending ? "Creating…" : "Create PR"}
+                </Button>
+              ) : null}
+            </div>
 
             <TabsContent value="changes" className="flex-1 min-h-0">
               <ChangesTab

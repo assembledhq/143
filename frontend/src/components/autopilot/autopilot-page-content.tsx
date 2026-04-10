@@ -7,10 +7,8 @@ import { PageHeader } from "@/components/page-header";
 import { AutopilotConfigFooter } from "./autopilot-config-footer";
 import { AutopilotEvidenceRow } from "./autopilot-evidence-row";
 import { useAutopilotPageData } from "./use-autopilot-page-data";
-import { DEFAULT_PRIORITY_WEIGHTS } from "./autopilot-helpers";
 import { useAnalyze } from "@/hooks/use-analyze";
 import { AutopilotSteeringSheet } from "./autopilot-steering-sheet";
-import { AutopilotWeightsSheet } from "./autopilot-weights-sheet";
 import { AutopilotDocumentsSheet } from "./autopilot-documents-sheet";
 import { AutopilotProposalCard } from "@/components/autopilot-proposal-card";
 import { Button } from "@/components/ui/button";
@@ -21,7 +19,6 @@ export function AutopilotPageContent() {
   const router = useRouter();
   const [showDirectionEditor, setShowDirectionEditor] = useState(false);
   const [showDocumentsEditor, setShowDocumentsEditor] = useState(false);
-  const [showWeightsEditor, setShowWeightsEditor] = useState(false);
   const { isLoading, isSetupComplete, pmStatus, settings, viewModel } = useAutopilotPageData();
   const { handleAnalyze, isAnalyzing, isPending } = useAnalyze(pmStatus.is_running);
 
@@ -115,7 +112,6 @@ export function AutopilotPageContent() {
           weightsSummary={viewModel.weightsSummary}
           onEditDirection={() => setShowDirectionEditor(true)}
           onManageDocuments={() => setShowDocumentsEditor(true)}
-          onCustomizeWeights={() => setShowWeightsEditor(true)}
           onOpenSettings={() => router.push("/settings/autopilot")}
         />
 
@@ -124,11 +120,6 @@ export function AutopilotPageContent() {
           open={showDirectionEditor}
           onOpenChange={setShowDirectionEditor}
           settings={settings}
-        />
-        <AutopilotWeightsSheet
-          open={showWeightsEditor}
-          onOpenChange={setShowWeightsEditor}
-          weights={settings.priority_weights ?? DEFAULT_PRIORITY_WEIGHTS}
         />
         <AutopilotDocumentsSheet
           open={showDocumentsEditor}

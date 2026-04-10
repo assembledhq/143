@@ -82,7 +82,7 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
       return contents;
     }, [file.hunks]);
 
-    const highlighted = useFileHighlighting(allLineContents, file.language, "github-dark", isActive);
+    const highlighted = useFileHighlighting(allLineContents, file.language, undefined, isActive);
 
     // Build per-hunk Maps of line index → highlighted HTML
     const hunkHighlightMaps = useMemo(() => {
@@ -150,6 +150,7 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
           onBrowseFile={onBrowseFile}
         />
         <div className="overflow-x-auto">
+        <div className="min-w-fit">
         {file.hunks.map((hunk, i) => {
           const hunkEl =
             viewMode === "split" ? (
@@ -208,6 +209,7 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
             </div>
           );
         })}
+        </div>
         </div>
       </div>
     );

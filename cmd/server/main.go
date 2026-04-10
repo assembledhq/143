@@ -123,7 +123,8 @@ func main() {
 		fileReader = sandbox.NoOpFileReader{}
 	}
 
-	router, err := api.NewRouter(cfg, pool, logger, codexAuthSvc, llmClient, fileReader)
+	cancelRegistry := agent.NewCancelRegistry(logger)
+	router, err := api.NewRouter(cfg, pool, logger, codexAuthSvc, llmClient, fileReader, cancelRegistry)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}
@@ -184,7 +185,7 @@ func main() {
 				jobStore, orgStore, repoStore, validationStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
-				sessionMessageStore, snapshotStore, billingMetrics)
+				sessionMessageStore, snapshotStore, billingMetrics, cancelRegistry)
 		}
 		retentionCfg := worker.DataRetentionConfig{
 			WebhookDays: cfg.DataRetentionWebhookDays,
@@ -286,6 +287,7 @@ func buildServices(
 	sessionMessageStore *db.SessionMessageStore,
 	snapshotStore storage.SnapshotStore,
 	billingMetrics *metrics.BillingMetrics,
+	cancelRegistry *agent.CancelRegistry,
 ) *worker.Services {
 	// GitHub App service (for installation tokens, PR creation).
 	ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
@@ -354,6 +356,7 @@ func buildServices(
 		UserCredentials:  userCredentialStore,
 		Snapshots:        snapshotStore,
 		UsageTracker:     usageTracker,
+		Cancels:          cancelRegistry,
 		Logger:           logger,
 	})
 

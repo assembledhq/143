@@ -61,6 +61,7 @@ type SessionStore interface {
 	UpdateSnapshotInfo(ctx context.Context, orgID, sessionID uuid.UUID, agentSessionID, snapshotKey string) error
 	UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state string) error
 	UpdateWorkingBranch(ctx context.Context, orgID, sessionID uuid.UUID, branch string) error
+	UpdateFailure(ctx context.Context, orgID, runID uuid.UUID, explanation, category string, nextSteps []string, retryAdvised bool) error
 	GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 }
 
@@ -160,6 +161,7 @@ type Orchestrator struct {
 	usageTracker      UsageRecorder         // can be nil — billing tracking disabled if nil
 	logger            zerolog.Logger
 	maxConcurrent     int
+	cancels           *CancelRegistry
 }
 
 // OrchestratorConfig holds the dependencies for creating an Orchestrator.
@@ -183,6 +185,7 @@ type OrchestratorConfig struct {
 	UserCredentials   UserCredentialProvider // optional — enables personal/team credential resolution
 	Snapshots         storage.SnapshotStore // optional — enables multi-turn snapshot/restore
 	UsageTracker      UsageRecorder         // optional — enables billing observability
+	Cancels           *CancelRegistry       // optional — enables session cancellation from API
 	Logger            zerolog.Logger
 	MaxConcurrent     int
 }
@@ -214,6 +217,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		userCredentials:   cfg.UserCredentials,
 		snapshots:         cfg.Snapshots,
 		usageTracker:      cfg.UsageTracker,
+		cancels:           cfg.Cancels,
 		logger:            cfg.Logger,
 		maxConcurrent:     maxConcurrent,
 	}
@@ -223,6 +227,14 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 // concurrency check → sandbox creation → repo clone → agent execution →
 // result handling → follow-up job enqueuing → sandbox cleanup.
 func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error {
+	// Create a cancellable context. The cancel registry is populated later
+	// once the sandbox is available, so CancelSession can send SIGINT.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if o.cancels != nil {
+		defer o.cancels.Deregister(run.ID)
+	}
+
 	log := o.logger.With().
 		Str("run_id", run.ID.String()).
 		Str("org_id", run.OrgID.String()).
@@ -399,10 +411,17 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			defer stopCancel()
 			o.usageTracker.ContainerStopped(stopCtx, run.OrgID, usageEventID, containerStartedAt, exitReason)
 		}
-		if destroyErr := o.provider.Destroy(ctx, sandbox); destroyErr != nil {
+		// Use a background context for cleanup since the run context may be cancelled.
+		destroyCtx := context.Background()
+		if destroyErr := o.provider.Destroy(destroyCtx, sandbox); destroyErr != nil {
 			log.Error().Err(destroyErr).Msg("failed to destroy sandbox")
 		}
 	}()
+
+	// Register sandbox with cancel registry so CancelSession can send SIGINT.
+	if o.cancels != nil {
+		o.cancels.Register(run.ID, sandbox, o.provider, cancel)
+	}
 
 	// 8. Clone repo into sandbox. This must happen before auth injection
 	// so that /workspace is empty when git clone runs (git clone fails on
@@ -437,14 +456,8 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	//    auth.json is the primary auth mechanism (uses ChatGPT backend).
 	//    Done after clone so the workspace is available.
 	if run.AgentType == models.AgentTypeCodex {
-		injected, err := o.injectCodexAuth(ctx, run.OrgID, sandbox)
-		if err != nil {
-			o.failRun(ctx, run, fmt.Sprintf("codex auth injection failed: %s", err))
-			return fmt.Errorf("codex auth injection: %w", err)
-		}
-		if !injected {
-			o.failRun(ctx, run, "no credentials configured for codex: connect ChatGPT from the Overview page")
-			return fmt.Errorf("no credentials for codex agent")
+		if err := o.ensureCodexAuth(ctx, run, sandbox); err != nil {
+			return err
 		}
 	}
 
@@ -471,13 +484,30 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.ID, run.CurrentTurn, sandbox, adapter, execCtx, prompt, result, err, log)
 
 	// 11. Handle result.
+	wasCancelled := o.cancels != nil && o.cancels.WasCancelled(run.ID)
+
 	if err != nil {
+		// If the session was cancelled by the user (context force-cancelled
+		// after SIGINT timeout), snapshot what we have and go to idle.
+		if wasCancelled || ctx.Err() != nil {
+			log.Info().Msg("session cancelled by user")
+			o.handleCancelledSession(run, sandbox, result, run.CurrentTurn+1, log)
+			return fmt.Errorf("session cancelled: %w", ctx.Err())
+		}
 		o.failRun(ctx, run, err.Error())
 		o.enqueueJob(ctx, run.OrgID, "agent", "analyze_failure", map[string]interface{}{
 			"session_id": run.ID.String(),
 			"org_id":     run.OrgID.String(),
 		})
 		return fmt.Errorf("execute agent: %w", err)
+	}
+
+	// 11a. If the agent exited after receiving SIGINT (user cancel), snapshot
+	// the workspace and return the session to idle so it can be continued.
+	if wasCancelled {
+		log.Info().Msg("agent exited after cancel, snapshotting and returning to idle")
+		o.handleCancelledSession(run, sandbox, result, run.CurrentTurn+1, log)
+		return nil
 	}
 
 	// 11b. Snapshot workspace for multi-turn support (does not change session status).
@@ -591,6 +621,14 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 // invoking this method. The SendMessage HTTP handler enforces this via org_id
 // scoping and ClaimIdle atomicity.
 func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Session) error {
+	// Create a cancellable context. The cancel registry is populated later
+	// once the sandbox is available, so CancelSession can send SIGINT.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if o.cancels != nil {
+		defer o.cancels.Deregister(session.ID)
+	}
+
 	log := o.logger.With().
 		Str("session_id", session.ID.String()).
 		Str("org_id", session.OrgID.String()).
@@ -685,10 +723,16 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			defer stopCancel()
 			o.usageTracker.ContainerStopped(stopCtx, session.OrgID, usageEventID, containerStartedAt, exitReason)
 		}
-		if destroyErr := o.provider.Destroy(ctx, sandbox); destroyErr != nil {
+		destroyCtx := context.Background()
+		if destroyErr := o.provider.Destroy(destroyCtx, sandbox); destroyErr != nil {
 			log.Error().Err(destroyErr).Msg("failed to destroy sandbox")
 		}
 	}()
+
+	// Register sandbox with cancel registry so CancelSession can send SIGINT.
+	if o.cancels != nil {
+		o.cancels.Register(session.ID, sandbox, o.provider, cancel)
+	}
 
 	// 5. Set up the workspace — either restore snapshot or clone fresh.
 	var prompt *AgentPrompt
@@ -718,14 +762,8 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 
 		// Re-inject Codex auth.json if needed.
 		if session.AgentType == models.AgentTypeCodex {
-			injected, err := o.injectCodexAuth(ctx, session.OrgID, sandbox)
-			if err != nil {
-				o.failRun(ctx, session, fmt.Sprintf("codex auth injection failed: %s", err))
-				return fmt.Errorf("codex auth injection: %w", err)
-			}
-			if !injected {
-				o.failRun(ctx, session, "no credentials configured for codex: connect ChatGPT from the Overview page")
-				return fmt.Errorf("no credentials for codex agent")
+			if err := o.ensureCodexAuth(ctx, session, sandbox); err != nil {
+				return err
 			}
 		}
 
@@ -802,9 +840,23 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// 6b. Retry once on token expiration for Codex agents.
 	result, err = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.ID, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
 
+	wasCancelled := o.cancels != nil && o.cancels.WasCancelled(session.ID)
+
 	if err != nil {
+		if wasCancelled || ctx.Err() != nil {
+			log.Info().Msg("session cancelled by user during continue")
+			o.handleCancelledSession(session, sandbox, result, turnNumber, log)
+			return fmt.Errorf("session cancelled: %w", ctx.Err())
+		}
 		o.failRun(ctx, session, err.Error())
 		return fmt.Errorf("execute agent on continue: %w", err)
+	}
+
+	// 6c. If cancelled but agent exited gracefully, snapshot and return to idle.
+	if wasCancelled {
+		log.Info().Msg("agent exited after cancel during continue, returning to idle")
+		o.handleCancelledSession(session, sandbox, result, turnNumber, log)
+		return nil
 	}
 
 	// 7. Create assistant message with result summary.
@@ -1053,6 +1105,41 @@ func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg 
 			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update project task on run failure")
 		}
 	}
+}
+
+// failRunWithCategory marks a run as failed with a structured failure category,
+// explanation, and next steps. Used for well-known failure modes (e.g. auth expiry)
+// where we can provide actionable guidance in the UI.
+func (o *Orchestrator) failRunWithCategory(ctx context.Context, run *models.Session, errMsg, category, explanation string, nextSteps []string) {
+	o.failRun(ctx, run, errMsg)
+	if err := o.sessions.UpdateFailure(ctx, run.OrgID, run.ID, explanation, category, nextSteps, true); err != nil {
+		o.logger.Error().Err(err).Str("run_id", run.ID.String()).Msg("failed to update run failure details")
+	}
+}
+
+// ensureCodexAuth injects Codex auth credentials into the sandbox, failing the
+// run with a codex_auth_expired category if injection fails or no creds exist.
+func (o *Orchestrator) ensureCodexAuth(ctx context.Context, run *models.Session, sandbox *Sandbox) error {
+	injected, err := o.injectCodexAuth(ctx, run.OrgID, sandbox)
+	if err != nil {
+		o.failRunWithCategory(ctx, run,
+			fmt.Sprintf("codex auth injection failed: %s", err),
+			FailureCategoryCodexAuth,
+			"Your ChatGPT authentication has expired or was revoked. Please re-authenticate to continue using Codex.",
+			[]string{"Re-authenticate with ChatGPT from the session page to sign in again"},
+		)
+		return fmt.Errorf("codex auth injection: %w", err)
+	}
+	if !injected {
+		o.failRunWithCategory(ctx, run,
+			"no credentials configured for codex: connect ChatGPT from the Overview page",
+			FailureCategoryCodexAuth,
+			"No ChatGPT credentials are configured. Please connect your ChatGPT account to use Codex.",
+			[]string{"Re-authenticate with ChatGPT from the session page to sign in"},
+		)
+		return fmt.Errorf("no credentials for codex agent")
+	}
+	return nil
 }
 
 // buildRunResult converts an AgentResult into the DB update struct.
@@ -1363,9 +1450,47 @@ func (o *Orchestrator) BuildIntegrationSkills(ctx context.Context, orgID uuid.UU
 	return mcp.GenerateSkillsDoc(tr)
 }
 
+// handleCancelledSession snapshots the workspace and returns the session to idle
+// (if snapshot succeeds) or marks it as cancelled (if not). This is shared by
+// both RunAgent and ContinueSession to avoid duplication.
+//
+// result may be nil (e.g. when the agent was force-killed and returned an error).
+func (o *Orchestrator) handleCancelledSession(session *models.Session, sandbox *Sandbox, result *AgentResult, turnNumber int, log zerolog.Logger) {
+	bgCtx := context.Background()
+
+	// Attempt to snapshot so the session can be continued later.
+	snapshotKey, snapshotErr := o.snapshotSession(bgCtx, session, sandbox, nil)
+	if snapshotErr != nil {
+		log.Warn().Err(snapshotErr).Msg("failed to snapshot cancelled session")
+	}
+
+	// Resolve the agent session ID — prefer the result if the agent exited
+	// gracefully, otherwise fall back to whatever was on the session.
+	agentSessionID := ""
+	if result != nil && result.AgentSessionID != "" {
+		agentSessionID = result.AgentSessionID
+	} else if session.AgentSessionID != nil {
+		agentSessionID = *session.AgentSessionID
+	}
+
+	// If we got a snapshot, return to idle via UpdateTurnComplete so the user
+	// can continue the conversation. Otherwise, mark as cancelled (terminal).
+	if snapshotKey != "" {
+		if err := o.sessions.UpdateTurnComplete(bgCtx, session.OrgID, session.ID, turnNumber, nil, agentSessionID, snapshotKey); err != nil {
+			log.Warn().Err(err).Msg("failed to return cancelled session to idle")
+			_ = o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, string(models.SessionStatusCancelled))
+		} else {
+			log.Info().Int("turn", turnNumber).Msg("cancelled session returned to idle")
+		}
+	} else {
+		_ = o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, string(models.SessionStatusCancelled))
+	}
+}
+
 // snapshotSession snapshots the sandbox workspace to object storage for multi-turn support.
 // If snapshots are not configured, this is a no-op. This only saves the snapshot
 // and updates sandbox state — it does NOT change session status or call UpdateTurnComplete.
+// result is unused but kept in the signature for future extensibility (e.g. metadata).
 func (o *Orchestrator) snapshotSession(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult) (string, error) {
 	if o.snapshots == nil {
 		return "", nil

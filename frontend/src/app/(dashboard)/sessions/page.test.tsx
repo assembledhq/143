@@ -70,6 +70,17 @@ describe('SessionSidebar', () => {
     expect(screen.getAllByText('Done').length).toBeGreaterThanOrEqual(1);
   });
 
+  it('uses a left-aligned horizontal-only tab scroller', async () => {
+    renderWithProviders(<SessionSidebar />);
+
+    await screen.findByText('Fixed TypeError by adding null check');
+
+    const tabList = screen.getByRole('tablist');
+    expect(tabList.className).toContain('justify-start');
+    expect(tabList.className).toContain('overflow-x-auto');
+    expect(tabList.className).toContain('overflow-y-hidden');
+  });
+
   it('shows status indicators for sessions', async () => {
     renderWithProviders(<SessionSidebar />);
 

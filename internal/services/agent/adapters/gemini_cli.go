@@ -101,19 +101,24 @@ func (a *GeminiCLIAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, 
 	result := &agent.AgentResult{}
 	var stderr bytes.Buffer
 	var summaryParts []string
+	var lastAssistantContent string
 
 	exitCode, err := provider.ExecStream(ctx, sandbox, cmd, func(line []byte) {
 		if len(bytes.TrimSpace(line)) == 0 {
 			return
 		}
-		parseGeminiStreamLine(line, result, logCh, &summaryParts)
+		parseGeminiStreamLine(line, result, logCh, &summaryParts, &lastAssistantContent)
 	}, &stderr)
 	if err != nil {
 		return nil, fmt.Errorf("exec gemini CLI: %w", err)
 	}
 
 	result.ExitCode = exitCode
-	result.Summary = strings.Join(summaryParts, "\n")
+	if len(summaryParts) > 0 {
+		result.Summary = strings.Join(summaryParts, "\n")
+	} else if lastAssistantContent != "" {
+		result.Summary = lastAssistantContent
+	}
 
 	if stderr.Len() > 0 {
 		logCh <- agent.LogEntry{
@@ -152,7 +157,7 @@ func (a *GeminiCLIAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, 
 }
 
 // parseGeminiStreamLine processes a single line of Gemini streaming output.
-func parseGeminiStreamLine(line []byte, result *agent.AgentResult, logCh chan<- agent.LogEntry, summaryParts *[]string) {
+func parseGeminiStreamLine(line []byte, result *agent.AgentResult, logCh chan<- agent.LogEntry, summaryParts *[]string, lastAssistant *string) {
 	var event geminiStreamEvent
 	if err := json.Unmarshal(line, &event); err != nil {
 		text := string(line)
@@ -205,7 +210,9 @@ func parseGeminiStreamLine(line []byte, result *agent.AgentResult, logCh chan<- 
 			Level:     "output",
 			Message:   content,
 		}
-		*summaryParts = append(*summaryParts, content)
+		// Individual text blocks are persisted as separate output logs —
+		// don't merge them into the summary. Track as fallback.
+		*lastAssistant = content
 		tryExtractConfidence(content, result)
 
 	case "tool_call", "tool_use":
@@ -394,6 +401,7 @@ func parseGeminiStreamOutput(output []byte, result *agent.AgentResult, logCh cha
 	// Parse as streaming JSONL line by line.
 	scanner := bufio.NewScanner(bytes.NewReader(output))
 	var summaryParts []string
+	var lastAssistantContent string
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -426,7 +434,7 @@ func parseGeminiStreamOutput(output []byte, result *agent.AgentResult, logCh cha
 				Level:     "output",
 				Message:   content,
 			}
-			summaryParts = append(summaryParts, content)
+			lastAssistantContent = content
 			tryExtractConfidence(content, result)
 
 		case "tool_call", "tool_use":
@@ -523,7 +531,11 @@ func parseGeminiStreamOutput(output []byte, result *agent.AgentResult, logCh cha
 		}
 	}
 
-	result.Summary = strings.Join(summaryParts, "\n")
+	if len(summaryParts) > 0 {
+		result.Summary = strings.Join(summaryParts, "\n")
+	} else if lastAssistantContent != "" {
+		result.Summary = lastAssistantContent
+	}
 }
 
 // shellEscapeGemini escapes single quotes for safe shell usage.

@@ -11,6 +11,15 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
+// Well-known failure categories.
+const (
+	FailureCategoryTooling    = "tooling"
+	FailureCategoryContext    = "context"
+	FailureCategoryValidation = "validation"
+	FailureCategoryComplexity = "complexity"
+	FailureCategoryCodexAuth  = "codex_auth_expired"
+)
+
 // FailureSummary holds a human-readable explanation of why an agent run failed,
 // along with classification metadata and actionable next steps.
 type FailureSummary struct {
@@ -81,7 +90,7 @@ func (s *FailureService) classifyFailure(run *models.Session) *FailureSummary {
 	if containsAny(errorMsg, "timeout", "deadline exceeded") {
 		return &FailureSummary{
 			Explanation:  "The agent ran out of time before completing the fix. This usually means the issue requires more analysis than the allocated time window allows.",
-			Category:     "tooling",
+			Category:     FailureCategoryTooling,
 			SubType:      "timeout",
 			NextSteps:    []string{"Retry with a higher complexity tier to allow more time", "Break the issue into smaller, more focused sub-tasks", "Provide additional context about the root cause to speed up analysis"},
 			RetryAdvised: true,
@@ -92,7 +101,7 @@ func (s *FailureService) classifyFailure(run *models.Session) *FailureSummary {
 	if containsAny(errorMsg, "oom", "killed", "signal", "crash", "out of memory") {
 		return &FailureSummary{
 			Explanation:  "The agent's sandbox environment crashed, likely due to running out of memory or being terminated by the system. This is an infrastructure issue, not a problem with the fix approach.",
-			Category:     "tooling",
+			Category:     FailureCategoryTooling,
 			SubType:      "sandbox_crash",
 			NextSteps:    []string{"Retry the run — sandbox crashes are usually transient", "If this keeps happening, the repository may need more resources to build", "Contact support if crashes persist across multiple retries"},
 			RetryAdvised: true,
@@ -103,7 +112,7 @@ func (s *FailureService) classifyFailure(run *models.Session) *FailureSummary {
 	if containsAny(errorMsg, "rate limit", "429", "503", "api error") {
 		return &FailureSummary{
 			Explanation:  "The agent encountered an API error, likely due to rate limiting or a temporary service outage. This is not related to the quality of the fix.",
-			Category:     "tooling",
+			Category:     FailureCategoryTooling,
 			SubType:      "api_error",
 			NextSteps:    []string{"Wait a few minutes and retry", "Check the status page for any ongoing service incidents", "If rate limiting persists, consider reducing concurrent agent runs"},
 			RetryAdvised: true,
@@ -114,7 +123,7 @@ func (s *FailureService) classifyFailure(run *models.Session) *FailureSummary {
 	if containsAny(errorMsg, "build failed", "compilation error", "syntax error") {
 		return &FailureSummary{
 			Explanation:  "The agent's changes caused a build failure. The generated code had compilation or syntax errors that prevented a successful build.",
-			Category:     "tooling",
+			Category:     FailureCategoryTooling,
 			SubType:      "build_failure",
 			NextSteps:    []string{"Review the build logs for specific errors", "Ensure the repository's build toolchain is properly configured", "Retry — the agent may produce a different, valid fix on a second attempt"},
 			RetryAdvised: true,
@@ -125,7 +134,7 @@ func (s *FailureService) classifyFailure(run *models.Session) *FailureSummary {
 	if diff == "" && errorMsg == "" {
 		return &FailureSummary{
 			Explanation:  "The agent was unable to produce a code change. It could not identify the right files to modify or determine a clear fix for this issue.",
-			Category:     "context",
+			Category:     FailureCategoryContext,
 			SubType:      "missing_context",
 			NextSteps:    []string{"Add more detail to the issue description, especially which files or functions are involved", "Link related issues or stack traces to provide more context", "Consider manually pointing the agent to the relevant code area"},
 			RetryAdvised: false,
@@ -137,7 +146,7 @@ func (s *FailureService) classifyFailure(run *models.Session) *FailureSummary {
 		containsAny(resultSummary, "test failed", "test regression", "tests failed") {
 		return &FailureSummary{
 			Explanation:  "The agent produced a fix, but it caused existing tests to fail. The change was rejected to protect against regressions.",
-			Category:     "validation",
+			Category:     FailureCategoryValidation,
 			SubType:      "test_regression",
 			NextSteps:    []string{"Review which tests failed to understand the regression", "The fix may be partially correct — consider refining the approach manually", "Retry with more context about the expected test behavior"},
 			RetryAdvised: true,
@@ -149,7 +158,7 @@ func (s *FailureService) classifyFailure(run *models.Session) *FailureSummary {
 		containsAny(resultSummary, "security violation", "security scan", "vulnerability") {
 		return &FailureSummary{
 			Explanation:  "The agent's fix was rejected because it introduced a security concern. The security scan flagged potential vulnerabilities in the generated code.",
-			Category:     "validation",
+			Category:     FailureCategoryValidation,
 			SubType:      "security_violation",
 			NextSteps:    []string{"Review the security scan results to understand the specific concern", "A human developer should address this issue with security best practices in mind", "Consider adding security-related context or constraints to the issue description"},
 			RetryAdvised: false,
@@ -160,7 +169,7 @@ func (s *FailureService) classifyFailure(run *models.Session) *FailureSummary {
 	if diff != "" && countLines(diff) > 500 {
 		return &FailureSummary{
 			Explanation:  "The agent produced a very large change spanning many lines. Changes of this size are often unreliable and may indicate the issue requires a more targeted approach.",
-			Category:     "complexity",
+			Category:     FailureCategoryComplexity,
 			SubType:      "multi_file_scope",
 			NextSteps:    []string{"Break the issue into smaller, more focused sub-tasks", "Identify the core change needed and create a narrower issue", "Consider having a human developer handle this architectural change"},
 			RetryAdvised: false,
