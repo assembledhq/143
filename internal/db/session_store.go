@@ -486,6 +486,29 @@ func (s *SessionStore) ListByIDs(ctx context.Context, orgID uuid.UUID, ids []uui
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
 }
 
+// GetLatestFailedByAgentType returns the ID of the most recent failed session
+// for the given org and agent type. Returns nil if none exists.
+func (s *SessionStore) GetLatestFailedByAgentType(ctx context.Context, orgID uuid.UUID, agentType models.AgentType) (*uuid.UUID, error) {
+	query := `
+		SELECT id FROM sessions
+		WHERE org_id = @org_id AND agent_type = @agent_type AND status = 'failed' AND deleted_at IS NULL
+		ORDER BY created_at DESC
+		LIMIT 1`
+
+	var id uuid.UUID
+	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"org_id":     orgID,
+		"agent_type": agentType,
+	}).Scan(&id)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("query latest failed session: %w", err)
+	}
+	return &id, nil
+}
+
 // UpdateTurnComplete sets the session to idle, persists the latest turn result,
 // and updates multi-turn metadata. It also computes diff_stats and appends
 // a snapshot to diff_history for diff-between-passes review.

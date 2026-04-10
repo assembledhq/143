@@ -22,7 +22,13 @@ type PMHandler struct {
 	jobStore         *db.JobStore
 	orgStore         *db.OrganizationStore
 	pmDocStore       *db.PMDocumentStore // nil-safe: context endpoints disabled if nil
+	sessionStore     *db.SessionStore    // nil-safe: failed session lookup disabled if nil
 	audit            *db.AuditEmitter
+}
+
+// SetSessionStore injects the session store for failed PM session lookup.
+func (h *PMHandler) SetSessionStore(store *db.SessionStore) {
+	h.sessionStore = store
 }
 
 // SetAuditEmitter injects the audit emitter for logging PM events.
@@ -251,6 +257,15 @@ func (h *PMHandler) Status(w http.ResponseWriter, r *http.Request) {
 		if showError {
 			status.LastError = &failedJob.LastError
 			status.LastFailedAt = &failedJob.UpdatedAt
+
+			// Look up the latest failed PM session so the UI can link to its logs.
+			if h.sessionStore != nil {
+				sessionID, err := h.sessionStore.GetLatestFailedByAgentType(r.Context(), orgID, models.AgentTypePMAgent)
+				if err == nil && sessionID != nil {
+					sid := sessionID.String()
+					status.LastFailedSessionID = &sid
+				}
+			}
 		}
 	}
 

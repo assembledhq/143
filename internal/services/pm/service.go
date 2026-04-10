@@ -391,6 +391,15 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	plan, err := parsePlan(result.Summary)
 	if err != nil {
 		failSession()
+		sessionID := ""
+		if pmSession != nil {
+			sessionID = pmSession.ID.String()
+			s.logger.Error().
+				Str("session_id", sessionID).
+				Str("agent_output", result.Summary).
+				Err(err).
+				Msg("failed to parse PM plan from agent output")
+		}
 		return nil, fmt.Errorf("parse plan: %w", err)
 	}
 

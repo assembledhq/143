@@ -444,6 +444,7 @@ export interface PMStatus {
   next_run_at?: string;
   last_error?: string;
   last_failed_at?: string;
+  last_failed_session_id?: string;
 }
 
 export interface SessionsListResponse {

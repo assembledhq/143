@@ -73,6 +73,12 @@ function getDocumentsSummary(documents: PMDocument[]): string {
   return `${documents.length} attached`;
 }
 
+function truncateError(error?: string): string | undefined {
+  if (!error) return undefined;
+  if (error.length <= 150) return error;
+  return error.slice(0, 150).trim() + "...";
+}
+
 export function formatFreshness(lastRunAt?: string, now = Date.now()): string {
   if (!lastRunAt) return "No analysis yet";
   const delta = now - new Date(lastRunAt).getTime();
@@ -130,7 +136,7 @@ export function deriveAutopilotViewModel({
   if (pmStatus.last_error || pmStatus.last_run_status === "failed") {
     heroMode = "attention";
     heroTitle = "Attention needed";
-    heroBody = pmStatus.last_error || "The last analysis failed. Review setup or rerun the PM agent.";
+    heroBody = truncateError(pmStatus.last_error) || "The last analysis failed. Review setup or rerun the PM agent.";
     primaryActionLabel = "Run analysis";
   } else if (!latestPlan) {
     heroMode = "first_analysis";

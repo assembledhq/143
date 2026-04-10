@@ -10,7 +10,14 @@ func parsePlan(output string) (*Plan, error) {
 	start := strings.Index(output, "<pm-plan>")
 	end := strings.Index(output, "</pm-plan>")
 	if start == -1 || end == -1 || end <= start {
-		return nil, fmt.Errorf("pm plan tags not found")
+		preview := output
+		if len(preview) > 200 {
+			preview = preview[:200] + "..."
+		}
+		if preview == "" {
+			preview = "(empty)"
+		}
+		return nil, fmt.Errorf("pm plan tags not found in agent output: %s", preview)
 	}
 
 	content := strings.TrimSpace(output[start+len("<pm-plan>") : end])
