@@ -70,13 +70,13 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 		msg := shellEscapeDouble(prompt.UserMessage)
 		if prompt.ResumeSessionID != "" {
 			cmd = fmt.Sprintf(
-				"codex exec resume --dangerously-bypass-approvals-and-sandbox --sandbox danger-full-access --skip-git-repo-check --json %s \"%s\"",
+				"codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json %s \"%s\"",
 				shellEscapeCodex(prompt.ResumeSessionID),
 				msg,
 			)
 		} else {
 			cmd = fmt.Sprintf(
-				"codex exec resume --last --dangerously-bypass-approvals-and-sandbox --sandbox danger-full-access --skip-git-repo-check --json \"%s\"",
+				"codex exec resume --last --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json \"%s\"",
 				msg,
 			)
 		}
@@ -88,7 +88,7 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 			return nil, fmt.Errorf("write prompt file: %w", err)
 		}
 		cmd = fmt.Sprintf(
-			"codex exec --dangerously-bypass-approvals-and-sandbox --sandbox danger-full-access --skip-git-repo-check --json \"$(cat '%s')\"",
+			"codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json \"$(cat '%s')\"",
 			shellEscapeCodex(promptPath),
 		)
 	}
