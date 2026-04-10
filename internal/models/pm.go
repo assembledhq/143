@@ -111,4 +111,5 @@ type PMStatus struct {
 	NextRunAt      *time.Time `json:"next_run_at,omitempty"`
 	LastError      *string    `json:"last_error,omitempty"`
 	LastFailedAt   *time.Time `json:"last_failed_at,omitempty"`
+	LastFailedSessionID *string `json:"last_failed_session_id,omitempty"`
 }
