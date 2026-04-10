@@ -19,6 +19,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/prompts"
+	"github.com/assembledhq/143/internal/services"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/feedback"
 	ghservice "github.com/assembledhq/143/internal/services/github"
@@ -107,6 +108,7 @@ type Stores struct {
 	EvalBatches         *db.EvalBatchStore     // nil-safe: eval feature
 	EvalBootstraps      *db.EvalBootstrapStore // nil-safe: eval bootstrap feature
 	Repositories        *db.RepositoryStore    // nil-safe: needed for eval repo lookup
+	SessionMessages     *db.SessionMessageStore // nil-safe: needed for title regeneration
 }
 
 // MemoryReinforcer retrieves and reinforces memories for a repo.
@@ -129,6 +131,7 @@ type Services struct {
 	SlackSummarizer *ingestion.SlackSummarizer // nil-safe: Slack summarization disabled if nil
 	LLM             llmClient        // nil-safe: needed for eval LLM judge grading
 	GitHub          agent.GitHubTokenProvider // nil-safe: needed for eval repo cloning
+	TitleService    *services.SessionTitleService // nil-safe: session title regeneration
 }
 
 // llmClient is the interface for LLM completion calls used by eval graders.
@@ -626,7 +629,20 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			Int("current_turn", session.CurrentTurn).
 			Msg("starting continue_session job")
 
-		return services.Orchestrator.ContinueSession(ctx, &session)
+		if err := services.Orchestrator.ContinueSession(ctx, &session); err != nil {
+			return err
+		}
+
+		// Regenerate title if due (every 3 turns). Non-fatal — log and continue.
+		if services.TitleService != nil {
+			updated, fetchErr := stores.Sessions.GetByID(ctx, orgID, sessionID)
+			if fetchErr == nil {
+				if titleErr := services.TitleService.MaybeRegenerateTitle(ctx, orgID, sessionID, updated.CurrentTurn); titleErr != nil {
+					logger.Warn().Err(titleErr).Str("session_id", sessionID.String()).Msg("failed to regenerate session title")
+				}
+			}
+		}
+		return nil
 	}
 }
 
