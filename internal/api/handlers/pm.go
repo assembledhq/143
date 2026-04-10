@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
@@ -249,7 +251,14 @@ func (h *PMHandler) Status(w http.ResponseWriter, r *http.Request) {
 		// Only show the error if it's newer than the last successful plan.
 		showError := status.LastRunAt == nil || failedJob.UpdatedAt.After(*status.LastRunAt)
 		if showError {
-			status.LastError = &failedJob.LastError
+			displayError := failedJob.LastError
+			// Extract embedded session ID (format: "... [session_id=<uuid>]: ...")
+			// and strip it from the user-facing error message.
+			if sid := extractSessionID(failedJob.LastError); sid != "" {
+				status.LastFailedSessionID = &sid
+				displayError = strings.Replace(displayError, " [session_id="+sid+"]", "", 1)
+			}
+			status.LastError = &displayError
 			status.LastFailedAt = &failedJob.UpdatedAt
 		}
 	}
@@ -453,4 +462,16 @@ func (h *PMHandler) RejectRefresh(w http.ResponseWriter, r *http.Request) {
 	emitUserAudit(h.audit, r, models.AuditActionPMRefreshRejected, models.AuditResourcePMDocument, &refreshIDStr, nil)
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+var sessionIDRe = regexp.MustCompile(`\[session_id=([0-9a-f-]{36})\]`)
+
+// extractSessionID parses an embedded session ID from an error string
+// formatted as "... [session_id=<uuid>]: ...". Returns "" if not found.
+func extractSessionID(errMsg string) string {
+	m := sessionIDRe.FindStringSubmatch(errMsg)
+	if len(m) < 2 {
+		return ""
+	}
+	return m[1]
 }
