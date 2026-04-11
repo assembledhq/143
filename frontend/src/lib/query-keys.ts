@@ -47,6 +47,14 @@ export const queryKeys = {
   team: {
     members: ["team", "members"] as const,
   },
+  usage: {
+    summary: (params: { start: string; end: string }) =>
+      ["usage", "summary", params] as const,
+    timeseries: (params: { start: string; end: string; group_by?: string; user_id?: string; capacity?: string }) =>
+      ["usage", "timeseries", params] as const,
+    breakdown: (params: { start: string; end: string; dimension?: string; sort?: string }) =>
+      ["usage", "breakdown", params] as const,
+  },
   evals: {
     tasks: (params?: Record<string, string | undefined>) => ["evals", "tasks", params] as const,
     taskDetail: (id: string) => ["evals", "task", id] as const,

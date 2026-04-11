@@ -1,7 +1,10 @@
 package handlers
 
 import (
+	"encoding/csv"
+	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -14,7 +17,8 @@ import (
 
 // UsageHandler exposes container usage data for billing dashboards.
 type UsageHandler struct {
-	usageStore *db.ContainerUsageStore
+	usageStore  *db.ContainerUsageStore
+	rollupStore *db.UsageRollupStore
 }
 
 // NewUsageHandler creates a UsageHandler.
@@ -22,11 +26,55 @@ func NewUsageHandler(usageStore *db.ContainerUsageStore) *UsageHandler {
 	return &UsageHandler{usageStore: usageStore}
 }
 
+// SetRollupStore wires the rollup store for timeseries/breakdown/export endpoints.
+func (h *UsageHandler) SetRollupStore(rs *db.UsageRollupStore) {
+	h.rollupStore = rs
+}
+
+// parseTimeRange extracts start/end from query params with defaults and validation.
+func parseTimeRange(r *http.Request, w http.ResponseWriter) (start, end time.Time, ok bool) {
+	now := time.Now().UTC()
+	start = now.AddDate(0, 0, -30)
+	end = now
+
+	if s := r.URL.Query().Get("start"); s != "" {
+		parsed, err := time.Parse(time.RFC3339, s)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "start must be RFC3339 format")
+			return time.Time{}, time.Time{}, false
+		}
+		start = parsed
+	}
+	if e := r.URL.Query().Get("end"); e != "" {
+		parsed, err := time.Parse(time.RFC3339, e)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "end must be RFC3339 format")
+			return time.Time{}, time.Time{}, false
+		}
+		end = parsed
+	}
+
+	if !start.Before(end) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "start must be before end")
+		return time.Time{}, time.Time{}, false
+	}
+
+	const maxRange = 90 * 24 * time.Hour
+	if end.Sub(start) > maxRange {
+		writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "time range must not exceed 90 days")
+		return time.Time{}, time.Time{}, false
+	}
+
+	return start, end, true
+}
+
 // GetSummary returns aggregated container usage for the org over a time period.
 //
-//	GET /api/v1/orgs/{orgID}/usage?start=2026-04-01T00:00:00Z&end=2026-05-01T00:00:00Z
+//	GET /api/v1/usage?start=2026-04-01T00:00:00Z&end=2026-05-01T00:00:00Z
 //
 // Defaults to the current calendar month if start/end are omitted.
+// NOTE: This intentionally does NOT use parseTimeRange because it defaults to
+// the current calendar month, while parseTimeRange defaults to last 30 days.
 func (h *UsageHandler) GetSummary(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
@@ -73,7 +121,7 @@ func (h *UsageHandler) GetSummary(w http.ResponseWriter, r *http.Request) {
 
 // ListBySession returns all container usage events for a given session.
 //
-//	GET /api/v1/orgs/{orgID}/sessions/{sessionID}/usage
+//	GET /api/v1/sessions/{id}/usage
 func (h *UsageHandler) ListBySession(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
@@ -91,4 +139,267 @@ func (h *UsageHandler) ListBySession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, models.ListResponse[models.ContainerUsageEvent]{
 		Data: events,
 	})
+}
+
+// GetTimeseries returns hourly-bucketed usage data from the rollup table.
+//
+//	GET /api/v1/usage/timeseries?start=...&end=...&group_by=hour&user_id=...&capacity=...
+func (h *UsageHandler) GetTimeseries(w http.ResponseWriter, r *http.Request) {
+	if h.rollupStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "NOT_READY", "usage rollup not available")
+		return
+	}
+
+	orgID := middleware.OrgIDFromContext(r.Context())
+	start, end, ok := parseTimeRange(r, w)
+	if !ok {
+		return
+	}
+
+	groupBy := r.URL.Query().Get("group_by")
+	if groupBy == "" {
+		groupBy = "hour"
+	}
+
+	var userID *uuid.UUID
+	if uid := r.URL.Query().Get("user_id"); uid != "" {
+		parsed, err := uuid.Parse(uid)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "invalid user_id")
+			return
+		}
+		userID = &parsed
+	}
+
+	var capacity *string
+	if c := r.URL.Query().Get("capacity"); c != "" {
+		capacity = &c
+	}
+
+	buckets, err := h.rollupStore.GetTimeseries(r.Context(), orgID, start, end, groupBy, userID, capacity)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL", "failed to fetch usage timeseries", err)
+		return
+	}
+	if buckets == nil {
+		buckets = []models.UsageTimeseriesBucket{}
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.UsageTimeseriesResponse]{
+		Data: models.UsageTimeseriesResponse{
+			Buckets:     buckets,
+			PeriodStart: start,
+			PeriodEnd:   end,
+		},
+	})
+}
+
+// GetBreakdown returns a dimensional breakdown of usage.
+//
+//	GET /api/v1/usage/breakdown?start=...&end=...&dimension=user&sort=minutes_desc&limit=50
+func (h *UsageHandler) GetBreakdown(w http.ResponseWriter, r *http.Request) {
+	if h.rollupStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "NOT_READY", "usage rollup not available")
+		return
+	}
+
+	orgID := middleware.OrgIDFromContext(r.Context())
+	start, end, ok := parseTimeRange(r, w)
+	if !ok {
+		return
+	}
+
+	dimension := r.URL.Query().Get("dimension")
+	if dimension == "" {
+		dimension = "user"
+	}
+
+	sortBy := r.URL.Query().Get("sort")
+	if sortBy == "" {
+		sortBy = "minutes_desc"
+	}
+
+	limit := 50
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 && parsed <= 500 {
+			limit = parsed
+		}
+	}
+
+	rows, err := h.rollupStore.GetBreakdown(r.Context(), orgID, start, end, dimension, sortBy, limit)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL", "failed to fetch usage breakdown", err)
+		return
+	}
+	if rows == nil {
+		rows = []models.UsageBreakdownRow{}
+	}
+
+	writeJSON(w, http.StatusOK, models.ListResponse[models.UsageBreakdownRow]{Data: rows})
+}
+
+// ExportCSV streams usage data as a CSV download.
+// This is a read-only GET endpoint so CSRF is not required; the browser will
+// include auth cookies automatically via same-origin window.open().
+//
+//	GET /api/v1/usage/export?start=...&end=...&granularity=daily&dimension=none&tz=America/Los_Angeles
+func (h *UsageHandler) ExportCSV(w http.ResponseWriter, r *http.Request) {
+	if h.rollupStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "NOT_READY", "usage rollup not available")
+		return
+	}
+
+	orgID := middleware.OrgIDFromContext(r.Context())
+	start, end, ok := parseTimeRange(r, w)
+	if !ok {
+		return
+	}
+
+	dimension := r.URL.Query().Get("dimension")
+	if dimension == "" {
+		dimension = "none"
+	}
+
+	granularity := r.URL.Query().Get("granularity")
+	if granularity == "" {
+		granularity = "daily"
+	}
+
+	tzName := r.URL.Query().Get("tz")
+	if tzName == "" {
+		tzName = "UTC"
+	}
+	loc, err := time.LoadLocation(tzName)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "invalid timezone")
+		return
+	}
+
+	rows, err := h.rollupStore.GetExportRows(r.Context(), orgID, start, end, dimension)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL", "failed to export usage", err)
+		return
+	}
+	defer rows.Close()
+
+	filename := fmt.Sprintf("usage-%s-to-%s.csv", start.Format("2006-01-02"), end.Format("2006-01-02"))
+	w.Header().Set("Content-Type", "text/csv")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+
+	cw := csv.NewWriter(w)
+
+	// Write header.
+	header := []string{"date"}
+	if granularity == "hourly" {
+		header = append(header, "hour_utc")
+	}
+	if dimension == "user" {
+		header = append(header, "user_email")
+	}
+	if dimension == "capacity" {
+		header = append(header, "capacity_tier")
+	}
+	header = append(header, "container_minutes", "sessions", "container_starts", "peak_concurrent", "input_tokens", "output_tokens", "llm_cost_usd")
+	_ = cw.Write(header)
+
+	// Track daily aggregation for daily granularity.
+	type dailyKey struct {
+		date      string
+		email     string
+		capacity  string
+	}
+	type dailyRow struct {
+		minutes  float64
+		sessions int
+		starts   int
+		peak     int
+		inTok    int64
+		outTok   int64
+		cost     float64
+	}
+	dailyAgg := make(map[dailyKey]*dailyRow)
+	var dailyOrder []dailyKey
+
+	for rows.Next() {
+		var (
+			hourUTC      time.Time
+			userEmail    string
+			capacityTier string
+			minutes      float64
+			sessions     int
+			starts       int
+			peak         int
+			inTok        int64
+			outTok       int64
+			cost         float64
+		)
+		if err := rows.Scan(&hourUTC, &userEmail, &capacityTier, &minutes, &sessions, &starts, &peak, &inTok, &outTok, &cost); err != nil {
+			break
+		}
+
+		localTime := hourUTC.In(loc)
+		dateStr := localTime.Format("2006-01-02")
+
+		if granularity == "hourly" {
+			record := []string{dateStr, hourUTC.Format(time.RFC3339)}
+			if dimension == "user" {
+				record = append(record, userEmail)
+			}
+			if dimension == "capacity" {
+				record = append(record, capacityTier)
+			}
+			record = append(record,
+				fmt.Sprintf("%.2f", minutes),
+				strconv.Itoa(sessions),
+				strconv.Itoa(starts),
+				strconv.Itoa(peak),
+				strconv.FormatInt(inTok, 10),
+				strconv.FormatInt(outTok, 10),
+				fmt.Sprintf("%.2f", cost),
+			)
+			_ = cw.Write(record)
+		} else {
+			key := dailyKey{date: dateStr, email: userEmail, capacity: capacityTier}
+			agg, ok := dailyAgg[key]
+			if !ok {
+				agg = &dailyRow{}
+				dailyAgg[key] = agg
+				dailyOrder = append(dailyOrder, key)
+			}
+			agg.minutes += minutes
+			agg.sessions += sessions
+			agg.starts += starts
+			if peak > agg.peak {
+				agg.peak = peak
+			}
+			agg.inTok += inTok
+			agg.outTok += outTok
+			agg.cost += cost
+		}
+	}
+
+	if granularity == "daily" {
+		for _, key := range dailyOrder {
+			agg := dailyAgg[key]
+			record := []string{key.date}
+			if dimension == "user" {
+				record = append(record, key.email)
+			}
+			if dimension == "capacity" {
+				record = append(record, key.capacity)
+			}
+			record = append(record,
+				fmt.Sprintf("%.2f", agg.minutes),
+				strconv.Itoa(agg.sessions),
+				strconv.Itoa(agg.starts),
+				strconv.Itoa(agg.peak),
+				strconv.FormatInt(agg.inTok, 10),
+				strconv.FormatInt(agg.outTok, 10),
+				fmt.Sprintf("%.2f", agg.cost),
+			)
+			_ = cw.Write(record)
+		}
+	}
+
+	cw.Flush()
 }

@@ -1,6 +1,6 @@
 # Design: Billing & Usage Dashboard
 
-> **Status:** Not Started | **Last reviewed:** 2026-04-09
+> **Status:** Implemented | **Last reviewed:** 2026-04-10
 
 A new settings page (`/settings/usage`) that displays container usage and LLM token consumption, allows day-by-day exploration, per-user breakdowns, filtering, and CSV export. Backed by new API endpoints optimized for time-series and dimensional queries over existing tables plus a new hourly rollup table.
 

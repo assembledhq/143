@@ -198,8 +198,10 @@ func main() {
 		go w.Start(ctx)
 		logger.Info().Msg("worker started with registered handlers")
 
+		usageRollupStore := db.NewUsageRollupStore(pool)
 		reaper := agent.NewSessionReaper(sessionStore, snapshotStore, cfg.SessionMaxIdleAge, cfg.SessionMaxSnapshotAge, cfg.SessionReaperInterval, logger,
 			agent.WithOrphanCloser(db.NewContainerUsageStore(pool)),
+			agent.WithUsageRoller(usageRollupStore),
 		)
 		go reaper.Run(ctx)
 

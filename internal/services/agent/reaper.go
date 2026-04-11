@@ -16,19 +16,28 @@ type OrphanCloser interface {
 	CloseOrphans(ctx context.Context, startedBefore time.Time) (int64, error)
 }
 
+// UsageRoller computes and upserts hourly usage rollups.
+type UsageRoller interface {
+	RollupAllOrgs(ctx context.Context, hour time.Time) error
+	DeleteOlderThan(ctx context.Context, cutoff time.Time) (int64, error)
+}
+
 // SessionReaper periodically cleans up stale sessions and expired snapshots
-// in three phases:
+// in four phases:
 //   - Phase 1: Transition idle sessions to completed (keep snapshots)
 //   - Phase 2: Delete snapshots that have exceeded the max snapshot age
 //   - Phase 3: Close orphaned container usage events for billing accuracy
+//   - Phase 4: Roll up hourly usage data and clean up old rollup rows
 type SessionReaper struct {
-	sessions       StaleSessionLister
-	snapshotStore  storage.SnapshotStore
-	orphanCloser   OrphanCloser // nil-safe — billing orphan cleanup disabled if nil
-	maxIdleAge     time.Duration
-	maxSnapshotAge time.Duration
-	interval       time.Duration
-	logger         zerolog.Logger
+	sessions         StaleSessionLister
+	snapshotStore    storage.SnapshotStore
+	orphanCloser     OrphanCloser // nil-safe — billing orphan cleanup disabled if nil
+	usageRoller      UsageRoller  // nil-safe — usage rollup disabled if nil
+	maxIdleAge       time.Duration
+	maxSnapshotAge   time.Duration
+	interval         time.Duration
+	logger           zerolog.Logger
+	lastRetentionRun time.Time // throttles retention cleanup to once per hour
 }
 
 // StaleSessionLister is the subset of the session store used by the reaper.
@@ -45,6 +54,11 @@ type SessionReaperOption func(*SessionReaper)
 // WithOrphanCloser enables billing orphan cleanup in the reaper.
 func WithOrphanCloser(oc OrphanCloser) SessionReaperOption {
 	return func(r *SessionReaper) { r.orphanCloser = oc }
+}
+
+// WithUsageRoller enables hourly usage rollup in the reaper.
+func WithUsageRoller(ur UsageRoller) SessionReaperOption {
+	return func(r *SessionReaper) { r.usageRoller = ur }
 }
 
 // NewSessionReaper creates a reaper that runs every interval, cleaning up
@@ -148,6 +162,36 @@ func (r *SessionReaper) reap(ctx context.Context) {
 			r.logger.Error().Err(err).Msg("reaper: failed to close orphaned container usage events")
 		} else if closed > 0 {
 			r.logger.Info().Int64("count", closed).Msg("reaper: closed orphaned container usage events")
+		}
+	}
+
+	// Phase 4: Roll up hourly usage data for the billing dashboard.
+	// Re-rolls the current hour on each run to keep the dashboard near-real-time.
+	// Also catches up the previous hour in case it was missed.
+	if r.usageRoller != nil {
+		now := time.Now().UTC()
+		currentHour := now.Truncate(time.Hour)
+		prevHour := currentHour.Add(-time.Hour)
+
+		for _, h := range []time.Time{prevHour, currentHour} {
+			if err := r.usageRoller.RollupAllOrgs(ctx, h); err != nil {
+				r.logger.Error().Err(err).Time("hour", h).Msg("reaper: failed to roll up hourly usage")
+			}
+		}
+
+		// Clean up rollup rows older than 90 days — throttled to once per hour
+		// to avoid running a DELETE scan on every reaper tick.
+		if now.Sub(r.lastRetentionRun) >= time.Hour {
+			cutoff := now.AddDate(0, 0, -90)
+			deleted, err := r.usageRoller.DeleteOlderThan(ctx, cutoff)
+			if err != nil {
+				r.logger.Error().Err(err).Msg("reaper: failed to clean up old usage rollup rows")
+			} else {
+				if deleted > 0 {
+					r.logger.Info().Int64("count", deleted).Msg("reaper: cleaned up old usage rollup rows")
+				}
+				r.lastRetentionRun = now
+			}
 		}
 	}
 }

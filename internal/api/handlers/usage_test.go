@@ -2,9 +2,11 @@ package handlers
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -117,4 +119,49 @@ func TestUsageHandler_ListBySession(t *testing.T) {
 	require.Len(t, resp.Data, 1)
 	require.Equal(t, "ctr-1", resp.Data[0].ContainerID)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestUsageHandler_ExportCSV_DailyDoesNotDoubleCountSessionsAcrossHours(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	usageStore := db.NewContainerUsageStore(mock)
+	rollupStore := db.NewUsageRollupStore(mock)
+	handler := NewUsageHandler(usageStore)
+	handler.SetRollupStore(rollupStore)
+
+	orgID := uuid.New()
+	start := "2026-04-01T00:00:00Z"
+	end := "2026-04-02T00:00:00Z"
+
+	mock.ExpectQuery("SELECT uh.hour_utc").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"hour_utc", "user_email", "capacity_tier",
+				"total_container_minutes", "total_sessions", "total_container_starts",
+				"peak_concurrent", "total_input_tokens", "total_output_tokens", "total_llm_cost_usd",
+			}).
+				AddRow(time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC), "", "", 30.0, 1, 1, 1, int64(100), int64(50), 0.25).
+				AddRow(time.Date(2026, 4, 1, 1, 0, 0, 0, time.UTC), "", "", 15.0, 1, 0, 1, int64(0), int64(0), 0.00),
+		)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/export?start="+start+"&end="+end+"&granularity=daily&dimension=none&tz=UTC", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.ExportCSV(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "daily export should return HTTP 200")
+
+	reader := csv.NewReader(strings.NewReader(rr.Body.String()))
+	records, err := reader.ReadAll()
+	require.NoError(t, err, "daily export should return valid CSV")
+	require.Len(t, records, 2, "daily export should include header plus one data row")
+	require.Equal(t, "sessions", records[0][2], "daily export should include the sessions column")
+	require.Equal(t, "1", records[1][2], "daily export should count a cross-hour session once per day")
+	require.NoError(t, mock.ExpectationsWereMet(), "all export queries should be executed")
 }
