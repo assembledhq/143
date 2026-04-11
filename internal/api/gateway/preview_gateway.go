@@ -193,15 +193,7 @@ func (g *Gateway) handleBootstrapExchange(w http.ResponseWriter, r *http.Request
 
 	// Set the preview session cookie (HMAC-signed).
 	cookieValue := encodeCookieValue(g.cookieSecret, sess.OrgID, previewID, sess.ID)
-	http.SetCookie(w, &http.Cookie{
-		Name:     "__Host-preview_session",
-		Value:    cookieValue,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   r.TLS != nil,
-		SameSite: http.SameSiteStrictMode,
-		Expires:  sess.ExpiresAt,
-	})
+	http.SetCookie(w, previewSessionCookie(cookieValue, sess.ExpiresAt))
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -237,15 +229,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 	// Refresh the session cookie expiry on each successful request so that
 	// active users are not logged out after the initial 5-minute window.
 	refreshedCookie := encodeCookieValue(g.cookieSecret, orgID, previewID, accessSessionID)
-	http.SetCookie(w, &http.Cookie{
-		Name:     "__Host-preview_session",
-		Value:    refreshedCookie,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   r.TLS != nil,
-		SameSite: http.SameSiteStrictMode,
-		Expires:  time.Now().Add(5 * time.Minute),
-	})
+	http.SetCookie(w, previewSessionCookie(refreshedCookie, time.Now().Add(5*time.Minute)))
 
 	// Record activity for idle timeout tracking.
 	if err := g.manager.RecordAccess(r.Context(), orgID, previewID); err != nil {
@@ -331,8 +315,9 @@ func (g *Gateway) handleWebSocket(w http.ResponseWriter, r *http.Request, orgID,
 	}
 	defer clientConn.Close()
 
-	// Forward the original request to the backend.
-	if err := r.Write(backendConn); err != nil {
+	// Forward a sanitized copy of the original request to the backend.
+	backendReq := cloneWebSocketRequestForBackend(r)
+	if err := backendReq.Write(backendConn); err != nil {
 		g.logger.Warn().Err(err).Msg("websocket: failed to forward upgrade request")
 		return
 	}
@@ -629,6 +614,25 @@ func stripPreviewCookie(req *http.Request) {
 			req.AddCookie(c)
 		}
 	}
+}
+
+func previewSessionCookie(value string, expiresAt time.Time) *http.Cookie {
+	return &http.Cookie{
+		Name:     "__Host-preview_session",
+		Value:    value,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+		Expires:  expiresAt,
+	}
+}
+
+func cloneWebSocketRequestForBackend(req *http.Request) *http.Request {
+	cloned := req.Clone(req.Context())
+	cloned.Header = req.Header.Clone()
+	stripPreviewCookie(cloned)
+	return cloned
 }
 
 // =============================================================================

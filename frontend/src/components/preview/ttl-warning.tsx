@@ -60,7 +60,10 @@ export function TTLWarning({ expiresAt, sessionId }: TTLWarningProps) {
     formatRemainingTime(expiresAt)
   );
   const expiresAtRef = useRef(expiresAt);
-  expiresAtRef.current = expiresAt;
+
+  useEffect(() => {
+    expiresAtRef.current = expiresAt;
+  }, [expiresAt]);
 
   // Update remaining time every second
   useEffect(() => {

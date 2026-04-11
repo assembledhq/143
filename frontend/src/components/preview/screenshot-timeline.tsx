@@ -38,7 +38,7 @@ const TRIGGER_COLORS: Record<PreviewTrigger, string> = {
 };
 
 export function ScreenshotTimeline({
-  sessionId,
+  sessionId: _sessionId,
   snapshots,
 }: ScreenshotTimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null);

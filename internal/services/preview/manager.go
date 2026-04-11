@@ -572,8 +572,13 @@ func (m *Manager) RecyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 		m.logger.Error().Err(err).Str("status", string(nextStatus)).Msg("recycle: failed to set preview status")
 	}
 
-	// Reset expiry.
-	if err := m.store.UpdatePreviewExpiry(ctx, orgID, previewID, time.Now().Add(DefaultHardTTL)); err != nil {
+	// Reset expiry without extending beyond the preview's hard max lifetime.
+	newExpiry := time.Now().Add(DefaultHardTTL)
+	maxExpiry := instance.CreatedAt.Add(DefaultMaxTTL)
+	if newExpiry.After(maxExpiry) {
+		newExpiry = maxExpiry
+	}
+	if err := m.store.UpdatePreviewExpiry(ctx, orgID, previewID, newExpiry); err != nil {
 		m.logger.Warn().Err(err).Msg("recycle: failed to reset expiry")
 	}
 

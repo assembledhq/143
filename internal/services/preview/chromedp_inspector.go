@@ -720,10 +720,20 @@ func gifPalette() color.Palette {
 	for r := 0; r < 6; r++ {
 		for g := 0; g < 6; g++ {
 			for b := 0; b < 6; b++ {
+				rv, gv, bv := r*51, g*51, b*51
+				if rv > 255 {
+					rv = 255
+				}
+				if gv > 255 {
+					gv = 255
+				}
+				if bv > 255 {
+					bv = 255
+				}
 				p[idx] = color.RGBA{
-					R: uint8(min(r*51, 255)),
-					G: uint8(min(g*51, 255)),
-					B: uint8(min(b*51, 255)),
+					R: uint8(rv), // #nosec G115 -- clamped above
+					G: uint8(gv), // #nosec G115 -- clamped above
+					B: uint8(bv), // #nosec G115 -- clamped above
 					A: 255,
 				}
 				idx++
@@ -731,7 +741,11 @@ func gifPalette() color.Palette {
 		}
 	}
 	for i := 0; i < 40; i++ {
-		gray := uint8(min(i*255/39, 255))
+		gv := i * 255 / 39
+		if gv > 255 {
+			gv = 255
+		}
+		gray := uint8(gv) // #nosec G115 -- clamped above
 		p[idx] = color.RGBA{R: gray, G: gray, B: gray, A: 255}
 		idx++
 	}
@@ -747,7 +761,7 @@ func (c *ChromeDPInspector) ExecuteInteraction(ctx context.Context, previewID st
 		return nil, fmt.Errorf("too many interaction steps: %d (max %d)", len(steps), maxInteractionSteps)
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, maxInteractionTimeout)
+	_, cancel := context.WithTimeout(ctx, maxInteractionTimeout)
 	defer cancel()
 
 	pc, err := c.getOrCreatePreviewCtx(previewID)
@@ -953,7 +967,7 @@ func (c *ChromeDPInspector) CaptureMultiViewport(ctx context.Context, previewID 
 // =============================================================================
 
 func (c *ChromeDPInspector) ComputeVisualDiff(ctx context.Context, previewID string, beforeSnapshotID, afterSnapshotID string) (*models.VisualDiff, error) {
-	ctx, cancel := context.WithTimeout(ctx, defaultOpTimeout)
+	_, cancel := context.WithTimeout(ctx, defaultOpTimeout)
 	defer cancel()
 
 	pc, err := c.getOrCreatePreviewCtx(previewID)
@@ -1181,10 +1195,10 @@ func generateDiffOverlay(before, after image.Image) ([]byte, error) {
 				// Semi-transparent grayscale for unchanged pixels.
 				r, g, b, _ := after.At(aBounds.Min.X+x, aBounds.Min.Y+y).RGBA()
 				grayVal := (r/256 + g/256 + b/256) / 3
-			if grayVal > 255 {
-				grayVal = 255
-			}
-			gray := uint8(grayVal)
+				if grayVal > 255 {
+					grayVal = 255
+				}
+				gray := uint8(grayVal) // #nosec G115 -- clamped above
 				overlay.Set(x, y, color.RGBA{R: gray, G: gray, B: gray, A: 100})
 			}
 		}
@@ -1209,7 +1223,7 @@ func absDiff(a, b uint32) uint32 {
 // =============================================================================
 
 func (c *ChromeDPInspector) RunAssertions(ctx context.Context, previewID string, assertions []Assertion) (*AssertionResult, error) {
-	ctx, cancel := context.WithTimeout(ctx, defaultOpTimeout)
+	_, cancel := context.WithTimeout(ctx, defaultOpTimeout)
 	defer cancel()
 
 	pc, err := c.getOrCreatePreviewCtx(previewID)

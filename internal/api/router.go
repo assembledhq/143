@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -313,7 +314,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		go func() {
 			addr := fmt.Sprintf(":%d", cfg.PreviewGatewayPort)
 			logger.Info().Str("addr", addr).Msg("starting preview gateway")
-			gwSrv := &http.Server{Addr: addr, Handler: gw}
+			gwSrv := &http.Server{Addr: addr, Handler: gw, ReadHeaderTimeout: 10 * time.Second}
 			if gwErr := gwSrv.ListenAndServe(); gwErr != nil && gwErr != http.ErrServerClosed {
 				logger.Error().Err(gwErr).Msg("preview gateway failed")
 			}

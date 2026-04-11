@@ -31,13 +31,19 @@ import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
 import type {
   PreviewStatus,
-  PreviewInstance,
   PreviewPhase,
 } from "@/lib/preview-types";
 import { ScreenshotTimeline } from "./screenshot-timeline";
 import { ConsoleBadge } from "./console-badge";
 import { DesignModeOverlay } from "./design-mode-overlay";
 import { TTLWarning } from "./ttl-warning";
+
+export const PREVIEW_BOOTSTRAP_READY_EVENT = "preview_bootstrap_ready";
+export const PREVIEW_BOOTSTRAP_TOKEN_EVENT = "preview_bootstrap_token";
+
+export function buildPreviewIframeSrc(previewOrigin: string): string {
+  return `${previewOrigin}/bootstrap`;
+}
 
 export interface PreviewPanelProps {
   sessionId: string;
@@ -117,7 +123,7 @@ const KNOWN_FAILURE_PATTERNS: Record<string, string> = {
 
 export function PreviewPanel({
   sessionId,
-  orgId,
+  orgId: _orgId,
   previewOriginTemplate,
 }: PreviewPanelProps) {
   const queryClient = useQueryClient();
@@ -125,7 +131,7 @@ export function PreviewPanel({
   const [selectedWidth, setSelectedWidth] = useState<number>(0); // 0 = full
   const [designMode, setDesignMode] = useState(false);
   const [bootstrapComplete, setBootstrapComplete] = useState(false);
-  const [iframeLoaded, setIframeLoaded] = useState(false);
+  const [_iframeLoaded, setIframeLoaded] = useState(false);
   const [mutationError, setMutationError] = useState<string | null>(null);
 
   // Poll preview status every 3s when active
@@ -220,7 +226,7 @@ export function PreviewPanel({
       const contentWindow = iframeRef.current?.contentWindow;
       if (contentWindow) {
         contentWindow.postMessage(
-          { type: "preview-bootstrap", token },
+          { type: PREVIEW_BOOTSTRAP_TOKEN_EVENT, token },
           origin
         );
         setBootstrapComplete(true);
@@ -234,7 +240,7 @@ export function PreviewPanel({
         const cw = iframe.contentWindow;
         if (cw) {
           cw.postMessage(
-            { type: "preview-bootstrap", token },
+            { type: PREVIEW_BOOTSTRAP_TOKEN_EVENT, token },
             origin
           );
           setBootstrapComplete(true);
@@ -251,7 +257,7 @@ export function PreviewPanel({
       if (!previewOrigin || event.origin !== new URL(previewOrigin).origin)
         return;
 
-      if (event.data?.type === "preview-ready") {
+      if (event.data?.type === PREVIEW_BOOTSTRAP_READY_EVENT) {
         bootstrapMutation.mutate(undefined, {
           onSuccess: (data) => {
             setMutationError(null);
@@ -270,7 +276,7 @@ export function PreviewPanel({
 
   // Set iframe src when preview is ready
   const iframeSrc =
-    isReady && previewOrigin ? `${previewOrigin}/` : undefined;
+    isReady && previewOrigin ? buildPreviewIframeSrc(previewOrigin) : undefined;
 
   const isMutating =
     startMutation.isPending ||
