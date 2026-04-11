@@ -1,10 +1,15 @@
 package gateway
 
 import (
+	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/assembledhq/143/internal/services/preview"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -212,6 +217,65 @@ func TestNewGateway(t *testing.T) {
 	gw := NewGateway(GatewayConfig{AppOrigin: "https://app.143.dev"})
 	require.NotNil(t, gw)
 	require.Equal(t, "https://app.143.dev", gw.appOrigin)
+}
+
+func TestInjectScriptsIntoHTML_GzipResponse(t *testing.T) {
+	t.Parallel()
+
+	gw := NewGateway(GatewayConfig{AppOrigin: "https://app.143.dev"})
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	_, err := writer.Write([]byte("<html><head></head><body>Hello</body></html>"))
+	require.NoError(t, err, "gzip writer should accept the test HTML")
+	require.NoError(t, writer.Close(), "gzip writer should close cleanly")
+
+	resp := &http.Response{
+		Header: make(http.Header),
+		Body:   io.NopCloser(bytes.NewReader(compressed.Bytes())),
+	}
+	resp.Header.Set("Content-Type", "text/html; charset=utf-8")
+	resp.Header.Set("Content-Encoding", "gzip")
+
+	err = gw.injectScriptsIntoHTML(resp, uuid.New())
+	require.NoError(t, err, "injectScriptsIntoHTML should handle gzip-encoded HTML")
+	require.Equal(t, "gzip", resp.Header.Get("Content-Encoding"), "gzip encoding should be preserved after injection")
+
+	reader, err := gzip.NewReader(resp.Body)
+	require.NoError(t, err, "gzip reader should open the modified response body")
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err, "should read the modified gzip response body")
+	require.NoError(t, reader.Close(), "gzip reader should close cleanly")
+	require.Contains(t, string(body), activityHeartbeatScript, "modified HTML should include the injected activity heartbeat script")
+	require.Contains(t, string(body), preview.ComponentResolverScript, "modified HTML should include the component resolver script")
+}
+
+func TestInjectScriptsIntoHTML_UnsupportedEncodingReturnsErrorWithoutMutatingResponse(t *testing.T) {
+	t.Parallel()
+
+	gw := NewGateway(GatewayConfig{AppOrigin: "https://app.143.dev"})
+	var compressed bytes.Buffer
+	writer, err := flate.NewWriter(&compressed, flate.DefaultCompression)
+	require.NoError(t, err, "deflate writer should be created")
+	_, err = writer.Write([]byte("<html><head></head><body>Hello</body></html>"))
+	require.NoError(t, err, "deflate writer should accept the test HTML")
+	require.NoError(t, writer.Close(), "deflate writer should close cleanly")
+
+	original := compressed.Bytes()
+	resp := &http.Response{
+		Header: make(http.Header),
+		Body:   io.NopCloser(bytes.NewReader(original)),
+	}
+	resp.Header.Set("Content-Type", "text/html; charset=utf-8")
+	resp.Header.Set("Content-Encoding", "br")
+
+	err = gw.injectScriptsIntoHTML(resp, uuid.New())
+	require.Error(t, err, "injectScriptsIntoHTML should reject unsupported content encodings")
+	require.Contains(t, err.Error(), "unsupported content encoding", "unsupported encodings should return a clear error")
+	require.Equal(t, "br", resp.Header.Get("Content-Encoding"), "unsupported encodings should remain unchanged")
+
+	body, readErr := io.ReadAll(resp.Body)
+	require.NoError(t, readErr, "response body should remain readable when injection is skipped")
+	require.Equal(t, original, body, "unsupported encoded bodies should not be mutated")
 }
 
 func TestGateway_ServeHTTP_InvalidHost(t *testing.T) {

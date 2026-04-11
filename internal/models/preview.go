@@ -31,11 +31,13 @@ type PreviewInstance struct {
 	ExpiresAt       time.Time      `db:"expires_at" json:"expires_at"`
 	StoppedAt       *time.Time     `db:"stopped_at" json:"stopped_at,omitempty"`
 	LastPath        string         `db:"last_path" json:"last_path"`
-	MemoryLimitMB   int            `db:"memory_limit_mb" json:"memory_limit_mb"`
-	CPULimitMillis  int            `db:"cpu_limit_millis" json:"cpu_limit_millis"`
-	Error           string         `db:"error" json:"error,omitempty"`
-	CreatedAt       time.Time      `db:"created_at" json:"created_at"`
-	UpdatedAt       time.Time      `db:"updated_at" json:"updated_at"`
+	MemoryLimitMB   int             `db:"memory_limit_mb" json:"memory_limit_mb"`
+	CPULimitMillis  int             `db:"cpu_limit_millis" json:"cpu_limit_millis"`
+	RecycleConfig   json.RawMessage `db:"recycle_config" json:"-"`
+	RecycleSandbox  json.RawMessage `db:"recycle_sandbox" json:"-"`
+	Error           string          `db:"error" json:"error,omitempty"`
+	CreatedAt       time.Time       `db:"created_at" json:"created_at"`
+	UpdatedAt       time.Time       `db:"updated_at" json:"updated_at"`
 }
 
 // PreviewService tracks the state of a single service within a multi-service preview.

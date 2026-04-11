@@ -206,23 +206,76 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 	state.primaryPort = primaryPort
 
 	// Phase 6: Wait for readiness probes.
-	for name, svcCfg := range cfg.Services {
-		timeout := 90 * time.Second
-		if svcCfg.Ready.TimeoutSeconds > 0 {
-			timeout = time.Duration(svcCfg.Ready.TimeoutSeconds) * time.Second
+	//
+	// Progressive preview: when cfg.Progressive is true and this is a
+	// multi-service config, report readiness as soon as the primary service
+	// passes its probe. Support services continue starting in the background.
+	// The caller receives a PartiallyReady flag on the handle so the manager
+	// can set the correct status.
+	partiallyReady := false
+	if cfg.Progressive && len(cfg.Services) > 1 {
+		// Wait for primary first.
+		if primaryCfg, ok := cfg.Services[cfg.Primary]; ok {
+			timeout := 90 * time.Second
+			if primaryCfg.Ready.TimeoutSeconds > 0 {
+				timeout = time.Duration(primaryCfg.Ready.TimeoutSeconds) * time.Second
+			}
+			if err := d.waitForReadiness(ctx, sb, primaryCfg.Port, primaryCfg.Ready.HTTPPath, timeout); err != nil {
+				d.cleanupState(handle)
+				return nil, fmt.Errorf("readiness probe for primary %q failed: %w", cfg.Primary, err)
+			}
+			state.services[cfg.Primary].status = models.PreviewServiceStatusReady
+			d.logger.Info().Str("service", cfg.Primary).Int("port", primaryCfg.Port).Msg("primary service ready (progressive)")
+			partiallyReady = true
 		}
-		if err := d.waitForReadiness(ctx, sb, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
-			d.cleanupState(handle)
-			return nil, fmt.Errorf("readiness probe for %q failed: %w", name, err)
+
+		// Wait for support services in the background.
+		go func() {
+			for name, svcCfg := range cfg.Services {
+				if name == cfg.Primary {
+					continue
+				}
+				timeout := 90 * time.Second
+				if svcCfg.Ready.TimeoutSeconds > 0 {
+					timeout = time.Duration(svcCfg.Ready.TimeoutSeconds) * time.Second
+				}
+				bgCtx, cancel := context.WithTimeout(svcCtx, timeout)
+				if err := d.waitForReadiness(bgCtx, sb, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
+					d.logger.Warn().Err(err).Str("service", name).Msg("support service readiness failed (progressive)")
+					d.mu.Lock()
+					state.services[name].status = models.PreviewServiceStatusFailed
+					state.services[name].err = err.Error()
+					d.mu.Unlock()
+				} else {
+					d.mu.Lock()
+					state.services[name].status = models.PreviewServiceStatusReady
+					d.mu.Unlock()
+					d.logger.Info().Str("service", name).Int("port", svcCfg.Port).Msg("support service ready (progressive)")
+				}
+				cancel()
+			}
+		}()
+	} else {
+		// Standard: wait for all services before reporting ready.
+		for name, svcCfg := range cfg.Services {
+			timeout := 90 * time.Second
+			if svcCfg.Ready.TimeoutSeconds > 0 {
+				timeout = time.Duration(svcCfg.Ready.TimeoutSeconds) * time.Second
+			}
+			if err := d.waitForReadiness(ctx, sb, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
+				d.cleanupState(handle)
+				return nil, fmt.Errorf("readiness probe for %q failed: %w", name, err)
+			}
+			state.services[name].status = models.PreviewServiceStatusReady
+			d.logger.Info().Str("service", name).Int("port", svcCfg.Port).Msg("service ready")
 		}
-		state.services[name].status = models.PreviewServiceStatusReady
-		d.logger.Info().Str("service", name).Int("port", svcCfg.Port).Msg("service ready")
 	}
 
 	return &preview.PreviewHandle{
 		Handle:           handle,
 		PrimaryPort:      primaryPort,
 		InfraCredentials: infraCreds,
+		PartiallyReady:   partiallyReady,
 	}, nil
 }
 

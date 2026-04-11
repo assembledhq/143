@@ -152,6 +152,7 @@ export const api = {
     delete: (id: string) => del(`/api/v1/repositories/${id}`),
     summary: () => get<import('./types').ListResponse<import('./types').RepoSummary>>('/api/v1/repositories/summary'),
     branches: (id: string) => get<import('./types').ListResponse<{ name: string; protected: boolean }>>(`/api/v1/repositories/${id}/branches`),
+    detectPreview: (owner: string, repo: string) => get<import('./preview-types').PreviewDetectionResult>(`/api/v1/repos/${owner}/${repo}/preview/detect`),
   },
   issues: {
     list: (params?: { status?: string; source?: string; severity?: string; sort?: string; cursor?: string; limit?: number }) => {
@@ -282,6 +283,25 @@ export const api = {
       if (above != null) params.set('above', String(above));
       if (below != null) params.set('below', String(below));
       return get<import('./types').SingleResponse<import('./types').FileContextResponse>>(`/api/v1/sessions/${sessionId}/files/context?${params.toString()}`);
+    },
+    preview: {
+      get: (sessionId: string) => get<import('./preview-types').PreviewStatus>(`/api/v1/sessions/${sessionId}/preview`),
+      start: (sessionId: string) => post<import('./preview-types').PreviewInstance>(`/api/v1/sessions/${sessionId}/preview`),
+      stop: (sessionId: string) => del(`/api/v1/sessions/${sessionId}/preview`),
+      restart: (sessionId: string) => post<import('./preview-types').PreviewInstance>(`/api/v1/sessions/${sessionId}/preview/restart`),
+      bootstrap: (sessionId: string) => post<{ token: string }>(`/api/v1/sessions/${sessionId}/preview/bootstrap`),
+      extend: (sessionId: string) => post(`/api/v1/sessions/${sessionId}/preview/extend`),
+      logs: (sessionId: string) => get<import('./preview-types').PreviewLog[]>(`/api/v1/sessions/${sessionId}/preview/logs`),
+      services: (sessionId: string) => get<import('./preview-types').PreviewService[]>(`/api/v1/sessions/${sessionId}/preview/services`),
+      console: (sessionId: string) => get<import('./preview-types').ConsoleMessage[]>(`/api/v1/sessions/${sessionId}/preview/console`),
+      snapshots: (sessionId: string) => get<import('./preview-types').PreviewSnapshot[]>(`/api/v1/sessions/${sessionId}/preview/snapshots`),
+      screenshot: (sessionId: string, opts: import('./preview-types').ScreenshotOpts) => post<import('./preview-types').ScreenshotResult>(`/api/v1/sessions/${sessionId}/preview/screenshot`, opts),
+      inspect: (sessionId: string, x: number, y: number) => post<import('./preview-types').ElementInfo>(`/api/v1/sessions/${sessionId}/preview/inspect`, { x, y }),
+      designFeedback: (sessionId: string, feedback: import('./preview-types').DesignModeFeedback) => post(`/api/v1/sessions/${sessionId}/preview/design-feedback`, feedback),
+      interact: (sessionId: string, steps: import('./preview-types').InteractionStep[]) => post<import('./preview-types').InteractionResult>(`/api/v1/sessions/${sessionId}/preview/interact`, { steps }),
+      multiViewport: (sessionId: string, opts: import('./preview-types').MultiViewportOpts) => post<import('./preview-types').MultiViewportResult>(`/api/v1/sessions/${sessionId}/preview/multi-viewport`, opts),
+      visualDiff: (sessionId: string, before: string, after: string) => post<import('./preview-types').VisualDiff>(`/api/v1/sessions/${sessionId}/preview/visual-diff`, { before_snapshot_id: before, after_snapshot_id: after }),
+      assert: (sessionId: string, assertions: import('./preview-types').PreviewAssertion[]) => post<import('./preview-types').AssertionResults>(`/api/v1/sessions/${sessionId}/preview/assert`, { assertions }),
     },
   },
   settings: {

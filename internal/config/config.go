@@ -108,6 +108,13 @@ type Config struct {
 	SessionReaperInterval time.Duration `env:"SESSION_REAPER_INTERVAL" envDefault:"5m"`
 	SessionMaxSnapshotAge time.Duration `env:"SESSION_MAX_SNAPSHOT_AGE" envDefault:"720h"` // 30 days
 
+	// Preview system
+	ChromeWSURL            string `env:"CHROME_WS_URL"`                                                        // e.g. "ws://chrome:9222"
+	PreviewOriginTemplate  string `env:"PREVIEW_ORIGIN_TEMPLATE"  envDefault:"http://{id}.preview.localhost:9090"` // {id} replaced with preview ID
+	PreviewGatewayPort     int    `env:"PREVIEW_GATEWAY_PORT"     envDefault:"9090"`
+	PreviewSnapshotCacheDir string `env:"PREVIEW_SNAPSHOT_CACHE_DIR" envDefault:".data/preview-snapshots"`
+	PreviewHMRBlobDir      string `env:"PREVIEW_HMR_BLOB_DIR"     envDefault:".data/preview-hmr"`
+
 	// Telemetry (OpenTelemetry)
 	OTLPEndpoint string `env:"OTEL_EXPORTER_OTLP_ENDPOINT"` // e.g. "otel-collector:4318" or "https://otlp.grafana.net"
 	OTLPInsecure bool   `env:"OTEL_EXPORTER_OTLP_INSECURE" envDefault:"false"`

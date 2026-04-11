@@ -8,6 +8,7 @@ import {
   ArrowUp,
   ClipboardList,
   ExternalLink,
+  Eye,
   FileCode2,
   GitPullRequest,
   Loader2,
@@ -58,6 +59,11 @@ import { useReviewComments } from "@/hooks/use-review-comments";
 import { useDiffViewState } from "@/hooks/use-diff-view-state";
 import { useReviewedFiles } from "@/hooks/use-reviewed-files";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
+import { PreviewPanel } from "@/components/preview/preview-panel";
+
+const PREVIEW_ORIGIN_TEMPLATE =
+  process.env.NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE ||
+  "http://{id}.preview.localhost:9090";
 
 const FAILURE_CATEGORY_CODEX_AUTH = "codex_auth_expired";
 
@@ -125,7 +131,7 @@ function checkResultBadge(result: string | null) {
 // Detail panel tabs (shown in right sidebar)
 // ---------------------------------------------------------------------------
 
-type DetailTab = "overview" | "changes" | "validation";
+type DetailTab = "overview" | "changes" | "validation" | "preview";
 
 function OverviewTab({ session, members }: { session: Session; members: User[] }) {
   const queryClient = useQueryClient();
@@ -1314,8 +1320,11 @@ const DEFAULT_DETAIL = 384;
 export function SessionDetailContent({ id }: { id: string }) {
   const terminalStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
   const [reviewParam, setReviewParam] = useQueryState("review");
+  const [previewParam] = useQueryState("preview");
   const centerMode = reviewParam === "active" ? "review" : "chat";
-  const [detailTab, setDetailTab] = useState<DetailTab>("overview");
+  const [detailTab, setDetailTab] = useState<DetailTab>(
+    previewParam === "1" ? "preview" : "overview"
+  );
   const [showDetailPanel, setShowDetailPanel] = useState(true);
   const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
@@ -1606,6 +1615,10 @@ export function SessionDetailContent({ id }: { id: string }) {
                 {showValidationTab && (
                   <TabsTrigger value="validation">Validation</TabsTrigger>
                 )}
+                <TabsTrigger value="preview">
+                  <Eye className="h-3 w-3 mr-1" />
+                  Preview
+                </TabsTrigger>
               </TabsList>
               {hasPR && prData?.data?.github_pr_url ? (
                 <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
@@ -1660,6 +1673,13 @@ export function SessionDetailContent({ id }: { id: string }) {
                 <ValidationTab sessionId={id} />
               </TabsContent>
             )}
+            <TabsContent value="preview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
+              <PreviewPanel
+                sessionId={id}
+                orgId={session.org_id}
+                previewOriginTemplate={PREVIEW_ORIGIN_TEMPLATE}
+              />
+            </TabsContent>
           </Tabs>
         </div>
         </>

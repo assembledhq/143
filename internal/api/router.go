@@ -2,6 +2,9 @@ package api
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"strings"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -11,6 +14,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/api/gateway"
 	"github.com/assembledhq/143/internal/api/handlers"
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/config"
@@ -241,12 +245,81 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	sessionReviewCommentHandler.SetMessageAndJobStores(sessionMessageStore, jobStore)
 	sessionFileHandler := handlers.NewSessionFileHandler(sessionStore, fileReader, logger)
 
-	// Preview manager and handler.
+	// Preview system: inspector, snapshot cache, HMR watcher, manager, recycler, gateway.
+	var previewInspector preview.PreviewInspector
+	if cfg.ChromeWSURL != "" {
+		// Convert env-friendly "{id}" placeholder to chromedp inspector's "{{.PreviewID}}" format.
+		inspectorURLTemplate := strings.Replace(cfg.PreviewOriginTemplate, "{id}", "{{.PreviewID}}", 1) + "{{.Path}}"
+		previewInspector = preview.NewChromeDPInspector(preview.ChromeDPInspectorConfig{
+			RemoteURL:          cfg.ChromeWSURL,
+			PreviewURLTemplate: inspectorURLTemplate,
+		}, logger)
+	}
+
+	var previewSnapshotCache *preview.SnapshotCache
+	if cfg.PreviewSnapshotCacheDir != "" {
+		var scErr error
+		previewSnapshotCache, scErr = preview.NewSnapshotCache(preview.SnapshotCacheConfig{
+			Store:        previewStore,
+			Logger:       logger,
+			WorkerNodeID: "local",
+			CacheDir:     cfg.PreviewSnapshotCacheDir,
+		})
+		if scErr != nil {
+			logger.Warn().Err(scErr).Msg("failed to initialize preview snapshot cache — caching disabled")
+			previewSnapshotCache = nil
+		}
+	}
+
 	previewManager := preview.NewManager(preview.ManagerConfig{
-		Store:        previewStore,
-		Logger:       logger,
-		WorkerNodeID: "local", // MODE=all: single-node
+		Store:         previewStore,
+		Inspector:     previewInspector,
+		SnapshotCache: previewSnapshotCache,
+		Logger:        logger,
+		WorkerNodeID:  "local", // MODE=all: single-node
 	})
+
+	var hmrWatcher *preview.HMRWatcher
+	if previewInspector != nil && cfg.PreviewHMRBlobDir != "" {
+		var hmrErr error
+		hmrWatcher, hmrErr = preview.NewHMRWatcher(preview.HMRWatcherConfig{
+			Inspector: previewInspector,
+			Store:     previewStore,
+			Logger:    logger,
+			BlobDir:   cfg.PreviewHMRBlobDir,
+		})
+		if hmrErr != nil {
+			logger.Warn().Err(hmrErr).Msg("failed to initialize HMR watcher — auto-screenshot disabled")
+			hmrWatcher = nil
+		}
+	}
+
+	recycleWorker := preview.NewRecycleWorker(preview.RecycleWorkerConfig{
+		Manager: previewManager,
+		Logger:  logger,
+	})
+	recycleWorker.Start()
+
+	// Preview gateway (separate HTTP listener for <id>.preview.* origins).
+	if cfg.PreviewGatewayPort > 0 {
+		gw := gateway.NewGateway(gateway.GatewayConfig{
+			Store:        previewStore,
+			Manager:      previewManager,
+			HMRWatcher:   hmrWatcher,
+			Logger:       logger,
+			AppOrigin:    cfg.FrontendURL,
+			CookieSecret: []byte(cfg.SessionSecret),
+		})
+		go func() {
+			addr := fmt.Sprintf(":%d", cfg.PreviewGatewayPort)
+			logger.Info().Str("addr", addr).Msg("starting preview gateway")
+			gwSrv := &http.Server{Addr: addr, Handler: gw}
+			if gwErr := gwSrv.ListenAndServe(); gwErr != nil && gwErr != http.ErrServerClosed {
+				logger.Error().Err(gwErr).Msg("preview gateway failed")
+			}
+		}()
+	}
+
 	previewHandler := handlers.NewPreviewHandler(previewManager, previewStore, logger)
 	previewHandler.SetAuditEmitter(auditEmitter)
 

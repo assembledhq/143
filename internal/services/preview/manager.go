@@ -59,6 +59,9 @@ type Manager struct {
 	// browser has not been configured on this worker node.
 	inspector PreviewInspector
 
+	// snapshotCache handles filesystem snapshot caching for fast startup.
+	snapshotCache *SnapshotCache
+
 	// Caps (configurable per org in future; hardcoded for MVP).
 	maxPerUser   int
 	maxPerOrg    int
@@ -67,27 +70,29 @@ type Manager struct {
 
 // ManagerConfig holds initialization options for the preview Manager.
 type ManagerConfig struct {
-	Store        *db.PreviewStore
-	Provider     PreviewCapableProvider
-	Inspector    PreviewInspector
-	Logger       zerolog.Logger
-	WorkerNodeID string
-	MaxPerUser   int
-	MaxPerOrg    int
-	MaxPerWorker int
+	Store         *db.PreviewStore
+	Provider      PreviewCapableProvider
+	Inspector     PreviewInspector
+	SnapshotCache *SnapshotCache
+	Logger        zerolog.Logger
+	WorkerNodeID  string
+	MaxPerUser    int
+	MaxPerOrg     int
+	MaxPerWorker  int
 }
 
 // NewManager creates a new preview Manager.
 func NewManager(cfg ManagerConfig) *Manager {
 	m := &Manager{
-		store:        cfg.Store,
-		provider:     cfg.Provider,
-		inspector:    cfg.Inspector,
-		logger:       cfg.Logger,
-		workerNodeID: cfg.WorkerNodeID,
-		maxPerUser:   cfg.MaxPerUser,
-		maxPerOrg:    cfg.MaxPerOrg,
-		maxPerWorker: cfg.MaxPerWorker,
+		store:         cfg.Store,
+		provider:      cfg.Provider,
+		inspector:     cfg.Inspector,
+		snapshotCache: cfg.SnapshotCache,
+		logger:        cfg.Logger,
+		workerNodeID:  cfg.WorkerNodeID,
+		maxPerUser:    cfg.MaxPerUser,
+		maxPerOrg:     cfg.MaxPerOrg,
+		maxPerWorker:  cfg.MaxPerWorker,
 	}
 	if m.maxPerUser <= 0 {
 		m.maxPerUser = DefaultMaxPreviewsPerUser
@@ -169,6 +174,9 @@ func (m *Manager) StartPreview(ctx context.Context, input StartPreviewInput) (*m
 		MemoryLimitMB:  limits.MemoryMB,
 		CPULimitMillis: limits.CPUMillis,
 	}
+	if err := storeRecycleInput(instance, input); err != nil {
+		return nil, fmt.Errorf("store recycle input: %w", err)
+	}
 
 	if err := m.store.CreatePreviewInstance(ctx, instance); err != nil {
 		return nil, fmt.Errorf("create preview instance: %w", err)
@@ -233,10 +241,23 @@ func (m *Manager) StartPreview(ctx context.Context, input StartPreviewInput) (*m
 	// 10. Update instance with handle and port.
 	instance.PreviewHandle = handle.Handle
 	instance.Port = handle.PrimaryPort
-	instance.Status = models.PreviewStatusReady
 
-	if err := m.store.UpdatePreviewStatus(ctx, input.OrgID, instance.ID, models.PreviewStatusReady, ""); err != nil {
-		m.logger.Error().Err(err).Str("preview_id", instance.ID.String()).Msg("failed to update preview status to ready")
+	// Set status based on progressive preview support.
+	if handle.PartiallyReady {
+		instance.Status = models.PreviewStatusPartiallyReady
+		if err := m.store.UpdatePreviewStatus(ctx, input.OrgID, instance.ID, models.PreviewStatusPartiallyReady, ""); err != nil {
+			m.logger.Error().Err(err).Str("preview_id", instance.ID.String()).Msg("failed to update preview status to partially_ready")
+		}
+	} else {
+		instance.Status = models.PreviewStatusReady
+		if err := m.store.UpdatePreviewStatus(ctx, input.OrgID, instance.ID, models.PreviewStatusReady, ""); err != nil {
+			m.logger.Error().Err(err).Str("preview_id", instance.ID.String()).Msg("failed to update preview status to ready")
+		}
+	}
+
+	// Update handle in DB for recycle support.
+	if err := m.store.UpdatePreviewHandle(ctx, input.OrgID, instance.ID, handle.Handle, handle.PrimaryPort); err != nil {
+		m.logger.Warn().Err(err).Str("preview_id", instance.ID.String()).Msg("failed to update handle in DB")
 	}
 
 	// 11. Update infrastructure records with container details.
@@ -480,6 +501,89 @@ func (m *Manager) SetInspector(inspector PreviewInspector) {
 }
 
 // =============================================================================
+// RecyclePreview
+// =============================================================================
+
+// RecyclePreview restarts a preview in place. It stops the existing processes,
+// re-provisions infrastructure, re-runs init scripts, and restarts services.
+// The preview instance ID and last_path are preserved.
+func (m *Manager) RecyclePreview(ctx context.Context, orgID, previewID uuid.UUID) error {
+	instance, err := m.store.GetPreviewInstance(ctx, orgID, previewID)
+	if err != nil {
+		return fmt.Errorf("get preview instance: %w", err)
+	}
+	if instance.Status.IsTerminal() {
+		return fmt.Errorf("cannot recycle terminal preview (status=%s)", instance.Status)
+	}
+
+	input, err := loadRecycleInput(instance)
+	if err != nil {
+		return fmt.Errorf("load recycle input: %w", err)
+	}
+
+	m.logger.Info().Str("preview_id", previewID.String()).Msg("recycling preview")
+
+	// Transition to starting.
+	if err := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusStarting, ""); err != nil {
+		return fmt.Errorf("set starting status: %w", err)
+	}
+
+	// Stop current processes via provider.
+	if instance.PreviewHandle != "" {
+		if err := m.provider.StopPreview(ctx, instance.PreviewHandle); err != nil {
+			m.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("recycle: provider stop failed")
+		}
+	}
+
+	// Restart via provider with same sandbox and config.
+	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config)
+	if err != nil {
+		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, err.Error()); statusErr != nil {
+			m.logger.Warn().Err(statusErr).Msg("recycle: failed to set failed status")
+		}
+		return fmt.Errorf("recycle start: %w", err)
+	}
+
+	// Update instance with new handle.
+	if err := m.store.UpdatePreviewHandle(ctx, orgID, previewID, handle.Handle, handle.PrimaryPort); err != nil {
+		m.logger.Error().Err(err).Msg("recycle: failed to update handle")
+	}
+	nextStatus := models.PreviewStatusReady
+	if handle.PartiallyReady {
+		nextStatus = models.PreviewStatusPartiallyReady
+	}
+	if err := m.store.UpdatePreviewStatus(ctx, orgID, previewID, nextStatus, ""); err != nil {
+		m.logger.Error().Err(err).Str("status", string(nextStatus)).Msg("recycle: failed to set preview status")
+	}
+
+	// Reset expiry.
+	if err := m.store.UpdatePreviewExpiry(ctx, orgID, previewID, time.Now().Add(DefaultHardTTL)); err != nil {
+		m.logger.Warn().Err(err).Msg("recycle: failed to reset expiry")
+	}
+
+	m.logger.Info().Str("preview_id", previewID.String()).Str("handle", handle.Handle).Msg("preview recycled")
+	return nil
+}
+
+// =============================================================================
+// Store accessor
+// =============================================================================
+
+// Store returns the preview store (used by cleanup/recycle workers).
+func (m *Manager) Store() *db.PreviewStore {
+	return m.store
+}
+
+// =============================================================================
+// SnapshotCache accessor
+// =============================================================================
+
+// SnapshotCache returns the filesystem snapshot cache, or nil if not configured.
+func (m *Manager) SnapshotCache() *SnapshotCache {
+	return m.snapshotCache
+}
+
+// =============================================================================
 // Concurrency checks
 // =============================================================================
 
@@ -533,6 +637,56 @@ func computeConfigDigest(cfg *models.PreviewConfig) string {
 	}
 	h := sha256.Sum256(data)
 	return "sha256:" + hex.EncodeToString(h[:])[:16]
+}
+
+func storeRecycleInput(instance *models.PreviewInstance, input StartPreviewInput) error {
+	if input.Config == nil {
+		return fmt.Errorf("preview config is required")
+	}
+	if input.Sandbox == nil {
+		return fmt.Errorf("sandbox is required")
+	}
+
+	configBytes, err := json.Marshal(input.Config)
+	if err != nil {
+		return fmt.Errorf("marshal preview config: %w", err)
+	}
+	sandboxBytes, err := json.Marshal(input.Sandbox)
+	if err != nil {
+		return fmt.Errorf("marshal sandbox: %w", err)
+	}
+
+	instance.RecycleConfig = configBytes
+	instance.RecycleSandbox = sandboxBytes
+	return nil
+}
+
+func loadRecycleInput(instance *models.PreviewInstance) (StartPreviewInput, error) {
+	if len(instance.RecycleConfig) == 0 {
+		return StartPreviewInput{}, fmt.Errorf("preview %s is missing stored recycle config", instance.ID)
+	}
+	if len(instance.RecycleSandbox) == 0 {
+		return StartPreviewInput{}, fmt.Errorf("preview %s is missing stored recycle sandbox", instance.ID)
+	}
+
+	var cfg models.PreviewConfig
+	if err := json.Unmarshal(instance.RecycleConfig, &cfg); err != nil {
+		return StartPreviewInput{}, fmt.Errorf("unmarshal recycle config: %w", err)
+	}
+	var sandbox agent.Sandbox
+	if err := json.Unmarshal(instance.RecycleSandbox, &sandbox); err != nil {
+		return StartPreviewInput{}, fmt.Errorf("unmarshal recycle sandbox: %w", err)
+	}
+
+	return StartPreviewInput{
+		SessionID:     instance.SessionID,
+		OrgID:         instance.OrgID,
+		UserID:        instance.UserID,
+		Sandbox:       &sandbox,
+		Config:        &cfg,
+		BaseCommitSHA: instance.BaseCommitSHA,
+		ProfileName:   instance.ProfileName,
+	}, nil
 }
 
 // RandomHex returns n random bytes encoded as a hex string.

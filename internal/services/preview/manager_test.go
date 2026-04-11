@@ -2,6 +2,7 @@ package preview
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"testing"
@@ -21,14 +22,22 @@ import (
 // =============================================================================
 
 type mockProvider struct {
-	stopErr    error
-	dialErr    error
-	dialStream PreviewStream
-	statusSnap *PreviewStatusSnapshot
-	statusErr  error
+	startHandle *PreviewHandle
+	startErr    error
+	stopErr     error
+	dialErr     error
+	dialStream  PreviewStream
+	statusSnap  *PreviewStatusSnapshot
+	statusErr   error
 }
 
 func (m *mockProvider) StartPreview(_ context.Context, _ *agent.Sandbox, _ *models.PreviewConfig) (*PreviewHandle, error) {
+	if m.startErr != nil {
+		return nil, m.startErr
+	}
+	if m.startHandle != nil {
+		return m.startHandle, nil
+	}
 	return nil, fmt.Errorf("not implemented in mock")
 }
 
@@ -113,7 +122,7 @@ var previewInstanceTestCols = []string{
 	"id", "session_id", "org_id", "user_id", "profile_name", "name", "status",
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
-	"last_path", "memory_limit_mb", "cpu_limit_millis", "error", "created_at", "updated_at",
+	"last_path", "memory_limit_mb", "cpu_limit_millis", "recycle_config", "recycle_sandbox", "error", "created_at", "updated_at",
 }
 
 var previewServiceTestCols = []string{
@@ -136,7 +145,7 @@ func newPreviewInstanceRow(id, sessionID, orgID, userID uuid.UUID, status models
 		id, sessionID, orgID, userID, "bootstrap", "my-preview", string(status),
 		"docker", "worker-1", handle, "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
-		"/", 512, 500, "", now, now,
+		"/", 512, 500, []byte(`{"version":"3","name":"my-preview","primary":"web","services":{"web":{"command":["npm","run","dev"],"port":3000,"ready":{"http_path":"/"}}},"credentials":{"mode":"none"},"network":{"mode":"restricted"}}`), []byte(`{"id":"sandbox-1","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"abc"}}`), "", now, now,
 	}
 }
 
@@ -970,4 +979,133 @@ func TestCheckConcurrencyCaps_WorkerExceeded(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "worker node has reached its limit")
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRecyclePreview_PreservesPartiallyReadyStatus(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-old", now)...),
+		)
+	mock.ExpectExec("UPDATE preview_instances SET status = @status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_instances SET preview_handle = @handle, port = @port").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_instances SET status = @status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_instances SET expires_at = @expires_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	mgr := newTestManager(mock, &mockProvider{
+		startHandle: &PreviewHandle{
+			Handle:         "handle-new",
+			PrimaryPort:    3001,
+			PartiallyReady: true,
+		},
+	})
+
+	err = mgr.RecyclePreview(context.Background(), orgID, previewID)
+	require.NoError(t, err, "RecyclePreview should succeed for a partially ready restart")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestRecyclePreview_ReconstructsInputFromStoredState(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-old", now)...),
+		)
+	mock.ExpectExec("UPDATE preview_instances SET status = @status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_instances SET preview_handle = @handle, port = @port").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_instances SET status = @status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_instances SET expires_at = @expires_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	provider := &mockProvider{
+		startHandle: &PreviewHandle{
+			Handle:      "handle-new",
+			PrimaryPort: 3001,
+		},
+	}
+	mgr := newTestManager(mock, provider)
+
+	err = mgr.RecyclePreview(context.Background(), orgID, previewID)
+	require.NoError(t, err, "RecyclePreview should rebuild restart inputs from stored preview state")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestBuildStoredRecycleInputRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	cfg := &models.PreviewConfig{
+		Version: "3",
+		Name:    "my-preview",
+		Primary: "web",
+		Services: map[string]models.ServiceConfig{
+			"web": {
+				Command: []string{"npm", "run", "dev"},
+				Port:    3000,
+				Ready:   models.ReadinessProbe{HTTPPath: "/"},
+			},
+		},
+		Credentials: models.CredentialConfig{Mode: "none"},
+		Network:     models.NetworkConfig{Mode: "restricted"},
+	}
+	sandbox := &agent.Sandbox{
+		ID:       "sandbox-1",
+		Provider: "docker",
+		WorkDir:  "/workspace",
+		Metadata: map[string]string{"container_id": "abc"},
+	}
+
+	instance := &models.PreviewInstance{}
+	err := storeRecycleInput(instance, StartPreviewInput{Config: cfg, Sandbox: sandbox})
+	require.NoError(t, err, "storeRecycleInput should serialize restart inputs")
+
+	got, err := loadRecycleInput(instance)
+	require.NoError(t, err, "loadRecycleInput should deserialize stored restart inputs")
+
+	expectedConfig, err := json.Marshal(cfg)
+	require.NoError(t, err, "test should be able to marshal the expected config")
+	actualConfig, err := json.Marshal(got.Config)
+	require.NoError(t, err, "test should be able to marshal the round-tripped config")
+	require.JSONEq(t, string(expectedConfig), string(actualConfig), "recycle config should survive a serialize/deserialize round trip")
+	require.Equal(t, sandbox, got.Sandbox, "recycle sandbox should survive a serialize/deserialize round trip")
 }

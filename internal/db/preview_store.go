@@ -49,7 +49,7 @@ const activeStatusFilter = `('starting', 'ready', 'partially_ready', 'unhealthy'
 const previewInstanceColumns = `id, session_id, org_id, user_id, profile_name, name, status,
 	provider, worker_node_id, preview_handle, primary_service, port,
 	config_digest, base_commit_sha, last_accessed_at, expires_at, stopped_at,
-	last_path, memory_limit_mb, cpu_limit_millis, error, created_at, updated_at`
+	last_path, memory_limit_mb, cpu_limit_millis, recycle_config, recycle_sandbox, error, created_at, updated_at`
 
 const previewServiceColumns = `id, preview_instance_id, service_name, role, status,
 	command, cwd, port, pid, error, created_at`
@@ -84,12 +84,12 @@ func (s *PreviewStore) CreatePreviewInstance(ctx context.Context, p *models.Prev
 			session_id, org_id, user_id, profile_name, name, status, provider,
 			worker_node_id, preview_handle, primary_service, port,
 			config_digest, base_commit_sha, expires_at,
-			last_path, memory_limit_mb, cpu_limit_millis
+			last_path, memory_limit_mb, cpu_limit_millis, recycle_config, recycle_sandbox
 		) VALUES (
 			@session_id, @org_id, @user_id, @profile_name, @name, @status, @provider,
 			@worker_node_id, @preview_handle, @primary_service, @port,
 			@config_digest, @base_commit_sha, @expires_at,
-			@last_path, @memory_limit_mb, @cpu_limit_millis
+			@last_path, @memory_limit_mb, @cpu_limit_millis, @recycle_config, @recycle_sandbox
 		) RETURNING %s`, previewInstanceColumns)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
@@ -110,6 +110,8 @@ func (s *PreviewStore) CreatePreviewInstance(ctx context.Context, p *models.Prev
 		"last_path":        p.LastPath,
 		"memory_limit_mb":  p.MemoryLimitMB,
 		"cpu_limit_millis": p.CPULimitMillis,
+		"recycle_config":   p.RecycleConfig,
+		"recycle_sandbox":  p.RecycleSandbox,
 	})
 	if err != nil {
 		return fmt.Errorf("insert preview instance: %w", err)
@@ -231,6 +233,45 @@ func (s *PreviewStore) StopPreview(ctx context.Context, orgID, id uuid.UUID) err
 		return fmt.Errorf("preview instance not found or already stopped")
 	}
 	return nil
+}
+
+// UpdatePreviewHandle updates the provider handle and primary port after a recycle.
+func (s *PreviewStore) UpdatePreviewHandle(ctx context.Context, orgID, id uuid.UUID, handle string, port int) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE preview_instances SET preview_handle = @handle, port = @port, updated_at = now()
+		 WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": id, "org_id": orgID, "handle": handle, "port": port},
+	)
+	if err != nil {
+		return fmt.Errorf("update preview handle: %w", err)
+	}
+	return nil
+}
+
+// ListActivePreviews returns all active previews for a given worker node.
+func (s *PreviewStore) ListActivePreviews(ctx context.Context, workerNodeID string) ([]models.PreviewInstance, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_instances
+		WHERE worker_node_id = @worker_node_id AND status IN %s
+		ORDER BY created_at ASC`, previewInstanceColumns, activeStatusFilter)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"worker_node_id": workerNodeID})
+	if err != nil {
+		return nil, fmt.Errorf("list active previews: %w", err)
+	}
+	defer rows.Close()
+	var result []models.PreviewInstance
+	for rows.Next() {
+		var p models.PreviewInstance
+		if err := rows.Scan(
+			&p.ID, &p.SessionID, &p.OrgID, &p.UserID, &p.ProfileName, &p.Name, &p.Status,
+			&p.Provider, &p.WorkerNodeID, &p.PreviewHandle, &p.PrimaryService, &p.Port,
+			&p.ConfigDigest, &p.BaseCommitSHA, &p.LastAccessedAt, &p.ExpiresAt, &p.StoppedAt,
+			&p.LastPath, &p.MemoryLimitMB, &p.CPULimitMillis, &p.RecycleConfig, &p.RecycleSandbox, &p.Error, &p.CreatedAt, &p.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan preview instance: %w", err)
+		}
+		result = append(result, p)
+	}
+	return result, rows.Err()
 }
 
 // CountActivePreviewsByOrg counts active previews for concurrency cap enforcement.

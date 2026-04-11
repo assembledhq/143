@@ -2,6 +2,9 @@ package gateway
 
 import (
 	"bufio"
+	"bytes"
+	"compress/flate"
+	"compress/gzip"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -27,6 +30,7 @@ import (
 type Gateway struct {
 	store        *db.PreviewStore
 	manager      *preview.Manager
+	hmrWatcher   *preview.HMRWatcher
 	logger       zerolog.Logger
 	appOrigin    string
 	cookieSecret []byte
@@ -37,6 +41,7 @@ type Gateway struct {
 type GatewayConfig struct {
 	Store        *db.PreviewStore
 	Manager      *preview.Manager
+	HMRWatcher   *preview.HMRWatcher // optional; enables HMR screenshot capture
 	Logger       zerolog.Logger
 	AppOrigin    string // e.g. "https://app.143.dev"
 	CookieSecret []byte // HMAC key for signing preview session cookies
@@ -47,6 +52,7 @@ func NewGateway(cfg GatewayConfig) *Gateway {
 	return &Gateway{
 		store:        cfg.Store,
 		manager:      cfg.Manager,
+		hmrWatcher:   cfg.HMRWatcher,
 		logger:       cfg.Logger,
 		appOrigin:    cfg.AppOrigin,
 		cookieSecret: cfg.CookieSecret,
@@ -248,6 +254,7 @@ func (g *Gateway) handleHTTPProxy(w http.ResponseWriter, r *http.Request, orgID,
 		Director: func(req *http.Request) {
 			req.URL.Scheme = "http"
 			req.URL.Host = "preview-target"
+			req.Header.Del("Accept-Encoding")
 			// Strip the preview session cookie from forwarded requests.
 			stripPreviewCookie(req)
 		},
@@ -259,6 +266,20 @@ func (g *Gateway) handleHTTPProxy(w http.ResponseWriter, r *http.Request, orgID,
 		ModifyResponse: func(resp *http.Response) error {
 			g.injectSecurityHeaders(resp.Header)
 			stripSensitiveResponseHeaders(resp.Header)
+
+			// Inject scripts into HTML responses.
+			ct := resp.Header.Get("Content-Type")
+			if strings.HasPrefix(ct, "text/html") {
+				if err := g.injectScriptsIntoHTML(resp, previewID); err != nil {
+					g.logger.Warn().Err(err).
+						Str("preview_id", previewID.String()).
+						Msg("failed to inject scripts into HTML response")
+					// Non-fatal: the original response is already consumed,
+					// so we cannot fall back. The error is logged and we
+					// proceed with whatever body state we have.
+				}
+			}
+
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -307,8 +328,14 @@ func (g *Gateway) handleWebSocket(w http.ResponseWriter, r *http.Request, orgID,
 	// Bidirectional copy.
 	done := make(chan struct{})
 	go func() {
-		if _, err := io.Copy(clientConn, backendConn); err != nil {
-			g.logger.Debug().Err(err).Str("preview_id", previewID.String()).Msg("websocket: backend→client copy ended")
+		if g.hmrWatcher != nil {
+			// Tee backend→client traffic through the HMR watcher so it
+			// can detect HMR update messages and trigger screenshots.
+			g.copyWithHMRSnoop(clientConn, backendConn, previewID)
+		} else {
+			if _, err := io.Copy(clientConn, backendConn); err != nil {
+				g.logger.Debug().Err(err).Str("preview_id", previewID.String()).Msg("websocket: backend→client copy ended")
+			}
 		}
 		close(done)
 	}()
@@ -353,6 +380,204 @@ func (t *previewTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	// The response body will close the connection when fully read.
 	return resp, nil
+}
+
+// =============================================================================
+// Script injection
+// =============================================================================
+
+// activityHeartbeatScript is injected into HTML pages to send periodic
+// activity heartbeats while the preview tab is visible. This keeps the
+// idle timeout tracker accurate even when the user is just viewing (not
+// navigating) the preview.
+const activityHeartbeatScript = `
+(function() {
+  "use strict";
+  if (window.__143_heartbeat) return;
+  window.__143_heartbeat = true;
+
+  var INTERVAL_MS = 30000; // 30 seconds
+  var timer = null;
+
+  function sendHeartbeat() {
+    var img = new Image();
+    img.src = "/__143_heartbeat?t=" + Date.now();
+  }
+
+  function onVisibilityChange() {
+    if (document.visibilityState === "visible") {
+      sendHeartbeat();
+      if (!timer) {
+        timer = setInterval(sendHeartbeat, INTERVAL_MS);
+      }
+    } else {
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+    }
+  }
+
+  document.addEventListener("visibilitychange", onVisibilityChange);
+  // Start immediately if already visible.
+  if (document.visibilityState === "visible") {
+    sendHeartbeat();
+    timer = setInterval(sendHeartbeat, INTERVAL_MS);
+  }
+})();
+`
+
+// injectScriptsIntoHTML reads the response body, injects the component
+// resolver and activity heartbeat scripts, and replaces the body with the
+// modified content. The Content-Length header is updated accordingly.
+func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID) error {
+	// Read the original body and decode it when the upstream still responded
+	// with a supported content encoding.
+	var bodyBytes []byte
+	contentEncoding := strings.TrimSpace(strings.ToLower(resp.Header.Get("Content-Encoding")))
+	recompress := func(body []byte) ([]byte, error) {
+		return body, nil
+	}
+
+	switch contentEncoding {
+	case "", "identity":
+	case "gzip":
+		gr, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			return fmt.Errorf("gzip reader: %w", err)
+		}
+		bodyBytes, err = io.ReadAll(gr)
+		_ = gr.Close()
+		_ = resp.Body.Close()
+		if err != nil {
+			return fmt.Errorf("read gzipped body: %w", err)
+		}
+		recompress = func(body []byte) ([]byte, error) {
+			var buf bytes.Buffer
+			gw := gzip.NewWriter(&buf)
+			if _, err := gw.Write(body); err != nil {
+				return nil, fmt.Errorf("gzip write: %w", err)
+			}
+			if err := gw.Close(); err != nil {
+				return nil, fmt.Errorf("gzip close: %w", err)
+			}
+			return buf.Bytes(), nil
+		}
+	case "deflate":
+		reader := flate.NewReader(resp.Body)
+		var err error
+		bodyBytes, err = io.ReadAll(reader)
+		_ = reader.Close()
+		_ = resp.Body.Close()
+		if err != nil {
+			return fmt.Errorf("read deflate body: %w", err)
+		}
+		recompress = func(body []byte) ([]byte, error) {
+			var buf bytes.Buffer
+			writer, err := flate.NewWriter(&buf, flate.DefaultCompression)
+			if err != nil {
+				return nil, fmt.Errorf("deflate writer: %w", err)
+			}
+			if _, err := writer.Write(body); err != nil {
+				return nil, fmt.Errorf("deflate write: %w", err)
+			}
+			if err := writer.Close(); err != nil {
+				return nil, fmt.Errorf("deflate close: %w", err)
+			}
+			return buf.Bytes(), nil
+		}
+	default:
+		return fmt.Errorf("unsupported content encoding %q", contentEncoding)
+	}
+
+	if bodyBytes == nil {
+		var err error
+		bodyBytes, err = io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			return fmt.Errorf("read body: %w", err)
+		}
+	}
+
+	// Build the script block to inject.
+	scriptBlock := "<script>" + preview.ComponentResolverScript + "</script>" +
+		"<script>" + activityHeartbeatScript + "</script>"
+
+	body := string(bodyBytes)
+	bodyLower := strings.ToLower(body)
+	injected := false
+
+	// Prefer injecting before </head>.
+	if idx := strings.Index(bodyLower, "</head>"); idx != -1 {
+		body = body[:idx] + scriptBlock + body[idx:]
+		injected = true
+	}
+
+	// Fallback: inject before </body>.
+	if !injected {
+		if idx := strings.Index(bodyLower, "</body>"); idx != -1 {
+			body = body[:idx] + scriptBlock + body[idx:]
+			injected = true
+		}
+	}
+
+	// Last resort: append to end of document.
+	if !injected {
+		body = body + scriptBlock
+	}
+
+	// Replace the response body.
+	newBody := []byte(body)
+
+	newBody, err := recompress(newBody)
+	if err != nil {
+		return err
+	}
+	if contentEncoding == "" || contentEncoding == "identity" {
+		resp.Header.Del("Content-Encoding")
+	}
+
+	resp.Body = io.NopCloser(bytes.NewReader(newBody))
+	resp.ContentLength = int64(len(newBody))
+	resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(newBody)))
+
+	return nil
+}
+
+// =============================================================================
+// WebSocket HMR snooping
+// =============================================================================
+
+// copyWithHMRSnoop copies data from src to dst while also passing each
+// chunk to the HMR watcher for pattern detection. This is a best-effort
+// approach — we forward raw TCP bytes (which may span multiple WebSocket
+// frames) to the watcher. The watcher's pattern matching is substring-based
+// and tolerates partial frames.
+func (g *Gateway) copyWithHMRSnoop(dst io.Writer, src io.Reader, previewID uuid.UUID) {
+	buf := make([]byte, 32*1024)
+	for {
+		n, readErr := src.Read(buf)
+		if n > 0 {
+			data := buf[:n]
+			// Forward to HMR watcher for pattern detection.
+			g.hmrWatcher.OnWebSocketMessage(previewID, data)
+			// Write to the client.
+			if _, writeErr := dst.Write(data); writeErr != nil {
+				g.logger.Debug().Err(writeErr).
+					Str("preview_id", previewID.String()).
+					Msg("websocket: backend→client write ended")
+				return
+			}
+		}
+		if readErr != nil {
+			if readErr != io.EOF {
+				g.logger.Debug().Err(readErr).
+					Str("preview_id", previewID.String()).
+					Msg("websocket: backend→client read ended")
+			}
+			return
+		}
+	}
 }
 
 // =============================================================================
