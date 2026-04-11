@@ -3,6 +3,7 @@
 import {
   type RefObject,
   useCallback,
+  useEffect,
   useRef,
   useState,
 } from "react";
@@ -76,6 +77,11 @@ export function DesignModeOverlay({
     },
   });
 
+  const inspectMutateRef = useRef(inspectMutation.mutate);
+  useEffect(() => {
+    inspectMutateRef.current = inspectMutation.mutate;
+  }, [inspectMutation.mutate]);
+
   // Send design feedback to agent
   const feedbackMutation = useMutation({
     mutationFn: (feedback: DesignModeFeedback) =>
@@ -112,15 +118,15 @@ export function DesignModeOverlay({
 
       const { x, y } = toIframeCoords(e.clientX, e.clientY);
 
-      inspectMutation.mutate(
+      inspectMutateRef.current(
         { x, y },
         {
           onSuccess: (info) => {
             const selector =
               info.id
-                ? `#${info.id}`
+                ? `#${CSS.escape(info.id)}`
                 : info.class_list.length > 0
-                  ? `${info.tag_name}.${info.class_list.join(".")}`
+                  ? `${info.tag_name}.${info.class_list.map((c: string) => CSS.escape(c)).join(".")}`
                   : info.tag_name;
 
             const newElement: SelectedElement = { info, selector };
@@ -141,7 +147,7 @@ export function DesignModeOverlay({
         }
       );
     },
-    [activeTool, toIframeCoords, inspectMutation]
+    [activeTool, toIframeCoords]
   );
 
   const handleMouseMove = useCallback(
@@ -473,7 +479,7 @@ export function DesignModeOverlay({
               </Button>
             </div>
             <p className="text-xs text-muted-foreground">
-              {navigator.platform.includes("Mac") ? "Cmd" : "Ctrl"}+Enter to
+              {/Mac|iPhone|iPad|iPod/.test(navigator.userAgent) ? "Cmd" : "Ctrl"}+Enter to
               send
             </p>
           </div>

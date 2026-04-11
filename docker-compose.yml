@@ -72,8 +72,7 @@ services:
 
   chrome:
     image: chromedp/headless-shell:latest
-    ports:
-      - "9222:9222"
+    shm_size: 256m
     networks:
       - default
       - preview-net
@@ -118,5 +117,4 @@ volumes:
 
 networks:
   preview-net:
-    name: 143-preview-net
-    external: true
+    driver: bridge

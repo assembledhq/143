@@ -35,8 +35,8 @@ const (
 	// commitStatusContext is the GitHub commit status context name.
 	commitStatusContext = "preview/143"
 
-	// appBaseURL is the base URL for the 143 web app.
-	appBaseURL = "https://app.143.dev"
+	// defaultAppBaseURL is the fallback base URL for the 143 web app.
+	defaultAppBaseURL = "https://app.143.dev"
 
 	// commentHeader is the consistent header so we can identify our comments.
 	commentHeader = "<!-- 143-preview-comment -->"
@@ -64,17 +64,23 @@ const (
 // status for preview sessions. It maintains a single updating comment per PR
 // and creates GitHub deployments with environment URLs.
 type PRPreviewIntegration struct {
-	store  *db.PreviewStore
-	gh     GitHubClient
-	logger zerolog.Logger
+	store      *db.PreviewStore
+	gh         GitHubClient
+	logger     zerolog.Logger
+	appBaseURL string
 }
 
-// NewPRPreviewIntegration creates a new PRPreviewIntegration.
-func NewPRPreviewIntegration(store *db.PreviewStore, gh GitHubClient, logger zerolog.Logger) *PRPreviewIntegration {
+// NewPRPreviewIntegration creates a new PRPreviewIntegration. If appBaseURL is
+// empty, it falls back to defaultAppBaseURL.
+func NewPRPreviewIntegration(store *db.PreviewStore, gh GitHubClient, logger zerolog.Logger, appBaseURL string) *PRPreviewIntegration {
+	if appBaseURL == "" {
+		appBaseURL = defaultAppBaseURL
+	}
 	return &PRPreviewIntegration{
-		store:  store,
-		gh:     gh,
-		logger: logger,
+		store:      store,
+		gh:         gh,
+		logger:     logger,
+		appBaseURL: appBaseURL,
 	}
 }
 
@@ -92,7 +98,7 @@ func (p *PRPreviewIntegration) OnPROpened(
 	owner, repo string,
 	sessionID uuid.UUID,
 ) error {
-	sessionURL := buildSessionURL(sessionID)
+	sessionURL := p.buildSessionURL(sessionID)
 	body := p.buildNeverStartedComment(sessionURL)
 
 	commentID, err := p.gh.CreateIssueComment(ctx, owner, repo, prNumber, body)
@@ -493,8 +499,8 @@ func (p *PRPreviewIntegration) updateComment(ctx context.Context, owner, repo st
 }
 
 // buildSessionURL constructs the app URL for a preview session.
-func buildSessionURL(sessionID uuid.UUID) string {
-	return fmt.Sprintf("%s/sessions/%s?preview=1", appBaseURL, sessionID)
+func (p *PRPreviewIntegration) buildSessionURL(sessionID uuid.UUID) string {
+	return fmt.Sprintf("%s/sessions/%s?preview=1", p.appBaseURL, sessionID)
 }
 
 // formatTimestamp formats a time as a human-readable string.

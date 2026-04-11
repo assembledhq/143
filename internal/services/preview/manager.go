@@ -544,11 +544,28 @@ func (m *Manager) RecyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 		return fmt.Errorf("set starting status: %w", err)
 	}
 
+	// Re-fetch to reduce TOCTOU window: the preview may have been stopped
+	// by cleanup between our initial check and now. The remaining window is
+	// small but acceptable for MVP.
+	instance, err = m.store.GetPreviewInstance(ctx, orgID, previewID)
+	if err != nil {
+		return fmt.Errorf("re-fetch preview instance: %w", err)
+	}
+	if instance.Status.IsTerminal() {
+		return fmt.Errorf("preview was stopped during recycle setup (status=%s)", instance.Status)
+	}
+
 	// Stop current processes via provider.
 	if instance.PreviewHandle != "" {
 		if err := m.provider.StopPreview(ctx, instance.PreviewHandle); err != nil {
 			m.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("recycle: provider stop failed")
 		}
+	}
+
+	// Revoke all access sessions before restarting so stale cookies are
+	// invalidated across the recycle boundary.
+	if err := m.store.RevokeAllForPreview(ctx, orgID, previewID); err != nil {
+		m.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("recycle: failed to revoke access sessions")
 	}
 
 	// Restart via provider with same sandbox and config.
@@ -683,10 +700,10 @@ func storeRecycleInput(instance *models.PreviewInstance, input StartPreviewInput
 }
 
 func loadRecycleInput(instance *models.PreviewInstance) (StartPreviewInput, error) {
-	if len(instance.RecycleConfig) == 0 {
+	if len(instance.RecycleConfig) <= 2 {
 		return StartPreviewInput{}, fmt.Errorf("preview %s is missing stored recycle config", instance.ID)
 	}
-	if len(instance.RecycleSandbox) == 0 {
+	if len(instance.RecycleSandbox) <= 2 {
 		return StartPreviewInput{}, fmt.Errorf("preview %s is missing stored recycle sandbox", instance.ID)
 	}
 

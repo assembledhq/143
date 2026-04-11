@@ -32,7 +32,7 @@ import (
 	threadservice "github.com/assembledhq/143/internal/services/thread"
 )
 
-func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, codexAuthSvc *codexauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller) (*chi.Mux, error) {
+func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, codexAuthSvc *codexauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller) (*chi.Mux, *http.Server, *preview.RecycleWorker, error) {
 	// Create stores
 	orgStore := db.NewOrganizationStore(pool)
 	userStore := db.NewUserStore(pool)
@@ -302,19 +302,22 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	recycleWorker.Start()
 
 	// Preview gateway (separate HTTP listener for <id>.preview.* origins).
+	// gwSrv is stored so callers can shut it down gracefully.
+	var gwSrv *http.Server
 	if cfg.PreviewGatewayPort > 0 {
 		gw := gateway.NewGateway(gateway.GatewayConfig{
-			Store:        previewStore,
-			Manager:      previewManager,
-			HMRWatcher:   hmrWatcher,
-			Logger:       logger,
-			AppOrigin:    cfg.FrontendURL,
-			CookieSecret: []byte(cfg.SessionSecret),
+			Store:                 previewStore,
+			Manager:               previewManager,
+			HMRWatcher:            hmrWatcher,
+			Logger:                logger,
+			AppOrigin:             cfg.FrontendURL,
+			CookieSecret:          []byte(cfg.SessionSecret),
+			PreviewOriginTemplate: cfg.PreviewOriginTemplate,
 		})
+		addr := fmt.Sprintf(":%d", cfg.PreviewGatewayPort)
+		logger.Info().Str("addr", addr).Msg("starting preview gateway")
+		gwSrv = &http.Server{Addr: addr, Handler: gw, ReadHeaderTimeout: 10 * time.Second}
 		go func() {
-			addr := fmt.Sprintf(":%d", cfg.PreviewGatewayPort)
-			logger.Info().Str("addr", addr).Msg("starting preview gateway")
-			gwSrv := &http.Server{Addr: addr, Handler: gw, ReadHeaderTimeout: 10 * time.Second}
 			if gwErr := gwSrv.ListenAndServe(); gwErr != nil && gwErr != http.ErrServerClosed {
 				logger.Error().Err(gwErr).Msg("preview gateway failed")
 			}
@@ -652,5 +655,5 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		})
 	})
 
-	return r, nil
+	return r, gwSrv, recycleWorker, nil
 }

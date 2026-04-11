@@ -81,6 +81,9 @@ export function TTLWarning({ expiresAt, sessionId }: TTLWarningProps) {
         queryKey: ["preview-status", sessionId],
       });
     },
+    onError: (error) => {
+      console.error("Failed to extend preview TTL:", error);
+    },
   });
 
   // Only show when urgent or already expired

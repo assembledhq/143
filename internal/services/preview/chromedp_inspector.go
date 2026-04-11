@@ -37,6 +37,7 @@ const (
 	maxScreencastDuration = 30 * time.Second
 	maxScreencastFPS      = 4
 	maxScreencastBytes    = 10 * 1024 * 1024 // 10 MB
+	maxConsoleMessages    = 1000
 )
 
 // =============================================================================
@@ -276,6 +277,9 @@ func (c *ChromeDPInspector) getOrCreatePreviewCtx(previewID string) (*previewCon
 			}
 			pc.mu.Lock()
 			pc.messages = append(pc.messages, msg)
+			if len(pc.messages) > maxConsoleMessages {
+				pc.messages = pc.messages[len(pc.messages)-maxConsoleMessages:]
+			}
 			pc.mu.Unlock()
 		}
 	})
@@ -289,9 +293,6 @@ func (c *ChromeDPInspector) getOrCreatePreviewCtx(previewID string) (*previewCon
 // =============================================================================
 
 func (c *ChromeDPInspector) CaptureScreenshot(ctx context.Context, previewID string, opts models.ScreenshotOpts) (*models.ScreenshotResult, error) {
-	_, cancel := context.WithTimeout(ctx, defaultOpTimeout)
-	defer cancel()
-
 	if opts.ViewportW == 0 {
 		opts.ViewportW = 1280
 	}
@@ -303,6 +304,9 @@ func (c *ChromeDPInspector) CaptureScreenshot(ctx context.Context, previewID str
 	if err != nil {
 		return nil, fmt.Errorf("get preview context: %w", err)
 	}
+
+	timeoutCtx, cancel := context.WithTimeout(pc.ctx, defaultOpTimeout)
+	defer cancel()
 
 	url := c.previewURL(previewID, opts.Path)
 
@@ -328,7 +332,7 @@ func (c *ChromeDPInspector) CaptureScreenshot(ctx context.Context, previewID str
 		actions = append(actions, chromedp.CaptureScreenshot(&pngData))
 	}
 
-	if err := chromedp.Run(pc.ctx, actions...); err != nil {
+	if err := chromedp.Run(timeoutCtx, actions...); err != nil {
 		return nil, fmt.Errorf("capture screenshot: %w", err)
 	}
 
@@ -362,9 +366,6 @@ func (c *ChromeDPInspector) CaptureScreenshot(ctx context.Context, previewID str
 // =============================================================================
 
 func (c *ChromeDPInspector) CaptureDOM(ctx context.Context, previewID string, opts DOMCaptureOpts) (*DOMSnapshot, error) {
-	_, cancel := context.WithTimeout(ctx, defaultOpTimeout)
-	defer cancel()
-
 	pc, err := c.getOrCreatePreviewCtx(previewID)
 	if err != nil {
 		return nil, fmt.Errorf("get preview context: %w", err)
@@ -374,6 +375,9 @@ func (c *ChromeDPInspector) CaptureDOM(ctx context.Context, previewID string, op
 	if path == "" {
 		path = "/"
 	}
+	timeoutCtx, cancel := context.WithTimeout(pc.ctx, defaultOpTimeout)
+	defer cancel()
+
 	url := c.previewURL(previewID, path)
 
 	var outerHTML string
@@ -389,7 +393,7 @@ func (c *ChromeDPInspector) CaptureDOM(ctx context.Context, previewID string, op
 		actions = append(actions, chromedp.OuterHTML("html", &outerHTML, chromedp.ByQuery))
 	}
 
-	if err := chromedp.Run(pc.ctx, actions...); err != nil {
+	if err := chromedp.Run(timeoutCtx, actions...); err != nil {
 		return nil, fmt.Errorf("capture dom: %w", err)
 	}
 
@@ -399,9 +403,14 @@ func (c *ChromeDPInspector) CaptureDOM(ctx context.Context, previewID string, op
 
 	// Optionally collect computed styles via JavaScript.
 	if opts.IncludeStyles {
+		selector := opts.Selector
+		if selector == "" {
+			selector = "body"
+		}
+		selectorJSON, _ := json.Marshal(selector)
 		var stylesJSON string
 		js := `(function() {
-			var el = document.querySelector('` + escapeJSString(opts.Selector) + `');
+			var el = document.querySelector(` + string(selectorJSON) + `);
 			if (!el) el = document.body;
 			var cs = window.getComputedStyle(el);
 			var result = {};
@@ -410,7 +419,7 @@ func (c *ChromeDPInspector) CaptureDOM(ctx context.Context, previewID string, op
 			}
 			return JSON.stringify(result);
 		})()`
-		if err := chromedp.Run(pc.ctx, chromedp.Evaluate(js, &stylesJSON)); err == nil && stylesJSON != "" {
+		if err := chromedp.Run(timeoutCtx, chromedp.Evaluate(js, &stylesJSON)); err == nil && stylesJSON != "" {
 			var styles map[string]string
 			if json.Unmarshal([]byte(stylesJSON), &styles) == nil {
 				snapshot.Styles = styles
@@ -449,13 +458,13 @@ func (c *ChromeDPInspector) ReadConsole(ctx context.Context, previewID string) (
 // =============================================================================
 
 func (c *ChromeDPInspector) InspectElement(ctx context.Context, previewID string, x, y int) (*models.ElementInfo, error) {
-	_, cancel := context.WithTimeout(ctx, defaultOpTimeout)
-	defer cancel()
-
 	pc, err := c.getOrCreatePreviewCtx(previewID)
 	if err != nil {
 		return nil, fmt.Errorf("get preview context: %w", err)
 	}
+
+	timeoutCtx, cancel := context.WithTimeout(pc.ctx, defaultOpTimeout)
+	defer cancel()
 
 	// JavaScript that inspects the element at (x, y) and returns metadata.
 	js := fmt.Sprintf(`(function() {
@@ -536,7 +545,7 @@ func (c *ChromeDPInspector) InspectElement(ctx context.Context, previewID string
 	})()`, x, y)
 
 	var raw string
-	if err := chromedp.Run(pc.ctx, chromedp.Evaluate(js, &raw)); err != nil {
+	if err := chromedp.Run(timeoutCtx, chromedp.Evaluate(js, &raw)); err != nil {
 		return nil, fmt.Errorf("inspect element: %w", err)
 	}
 
@@ -761,13 +770,13 @@ func (c *ChromeDPInspector) ExecuteInteraction(ctx context.Context, previewID st
 		return nil, fmt.Errorf("too many interaction steps: %d (max %d)", len(steps), maxInteractionSteps)
 	}
 
-	_, cancel := context.WithTimeout(ctx, maxInteractionTimeout)
-	defer cancel()
-
 	pc, err := c.getOrCreatePreviewCtx(previewID)
 	if err != nil {
 		return nil, fmt.Errorf("get preview context: %w", err)
 	}
+
+	timeoutCtx, cancel := context.WithTimeout(pc.ctx, maxInteractionTimeout)
+	defer cancel()
 
 	startTime := time.Now()
 	result := &models.InteractionResult{}
@@ -967,13 +976,13 @@ func (c *ChromeDPInspector) CaptureMultiViewport(ctx context.Context, previewID 
 // =============================================================================
 
 func (c *ChromeDPInspector) ComputeVisualDiff(ctx context.Context, previewID string, beforeSnapshotID, afterSnapshotID string) (*models.VisualDiff, error) {
-	_, cancel := context.WithTimeout(ctx, defaultOpTimeout)
-	defer cancel()
-
 	pc, err := c.getOrCreatePreviewCtx(previewID)
 	if err != nil {
 		return nil, fmt.Errorf("get preview context: %w", err)
 	}
+
+	timeoutCtx, cancel := context.WithTimeout(pc.ctx, defaultOpTimeout)
+	defer cancel()
 
 	// Navigate to the before snapshot URL and capture.
 	beforeURL := c.previewURL(previewID, "/")
@@ -982,7 +991,7 @@ func (c *ChromeDPInspector) ComputeVisualDiff(ctx context.Context, previewID str
 	}
 
 	var beforePNG []byte
-	if err := chromedp.Run(pc.ctx,
+	if err := chromedp.Run(timeoutCtx,
 		chromedp.EmulateViewport(1280, 720),
 		chromedp.Navigate(beforeURL),
 		chromedp.WaitReady("body", chromedp.ByQuery),
@@ -999,7 +1008,7 @@ func (c *ChromeDPInspector) ComputeVisualDiff(ctx context.Context, previewID str
 	}
 
 	var afterPNG []byte
-	if err := chromedp.Run(pc.ctx,
+	if err := chromedp.Run(timeoutCtx,
 		chromedp.Navigate(afterURL),
 		chromedp.WaitReady("body", chromedp.ByQuery),
 		chromedp.Sleep(time.Second),
@@ -1223,13 +1232,14 @@ func absDiff(a, b uint32) uint32 {
 // =============================================================================
 
 func (c *ChromeDPInspector) RunAssertions(ctx context.Context, previewID string, assertions []Assertion) (*AssertionResult, error) {
-	_, cancel := context.WithTimeout(ctx, defaultOpTimeout)
-	defer cancel()
-
 	pc, err := c.getOrCreatePreviewCtx(previewID)
 	if err != nil {
 		return nil, fmt.Errorf("get preview context: %w", err)
 	}
+
+	// Remove _ = ... to silence the unused variable lint. Assertion helpers
+	// use pc.ctx directly; adding a per-assertion timeout is a follow-up.
+	_ = ctx // caller context unused; assertions run on the browser context
 
 	result := &AssertionResult{
 		Total: len(assertions),
@@ -1271,8 +1281,9 @@ func (c *ChromeDPInspector) RunAssertions(ctx context.Context, previewID string,
 func (c *ChromeDPInspector) assertElementExists(pc *previewContext, a Assertion) AssertionCheck {
 	check := AssertionCheck{Assertion: a}
 
+	selectorJSON, _ := json.Marshal(a.Selector)
 	js := fmt.Sprintf(`(function() {
-		var el = document.querySelector(%q);
+		var el = document.querySelector(%s);
 		if (!el) return 'not_found';
 		if (%v) {
 			var rect = el.getBoundingClientRect();
@@ -1281,7 +1292,7 @@ func (c *ChromeDPInspector) assertElementExists(pc *previewContext, a Assertion)
 				rect.width === 0 || rect.height === 0) return 'hidden';
 		}
 		return 'found';
-	})()`, a.Selector, a.Visible != nil && *a.Visible)
+	})()`, string(selectorJSON), a.Visible != nil && *a.Visible)
 
 	var result string
 	if err := chromedp.Run(pc.ctx, chromedp.Evaluate(js, &result)); err != nil {
@@ -1332,11 +1343,13 @@ func (c *ChromeDPInspector) assertElementText(pc *previewContext, a Assertion) A
 func (c *ChromeDPInspector) assertElementStyle(pc *previewContext, a Assertion) AssertionCheck {
 	check := AssertionCheck{Assertion: a}
 
+	selectorJSON, _ := json.Marshal(a.Selector)
+	propertyJSON, _ := json.Marshal(a.Property)
 	js := fmt.Sprintf(`(function() {
-		var el = document.querySelector(%q);
+		var el = document.querySelector(%s);
 		if (!el) return '';
-		return window.getComputedStyle(el).getPropertyValue(%q);
-	})()`, a.Selector, a.Property)
+		return window.getComputedStyle(el).getPropertyValue(%s);
+	})()`, string(selectorJSON), string(propertyJSON))
 
 	var actual string
 	if err := chromedp.Run(pc.ctx, chromedp.Evaluate(js, &actual)); err != nil {
@@ -1363,7 +1376,8 @@ func (c *ChromeDPInspector) assertElementStyle(pc *previewContext, a Assertion) 
 func (c *ChromeDPInspector) assertElementCount(pc *previewContext, a Assertion) AssertionCheck {
 	check := AssertionCheck{Assertion: a}
 
-	js := fmt.Sprintf(`document.querySelectorAll(%q).length`, a.Selector)
+	selectorJSON, _ := json.Marshal(a.Selector)
+	js := fmt.Sprintf(`document.querySelectorAll(%s).length`, string(selectorJSON))
 	var count int
 	if err := chromedp.Run(pc.ctx, chromedp.Evaluate(js, &count)); err != nil {
 		check.Message = fmt.Sprintf("error: %v", err)
@@ -1480,17 +1494,8 @@ func (c *ChromeDPInspector) Close() error {
 // Helpers
 // =============================================================================
 
-// escapeJSString escapes a string for safe inclusion in a JavaScript string literal.
-func escapeJSString(s string) string {
-	if s == "" {
-		return "body"
-	}
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `'`, `\'`)
-	s = strings.ReplaceAll(s, "\n", `\n`)
-	s = strings.ReplaceAll(s, "\r", `\r`)
-	return s
-}
+// escapeJSString is intentionally removed — use json.Marshal for safe JS
+// string interpolation into document.querySelector() calls.
 
 // Compile-time interface check.
 var _ PreviewInspector = (*ChromeDPInspector)(nil)

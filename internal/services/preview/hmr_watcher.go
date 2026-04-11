@@ -92,6 +92,7 @@ func isHMRMessage(data []byte) bool {
 type previewWatcher struct {
 	previewID uuid.UUID
 	orgID     uuid.UUID
+	ctx       context.Context
 	cancel    context.CancelFunc
 
 	mu    sync.Mutex
@@ -195,6 +196,7 @@ func (hw *HMRWatcher) StartWatching(previewID, orgID uuid.UUID) {
 	pw := &previewWatcher{
 		previewID: previewID,
 		orgID:     orgID,
+		ctx:       ctx,
 		cancel:    cancel,
 	}
 	hw.watchers[previewID] = pw
@@ -299,7 +301,7 @@ func (hw *HMRWatcher) captureBaseline(ctx context.Context, pw *previewWatcher) {
 func (hw *HMRWatcher) captureAgentChange(pw *previewWatcher) {
 	// Build a context that respects both the per-preview cancellation and
 	// the screenshot timeout.
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(pw.ctx, 30*time.Second)
 	defer cancel()
 
 	// Check if the watcher is still active.

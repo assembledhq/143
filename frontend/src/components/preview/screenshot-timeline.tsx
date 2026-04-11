@@ -17,7 +17,6 @@ import { cn, formatTimeAgo } from "@/lib/utils";
 import type { PreviewSnapshot, PreviewTrigger } from "@/lib/preview-types";
 
 interface ScreenshotTimelineProps {
-  sessionId: string;
   snapshots: PreviewSnapshot[];
 }
 
@@ -38,7 +37,6 @@ const TRIGGER_COLORS: Record<PreviewTrigger, string> = {
 };
 
 export function ScreenshotTimeline({
-  sessionId: _sessionId,
   snapshots,
 }: ScreenshotTimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -104,6 +102,7 @@ export function ScreenshotTimeline({
                     src={snapshot.thumbnail_url || snapshot.screenshot_url}
                     alt={`Screenshot - ${TRIGGER_LABELS[snapshot.trigger]}`}
                     className="w-full h-full object-cover object-top"
+                    onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
                   />
                 ) : (
                   <div className="w-full h-full flex items-center justify-center">
@@ -176,6 +175,7 @@ export function ScreenshotTimeline({
               src={expandedSnapshot.screenshot_url}
               alt="Full screenshot"
               className="w-full"
+              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
             />
           </div>
 

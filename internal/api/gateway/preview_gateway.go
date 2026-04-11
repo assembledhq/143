@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"strings"
 	"time"
 
@@ -40,13 +41,17 @@ type Gateway struct {
 
 // GatewayConfig holds initialization options.
 type GatewayConfig struct {
-	Store        *db.PreviewStore
-	Manager      *preview.Manager
-	HMRWatcher   *preview.HMRWatcher // optional; enables HMR screenshot capture
-	Logger       zerolog.Logger
-	AppOrigin    string // e.g. "https://app.143.dev"
-	CookieSecret []byte // HMAC key for signing preview session cookies
+	Store                *db.PreviewStore
+	Manager              *preview.Manager
+	HMRWatcher           *preview.HMRWatcher // optional; enables HMR screenshot capture
+	Logger               zerolog.Logger
+	AppOrigin            string // e.g. "https://app.143.dev"
+	CookieSecret         []byte // HMAC key for signing preview session cookies
+	PreviewOriginTemplate string // e.g. "https://{id}.preview.143.dev"
 }
+
+// maxHTMLBodySize caps how much HTML we read into memory for script injection.
+const maxHTMLBodySize = 50 * 1024 * 1024 // 50 MB
 
 // NewGateway creates a new preview gateway.
 func NewGateway(cfg GatewayConfig) *Gateway {
@@ -63,7 +68,7 @@ func NewGateway(cfg GatewayConfig) *Gateway {
 			"style-src 'self' 'unsafe-inline'",
 			"img-src 'self' data: blob:",
 			"font-src 'self' data:",
-			"connect-src 'self' wss://*.preview.143.dev",
+			"connect-src 'self' " + deriveWSConnectSrc(cfg.PreviewOriginTemplate),
 			"form-action 'self'",
 			"object-src 'none'",
 			"base-uri 'none'",
@@ -241,6 +246,12 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 		}
 	}
 
+	// Intercept heartbeat pings — no need to proxy to the backend.
+	if r.URL.Path == "/__143_heartbeat" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	// Check for WebSocket upgrade.
 	if isWebSocketUpgrade(r) {
 		g.handleWebSocket(w, r, orgID, previewID)
@@ -256,7 +267,6 @@ func (g *Gateway) handleHTTPProxy(w http.ResponseWriter, r *http.Request, orgID,
 		Director: func(req *http.Request) {
 			req.URL.Scheme = "http"
 			req.URL.Host = "preview-target"
-			req.Header.Del("Accept-Encoding")
 			// Strip the preview session cookie from forwarded requests.
 			stripPreviewCookie(req)
 		},
@@ -449,7 +459,7 @@ func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID
 		if err != nil {
 			return fmt.Errorf("gzip reader: %w", err)
 		}
-		bodyBytes, err = io.ReadAll(gr)
+		bodyBytes, err = io.ReadAll(io.LimitReader(gr, maxHTMLBodySize))
 		_ = gr.Close()
 		_ = resp.Body.Close()
 		if err != nil {
@@ -469,7 +479,7 @@ func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID
 	case "deflate":
 		reader := flate.NewReader(resp.Body)
 		var err error
-		bodyBytes, err = io.ReadAll(reader)
+		bodyBytes, err = io.ReadAll(io.LimitReader(reader, maxHTMLBodySize))
 		_ = reader.Close()
 		_ = resp.Body.Close()
 		if err != nil {
@@ -495,7 +505,7 @@ func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID
 
 	if bodyBytes == nil {
 		var err error
-		bodyBytes, err = io.ReadAll(resp.Body)
+		bodyBytes, err = io.ReadAll(io.LimitReader(resp.Body, maxHTMLBodySize))
 		_ = resp.Body.Close()
 		if err != nil {
 			return fmt.Errorf("read body: %w", err)
@@ -695,4 +705,25 @@ func computeCookieHMAC(secret []byte, payload string) string {
 func isWebSocketUpgrade(r *http.Request) bool {
 	return strings.EqualFold(r.Header.Get("Connection"), "upgrade") &&
 		strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
+}
+
+// deriveWSConnectSrc converts a preview origin template like
+// "https://{id}.preview.143.dev" into a CSP connect-src value like
+// "wss://*.preview.143.dev". Falls back to a permissive wildcard if the
+// template is empty or unparseable.
+func deriveWSConnectSrc(template string) string {
+	if template == "" {
+		return "wss://*.preview.143.dev"
+	}
+	// Replace {id} with * for wildcard matching.
+	wildcard := strings.ReplaceAll(template, "{id}", "*")
+	parsed, err := url.Parse(wildcard)
+	if err != nil {
+		return "wss://*.preview.143.dev"
+	}
+	scheme := "wss"
+	if parsed.Scheme == "http" {
+		scheme = "ws"
+	}
+	return scheme + "://" + parsed.Host
 }

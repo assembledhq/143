@@ -109,6 +109,9 @@ type SnapshotCacheConfig struct {
 // If MaxCacheBytes is zero, DefaultMaxCacheBytes (20 GB) is used.
 // The cache directory is created if it does not exist.
 func NewSnapshotCache(cfg SnapshotCacheConfig) (*SnapshotCache, error) {
+	if cfg.Executor == nil {
+		return nil, fmt.Errorf("snapshot cache: executor must be non-nil")
+	}
 	if cfg.CacheDir == "" {
 		return nil, fmt.Errorf("snapshot cache: cache directory must be specified")
 	}
@@ -187,7 +190,7 @@ func (sc *SnapshotCache) CreateSnapshot(
 	tarCmd := fmt.Sprintf(
 		"tar czf %s -C %s %s .",
 		snapshotTmpFile,
-		sb.WorkDir,
+		shellQuote(sb.WorkDir),
 		tarExcludeFlags,
 	)
 
@@ -361,7 +364,7 @@ func (sc *SnapshotCache) RestoreSnapshot(
 	}
 
 	// 3. Extract inside the sandbox.
-	extractCmd := fmt.Sprintf("tar xzf %s -C %s", snapshotTmpFile, sb.WorkDir)
+	extractCmd := fmt.Sprintf("tar xzf %s -C %s", snapshotTmpFile, shellQuote(sb.WorkDir))
 
 	var stderr bytes.Buffer
 	exitCode, err := sc.executor.Exec(ctx, sb, extractCmd, io.Discard, &stderr)
@@ -438,7 +441,7 @@ func (sc *SnapshotCache) ApplyPartialInvalidation(
 	//    matches the standard `git diff` output format (a/path b/path).
 	applyCmd := fmt.Sprintf(
 		"cd %s && git apply --stat %s && git apply --allow-empty %s",
-		sb.WorkDir,
+		shellQuote(sb.WorkDir),
 		diffTmpPath,
 		diffTmpPath,
 	)
@@ -551,8 +554,18 @@ func (sc *SnapshotCache) TotalCacheSize(ctx context.Context) (int64, error) {
 // Snapshots are organized by the first two hex chars of the key to avoid
 // putting too many files in a single directory.
 func (sc *SnapshotCache) blobPath(snapshotKey string) string {
-	prefix := snapshotKey[:2]
+	prefix := "xx"
+	if len(snapshotKey) >= 2 {
+		prefix = snapshotKey[:2]
+	}
 	return filepath.Join(sc.cacheDir, prefix, snapshotKey+".tar.gz")
+}
+
+// shellQuote wraps a string in single quotes, escaping any embedded single
+// quotes. This prevents shell metacharacter injection when interpolating
+// user-controlled paths into shell commands.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 // totalSize sums the SizeBytes of all entries.

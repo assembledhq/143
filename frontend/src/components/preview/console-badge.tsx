@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, ChevronDown, ChevronUp, Info, AlertCircle } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -42,6 +42,18 @@ const LEVEL_CONFIG: Record<
 
 export function ConsoleBadge({ sessionId }: ConsoleBadgeProps) {
   const [expanded, setExpanded] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!expanded) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setExpanded(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [expanded]);
 
   const { data: messages = [] } = useQuery({
     queryKey: ["preview-console", sessionId],
@@ -55,7 +67,7 @@ export function ConsoleBadge({ sessionId }: ConsoleBadgeProps) {
   if (messages.length === 0) return null;
 
   return (
-    <div className="relative">
+    <div className="relative" ref={containerRef}>
       <button
         onClick={() => setExpanded(!expanded)}
         className="flex items-center gap-1"

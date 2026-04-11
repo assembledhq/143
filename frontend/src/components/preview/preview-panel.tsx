@@ -157,6 +157,7 @@ export function PreviewPanel({
   const isActive =
     phase === "ready" ||
     phase === "partially_ready" ||
+    phase === "pending" ||
     phase === "building" ||
     phase === "initializing" ||
     phase === "starting";
@@ -216,6 +217,11 @@ export function PreviewPanel({
     },
   });
 
+  const bootstrapMutateRef = useRef(bootstrapMutation.mutate);
+  useEffect(() => {
+    bootstrapMutateRef.current = bootstrapMutation.mutate;
+  }, [bootstrapMutation.mutate]);
+
   const previewOrigin = instance
     ? previewOriginTemplate.replace("{id}", instance.id)
     : "";
@@ -258,7 +264,7 @@ export function PreviewPanel({
         return;
 
       if (event.data?.type === PREVIEW_BOOTSTRAP_READY_EVENT) {
-        bootstrapMutation.mutate(undefined, {
+        bootstrapMutateRef.current(undefined, {
           onSuccess: (data) => {
             setMutationError(null);
             sendBootstrapToken(data.token, new URL(previewOrigin).origin);
@@ -266,7 +272,7 @@ export function PreviewPanel({
         });
       }
     },
-    [previewOrigin, bootstrapMutation, sendBootstrapToken]
+    [previewOrigin, sendBootstrapToken]
   );
 
   useEffect(() => {
@@ -282,6 +288,17 @@ export function PreviewPanel({
     startMutation.isPending ||
     stopMutation.isPending ||
     restartMutation.isPending;
+
+  if (statusLoading) {
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="rounded-lg border border-dashed p-8 flex items-center justify-center gap-2 text-sm text-muted-foreground">
+          <Loader2 className="size-4 animate-spin" />
+          Loading preview status...
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-3">
@@ -580,7 +597,7 @@ export function PreviewPanel({
                 ref={iframeRef}
                 src={iframeSrc}
                 className="absolute inset-0 w-full h-full bg-white"
-                sandbox="allow-scripts allow-forms allow-modals allow-downloads allow-popups allow-popups-to-escape-sandbox"
+                sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-popups allow-popups-to-escape-sandbox"
                 onLoad={() => setIframeLoaded(true)}
                 title="Preview"
               />
@@ -633,7 +650,6 @@ export function PreviewPanel({
       {/* Screenshot timeline */}
       {isReady && (
         <ScreenshotTimeline
-          sessionId={sessionId}
           snapshots={previewStatus?.snapshots ?? []}
         />
       )}

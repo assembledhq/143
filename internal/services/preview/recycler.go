@@ -2,6 +2,7 @@ package preview
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -35,6 +36,7 @@ type RecycleWorker struct {
 	maxUptime time.Duration
 	stopCh    chan struct{}
 	doneCh    chan struct{}
+	stopOnce  sync.Once
 }
 
 // RecycleWorkerConfig holds initialization options.
@@ -102,15 +104,15 @@ func (w *RecycleWorker) recycle() {
 	var recycledCount int
 	for _, p := range candidates {
 		// Only recycle previews that have exceeded max uptime.
-		if p.CreatedAt.After(uptimeCutoff) {
+		if p.UpdatedAt.After(uptimeCutoff) {
 			continue
 		}
 
 		w.logger.Info().
 			Str("preview_id", p.ID.String()).
 			Str("org_id", p.OrgID.String()).
-			Time("created_at", p.CreatedAt).
-			Dur("uptime", now.Sub(p.CreatedAt)).
+			Time("updated_at", p.UpdatedAt).
+			Dur("uptime", now.Sub(p.UpdatedAt)).
 			Msg("recycle: preview exceeded max uptime, recycling")
 
 		// Use a per-preview context with a shorter timeout so that one
@@ -135,8 +137,11 @@ func (w *RecycleWorker) recycle() {
 	}
 }
 
-// Stop signals the worker to stop and waits for completion.
+// Stop signals the worker to stop and waits for completion. Safe to call
+// multiple times.
 func (w *RecycleWorker) Stop() {
-	close(w.stopCh)
+	w.stopOnce.Do(func() {
+		close(w.stopCh)
+	})
 	<-w.doneCh
 }

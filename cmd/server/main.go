@@ -128,7 +128,7 @@ func main() {
 	}
 
 	cancelRegistry := agent.NewCancelRegistry(logger)
-	router, err := api.NewRouter(cfg, pool, logger, codexAuthSvc, llmClient, fileReader, cancelRegistry)
+	router, gwSrv, recycleWorker, err := api.NewRouter(cfg, pool, logger, codexAuthSvc, llmClient, fileReader, cancelRegistry)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}
@@ -247,8 +247,16 @@ func main() {
 		<-sigCh
 		logger.Info().Msg("shutting down server...")
 		cancel() // stop worker
+		if recycleWorker != nil {
+			recycleWorker.Stop()
+		}
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutdownCancel()
+		if gwSrv != nil {
+			if err := gwSrv.Shutdown(shutdownCtx); err != nil {
+				logger.Error().Err(err).Msg("preview gateway shutdown failed")
+			}
+		}
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			logger.Error().Err(err).Msg("server shutdown failed")
 		}
