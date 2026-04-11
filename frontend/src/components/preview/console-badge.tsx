@@ -61,20 +61,20 @@ export function ConsoleBadge({ sessionId }: ConsoleBadgeProps) {
         className="flex items-center gap-1"
       >
         {errorCount > 0 ? (
-          <Badge variant="destructive" className="text-[11px] gap-1">
+          <Badge variant="destructive" className="text-xs gap-1">
             <AlertTriangle className="size-3" />
             {errorCount} error{errorCount !== 1 ? "s" : ""}
           </Badge>
         ) : warnCount > 0 ? (
           <Badge
             variant="secondary"
-            className="text-[11px] gap-1 bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/20"
+            className="text-xs gap-1 bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/20"
           >
             <AlertCircle className="size-3" />
             {warnCount} warning{warnCount !== 1 ? "s" : ""}
           </Badge>
         ) : (
-          <Badge variant="secondary" className="text-[11px] gap-1">
+          <Badge variant="secondary" className="text-xs gap-1">
             <Info className="size-3" />
             {messages.length} message{messages.length !== 1 ? "s" : ""}
           </Badge>
@@ -115,17 +115,17 @@ export function ConsoleBadge({ sessionId }: ConsoleBadgeProps) {
                   >
                     <Icon className={cn("size-3 mt-0.5 shrink-0", config.color)} />
                     <div className="min-w-0 flex-1 space-y-0.5">
-                      <p className="font-mono text-[11px] break-all whitespace-pre-wrap">
+                      <p className="font-mono text-xs break-all whitespace-pre-wrap">
                         {msg.text}
                       </p>
                       {msg.source && (
-                        <p className="text-[10px] text-muted-foreground truncate">
+                        <p className="text-xs text-muted-foreground truncate">
                           {msg.source}
                           {msg.line_number != null ? `:${msg.line_number}` : ""}
                         </p>
                       )}
                     </div>
-                    <span className="text-[10px] text-muted-foreground whitespace-nowrap">
+                    <span className="text-xs text-muted-foreground whitespace-nowrap">
                       {new Date(msg.timestamp).toLocaleTimeString()}
                     </span>
                   </div>

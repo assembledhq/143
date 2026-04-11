@@ -113,7 +113,7 @@ export function ScreenshotTimeline({
 
                 {/* Console error indicator */}
                 {snapshot.console_error_count > 0 && (
-                  <div className="absolute top-1 right-1 flex items-center gap-0.5 rounded bg-destructive/90 px-1 py-0.5 text-[10px] text-white">
+                  <div className="absolute top-1 right-1 flex items-center gap-0.5 rounded bg-destructive/90 px-1 py-0.5 text-xs text-white">
                     <AlertTriangle className="size-2.5" />
                     {snapshot.console_error_count}
                   </div>
@@ -125,13 +125,13 @@ export function ScreenshotTimeline({
                 <Badge
                   variant="secondary"
                   className={cn(
-                    "text-[10px] px-1 py-0",
+                    "text-xs px-1 py-0",
                     TRIGGER_COLORS[snapshot.trigger]
                   )}
                 >
                   {TRIGGER_LABELS[snapshot.trigger]}
                 </Badge>
-                <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
+                <div className="flex items-center gap-1 text-xs text-muted-foreground">
                   <Clock className="size-2.5" />
                   {formatTimeAgo(snapshot.created_at)}
                 </div>
@@ -193,7 +193,7 @@ export function ScreenshotTimeline({
                       <Badge
                         key={file}
                         variant="secondary"
-                        className="text-[10px] font-mono"
+                        className="text-xs font-mono"
                       >
                         {file}
                       </Badge>

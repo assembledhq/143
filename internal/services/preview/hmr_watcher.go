@@ -418,7 +418,7 @@ func (hw *HMRWatcher) writePNG(previewID uuid.UUID, png []byte) (string, error) 
 	filename := fmt.Sprintf("%d_%s.png", time.Now().UnixMilli(), uuid.New().String()[:8])
 	path := filepath.Join(dir, filename)
 
-	if err := os.WriteFile(path, png, 0o640); err != nil {
+	if err := os.WriteFile(path, png, 0o600); err != nil {
 		return "", fmt.Errorf("write png: %w", err)
 	}
 

@@ -130,7 +130,7 @@ export function PreviewPanel({
   const {
     data: previewStatus,
     isLoading: statusLoading,
-    error: statusError,
+    error: _statusError,
   } = useQuery({
     queryKey: ["preview-status", sessionId],
     queryFn: () => api.sessions.preview.get(sessionId),
@@ -458,7 +458,7 @@ export function PreviewPanel({
               <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
                 Build log
               </summary>
-              <pre className="mt-1 max-h-40 overflow-auto rounded bg-muted p-2 text-[11px] leading-relaxed">
+              <pre className="mt-1 max-h-40 overflow-auto rounded bg-muted p-2 text-xs leading-relaxed">
                 {instance.build_log}
               </pre>
             </details>

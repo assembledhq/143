@@ -328,7 +328,7 @@ export function VisualEditingPanel({
         {/* Spacing tab */}
         <TabsContent value="spacing" className="p-2 space-y-3">
           <div className="space-y-1.5">
-            <Label className="text-[11px]">Margin</Label>
+            <Label className="text-xs">Margin</Label>
             <div className="grid grid-cols-2 gap-1.5">
               <SpacingSlider
                 label="T"
@@ -353,7 +353,7 @@ export function VisualEditingPanel({
             </div>
           </div>
           <div className="space-y-1.5">
-            <Label className="text-[11px]">Padding</Label>
+            <Label className="text-xs">Padding</Label>
             <div className="grid grid-cols-2 gap-1.5">
               <SpacingSlider
                 label="T"
@@ -378,7 +378,7 @@ export function VisualEditingPanel({
             </div>
           </div>
           <div className="space-y-1.5">
-            <Label className="text-[11px]">Border Radius</Label>
+            <Label className="text-xs">Border Radius</Label>
             <div className="flex items-center gap-2">
               <Circle className="size-3 text-muted-foreground" />
               <Slider
@@ -388,7 +388,7 @@ export function VisualEditingPanel({
                 onValueChange={([v]) => update("borderRadius", v)}
                 className="flex-1"
               />
-              <span className="text-[10px] text-muted-foreground w-8 text-right">
+              <span className="text-xs text-muted-foreground w-8 text-right">
                 {editState.borderRadius}px
               </span>
             </div>
@@ -398,7 +398,7 @@ export function VisualEditingPanel({
         {/* Typography tab */}
         <TabsContent value="typography" className="p-2 space-y-3">
           <div className="space-y-1.5">
-            <Label className="text-[11px]">Font Size</Label>
+            <Label className="text-xs">Font Size</Label>
             <div className="flex items-center gap-1.5">
               <Slider
                 min={8}
@@ -407,14 +407,14 @@ export function VisualEditingPanel({
                 onValueChange={([v]) => update("fontSize", v)}
                 className="flex-1"
               />
-              <span className="text-[10px] text-muted-foreground w-8 text-right">
+              <span className="text-xs text-muted-foreground w-8 text-right">
                 {editState.fontSize}
               </span>
               <Select
                 value={editState.fontSizeUnit}
                 onValueChange={(v) => update("fontSizeUnit", v)}
               >
-                <SelectTrigger className="w-14 h-6 text-[10px]">
+                <SelectTrigger className="w-14 h-6 text-xs">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -428,7 +428,7 @@ export function VisualEditingPanel({
             </div>
           </div>
           <div className="space-y-1.5">
-            <Label className="text-[11px]">Font Weight</Label>
+            <Label className="text-xs">Font Weight</Label>
             <Select
               value={editState.fontWeight}
               onValueChange={(v) => update("fontWeight", v)}
@@ -446,7 +446,7 @@ export function VisualEditingPanel({
             </Select>
           </div>
           <div className="space-y-1.5">
-            <Label className="text-[11px]">Line Height</Label>
+            <Label className="text-xs">Line Height</Label>
             <div className="flex items-center gap-2">
               <Slider
                 min={0}
@@ -455,13 +455,13 @@ export function VisualEditingPanel({
                 onValueChange={([v]) => update("lineHeight", v)}
                 className="flex-1"
               />
-              <span className="text-[10px] text-muted-foreground w-8 text-right">
+              <span className="text-xs text-muted-foreground w-8 text-right">
                 {editState.lineHeight}px
               </span>
             </div>
           </div>
           <div className="space-y-1.5">
-            <Label className="text-[11px]">Letter Spacing</Label>
+            <Label className="text-xs">Letter Spacing</Label>
             <div className="flex items-center gap-2">
               <Slider
                 min={-5}
@@ -470,7 +470,7 @@ export function VisualEditingPanel({
                 onValueChange={([v]) => update("letterSpacing", v)}
                 className="flex-1"
               />
-              <span className="text-[10px] text-muted-foreground w-8 text-right">
+              <span className="text-xs text-muted-foreground w-8 text-right">
                 {editState.letterSpacing}px
               </span>
             </div>
@@ -480,7 +480,7 @@ export function VisualEditingPanel({
         {/* Layout tab */}
         <TabsContent value="layout" className="p-2 space-y-3">
           <div className="space-y-1.5">
-            <Label className="text-[11px]">Flex Direction</Label>
+            <Label className="text-xs">Flex Direction</Label>
             <Select
               value={editState.flexDirection}
               onValueChange={(v) => update("flexDirection", v)}
@@ -498,7 +498,7 @@ export function VisualEditingPanel({
             </Select>
           </div>
           <div className="space-y-1.5">
-            <Label className="text-[11px]">Justify Content</Label>
+            <Label className="text-xs">Justify Content</Label>
             <Select
               value={editState.justifyContent}
               onValueChange={(v) => update("justifyContent", v)}
@@ -516,7 +516,7 @@ export function VisualEditingPanel({
             </Select>
           </div>
           <div className="space-y-1.5">
-            <Label className="text-[11px]">Align Items</Label>
+            <Label className="text-xs">Align Items</Label>
             <Select
               value={editState.alignItems}
               onValueChange={(v) => update("alignItems", v)}
@@ -534,7 +534,7 @@ export function VisualEditingPanel({
             </Select>
           </div>
           <div className="space-y-1.5">
-            <Label className="text-[11px]">Gap</Label>
+            <Label className="text-xs">Gap</Label>
             <div className="flex items-center gap-2">
               <Slider
                 min={0}
@@ -543,7 +543,7 @@ export function VisualEditingPanel({
                 onValueChange={([v]) => update("gap", v)}
                 className="flex-1"
               />
-              <span className="text-[10px] text-muted-foreground w-8 text-right">
+              <span className="text-xs text-muted-foreground w-8 text-right">
                 {editState.gap}px
               </span>
             </div>
@@ -553,7 +553,7 @@ export function VisualEditingPanel({
         {/* Size tab */}
         <TabsContent value="size" className="p-2 space-y-3">
           <div className="space-y-1.5">
-            <Label className="text-[11px]">Width</Label>
+            <Label className="text-xs">Width</Label>
             <div className="flex items-center gap-1.5">
               <Input
                 value={editState.width}
@@ -565,7 +565,7 @@ export function VisualEditingPanel({
                 value={editState.widthUnit}
                 onValueChange={(v) => update("widthUnit", v)}
               >
-                <SelectTrigger className="w-16 h-7 text-[10px]">
+                <SelectTrigger className="w-16 h-7 text-xs">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -579,7 +579,7 @@ export function VisualEditingPanel({
             </div>
           </div>
           <div className="space-y-1.5">
-            <Label className="text-[11px]">Height</Label>
+            <Label className="text-xs">Height</Label>
             <div className="flex items-center gap-1.5">
               <Input
                 value={editState.height}
@@ -591,7 +591,7 @@ export function VisualEditingPanel({
                 value={editState.heightUnit}
                 onValueChange={(v) => update("heightUnit", v)}
               >
-                <SelectTrigger className="w-16 h-7 text-[10px]">
+                <SelectTrigger className="w-16 h-7 text-xs">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -636,7 +636,7 @@ function ColorField({
 }) {
   return (
     <div className="space-y-1">
-      <Label className="text-[11px]">{label}</Label>
+      <Label className="text-xs">{label}</Label>
       <div className="flex items-center gap-1.5">
         <div className="relative">
           <input
@@ -679,7 +679,7 @@ function SpacingSlider({
 }) {
   return (
     <div className="flex items-center gap-1">
-      <span className="text-[10px] text-muted-foreground w-3">{label}</span>
+      <span className="text-xs text-muted-foreground w-3">{label}</span>
       <Slider
         min={0}
         max={64}
@@ -687,7 +687,7 @@ function SpacingSlider({
         onValueChange={([v]) => onChange(v)}
         className="flex-1"
       />
-      <span className="text-[10px] text-muted-foreground w-6 text-right">
+      <span className="text-xs text-muted-foreground w-6 text-right">
         {value}
       </span>
     </div>

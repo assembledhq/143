@@ -329,13 +329,13 @@ export function DesignModeOverlay({
         <div className="absolute bottom-2 left-2 w-72 rounded-lg border bg-background/95 backdrop-blur shadow-lg pointer-events-auto">
           <div className="flex items-center justify-between p-2 border-b">
             <div className="flex items-center gap-1.5">
-              <Badge variant="secondary" className="font-mono text-[10px]">
+              <Badge variant="secondary" className="font-mono text-xs">
                 {"<"}
                 {primarySelected.info.tag_name}
                 {">"}
               </Badge>
               {primarySelected.info.component_name && (
-                <Badge variant="outline" className="text-[10px]">
+                <Badge variant="outline" className="text-xs">
                   {primarySelected.info.component_name}
                 </Badge>
               )}
@@ -364,7 +364,7 @@ export function DesignModeOverlay({
             {primarySelected.info.id && (
               <div className="flex items-center gap-1">
                 <span className="text-muted-foreground">id:</span>
-                <code className="font-mono text-[10px]">
+                <code className="font-mono text-xs">
                   {primarySelected.info.id}
                 </code>
               </div>
@@ -376,13 +376,13 @@ export function DesignModeOverlay({
                   {primarySelected.info.class_list.slice(0, 8).map((cls) => (
                     <code
                       key={cls}
-                      className="rounded bg-muted px-1 py-0.5 font-mono text-[10px]"
+                      className="rounded bg-muted px-1 py-0.5 font-mono text-xs"
                     >
                       {cls}
                     </code>
                   ))}
                   {primarySelected.info.class_list.length > 8 && (
-                    <span className="text-muted-foreground text-[10px]">
+                    <span className="text-muted-foreground text-xs">
                       +{primarySelected.info.class_list.length - 8} more
                     </span>
                   )}
@@ -392,7 +392,7 @@ export function DesignModeOverlay({
             {primarySelected.info.text_content && (
               <div className="space-y-0.5">
                 <span className="text-muted-foreground">text:</span>
-                <p className="truncate text-[11px]">
+                <p className="truncate text-xs">
                   {primarySelected.info.text_content}
                 </p>
               </div>
@@ -400,7 +400,7 @@ export function DesignModeOverlay({
             {primarySelected.info.component_file && (
               <div className="flex items-center gap-1">
                 <span className="text-muted-foreground">file:</span>
-                <code className="font-mono text-[10px] truncate">
+                <code className="font-mono text-xs truncate">
                   {primarySelected.info.component_file}
                 </code>
               </div>
@@ -408,7 +408,7 @@ export function DesignModeOverlay({
 
             {/* Reorder controls */}
             <div className="flex items-center gap-1 pt-1 border-t">
-              <span className="text-muted-foreground text-[10px] mr-1">
+              <span className="text-muted-foreground text-xs mr-1">
                 Reorder:
               </span>
               {[
@@ -439,7 +439,7 @@ export function DesignModeOverlay({
           {/* Multi-selection indicator */}
           {selectedElements.length > 1 && (
             <div className="px-2 pb-2">
-              <Badge variant="secondary" className="text-[10px]">
+              <Badge variant="secondary" className="text-xs">
                 {selectedElements.length} elements selected (shift+click to
                 add/remove)
               </Badge>
@@ -474,7 +474,7 @@ export function DesignModeOverlay({
                 Send to agent
               </Button>
             </div>
-            <p className="text-[10px] text-muted-foreground">
+            <p className="text-xs text-muted-foreground">
               {navigator.platform.includes("Mac") ? "Cmd" : "Ctrl"}+Enter to
               send
             </p>

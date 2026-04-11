@@ -284,23 +284,12 @@ func (c *ChromeDPInspector) getOrCreatePreviewCtx(previewID string) (*previewCon
 	return pc, nil
 }
 
-// releasePreviewCtx closes and removes the browser context for a preview.
-func (c *ChromeDPInspector) releasePreviewCtx(previewID string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if pc, ok := c.previews[previewID]; ok {
-		pc.cancel()
-		delete(c.previews, previewID)
-	}
-}
-
 // =============================================================================
 // CaptureScreenshot
 // =============================================================================
 
 func (c *ChromeDPInspector) CaptureScreenshot(ctx context.Context, previewID string, opts models.ScreenshotOpts) (*models.ScreenshotResult, error) {
-	ctx, cancel := context.WithTimeout(ctx, defaultOpTimeout)
+	_, cancel := context.WithTimeout(ctx, defaultOpTimeout)
 	defer cancel()
 
 	if opts.ViewportW == 0 {
@@ -373,7 +362,7 @@ func (c *ChromeDPInspector) CaptureScreenshot(ctx context.Context, previewID str
 // =============================================================================
 
 func (c *ChromeDPInspector) CaptureDOM(ctx context.Context, previewID string, opts DOMCaptureOpts) (*DOMSnapshot, error) {
-	ctx, cancel := context.WithTimeout(ctx, defaultOpTimeout)
+	_, cancel := context.WithTimeout(ctx, defaultOpTimeout)
 	defer cancel()
 
 	pc, err := c.getOrCreatePreviewCtx(previewID)
@@ -460,7 +449,7 @@ func (c *ChromeDPInspector) ReadConsole(ctx context.Context, previewID string) (
 // =============================================================================
 
 func (c *ChromeDPInspector) InspectElement(ctx context.Context, previewID string, x, y int) (*models.ElementInfo, error) {
-	ctx, cancel := context.WithTimeout(ctx, defaultOpTimeout)
+	_, cancel := context.WithTimeout(ctx, defaultOpTimeout)
 	defer cancel()
 
 	pc, err := c.getOrCreatePreviewCtx(previewID)
@@ -732,9 +721,9 @@ func gifPalette() color.Palette {
 		for g := 0; g < 6; g++ {
 			for b := 0; b < 6; b++ {
 				p[idx] = color.RGBA{
-					R: uint8(r * 51),
-					G: uint8(g * 51),
-					B: uint8(b * 51),
+					R: uint8(min(r*51, 255)),
+					G: uint8(min(g*51, 255)),
+					B: uint8(min(b*51, 255)),
 					A: 255,
 				}
 				idx++
@@ -742,7 +731,7 @@ func gifPalette() color.Palette {
 		}
 	}
 	for i := 0; i < 40; i++ {
-		gray := uint8(i * 255 / 39)
+		gray := uint8(min(i*255/39, 255))
 		p[idx] = color.RGBA{R: gray, G: gray, B: gray, A: 255}
 		idx++
 	}
@@ -1191,7 +1180,11 @@ func generateDiffOverlay(before, after image.Image) ([]byte, error) {
 			} else {
 				// Semi-transparent grayscale for unchanged pixels.
 				r, g, b, _ := after.At(aBounds.Min.X+x, aBounds.Min.Y+y).RGBA()
-				gray := uint8((r/256 + g/256 + b/256) / 3)
+				grayVal := (r/256 + g/256 + b/256) / 3
+			if grayVal > 255 {
+				grayVal = 255
+			}
+			gray := uint8(grayVal)
 				overlay.Set(x, y, color.RGBA{R: gray, G: gray, B: gray, A: 100})
 			}
 		}

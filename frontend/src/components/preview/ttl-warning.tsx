@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Clock, Plus } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -59,17 +59,17 @@ export function TTLWarning({ expiresAt, sessionId }: TTLWarningProps) {
   const [remaining, setRemaining] = useState(() =>
     formatRemainingTime(expiresAt)
   );
+  const expiresAtRef = useRef(expiresAt);
+  expiresAtRef.current = expiresAt;
 
   // Update remaining time every second
   useEffect(() => {
-    setRemaining(formatRemainingTime(expiresAt));
-
     const interval = setInterval(() => {
-      setRemaining(formatRemainingTime(expiresAt));
+      setRemaining(formatRemainingTime(expiresAtRef.current));
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [expiresAt]);
+  }, []);
 
   const extendMutation = useMutation({
     mutationFn: () => api.sessions.preview.extend(sessionId),
@@ -93,7 +93,7 @@ export function TTLWarning({ expiresAt, sessionId }: TTLWarningProps) {
       <Badge
         variant="secondary"
         className={cn(
-          "text-[11px] gap-1",
+          "text-xs gap-1",
           remaining.urgent && !remaining.expired
             ? "bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/20"
             : remaining.expired
