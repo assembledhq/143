@@ -11,6 +11,7 @@ import {
   Ruler,
   Circle,
   Send,
+  AlertTriangle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -125,6 +126,19 @@ const JUSTIFY_OPTIONS = [
 const ALIGN_OPTIONS = ["flex-start", "flex-end", "center", "stretch", "baseline"];
 const SIZE_UNITS = ["px", "%", "rem", "em", "vw", "vh", "auto"];
 
+function isValidHexColor(value: string): boolean {
+  if (value === "transparent") return true;
+  if (!value.startsWith("#")) return false;
+  const hex = value.slice(1);
+  return /^[0-9a-fA-F]{3}$|^[0-9a-fA-F]{4}$|^[0-9a-fA-F]{6}$|^[0-9a-fA-F]{8}$/.test(hex);
+}
+
+function isValidNumericSize(value: string, unit: string): boolean {
+  if (unit === "auto" || value === "auto" || value === "") return true;
+  const num = parseFloat(value);
+  return !isNaN(num) && num >= 0;
+}
+
 export function VisualEditingPanel({
   sessionId,
   element,
@@ -135,6 +149,26 @@ export function VisualEditingPanel({
     initStateFromElement(element)
   );
   const [dirtyFields, setDirtyFields] = useState<Set<string>>(new Set());
+  const [applyError, setApplyError] = useState<string | null>(null);
+
+  // Validation
+  const validationErrors: string[] = [];
+  if (dirtyFields.has("color") && !isValidHexColor(editState.color)) {
+    validationErrors.push("Invalid text color hex value");
+  }
+  if (dirtyFields.has("backgroundColor") && !isValidHexColor(editState.backgroundColor)) {
+    validationErrors.push("Invalid background color hex value");
+  }
+  if (dirtyFields.has("borderColor") && !isValidHexColor(editState.borderColor)) {
+    validationErrors.push("Invalid border color hex value");
+  }
+  if (dirtyFields.has("width") && !isValidNumericSize(editState.width, editState.widthUnit)) {
+    validationErrors.push("Width must be a non-negative number");
+  }
+  if (dirtyFields.has("height") && !isValidNumericSize(editState.height, editState.heightUnit)) {
+    validationErrors.push("Height must be a non-negative number");
+  }
+  const hasValidationErrors = validationErrors.length > 0;
 
   const update = useCallback(
     <K extends keyof EditState>(key: K, value: EditState[K]) => {
@@ -274,7 +308,11 @@ export function VisualEditingPanel({
       });
     },
     onSuccess: () => {
+      setApplyError(null);
       setDirtyFields(new Set());
+    },
+    onError: (err) => {
+      setApplyError(`Failed to apply edits: ${err.message}`);
     },
   });
 
@@ -607,13 +645,39 @@ export function VisualEditingPanel({
         </TabsContent>
       </Tabs>
 
+      {/* Validation errors */}
+      {hasValidationErrors && (
+        <div className="px-2 py-1.5 text-xs text-destructive space-y-0.5">
+          {validationErrors.map((err, i) => (
+            <div key={i} className="flex items-center gap-1">
+              <AlertTriangle className="size-3 shrink-0" />
+              {err}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Apply error */}
+      {applyError && (
+        <div className="mx-2 mb-1 flex items-center gap-1.5 rounded border border-destructive/20 bg-destructive/5 p-1.5 text-xs text-destructive">
+          <AlertTriangle className="size-3 shrink-0" />
+          <span className="flex-1">{applyError}</span>
+          <button
+            onClick={() => setApplyError(null)}
+            className="rounded p-0.5 hover:bg-destructive/10"
+          >
+            <X className="size-3" />
+          </button>
+        </div>
+      )}
+
       {/* Apply button */}
       <div className="p-2 border-t">
         <Button
           size="sm"
           className="w-full"
           onClick={() => applyMutation.mutate()}
-          disabled={dirtyFields.size === 0 || applyMutation.isPending}
+          disabled={dirtyFields.size === 0 || applyMutation.isPending || hasValidationErrors}
           loading={applyMutation.isPending}
         >
           <Send className="size-3" />

@@ -120,7 +120,10 @@ func NewDockerPreviewProvider(
 // =============================================================================
 
 func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig) (*preview.PreviewHandle, error) {
-	handle := generateHandle()
+	handle, err := generateHandle()
+	if err != nil {
+		return nil, fmt.Errorf("generate preview handle: %w", err)
+	}
 	// Use context.Background() so service processes outlive the StartPreview call.
 	// The cancelFn is stored in previewState and called by StopPreview.
 	svcCtx, cancelFn := context.WithCancel(context.Background())
@@ -135,6 +138,10 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 	}
 
 	d.mu.Lock()
+	if _, exists := d.previews[handle]; exists {
+		d.mu.Unlock()
+		return nil, fmt.Errorf("preview handle %q already exists (duplicate handle collision)", handle)
+	}
 	d.previews[handle] = state
 	d.mu.Unlock()
 
@@ -416,7 +423,10 @@ func (d *DockerPreviewProvider) provisionInfra(
 	infraCfg models.InfrastructureConfig,
 	tmpl preview.InfraTemplate,
 ) (*preview.InfraHandle, error) {
-	cred := generateInfraCredential(infraName)
+	cred, err := generateInfraCredential(infraName)
+	if err != nil {
+		return nil, fmt.Errorf("generate credential for %q: %w", infraName, err)
+	}
 	containerName := fmt.Sprintf("preview-%s-%s", infraName, previewHandle[:12])
 
 	env := d.buildInfraEnv(infraCfg.Template, cred)
@@ -779,12 +789,16 @@ func resolveCredentialTemplate(template string, cred preview.InfraCredential) st
 	return r.Replace(template)
 }
 
-func generateInfraCredential(infraName string) preview.InfraCredential {
+func generateInfraCredential(infraName string) (preview.InfraCredential, error) {
+	password, err := preview.RandomHex(16)
+	if err != nil {
+		return preview.InfraCredential{}, fmt.Errorf("generate infra credential password: %w", err)
+	}
 	return preview.InfraCredential{
 		Username: fmt.Sprintf("preview_%s", infraName),
-		Password: preview.RandomHex(16),
+		Password: password,
 		Database: "preview_db",
-	}
+	}, nil
 }
 
 // =============================================================================
@@ -801,7 +815,7 @@ func (d *DockerPreviewProvider) cleanupState(handle string) {
 // Helpers
 // =============================================================================
 
-func generateHandle() string {
+func generateHandle() (string, error) {
 	return preview.RandomHex(16)
 }
 

@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -221,7 +222,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 		return
 	}
 
-	orgID, cookiePreviewID, _, err := decodeCookieValue(g.cookieSecret, cookie.Value)
+	orgID, cookiePreviewID, accessSessionID, err := decodeCookieValue(g.cookieSecret, cookie.Value)
 	if err != nil {
 		http.Error(w, "invalid preview session", http.StatusUnauthorized)
 		return
@@ -233,10 +234,27 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 		return
 	}
 
+	// Refresh the session cookie expiry on each successful request so that
+	// active users are not logged out after the initial 5-minute window.
+	refreshedCookie := encodeCookieValue(g.cookieSecret, orgID, previewID, accessSessionID)
+	http.SetCookie(w, &http.Cookie{
+		Name:     "__Host-preview_session",
+		Value:    refreshedCookie,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   r.TLS != nil,
+		SameSite: http.SameSiteStrictMode,
+		Expires:  time.Now().Add(5 * time.Minute),
+	})
+
 	// Record activity for idle timeout tracking.
-	_ = g.manager.RecordAccess(r.Context(), orgID, previewID)
+	if err := g.manager.RecordAccess(r.Context(), orgID, previewID); err != nil {
+		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to record access")
+	}
 	if r.URL.Path != "" && r.URL.Path != "/" {
-		_ = g.manager.RecordLastPath(r.Context(), orgID, previewID, r.URL.Path)
+		if err := g.manager.RecordLastPath(r.Context(), orgID, previewID, r.URL.Path); err != nil {
+			g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to record last path")
+		}
 	}
 
 	// Check for WebSocket upgrade.
@@ -508,6 +526,10 @@ func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID
 	injected := false
 
 	// Prefer injecting before </head>.
+	// NOTE: This substring-based matching can produce incorrect results if
+	// "</head>" appears inside a string literal, JS template, or HTML comment
+	// rather than as the actual closing head tag. A proper fix would require
+	// an HTML parser, but we accept this limitation to avoid the dependency.
 	if idx := strings.Index(bodyLower, "</head>"); idx != -1 {
 		body = body[:idx] + scriptBlock + body[idx:]
 		injected = true

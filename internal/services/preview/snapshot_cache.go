@@ -216,6 +216,15 @@ func (sc *SnapshotCache) CreateSnapshot(
 		return fmt.Errorf("snapshot create: write blob: %w", err)
 	}
 
+	// Compute and store a SHA-256 checksum alongside the blob for integrity
+	// verification on restore.
+	checksum := sha256.Sum256(tarData)
+	checksumHex := hex.EncodeToString(checksum[:])
+	checksumPath := blobPath + ".sha256"
+	if err := atomicWriteFile(checksumPath, []byte(checksumHex), 0o640); err != nil {
+		return fmt.Errorf("snapshot create: write checksum: %w", err)
+	}
+
 	sizeBytes := int64(len(tarData))
 
 	// 4. Record in database.
@@ -287,6 +296,7 @@ func (sc *SnapshotCache) FindSnapshot(
 		sc.logger.Warn().
 			Str("blob_path", entry.BlobPath).
 			Msg("snapshot blob missing from disk; cleaning up stale DB entry")
+		_ = os.Remove(entry.BlobPath + ".sha256") // best-effort cleanup of checksum file
 		_ = sc.store.DeleteCache(ctx, entry.OrgID, entry.ID)
 		return nil, nil
 	}
@@ -326,6 +336,23 @@ func (sc *SnapshotCache) RestoreSnapshot(
 	tarData, err := os.ReadFile(hit.BlobPath)
 	if err != nil {
 		return fmt.Errorf("snapshot restore: read blob: %w", err)
+	}
+
+	// Verify SHA-256 checksum if a checksum file exists alongside the blob.
+	checksumPath := hit.BlobPath + ".sha256"
+	if expectedHex, readErr := os.ReadFile(checksumPath); readErr == nil {
+		actualSum := sha256.Sum256(tarData)
+		actualHex := hex.EncodeToString(actualSum[:])
+		if actualHex != strings.TrimSpace(string(expectedHex)) {
+			log.Error().
+				Str("expected", strings.TrimSpace(string(expectedHex))).
+				Str("actual", actualHex).
+				Msg("snapshot checksum mismatch — deleting corrupted entry")
+			_ = os.Remove(hit.BlobPath)
+			_ = os.Remove(checksumPath)
+			_ = sc.store.DeleteCache(ctx, hit.Entry.OrgID, hit.Entry.ID)
+			return fmt.Errorf("snapshot restore: checksum mismatch for key %s", hit.Entry.SnapshotKey)
+		}
 	}
 
 	// 2. Write the tar.gz into the sandbox.
@@ -476,11 +503,12 @@ func (sc *SnapshotCache) EvictLRU(ctx context.Context) error {
 			Time("last_used_at", entry.LastUsedAt).
 			Msg("evicting snapshot")
 
-		// Remove the blob from disk. Ignore errors for files that are
-		// already gone (idempotent).
+		// Remove the blob and its checksum file from disk. Ignore errors
+		// for files that are already gone (idempotent).
 		if err := os.Remove(entry.BlobPath); err != nil && !os.IsNotExist(err) {
 			sc.logger.Warn().Err(err).Str("blob_path", entry.BlobPath).Msg("failed to remove blob")
 		}
+		_ = os.Remove(entry.BlobPath + ".sha256") // best-effort cleanup of checksum file
 
 		if err := sc.store.DeleteCache(ctx, entry.OrgID, entry.ID); err != nil {
 			sc.logger.Warn().Err(err).Str("id", entry.ID.String()).Msg("failed to delete cache entry")

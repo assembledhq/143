@@ -3,7 +3,6 @@
 import {
   type RefObject,
   useCallback,
-  useEffect,
   useRef,
   useState,
 } from "react";
@@ -20,7 +19,7 @@ import {
   MoveRight,
   Pencil,
   Trash2,
-  Plus,
+  AlertTriangle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -29,7 +28,6 @@ import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
 import type {
   ElementInfo,
-  Rect,
   Annotation,
   DesignModeFeedback,
 } from "@/lib/preview-types";
@@ -59,7 +57,6 @@ export function DesignModeOverlay({
   const [selectedElements, setSelectedElements] = useState<SelectedElement[]>(
     []
   );
-  const [hoverBox, setHoverBox] = useState<Rect | null>(null);
   const [instruction, setInstruction] = useState("");
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [activeTool, setActiveTool] = useState<AnnotationTool>("select");
@@ -68,11 +65,15 @@ export function DesignModeOverlay({
     []
   );
   const [showEditPanel, setShowEditPanel] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   // Inspect element at coordinates
   const inspectMutation = useMutation({
     mutationFn: ({ x, y }: { x: number; y: number }) =>
       api.sessions.preview.inspect(sessionId, x, y),
+    onError: (err) => {
+      setError(`Failed to inspect element: ${err.message}`);
+    },
   });
 
   // Send design feedback to agent
@@ -80,9 +81,13 @@ export function DesignModeOverlay({
     mutationFn: (feedback: DesignModeFeedback) =>
       api.sessions.preview.designFeedback(sessionId, feedback),
     onSuccess: () => {
+      setError(null);
       setSelectedElements([]);
       setAnnotations([]);
       setInstruction("");
+    },
+    onError: (err) => {
+      setError(`Failed to send feedback: ${err.message}`);
     },
   });
 
@@ -141,13 +146,6 @@ export function DesignModeOverlay({
 
   const handleMouseMove = useCallback(
     (e: React.MouseEvent) => {
-      if (activeTool === "select") {
-        // Show hover highlight
-        const { x, y } = toIframeCoords(e.clientX, e.clientY);
-        // Throttle: only update if significantly moved
-        setHoverBox(null); // Simplified: full hover inspection is expensive
-      }
-
       if (isDrawing && (activeTool === "freehand" || activeTool === "arrow")) {
         const { x, y } = toIframeCoords(e.clientX, e.clientY);
         setDrawPoints((prev) => [...prev, { x, y }]);
@@ -227,20 +225,6 @@ export function DesignModeOverlay({
           ref={svgRef}
           className="absolute inset-0 w-full h-full pointer-events-none"
         >
-          {/* Hover highlight */}
-          {hoverBox && (
-            <rect
-              x={hoverBox.x}
-              y={hoverBox.y}
-              width={hoverBox.width}
-              height={hoverBox.height}
-              fill="rgba(59, 130, 246, 0.1)"
-              stroke="rgba(59, 130, 246, 0.5)"
-              strokeWidth={1}
-              strokeDasharray="4 2"
-            />
-          )}
-
           {/* Selected element highlights */}
           {selectedElements.map((el, i) => (
             <rect
@@ -323,6 +307,20 @@ export function DesignModeOverlay({
           </>
         )}
       </div>
+
+      {/* Error banner */}
+      {error && (
+        <div className="absolute top-2 right-2 flex items-center gap-2 max-w-xs rounded-md border border-destructive/20 bg-destructive/5 backdrop-blur p-2 text-xs text-destructive pointer-events-auto shadow-sm">
+          <AlertTriangle className="size-3.5 shrink-0" />
+          <span className="flex-1">{error}</span>
+          <button
+            onClick={() => setError(null)}
+            className="rounded p-0.5 hover:bg-destructive/10"
+          >
+            <X className="size-3" />
+          </button>
+        </div>
+      )}
 
       {/* Element info panel (bottom-left) */}
       {primarySelected && (

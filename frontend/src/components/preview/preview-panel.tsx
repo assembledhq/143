@@ -17,6 +17,7 @@ import {
   Circle,
   Palette,
   RefreshCw,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -125,12 +126,14 @@ export function PreviewPanel({
   const [designMode, setDesignMode] = useState(false);
   const [bootstrapComplete, setBootstrapComplete] = useState(false);
   const [iframeLoaded, setIframeLoaded] = useState(false);
+  const [mutationError, setMutationError] = useState<string | null>(null);
 
   // Poll preview status every 3s when active
   const {
     data: previewStatus,
     isLoading: statusLoading,
-    error: _statusError,
+    error: statusError,
+    refetch: refetchStatus,
   } = useQuery({
     queryKey: ["preview-status", sessionId],
     queryFn: () => api.sessions.preview.get(sessionId),
@@ -157,9 +160,13 @@ export function PreviewPanel({
   const startMutation = useMutation({
     mutationFn: () => api.sessions.preview.start(sessionId),
     onSuccess: () => {
+      setMutationError(null);
       queryClient.invalidateQueries({
         queryKey: ["preview-status", sessionId],
       });
+    },
+    onError: (err) => {
+      setMutationError(`Failed to start preview: ${err.message}`);
     },
   });
 
@@ -167,11 +174,15 @@ export function PreviewPanel({
   const stopMutation = useMutation({
     mutationFn: () => api.sessions.preview.stop(sessionId),
     onSuccess: () => {
+      setMutationError(null);
       setBootstrapComplete(false);
       setIframeLoaded(false);
       queryClient.invalidateQueries({
         queryKey: ["preview-status", sessionId],
       });
+    },
+    onError: (err) => {
+      setMutationError(`Failed to stop preview: ${err.message}`);
     },
   });
 
@@ -179,22 +190,60 @@ export function PreviewPanel({
   const restartMutation = useMutation({
     mutationFn: () => api.sessions.preview.restart(sessionId),
     onSuccess: () => {
+      setMutationError(null);
       setBootstrapComplete(false);
       setIframeLoaded(false);
       queryClient.invalidateQueries({
         queryKey: ["preview-status", sessionId],
       });
     },
+    onError: (err) => {
+      setMutationError(`Failed to restart preview: ${err.message}`);
+    },
   });
 
   // Bootstrap token exchange
   const bootstrapMutation = useMutation({
     mutationFn: () => api.sessions.preview.bootstrap(sessionId),
+    onError: (err) => {
+      setMutationError(`Failed to bootstrap preview: ${err.message}`);
+    },
   });
 
   const previewOrigin = instance
     ? previewOriginTemplate.replace("{id}", instance.id)
     : "";
+
+  // Post bootstrap token to iframe, retrying on iframe load if needed
+  const sendBootstrapToken = useCallback(
+    (token: string, origin: string) => {
+      const contentWindow = iframeRef.current?.contentWindow;
+      if (contentWindow) {
+        contentWindow.postMessage(
+          { type: "preview-bootstrap", token },
+          origin
+        );
+        setBootstrapComplete(true);
+        return;
+      }
+      // Iframe not loaded yet - wait for load event and retry
+      const iframe = iframeRef.current;
+      if (!iframe) return;
+      const onLoad = () => {
+        iframe.removeEventListener("load", onLoad);
+        const cw = iframe.contentWindow;
+        if (cw) {
+          cw.postMessage(
+            { type: "preview-bootstrap", token },
+            origin
+          );
+          setBootstrapComplete(true);
+        }
+      };
+      iframe.addEventListener("load", onLoad);
+    },
+    []
+  );
 
   // Handle postMessage exchange for bootstrap
   const handleMessage = useCallback(
@@ -205,16 +254,13 @@ export function PreviewPanel({
       if (event.data?.type === "preview-ready") {
         bootstrapMutation.mutate(undefined, {
           onSuccess: (data) => {
-            iframeRef.current?.contentWindow?.postMessage(
-              { type: "preview-bootstrap", token: data.token },
-              new URL(previewOrigin).origin
-            );
-            setBootstrapComplete(true);
+            setMutationError(null);
+            sendBootstrapToken(data.token, new URL(previewOrigin).origin);
           },
         });
       }
     },
-    [previewOrigin, bootstrapMutation]
+    [previewOrigin, bootstrapMutation, sendBootstrapToken]
   );
 
   useEffect(() => {
@@ -373,6 +419,41 @@ export function PreviewPanel({
           </TooltipProvider>
         )}
       </div>
+
+      {/* Mutation error banner */}
+      {mutationError && (
+        <div className="flex items-center gap-2 rounded-lg border border-destructive/20 bg-destructive/5 p-2 text-sm text-destructive">
+          <AlertTriangle className="size-4 shrink-0" />
+          <span className="flex-1">{mutationError}</span>
+          <button
+            onClick={() => setMutationError(null)}
+            className="rounded p-0.5 hover:bg-destructive/10"
+          >
+            <X className="size-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Query error state */}
+      {statusError && (
+        <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 space-y-2">
+          <div className="flex items-center gap-2 text-sm font-medium text-destructive">
+            <AlertTriangle className="size-4" />
+            Failed to load preview status
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {statusError.message}
+          </p>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => refetchStatus()}
+          >
+            <RefreshCw className="size-3.5" />
+            Retry
+          </Button>
+        </div>
+      )}
 
       {/* Service status indicators */}
       {services.length > 1 && isActive && (

@@ -68,7 +68,8 @@ func TestResolveCredentialTemplate(t *testing.T) {
 
 func TestGenerateInfraCredential(t *testing.T) {
 	t.Parallel()
-	cred := generateInfraCredential("db")
+	cred, err := generateInfraCredential("db")
+	require.NoError(t, err)
 	require.Equal(t, "preview_db", cred.Username)
 	require.Equal(t, "preview_db", cred.Database)
 	require.Len(t, cred.Password, 32) // 16 bytes → 32 hex chars
@@ -76,8 +77,10 @@ func TestGenerateInfraCredential(t *testing.T) {
 
 func TestGenerateHandle(t *testing.T) {
 	t.Parallel()
-	h1 := preview.RandomHex(16)
-	h2 := preview.RandomHex(16)
+	h1, err := preview.RandomHex(16)
+	require.NoError(t, err)
+	h2, err := preview.RandomHex(16)
+	require.NoError(t, err)
 	require.Len(t, h1, 32)
 	require.NotEqual(t, h1, h2)
 }

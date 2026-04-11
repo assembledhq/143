@@ -81,8 +81,13 @@ type ManagerConfig struct {
 	MaxPerWorker  int
 }
 
-// NewManager creates a new preview Manager.
+// NewManager creates a new preview Manager. If cfg.Provider is nil, the
+// manager is created but any operation that requires the provider (StartPreview,
+// StopPreview, DialPreview, etc.) will return an error.
 func NewManager(cfg ManagerConfig) *Manager {
+	if cfg.Provider == nil {
+		cfg.Logger.Warn().Msg("preview.NewManager: Provider is nil — preview operations will fail until a provider is set")
+	}
 	m := &Manager{
 		store:         cfg.Store,
 		provider:      cfg.Provider,
@@ -128,6 +133,14 @@ type StartPreviewInput struct {
 // StartPreview validates caps, resolves config, starts the preview via the
 // provider, and persists the result.
 func (m *Manager) StartPreview(ctx context.Context, input StartPreviewInput) (*models.PreviewInstance, error) {
+	// 0. Validate required pointers.
+	if m.provider == nil {
+		return nil, fmt.Errorf("preview provider is not configured")
+	}
+	if input.Sandbox == nil {
+		return nil, fmt.Errorf("sandbox must not be nil")
+	}
+
 	// 1. Validate the config.
 	if errs := ValidateConfig(input.Config); len(errs) > 0 {
 		return nil, fmt.Errorf("invalid preview config: %s", strings.Join(errs, "; "))
@@ -367,7 +380,10 @@ func (m *Manager) MintBootstrapToken(ctx context.Context, orgID, userID, preview
 	}
 
 	// Generate a random token.
-	token := generateToken()
+	token, err := generateToken()
+	if err != nil {
+		return "", fmt.Errorf("generate bootstrap token: %w", err)
+	}
 	tokenHash := hashToken(token)
 
 	sess := &models.PreviewAccessSession{
@@ -690,15 +706,15 @@ func loadRecycleInput(instance *models.PreviewInstance) (StartPreviewInput, erro
 }
 
 // RandomHex returns n random bytes encoded as a hex string.
-func RandomHex(n int) string {
+func RandomHex(n int) (string, error) {
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand.Read failed: " + err.Error())
+		return "", fmt.Errorf("crypto/rand.Read failed: %w", err)
 	}
-	return hex.EncodeToString(b)
+	return hex.EncodeToString(b), nil
 }
 
-func generateToken() string {
+func generateToken() (string, error) {
 	return RandomHex(32)
 }
 

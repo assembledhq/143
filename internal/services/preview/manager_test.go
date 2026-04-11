@@ -206,8 +206,10 @@ func TestComputeConfigDigest(t *testing.T) {
 func TestGenerateAndHashToken(t *testing.T) {
 	t.Parallel()
 
-	token1 := generateToken()
-	token2 := generateToken()
+	token1, err := generateToken()
+	require.NoError(t, err)
+	token2, err := generateToken()
+	require.NoError(t, err)
 
 	require.Len(t, token1, 64) // 32 bytes → 64 hex chars
 	require.NotEqual(t, token1, token2)
@@ -436,7 +438,8 @@ func TestValidateBootstrapToken_Valid(t *testing.T) {
 	previewID := uuid.New()
 	sessID := uuid.New()
 	now := time.Now()
-	token := generateToken()
+	token, err := generateToken()
+	require.NoError(t, err)
 	tokenHash := hashToken(token)
 
 	// Return a valid, non-expired, non-revoked session.
@@ -472,7 +475,8 @@ func TestValidateBootstrapToken_Expired(t *testing.T) {
 	previewID := uuid.New()
 	sessID := uuid.New()
 	now := time.Now()
-	token := generateToken()
+	token, err := generateToken()
+	require.NoError(t, err)
 	tokenHash := hashToken(token)
 
 	// Return a session that expired in the past.
@@ -503,7 +507,8 @@ func TestValidateBootstrapToken_Revoked(t *testing.T) {
 	previewID := uuid.New()
 	sessID := uuid.New()
 	now := time.Now()
-	token := generateToken()
+	token, err := generateToken()
+	require.NoError(t, err)
 	tokenHash := hashToken(token)
 	revokedAt := now.Add(-30 * time.Second)
 
@@ -531,7 +536,8 @@ func TestValidateBootstrapToken_NotFound(t *testing.T) {
 	mgr := newTestManager(mock, &mockProvider{})
 
 	orgID := uuid.New()
-	token := generateToken()
+	token, err := generateToken()
+	require.NoError(t, err)
 
 	// Return no rows.
 	mock.ExpectQuery("SELECT .+ FROM preview_access_sessions").
@@ -562,7 +568,8 @@ func TestValidateBootstrapTokenUnscoped_Valid(t *testing.T) {
 	previewID := uuid.New()
 	sessID := uuid.New()
 	now := time.Now()
-	token := generateToken()
+	token, err := generateToken()
+	require.NoError(t, err)
 	tokenHash := hashToken(token)
 
 	// Return a valid, non-expired, non-revoked session (unscoped query has 1 arg).
@@ -600,7 +607,8 @@ func TestValidateBootstrapTokenUnscoped_Expired(t *testing.T) {
 	previewID := uuid.New()
 	sessID := uuid.New()
 	now := time.Now()
-	token := generateToken()
+	token, err := generateToken()
+	require.NoError(t, err)
 	tokenHash := hashToken(token)
 
 	// Return an expired session.
@@ -631,7 +639,8 @@ func TestValidateBootstrapTokenUnscoped_Revoked(t *testing.T) {
 	previewID := uuid.New()
 	sessID := uuid.New()
 	now := time.Now()
-	token := generateToken()
+	token, err := generateToken()
+	require.NoError(t, err)
 	tokenHash := hashToken(token)
 	revokedAt := now.Add(-30 * time.Second)
 
@@ -657,7 +666,8 @@ func TestValidateBootstrapTokenUnscoped_NotFound(t *testing.T) {
 
 	mgr := newTestManager(mock, &mockProvider{})
 
-	token := generateToken()
+	token, err := generateToken()
+	require.NoError(t, err)
 
 	mock.ExpectQuery("SELECT .+ FROM preview_access_sessions").
 		WithArgs(pgxmock.AnyArg()).

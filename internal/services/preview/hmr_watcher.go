@@ -44,27 +44,39 @@ const (
 // HMR pattern detection
 // =============================================================================
 
-// hmrPatterns lists substrings that identify HMR messages from common dev
-// servers. Each entry is checked against the raw WebSocket frame payload.
-var hmrPatterns = []string{
-	// Vite
-	`"type":"update"`,
-	`"type":"full-reload"`,
+// hmrPatternSets lists co-occurring substrings that identify HMR messages from
+// common dev servers. Each entry requires ALL patterns in the set to match,
+// reducing false positives from non-HMR messages that happen to contain a
+// single matching substring.
+var hmrPatternSets = [][]string{
+	// Vite: messages always include both "type" and "updates" array
+	{`"type":"update"`, `"updates":`},
+	// Vite full-reload: includes "type" and "path"
+	{`"type":"full-reload"`, `"path":`},
 
-	// webpack (webpack-dev-server / webpack-hot-middleware)
-	`"action":"built"`,
-	`"type":"hash"`,
+	// webpack (webpack-dev-server): "action":"built" co-occurs with "hash"
+	{`"action":"built"`, `"hash":"`},
+	// webpack hash message: "type":"hash" co-occurs with "data"
+	{`"type":"hash"`, `"data":"`},
 
-	// Next.js
-	`"action":"serverComponentChanges"`,
-	`"action":"devPagesManifestUpdate"`,
+	// Next.js: these action values are specific enough on their own
+	{`"action":"serverComponentChanges"`},
+	{`"action":"devPagesManifestUpdate"`},
 }
 
-// isHMRMessage returns true if data contains a known HMR update pattern.
+// isHMRMessage returns true if data contains a known HMR update pattern set.
+// All patterns within a set must match for the message to be considered HMR.
 func isHMRMessage(data []byte) bool {
 	s := string(data)
-	for _, p := range hmrPatterns {
-		if strings.Contains(s, p) {
+	for _, patterns := range hmrPatternSets {
+		allMatch := true
+		for _, p := range patterns {
+			if !strings.Contains(s, p) {
+				allMatch = false
+				break
+			}
+		}
+		if allMatch {
 			return true
 		}
 	}
