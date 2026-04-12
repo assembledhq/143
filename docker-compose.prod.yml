@@ -64,7 +64,7 @@ services:
       POSTGRES_DB: onefortythree
       POSTGRES_INITDB_ARGS: "--data-checksums"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
       - ./deploy/postgres/postgresql.conf:/etc/postgresql/conf.d/custom.conf:ro
       - ./deploy/postgres/pg_hba.conf:/etc/postgresql/conf.d/pg_hba.conf:ro
     command: postgres -c config_file=/etc/postgresql/conf.d/custom.conf -c hba_file=/etc/postgresql/conf.d/pg_hba.conf
