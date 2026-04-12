@@ -1,0 +1,28 @@
+# Worker node for agent sandboxes (Phase 3b).
+# See docs/design/36-docker-agents-vps-architecture.md
+
+services:
+  worker:
+    image: ghcr.io/assembledhq/143-server:latest
+    environment:
+      DATABASE_URL: postgres://onefortythree:${DB_PASSWORD}@${DB_HOST}:5432/onefortythree?sslmode=disable
+      MODE: worker
+      NODE_ID: ${HOSTNAME}
+      MAX_CONCURRENT_RUNS: ${MAX_CONCURRENT_RUNS:-5}
+      SANDBOX_IMAGE: ghcr.io/assembledhq/143-sandbox:latest
+      SANDBOX_RUNTIME: runsc
+    env_file:
+      - .env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "1.0"
