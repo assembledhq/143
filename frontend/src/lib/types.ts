@@ -972,6 +972,9 @@ export interface UsageSummary {
   total_sessions: number;
   peak_concurrent: number;
   by_capacity: CapacityBucket[];
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_llm_cost_usd: number;
 }
 
 export interface CapacityBucket {

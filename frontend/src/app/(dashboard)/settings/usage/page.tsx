@@ -53,7 +53,7 @@ export default function UsagePage() {
       setSelectedDay(null);
       setSelectedUserId(null);
     },
-    [setSelectedUserId]
+    [setSelectedDay, setSelectedUserId]
   );
 
   return (

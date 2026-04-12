@@ -55,20 +55,11 @@ export function UsageSummaryCards({ start, end }: UsageSummaryCardsProps) {
 
   const summary = data?.data;
 
-  // Also fetch timeseries for token totals
-  const { data: tsData } = useQuery({
-    queryKey: queryKeys.usage.timeseries({ start, end }),
-    queryFn: () => api.usage.getTimeseries({ start, end }),
-  });
-
-  const tokenTotals = tsData?.data?.buckets?.reduce(
-    (acc, b) => ({
-      input: acc.input + b.total_input_tokens,
-      output: acc.output + b.total_output_tokens,
-      cost: acc.cost + b.total_llm_cost_usd,
-    }),
-    { input: 0, output: 0, cost: 0 }
-  ) ?? { input: 0, output: 0, cost: 0 };
+  const tokenTotals = {
+    input: summary?.total_input_tokens ?? 0,
+    output: summary?.total_output_tokens ?? 0,
+    cost: summary?.total_llm_cost_usd ?? 0,
+  };
 
   return (
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">

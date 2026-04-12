@@ -38,6 +38,7 @@ type SessionReaper struct {
 	interval         time.Duration
 	logger           zerolog.Logger
 	lastRetentionRun time.Time // throttles retention cleanup to once per hour
+	lastRollupHour   time.Time // watermark: last hour successfully rolled up
 }
 
 // StaleSessionLister is the subset of the session store used by the reaper.
@@ -166,18 +167,9 @@ func (r *SessionReaper) reap(ctx context.Context) {
 	}
 
 	// Phase 4: Roll up hourly usage data for the billing dashboard.
-	// Re-rolls the current hour on each run to keep the dashboard near-real-time.
-	// Also catches up the previous hour in case it was missed.
 	if r.usageRoller != nil {
 		now := time.Now().UTC()
-		currentHour := now.Truncate(time.Hour)
-		prevHour := currentHour.Add(-time.Hour)
-
-		for _, h := range []time.Time{prevHour, currentHour} {
-			if err := r.usageRoller.RollupAllOrgs(ctx, h); err != nil {
-				r.logger.Error().Err(err).Time("hour", h).Msg("reaper: failed to roll up hourly usage")
-			}
-		}
+		r.reapUsageRollups(ctx, now)
 
 		// Clean up rollup rows older than 90 days — throttled to once per hour
 		// to avoid running a DELETE scan on every reaper tick.
@@ -194,4 +186,26 @@ func (r *SessionReaper) reap(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// reapUsageRollups rolls up all hours from the watermark (lastRollupHour)
+// through the current hour. On the first run (zero watermark), only the
+// previous and current hours are rolled. Subsequent runs catch up any hours
+// that were missed and always re-roll the current (partial) hour.
+func (r *SessionReaper) reapUsageRollups(ctx context.Context, now time.Time) {
+	currentHour := now.Truncate(time.Hour)
+
+	// On first run, seed the watermark so we only roll prevHour + currentHour.
+	if r.lastRollupHour.IsZero() {
+		r.lastRollupHour = currentHour.Add(-time.Hour)
+	}
+
+	// Roll up every hour from lastRollupHour+1 through currentHour.
+	for h := r.lastRollupHour.Add(time.Hour); !h.After(currentHour); h = h.Add(time.Hour) {
+		if err := r.usageRoller.RollupAllOrgs(ctx, h); err != nil {
+			r.logger.Error().Err(err).Time("hour", h).Msg("reaper: failed to roll up hourly usage")
+			return // stop catch-up on first error so watermark stays accurate
+		}
+	}
+	r.lastRollupHour = currentHour
 }

@@ -357,9 +357,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.List)
 			r.Get("/api/v1/sessions/{id}/usage", usageHandler.ListBySession)
 			r.Get("/api/v1/usage", usageHandler.GetSummary)
-			r.Get("/api/v1/usage/timeseries", usageHandler.GetTimeseries)
-			r.Get("/api/v1/usage/breakdown", usageHandler.GetBreakdown)
-			r.Get("/api/v1/usage/export", usageHandler.ExportCSV)
 			r.Get("/api/v1/sessions/{id}/preview", previewHandler.GetPreview)
 			r.Get("/api/v1/sessions/{id}/preview/logs", previewHandler.GetLogs)
 			r.Get("/api/v1/sessions/{id}/preview/services", previewHandler.GetServices)
@@ -540,6 +537,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Post("/api/v1/settings/codex-auth/initiate", codexAuthHandler.Initiate)
 			r.Get("/api/v1/settings/codex-auth/status", codexAuthHandler.Status)
 			r.Post("/api/v1/settings/codex-auth/disconnect", codexAuthHandler.Disconnect)
+
+			// Usage timeseries, breakdown, and export (admin-only)
+			r.Get("/api/v1/usage/timeseries", usageHandler.GetTimeseries)
+			r.Get("/api/v1/usage/breakdown", usageHandler.GetBreakdown)
+			r.Get("/api/v1/usage/export", usageHandler.ExportCSV)
 
 			// Audit logs
 			r.Get("/api/v1/audit-logs", auditLogHandler.List)

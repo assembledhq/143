@@ -116,6 +116,16 @@ func (h *UsageHandler) GetSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enrich summary with token totals from the rollup table if available.
+	if h.rollupStore != nil {
+		totals, err := h.rollupStore.GetTokenTotals(r.Context(), orgID, start, end)
+		if err == nil {
+			summary.TotalInputTokens = totals.InputTokens
+			summary.TotalOutputTokens = totals.OutputTokens
+			summary.TotalLLMCostUSD = totals.CostUSD
+		}
+	}
+
 	writeJSON(w, http.StatusOK, models.SingleResponse[*models.UsageSummary]{Data: summary})
 }
 
@@ -367,7 +377,9 @@ func (h *UsageHandler) ExportCSV(w http.ResponseWriter, r *http.Request) {
 				dailyOrder = append(dailyOrder, key)
 			}
 			agg.minutes += minutes
-			agg.sessions += sessions
+			if sessions > agg.sessions {
+				agg.sessions = sessions
+			}
 			agg.starts += starts
 			if peak > agg.peak {
 				agg.peak = peak

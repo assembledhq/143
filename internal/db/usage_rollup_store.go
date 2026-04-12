@@ -139,6 +139,9 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 	}
 
 	// Query token usage from sessions that were active during this hour.
+	// Known limitation: tokens are attributed to the hour the session was created,
+	// not when tokens were actually consumed. Sessions spanning multiple hours will
+	// have all their tokens in the creation hour. This is acceptable for v1 dashboards.
 	tokenRows, err := s.db.Query(ctx, `
 		SELECT
 			s.created_by AS user_id,
@@ -238,7 +241,6 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 		ua.intervals = append(ua.intervals, agg.intervals...)
 	}
 	for uid, agg := range userAgg {
-		uid := uid
 		peak := computePeakConcurrent(agg.intervals)
 		avgDur, p95Dur := computeDurationStats(agg.durations)
 		ta := tokensByUser[uid]
@@ -283,7 +285,6 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 		ta.intervals = append(ta.intervals, agg.intervals...)
 	}
 	for tier, agg := range tierAgg {
-		tier := tier
 		peak := computePeakConcurrent(agg.intervals)
 		avgDur, p95Dur := computeDurationStats(agg.durations)
 		upserts = append(upserts, upsertRow{
@@ -332,50 +333,57 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 		costUSD:      orgTokens.costUSD,
 	})
 
-	// Upsert all rows.
+	// Upsert all rows using a batch to avoid N individual round-trips.
+	const upsertSQL = `
+		INSERT INTO usage_hourly (
+			org_id, hour_utc, user_id, capacity_tier,
+			total_container_minutes, total_sessions, total_container_starts,
+			peak_concurrent, avg_duration_sec, p95_duration_sec,
+			total_input_tokens, total_output_tokens, total_llm_cost_usd,
+			updated_at
+		) VALUES (
+			@org_id, @hour_utc, @user_id, @capacity_tier,
+			@total_container_minutes, @total_sessions, @total_container_starts,
+			@peak_concurrent, @avg_duration_sec, @p95_duration_sec,
+			@total_input_tokens, @total_output_tokens, @total_llm_cost_usd,
+			now()
+		)
+		ON CONFLICT (org_id, hour_utc, COALESCE(user_id, '00000000-0000-0000-0000-000000000000'), COALESCE(capacity_tier, '')) DO UPDATE SET
+			total_container_minutes = EXCLUDED.total_container_minutes,
+			total_sessions = EXCLUDED.total_sessions,
+			total_container_starts = EXCLUDED.total_container_starts,
+			peak_concurrent = EXCLUDED.peak_concurrent,
+			avg_duration_sec = EXCLUDED.avg_duration_sec,
+			p95_duration_sec = EXCLUDED.p95_duration_sec,
+			total_input_tokens = EXCLUDED.total_input_tokens,
+			total_output_tokens = EXCLUDED.total_output_tokens,
+			total_llm_cost_usd = EXCLUDED.total_llm_cost_usd,
+			updated_at = now()`
+
+	batch := &pgx.Batch{}
 	for _, row := range upserts {
-		_, err := s.db.Exec(ctx, `
-			INSERT INTO usage_hourly (
-				org_id, hour_utc, user_id, capacity_tier,
-				total_container_minutes, total_sessions, total_container_starts,
-				peak_concurrent, avg_duration_sec, p95_duration_sec,
-				total_input_tokens, total_output_tokens, total_llm_cost_usd,
-				updated_at
-			) VALUES (
-				@org_id, @hour_utc, @user_id, @capacity_tier,
-				@total_container_minutes, @total_sessions, @total_container_starts,
-				@peak_concurrent, @avg_duration_sec, @p95_duration_sec,
-				@total_input_tokens, @total_output_tokens, @total_llm_cost_usd,
-				now()
-			)
-			ON CONFLICT (org_id, hour_utc, COALESCE(user_id, '00000000-0000-0000-0000-000000000000'), COALESCE(capacity_tier, '')) DO UPDATE SET
-				total_container_minutes = EXCLUDED.total_container_minutes,
-				total_sessions = EXCLUDED.total_sessions,
-				total_container_starts = EXCLUDED.total_container_starts,
-				peak_concurrent = EXCLUDED.peak_concurrent,
-				avg_duration_sec = EXCLUDED.avg_duration_sec,
-				p95_duration_sec = EXCLUDED.p95_duration_sec,
-				total_input_tokens = EXCLUDED.total_input_tokens,
-				total_output_tokens = EXCLUDED.total_output_tokens,
-				total_llm_cost_usd = EXCLUDED.total_llm_cost_usd,
-				updated_at = now()`,
-			pgx.NamedArgs{
-				"org_id":                  orgID,
-				"hour_utc":               hour,
-				"user_id":                row.userID,
-				"capacity_tier":          row.capacityTier,
-				"total_container_minutes": row.minutes,
-				"total_sessions":          row.sessions,
-				"total_container_starts":  row.starts,
-				"peak_concurrent":         row.peak,
-				"avg_duration_sec":        row.avgDur,
-				"p95_duration_sec":        row.p95Dur,
-				"total_input_tokens":      row.inputTokens,
-				"total_output_tokens":     row.outputTokens,
-				"total_llm_cost_usd":      row.costUSD,
-			})
-		if err != nil {
-			return fmt.Errorf("upsert usage_hourly: %w", err)
+		batch.Queue(upsertSQL, pgx.NamedArgs{
+			"org_id":                  orgID,
+			"hour_utc":               hour,
+			"user_id":                row.userID,
+			"capacity_tier":          row.capacityTier,
+			"total_container_minutes": row.minutes,
+			"total_sessions":          row.sessions,
+			"total_container_starts":  row.starts,
+			"peak_concurrent":         row.peak,
+			"avg_duration_sec":        row.avgDur,
+			"p95_duration_sec":        row.p95Dur,
+			"total_input_tokens":      row.inputTokens,
+			"total_output_tokens":     row.outputTokens,
+			"total_llm_cost_usd":      row.costUSD,
+		})
+	}
+
+	br := s.db.SendBatch(ctx, batch)
+	defer br.Close()
+	for i := 0; i < len(upserts); i++ {
+		if _, err := br.Exec(); err != nil {
+			return fmt.Errorf("upsert usage_hourly (batch item %d): %w", i, err)
 		}
 	}
 
@@ -489,8 +497,7 @@ func (s *UsageRollupStore) GetTimeseries(ctx context.Context, orgID uuid.UUID, s
 			  AND uh.user_id = @user_id AND uh.capacity_tier IS NULL
 			ORDER BY uh.hour_utc`
 		args["user_id"] = *userID
-	}
-	if capacity != nil {
+	} else if capacity != nil {
 		query = `
 			SELECT uh.hour_utc, uh.user_id, '' AS user_name, uh.capacity_tier,
 				uh.total_container_minutes, uh.total_sessions, uh.total_container_starts,
@@ -535,6 +542,7 @@ func (s *UsageRollupStore) GetBreakdown(ctx context.Context, orgID uuid.UUID, st
 		"limit":  limit,
 	}
 
+	// SAFETY: orderClause is built from a fixed set of switch cases — never interpolate user input directly.
 	orderClause := "ORDER BY total_container_minutes DESC"
 	switch sortBy {
 	case "sessions_desc":
@@ -662,6 +670,30 @@ func (s *UsageRollupStore) GetExportRows(ctx context.Context, orgID uuid.UUID, s
 	}
 
 	return s.db.Query(ctx, query, args)
+}
+
+// TokenTotals holds aggregated token counts from the rollup table.
+type TokenTotals struct {
+	InputTokens  int64
+	OutputTokens int64
+	CostUSD      float64
+}
+
+// GetTokenTotals returns aggregated token totals from org-level rollup rows
+// (user_id IS NULL AND capacity_tier IS NULL) over the given time range.
+func (s *UsageRollupStore) GetTokenTotals(ctx context.Context, orgID uuid.UUID, start, end time.Time) (TokenTotals, error) {
+	var t TokenTotals
+	err := s.db.QueryRow(ctx, `
+		SELECT
+			COALESCE(SUM(total_input_tokens), 0),
+			COALESCE(SUM(total_output_tokens), 0),
+			COALESCE(SUM(total_llm_cost_usd), 0)
+		FROM usage_hourly
+		WHERE org_id = @org_id AND hour_utc >= @start AND hour_utc < @end
+		  AND user_id IS NULL AND capacity_tier IS NULL`,
+		pgx.NamedArgs{"org_id": orgID, "start": start, "end": end},
+	).Scan(&t.InputTokens, &t.OutputTokens, &t.CostUSD)
+	return t, err
 }
 
 // DeleteOlderThan removes rollup rows older than the given cutoff.

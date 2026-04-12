@@ -307,6 +307,32 @@ func (m *mockOrphanCloser) CloseOrphans(_ context.Context, startedBefore time.Ti
 	return m.closed, m.closeErr
 }
 
+type mockUsageRoller struct {
+	rolledHours    []time.Time
+	rollupErrByHour map[time.Time]error
+	deletedCutoffs []time.Time
+	deleteErr      error
+}
+
+func (m *mockUsageRoller) RollupAllOrgs(_ context.Context, hour time.Time) error {
+	hour = hour.UTC()
+	m.rolledHours = append(m.rolledHours, hour)
+	if m.rollupErrByHour != nil {
+		if err := m.rollupErrByHour[hour]; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *mockUsageRoller) DeleteOlderThan(_ context.Context, cutoff time.Time) (int64, error) {
+	m.deletedCutoffs = append(m.deletedCutoffs, cutoff.UTC())
+	if m.deleteErr != nil {
+		return 0, m.deleteErr
+	}
+	return 0, nil
+}
+
 func TestReapPhase3_ClosesOrphanedUsageEvents(t *testing.T) {
 	t.Parallel()
 
@@ -339,4 +365,26 @@ func TestReapPhase3_SkippedWhenOrphanCloserNil(t *testing.T) {
 	// No orphan closer — should not panic.
 	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop())
 	reaper.reap(context.Background())
+}
+
+func TestReapPhase4_CatchesUpMissedHoursFromWatermark(t *testing.T) {
+	t.Parallel()
+
+	mock := &reaperMockSessionLister{}
+	snapStore := &reaperMockSnapshotStore{}
+	usageRoller := &mockUsageRoller{}
+
+	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop(),
+		WithUsageRoller(usageRoller),
+	)
+	reaper.lastRollupHour = time.Date(2026, 4, 10, 7, 0, 0, 0, time.UTC)
+
+	reaper.reapUsageRollups(context.Background(), time.Date(2026, 4, 10, 10, 35, 0, 0, time.UTC))
+
+	require.Equal(t, []time.Time{
+		time.Date(2026, 4, 10, 8, 0, 0, 0, time.UTC),
+		time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC),
+		time.Date(2026, 4, 10, 10, 0, 0, 0, time.UTC),
+	}, usageRoller.rolledHours, "reaper should catch up every missed hour through the current hour")
+	require.Equal(t, time.Date(2026, 4, 10, 10, 0, 0, 0, time.UTC), reaper.lastRollupHour, "reaper should advance the watermark after successful catch-up")
 }

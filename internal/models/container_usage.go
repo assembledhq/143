@@ -34,6 +34,9 @@ type UsageSummary struct {
 	TotalSessions         int       `json:"total_sessions"`
 	PeakConcurrent        int       `json:"peak_concurrent"`
 	ByCapacity            []CapacityBucket `json:"by_capacity"`
+	TotalInputTokens      int64     `json:"total_input_tokens"`
+	TotalOutputTokens     int64     `json:"total_output_tokens"`
+	TotalLLMCostUSD       float64   `json:"total_llm_cost_usd"`
 }
 
 // CapacityBucket groups usage by resource tier (CPU + memory combination).

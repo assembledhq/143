@@ -58,7 +58,6 @@ func main() {
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to query orgs")
 	}
-	defer rows.Close()
 
 	var orgIDs []uuid.UUID
 	for rows.Next() {
