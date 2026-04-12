@@ -430,6 +430,182 @@ func TestUsageHandler_ExportCSV_InvalidTimezone(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 }
 
+func TestUsageHandler_GetSummary_InvalidStart(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewUsageHandler(db.NewContainerUsageStore(mock))
+	orgID := uuid.New()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage?start=bad", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+	handler.GetSummary(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+func TestUsageHandler_GetSummary_InvalidEnd(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewUsageHandler(db.NewContainerUsageStore(mock))
+	orgID := uuid.New()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage?start=2026-04-01T00:00:00Z&end=bad", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+	handler.GetSummary(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+func TestUsageHandler_GetSummary_StartAfterEnd(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewUsageHandler(db.NewContainerUsageStore(mock))
+	orgID := uuid.New()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage?start=2026-05-01T00:00:00Z&end=2026-04-01T00:00:00Z", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+	handler.GetSummary(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+func TestUsageHandler_GetSummary_ExceedsMaxRange(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewUsageHandler(db.NewContainerUsageStore(mock))
+	orgID := uuid.New()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage?start=2026-01-01T00:00:00Z&end=2026-12-01T00:00:00Z", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+	handler.GetSummary(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+func TestUsageHandler_GetTimeseries_WithUserID(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewUsageHandler(db.NewContainerUsageStore(mock))
+	handler.SetRollupStore(&stubUsageRollupStore{})
+	orgID := uuid.New()
+	userID := uuid.New()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/timeseries?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z&user_id="+userID.String(), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+	handler.GetTimeseries(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+}
+
+func TestUsageHandler_GetTimeseries_InvalidUserID(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewUsageHandler(db.NewContainerUsageStore(mock))
+	handler.SetRollupStore(&stubUsageRollupStore{})
+	orgID := uuid.New()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/timeseries?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z&user_id=not-a-uuid", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+	handler.GetTimeseries(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+func TestUsageHandler_GetTimeseries_WithCapacity(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewUsageHandler(db.NewContainerUsageStore(mock))
+	handler.SetRollupStore(&stubUsageRollupStore{})
+	orgID := uuid.New()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/timeseries?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z&capacity=2cpu_4096mb", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+	handler.GetTimeseries(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+}
+
+func TestUsageHandler_GetBreakdown_DefaultParams(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewUsageHandler(db.NewContainerUsageStore(mock))
+	handler.SetRollupStore(&stubUsageRollupStore{})
+	orgID := uuid.New()
+	// No dimension, sort, or limit params — tests defaults
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/breakdown?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+	handler.GetBreakdown(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+}
+
+func TestUsageHandler_ListBySession_InvalidID(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewUsageHandler(db.NewContainerUsageStore(mock))
+	orgID := uuid.New()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/not-a-uuid/usage", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "not-a-uuid")
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+	handler.ListBySession(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+func TestUsageHandler_ExportCSV_DefaultGranularity(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewUsageHandler(db.NewContainerUsageStore(mock))
+	handler.SetRollupStore(&stubUsageRollupStore{
+		exportRows: &stubRows{
+			rows: [][]any{
+				{time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC), "", "", 30.0, 1, 1, 1, int64(100), int64(50), 0.25},
+			},
+		},
+	})
+	orgID := uuid.New()
+	// No granularity param — defaults to "daily"
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/export?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+	handler.ExportCSV(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	reader := csv.NewReader(strings.NewReader(rr.Body.String()))
+	records, err := reader.ReadAll()
+	require.NoError(t, err)
+	require.Len(t, records, 2)
+	// Default daily — no hour_utc column
+	require.Equal(t, "date", records[0][0])
+	require.Equal(t, "container_minutes", records[0][1])
+}
+
 func TestUsageHandler_ExportCSV_DailyDoesNotDoubleCountSessionsAcrossHours(t *testing.T) {
 	t.Parallel()
 

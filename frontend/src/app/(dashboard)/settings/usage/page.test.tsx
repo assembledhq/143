@@ -344,6 +344,174 @@ describe('UsageExportButton', () => {
 });
 
 // ---------------------------------------------------------------------------
+// UsageSummaryCards
+// ---------------------------------------------------------------------------
+
+import { UsageSummaryCards } from './usage-summary-cards';
+
+describe('UsageSummaryCards', () => {
+  it('renders all four KPI cards with loading state', () => {
+    server.use(
+      http.get('*/api/v1/usage', () => {
+        // Never resolve — keeps isLoading true
+        return new Promise(() => {});
+      })
+    );
+    renderWithProviders(
+      <UsageSummaryCards start="2026-04-01T00:00:00Z" end="2026-04-30T00:00:00Z" />
+    );
+    expect(screen.getByText('Container Minutes')).toBeInTheDocument();
+    expect(screen.getByText('Total Sessions')).toBeInTheDocument();
+    expect(screen.getByText('Peak Concurrent')).toBeInTheDocument();
+    expect(screen.getByText('LLM Tokens')).toBeInTheDocument();
+  });
+
+  it('renders formatted summary values after loading', async () => {
+    server.use(
+      http.get('*/api/v1/usage', () => {
+        return HttpResponse.json({
+          data: {
+            org_id: 'org-1',
+            period_start: '2026-04-01T00:00:00Z',
+            period_end: '2026-04-30T00:00:00Z',
+            total_container_minutes: 90,
+            total_sessions: 10,
+            peak_concurrent: 3,
+            by_capacity: [],
+            total_input_tokens: 2500000,
+            total_output_tokens: 800000,
+            total_llm_cost_usd: 5.25,
+          },
+        });
+      })
+    );
+    renderWithProviders(
+      <UsageSummaryCards start="2026-04-01T00:00:00Z" end="2026-04-30T00:00:00Z" />
+    );
+    await waitFor(() => {
+      expect(screen.getByText('1.5h')).toBeInTheDocument();
+    });
+    expect(screen.getByText('10')).toBeInTheDocument();
+    expect(screen.getByText('3')).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// UsageCapacityBars
+// ---------------------------------------------------------------------------
+
+import { UsageCapacityBars } from './usage-capacity-bars';
+
+describe('UsageCapacityBars', () => {
+  it('renders empty state when no data', async () => {
+    server.use(
+      http.get('*/api/v1/usage/breakdown', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      })
+    );
+    renderWithProviders(
+      <UsageCapacityBars start="2026-04-01T00:00:00Z" end="2026-04-30T00:00:00Z" />
+    );
+    await waitFor(() => {
+      expect(screen.getByText('No capacity data available')).toBeInTheDocument();
+    });
+  });
+
+  it('renders capacity bars with formatted labels', async () => {
+    server.use(
+      http.get('*/api/v1/usage/breakdown', () => {
+        return HttpResponse.json({
+          data: [
+            {
+              key: '2cpu_4096mb',
+              label: '2cpu_4096mb',
+              total_container_minutes: 100,
+              total_sessions: 5,
+              total_container_starts: 5,
+              peak_concurrent: 2,
+              total_input_tokens: 1000,
+              total_output_tokens: 500,
+              total_llm_cost_usd: 1.5,
+              percentage: 75.0,
+            },
+          ],
+          meta: {},
+        });
+      })
+    );
+    renderWithProviders(
+      <UsageCapacityBars start="2026-04-01T00:00:00Z" end="2026-04-30T00:00:00Z" />
+    );
+    await waitFor(() => {
+      expect(screen.getByText('75.0%')).toBeInTheDocument();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// UsageBreakdownTable
+// ---------------------------------------------------------------------------
+
+import { UsageBreakdownTable } from './usage-breakdown-table';
+
+describe('UsageBreakdownTable', () => {
+  it('renders empty state when no breakdown data', async () => {
+    server.use(
+      http.get('*/api/v1/usage/breakdown', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      })
+    );
+    renderWithProviders(
+      <UsageBreakdownTable
+        start="2026-04-01T00:00:00Z"
+        end="2026-04-30T00:00:00Z"
+        dimension="user"
+        onDimensionChange={() => {}}
+      />
+    );
+    await waitFor(() => {
+      expect(screen.getByText('No breakdown data available')).toBeInTheDocument();
+    });
+  });
+
+  it('renders table rows with data', async () => {
+    server.use(
+      http.get('*/api/v1/usage/breakdown', () => {
+        return HttpResponse.json({
+          data: [
+            {
+              key: 'user-1',
+              label: 'alice@example.com',
+              total_container_minutes: 60,
+              total_sessions: 3,
+              total_container_starts: 3,
+              peak_concurrent: 1,
+              total_input_tokens: 5000,
+              total_output_tokens: 2000,
+              total_llm_cost_usd: 0.5,
+              percentage: 100.0,
+            },
+          ],
+          meta: {},
+        });
+      })
+    );
+    renderWithProviders(
+      <UsageBreakdownTable
+        start="2026-04-01T00:00:00Z"
+        end="2026-04-30T00:00:00Z"
+        dimension="user"
+        onDimensionChange={() => {}}
+      />
+    );
+    await waitFor(() => {
+      expect(screen.getByText('alice@example.com')).toBeInTheDocument();
+    });
+    expect(screen.getByText('1.0h')).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // metricOptions coverage
 // ---------------------------------------------------------------------------
 
