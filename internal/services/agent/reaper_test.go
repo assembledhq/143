@@ -297,9 +297,9 @@ func TestReapPhase2_SnapshotDeleteError_SkipsSession(t *testing.T) {
 
 // mockOrphanCloser implements OrphanCloser for testing.
 type mockOrphanCloser struct {
-	closed    int64
-	closeErr  error
-	calledAt  time.Time
+	closed   int64
+	closeErr error
+	calledAt time.Time
 }
 
 func (m *mockOrphanCloser) CloseOrphans(_ context.Context, startedBefore time.Time) (int64, error) {
@@ -308,10 +308,10 @@ func (m *mockOrphanCloser) CloseOrphans(_ context.Context, startedBefore time.Ti
 }
 
 type mockUsageRoller struct {
-	rolledHours    []time.Time
+	rolledHours     []time.Time
 	rollupErrByHour map[time.Time]error
-	deletedCutoffs []time.Time
-	deleteErr      error
+	deletedCutoffs  []time.Time
+	deleteErr       error
 }
 
 func (m *mockUsageRoller) RollupAllOrgs(_ context.Context, hour time.Time) error {

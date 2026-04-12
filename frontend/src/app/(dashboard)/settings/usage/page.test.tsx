@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
-import { renderWithProviders, screen } from '@/test/test-utils';
+import { renderWithProviders, screen, waitFor, userEvent } from '@/test/test-utils';
 import { server } from '@/test/mocks/server';
 import UsagePage from './page';
 import { UsageDatePicker } from './usage-date-picker';
+import { UsageExportButton } from './usage-export-button';
 import {
   formatMinutes,
   formatTokenCount,
@@ -13,6 +14,7 @@ import {
   groupByLocalDay,
   formatDayLabel,
   formatDateForApi,
+  metricOptions,
 } from './usage-helpers';
 import type { UsageTimeseriesBucket } from '@/lib/types';
 
@@ -40,31 +42,43 @@ function makeBucket(overrides: Partial<UsageTimeseriesBucket> = {}): UsageTimese
   };
 }
 
-function setupHandlers() {
+function setupHandlers(overrides?: {
+  summary?: Record<string, unknown>;
+  timeseries?: Record<string, unknown>;
+  breakdown?: Record<string, unknown>;
+}) {
   server.use(
-    http.get('/api/v1/usage/timeseries', () => {
+    http.get('*/api/v1/usage', () => {
       return HttpResponse.json({
-        buckets: [],
-        period_start: '2026-03-13T00:00:00Z',
-        period_end: '2026-04-12T00:00:00Z',
+        data: {
+          org_id: 'org-1',
+          period_start: '2026-03-13T00:00:00Z',
+          period_end: '2026-04-12T00:00:00Z',
+          total_container_minutes: 0,
+          total_sessions: 0,
+          peak_concurrent: 0,
+          by_capacity: [],
+          total_input_tokens: 0,
+          total_output_tokens: 0,
+          total_llm_cost_usd: 0,
+          ...overrides?.summary,
+        },
       });
     }),
-    http.get('/api/v1/usage/summary', () => {
+    http.get('*/api/v1/usage/timeseries', () => {
       return HttpResponse.json({
-        total_container_minutes: 0,
-        total_sessions: 0,
-        total_container_starts: 0,
-        peak_concurrent: 0,
-        total_input_tokens: 0,
-        total_output_tokens: 0,
-        total_llm_cost_usd: 0,
+        data: {
+          buckets: [],
+          period_start: '2026-03-13T00:00:00Z',
+          period_end: '2026-04-12T00:00:00Z',
+          ...overrides?.timeseries,
+        },
       });
     }),
-    http.get('/api/v1/usage/breakdown', () => {
-      return HttpResponse.json({ rows: [] });
-    }),
-    http.get('/api/v1/usage/capacity', () => {
-      return HttpResponse.json({ tiers: [] });
+    http.get('*/api/v1/usage/breakdown', () => {
+      return HttpResponse.json({
+        data: overrides?.breakdown?.rows ?? [],
+      });
     }),
   );
 }
@@ -270,5 +284,78 @@ describe('UsagePage', () => {
     expect(
       screen.getByText(/Data updates every ~5 minutes/)
     ).toBeInTheDocument();
+  });
+
+  it('renders summary cards with formatted data', async () => {
+    setupHandlers({
+      summary: {
+        total_container_minutes: 120,
+        total_sessions: 42,
+        peak_concurrent: 5,
+        total_input_tokens: 1500000,
+        total_output_tokens: 500000,
+        total_llm_cost_usd: 3.75,
+      },
+    });
+    renderWithProviders(<UsagePage />);
+    await waitFor(() => {
+      expect(screen.getByText('2.0h')).toBeInTheDocument();
+    });
+    expect(screen.getByText('42')).toBeInTheDocument();
+    expect(screen.getByText('5')).toBeInTheDocument();
+  });
+
+  it('renders export CSV button', () => {
+    renderWithProviders(<UsagePage />);
+    expect(screen.getByText('Export CSV')).toBeInTheDocument();
+  });
+
+  it('shows empty state when no timeseries data', async () => {
+    setupHandlers();
+    renderWithProviders(<UsagePage />);
+    await waitFor(() => {
+      expect(screen.getByText('No usage data for this period')).toBeInTheDocument();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// UsageExportButton
+// ---------------------------------------------------------------------------
+
+describe('UsageExportButton', () => {
+  it('renders the export button', () => {
+    renderWithProviders(
+      <UsageExportButton start="2026-04-01T00:00:00Z" end="2026-04-30T00:00:00Z" />
+    );
+    expect(screen.getByText('Export CSV')).toBeInTheDocument();
+  });
+
+  it('shows options dropdown when clicked', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <UsageExportButton start="2026-04-01T00:00:00Z" end="2026-04-30T00:00:00Z" />
+    );
+    await user.click(screen.getByText('Export CSV'));
+    expect(screen.getByText('Granularity')).toBeInTheDocument();
+    expect(screen.getByText('Breakdown')).toBeInTheDocument();
+    expect(screen.getByText('Download')).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// metricOptions coverage
+// ---------------------------------------------------------------------------
+
+describe('metricOptions', () => {
+  it('contains all expected metric keys', () => {
+    const keys = metricOptions.map((o) => o.value);
+    expect(keys).toContain('total_container_minutes');
+    expect(keys).toContain('total_sessions');
+    expect(keys).toContain('total_container_starts');
+    expect(keys).toContain('peak_concurrent');
+    expect(keys).toContain('total_input_tokens');
+    expect(keys).toContain('total_output_tokens');
+    expect(keys).toContain('total_llm_cost_usd');
   });
 });

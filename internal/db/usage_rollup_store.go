@@ -18,6 +18,14 @@ type UsageRollupStore struct {
 	db DBTX
 }
 
+// ExportDailySessionCountRow holds exact per-day session counts for CSV export.
+type ExportDailySessionCountRow struct {
+	LocalDate    string
+	UserEmail    string
+	CapacityTier string
+	Sessions     int
+}
+
 // NewUsageRollupStore creates a new UsageRollupStore.
 func NewUsageRollupStore(db DBTX) *UsageRollupStore {
 	return &UsageRollupStore{db: db}
@@ -88,15 +96,15 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 
 	for rows.Next() {
 		var (
-			eventID      uuid.UUID
-			sessionID    uuid.UUID
-			userID       uuid.UUID
-			cpuLimit     float64
-			memoryMB     int
-			startedAt    time.Time
-			stoppedAt    time.Time
-			minutes      float64
-			durationMs   float64
+			eventID    uuid.UUID
+			sessionID  uuid.UUID
+			userID     uuid.UUID
+			cpuLimit   float64
+			memoryMB   int
+			startedAt  time.Time
+			stoppedAt  time.Time
+			minutes    float64
+			durationMs float64
 		)
 		if err := rows.Scan(&eventID, &sessionID, &userID, &cpuLimit, &memoryMB,
 			&startedAt, &stoppedAt, &minutes, &durationMs); err != nil {
@@ -364,9 +372,9 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 	for _, row := range upserts {
 		batch.Queue(upsertSQL, pgx.NamedArgs{
 			"org_id":                  orgID,
-			"hour_utc":               hour,
-			"user_id":                row.userID,
-			"capacity_tier":          row.capacityTier,
+			"hour_utc":                hour,
+			"user_id":                 row.userID,
+			"capacity_tier":           row.capacityTier,
 			"total_container_minutes": row.minutes,
 			"total_sessions":          row.sessions,
 			"total_container_starts":  row.starts,
@@ -670,6 +678,98 @@ func (s *UsageRollupStore) GetExportRows(ctx context.Context, orgID uuid.UUID, s
 	}
 
 	return s.db.Query(ctx, query, args)
+}
+
+// GetDailySessionCounts returns exact daily session counts keyed by the export dimension.
+func (s *UsageRollupStore) GetDailySessionCounts(ctx context.Context, orgID uuid.UUID, start, end time.Time, dimension, tzName string) ([]ExportDailySessionCountRow, error) {
+	args := pgx.NamedArgs{
+		"org_id": orgID,
+		"start":  start,
+		"end":    end,
+		"tz":     tzName,
+	}
+
+	const daySeries = `
+		WITH days AS (
+			SELECT generate_series(
+				date_trunc('day', @start AT TIME ZONE @tz),
+				date_trunc('day', (@end - interval '1 microsecond') AT TIME ZONE @tz),
+				interval '1 day'
+			) AS local_day
+		)
+	`
+
+	var query string
+	switch dimension {
+	case "user":
+		query = daySeries + `
+			SELECT
+				to_char(days.local_day::date, 'YYYY-MM-DD') AS local_date,
+				COALESCE(u.email, '') AS user_email,
+				'' AS capacity_tier,
+				COUNT(DISTINCT e.session_id) AS sessions
+			FROM days
+			JOIN container_usage_events e
+			  ON e.org_id = @org_id
+			 AND e.started_at < ((days.local_day + interval '1 day') AT TIME ZONE @tz)
+			 AND COALESCE(e.stopped_at, now()) > (days.local_day AT TIME ZONE @tz)
+			JOIN sessions s
+			  ON s.id = e.session_id
+			 AND s.org_id = e.org_id
+			LEFT JOIN users u
+			  ON u.id = s.created_by
+			 AND u.org_id = s.org_id
+			GROUP BY days.local_day, COALESCE(u.email, '')
+			ORDER BY days.local_day, user_email`
+	case "capacity":
+		query = daySeries + `
+			SELECT
+				to_char(days.local_day::date, 'YYYY-MM-DD') AS local_date,
+				'' AS user_email,
+				format('%.0fcpu_%smb', e.cpu_limit, e.memory_limit_mb) AS capacity_tier,
+				COUNT(DISTINCT e.session_id) AS sessions
+			FROM days
+			JOIN container_usage_events e
+			  ON e.org_id = @org_id
+			 AND e.started_at < ((days.local_day + interval '1 day') AT TIME ZONE @tz)
+			 AND COALESCE(e.stopped_at, now()) > (days.local_day AT TIME ZONE @tz)
+			GROUP BY days.local_day, capacity_tier
+			ORDER BY days.local_day, capacity_tier`
+	default:
+		query = daySeries + `
+			SELECT
+				to_char(days.local_day::date, 'YYYY-MM-DD') AS local_date,
+				'' AS user_email,
+				'' AS capacity_tier,
+				COUNT(DISTINCT e.session_id) AS sessions
+			FROM days
+			JOIN container_usage_events e
+			  ON e.org_id = @org_id
+			 AND e.started_at < ((days.local_day + interval '1 day') AT TIME ZONE @tz)
+			 AND COALESCE(e.stopped_at, now()) > (days.local_day AT TIME ZONE @tz)
+			GROUP BY days.local_day
+			ORDER BY days.local_day`
+	}
+
+	rows, err := s.db.Query(ctx, query, args)
+	if err != nil {
+		return nil, fmt.Errorf("query daily session counts: %w", err)
+	}
+	defer rows.Close()
+
+	var counts []ExportDailySessionCountRow
+	for rows.Next() {
+		var row ExportDailySessionCountRow
+		if err := rows.Scan(&row.LocalDate, &row.UserEmail, &row.CapacityTier, &row.Sessions); err != nil {
+			return nil, fmt.Errorf("scan daily session count row: %w", err)
+		}
+		counts = append(counts, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate daily session counts: %w", err)
+	}
+
+	return counts, nil
 }
 
 // TokenTotals holds aggregated token counts from the rollup table.

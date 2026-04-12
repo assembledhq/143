@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/csv"
 	"fmt"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
@@ -18,7 +20,15 @@ import (
 // UsageHandler exposes container usage data for billing dashboards.
 type UsageHandler struct {
 	usageStore  *db.ContainerUsageStore
-	rollupStore *db.UsageRollupStore
+	rollupStore usageRollupReader
+}
+
+type usageRollupReader interface {
+	GetTokenTotals(ctx context.Context, orgID uuid.UUID, start, end time.Time) (db.TokenTotals, error)
+	GetTimeseries(ctx context.Context, orgID uuid.UUID, start, end time.Time, groupBy string, userID *uuid.UUID, capacity *string) ([]models.UsageTimeseriesBucket, error)
+	GetBreakdown(ctx context.Context, orgID uuid.UUID, start, end time.Time, dimension, sortBy string, limit int) ([]models.UsageBreakdownRow, error)
+	GetExportRows(ctx context.Context, orgID uuid.UUID, start, end time.Time, dimension string) (pgx.Rows, error)
+	GetDailySessionCounts(ctx context.Context, orgID uuid.UUID, start, end time.Time, dimension, tzName string) ([]db.ExportDailySessionCountRow, error)
 }
 
 // NewUsageHandler creates a UsageHandler.
@@ -27,7 +37,7 @@ func NewUsageHandler(usageStore *db.ContainerUsageStore) *UsageHandler {
 }
 
 // SetRollupStore wires the rollup store for timeseries/breakdown/export endpoints.
-func (h *UsageHandler) SetRollupStore(rs *db.UsageRollupStore) {
+func (h *UsageHandler) SetRollupStore(rs usageRollupReader) {
 	h.rollupStore = rs
 }
 
@@ -314,9 +324,9 @@ func (h *UsageHandler) ExportCSV(w http.ResponseWriter, r *http.Request) {
 
 	// Track daily aggregation for daily granularity.
 	type dailyKey struct {
-		date      string
-		email     string
-		capacity  string
+		date     string
+		email    string
+		capacity string
 	}
 	type dailyRow struct {
 		minutes  float64
