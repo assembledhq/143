@@ -5,7 +5,6 @@ set -euo pipefail
 
 # Create deploy user (idempotent)
 id deploy &>/dev/null || adduser --disabled-password --gecos "" deploy
-usermod -aG docker deploy 2>/dev/null || true
 mkdir -p /home/deploy/.ssh /opt/143
 [ -f /root/.ssh/authorized_keys ] && cp /root/.ssh/authorized_keys /home/deploy/.ssh/
 chown -R deploy:deploy /home/deploy/.ssh /opt/143
@@ -13,6 +12,9 @@ chmod 700 /home/deploy/.ssh
 
 # Docker (idempotent)
 command -v docker &>/dev/null || (curl -fsSL https://get.docker.com | sh)
+
+# Add deploy to docker group (must be after Docker install creates the group)
+usermod -aG docker deploy
 
 # gVisor (idempotent)
 command -v runsc &>/dev/null || {
