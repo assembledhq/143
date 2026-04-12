@@ -176,11 +176,12 @@ lint-bootstrap:
 
 export SOPS_AGE_KEY_FILE ?= $(HOME)/.config/sops/age/keys.txt
 ENV ?=
+_ENV_LC := $(shell echo '$(ENV)' | tr '[:upper:]' '[:lower:]')
 
 # Resolve file names from ENV. "" → .env / .env.enc, "staging" → .env.staging / .env.staging.enc
 ifdef ENV
-  _ENV_FILE     := .env.$(ENV)
-  _ENV_ENC_FILE := .env.$(ENV).enc
+  _ENV_FILE     := .env.$(_ENV_LC)
+  _ENV_ENC_FILE := .env.$(_ENV_LC).enc
 else
   _ENV_FILE     := .env
   _ENV_ENC_FILE := .env.enc
