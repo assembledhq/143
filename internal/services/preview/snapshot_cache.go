@@ -343,7 +343,8 @@ func (sc *SnapshotCache) RestoreSnapshot(
 
 	// Verify SHA-256 checksum if a checksum file exists alongside the blob.
 	checksumPath := hit.BlobPath + ".sha256"
-	if expectedHex, readErr := os.ReadFile(checksumPath); readErr == nil { // #nosec G304 -- checksumPath is derived from validated BlobPath with a fixed suffix
+	expectedHex, readErr := os.ReadFile(checksumPath) // #nosec G304 -- checksumPath is derived from validated BlobPath with a fixed suffix
+	if readErr == nil {
 		actualSum := sha256.Sum256(tarData)
 		actualHex := hex.EncodeToString(actualSum[:])
 		if actualHex != strings.TrimSpace(string(expectedHex)) {
