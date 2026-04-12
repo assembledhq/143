@@ -9,11 +9,10 @@ function makeSnapshot(overrides: Partial<PreviewSnapshot> = {}): PreviewSnapshot
     instance_id: "inst-1",
     trigger: "baseline",
     screenshot_url: "/screenshots/snap-1.png",
-    page_title: "Test Page",
-    page_url: "http://localhost:3000/",
     viewport_width: 1280,
     viewport_height: 720,
-    captured_at: new Date().toISOString(),
+    console_error_count: 0,
+    created_at: new Date().toISOString(),
     ...overrides,
   };
 }
