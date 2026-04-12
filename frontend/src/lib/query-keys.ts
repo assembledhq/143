@@ -33,6 +33,10 @@ export const queryKeys = {
     all: ["settings"] as const,
     agentDefaults: ["agent-defaults"] as const,
   },
+  credentials: {
+    all: ["credentials"] as const,
+    resolved: ["credentials", "resolved"] as const,
+  },
   codexAuth: {
     status: ["codex-auth-status"] as const,
   },

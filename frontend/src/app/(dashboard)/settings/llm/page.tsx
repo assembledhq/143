@@ -30,7 +30,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
-import { Check, Eye, EyeOff } from "lucide-react";
+import { AlertTriangle, Check, Eye, EyeOff } from "lucide-react";
 import {
   LLM_MODELS_BY_PROVIDER,
   LLM_PROVIDER_INFO,
@@ -65,11 +65,13 @@ export default function LLMPage() {
   const credentials = useMemo(() => credentialsResp?.data ?? [], [credentialsResp?.data]);
 
   // Fetch platform-level LLM defaults (to show fallback availability)
-  const { data: llmDefaultsResp } = useQuery<{ data: Record<string, string> }>({
+  const { data: llmDefaultsResp } = useQuery<{ data: Record<string, string>; platform_model?: string }>({
     queryKey: ["llm-defaults"],
     queryFn: () => api.settings.getLLMDefaults(),
   });
   const platformProviders = useMemo(() => llmDefaultsResp?.data ?? {}, [llmDefaultsResp?.data]);
+  const platformModel = llmDefaultsResp?.platform_model;
+  const hasPlatformLLM = Object.keys(platformProviders).length > 0;
 
   // Fetch available models from backend (source of truth)
   const { data: llmModelsResp } = useQuery<{ data: Record<string, string[]> }>({
@@ -210,15 +212,59 @@ export default function LLMPage() {
       <div className="space-y-6">
         <PageHeader
           title="LLM"
-          description="Configure the AI model used for validation, prioritization, and general intelligence."
+          description="Configure agent credentials and the AI model for your organization."
         />
 
-        {/* Provider API Keys */}
+        {/* Platform Intelligence (read-only) */}
         <section className="space-y-3">
-          <h2 className="text-[13px] font-medium text-foreground">Provider keys</h2>
+          <h2 className="text-[13px] font-medium text-foreground">Platform intelligence</h2>
+          <Card>
+            <CardContent>
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm text-muted-foreground">
+                    These features are powered by the platform and work automatically. No configuration needed.
+                  </p>
+                  {hasPlatformLLM ? (
+                    <Badge variant="success" className="text-xs px-1.5 py-0 shrink-0">
+                      <Check className="mr-0.5 h-3 w-3" />
+                      Active
+                    </Badge>
+                  ) : (
+                    <Badge variant="secondary" className="text-xs px-1.5 py-0 shrink-0">
+                      <AlertTriangle className="mr-0.5 h-3 w-3" />
+                      Not configured
+                    </Badge>
+                  )}
+                </div>
+                <ul className="text-xs text-muted-foreground space-y-1 ml-1">
+                  <li>Session titles</li>
+                  <li>PR descriptions</li>
+                  <li>Project generation</li>
+                  <li>Validation checks</li>
+                  <li>Priority scoring</li>
+                </ul>
+                {platformModel && (
+                  <p className="text-xs text-muted-foreground">
+                    Model: <span className="font-mono">{platformModel}</span>
+                  </p>
+                )}
+                {!hasPlatformLLM && (
+                  <p className="text-xs text-amber-600 dark:text-amber-400">
+                    The platform administrator has not configured an LLM provider. These features will be unavailable.
+                  </p>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        </section>
+
+        {/* Agent Credentials */}
+        <section className="space-y-3">
+          <h2 className="text-[13px] font-medium text-foreground">Agent credentials</h2>
           <p className="text-xs text-muted-foreground">
-            Add your own API key for any provider below. If you don&apos;t configure a key, the platform
-            default will be used when available.
+            Add API keys for running coding agent sessions (Claude Code, Codex, Gemini CLI).
+            These keys are separate from the platform&apos;s built-in intelligence.
           </p>
           <div className="space-y-3">
             {LLM_PROVIDERS.map((provider) => {
@@ -238,11 +284,6 @@ export default function LLMPage() {
                               <Badge variant="success" className="text-xs px-1.5 py-0">
                                 <Check className="mr-0.5 h-3 w-3" />
                                 Configured
-                              </Badge>
-                            )}
-                            {!ps?.orgConfigured && ps?.platformAvailable && (
-                              <Badge variant="secondary" className="text-xs px-1.5 py-0">
-                                Platform default
                               </Badge>
                             )}
                           </div>

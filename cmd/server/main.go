@@ -107,10 +107,13 @@ func main() {
 	userCredentialStore := db.NewUserCredentialStore(pool, cryptoSvc)
 	codexAuthSvc := codexauth.NewService(credentialStore, logger)
 
-	// LLM client (shared between router and worker services).
-	llmClient, err := llm.NewClient(cfg.LLMConfig(), logger)
+	// Platform LLM client for internal features (titles, PR descriptions, project
+	// generation, validation, prioritization). Uses the cheap PLATFORM_LLM_MODEL.
+	llmClient, err := llm.NewClient(cfg.PlatformLLMConfig(), logger)
 	if err != nil {
-		logger.Warn().Err(err).Msg("LLM client initialization failed — LLM-dependent features will be unavailable")
+		logger.Warn().Err(err).Msg("Platform LLM client initialization failed — LLM-dependent features will be unavailable")
+	} else {
+		logger.Info().Str("model", cfg.PlatformLLMModel).Msg("Platform LLM client initialized for internal features")
 	}
 
 	// Create file reader for sandbox file browsing (optional — gracefully degrades
@@ -322,10 +325,10 @@ func buildServices(
 		}
 	}
 
-	// LLM client (optional — validation/prioritization degrade gracefully without it).
-	llmClient, err := llm.NewClient(cfg.LLMConfig(), logger)
+	// Platform LLM client for worker internal features (validation, prioritization).
+	llmClient, err := llm.NewClient(cfg.PlatformLLMConfig(), logger)
 	if err != nil {
-		logger.Warn().Err(err).Msg("LLM client initialization failed — LLM-dependent checks will be skipped")
+		logger.Warn().Err(err).Msg("Platform LLM client initialization failed — LLM-dependent checks will be skipped")
 	}
 
 	// Agent adapters.

@@ -1,0 +1,87 @@
+#cloud-config
+# Single-node Phase 1 bootstrap.
+# Substitute secrets at provision time via envsubst:
+#
+#   export SSH_PUBLIC_KEY="$(cat ~/.ssh/143-deploy.pub)"
+#   export GHCR_TOKEN="ghp_xxxx"
+#   export SOPS_AGE_KEY="AGE-SECRET-KEY-xxxx"
+#   export DB_PASSWORD="your-db-password"
+#   export ENV_PRODUCTION_ENC_B64="$(base64 < .env.production.enc)"
+#   export REPO_URL="https://github.com/assembledhq/143.git"
+#   envsubst < deploy/cloud-init/app.yml > /tmp/user-data.yml
+
+users:
+  - name: deploy
+    groups: docker
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - ${SSH_PUBLIC_KEY}
+
+packages:
+  - docker.io
+  - docker-compose-plugin
+  - git
+  - jq
+
+runcmd:
+  # Install gVisor
+  - curl -fsSL https://gvisor.dev/archive.key | gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+  - echo "deb [arch=amd64 signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" > /etc/apt/sources.list.d/gvisor.list
+  - apt-get update && apt-get install -y runsc
+  - runsc install
+  - systemctl restart docker
+
+  # Set up GHCR access (token written to file to avoid leaking in cloud-init logs)
+  - su - deploy -c 'cat /opt/143/.ghcr-token | docker login ghcr.io -u deploy --password-stdin && rm -f /opt/143/.ghcr-token'
+
+  # Clone repo to get compose files, Caddyfile, and Postgres config.
+  # Uses a shallow clone — we only need the config files, not full history.
+  - su - deploy -c 'git clone --depth 1 ${REPO_URL} /tmp/143-repo'
+  - su - deploy -c 'cp /tmp/143-repo/docker-compose.prod.yml /opt/143/'
+  - su - deploy -c 'cp -r /tmp/143-repo/deploy /opt/143/deploy'
+  - rm -rf /tmp/143-repo
+
+  # Pull images
+  - su - deploy -c 'docker pull ghcr.io/assembledhq/143-server:latest'
+  - su - deploy -c 'docker pull ghcr.io/assembledhq/143-sandbox:latest'
+  - su - deploy -c 'docker pull ghcr.io/assembledhq/143-frontend:latest'
+
+  # Apply kernel tuning
+  - sysctl -p /etc/sysctl.d/99-postgres.conf
+
+  # Start the stack and wait for health before migrating
+  - su - deploy -c 'cd /opt/143 && docker compose -f docker-compose.prod.yml up -d'
+  - |
+    echo "Waiting for API health check..."
+    for i in $(seq 1 30); do
+      curl -sf http://localhost:8080/healthz > /dev/null 2>&1 && break
+      sleep 2
+    done
+  - su - deploy -c 'cd /opt/143 && docker compose -f docker-compose.prod.yml exec -T api /bin/migrate up'
+
+write_files:
+  - path: /opt/143/.env
+    owner: deploy:deploy
+    permissions: '0600'
+    content: |
+      SOPS_AGE_KEY=${SOPS_AGE_KEY}
+      DB_PASSWORD=${DB_PASSWORD}
+
+  - path: /opt/143/.ghcr-token
+    owner: deploy:deploy
+    permissions: '0600'
+    content: ${GHCR_TOKEN}
+
+  - path: /opt/143/.env.production.enc
+    owner: deploy:deploy
+    permissions: '0600'
+    encoding: b64
+    content: ${ENV_PRODUCTION_ENC_B64}
+
+  # Kernel tuning for Postgres
+  - path: /etc/sysctl.d/99-postgres.conf
+    content: |
+      vm.overcommit_memory = 2
+      vm.overcommit_ratio = 80
+      vm.swappiness = 1

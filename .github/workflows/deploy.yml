@@ -1,0 +1,70 @@
+name: Build & Deploy
+
+on:
+  push:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - name: server
+            image: ghcr.io/assembledhq/143-server
+            context: .
+            file: Dockerfile
+          - name: sandbox
+            image: ghcr.io/assembledhq/143-sandbox
+            context: .
+            file: sandbox/Dockerfile
+          - name: frontend
+            image: ghcr.io/assembledhq/143-frontend
+            context: .
+            file: Dockerfile.frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push ${{ matrix.name }} image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          push: true
+          tags: |
+            ${{ matrix.image }}:latest
+            ${{ matrix.image }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy-key
+          chmod 600 ~/.ssh/deploy-key
+
+      - name: Deploy via SSH
+        run: |
+          chmod +x deploy/scripts/deploy.sh
+          ./deploy/scripts/deploy.sh "${{ secrets.DEPLOY_HOST }}" ~/.ssh/deploy-key
