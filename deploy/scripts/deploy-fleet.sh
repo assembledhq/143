@@ -1,47 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Deploy to all nodes listed in a hosts file.
-# Usage: ./deploy-fleet.sh [image-tag]
+# Deploy to all nodes in the fleet.
+# Usage: ./deploy-fleet.sh <ssh-key-path> [image-tag]
 #
-# Reads node IPs from /opt/143/fleet-hosts.txt (one IP per line).
-# Provider-agnostic — just needs SSH access.
+# Reads node definitions from fleet-hosts.txt (format: role IP).
+# Example fleet-hosts.txt:
+#   db    10.0.0.3
+#   app   10.0.0.2
+#   worker 10.0.0.4
 
-TAG="${1:-latest}"
-HOSTS_FILE="${FLEET_HOSTS:-/opt/143/fleet-hosts.txt}"
-SERVER_IMAGE="ghcr.io/assembledhq/143-server:$TAG"
-SANDBOX_IMAGE="ghcr.io/assembledhq/143-sandbox:$TAG"
+SSH_KEY="$1"
+TAG="${2:-latest}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+HOSTS_FILE="${FLEET_HOSTS:-$PROJECT_DIR/deploy/fleet-hosts.txt}"
 
-echo "Deploying $TAG to fleet..."
+echo "Deploying tag=$TAG to fleet..."
 
-while IFS= read -r IP; do
-  [[ -z "$IP" || "$IP" == \#* ]] && continue
-  echo "--- Deploying to $IP ---"
-
-  ssh -o StrictHostKeyChecking=accept-new deploy@"$IP" << REMOTE
-    docker pull $SERVER_IMAGE
-    docker pull $SANDBOX_IMAGE
-    cd /opt/143
-    docker compose -f docker-compose.*.yml up -d --remove-orphans
-
-    # Wait for health check (skip if this is a worker-only node with no API)
-    if docker compose -f docker-compose.*.yml ps --format json | grep -q '"api"'; then
-      for i in \$(seq 1 30); do
-        if curl -sf http://localhost:8080/healthz > /dev/null 2>&1; then
-          echo "Health check passed."
-          break
-        fi
-        if [ "\$i" -eq 30 ]; then
-          echo "WARNING: Health check timed out after 60s"
-        fi
-        sleep 2
-      done
-    else
-      echo "No API service on this node, skipping health check."
-    fi
-REMOTE
-
-  echo "$IP deployed."
+while IFS=' ' read -r ROLE IP; do
+  [[ -z "$ROLE" || "$ROLE" == \#* ]] && continue
+  echo "--- Deploying $ROLE to $IP ---"
+  "$SCRIPT_DIR/deploy.sh" "$ROLE" "$IP" "$SSH_KEY" "$TAG"
+  echo "$ROLE@$IP deployed."
 done < "$HOSTS_FILE"
 
 echo "Fleet deployment complete."
