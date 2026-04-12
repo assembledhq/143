@@ -1,11 +1,16 @@
 #cloud-config
-# Single-node Phase 1 bootstrap.
-# Substitute secrets at provision time via envsubst:
+# App node bootstrap (API + Frontend + Caddy).
+# Connects to a remote Postgres instance via DB_HOST.
 #
+# Provision from your local machine:
+#   make provision-app HOST=87.99.150.138 SSH_KEY=~/.ssh/143-deploy
+#
+# Or manually substitute and pass as user-data:
 #   export SSH_PUBLIC_KEY="$(cat ~/.ssh/143-deploy.pub)"
 #   export GHCR_TOKEN="ghp_xxxx"
 #   export SOPS_AGE_KEY="AGE-SECRET-KEY-xxxx"
 #   export DB_PASSWORD="your-db-password"
+#   export DB_HOST="10.0.0.3"
 #   export ENV_PRODUCTION_ENC_B64="$(base64 < .env.production.enc)"
 #   export REPO_URL="https://github.com/assembledhq/143.git"
 #   envsubst < deploy/cloud-init/app.yml > /tmp/user-data.yml
@@ -25,40 +30,37 @@ packages:
   - jq
 
 runcmd:
-  # Install gVisor
-  - curl -fsSL https://gvisor.dev/archive.key | gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
-  - echo "deb [arch=amd64 signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" > /etc/apt/sources.list.d/gvisor.list
-  - apt-get update && apt-get install -y runsc
-  - runsc install
-  - systemctl restart docker
-
   # Set up GHCR access (token written to file to avoid leaking in cloud-init logs)
   - su - deploy -c 'cat /opt/143/.ghcr-token | docker login ghcr.io -u deploy --password-stdin && rm -f /opt/143/.ghcr-token'
 
-  # Clone repo to get compose files, Caddyfile, and Postgres config.
-  # Uses a shallow clone — we only need the config files, not full history.
+  # Clone repo to get compose files, Caddyfile, and configs.
   - su - deploy -c 'git clone --depth 1 ${REPO_URL} /tmp/143-repo'
-  - su - deploy -c 'cp /tmp/143-repo/docker-compose.prod.yml /opt/143/'
+  - su - deploy -c 'cp /tmp/143-repo/docker-compose.app.yml /opt/143/'
   - su - deploy -c 'cp -r /tmp/143-repo/deploy /opt/143/deploy'
   - rm -rf /tmp/143-repo
 
   # Pull images
   - su - deploy -c 'docker pull ghcr.io/assembledhq/143-server:latest'
-  - su - deploy -c 'docker pull ghcr.io/assembledhq/143-sandbox:latest'
   - su - deploy -c 'docker pull ghcr.io/assembledhq/143-frontend:latest'
 
-  # Apply kernel tuning
-  - sysctl -p /etc/sysctl.d/99-postgres.conf
-
   # Start the stack and wait for health before migrating
-  - su - deploy -c 'cd /opt/143 && docker compose -f docker-compose.prod.yml up -d'
+  - su - deploy -c 'cd /opt/143 && docker compose -f docker-compose.app.yml up -d --remove-orphans'
   - |
     echo "Waiting for API health check..."
+    HEALTHY=false
     for i in $(seq 1 30); do
-      curl -sf http://localhost:8080/healthz > /dev/null 2>&1 && break
+      if curl -sf http://localhost:8080/healthz > /dev/null 2>&1; then
+        echo "Health check passed."
+        HEALTHY=true
+        break
+      fi
       sleep 2
     done
-  - su - deploy -c 'cd /opt/143 && docker compose -f docker-compose.prod.yml exec -T api /bin/migrate up'
+    if [ "$HEALTHY" != "true" ]; then
+      echo "ERROR: Health check timed out after 60s — aborting before migrations."
+      exit 1
+    fi
+  - su - deploy -c 'cd /opt/143 && docker compose -f docker-compose.app.yml exec -T api /bin/migrate up'
 
 write_files:
   - path: /opt/143/.env
@@ -67,6 +69,7 @@ write_files:
     content: |
       SOPS_AGE_KEY=${SOPS_AGE_KEY}
       DB_PASSWORD=${DB_PASSWORD}
+      DB_HOST=${DB_HOST}
 
   - path: /opt/143/.ghcr-token
     owner: deploy:deploy
@@ -78,10 +81,3 @@ write_files:
     permissions: '0600'
     encoding: b64
     content: ${ENV_PRODUCTION_ENC_B64}
-
-  # Kernel tuning for Postgres
-  - path: /etc/sysctl.d/99-postgres.conf
-    content: |
-      vm.overcommit_memory = 2
-      vm.overcommit_ratio = 80
-      vm.swappiness = 1
