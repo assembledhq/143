@@ -481,6 +481,44 @@ export const handlers = [
     } satisfies PMDecisionsResponse);
   }),
 
+  http.get('/api/v1/issues/:id', ({ params }) => {
+    const issue = mockIssues.find((i) => i.id === params.id);
+    if (!issue) {
+      return HttpResponse.json(
+        { error: { code: 'NOT_FOUND', message: 'Issue not found' } },
+        { status: 404 },
+      );
+    }
+    // Return issue without description by default to avoid creating synthetic
+    // timeline messages that break tests expecting empty timelines.
+    return HttpResponse.json({ data: { ...issue, description: undefined } } satisfies SingleResponse<Issue>);
+  }),
+
+  http.post('/api/v1/sessions/:id/view', () => {
+    return HttpResponse.json({ data: { status: 'ok' } });
+  }),
+
+  http.post('/api/v1/sessions/:id/cancel', () => {
+    return HttpResponse.json({ data: { ...mockSessions[0], status: 'cancelled' } });
+  }),
+
+  http.post('/api/v1/sessions/:id/retry', () => {
+    return HttpResponse.json({ data: { ...mockSessions[0], status: 'pending' } });
+  }),
+
+  http.get('/api/v1/users/me/github-status', () => {
+    return HttpResponse.json({
+      connected: false,
+      has_repo_scope: false,
+      pr_authorship_mode: 'bot',
+      pr_draft_default: false,
+    });
+  }),
+
+  http.get('/api/v1/sessions/:id/preview', () => {
+    return HttpResponse.json({ data: null });
+  }),
+
   http.get('/api/v1/sessions/:id/files', ({ request }) => {
     const url = new URL(request.url);
     const path = url.searchParams.get('path') || '';

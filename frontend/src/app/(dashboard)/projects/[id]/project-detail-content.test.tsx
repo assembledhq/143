@@ -365,4 +365,271 @@ describe("ProjectDetailContent", () => {
     expect(screen.getByText("1 designs")).toBeInTheDocument();
     expect(screen.getByText("Phase: implementation")).toBeInTheDocument();
   });
+
+  it("shows failed task count when failed_tasks > 0", async () => {
+    server.use(
+      http.get("*/api/v1/projects/:id", () => {
+        return HttpResponse.json({
+          data: {
+            project: {
+              id: "proj-1", org_id: "org-1", repository_id: "repo-1",
+              title: "Failed Tasks Project", goal: "Test failures",
+              status: "active", priority: 50, execution_mode: "sequential",
+              max_concurrent: 1, auto_merge: false, base_branch: "main",
+              total_tasks: 5, completed_tasks: 2, failed_tasks: 2,
+              proposed_by_pm: false, source_issue_ids: [],
+              schedule_enabled: false, schedule_interval: 1, schedule_unit: 'days',
+              created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+            },
+            tasks: [],
+            recent_cycles: [],
+            attachments: [],
+            specs: [],
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<ProjectDetailContent id="proj-1" />);
+    await waitFor(() => {
+      expect(screen.getByText("Failed Tasks Project")).toBeInTheDocument();
+    });
+    expect(screen.getByText(/2 failed/)).toBeInTheDocument();
+  });
+
+  it("shows blocked tasks warning when tasks are failed or blocked", async () => {
+    server.use(
+      http.get("*/api/v1/projects/:id", () => {
+        return HttpResponse.json({
+          data: {
+            project: {
+              id: "proj-1", org_id: "org-1", repository_id: "repo-1",
+              title: "Blocked Project", goal: "Test blocked",
+              status: "active", priority: 50, execution_mode: "sequential",
+              max_concurrent: 1, auto_merge: false, base_branch: "main",
+              total_tasks: 4, completed_tasks: 1, failed_tasks: 1,
+              proposed_by_pm: false, source_issue_ids: [],
+              schedule_enabled: false, schedule_interval: 1, schedule_unit: 'days',
+              created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+            },
+            tasks: [
+              {
+                id: "task-1", project_id: "proj-1", org_id: "org-1",
+                title: "Failed Task", sort_order: 1, batch_number: 1,
+                status: "failed", retry_count: 3, max_retries: 3,
+                created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+              },
+              {
+                id: "task-2", project_id: "proj-1", org_id: "org-1",
+                title: "Blocked Task", sort_order: 2, batch_number: 1,
+                status: "blocked", retry_count: 0, max_retries: 3,
+                created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+              },
+            ],
+            recent_cycles: [],
+            attachments: [],
+            specs: [],
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<ProjectDetailContent id="proj-1" />);
+    await waitFor(() => {
+      expect(screen.getByText("Blocked Project")).toBeInTheDocument();
+    });
+    expect(screen.getByText(/2 tasks need attention/)).toBeInTheDocument();
+  });
+
+  it("shows singular 'task needs' for exactly one blocked task", async () => {
+    server.use(
+      http.get("*/api/v1/projects/:id", () => {
+        return HttpResponse.json({
+          data: {
+            project: {
+              id: "proj-1", org_id: "org-1", repository_id: "repo-1",
+              title: "Single Blocked", goal: "One blocked",
+              status: "active", priority: 50, execution_mode: "sequential",
+              max_concurrent: 1, auto_merge: false, base_branch: "main",
+              total_tasks: 3, completed_tasks: 1, failed_tasks: 1,
+              proposed_by_pm: false, source_issue_ids: [],
+              schedule_enabled: false, schedule_interval: 1, schedule_unit: 'days',
+              created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+            },
+            tasks: [
+              {
+                id: "task-1", project_id: "proj-1", org_id: "org-1",
+                title: "Failed Task", sort_order: 1, batch_number: 1,
+                status: "failed", retry_count: 3, max_retries: 3,
+                created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+              },
+            ],
+            recent_cycles: [],
+            attachments: [],
+            specs: [],
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<ProjectDetailContent id="proj-1" />);
+    await waitFor(() => {
+      expect(screen.getByText("Single Blocked")).toBeInTheDocument();
+    });
+    expect(screen.getByText(/1 task needs attention/)).toBeInTheDocument();
+  });
+
+  it("hides lifecycle buttons for completed project", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get("*/api/v1/projects/:id", () => {
+        return HttpResponse.json({
+          data: {
+            project: {
+              id: "proj-1", org_id: "org-1", repository_id: "repo-1",
+              title: "Completed Project", goal: "Done",
+              status: "completed", priority: 50, execution_mode: "sequential",
+              max_concurrent: 1, auto_merge: false, base_branch: "main",
+              total_tasks: 3, completed_tasks: 3, failed_tasks: 0,
+              proposed_by_pm: false, source_issue_ids: [],
+              schedule_enabled: false, schedule_interval: 1, schedule_unit: 'days',
+              created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+            },
+            tasks: [],
+            recent_cycles: [],
+            attachments: [],
+            specs: [],
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<ProjectDetailContent id="proj-1" />);
+    await waitFor(() => {
+      expect(screen.getByText("Completed Project")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("tab", { name: /Settings/ }));
+
+    // No lifecycle buttons should be visible for completed projects
+    expect(screen.queryByRole("button", { name: "Start project" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel project" })).not.toBeInTheDocument();
+  });
+
+  it("shows schedule fields and Run now button for active project with schedule enabled", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get("*/api/v1/projects/:id", () => {
+        return HttpResponse.json({
+          data: {
+            project: {
+              id: "proj-1", org_id: "org-1", repository_id: "repo-1",
+              title: "Scheduled Project", goal: "Recurring",
+              status: "active", priority: 50, execution_mode: "sequential",
+              max_concurrent: 1, auto_merge: false, base_branch: "main",
+              total_tasks: 2, completed_tasks: 1, failed_tasks: 0,
+              proposed_by_pm: false, source_issue_ids: [],
+              schedule_enabled: true, schedule_interval: 7, schedule_unit: 'days',
+              next_run_at: new Date(Date.now() + 86400000).toISOString(),
+              created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+            },
+            tasks: [],
+            recent_cycles: [],
+            attachments: [],
+            specs: [],
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<ProjectDetailContent id="proj-1" />);
+    await waitFor(() => {
+      expect(screen.getByText("Scheduled Project")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("tab", { name: /Settings/ }));
+
+    // Schedule should show Enabled button
+    expect(screen.getByRole("button", { name: "Enabled" })).toBeInTheDocument();
+    // Should show the "This project runs on a recurring schedule." text
+    expect(screen.getByText("This project runs on a recurring schedule.")).toBeInTheDocument();
+    // Should show Next run text
+    expect(screen.getByText(/Next run:/)).toBeInTheDocument();
+    // Should show Run now button for active projects
+    expect(screen.getByRole("button", { name: /Run now/ })).toBeInTheDocument();
+    // Should show Save schedule button
+    expect(screen.getByRole("button", { name: "Save schedule" })).toBeInTheDocument();
+  });
+
+  it("shows disabled schedule text when schedule is not enabled", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get("*/api/v1/projects/:id", () => {
+        return HttpResponse.json({
+          data: {
+            project: {
+              id: "proj-1", org_id: "org-1", repository_id: "repo-1",
+              title: "No Schedule Project", goal: "No schedule",
+              status: "draft", priority: 50, execution_mode: "sequential",
+              max_concurrent: 1, auto_merge: false, base_branch: "main",
+              total_tasks: 1, completed_tasks: 0, failed_tasks: 0,
+              proposed_by_pm: false, source_issue_ids: [],
+              schedule_enabled: false, schedule_interval: 1, schedule_unit: 'days',
+              created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+            },
+            tasks: [],
+            recent_cycles: [],
+            attachments: [],
+            specs: [],
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<ProjectDetailContent id="proj-1" />);
+    await waitFor(() => {
+      expect(screen.getByText("No Schedule Project")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("tab", { name: /Settings/ }));
+
+    expect(screen.getByRole("button", { name: "Disabled" })).toBeInTheDocument();
+    expect(screen.getByText("Enable to run this project automatically.")).toBeInTheDocument();
+    // Run now should not show for non-active projects
+    expect(screen.queryByRole("button", { name: /Run now/ })).not.toBeInTheDocument();
+  });
+
+  it("renders project without goal", async () => {
+    server.use(
+      http.get("*/api/v1/projects/:id", () => {
+        return HttpResponse.json({
+          data: {
+            project: {
+              id: "proj-1", org_id: "org-1", repository_id: "repo-1",
+              title: "No Goal Project", goal: "",
+              status: "draft", priority: 50, execution_mode: "sequential",
+              max_concurrent: 1, auto_merge: false, base_branch: "main",
+              total_tasks: 0, completed_tasks: 0, failed_tasks: 0,
+              proposed_by_pm: false, source_issue_ids: [],
+              schedule_enabled: false, schedule_interval: 1, schedule_unit: 'days',
+              created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+            },
+            tasks: [],
+            recent_cycles: [],
+            attachments: [],
+            specs: [],
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<ProjectDetailContent id="proj-1" />);
+    await waitFor(() => {
+      expect(screen.getByText("No Goal Project")).toBeInTheDocument();
+    });
+    // The Target icon should not appear when there's no goal
+    expect(screen.queryByTestId("icon-Target")).not.toBeInTheDocument();
+  });
 });

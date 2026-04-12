@@ -1,3 +1,4 @@
+import React from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { renderWithProviders, screen, waitFor } from "@/test/test-utils";
 import { ManualSessionCreatePageContent } from "./manual-session-create-page-content";
@@ -73,6 +74,7 @@ vi.mock("@/contexts/optimistic-sessions", () => ({
   useOptimisticSessions: () => ({
     addOptimisticSession: vi.fn(),
   }),
+  OptimisticSessionsProvider: ({ children }: { children: React.ReactNode }) => children,
 }));
 
 describe("ManualSessionCreatePageContent", () => {

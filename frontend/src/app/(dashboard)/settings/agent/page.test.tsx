@@ -203,4 +203,279 @@ describe('AgentPage', () => {
       expect(body.settings).toHaveProperty('max_concurrent_runs');
     });
   });
+
+  it('shows team default masked key and set_by_user_name', async () => {
+    // Use claude_code as default agent so the anthropic team default is shown
+    setupHandlers({ team: mockTeamDefaults, resolved: mockResolved });
+
+    renderWithProviders(<AgentPage />);
+
+    expect(await screen.findByText(/sk-ant-\.\.\.xyz/)).toBeInTheDocument();
+    expect(screen.getByText(/Set by Alice Smith/)).toBeInTheDocument();
+    expect(screen.getByText('Team default set')).toBeInTheDocument();
+  });
+
+  it('shows Remove team default button and opens confirmation dialog', async () => {
+    setupHandlers({ team: mockTeamDefaults, resolved: mockResolved });
+
+    const user = userEvent.setup();
+    renderWithProviders(<AgentPage />);
+
+    const removeBtn = await screen.findByText('Remove team default');
+    expect(removeBtn).toBeInTheDocument();
+
+    await user.click(removeBtn);
+
+    expect(await screen.findByText(/Are you sure you want to remove the team default/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Remove' })).toBeInTheDocument();
+  });
+
+  it('confirms removal of team default via dialog', async () => {
+    let removeCalled = false;
+    setupHandlers({ team: mockTeamDefaults, resolved: mockResolved });
+    server.use(
+      http.delete('/api/v1/settings/credentials/team/:provider', () => {
+        removeCalled = true;
+        return HttpResponse.json({ data: null });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<AgentPage />);
+
+    await user.click(await screen.findByText('Remove team default'));
+    await user.click(await screen.findByRole('button', { name: 'Remove' }));
+
+    await waitFor(() => {
+      expect(removeCalled).toBe(true);
+    });
+  });
+
+  it('renders Codex agent with credential method toggle when selected', async () => {
+    setupHandlers({ team: [], resolved: [] });
+    server.use(
+      http.get('/api/v1/settings', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockOrgSettings.data,
+            settings: { ...mockOrgSettings.data.settings, default_agent_type: 'codex' },
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<AgentPage />);
+
+    expect(await screen.findByText('Codex settings')).toBeInTheDocument();
+    expect(screen.getByText('Credential method')).toBeInTheDocument();
+    // "Sign in with ChatGPT" appears in both the RadioCard label and the auth button
+    expect(screen.getAllByText('Sign in with ChatGPT').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('Use API key')).toBeInTheDocument();
+  });
+
+  it('shows hidden env vars message when ChatGPT method is selected for Codex', async () => {
+    setupHandlers({ team: [], resolved: [] });
+    server.use(
+      http.get('/api/v1/settings', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockOrgSettings.data,
+            settings: { ...mockOrgSettings.data.settings, default_agent_type: 'codex' },
+          },
+        });
+      }),
+      http.get('/api/v1/settings/codex-auth/status', () => {
+        return HttpResponse.json({ data: { status: 'none' } });
+      }),
+    );
+
+    renderWithProviders(<AgentPage />);
+
+    // Default inferred method is "chatgpt" when no API key set and status is not completed
+    expect(await screen.findByText('API key fields are hidden while ChatGPT sign-in is selected.')).toBeInTheDocument();
+  });
+
+  it('shows API key env var fields when api_key method is inferred for Codex', async () => {
+    setupHandlers({ team: [], resolved: [] });
+    server.use(
+      http.get('/api/v1/settings', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockOrgSettings.data,
+            settings: {
+              ...mockOrgSettings.data.settings,
+              default_agent_type: 'codex',
+              agent_config: { codex: { OPENAI_API_KEY: 'sk-test' } },
+            },
+          },
+        });
+      }),
+      http.get('/api/v1/settings/codex-auth/status', () => {
+        return HttpResponse.json({ data: { status: 'none' } });
+      }),
+    );
+
+    renderWithProviders(<AgentPage />);
+
+    // hasCodexAPIKey is true and status is not completed => api_key method inferred
+    expect(await screen.findByText('API Key')).toBeInTheDocument();
+    expect(screen.queryByText('API key fields are hidden while ChatGPT sign-in is selected.')).not.toBeInTheDocument();
+  });
+
+  it('shows Advanced settings toggle for agents with advanced env vars', async () => {
+    // claude_code has advanced env var (ANTHROPIC_BASE_URL)
+    setupHandlers({ team: [], resolved: [] });
+
+    renderWithProviders(<AgentPage />);
+
+    expect(await screen.findByText('Advanced settings')).toBeInTheDocument();
+  });
+
+  it('toggles advanced settings to show/hide advanced env vars', async () => {
+    setupHandlers({ team: [], resolved: [] });
+
+    const user = userEvent.setup();
+    renderWithProviders(<AgentPage />);
+
+    const advBtn = await screen.findByText('Advanced settings');
+    await user.click(advBtn);
+
+    expect(await screen.findByText('Base URL')).toBeInTheDocument();
+    expect(screen.getByText('Hide advanced settings')).toBeInTheDocument();
+
+    await user.click(screen.getByText('Hide advanced settings'));
+
+    await waitFor(() => {
+      expect(screen.queryByText('Base URL')).not.toBeInTheDocument();
+    });
+  });
+
+  it('shows success message after saving org settings', async () => {
+    server.use(
+      http.patch('/api/v1/settings', () => {
+        return HttpResponse.json(mockOrgSettings);
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<AgentPage />);
+
+    await screen.findByText('Save organization settings');
+    await user.click(screen.getByText('Save organization settings'));
+
+    expect(await screen.findByText('Settings saved.')).toBeInTheDocument();
+  });
+
+  it('shows error message when save fails', async () => {
+    server.use(
+      http.patch('/api/v1/settings', () => {
+        return new HttpResponse(null, { status: 500 });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<AgentPage />);
+
+    await screen.findByText('Save organization settings');
+    await user.click(screen.getByText('Save organization settings'));
+
+    expect(await screen.findByText('Failed to save settings.')).toBeInTheDocument();
+  });
+
+  it('shows Disconnect button and calls disconnect mutation when ChatGPT is connected', async () => {
+    let disconnectCalled = false;
+    setupHandlers({ team: [], resolved: [] });
+    server.use(
+      http.get('/api/v1/settings/codex-auth/status', () => {
+        return HttpResponse.json({ data: { status: 'completed' } });
+      }),
+      http.get('/api/v1/settings', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockOrgSettings.data,
+            settings: { ...mockOrgSettings.data.settings, default_agent_type: 'codex' },
+          },
+        });
+      }),
+      http.post('/api/v1/settings/codex-auth/disconnect', () => {
+        disconnectCalled = true;
+        return HttpResponse.json({ data: null });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<AgentPage />);
+
+    const disconnectBtn = await screen.findByRole('button', { name: 'Disconnect' });
+    await user.click(disconnectBtn);
+
+    await waitFor(() => {
+      expect(disconnectCalled).toBe(true);
+    });
+  });
+
+  it('updates max concurrent runs input', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<AgentPage />);
+
+    const input = await screen.findByLabelText('Max concurrent runs');
+    await user.clear(input);
+    await user.type(input, '8');
+
+    expect(input).toHaveValue(8);
+  });
+
+  it('renders Gemini CLI settings when gemini_cli is selected as default', async () => {
+    setupHandlers({ team: [], resolved: [] });
+    server.use(
+      http.get('/api/v1/settings', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockOrgSettings.data,
+            settings: { ...mockOrgSettings.data.settings, default_agent_type: 'gemini_cli' },
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<AgentPage />);
+
+    expect(await screen.findByText('Gemini CLI settings')).toBeInTheDocument();
+  });
+
+  it('shows server default indicator for env vars with server defaults', async () => {
+    setupHandlers({ team: [], resolved: [] });
+    server.use(
+      http.get('/api/v1/settings/agent-defaults', () => {
+        return HttpResponse.json({
+          data: { claude_code: { ANTHROPIC_API_KEY: 'sk-server-default' } },
+        });
+      }),
+    );
+
+    renderWithProviders(<AgentPage />);
+
+    expect(await screen.findByText('server default')).toBeInTheDocument();
+  });
+
+  it('does not show Advanced settings toggle for agents without advanced env vars', async () => {
+    // gemini_cli has no advanced env vars
+    setupHandlers({ team: [], resolved: [] });
+    server.use(
+      http.get('/api/v1/settings', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockOrgSettings.data,
+            settings: { ...mockOrgSettings.data.settings, default_agent_type: 'gemini_cli' },
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<AgentPage />);
+
+    await screen.findByText('Gemini CLI settings');
+    expect(screen.queryByText('Advanced settings')).not.toBeInTheDocument();
+  });
 });

@@ -85,11 +85,11 @@ describe("SetupChecklist", () => {
     expect(screen.getByText(/coding agent/i)).toBeInTheDocument();
   });
 
-  it("renders the GitHub connection step", async () => {
+  it("renders the integrations connection step", async () => {
     renderWithProviders(<SetupChecklist />);
 
     await waitFor(() => {
-      expect(screen.getByText(/GitHub/i)).toBeInTheDocument();
+      expect(screen.getByText(/Connect integrations/i)).toBeInTheDocument();
     });
   });
 
