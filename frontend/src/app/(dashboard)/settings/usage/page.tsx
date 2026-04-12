@@ -34,17 +34,17 @@ export default function UsagePage() {
   const handleRowClick = useCallback(
     (key: string) => {
       if (dimension === "user") {
-        setSelectedUserId(selectedUserId === key ? null : key);
+        setSelectedUserId((prev) => (prev === key ? null : key));
       }
     },
-    [dimension, selectedUserId, setSelectedUserId]
+    [dimension, setSelectedUserId]
   );
 
   const handleDayClick = useCallback(
     (day: string) => {
-      setSelectedDay(selectedDay === day ? null : day);
+      setSelectedDay((prev) => (prev === day ? null : day));
     },
-    [selectedDay]
+    [setSelectedDay]
   );
 
   const handlePresetChange = useCallback(
