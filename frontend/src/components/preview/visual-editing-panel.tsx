@@ -450,7 +450,10 @@ export function VisualEditingPanel({
               </span>
               <Select
                 value={editState.fontSizeUnit}
-                onValueChange={(v) => update("fontSizeUnit", v)}
+                onValueChange={(v) => {
+                  update("fontSizeUnit", v);
+                  setDirtyFields((prev) => new Set(prev).add("fontSize"));
+                }}
               >
                 <SelectTrigger className="w-14 h-6 text-xs">
                   <SelectValue />
@@ -601,7 +604,10 @@ export function VisualEditingPanel({
               />
               <Select
                 value={editState.widthUnit}
-                onValueChange={(v) => update("widthUnit", v)}
+                onValueChange={(v) => {
+                  update("widthUnit", v);
+                  setDirtyFields((prev) => new Set(prev).add("width"));
+                }}
               >
                 <SelectTrigger className="w-16 h-7 text-xs">
                   <SelectValue />
@@ -627,7 +633,10 @@ export function VisualEditingPanel({
               />
               <Select
                 value={editState.heightUnit}
-                onValueChange={(v) => update("heightUnit", v)}
+                onValueChange={(v) => {
+                  update("heightUnit", v);
+                  setDirtyFields((prev) => new Set(prev).add("height"));
+                }}
               >
                 <SelectTrigger className="w-16 h-7 text-xs">
                   <SelectValue />

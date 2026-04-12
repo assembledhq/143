@@ -427,7 +427,11 @@ func (d *DockerPreviewProvider) provisionInfra(
 	if err != nil {
 		return nil, fmt.Errorf("generate credential for %q: %w", infraName, err)
 	}
-	containerName := fmt.Sprintf("preview-%s-%s", infraName, previewHandle[:12])
+	handlePrefix := previewHandle
+	if len(handlePrefix) > 12 {
+		handlePrefix = handlePrefix[:12]
+	}
+	containerName := fmt.Sprintf("preview-%s-%s", infraName, handlePrefix)
 
 	env := d.buildInfraEnv(infraCfg.Template, cred)
 	memLimit := int64(tmpl.DefaultMemMB) * 1024 * 1024

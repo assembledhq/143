@@ -467,12 +467,21 @@ func (p *PreviewToolProvider) execScreenshot(
 		opts.Path = args.Path
 	}
 	if args.ViewportW > 0 {
+		if args.ViewportW > 3840 {
+			args.ViewportW = 3840
+		}
 		opts.ViewportW = args.ViewportW
 	}
 	if args.ViewportH > 0 && !fullPage {
+		if args.ViewportH > 2160 {
+			args.ViewportH = 2160
+		}
 		opts.ViewportH = args.ViewportH
 	}
 	if args.DelayMS > 0 {
+		if args.DelayMS > 30000 {
+			args.DelayMS = 30000
+		}
 		opts.Delay = time.Duration(args.DelayMS) * time.Millisecond
 	}
 
@@ -549,9 +558,8 @@ func (p *PreviewToolProvider) execElement(
 		return nil, fmt.Errorf("selector is required")
 	}
 
-	// Use DOM capture with selector to get element info, then use InspectElement
-	// at the center of the element's bounding box. First, capture the DOM to
-	// find the element's position.
+	// Use DOM capture with the user's selector to get element info including
+	// HTML, styles, and component tree data.
 	domSnap, err := inspector.CaptureDOM(ctx, previewID, DOMCaptureOpts{
 		Selector:      args.Selector,
 		IncludeStyles: true,
@@ -560,22 +568,39 @@ func (p *PreviewToolProvider) execElement(
 		return nil, fmt.Errorf("capture DOM for selector %q: %w", args.Selector, err)
 	}
 
-	// If the DOM snapshot has component tree info, we have enough data.
-	// Fall back to InspectElement at 0,0 as a heuristic — the chromedp
-	// inspector implementation handles selector-based lookup internally.
-	_ = domSnap
+	// Build an ElementInfo from the DOM snapshot data rather than calling
+	// InspectElement with meaningless sentinel coordinates.
+	if domSnap != nil {
+		info := &models.ElementInfo{
+			DOMPath:        args.Selector,
+			ComputedStyles: domSnap.Styles,
+		}
+		// Extract component info from the tree if available.
+		if len(domSnap.ComponentTree) > 0 {
+			root := domSnap.ComponentTree[0]
+			info.ComponentName = root.Name
+			info.ComponentFile = root.File
+			info.ComponentLine = root.Line
+			info.Props = root.Props
+			// Build ancestor tree.
+			tree := make([]string, len(domSnap.ComponentTree))
+			for i, n := range domSnap.ComponentTree {
+				tree[i] = n.Name
+			}
+			info.ComponentTree = tree
+		}
+		return info, nil
+	}
 
-	// InspectElement with coordinates derived from a selector-based query.
-	// The inspector implementation maps selectors to bounding boxes internally,
-	// so we pass sentinel coordinates that trigger selector-based inspection.
-	info, err := inspector.InspectElement(ctx, previewID, -1, -1)
+	// Fallback: try InspectElement at 0,0 as a last resort.
+	info, err := inspector.InspectElement(ctx, previewID, 0, 0)
 	if err != nil {
-		// Fallback: if coordinate-based inspection fails, return what we got from DOM.
 		return &models.ElementInfo{
 			TagName: "unknown",
 			DOMPath: args.Selector,
 		}, nil
 	}
+	info.DOMPath = args.Selector
 	return info, nil
 }
 
@@ -1095,6 +1120,9 @@ func (p *PreviewToolProvider) execInteract(
 	for i, s := range args.Steps {
 		timeout := 10 * time.Second
 		if s.TimeoutMS > 0 {
+			if s.TimeoutMS > 60000 {
+				s.TimeoutMS = 60000
+			}
 			timeout = time.Duration(s.TimeoutMS) * time.Millisecond
 		}
 		steps[i] = models.InteractionStep{
@@ -1177,6 +1205,9 @@ func (p *PreviewToolProvider) execMultiViewport(
 	}
 	delay := time.Second
 	if args.DelayMS > 0 {
+		if args.DelayMS > 30000 {
+			args.DelayMS = 30000
+		}
 		delay = time.Duration(args.DelayMS) * time.Millisecond
 	}
 

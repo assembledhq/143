@@ -1320,7 +1320,7 @@ const DEFAULT_DETAIL = 384;
 export function SessionDetailContent({ id }: { id: string }) {
   const terminalStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
   const [reviewParam, setReviewParam] = useQueryState("review");
-  const [previewParam] = useQueryState("preview");
+  const [previewParam, setPreviewParam] = useQueryState("preview");
   const centerMode = reviewParam === "active" ? "review" : "chat";
   const [detailTab, setDetailTab] = useState<DetailTab>(
     previewParam === "1" ? "preview" : "overview"
@@ -1349,11 +1349,12 @@ export function SessionDetailContent({ id }: { id: string }) {
   // --- Handle detail tab click ---
   const handleDetailTabClick = useCallback((tab: DetailTab) => {
     setDetailTab(tab);
+    setPreviewParam(tab === "preview" ? "1" : null);
     // Clicking a non-changes tab exits review mode
     if (tab !== "changes" && centerMode === "review") {
       exitReview();
     }
-  }, [centerMode, exitReview]);
+  }, [centerMode, exitReview, setPreviewParam]);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["session", id],

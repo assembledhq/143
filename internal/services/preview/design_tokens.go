@@ -124,14 +124,7 @@ func ReverseMapValue(tokens *DesignTokenMap, property, computedValue string) str
 
 	normalized := normalizeColorValue(computedValue)
 
-	// First pass: exact value match.
-	for name, value := range tokens.Tokens {
-		if normalizeColorValue(value) == normalized {
-			return name
-		}
-	}
-
-	// Second pass: for Tailwind, try matching with the property-based prefix.
+	// First pass: for Tailwind, prefer context-aware prefix match.
 	if tokens.Framework == "tailwind" {
 		prefix := tailwindPropertyPrefix(property)
 		if prefix != "" {
@@ -140,6 +133,13 @@ func ReverseMapValue(tokens *DesignTokenMap, property, computedValue string) str
 					return name
 				}
 			}
+		}
+	}
+
+	// Second pass: fall back to any exact value match.
+	for name, value := range tokens.Tokens {
+		if normalizeColorValue(value) == normalized {
+			return name
 		}
 	}
 
@@ -170,6 +170,9 @@ var (
 	reKeyValue = regexp.MustCompile(`['"]?([\w-]+)['"]?\s*:\s*['"]([^'"]+)['"]`)
 
 	// reSectionBlock matches a named section like `colors: { ... }` inside theme config.
+	// NOTE: Uses [^}] which cannot handle nested braces (e.g. colors: { blue: { 500: "#..." } }).
+	// A proper JS parser would be needed for nested Tailwind color objects. For now this
+	// only extracts flat key-value sections, which covers the most common configurations.
 	reSectionBlock = regexp.MustCompile(`(?s)(colors|spacing|fontSize|fontFamily|borderRadius|lineHeight)\s*:\s*\{([^}]+)\}`)
 )
 

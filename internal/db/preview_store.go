@@ -237,13 +237,16 @@ func (s *PreviewStore) StopPreview(ctx context.Context, orgID, id uuid.UUID) err
 
 // UpdatePreviewHandle updates the provider handle and primary port after a recycle.
 func (s *PreviewStore) UpdatePreviewHandle(ctx context.Context, orgID, id uuid.UUID, handle string, port int) error {
-	_, err := s.db.Exec(ctx,
+	tag, err := s.db.Exec(ctx,
 		`UPDATE preview_instances SET preview_handle = @handle, port = @port, updated_at = now()
 		 WHERE id = @id AND org_id = @org_id`,
 		pgx.NamedArgs{"id": id, "org_id": orgID, "handle": handle, "port": port},
 	)
 	if err != nil {
 		return fmt.Errorf("update preview handle: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("preview instance not found")
 	}
 	return nil
 }
@@ -257,21 +260,11 @@ func (s *PreviewStore) ListActivePreviews(ctx context.Context, workerNodeID stri
 	if err != nil {
 		return nil, fmt.Errorf("list active previews: %w", err)
 	}
-	defer rows.Close()
-	var result []models.PreviewInstance
-	for rows.Next() {
-		var p models.PreviewInstance
-		if err := rows.Scan(
-			&p.ID, &p.SessionID, &p.OrgID, &p.UserID, &p.ProfileName, &p.Name, &p.Status,
-			&p.Provider, &p.WorkerNodeID, &p.PreviewHandle, &p.PrimaryService, &p.Port,
-			&p.ConfigDigest, &p.BaseCommitSHA, &p.LastAccessedAt, &p.ExpiresAt, &p.StoppedAt,
-			&p.LastPath, &p.MemoryLimitMB, &p.CPULimitMillis, &p.RecycleConfig, &p.RecycleSandbox, &p.Error, &p.CreatedAt, &p.UpdatedAt,
-		); err != nil {
-			return nil, fmt.Errorf("scan preview instance: %w", err)
-		}
-		result = append(result, p)
+	result, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewInstance])
+	if err != nil {
+		return nil, fmt.Errorf("scan preview instance: %w", err)
 	}
-	return result, rows.Err()
+	return result, nil
 }
 
 // CountActivePreviewsByOrg counts active previews for concurrency cap enforcement.

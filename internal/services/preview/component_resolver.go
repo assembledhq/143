@@ -323,7 +323,9 @@ const ComponentResolverScript = `
   // Serialization helpers
   // =========================================================================
 
-  function safeValue(val) {
+  function safeValue(val, depth) {
+    if (depth === undefined) depth = 0;
+    if (depth > 5) return "[MaxDepth]";
     if (val === null || val === undefined) return val;
     var t = typeof val;
     if (t === "string" || t === "number" || t === "boolean") return val;
@@ -331,7 +333,7 @@ const ComponentResolverScript = `
     if (val instanceof HTMLElement) return "[HTMLElement: " + val.tagName.toLowerCase() + "]";
     if (Array.isArray(val)) {
       if (val.length > 20) return "[Array(" + val.length + ")]";
-      return val.map(function(v) { return safeValue(v); });
+      return val.map(function(v) { return safeValue(v, depth + 1); });
     }
     if (t === "object") {
       // Avoid circular references and React elements.
@@ -340,7 +342,7 @@ const ComponentResolverScript = `
       if (keys.length > 30) return "[Object(" + keys.length + " keys)]";
       var out = {};
       keys.forEach(function(k) {
-        out[k] = safeValue(val[k]);
+        out[k] = safeValue(val[k], depth + 1);
       });
       return out;
     }
