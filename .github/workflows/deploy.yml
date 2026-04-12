@@ -22,7 +22,7 @@ jobs:
             file: Dockerfile
           - name: sandbox
             image: ghcr.io/assembledhq/143-sandbox
-            context: ./sandbox
+            context: .
             file: sandbox/Dockerfile
           - name: frontend
             image: ghcr.io/assembledhq/143-frontend
