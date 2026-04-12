@@ -1,6 +1,16 @@
 #cloud-config
-# Worker node bootstrap (Phase 3b).
-# Same substitution as app.yml:
+# Worker node bootstrap (agent sandboxes with gVisor).
+# Connects to a remote Postgres instance via DB_HOST.
+#
+# Provision from your local machine:
+#   make provision-worker HOST=87.99.158.39 SSH_KEY=~/.ssh/143-deploy
+#
+# Or manually substitute and pass as user-data:
+#   export SSH_PUBLIC_KEY="$(cat ~/.ssh/143-deploy.pub)"
+#   export GHCR_TOKEN="ghp_xxxx"
+#   export DB_PASSWORD="your-db-password"
+#   export DB_HOST="10.0.0.3"
+#   export REPO_URL="https://github.com/assembledhq/143.git"
 #   envsubst < deploy/cloud-init/worker.yml > /tmp/user-data.yml
 
 users:
@@ -31,6 +41,7 @@ runcmd:
   # Clone repo to get compose files
   - su - deploy -c 'git clone --depth 1 ${REPO_URL} /tmp/143-repo'
   - su - deploy -c 'cp /tmp/143-repo/docker-compose.worker.yml /opt/143/'
+  - su - deploy -c 'cp -r /tmp/143-repo/deploy /opt/143/deploy'
   - rm -rf /tmp/143-repo
 
   # Pull images
@@ -41,14 +52,15 @@ runcmd:
   - sysctl -p /etc/sysctl.d/99-worker.conf
 
   # Start the worker
-  - su - deploy -c 'cd /opt/143 && docker compose -f docker-compose.worker.yml up -d'
+  - su - deploy -c 'cd /opt/143 && docker compose -f docker-compose.worker.yml up -d --remove-orphans'
 
 write_files:
+  # Workers only get the secrets they need — no age key or encrypted bundle.
+  # A worker compromise cannot decrypt the full production secret set.
   - path: /opt/143/.env
     owner: deploy:deploy
     permissions: '0600'
     content: |
-      SOPS_AGE_KEY=${SOPS_AGE_KEY}
       DB_PASSWORD=${DB_PASSWORD}
       DB_HOST=${DB_HOST}
 
