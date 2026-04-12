@@ -64,7 +64,14 @@ jobs:
           echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy-key
           chmod 600 ~/.ssh/deploy-key
 
-      - name: Deploy via SSH
+      - name: Deploy worker node
         run: |
           chmod +x deploy/scripts/deploy.sh
-          ./deploy/scripts/deploy.sh "${{ secrets.DEPLOY_HOST }}" ~/.ssh/deploy-key
+          ./deploy/scripts/deploy.sh worker "${{ secrets.WORKER_HOST }}" ~/.ssh/deploy-key "${{ github.sha }}"
+
+      - name: Deploy app node
+        run: |
+          ./deploy/scripts/deploy.sh app "${{ secrets.APP_HOST }}" ~/.ssh/deploy-key "${{ github.sha }}"
+
+      # DB node is deployed manually (make deploy-db) to avoid
+      # unintended Postgres restarts on every push.
