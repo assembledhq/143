@@ -77,7 +77,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		var err error
 		cryptoSvc, err = crypto.NewService(cfg.EncryptionMasterKey)
 		if err != nil {
-			return nil, err
+			return nil, nil, nil, err
 		}
 	}
 	credentialStore := db.NewOrgCredentialStore(pool, cryptoSvc)

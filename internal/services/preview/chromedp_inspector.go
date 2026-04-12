@@ -791,12 +791,12 @@ func (c *ChromeDPInspector) ExecuteInteraction(ctx context.Context, previewID st
 		var stepErr error
 		switch step.Action {
 		case "click":
-			stepErr = chromedp.Run(pc.ctx,
+			stepErr = chromedp.Run(timeoutCtx,
 				chromedp.WaitVisible(step.Selector, chromedp.ByQuery),
 				chromedp.Click(step.Selector, chromedp.ByQuery),
 			)
 		case "type":
-			stepErr = chromedp.Run(pc.ctx,
+			stepErr = chromedp.Run(timeoutCtx,
 				chromedp.WaitVisible(step.Selector, chromedp.ByQuery),
 				chromedp.Clear(step.Selector, chromedp.ByQuery),
 				chromedp.SendKeys(step.Selector, step.Value, chromedp.ByQuery),
@@ -806,7 +806,7 @@ func (c *ChromeDPInspector) ExecuteInteraction(ctx context.Context, previewID st
 			if !strings.HasPrefix(url, "http") {
 				url = c.previewURL(previewID, step.Value)
 			}
-			stepErr = chromedp.Run(pc.ctx,
+			stepErr = chromedp.Run(timeoutCtx,
 				chromedp.Navigate(url),
 				chromedp.WaitReady("body", chromedp.ByQuery),
 			)
@@ -814,23 +814,23 @@ func (c *ChromeDPInspector) ExecuteInteraction(ctx context.Context, previewID st
 			if step.WaitFor != "" {
 				switch step.WaitFor {
 				case "load":
-					stepErr = chromedp.Run(pc.ctx,
+					stepErr = chromedp.Run(timeoutCtx,
 						chromedp.WaitReady("body", chromedp.ByQuery),
 					)
 				case "networkidle":
 					// Approximate network idle with a short sleep after load.
-					stepErr = chromedp.Run(pc.ctx,
+					stepErr = chromedp.Run(timeoutCtx,
 						chromedp.WaitReady("body", chromedp.ByQuery),
 						chromedp.Sleep(500*time.Millisecond),
 					)
 				default:
 					// Treat as CSS selector to wait for.
-					stepErr = chromedp.Run(pc.ctx,
+					stepErr = chromedp.Run(timeoutCtx,
 						chromedp.WaitVisible(step.WaitFor, chromedp.ByQuery),
 					)
 				}
 			} else if step.Selector != "" {
-				stepErr = chromedp.Run(pc.ctx,
+				stepErr = chromedp.Run(timeoutCtx,
 					chromedp.WaitVisible(step.Selector, chromedp.ByQuery),
 				)
 			} else {
@@ -838,7 +838,7 @@ func (c *ChromeDPInspector) ExecuteInteraction(ctx context.Context, previewID st
 				if waitDur <= 0 {
 					waitDur = time.Second
 				}
-				stepErr = chromedp.Run(pc.ctx,
+				stepErr = chromedp.Run(timeoutCtx,
 					chromedp.Sleep(waitDur),
 				)
 			}
@@ -847,9 +847,9 @@ func (c *ChromeDPInspector) ExecuteInteraction(ctx context.Context, previewID st
 			if step.Value == "" {
 				js = `window.scrollTo(0, document.body.scrollHeight)`
 			}
-			stepErr = chromedp.Run(pc.ctx, chromedp.Evaluate(js, nil))
+			stepErr = chromedp.Run(timeoutCtx, chromedp.Evaluate(js, nil))
 		case "select":
-			stepErr = chromedp.Run(pc.ctx,
+			stepErr = chromedp.Run(timeoutCtx,
 				chromedp.SetValue(step.Selector, step.Value, chromedp.ByQuery),
 			)
 		default:
@@ -860,17 +860,17 @@ func (c *ChromeDPInspector) ExecuteInteraction(ctx context.Context, previewID st
 		if stepErr == nil && step.WaitFor != "" && step.Action != "wait" {
 			switch step.WaitFor {
 			case "load":
-				_ = chromedp.Run(pc.ctx, chromedp.WaitReady("body", chromedp.ByQuery))
+				_ = chromedp.Run(timeoutCtx, chromedp.WaitReady("body", chromedp.ByQuery))
 			case "networkidle":
-				_ = chromedp.Run(pc.ctx, chromedp.Sleep(500*time.Millisecond))
+				_ = chromedp.Run(timeoutCtx, chromedp.Sleep(500*time.Millisecond))
 			default:
-				_ = chromedp.Run(pc.ctx, chromedp.WaitVisible(step.WaitFor, chromedp.ByQuery))
+				_ = chromedp.Run(timeoutCtx, chromedp.WaitVisible(step.WaitFor, chromedp.ByQuery))
 			}
 		}
 
 		// Get current URL.
 		var currentURL string
-		_ = chromedp.Run(pc.ctx, chromedp.Location(&currentURL))
+		_ = chromedp.Run(timeoutCtx, chromedp.Location(&currentURL))
 		sr.URL = currentURL
 
 		if stepErr != nil {
@@ -882,9 +882,9 @@ func (c *ChromeDPInspector) ExecuteInteraction(ctx context.Context, previewID st
 		// Optional screenshot at this step.
 		if step.Screenshot && stepErr == nil {
 			var pngData []byte
-			if err := chromedp.Run(pc.ctx, chromedp.CaptureScreenshot(&pngData)); err == nil {
+			if err := chromedp.Run(timeoutCtx, chromedp.CaptureScreenshot(&pngData)); err == nil {
 				var title string
-				_ = chromedp.Run(pc.ctx, chromedp.Title(&title))
+				_ = chromedp.Run(timeoutCtx, chromedp.Title(&title))
 				sr.Screenshot = &models.ScreenshotResult{
 					PNG:        pngData,
 					PageTitle:  title,
@@ -906,7 +906,7 @@ func (c *ChromeDPInspector) ExecuteInteraction(ctx context.Context, previewID st
 
 	// Get final URL.
 	var finalURL string
-	_ = chromedp.Run(pc.ctx, chromedp.Location(&finalURL))
+	_ = chromedp.Run(timeoutCtx, chromedp.Location(&finalURL))
 	result.FinalURL = finalURL
 
 	// Collect console errors.
