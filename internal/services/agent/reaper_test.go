@@ -388,3 +388,21 @@ func TestReapPhase4_CatchesUpMissedHoursFromWatermark(t *testing.T) {
 	}, usageRoller.rolledHours, "reaper should catch up every missed hour through the current hour")
 	require.Equal(t, time.Date(2026, 4, 10, 10, 0, 0, 0, time.UTC), reaper.lastRollupHour, "reaper should advance the watermark after successful catch-up")
 }
+
+func TestReapPhase4_BackfillsStartupWindowWhenWatermarkMissing(t *testing.T) {
+	t.Parallel()
+
+	mock := &reaperMockSessionLister{}
+	snapStore := &reaperMockSnapshotStore{}
+	usageRoller := &mockUsageRoller{}
+
+	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop(),
+		WithUsageRoller(usageRoller),
+	)
+
+	reaper.reapUsageRollups(context.Background(), time.Date(2026, 4, 10, 10, 35, 0, 0, time.UTC))
+
+	require.Len(t, usageRoller.rolledHours, 25, "fresh reaper should backfill a bounded startup window instead of only two hours")
+	require.Equal(t, time.Date(2026, 4, 9, 10, 0, 0, 0, time.UTC), usageRoller.rolledHours[0], "startup catch-up should begin 24 hours before the current hour")
+	require.Equal(t, time.Date(2026, 4, 10, 10, 0, 0, 0, time.UTC), usageRoller.rolledHours[len(usageRoller.rolledHours)-1], "startup catch-up should include the current hour")
+}

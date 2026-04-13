@@ -188,24 +188,26 @@ func (r *SessionReaper) reap(ctx context.Context) {
 	}
 }
 
-// reapUsageRollups rolls up all hours from the watermark (lastRollupHour)
-// through the current hour. On the first run (zero watermark), only the
-// previous and current hours are rolled. Subsequent runs catch up any hours
-// that were missed and always re-roll the current (partial) hour.
+// reapUsageRollups rolls up all hours from the watermark through the current
+// hour. On a fresh process with no watermark, it backfills a bounded startup
+// window so ordinary downtime does not leave permanent holes in the rollup.
 func (r *SessionReaper) reapUsageRollups(ctx context.Context, now time.Time) {
-	currentHour := now.Truncate(time.Hour)
+	const startupLookback = 24 * time.Hour
 
-	// On first run, seed the watermark so we only roll prevHour + currentHour.
+	currentHour := now.UTC().Truncate(time.Hour)
+	startHour := currentHour
+
 	if r.lastRollupHour.IsZero() {
-		r.lastRollupHour = currentHour.Add(-time.Hour)
+		startHour = currentHour.Add(-startupLookback)
+	} else if r.lastRollupHour.Before(currentHour) {
+		startHour = r.lastRollupHour.Add(time.Hour)
 	}
 
-	// Roll up every hour from lastRollupHour+1 through currentHour.
-	for h := r.lastRollupHour.Add(time.Hour); !h.After(currentHour); h = h.Add(time.Hour) {
+	for h := startHour; !h.After(currentHour); h = h.Add(time.Hour) {
 		if err := r.usageRoller.RollupAllOrgs(ctx, h); err != nil {
 			r.logger.Error().Err(err).Time("hour", h).Msg("reaper: failed to roll up hourly usage")
-			return // stop catch-up on first error so watermark stays accurate
+			return
 		}
+		r.lastRollupHour = h
 	}
-	r.lastRollupHour = currentHour
 }
