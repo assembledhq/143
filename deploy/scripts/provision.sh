@@ -2,10 +2,13 @@
 set -euo pipefail
 
 # Provision a node by running bootstrap.sh + copying config files via SSH.
-# Usage: ./provision.sh <role> <host> <ssh-key-path>
+# Usage: ./provision.sh <role> <host> <ssh-key-path> [--reprovision]
 #
 # Roles: app, worker, db
 # This is the SSH-based alternative to cloud-init for already-running servers.
+#
+# Pass --reprovision to tear down existing containers and volumes before reprovisioning.
+# Without --reprovision, the script will abort if services are already running.
 #
 # No env vars required by default — the script reads your age key from
 # ~/.config/sops/age/keys.txt and all other secrets from .env.production.enc.
@@ -22,6 +25,7 @@ set -euo pipefail
 ROLE="$1"
 HOST="$2"
 SSH_KEY="$3"
+REPROVISION="${4:-}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
@@ -77,6 +81,21 @@ fi
 
 SSH_OPTS=(-o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
 SCP_OPTS=(-o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
+
+# Check if already provisioned
+RUNNING=$(ssh "${SSH_OPTS[@]}" root@"$HOST" "su - deploy -c 'cd /opt/143 && docker compose -f $COMPOSE_FILE ps -q 2>/dev/null'" 2>/dev/null || true)
+if [ -n "$RUNNING" ]; then
+  if [ "$REPROVISION" != "--reprovision" ]; then
+    echo "ERROR: $ROLE node at $HOST is already provisioned and running."
+    echo ""
+    echo "To tear down and reprovision, run:"
+    echo "  make provision-$ROLE HOST=$HOST SSH_KEY=$SSH_KEY REPROVISION=true"
+    exit 1
+  fi
+
+  echo "=== Reprovisioning $ROLE node at $HOST (tearing down existing) ==="
+  ssh "${SSH_OPTS[@]}" root@"$HOST" "su - deploy -c 'cd /opt/143 && docker compose -f $COMPOSE_FILE down -v'"
+fi
 
 echo "=== Provisioning $ROLE node at $HOST ==="
 

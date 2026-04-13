@@ -240,21 +240,26 @@ secrets-rotate:
 #   make provision-app    HOST=87.99.150.138  SSH_KEY=~/.ssh/143-deploy
 #   make provision-worker HOST=87.99.158.39   SSH_KEY=~/.ssh/143-deploy
 #   make provision-db     HOST=87.99.157.55   SSH_KEY=~/.ssh/143-deploy
+#
+# To tear down and reprovision an existing node:
+#   make provision-app    HOST=87.99.150.138  SSH_KEY=~/.ssh/143-deploy REPROVISION=true
+
+REPROVISION ?=
 
 provision-app:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-app HOST=<ip> SSH_KEY=<path>"; exit 1; }
 	@test -n "$(SSH_KEY)" || { echo "SSH_KEY is required."; exit 1; }
-	./deploy/scripts/provision.sh app $(HOST) $(SSH_KEY)
+	./deploy/scripts/provision.sh app $(HOST) $(SSH_KEY) $(if $(REPROVISION),--reprovision)
 
 provision-worker:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-worker HOST=<ip> SSH_KEY=<path>"; exit 1; }
 	@test -n "$(SSH_KEY)" || { echo "SSH_KEY is required."; exit 1; }
-	./deploy/scripts/provision.sh worker $(HOST) $(SSH_KEY)
+	./deploy/scripts/provision.sh worker $(HOST) $(SSH_KEY) $(if $(REPROVISION),--reprovision)
 
 provision-db:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-db HOST=<ip> SSH_KEY=<path>"; exit 1; }
 	@test -n "$(SSH_KEY)" || { echo "SSH_KEY is required."; exit 1; }
-	./deploy/scripts/provision.sh db $(HOST) $(SSH_KEY)
+	./deploy/scripts/provision.sh db $(HOST) $(SSH_KEY) $(if $(REPROVISION),--reprovision)
 
 # Deploy (update) an already-provisioned node.
 # Usage:
