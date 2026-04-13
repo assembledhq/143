@@ -463,8 +463,14 @@ func TestRollupHour_NoEvents(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(tokenCols))
 
 	// Batch upsert: one org-total row (all zeros)
+	anyArgs13 := []any{
+		pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		pgxmock.AnyArg(),
+	}
 	eb := mock.ExpectBatch()
-	eb.ExpectExec("INSERT INTO usage_hourly").WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	eb.ExpectExec("INSERT INTO usage_hourly").WithArgs(anyArgs13...).WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	err = store.RollupHour(context.Background(), orgID, hour)
 	require.NoError(t, err)
@@ -529,11 +535,17 @@ func TestRollupHour_WithEvents(t *testing.T) {
 		))
 
 	// Batch upsert: 4 rows (per-user-tier, per-user, per-tier, org-total)
+	anyArgs := []any{
+		pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		pgxmock.AnyArg(),
+	}
 	eb2 := mock.ExpectBatch()
-	eb2.ExpectExec("INSERT INTO usage_hourly").WillReturnResult(pgxmock.NewResult("INSERT", 1))
-	eb2.ExpectExec("INSERT INTO usage_hourly").WillReturnResult(pgxmock.NewResult("INSERT", 1))
-	eb2.ExpectExec("INSERT INTO usage_hourly").WillReturnResult(pgxmock.NewResult("INSERT", 1))
-	eb2.ExpectExec("INSERT INTO usage_hourly").WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	eb2.ExpectExec("INSERT INTO usage_hourly").WithArgs(anyArgs...).WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	eb2.ExpectExec("INSERT INTO usage_hourly").WithArgs(anyArgs...).WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	eb2.ExpectExec("INSERT INTO usage_hourly").WithArgs(anyArgs...).WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	eb2.ExpectExec("INSERT INTO usage_hourly").WithArgs(anyArgs...).WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	err = store.RollupHour(context.Background(), orgID, hour)
 	require.NoError(t, err)
