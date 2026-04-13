@@ -587,6 +587,103 @@ func TestGetBreakdown_QueryError(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestGetTimeseries_WithUserIDFilter(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	orgID := uuid.New()
+	uid := uuid.New()
+	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC)
+
+	cols := []string{
+		"hour_utc", "user_id", "user_name", "capacity_tier",
+		"total_container_minutes", "total_sessions", "total_container_starts",
+		"peak_concurrent", "avg_duration_sec", "p95_duration_sec",
+		"total_input_tokens", "total_output_tokens", "total_llm_cost_usd",
+	}
+	mock.ExpectQuery("SELECT uh.hour_utc").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "start": start, "end": end, "user_id": uid}).
+		WillReturnRows(pgxmock.NewRows(cols).AddRow(
+			start, &uid, "alice", (*string)(nil),
+			30.0, 2, 2, 1, 60.0, 120.0,
+			int64(500), int64(250), 0.25,
+		))
+
+	buckets, err := store.GetTimeseries(context.Background(), orgID, start, end, "hour", &uid, nil)
+	require.NoError(t, err)
+	require.Len(t, buckets, 1)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestGetTimeseries_WithCapacityFilter(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	orgID := uuid.New()
+	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC)
+	cap := "2cpu_4096mb"
+
+	cols := []string{
+		"hour_utc", "user_id", "user_name", "capacity_tier",
+		"total_container_minutes", "total_sessions", "total_container_starts",
+		"peak_concurrent", "avg_duration_sec", "p95_duration_sec",
+		"total_input_tokens", "total_output_tokens", "total_llm_cost_usd",
+	}
+	mock.ExpectQuery("SELECT uh.hour_utc").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "start": start, "end": end, "capacity": cap}).
+		WillReturnRows(pgxmock.NewRows(cols).AddRow(
+			start, nil, "", &cap,
+			45.0, 3, 3, 2, 90.0, 200.0,
+			int64(800), int64(400), 0.40,
+		))
+
+	buckets, err := store.GetTimeseries(context.Background(), orgID, start, end, "hour", nil, &cap)
+	require.NoError(t, err)
+	require.Len(t, buckets, 1)
+	require.Equal(t, &cap, buckets[0].CapacityTier)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestGetTimeseries_CapacityGroupBy(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	orgID := uuid.New()
+	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC)
+
+	cols := []string{
+		"hour_utc", "user_id", "user_name", "capacity_tier",
+		"total_container_minutes", "total_sessions", "total_container_starts",
+		"peak_concurrent", "avg_duration_sec", "p95_duration_sec",
+		"total_input_tokens", "total_output_tokens", "total_llm_cost_usd",
+	}
+	cap := "2cpu_4096mb"
+	mock.ExpectQuery("SELECT uh.hour_utc").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "start": start, "end": end}).
+		WillReturnRows(pgxmock.NewRows(cols).AddRow(
+			start, nil, "", &cap,
+			50.0, 4, 4, 2, 100.0, 250.0,
+			int64(900), int64(450), 0.45,
+		))
+
+	buckets, err := store.GetTimeseries(context.Background(), orgID, start, end, "capacity", nil, nil)
+	require.NoError(t, err)
+	require.Len(t, buckets, 1)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestGetBreakdown_EmptyResult(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
