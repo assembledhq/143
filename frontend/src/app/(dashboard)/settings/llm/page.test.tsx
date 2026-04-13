@@ -83,11 +83,11 @@ describe("LLMPage", () => {
     });
   });
 
-  it("renders provider keys section", async () => {
+  it("renders agent credentials section", async () => {
     renderWithProviders(<LLMPage />);
 
     await waitFor(() => {
-      expect(screen.getByText("Provider keys")).toBeInTheDocument();
+      expect(screen.getByText("Agent credentials")).toBeInTheDocument();
     });
   });
 
@@ -99,15 +99,11 @@ describe("LLMPage", () => {
     });
   });
 
-  it("renders provider cards with platform default badge", async () => {
-    llmDefaultsMock.mockResolvedValue({
-      data: { openai: "configured" },
-    });
-
+  it("renders platform intelligence section", async () => {
     renderWithProviders(<LLMPage />);
 
     await waitFor(() => {
-      expect(screen.getByText("Platform default")).toBeInTheDocument();
+      expect(screen.getByText("Platform intelligence")).toBeInTheDocument();
     });
   });
 
