@@ -211,3 +211,211 @@ func TestDeleteOlderThan_Error(t *testing.T) {
 	require.Contains(t, err.Error(), "delete old usage_hourly")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+func TestGetExportRows_None(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	orgID := uuid.New()
+	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+
+	mock.ExpectQuery("SELECT uh.hour_utc").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "start": start, "end": end}).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"hour_utc", "user_email", "capacity_tier",
+			"total_container_minutes", "total_sessions", "total_container_starts",
+			"peak_concurrent", "total_input_tokens", "total_output_tokens", "total_llm_cost_usd",
+		}))
+
+	rows, err := store.GetExportRows(context.Background(), orgID, start, end, "none")
+	require.NoError(t, err)
+	defer rows.Close()
+	require.False(t, rows.Next())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestGetExportRows_User(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	orgID := uuid.New()
+	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+
+	mock.ExpectQuery("SELECT uh.hour_utc").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "start": start, "end": end}).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"hour_utc", "user_email", "capacity_tier",
+			"total_container_minutes", "total_sessions", "total_container_starts",
+			"peak_concurrent", "total_input_tokens", "total_output_tokens", "total_llm_cost_usd",
+		}).AddRow(
+			time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC), "alice@test.com", "",
+			30.0, 1, 1, 1, int64(100), int64(50), 0.25,
+		))
+
+	rows, err := store.GetExportRows(context.Background(), orgID, start, end, "user")
+	require.NoError(t, err)
+	defer rows.Close()
+	require.True(t, rows.Next())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestGetExportRows_Capacity(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	orgID := uuid.New()
+	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+
+	mock.ExpectQuery("SELECT uh.hour_utc").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "start": start, "end": end}).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"hour_utc", "user_email", "capacity_tier",
+			"total_container_minutes", "total_sessions", "total_container_starts",
+			"peak_concurrent", "total_input_tokens", "total_output_tokens", "total_llm_cost_usd",
+		}))
+
+	rows, err := store.GetExportRows(context.Background(), orgID, start, end, "capacity")
+	require.NoError(t, err)
+	defer rows.Close()
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestGetDailySessionCounts_Default(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	orgID := uuid.New()
+	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC)
+
+	mock.ExpectQuery("WITH days AS").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "start": start, "end": end, "tz": "UTC"}).
+		WillReturnRows(pgxmock.NewRows([]string{"local_date", "user_email", "capacity_tier", "sessions"}).
+			AddRow("2026-04-01", "", "", 5))
+
+	counts, err := store.GetDailySessionCounts(context.Background(), orgID, start, end, "none", "UTC")
+	require.NoError(t, err)
+	require.Len(t, counts, 1)
+	require.Equal(t, "2026-04-01", counts[0].LocalDate)
+	require.Equal(t, 5, counts[0].Sessions)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestGetDailySessionCounts_User(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	orgID := uuid.New()
+	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC)
+
+	mock.ExpectQuery("WITH days AS").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "start": start, "end": end, "tz": "UTC"}).
+		WillReturnRows(pgxmock.NewRows([]string{"local_date", "user_email", "capacity_tier", "sessions"}).
+			AddRow("2026-04-01", "alice@test.com", "", 3))
+
+	counts, err := store.GetDailySessionCounts(context.Background(), orgID, start, end, "user", "UTC")
+	require.NoError(t, err)
+	require.Len(t, counts, 1)
+	require.Equal(t, "alice@test.com", counts[0].UserEmail)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestGetDailySessionCounts_Capacity(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	orgID := uuid.New()
+	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC)
+
+	mock.ExpectQuery("WITH days AS").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "start": start, "end": end, "tz": "UTC"}).
+		WillReturnRows(pgxmock.NewRows([]string{"local_date", "user_email", "capacity_tier", "sessions"}).
+			AddRow("2026-04-01", "", "2cpu_4096mb", 2))
+
+	counts, err := store.GetDailySessionCounts(context.Background(), orgID, start, end, "capacity", "UTC")
+	require.NoError(t, err)
+	require.Len(t, counts, 1)
+	require.Equal(t, "2cpu_4096mb", counts[0].CapacityTier)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestGetDailySessionCounts_QueryError(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	orgID := uuid.New()
+	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC)
+
+	mock.ExpectQuery("WITH days AS").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "start": start, "end": end, "tz": "UTC"}).
+		WillReturnError(pgx.ErrTxClosed)
+
+	_, err = store.GetDailySessionCounts(context.Background(), orgID, start, end, "none", "UTC")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "query daily session counts")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRollupAllOrgs_NoActiveOrgs(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	hour := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+
+	mock.ExpectQuery("SELECT DISTINCT org_id").
+		WithArgs(pgx.NamedArgs{"hour_start": hour, "hour_end": hour.Add(time.Hour)}).
+		WillReturnRows(pgxmock.NewRows([]string{"org_id"}))
+
+	err = store.RollupAllOrgs(context.Background(), hour)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRollupAllOrgs_QueryError(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	hour := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+
+	mock.ExpectQuery("SELECT DISTINCT org_id").
+		WithArgs(pgx.NamedArgs{"hour_start": hour, "hour_end": hour.Add(time.Hour)}).
+		WillReturnError(pgx.ErrTxClosed)
+
+	err = store.RollupAllOrgs(context.Background(), hour)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "list active orgs")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
