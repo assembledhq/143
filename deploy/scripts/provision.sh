@@ -170,7 +170,7 @@ if [ "$ROLE" = "app" ]; then
   echo "Waiting for API health check..."
   ssh "${SSH_OPTS[@]}" root@"$HOST" << HEALTHCHECK
     for i in \$(seq 1 30); do
-      if curl -sf http://localhost:8080/healthz > /dev/null 2>&1; then
+      if curl -sf http://localhost:80/api/healthz > /dev/null 2>&1; then
         echo "Health check passed."
         break
       fi
