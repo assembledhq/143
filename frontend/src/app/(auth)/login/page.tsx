@@ -140,6 +140,7 @@ function LoginPageContent() {
                 onClick={() => api.auth.login(invitation)}
                 aria-label="Continue with GitHub"
               >
+                <img src="/integrations/github.svg" alt="" className="mr-2 h-5 w-5 dark:invert" aria-hidden="true" />
                 Continue with GitHub
               </Button>
             )}
@@ -150,6 +151,7 @@ function LoginPageContent() {
                 onClick={() => api.auth.loginGoogle(invitation)}
                 aria-label="Continue with Google"
               >
+                <img src="/integrations/google.svg" alt="" className="mr-2 h-5 w-5" aria-hidden="true" />
                 Continue with Google
               </Button>
             )}
