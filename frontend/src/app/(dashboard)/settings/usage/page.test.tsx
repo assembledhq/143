@@ -512,6 +512,102 @@ describe('UsageBreakdownTable', () => {
 });
 
 // ---------------------------------------------------------------------------
+// UsageTimeseriesChart
+// ---------------------------------------------------------------------------
+
+import { UsageTimeseriesChart } from './usage-timeseries-chart';
+
+describe('UsageTimeseriesChart', () => {
+  it('renders loading state', () => {
+    server.use(
+      http.get('*/api/v1/usage/timeseries', () => {
+        return new Promise(() => {});
+      })
+    );
+    renderWithProviders(
+      <UsageTimeseriesChart
+        start="2026-04-01T00:00:00Z"
+        end="2026-04-30T00:00:00Z"
+        metric="total_container_minutes"
+        onMetricChange={() => {}}
+      />
+    );
+    expect(screen.getByText('Daily Usage')).toBeInTheDocument();
+  });
+
+  it('renders empty state when no buckets', async () => {
+    server.use(
+      http.get('*/api/v1/usage/timeseries', () => {
+        return HttpResponse.json({
+          data: {
+            buckets: [],
+            period_start: '2026-04-01T00:00:00Z',
+            period_end: '2026-04-30T00:00:00Z',
+          },
+        });
+      })
+    );
+    renderWithProviders(
+      <UsageTimeseriesChart
+        start="2026-04-01T00:00:00Z"
+        end="2026-04-30T00:00:00Z"
+        metric="total_container_minutes"
+        onMetricChange={() => {}}
+      />
+    );
+    await waitFor(() => {
+      expect(screen.getByText('No usage data for this period')).toBeInTheDocument();
+    });
+  });
+
+  it('renders chart with data', async () => {
+    server.use(
+      http.get('*/api/v1/usage/timeseries', () => {
+        return HttpResponse.json({
+          data: {
+            buckets: [
+              {
+                hour_utc: '2026-04-01T00:00:00Z',
+                total_container_minutes: 60,
+                total_sessions: 5,
+                total_container_starts: 5,
+                peak_concurrent: 2,
+                total_input_tokens: 1000,
+                total_output_tokens: 500,
+                total_llm_cost_usd: 0.5,
+              },
+              {
+                hour_utc: '2026-04-01T01:00:00Z',
+                total_container_minutes: 30,
+                total_sessions: 3,
+                total_container_starts: 3,
+                peak_concurrent: 1,
+                total_input_tokens: 500,
+                total_output_tokens: 250,
+                total_llm_cost_usd: 0.25,
+              },
+            ],
+            period_start: '2026-04-01T00:00:00Z',
+            period_end: '2026-04-02T00:00:00Z',
+          },
+        });
+      })
+    );
+    renderWithProviders(
+      <UsageTimeseriesChart
+        start="2026-04-01T00:00:00Z"
+        end="2026-04-02T00:00:00Z"
+        metric="total_container_minutes"
+        onMetricChange={() => {}}
+      />
+    );
+    await waitFor(() => {
+      expect(screen.getByText('Daily Usage')).toBeInTheDocument();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // metricOptions coverage
 // ---------------------------------------------------------------------------
 

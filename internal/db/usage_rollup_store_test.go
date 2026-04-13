@@ -1,9 +1,13 @@
 package db
 
 import (
+	"context"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
 
@@ -114,4 +118,96 @@ func TestComputeDurationStats_DoesNotMutateInput(t *testing.T) {
 	original := []float64{3.0, 1.0, 2.0}
 	computeDurationStats(original)
 	require.Equal(t, []float64{3.0, 1.0, 2.0}, original)
+}
+
+func TestNewUsageRollupStore(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	require.NotNil(t, store)
+}
+
+func TestGetTokenTotals(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	orgID := uuid.New()
+	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+
+	mock.ExpectQuery("SELECT").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "start": start, "end": end}).
+		WillReturnRows(pgxmock.NewRows([]string{"input", "output", "cost"}).
+			AddRow(int64(5000), int64(2000), 1.25))
+
+	totals, err := store.GetTokenTotals(context.Background(), orgID, start, end)
+	require.NoError(t, err)
+	require.Equal(t, int64(5000), totals.InputTokens)
+	require.Equal(t, int64(2000), totals.OutputTokens)
+	require.Equal(t, 1.25, totals.CostUSD)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestGetTokenTotals_Error(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	orgID := uuid.New()
+	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+
+	mock.ExpectQuery("SELECT").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "start": start, "end": end}).
+		WillReturnError(pgx.ErrNoRows)
+
+	_, err = store.GetTokenTotals(context.Background(), orgID, start, end)
+	require.Error(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDeleteOlderThan(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	cutoff := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	mock.ExpectExec("DELETE FROM usage_hourly").
+		WithArgs(pgx.NamedArgs{"cutoff": cutoff}).
+		WillReturnResult(pgxmock.NewResult("DELETE", 42))
+
+	count, err := store.DeleteOlderThan(context.Background(), cutoff)
+	require.NoError(t, err)
+	require.Equal(t, int64(42), count)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDeleteOlderThan_Error(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	cutoff := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	mock.ExpectExec("DELETE FROM usage_hourly").
+		WithArgs(pgx.NamedArgs{"cutoff": cutoff}).
+		WillReturnError(pgx.ErrTxClosed)
+
+	_, err = store.DeleteOlderThan(context.Background(), cutoff)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "delete old usage_hourly")
+	require.NoError(t, mock.ExpectationsWereMet())
 }
