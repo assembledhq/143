@@ -420,6 +420,142 @@ func TestRollupAllOrgs_QueryError(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestRollupHour_QueryError(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	orgID := uuid.New()
+	hour := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+
+	mock.ExpectQuery("SELECT").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour_start": hour, "hour_end": hour.Add(time.Hour)}).
+		WillReturnError(pgx.ErrTxClosed)
+
+	err = store.RollupHour(context.Background(), orgID, hour)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "rollup query container events")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRollupHour_NoEvents(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	orgID := uuid.New()
+	hour := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+
+	// First query: container events — returns empty
+	eventCols := []string{"id", "session_id", "user_id", "cpu_limit", "memory_limit_mb", "started_at", "stopped_at", "container_minutes", "duration_ms"}
+	mock.ExpectQuery("SELECT").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour_start": hour, "hour_end": hour.Add(time.Hour)}).
+		WillReturnRows(pgxmock.NewRows(eventCols))
+
+	// Second query: token usage — returns empty
+	tokenCols := []string{"user_id", "input_tokens", "output_tokens", "cost_usd"}
+	mock.ExpectQuery("SELECT").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour": hour}).
+		WillReturnRows(pgxmock.NewRows(tokenCols))
+
+	// Batch upsert: one org-total row (all zeros)
+	eb := mock.ExpectBatch()
+	eb.ExpectExec("INSERT INTO usage_hourly").WillReturnResult(pgxmock.NewResult("INSERT", 1))
+
+	err = store.RollupHour(context.Background(), orgID, hour)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRollupHour_TokenQueryError(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	orgID := uuid.New()
+	hour := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+
+	// First query: container events — returns empty
+	eventCols := []string{"id", "session_id", "user_id", "cpu_limit", "memory_limit_mb", "started_at", "stopped_at", "container_minutes", "duration_ms"}
+	mock.ExpectQuery("SELECT").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour_start": hour, "hour_end": hour.Add(time.Hour)}).
+		WillReturnRows(pgxmock.NewRows(eventCols))
+
+	// Second query: token usage — error
+	mock.ExpectQuery("SELECT").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour": hour}).
+		WillReturnError(pgx.ErrTxClosed)
+
+	err = store.RollupHour(context.Background(), orgID, hour)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "rollup query token usage")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRollupHour_WithEvents(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	orgID := uuid.New()
+	userID := uuid.New()
+	hour := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	sessionID := uuid.New()
+	eventID := uuid.New()
+
+	// First query: container events — one event
+	eventCols := []string{"id", "session_id", "user_id", "cpu_limit", "memory_limit_mb", "started_at", "stopped_at", "container_minutes", "duration_ms"}
+	mock.ExpectQuery("SELECT").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour_start": hour, "hour_end": hour.Add(time.Hour)}).
+		WillReturnRows(pgxmock.NewRows(eventCols).AddRow(
+			eventID, sessionID, userID, 2.0, 4096,
+			hour, hour.Add(30*time.Minute), 30.0, 1800000.0,
+		))
+
+	// Second query: token usage — one row
+	tokenCols := []string{"user_id", "input_tokens", "output_tokens", "cost_usd"}
+	mock.ExpectQuery("SELECT").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour": hour}).
+		WillReturnRows(pgxmock.NewRows(tokenCols).AddRow(
+			userID, int64(1000), int64(500), 0.25,
+		))
+
+	// Batch upsert: 4 rows (per-user-tier, per-user, per-tier, org-total)
+	eb2 := mock.ExpectBatch()
+	eb2.ExpectExec("INSERT INTO usage_hourly").WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	eb2.ExpectExec("INSERT INTO usage_hourly").WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	eb2.ExpectExec("INSERT INTO usage_hourly").WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	eb2.ExpectExec("INSERT INTO usage_hourly").WillReturnResult(pgxmock.NewResult("INSERT", 1))
+
+	err = store.RollupHour(context.Background(), orgID, hour)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRollupRange_Empty(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	orgID := uuid.New()
+	// start == end → no hours to process
+	hour := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+
+	err = store.RollupRange(context.Background(), orgID, hour, hour)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestGetTimeseries_Default(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
