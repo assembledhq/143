@@ -419,3 +419,196 @@ func TestRollupAllOrgs_QueryError(t *testing.T) {
 	require.Contains(t, err.Error(), "list active orgs")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+func TestGetTimeseries_Default(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	orgID := uuid.New()
+	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC)
+
+	cols := []string{
+		"hour_utc", "user_id", "user_name", "capacity_tier",
+		"total_container_minutes", "total_sessions", "total_container_starts",
+		"peak_concurrent", "avg_duration_sec", "p95_duration_sec",
+		"total_input_tokens", "total_output_tokens", "total_llm_cost_usd",
+	}
+	mock.ExpectQuery("SELECT uh.hour_utc").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "start": start, "end": end}).
+		WillReturnRows(pgxmock.NewRows(cols).AddRow(
+			start, nil, "", (*string)(nil),
+			60.0, 5, 5, 2, 120.0, 300.0,
+			int64(1000), int64(500), 0.50,
+		))
+
+	buckets, err := store.GetTimeseries(context.Background(), orgID, start, end, "hour", nil, nil)
+	require.NoError(t, err)
+	require.Len(t, buckets, 1)
+	require.Equal(t, 60.0, buckets[0].TotalContainerMinutes)
+	require.Equal(t, 5, buckets[0].TotalSessions)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestGetTimeseries_QueryError(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	orgID := uuid.New()
+	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC)
+
+	mock.ExpectQuery("SELECT uh.hour_utc").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "start": start, "end": end}).
+		WillReturnError(pgx.ErrTxClosed)
+
+	_, err = store.GetTimeseries(context.Background(), orgID, start, end, "hour", nil, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "query timeseries")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestGetTimeseries_UserGroupBy(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	orgID := uuid.New()
+	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC)
+
+	cols := []string{
+		"hour_utc", "user_id", "user_name", "capacity_tier",
+		"total_container_minutes", "total_sessions", "total_container_starts",
+		"peak_concurrent", "avg_duration_sec", "p95_duration_sec",
+		"total_input_tokens", "total_output_tokens", "total_llm_cost_usd",
+	}
+	uid := uuid.New()
+	mock.ExpectQuery("SELECT uh.hour_utc").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "start": start, "end": end}).
+		WillReturnRows(pgxmock.NewRows(cols).AddRow(
+			start, &uid, "alice", (*string)(nil),
+			30.0, 2, 2, 1, 60.0, 120.0,
+			int64(500), int64(250), 0.25,
+		))
+
+	buckets, err := store.GetTimeseries(context.Background(), orgID, start, end, "user", nil, nil)
+	require.NoError(t, err)
+	require.Len(t, buckets, 1)
+	require.Equal(t, "alice", buckets[0].UserName)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestGetBreakdown_UserDimension(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	orgID := uuid.New()
+	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+
+	cols := []string{
+		"key", "label",
+		"total_container_minutes", "total_sessions", "total_container_starts",
+		"peak_concurrent", "total_input_tokens", "total_output_tokens", "total_llm_cost_usd",
+	}
+	mock.ExpectQuery("SELECT").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "start": start, "end": end, "limit": 50}).
+		WillReturnRows(pgxmock.NewRows(cols).
+			AddRow("u1", "alice@test.com", 60.0, 3, 3, 1, int64(1000), int64(500), 0.50).
+			AddRow("u2", "bob@test.com", 40.0, 2, 2, 1, int64(800), int64(400), 0.30))
+
+	rows, err := store.GetBreakdown(context.Background(), orgID, start, end, "user", "minutes_desc", 50)
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	require.Equal(t, "alice@test.com", rows[0].Label)
+	require.Equal(t, 60.0, rows[0].Percentage)  // 60/100 * 100 = 60.0%
+	require.Equal(t, 40.0, rows[1].Percentage)  // 40/100 * 100 = 40.0%
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestGetBreakdown_CapacityDimension(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	orgID := uuid.New()
+	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+
+	cols := []string{
+		"key", "label",
+		"total_container_minutes", "total_sessions", "total_container_starts",
+		"peak_concurrent", "total_input_tokens", "total_output_tokens", "total_llm_cost_usd",
+	}
+	mock.ExpectQuery("SELECT").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "start": start, "end": end, "limit": 10}).
+		WillReturnRows(pgxmock.NewRows(cols).
+			AddRow("2cpu_4096mb", "2cpu_4096mb", 100.0, 5, 5, 2, int64(2000), int64(1000), 1.0))
+
+	rows, err := store.GetBreakdown(context.Background(), orgID, start, end, "capacity", "sessions_desc", 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Equal(t, 100.0, rows[0].Percentage)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestGetBreakdown_QueryError(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	orgID := uuid.New()
+	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+
+	mock.ExpectQuery("SELECT").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "start": start, "end": end, "limit": 50}).
+		WillReturnError(pgx.ErrTxClosed)
+
+	_, err = store.GetBreakdown(context.Background(), orgID, start, end, "user", "minutes_desc", 50)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "query breakdown")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestGetBreakdown_EmptyResult(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	orgID := uuid.New()
+	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+
+	cols := []string{
+		"key", "label",
+		"total_container_minutes", "total_sessions", "total_container_starts",
+		"peak_concurrent", "total_input_tokens", "total_output_tokens", "total_llm_cost_usd",
+	}
+	mock.ExpectQuery("SELECT").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "start": start, "end": end, "limit": 50}).
+		WillReturnRows(pgxmock.NewRows(cols))
+
+	rows, err := store.GetBreakdown(context.Background(), orgID, start, end, "user", "tokens_desc", 50)
+	require.NoError(t, err)
+	require.Empty(t, rows)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
