@@ -53,13 +53,13 @@ function GitHubPRConnection() {
 
   return (
     <section className="space-y-3">
-      <h2 className="text-[13px] font-medium text-foreground">Pull requests</h2>
+      <h2 className="text-xs font-medium text-foreground">Pull requests</h2>
       <Card>
         <CardContent>
           <div className="flex items-center justify-between">
             <div className="space-y-0.5">
               <Label>GitHub connection for PRs</Label>
-              <p className="text-[13px] text-muted-foreground">
+              <p className="text-xs text-muted-foreground">
                 {ghStatus?.connected && ghStatus?.has_repo_scope
                   ? `Connected as @${ghStatus.github_login} — PRs will be authored by you`
                   : ghStatus?.connected && !ghStatus?.has_repo_scope
@@ -428,13 +428,13 @@ export default function AccountPage() {
         />
 
         <section className="space-y-3">
-          <h2 className="text-[13px] font-medium text-foreground">Appearance</h2>
+          <h2 className="text-xs font-medium text-foreground">Appearance</h2>
           <Card>
             <CardContent>
               <div className="flex items-center justify-between">
                 <div className="space-y-0.5">
                   <Label>Theme</Label>
-                  <p className="text-[13px] text-muted-foreground">
+                  <p className="text-xs text-muted-foreground">
                     Select your preferred color scheme
                   </p>
                 </div>
@@ -448,7 +448,7 @@ export default function AccountPage() {
 
         <section className="space-y-3">
           <div>
-            <h2 className="text-[13px] font-medium text-foreground">
+            <h2 className="text-xs font-medium text-foreground">
               Coding agent credentials
             </h2>
             <p className="text-xs text-muted-foreground mt-1">

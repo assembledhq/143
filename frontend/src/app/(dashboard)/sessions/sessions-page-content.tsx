@@ -128,7 +128,7 @@ function buildColumns(members: User[]): ColumnDef<Session>[] {
         const failed = session.status === "failed";
         return (
           <div className="min-w-0">
-            <span className="text-[13px] font-medium text-foreground truncate block max-w-[480px]">
+            <span className="text-xs font-medium text-foreground truncate block max-w-[480px]">
               {sessionTitle(session)}
             </span>
             {failed && (session.failure_explanation || session.error) && (
@@ -300,7 +300,7 @@ export function SessionsPageContent() {
             return (
               <button
                 key={tab.value}
-                className={`relative shrink-0 px-2.5 py-2.5 text-[13px] font-medium transition-colors duration-150 ${
+                className={`relative shrink-0 px-2.5 py-2.5 text-xs font-medium transition-colors duration-150 ${
                   isSelected
                     ? "text-foreground"
                     : "text-muted-foreground hover:text-foreground/80"
@@ -338,13 +338,13 @@ export function SessionsPageContent() {
 
       {/* ── Loading / error / empty states ─────────────────────────── */}
       {!showDecisions && isLoading && (
-        <div className="py-16 text-center text-[13px] text-muted-foreground">
+        <div className="py-16 text-center text-xs text-muted-foreground">
           Loading sessions...
         </div>
       )}
 
       {!showDecisions && error && (
-        <div className="py-16 text-center text-[13px] text-muted-foreground">
+        <div className="py-16 text-center text-xs text-muted-foreground">
           Failed to load sessions. Make sure the backend is running.
         </div>
       )}
@@ -355,8 +355,8 @@ export function SessionsPageContent() {
             <div className="flex h-10 w-10 items-center justify-center rounded-full bg-muted">
               <CalendarClock className="h-5 w-5 text-muted-foreground" />
             </div>
-            <p className="mt-4 text-[13px] font-medium text-foreground">No sessions yet</p>
-            <p className="mt-1 max-w-sm text-center text-[13px] text-muted-foreground">
+            <p className="mt-4 text-xs font-medium text-foreground">No sessions yet</p>
+            <p className="mt-1 max-w-sm text-center text-xs text-muted-foreground">
               The PM agent runs automatically on a schedule. Click <span className="font-medium text-foreground">Run now</span> above to start it immediately, or create a <span className="font-medium text-foreground">manual session</span> for a specific issue.
             </p>
             <div className="flex items-center gap-2 mt-4">
@@ -376,13 +376,13 @@ export function SessionsPageContent() {
         <div className="rounded-lg border border-border bg-card overflow-hidden">
           {/* Count header */}
           <div className="flex items-center justify-between px-4 py-2.5 border-b border-border/50 bg-muted/30">
-            <span className="text-xs font-semibold text-muted-foreground/70 tracking-wider">
+            <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">
               {filteredSessions.length} session{filteredSessions.length !== 1 ? "s" : ""}
             </span>
           </div>
 
           {filteredSessions.length === 0 ? (
-            <div className="py-12 text-center text-[13px] text-muted-foreground">
+            <div className="py-12 text-center text-xs text-muted-foreground">
               No sessions match this filter.
             </div>
           ) : (

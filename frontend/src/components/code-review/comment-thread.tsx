@@ -76,7 +76,7 @@ const SingleComment = memo(function SingleComment({
   return (
     <div
       className={cn(
-        "border-l-2 px-3 py-2 text-[13px]",
+        "border-l-2 px-3 py-2 text-xs",
         comment.resolved
           ? "border-muted-foreground/20 bg-muted/10"
           : "border-primary/40 bg-primary/5"

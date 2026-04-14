@@ -128,7 +128,7 @@ const SplitLineCell = memo(function SplitLineCell({
 }) {
   if (!line) {
     return (
-      <div className={cn("flex text-[13px] font-mono leading-[20px] flex-1 min-w-0", bgStyles.empty)}>
+      <div className={cn("flex text-xs font-mono leading-[20px] flex-1 min-w-0", bgStyles.empty)}>
         <div className={cn("w-[50px] shrink-0 select-none", gutterBg.empty)} />
         <div className="w-[16px] shrink-0" />
         <div className="flex-1 min-w-0">&nbsp;</div>
@@ -141,7 +141,7 @@ const SplitLineCell = memo(function SplitLineCell({
   const prefix = type === "add" ? "+" : type === "remove" ? "-" : " ";
 
   return (
-    <div className={cn("flex text-[13px] font-mono leading-[20px] flex-1 min-w-0 group/cell relative", bgStyles[type])}>
+    <div className={cn("flex text-xs font-mono leading-[20px] flex-1 min-w-0 group/cell relative", bgStyles[type])}>
       {/* Comment add button */}
       {onAddComment && (
         <button
@@ -167,7 +167,7 @@ const SplitLineCell = memo(function SplitLineCell({
       >
         {lineNum ?? ""}
       </div>
-      <div className="w-[16px] shrink-0 text-center select-none text-muted-foreground/50 text-[13px]">
+      <div className="w-[16px] shrink-0 text-center select-none text-muted-foreground/50 text-xs">
         {prefix}
       </div>
       <div className="flex-1 min-w-0 pr-2 whitespace-pre">

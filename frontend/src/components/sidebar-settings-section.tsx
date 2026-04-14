@@ -119,7 +119,7 @@ export function SidebarSettingsSection({
         <button
           type="button"
           className={cn(
-            "flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-[13px] font-medium transition-colors duration-150",
+            "flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors duration-150",
             onSettingsPage
               ? "bg-sidebar-accent text-sidebar-accent-foreground"
               : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
@@ -162,7 +162,7 @@ export function SidebarSettingsSection({
                         key={item.href}
                         href={item.href}
                         className={cn(
-                          "relative flex items-center gap-2 rounded-lg py-1.5 pl-7 pr-2.5 text-[13px] font-medium transition-colors duration-150",
+                          "relative flex items-center gap-2 rounded-lg py-1.5 pl-7 pr-2.5 text-xs font-medium transition-colors duration-150",
                           active
                             ? "bg-sidebar-accent text-sidebar-accent-foreground before:absolute before:left-1.5 before:top-1/2 before:h-4 before:-translate-y-1/2 before:w-[3px] before:rounded-full before:bg-primary"
                             : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"

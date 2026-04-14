@@ -565,10 +565,10 @@ export default function AgentPage() {
               {orgMutation.isPending ? "Saving..." : "Save organization settings"}
             </Button>
             {orgSaveStatus === "success" && (
-              <span className="text-[13px] text-emerald-600 dark:text-emerald-400">Settings saved.</span>
+              <span className="text-xs text-emerald-600 dark:text-emerald-400">Settings saved.</span>
             )}
             {orgSaveStatus === "error" && (
-              <span className="text-[13px] text-destructive">Failed to save settings.</span>
+              <span className="text-xs text-destructive">Failed to save settings.</span>
             )}
           </div>
         </div>

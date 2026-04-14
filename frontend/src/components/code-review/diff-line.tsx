@@ -49,7 +49,7 @@ export function DiffLineRow({ line, filePath, highlightedContent, onAddComment, 
           ? `${filePath.replace(/[^a-zA-Z0-9._/-]/g, "")}-L${line.newLineNumber}`
           : undefined
       }
-      className={cn("flex text-[13px] font-mono leading-[20px] group relative", lineTypeStyles[line.type])}
+      className={cn("flex text-xs font-mono leading-[20px] group relative", lineTypeStyles[line.type])}
     >
       {/* Comment add button — shown on hover */}
       {onAddComment && (

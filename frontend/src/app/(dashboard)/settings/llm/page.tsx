@@ -217,7 +217,7 @@ export default function LLMPage() {
 
         {/* Platform Intelligence (read-only) */}
         <section className="space-y-3">
-          <h2 className="text-[13px] font-medium text-foreground">Platform intelligence</h2>
+          <h2 className="text-xs font-medium text-foreground">Platform intelligence</h2>
           <Card>
             <CardContent>
               <div className="space-y-3">
@@ -261,7 +261,7 @@ export default function LLMPage() {
 
         {/* Agent Credentials */}
         <section className="space-y-3">
-          <h2 className="text-[13px] font-medium text-foreground">Agent credentials</h2>
+          <h2 className="text-xs font-medium text-foreground">Agent credentials</h2>
           <p className="text-xs text-muted-foreground">
             Add API keys for running coding agent sessions (Claude Code, Codex, Gemini CLI).
             These keys are separate from the platform&apos;s built-in intelligence.
@@ -356,7 +356,7 @@ export default function LLMPage() {
 
         {/* Model Selection */}
         <section className="space-y-3">
-          <h2 className="text-[13px] font-medium text-foreground">Model</h2>
+          <h2 className="text-xs font-medium text-foreground">Model</h2>
           <Card>
             <CardContent>
               <div className="space-y-3">

@@ -195,7 +195,7 @@ export default function EvalsSettingsPage() {
               </Select>
             </div>
             {bootstrapMutation.isError && (
-              <div className="rounded-md bg-destructive/10 px-3 py-2 text-[13px] text-destructive">
+              <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
                 Bootstrap scan failed. Please try again.
               </div>
             )}
@@ -355,7 +355,7 @@ function BootstrapProgressBanner({
       <CardContent className="flex items-center gap-3 py-3">
         {config.icon}
         <div className="min-w-0 flex-1">
-          <p className="text-[13px] font-medium text-foreground">{config.text}</p>
+          <p className="text-xs font-medium text-foreground">{config.text}</p>
           <div className="flex items-center gap-2 mt-0.5">
             {repoName && <span className="text-xs text-muted-foreground">{repoName}</span>}
             {isActive && (
@@ -621,7 +621,7 @@ function EvalTaskRow({ task, repoName }: { task: EvalTask; repoName?: string }) 
     >
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          <span className="text-[13px] font-medium text-foreground truncate">{task.name}</span>
+          <span className="text-xs font-medium text-foreground truncate">{task.name}</span>
           <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${complexityStyle.color}`}>
             {complexityStyle.label}
           </span>
@@ -677,7 +677,7 @@ function BatchHistory() {
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <Layers className="h-3.5 w-3.5 text-muted-foreground" />
-                  <span className="text-[13px] font-medium">{batch.name || "Unnamed batch"}</span>
+                  <span className="text-xs font-medium">{batch.name || "Unnamed batch"}</span>
                   <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
                     batch.status === "completed"
                       ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
@@ -723,7 +723,7 @@ function BootstrapCandidatesBanner({ repoIds }: { repoIds: string[] }) {
     <Card className="border-blue-200 bg-blue-50 dark:border-blue-800 dark:bg-blue-950/30">
       <CardContent className="flex items-center justify-between py-3">
         <div>
-          <p className="text-[13px] font-medium text-blue-800 dark:text-blue-300">
+          <p className="text-xs font-medium text-blue-800 dark:text-blue-300">
             {bootstrap.candidates.length} bootstrap candidates ready for review
           </p>
           <p className="text-xs text-blue-700 dark:text-blue-400">
