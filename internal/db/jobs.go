@@ -3,8 +3,9 @@ package db
 import (
 	"context"
 	"encoding/json"
-	"time"
+	"errors"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -17,16 +18,9 @@ func NewJobStore(db DBTX) *JobStore {
 	return &JobStore{db: db}
 }
 
-// LatestJobError holds the error and timestamp from the most recent failed job.
-type LatestJobError struct {
-	JobID     uuid.UUID
-	LastError string
-	UpdatedAt time.Time
-}
-
 // GetLatestFailedByType returns the most recent failed or dead_letter job for the given org and job type.
 // Returns nil, nil if no failed job exists.
-func (s *JobStore) GetLatestFailedByType(ctx context.Context, orgID uuid.UUID, jobType string) (*LatestJobError, error) {
+func (s *JobStore) GetLatestFailedByType(ctx context.Context, orgID uuid.UUID, jobType string) (*models.LatestJobError, error) {
 	query := `
 		SELECT id, last_error, updated_at
 		FROM jobs
@@ -34,13 +28,13 @@ func (s *JobStore) GetLatestFailedByType(ctx context.Context, orgID uuid.UUID, j
 		ORDER BY updated_at DESC
 		LIMIT 1`
 
-	var result LatestJobError
+	var result models.LatestJobError
 	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
 		"org_id":   orgID,
 		"job_type": jobType,
 	}).Scan(&result.JobID, &result.LastError, &result.UpdatedAt)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, err
