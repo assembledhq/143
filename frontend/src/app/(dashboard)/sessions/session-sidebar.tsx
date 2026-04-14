@@ -16,6 +16,12 @@ import { queryKeys } from "@/lib/query-keys";
 import { useOptimisticSessions, type OptimisticSession } from "@/contexts/optimistic-sessions";
 import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
 import type { SessionListItem } from "@/lib/types";
+import {
+  needsAttentionSet,
+  workingSet,
+  failedSet,
+  filterToStatusParam,
+} from "@/lib/session-status-groups";
 
 // ---------------------------------------------------------------------------
 // Status config
@@ -42,25 +48,6 @@ const filterTabs = [
   { value: "done", label: "Done" },
 ];
 
-// Status groups — keep in sync with models.NeedsAttentionStatuses / WorkingStatuses / FailedStatuses / DoneStatuses.
-const needsAttentionStatuses = ["awaiting_input", "needs_human_guidance"];
-const workingStatuses = ["pending", "running"];
-const failedStatuses = ["failed"];
-const doneStatuses = ["completed", "pr_created", "cancelled", "skipped", "idle"];
-
-const needsAttentionSet = new Set(needsAttentionStatuses);
-const workingSet = new Set(workingStatuses);
-const failedSet = new Set(failedStatuses);
-
-/** Map a filter tab value to the comma-separated status string for the API. */
-function filterToStatusParam(filter: string | null): string | undefined {
-  if (!filter || filter === "all") return undefined;
-  if (filter === "needs_attention") return needsAttentionStatuses.join(",");
-  if (filter === "working") return workingStatuses.join(",");
-  if (filter === "failed") return failedStatuses.join(",");
-  if (filter === "done") return doneStatuses.join(",");
-  return filter;
-}
 
 // ---------------------------------------------------------------------------
 // Unread indicator logic

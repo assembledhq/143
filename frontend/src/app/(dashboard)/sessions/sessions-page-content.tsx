@@ -33,6 +33,12 @@ import { StatusDot } from "@/components/status-dot";
 import { useSessionUserFilter } from "@/hooks/use-session-user-filter";
 import { SessionOwnerToggle } from "./session-owner-toggle";
 import type { Session, User } from "@/lib/types";
+import {
+  needsAttentionSet,
+  workingSet,
+  failedSet,
+  filterToStatusParam as baseFilterToStatusParam,
+} from "@/lib/session-status-groups";
 
 // ---------------------------------------------------------------------------
 // Status config
@@ -60,24 +66,9 @@ const filterTabs = [
   { value: "decisions", label: "Decisions" },
 ];
 
-// Status groups — keep in sync with models.NeedsAttentionStatuses / WorkingStatuses / FailedStatuses / DoneStatuses.
-const needsAttentionStatuses = ["awaiting_input", "needs_human_guidance"];
-const workingStatuses = ["pending", "running"];
-const failedStatuses = ["failed"];
-const doneStatuses = ["completed", "pr_created", "cancelled", "skipped", "idle"];
-
-const needsAttentionSet = new Set(needsAttentionStatuses);
-const workingSet = new Set(workingStatuses);
-const failedSet = new Set(failedStatuses);
-
-/** Map a filter tab value to the comma-separated status string for the API. */
+/** Wrapper that also passes through "decisions" as a client-only filter. */
 function filterToStatusParam(filter: string | null): string | undefined {
-  if (!filter || filter === "all" || filter === "decisions") return undefined;
-  if (filter === "needs_attention") return needsAttentionStatuses.join(",");
-  if (filter === "working") return workingStatuses.join(",");
-  if (filter === "failed") return failedStatuses.join(",");
-  if (filter === "done") return doneStatuses.join(",");
-  return filter;
+  return baseFilterToStatusParam(filter, ["decisions"]);
 }
 
 // ---------------------------------------------------------------------------
