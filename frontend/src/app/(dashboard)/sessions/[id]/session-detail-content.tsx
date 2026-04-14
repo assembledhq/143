@@ -712,7 +712,7 @@ function ReviewCommentInput({
 // Main chat panel
 // ---------------------------------------------------------------------------
 
-const MAX_SSE_RECONNECT_ATTEMPTS = 5;
+const MAX_SSE_RECONNECT_ATTEMPTS = 3;
 const BASE_SSE_RECONNECT_DELAY_MS = 1000;
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const SCROLL_NEAR_BOTTOM_THRESHOLD = 100;
