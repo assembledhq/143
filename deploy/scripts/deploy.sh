@@ -11,6 +11,8 @@ ROLE="$1"
 HOST="$2"
 SSH_KEY="$3"
 TAG="${4:-latest}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 case "$ROLE" in
   app)
@@ -31,6 +33,49 @@ esac
 echo "Deploying role=$ROLE tag=$TAG to $HOST..."
 
 SSH_OPTS=(-o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
+SCP_OPTS=(-o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
+
+# --- Refresh secrets from .env.production.enc ---
+if [ -z "${SOPS_AGE_KEY:-}" ]; then
+  AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-$HOME/.config/sops/age/keys.txt}"
+  if [ -f "$AGE_KEY_FILE" ]; then
+    SOPS_AGE_KEY=$(grep "^AGE-SECRET-KEY-" "$AGE_KEY_FILE" | head -1)
+    export SOPS_AGE_KEY
+  else
+    echo "WARNING: No SOPS_AGE_KEY set and no keyfile at $AGE_KEY_FILE — skipping secret refresh"
+  fi
+fi
+
+ENC_FILE="$PROJECT_DIR/.env.production.enc"
+if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
+  echo "Refreshing secrets from .env.production.enc..."
+  DECRYPTED=$(SOPS_AGE_KEY="$SOPS_AGE_KEY" sops --decrypt --input-type dotenv --output-type dotenv "$ENC_FILE")
+
+  while IFS= read -r line; do
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    key="${line%%=*}"
+    value="${line#*=}"
+    if [ -z "${!key+x}" ]; then
+      export "$key=$value"
+    fi
+  done <<< "$DECRYPTED"
+
+  if [ "$ROLE" = "db" ]; then
+    printf 'DB_PASSWORD=%s\n' "$DB_PASSWORD" \
+      | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat > /opt/143/.env && chmod 600 /opt/143/.env'
+  elif [ "$ROLE" = "worker" ]; then
+    printf 'DB_PASSWORD=%s\nDB_HOST=%s\n' "$DB_PASSWORD" "$DB_HOST" \
+      | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat > /opt/143/.env && chmod 600 /opt/143/.env'
+  else
+    printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\n' "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" \
+      | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat > /opt/143/.env && chmod 600 /opt/143/.env'
+    scp "${SCP_OPTS[@]}" "$ENC_FILE" deploy@"$HOST":/opt/143/
+    ssh "${SSH_OPTS[@]}" deploy@"$HOST" "chmod 600 /opt/143/.env.production.enc"
+  fi
+  echo "Secrets refreshed."
+else
+  echo "Skipping secret refresh (no SOPS key or .env.production.enc not found)."
+fi
 
 ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "COMPOSE_FILE=$COMPOSE_FILE" "HEALTH_SERVICE=$HEALTH_SERVICE" "ROLE=$ROLE" "IMAGE_TAG=$TAG" \

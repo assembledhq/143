@@ -59,9 +59,11 @@ if [ -f "$ENC_FILE" ]; then
   DECRYPTED=$(SOPS_AGE_KEY="$SOPS_AGE_KEY" sops --decrypt --input-type dotenv --output-type dotenv "$ENC_FILE")
 
   # Source decrypted values, but don't overwrite existing env vars
-  while IFS='=' read -r key value; do
+  while IFS= read -r line; do
     # Skip empty lines and comments
-    [[ -z "$key" || "$key" == \#* ]] && continue
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    key="${line%%=*}"
+    value="${line#*=}"
     # Only set if not already in environment
     if [ -z "${!key+x}" ]; then
       export "$key=$value"
