@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -145,7 +146,7 @@ func TestPreviewHandler_StartPreview_DefaultConfig(t *testing.T) {
 
 	// The handler now applies a default config and proceeds to session lookup.
 	// Expect the query to return no rows → 404 SESSION_NOT_FOUND.
-	mock.ExpectQuery("SELECT").WillReturnError(pgxmock.ErrCancelled)
+	mock.ExpectQuery("SELECT").WillReturnError(fmt.Errorf("no rows"))
 
 	m := preview.NewManager(preview.ManagerConfig{
 		Logger:       zerolog.Nop(),
