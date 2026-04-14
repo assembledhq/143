@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent } from "@/components/ui/card";
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -156,6 +156,7 @@ export function ProposalInbox({ proposals, onNavigateToProject }: ProposalInboxP
             <>
               <SheetHeader>
                 <SheetTitle>{selectedProposal.title}</SheetTitle>
+                <SheetDescription className="sr-only">Details for proposal: {selectedProposal.title}</SheetDescription>
               </SheetHeader>
               <div className="mt-6 space-y-6">
                 {/* Goal */}

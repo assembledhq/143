@@ -83,9 +83,17 @@ export function CollapsibleSection({
   const [open, setOpen] = useState(defaultOpen);
   return (
     <div>
-      <button
+      <div
+        role="button"
+        tabIndex={0}
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-2 w-full text-left py-2 group"
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setOpen(!open);
+          }
+        }}
+        className="flex items-center gap-2 w-full text-left py-2 group cursor-pointer"
       >
         {open ? (
           <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
@@ -103,7 +111,7 @@ export function CollapsibleSection({
         {actions && (
           <span onClick={(e) => e.stopPropagation()}>{actions}</span>
         )}
-      </button>
+      </div>
       {open && <div className="pl-6 pb-4">{children}</div>}
     </div>
   );
