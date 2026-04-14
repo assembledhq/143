@@ -58,20 +58,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Write SSH key
+      - name: Install sops and age
         run: |
-          mkdir -p ~/.ssh
+          curl -fsSL https://github.com/getsops/sops/releases/download/v3.9.4/sops-v3.9.4.linux.amd64 -o /usr/local/bin/sops
+          chmod +x /usr/local/bin/sops
+          curl -fsSL https://dl.filippo.io/age/latest?for=linux/amd64 | tar xz -C /usr/local/bin --strip-components=1
+
+      - name: Write SSH key and age key
+        run: |
+          mkdir -p ~/.ssh ~/.config/sops/age
           echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy-key
           chmod 600 ~/.ssh/deploy-key
+          echo "${{ secrets.SOPS_AGE_KEY }}" > ~/.config/sops/age/keys.txt
+          chmod 600 ~/.config/sops/age/keys.txt
 
-      - name: Deploy worker node
+      - name: Deploy fleet
         run: |
-          chmod +x deploy/scripts/deploy.sh
-          ./deploy/scripts/deploy.sh worker "${{ secrets.WORKER_HOST }}" ~/.ssh/deploy-key "${{ github.sha }}"
-
-      - name: Deploy app node
-        run: |
-          ./deploy/scripts/deploy.sh app "${{ secrets.APP_HOST }}" ~/.ssh/deploy-key "${{ github.sha }}"
-
-      # DB node is deployed manually (make deploy-db) to avoid
-      # unintended Postgres restarts on every push.
+          chmod +x deploy/scripts/deploy.sh deploy/scripts/deploy-fleet.sh
+          ./deploy/scripts/deploy-fleet.sh ~/.ssh/deploy-key "${{ github.sha }}"
