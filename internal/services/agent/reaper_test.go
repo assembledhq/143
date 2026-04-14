@@ -403,7 +403,7 @@ func TestReapPhase4_BackfillsStartupWindowWhenWatermarkMissing(t *testing.T) {
 	// now is 10:35 → lastCompletedHour is 09:00
 	reaper.reapUsageRollups(context.Background(), time.Date(2026, 4, 10, 10, 35, 0, 0, time.UTC))
 
-	require.Len(t, usageRoller.rolledHours, 24, "fresh reaper should backfill a bounded startup window")
+	require.Len(t, usageRoller.rolledHours, 25, "fresh reaper should backfill a bounded startup window (24h lookback inclusive of both endpoints)")
 	require.Equal(t, time.Date(2026, 4, 9, 9, 0, 0, 0, time.UTC), usageRoller.rolledHours[0], "startup catch-up should begin 24 hours before the last completed hour")
 	require.Equal(t, time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC), usageRoller.rolledHours[len(usageRoller.rolledHours)-1], "startup catch-up should end at the last completed hour")
 }

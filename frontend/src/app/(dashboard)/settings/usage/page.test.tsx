@@ -197,19 +197,18 @@ describe('groupByLocalDay', () => {
   });
 
   it('groups buckets from the same day', () => {
+    // Use midday hours (10:00 and 14:00 UTC) so they always land on the same
+    // local day regardless of the runner's timezone (up to UTC-10).
     const buckets: UsageTimeseriesBucket[] = [
-      makeBucket({ hour_utc: '2026-04-10T02:00:00Z', total_sessions: 3, peak_concurrent: 2 }),
+      makeBucket({ hour_utc: '2026-04-10T10:00:00Z', total_sessions: 3, peak_concurrent: 2 }),
       makeBucket({ hour_utc: '2026-04-10T14:00:00Z', total_sessions: 5, peak_concurrent: 4 }),
     ];
     const result = groupByLocalDay(buckets);
-    // Depending on timezone they may or may not collapse into one day,
-    // but verify the aggregation logic works.
-    const totalSessions = result.reduce((s, d) => s + d.total_sessions, 0);
+    expect(result).toHaveLength(1);
     // Sessions use max-of-hourly (not sum) to avoid double-counting sessions
-    // that span multiple hours. If both hours land on the same day, max(3,5)=5.
-    // If they split across days (timezone-dependent), 3+5=8.
-    expect(totalSessions).toBeGreaterThanOrEqual(5);
-    expect(totalSessions).toBeLessThanOrEqual(8);
+    // that span multiple hours. max(3, 5) = 5.
+    expect(result[0].total_sessions).toBe(5);
+    expect(result[0].peak_concurrent).toBe(4);
   });
 
   it('uses max for peak_concurrent across hours in a day', () => {
