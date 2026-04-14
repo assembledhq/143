@@ -3,12 +3,48 @@ package storage
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/stretchr/testify/require"
 )
+
+// mockS3Client implements S3Client for testing.
+type mockS3Client struct {
+	getObjectFunc    func(ctx context.Context, input *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
+	putObjectFunc    func(ctx context.Context, input *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
+	deleteObjectFunc func(ctx context.Context, input *s3.DeleteObjectInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectOutput, error)
+}
+
+func (m *mockS3Client) GetObject(ctx context.Context, input *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+	if m.getObjectFunc != nil {
+		return m.getObjectFunc(ctx, input, optFns...)
+	}
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (m *mockS3Client) PutObject(ctx context.Context, input *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
+	if m.putObjectFunc != nil {
+		return m.putObjectFunc(ctx, input, optFns...)
+	}
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (m *mockS3Client) DeleteObject(ctx context.Context, input *s3.DeleteObjectInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
+	if m.deleteObjectFunc != nil {
+		return m.deleteObjectFunc(ctx, input, optFns...)
+	}
+	return nil, fmt.Errorf("not implemented")
+}
+
+// Compile-time check that mockS3Client implements S3Client.
+var _ S3Client = (*mockS3Client)(nil)
 
 func TestFileUploadStore_SaveAndURL(t *testing.T) {
 	t.Parallel()
@@ -61,21 +97,93 @@ func TestFileUploadStore_TrailingSlashTrimmed(t *testing.T) {
 func TestS3UploadStore_URL(t *testing.T) {
 	t.Parallel()
 
-	store := NewS3UploadStore(nil, "mybucket", "uploads", "https://mybucket.s3.amazonaws.com")
-	require.Equal(t, "https://mybucket.s3.amazonaws.com/uploads/org-1/file.png", store.URL("org-1/file.png"))
+	store := NewS3UploadStore(nil, "mybucket", "uploads")
+	require.Equal(t, "/api/v1/uploads/files/org-1/file.png", store.URL("org-1/file.png"),
+		"S3 URLs should be proxied through the backend")
 }
 
 func TestS3UploadStore_URL_NoPrefix(t *testing.T) {
 	t.Parallel()
 
-	store := NewS3UploadStore(nil, "mybucket", "", "https://mybucket.s3.amazonaws.com")
-	require.Equal(t, "https://mybucket.s3.amazonaws.com/org-1/file.png", store.URL("org-1/file.png"))
+	store := NewS3UploadStore(nil, "mybucket", "")
+	require.Equal(t, "/api/v1/uploads/files/org-1/file.png", store.URL("org-1/file.png"),
+		"S3 URLs should be proxied through the backend regardless of prefix")
 }
 
-func TestS3UploadStore_EndpointTrailingSlashTrimmed(t *testing.T) {
+func TestS3UploadStore_Serve(t *testing.T) {
 	t.Parallel()
 
-	store := NewS3UploadStore(nil, "mybucket", "uploads", "https://mybucket.s3.amazonaws.com/")
-	require.Equal(t, "https://mybucket.s3.amazonaws.com/uploads/file.png", store.URL("file.png"),
-		"trailing slash on endpoint should be trimmed")
+	body := []byte("fake-image-data")
+	contentType := "image/png"
+	contentLength := int64(len(body))
+
+	mock := &mockS3Client{
+		getObjectFunc: func(_ context.Context, input *s3.GetObjectInput, _ ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+			require.Equal(t, "mybucket", *input.Bucket)
+			require.Equal(t, "uploads/org-1/2026-01/abc.png", *input.Key)
+			return &s3.GetObjectOutput{
+				Body:          io.NopCloser(bytes.NewReader(body)),
+				ContentType:   &contentType,
+				ContentLength: &contentLength,
+			}, nil
+		},
+	}
+
+	store := NewS3UploadStore(mock, "mybucket", "uploads")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/uploads/files/org-1/2026-01/abc.png", nil)
+	w := httptest.NewRecorder()
+
+	store.Serve(w, req, "org-1/2026-01/abc.png")
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, "image/png", w.Header().Get("Content-Type"))
+	require.Equal(t, fmt.Sprintf("%d", contentLength), w.Header().Get("Content-Length"))
+	require.Equal(t, "inline", w.Header().Get("Content-Disposition"))
+	require.Equal(t, "private, max-age=86400", w.Header().Get("Cache-Control"))
+	require.Equal(t, body, w.Body.Bytes())
+}
+
+func TestS3UploadStore_Serve_NonImageAttachment(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"key": "value"}`)
+	contentType := "application/json"
+	contentLength := int64(len(body))
+
+	mock := &mockS3Client{
+		getObjectFunc: func(_ context.Context, _ *s3.GetObjectInput, _ ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+			return &s3.GetObjectOutput{
+				Body:          io.NopCloser(bytes.NewReader(body)),
+				ContentType:   &contentType,
+				ContentLength: &contentLength,
+			}, nil
+		},
+	}
+
+	store := NewS3UploadStore(mock, "mybucket", "uploads")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/uploads/files/org-1/2026-01/data.json", nil)
+	w := httptest.NewRecorder()
+
+	store.Serve(w, req, "org-1/2026-01/data.json")
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, `attachment; filename="data.json"`, w.Header().Get("Content-Disposition"))
+}
+
+func TestS3UploadStore_Serve_GetObjectError(t *testing.T) {
+	t.Parallel()
+
+	mock := &mockS3Client{
+		getObjectFunc: func(_ context.Context, _ *s3.GetObjectInput, _ ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+			return nil, fmt.Errorf("NoSuchKey: the specified key does not exist")
+		},
+	}
+
+	store := NewS3UploadStore(mock, "mybucket", "uploads")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/uploads/files/org-1/missing.png", nil)
+	w := httptest.NewRecorder()
+
+	store.Serve(w, req, "org-1/missing.png")
+
+	require.Equal(t, http.StatusNotFound, w.Code)
 }

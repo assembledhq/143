@@ -74,7 +74,7 @@ func TestUploadReaper_S3ModeNoop(t *testing.T) {
 	t.Parallel()
 
 	// S3UploadStore should cause the reaper to exit immediately.
-	s3Store := NewS3UploadStore(nil, "bucket", "prefix", "https://example.com")
+	s3Store := NewS3UploadStore(nil, "bucket", "prefix")
 	logger := zerolog.Nop()
 	reaper := NewUploadReaper(s3Store, 24*time.Hour, time.Minute, logger)
 
