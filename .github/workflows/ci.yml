@@ -15,8 +15,48 @@ env:
   FRONTEND_COVERAGE_TARGET: "85.0"
 
 jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      migrations: ${{ steps.filter.outputs.migrations }}
+      docker: ${{ steps.filter.outputs.docker }}
+      ci: ${{ steps.filter.outputs.ci }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'cmd/**'
+              - 'internal/**'
+              - 'go.mod'
+              - 'go.sum'
+            frontend:
+              - 'frontend/**'
+            migrations:
+              - 'migrations/**'
+              - 'cmd/migrate/**'
+              - 'go.mod'
+              - 'go.sum'
+            docker:
+              - 'Dockerfile'
+              - 'Dockerfile.*'
+              - 'frontend/Dockerfile*'
+              - 'sandbox/Dockerfile*'
+              - '.dockerignore'
+            ci:
+              - '.github/workflows/**'
+
   backend-lint:
     name: Backend Lint
+    needs: changes
+    if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,6 +70,8 @@ jobs:
 
   backend-test:
     name: Backend Test
+    needs: changes
+    if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -84,6 +126,8 @@ jobs:
 
   frontend-lint:
     name: Frontend Lint & Typecheck
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -102,6 +146,8 @@ jobs:
 
   frontend-test:
     name: Frontend Test
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -142,6 +188,8 @@ jobs:
 
   migration-check:
     name: Migration Safety
+    needs: changes
+    if: needs.changes.outputs.migrations == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -176,6 +224,8 @@ jobs:
 
   docker-build:
     name: Docker Build
+    needs: changes
+    if: needs.changes.outputs.docker == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -199,6 +249,8 @@ jobs:
 
   security:
     name: Security Scan
+    needs: changes
+    if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -215,20 +267,31 @@ jobs:
 
   required-checks:
     name: All Checks Pass
-    needs: [backend-lint, backend-test, frontend-lint, frontend-test, migration-check, docker-build, security]
+    needs: [changes, backend-lint, backend-test, frontend-lint, frontend-test, migration-check, docker-build, security]
     runs-on: ubuntu-latest
     if: always()
     steps:
       - name: Check all jobs passed
         run: |
-          if [[ "${{ needs.backend-lint.result }}" != "success" ]] || \
-             [[ "${{ needs.backend-test.result }}" != "success" ]] || \
-             [[ "${{ needs.frontend-lint.result }}" != "success" ]] || \
-             [[ "${{ needs.frontend-test.result }}" != "success" ]] || \
-             [[ "${{ needs.migration-check.result }}" != "success" ]] || \
-             [[ "${{ needs.docker-build.result }}" != "success" ]] || \
-             [[ "${{ needs.security.result }}" != "success" ]]; then
-            echo "::error::One or more required checks failed"
-            exit 1
-          fi
+          echo "backend-lint: ${{ needs.backend-lint.result }}"
+          echo "backend-test: ${{ needs.backend-test.result }}"
+          echo "frontend-lint: ${{ needs.frontend-lint.result }}"
+          echo "frontend-test: ${{ needs.frontend-test.result }}"
+          echo "migration-check: ${{ needs.migration-check.result }}"
+          echo "docker-build: ${{ needs.docker-build.result }}"
+          echo "security: ${{ needs.security.result }}"
+
+          for result in \
+            "${{ needs.backend-lint.result }}" \
+            "${{ needs.backend-test.result }}" \
+            "${{ needs.frontend-lint.result }}" \
+            "${{ needs.frontend-test.result }}" \
+            "${{ needs.migration-check.result }}" \
+            "${{ needs.docker-build.result }}" \
+            "${{ needs.security.result }}"; do
+            if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+              echo "::error::One or more required checks failed"
+              exit 1
+            fi
+          done
           echo "All checks passed"
