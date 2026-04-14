@@ -416,13 +416,21 @@ func (hw *HMRWatcher) enforceSnapshotLimit(ctx context.Context, pw *previewWatch
 		return
 	}
 
-	if err := hw.store.DeleteOldestSnapshots(ctx, pw.orgID, pw.previewID, maxSnapshotsPerPreview); err != nil {
+	blobRefs, err := hw.store.DeleteOldestSnapshots(ctx, pw.orgID, pw.previewID, maxSnapshotsPerPreview)
+	if err != nil {
 		hw.logger.Warn().
 			Err(err).
 			Str("preview_id", pw.previewID.String()).
 			Int("count", count).
 			Msg("failed to evict oldest snapshots")
 		return
+	}
+
+	// Clean up the corresponding PNG files on disk.
+	for _, ref := range blobRefs {
+		if err := os.Remove(ref); err != nil && !os.IsNotExist(err) {
+			hw.logger.Warn().Err(err).Str("blob_ref", ref).Msg("failed to remove evicted snapshot blob")
+		}
 	}
 
 	hw.logger.Info().

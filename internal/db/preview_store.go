@@ -571,21 +571,35 @@ func (s *PreviewStore) CountSnapshotsByPreview(ctx context.Context, orgID, previ
 }
 
 // DeleteOldestSnapshots removes the oldest snapshots beyond a keep limit, scoped through org.
-func (s *PreviewStore) DeleteOldestSnapshots(ctx context.Context, orgID, previewInstanceID uuid.UUID, keepCount int) error {
-	_, err := s.db.Exec(ctx,
+// It returns the blob_ref paths of the deleted snapshots so callers can clean up
+// the corresponding files on disk.
+func (s *PreviewStore) DeleteOldestSnapshots(ctx context.Context, orgID, previewInstanceID uuid.UUID, keepCount int) ([]string, error) {
+	rows, err := s.db.Query(ctx,
 		`DELETE FROM preview_snapshots WHERE id IN (
 			SELECT ps.id FROM preview_snapshots ps
 			JOIN preview_instances pi ON pi.id = ps.preview_instance_id
 			WHERE ps.preview_instance_id = @pid AND pi.org_id = @org_id
 			ORDER BY ps.created_at DESC
 			OFFSET @keep
-		)`,
+		) RETURNING blob_ref`,
 		pgx.NamedArgs{"pid": previewInstanceID, "org_id": orgID, "keep": keepCount},
 	)
 	if err != nil {
-		return fmt.Errorf("delete oldest snapshots: %w", err)
+		return nil, fmt.Errorf("delete oldest snapshots: %w", err)
 	}
-	return nil
+	defer rows.Close()
+
+	var blobRefs []string
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return blobRefs, fmt.Errorf("scan blob_ref: %w", err)
+		}
+		if ref != "" {
+			blobRefs = append(blobRefs, ref)
+		}
+	}
+	return blobRefs, rows.Err()
 }
 
 // =============================================================================

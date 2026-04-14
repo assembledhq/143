@@ -305,6 +305,14 @@ func (m *Manager) StartPreview(ctx context.Context, input StartPreviewInput) (*m
 		Int("primary_port", handle.PrimaryPort).
 		Msg("preview ready")
 
+	// When the preview started with progressive readiness, support services
+	// are still being probed in the background. Poll the provider until all
+	// services leave "starting" status, then persist the final statuses to
+	// the database so the API returns up-to-date information.
+	if handle.PartiallyReady {
+		go m.pollSupportServiceStatus(input.OrgID, instance.ID, handle.Handle)
+	}
+
 	// Start HMR watching now that the preview is up so the gateway can
 	// detect live-reload messages and capture screenshots.
 	if m.hmrWatcher != nil {
@@ -312,6 +320,78 @@ func (m *Manager) StartPreview(ctx context.Context, input StartPreviewInput) (*m
 	}
 
 	return instance, nil
+}
+
+// pollSupportServiceStatus polls the provider until all support services leave
+// "starting" status, then persists the final statuses to the database. This
+// runs in a background goroutine after a progressive preview start.
+func (m *Manager) pollSupportServiceStatus(orgID, previewID uuid.UUID, handle string) {
+	const (
+		pollInterval = 3 * time.Second
+		maxPollTime  = 5 * time.Minute
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), maxPollTime)
+	defer cancel()
+
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			m.logger.Warn().
+				Str("preview_id", previewID.String()).
+				Msg("timed out polling support service status")
+			return
+		case <-ticker.C:
+			snap, err := m.provider.PreviewStatus(ctx, handle)
+			if err != nil {
+				m.logger.Debug().Err(err).
+					Str("preview_id", previewID.String()).
+					Msg("poll support service status: provider error")
+				continue
+			}
+
+			allSettled := true
+			for _, svc := range snap.Services {
+				if svc.Status == models.PreviewServiceStatusStarting {
+					allSettled = false
+					continue
+				}
+				// Persist non-starting statuses as they become available.
+				if err := m.store.UpdateServiceStatus(ctx, orgID, previewID, svc.Name, svc.Status, svc.Error); err != nil {
+					m.logger.Warn().Err(err).
+						Str("preview_id", previewID.String()).
+						Str("service", svc.Name).
+						Msg("failed to persist support service status")
+				}
+			}
+
+			if allSettled {
+				// All services have settled — check if the overall preview
+				// should be promoted from partially_ready to ready.
+				allReady := true
+				for _, svc := range snap.Services {
+					if svc.Status != models.PreviewServiceStatusReady {
+						allReady = false
+						break
+					}
+				}
+				if allReady {
+					if err := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusReady, ""); err != nil {
+						m.logger.Warn().Err(err).
+							Str("preview_id", previewID.String()).
+							Msg("failed to promote preview to ready")
+					}
+				}
+				m.logger.Info().
+					Str("preview_id", previewID.String()).
+					Msg("all support services settled")
+				return
+			}
+		}
+	}
 }
 
 // =============================================================================
@@ -330,7 +410,7 @@ func (m *Manager) StopPreview(ctx context.Context, orgID, previewID uuid.UUID) e
 	}
 
 	// Stop via provider.
-	if instance.PreviewHandle != "" {
+	if instance.PreviewHandle != "" && m.provider != nil {
 		if err := m.provider.StopPreview(ctx, instance.PreviewHandle); err != nil {
 			m.logger.Error().Err(err).
 				Str("preview_id", previewID.String()).
@@ -556,6 +636,10 @@ func (m *Manager) RecyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 		return fmt.Errorf("cannot recycle terminal preview (status=%s)", instance.Status)
 	}
 
+	if m.provider == nil {
+		return fmt.Errorf("preview provider is not configured")
+	}
+
 	input, err := loadRecycleInput(instance)
 	if err != nil {
 		return fmt.Errorf("load recycle input: %w", err)
@@ -575,7 +659,7 @@ func (m *Manager) RecyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 	}
 
 	// Stop current processes via provider.
-	if instance.PreviewHandle != "" {
+	if instance.PreviewHandle != "" && m.provider != nil {
 		if err := m.provider.StopPreview(ctx, instance.PreviewHandle); err != nil {
 			m.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("recycle: provider stop failed")
 		}

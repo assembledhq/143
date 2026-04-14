@@ -529,7 +529,7 @@ func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID
 		if err != nil {
 			return fmt.Errorf("gzip reader: %w", err)
 		}
-		bodyBytes, err = io.ReadAll(io.LimitReader(gr, maxHTMLBodySize+1))
+		bodyBytes, err = io.ReadAll(gr)
 		_ = gr.Close()
 		_ = resp.Body.Close()
 		if err != nil {
@@ -549,7 +549,7 @@ func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID
 	case "deflate":
 		reader := flate.NewReader(resp.Body)
 		var err error
-		bodyBytes, err = io.ReadAll(io.LimitReader(reader, maxHTMLBodySize+1))
+		bodyBytes, err = io.ReadAll(reader)
 		_ = reader.Close()
 		_ = resp.Body.Close()
 		if err != nil {
@@ -575,18 +575,15 @@ func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID
 
 	if bodyBytes == nil {
 		var err error
-		bodyBytes, err = io.ReadAll(io.LimitReader(resp.Body, maxHTMLBodySize+1))
+		bodyBytes, err = io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		if err != nil {
 			return fmt.Errorf("read body: %w", err)
 		}
 	}
 
-	// If the body exceeds the max size, skip injection entirely to avoid
-	// serving a silently truncated page. The original body has already been
-	// closed and fully read (limited to maxHTMLBodySize+1), so return what
-	// we have. For compressed bodies this is the decompressed content; the
-	// caller's recompress function will re-encode it correctly.
+	// If the body exceeds the max size, skip injection but serve the
+	// complete body so the browser gets a valid (uninstrumented) page.
 	if int64(len(bodyBytes)) > maxHTMLBodySize {
 		outBytes, recompErr := recompress(bodyBytes)
 		if recompErr != nil {

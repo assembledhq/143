@@ -589,12 +589,15 @@ func TestPreviewStore_CountAndDeleteSnapshots(t *testing.T) {
 	require.Equal(t, 15, count)
 
 	// Delete oldest
-	mock.ExpectExec("DELETE FROM preview_snapshots WHERE id IN").
+	mock.ExpectQuery("DELETE FROM preview_snapshots WHERE id IN").
 		WithArgs(previewAnyArgs(3)...).
-		WillReturnResult(pgxmock.NewResult("DELETE", 5))
+		WillReturnRows(pgxmock.NewRows([]string{"blob_ref"}).
+			AddRow("/tmp/blobs/snap1.png").
+			AddRow("/tmp/blobs/snap2.png"))
 
-	err = store.DeleteOldestSnapshots(context.Background(), orgID, previewID, 10)
+	blobRefs, err := store.DeleteOldestSnapshots(context.Background(), orgID, previewID, 10)
 	require.NoError(t, err)
+	require.Equal(t, []string{"/tmp/blobs/snap1.png", "/tmp/blobs/snap2.png"}, blobRefs)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

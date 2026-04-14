@@ -25,6 +25,22 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
+// mergeContexts returns a context that is cancelled when either parent is done.
+// The returned context inherits values from the primary context (typically the
+// chromedp browser context) so that chromedp allocator state is preserved, but
+// also respects the caller's cancellation/deadline.
+func mergeContexts(primary, caller context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(primary)
+	go func() {
+		select {
+		case <-caller.Done():
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
+}
+
 // =============================================================================
 // Constants
 // =============================================================================
@@ -314,7 +330,9 @@ func (c *ChromeDPInspector) CaptureScreenshot(ctx context.Context, previewID str
 		return nil, fmt.Errorf("get preview context: %w", err)
 	}
 
-	timeoutCtx, cancel := context.WithTimeout(pc.ctx, defaultOpTimeout)
+	merged, mergeCancel := mergeContexts(pc.ctx, ctx)
+	defer mergeCancel()
+	timeoutCtx, cancel := context.WithTimeout(merged, defaultOpTimeout)
 	defer cancel()
 
 	url, err := c.previewURL(previewID, opts.Path)
@@ -387,7 +405,9 @@ func (c *ChromeDPInspector) CaptureDOM(ctx context.Context, previewID string, op
 	if path == "" {
 		path = "/"
 	}
-	timeoutCtx, cancel := context.WithTimeout(pc.ctx, defaultOpTimeout)
+	merged, mergeCancel := mergeContexts(pc.ctx, ctx)
+	defer mergeCancel()
+	timeoutCtx, cancel := context.WithTimeout(merged, defaultOpTimeout)
 	defer cancel()
 
 	url, err := c.previewURL(previewID, path)
@@ -481,7 +501,9 @@ func (c *ChromeDPInspector) InspectElement(ctx context.Context, previewID string
 		return nil, fmt.Errorf("get preview context: %w", err)
 	}
 
-	timeoutCtx, cancel := context.WithTimeout(pc.ctx, defaultOpTimeout)
+	merged, mergeCancel := mergeContexts(pc.ctx, ctx)
+	defer mergeCancel()
+	timeoutCtx, cancel := context.WithTimeout(merged, defaultOpTimeout)
 	defer cancel()
 
 	// JavaScript that inspects the element at (x, y) and returns metadata.
@@ -809,7 +831,9 @@ func (c *ChromeDPInspector) ExecuteInteraction(ctx context.Context, previewID st
 		return nil, fmt.Errorf("get preview context: %w", err)
 	}
 
-	timeoutCtx, cancel := context.WithTimeout(pc.ctx, maxInteractionTimeout)
+	merged, mergeCancel := mergeContexts(pc.ctx, ctx)
+	defer mergeCancel()
+	timeoutCtx, cancel := context.WithTimeout(merged, maxInteractionTimeout)
 	defer cancel()
 
 	startTime := time.Now()
@@ -1066,7 +1090,9 @@ func (c *ChromeDPInspector) ComputeVisualDiff(ctx context.Context, previewID str
 		return nil, fmt.Errorf("get preview context: %w", err)
 	}
 
-	timeoutCtx, cancel := context.WithTimeout(pc.ctx, defaultOpTimeout)
+	merged, mergeCancel := mergeContexts(pc.ctx, ctx)
+	defer mergeCancel()
+	timeoutCtx, cancel := context.WithTimeout(merged, defaultOpTimeout)
 	defer cancel()
 
 	// Navigate to the before snapshot URL and capture.
