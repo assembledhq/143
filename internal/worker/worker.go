@@ -25,6 +25,16 @@ type RetryableError struct {
 func (e *RetryableError) Error() string { return e.Err.Error() }
 func (e *RetryableError) Unwrap() error { return e.Err }
 
+// FatalError wraps an error to indicate that the job should be dead-lettered
+// immediately without retrying. Use this for persistent failures where retrying
+// would produce the same result (e.g. Docker daemon unreachable, missing config).
+type FatalError struct {
+	Err error
+}
+
+func (e *FatalError) Error() string { return e.Err.Error() }
+func (e *FatalError) Unwrap() error { return e.Err }
+
 type jobContextKey string
 
 const jobOrgIDContextKey jobContextKey = "job_org_id"
@@ -147,6 +157,14 @@ func (w *Worker) poll(ctx context.Context) {
 	handlerCtx := withJobOrgID(ctx, orgID)
 	w.logger.Info().Str("job_id", jobID.String()).Str("job_type", jobType).Msg("processing job")
 	if err := handler(handlerCtx, jobType, payload); err != nil {
+		// FatalError means the failure is persistent — dead-letter immediately
+		// without wasting retries (e.g. Docker daemon unreachable).
+		var fatal *FatalError
+		if errors.As(err, &fatal) {
+			w.logger.Error().Err(err).Str("job_id", jobID.String()).Msg("job failed (fatal, skipping retries)")
+			w.deadLetterJob(ctx, jobID, err.Error())
+			return
+		}
 		// RetryableError means we should retry without consuming an attempt
 		// (e.g. concurrency limit reached — the job will succeed once a slot opens).
 		var retryable *RetryableError

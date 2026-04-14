@@ -424,6 +424,33 @@ func TestWorker_Poll(t *testing.T) {
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 			},
 		},
+		{
+			name: "fatal error dead-letters immediately without retrying",
+			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
+				t.Helper()
+				jobID := uuid.New()
+				orgID := uuid.New()
+				payload := json.RawMessage(`{}`)
+				handlerErr := &FatalError{Err: errors.New("docker daemon unreachable")}
+
+				w.Register("fatal_job", func(ctx context.Context, jobType string, p json.RawMessage) error {
+					return handlerErr
+				})
+
+				mock.ExpectBegin()
+				rows := pgxmock.NewRows([]string{"id", "org_id", "job_type", "payload", "attempts", "max_attempts"}).
+					AddRow(jobID, orgID, "fatal_job", payload, 0, 3) // attempt 0 of 3 — should still dead-letter
+				mock.ExpectQuery("SELECT .+ FROM jobs").
+					WillReturnRows(rows)
+				mock.ExpectExec("UPDATE jobs SET status = 'running'").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectCommit()
+				mock.ExpectExec("UPDATE jobs SET status = 'dead_letter'").
+					WithArgs(handlerErr.Error(), jobID).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			},
+		},
 	}
 
 	for _, tt := range tests {
