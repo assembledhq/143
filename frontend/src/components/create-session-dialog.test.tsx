@@ -443,37 +443,39 @@ describe("CreateSessionDialog", () => {
       }),
     );
 
-    renderWithProviders(
-      <CreateSessionDialog open onOpenChange={onOpenChange} />,
-    );
+    try {
+      renderWithProviders(
+        <CreateSessionDialog open onOpenChange={onOpenChange} />,
+      );
 
-    // Type a message
-    await user.type(
-      screen.getByPlaceholderText("Tell the agent what to do..."),
-      "Fix the bug",
-    );
+      // Type a message
+      await user.type(
+        screen.getByPlaceholderText("Tell the agent what to do..."),
+        "Fix the bug",
+      );
 
-    // Wait for repo selector and select a repo
-    const repoButton = await screen.findByRole("button", { name: /Repo/ });
-    await user.click(repoButton);
+      // Wait for repo selector and select a repo
+      const repoButton = await screen.findByRole("button", { name: /Repo/ });
+      await user.click(repoButton);
 
-    // Wait for dropdown to fully open and select repo
-    const repoOption = await screen.findByText("acme/api-server");
-    await user.click(repoOption);
+      // Wait for dropdown to fully open and select repo
+      const repoOption = await screen.findByText("acme/api-server");
+      await user.click(repoOption);
 
-    // Wait for dropdown to close, selection to settle, and branch data to load
-    await waitFor(() => {
-      expect(screen.getByText("api-server")).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: /Target branch/ })).toBeInTheDocument();
-    });
+      // Wait for dropdown to close, selection to settle, and branch data to load
+      await waitFor(() => {
+        expect(screen.getByText("api-server")).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: /Target branch/ })).toBeInTheDocument();
+      });
 
-    // Submit
-    await user.click(screen.getByRole("button", { name: /Create/ }));
+      // Submit
+      await user.click(screen.getByRole("button", { name: /Create/ }));
 
-    await waitFor(() => {
-      expect(onOpenChange).toHaveBeenCalledWith(false);
-    });
-
-    console.error = origConsoleError;
+      await waitFor(() => {
+        expect(onOpenChange).toHaveBeenCalledWith(false);
+      });
+    } finally {
+      console.error = origConsoleError;
+    }
   });
 });
