@@ -349,7 +349,10 @@ func (s *Scheduler) shouldRunPM(ctx context.Context, orgID uuid.UUID, now time.T
 	if err != nil {
 		return false, err
 	}
-	if failedJob != nil && failedJob.UpdatedAt.Add(interval).After(now) {
+	// Use half the success interval for failure backoff so transient errors
+	// don't block retries for the full schedule period.
+	failureBackoff := interval / 2
+	if failedJob != nil && failedJob.UpdatedAt.Add(failureBackoff).After(now) {
 		s.logger.Debug().
 			Str("org_id", orgID.String()).
 			Time("failed_at", failedJob.UpdatedAt).

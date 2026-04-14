@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
@@ -33,7 +34,7 @@ func (s *JobStore) GetLatestFailedByType(ctx context.Context, orgID uuid.UUID, j
 		"job_type": jobType,
 	}).Scan(&result.JobID, &result.LastError, &result.UpdatedAt)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, err
