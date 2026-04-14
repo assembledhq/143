@@ -401,7 +401,7 @@ func TestScheduler_ShouldRunPM_RecentFailure(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
-	failedAt := now.Add(-30 * time.Minute) // failed 30 min ago, within 2h failure backoff (interval/2)
+	failedAt := now.Add(-30 * time.Minute) // failed 30 min ago, within 4h failure backoff
 	s := &Scheduler{
 		lock: &mockSchedulerLock{},
 		jobs: &mockJobs{failedJob: &models.LatestJobError{
@@ -418,14 +418,14 @@ func TestScheduler_ShouldRunPM_RecentFailure(t *testing.T) {
 
 	run, err := s.shouldRunPM(context.Background(), uuid.New(), now, 4*time.Hour)
 	require.NoError(t, err, "shouldRunPM should not error")
-	require.False(t, run, "should not run when a recent failure exists within the failure backoff (interval/2)")
+	require.False(t, run, "should not run when a recent failure exists within the failure backoff")
 }
 
 func TestScheduler_ShouldRunPM_OldFailure(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
-	failedAt := now.Add(-3 * time.Hour) // failed 3 hours ago, beyond 2h failure backoff (interval/2)
+	failedAt := now.Add(-5 * time.Hour) // failed 5 hours ago, beyond 4h failure backoff
 	s := &Scheduler{
 		lock: &mockSchedulerLock{},
 		jobs: &mockJobs{failedJob: &models.LatestJobError{
@@ -442,5 +442,5 @@ func TestScheduler_ShouldRunPM_OldFailure(t *testing.T) {
 
 	run, err := s.shouldRunPM(context.Background(), uuid.New(), now, 4*time.Hour)
 	require.NoError(t, err, "shouldRunPM should not error")
-	require.True(t, run, "should run when the failure is older than the failure backoff (interval/2)")
+	require.True(t, run, "should run when the failure is older than the failure backoff")
 }

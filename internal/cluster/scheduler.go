@@ -349,9 +349,9 @@ func (s *Scheduler) shouldRunPM(ctx context.Context, orgID uuid.UUID, now time.T
 	if err != nil {
 		return false, err
 	}
-	// Use half the success interval for failure backoff so transient errors
-	// don't block retries for the full schedule period.
-	failureBackoff := interval / 2
+	// Use the full interval for failure backoff. Persistent failures (e.g. Docker
+	// daemon down) won't resolve in minutes, so retrying sooner just creates noise.
+	failureBackoff := interval
 	if failedJob != nil && failedJob.UpdatedAt.Add(failureBackoff).After(now) {
 		s.logger.Debug().
 			Str("org_id", orgID.String()).

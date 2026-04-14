@@ -240,7 +240,14 @@ func newPMAnalyzeHandler(stores *Stores, services *Services, logger zerolog.Logg
 
 		logger.Info().Str("org_id", orgID.String()).Str("trigger", string(trigger)).Msg("running pm analyze")
 		_, err = services.PM.Analyze(ctx, orgID, trigger, repoID)
-		return err
+		if err != nil {
+			// Mark all PM analysis errors as fatal (no retries). Analyze() creates a
+			// new session record before doing any real work, so each retry would produce
+			// a duplicate failed session in the UI. The scheduler will retry at the next
+			// configured interval instead.
+			return &FatalError{Err: err}
+		}
+		return nil
 	}
 }
 
