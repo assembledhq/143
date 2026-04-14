@@ -75,14 +75,15 @@ export function RepoContextSwitcher() {
   return (
     <DropdownMenu onOpenChange={(open) => { if (!open) setSearch(""); }}>
       <DropdownMenuTrigger
-        className="flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground hover:text-foreground transition-colors px-2 py-1 rounded-md hover:bg-sidebar-accent"
+        className="flex items-center h-8 w-full gap-2 rounded-md px-2.5 text-[13px] font-medium transition-colors duration-150 text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
         data-testid="repo-context-switcher"
       >
-        <span>{label}</span>
-        <ChevronDown className="h-3.5 w-3.5 opacity-50" />
+        <GitBranch className="h-4 w-4 shrink-0" />
+        <span className="truncate flex-1 text-left">{label}</span>
         {selectedRepo && <StatusDot status={selectedRepo.latest_session_status} />}
+        <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-40" />
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-64">
+      <DropdownMenuContent align="start" side="top" className="w-64">
         {showSearch && (
           <div className="px-2 pb-1.5">
             <Input
