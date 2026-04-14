@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -32,7 +33,7 @@ import (
 	threadservice "github.com/assembledhq/143/internal/services/thread"
 )
 
-func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, codexAuthSvc *codexauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller) (*chi.Mux, *http.Server, *preview.RecycleWorker, error) {
+func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, codexAuthSvc *codexauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, error) {
 	// Create stores
 	orgStore := db.NewOrganizationStore(pool)
 	userStore := db.NewUserStore(pool)
@@ -77,7 +78,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		var err error
 		cryptoSvc, err = crypto.NewService(cfg.EncryptionMasterKey)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 	}
 	credentialStore := db.NewOrgCredentialStore(pool, cryptoSvc)
@@ -248,20 +249,24 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 
 	// Preview system: inspector, snapshot cache, HMR watcher, manager, recycler, gateway.
 	var previewInspector preview.PreviewInspector
+	var inspectorCloser io.Closer // returned for graceful shutdown
 	if cfg.ChromeWSURL != "" {
 		// Convert env-friendly "{id}" placeholder to chromedp inspector's "{{.PreviewID}}" format.
 		inspectorURLTemplate := strings.Replace(cfg.PreviewOriginTemplate, "{id}", "{{.PreviewID}}", 1) + "{{.Path}}"
-		previewInspector = preview.NewChromeDPInspector(preview.ChromeDPInspectorConfig{
+		cdpInspector := preview.NewChromeDPInspector(preview.ChromeDPInspectorConfig{
 			RemoteURL:          cfg.ChromeWSURL,
 			PreviewURLTemplate: inspectorURLTemplate,
 		}, logger)
+		previewInspector = cdpInspector
+		inspectorCloser = cdpInspector
 	}
 
 	var previewSnapshotCache *preview.SnapshotCache
-	if cfg.PreviewSnapshotCacheDir != "" {
+	if cfg.PreviewSnapshotCacheDir != "" && snapshotExecutor != nil {
 		var scErr error
 		previewSnapshotCache, scErr = preview.NewSnapshotCache(preview.SnapshotCacheConfig{
 			Store:        previewStore,
+			Executor:     snapshotExecutor,
 			Logger:       logger,
 			WorkerNodeID: "local",
 			CacheDir:     cfg.PreviewSnapshotCacheDir,
@@ -271,14 +276,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			previewSnapshotCache = nil
 		}
 	}
-
-	previewManager := preview.NewManager(preview.ManagerConfig{
-		Store:         previewStore,
-		Inspector:     previewInspector,
-		SnapshotCache: previewSnapshotCache,
-		Logger:        logger,
-		WorkerNodeID:  "local", // MODE=all: single-node
-	})
 
 	var hmrWatcher *preview.HMRWatcher
 	if previewInspector != nil && cfg.PreviewHMRBlobDir != "" {
@@ -294,6 +291,16 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			hmrWatcher = nil
 		}
 	}
+
+	previewManager := preview.NewManager(preview.ManagerConfig{
+		Store:         previewStore,
+		Provider:      previewProvider,
+		Inspector:     previewInspector,
+		SnapshotCache: previewSnapshotCache,
+		HMRWatcher:    hmrWatcher,
+		Logger:        logger,
+		WorkerNodeID:  "local", // MODE=all: single-node
+	})
 
 	recycleWorker := preview.NewRecycleWorker(preview.RecycleWorkerConfig{
 		Manager: previewManager,
@@ -324,7 +331,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		}()
 	}
 
-	previewHandler := handlers.NewPreviewHandler(previewManager, previewStore, logger)
+	previewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, logger)
 	previewHandler.SetAuditEmitter(auditEmitter)
 
 	// Upload store: use S3 if configured, otherwise fall back to local filesystem.
@@ -655,5 +662,5 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		})
 	})
 
-	return r, gwSrv, recycleWorker, nil
+	return r, gwSrv, recycleWorker, inspectorCloser, nil
 }

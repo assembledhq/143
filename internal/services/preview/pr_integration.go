@@ -3,6 +3,7 @@ package preview
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -159,8 +160,8 @@ func (p *PRPreviewIntegration) OnPreviewStarted(
 	if previewInstance.BaseCommitSHA != "" {
 		if err := p.gh.CreateCommitStatus(
 			ctx, owner, repo, previewInstance.BaseCommitSHA,
-			commitStatusPending, sessionURL,
-			commitStatusContext, "Preview is starting...",
+			commitStatusPending, commitStatusContext,
+			sessionURL, "Preview is starting...",
 		); err != nil {
 			p.logger.Warn().Err(err).Msg("failed to create pending commit status")
 		}
@@ -217,8 +218,8 @@ func (p *PRPreviewIntegration) OnPreviewReady(
 	if previewInstance.BaseCommitSHA != "" {
 		if err := p.gh.CreateCommitStatus(
 			ctx, owner, repo, previewInstance.BaseCommitSHA,
-			commitStatusSuccess, sessionURL,
-			commitStatusContext, "Preview is live",
+			commitStatusSuccess, commitStatusContext,
+			sessionURL, "Preview is live",
 		); err != nil {
 			p.logger.Warn().Err(err).Msg("failed to create success commit status")
 		}
@@ -278,8 +279,8 @@ func (p *PRPreviewIntegration) OnPreviewStopped(
 	if previewInstance.BaseCommitSHA != "" {
 		if err := p.gh.CreateCommitStatus(
 			ctx, owner, repo, previewInstance.BaseCommitSHA,
-			commitStatusInactive, sessionURL,
-			commitStatusContext, "Preview stopped",
+			commitStatusInactive, commitStatusContext,
+			sessionURL, "Preview stopped",
 		); err != nil {
 			p.logger.Warn().Err(err).Msg("failed to create inactive commit status")
 		}
@@ -391,7 +392,7 @@ func (p *PRPreviewIntegration) buildNeverStartedComment(sessionURL string) strin
 	b.WriteString(commentHeader)
 	b.WriteString("\n")
 	b.WriteString("### \U0001F50D Preview available for this PR\n\n")
-	b.WriteString(fmt.Sprintf("**[Launch Preview](%s)** \u2014 starts a live preview of this change\n\n", sessionURL))
+	b.WriteString(fmt.Sprintf("**[Launch Preview](%s)** \u2014 starts a live preview of this change\n\n", sanitizeMarkdownURL(sessionURL)))
 	b.WriteString("---\n")
 	b.WriteString("*Powered by [143](https://143.dev)*\n")
 	return b.String()
@@ -402,10 +403,10 @@ func (p *PRPreviewIntegration) buildRunningComment(sessionURL string, screenshot
 	b.WriteString(commentHeader)
 	b.WriteString("\n")
 	b.WriteString("### \u2705 Preview is live\n\n")
-	b.WriteString(fmt.Sprintf("**[\U0001F517 Open Preview](%s)**\n\n", sessionURL))
+	b.WriteString(fmt.Sprintf("**[\U0001F517 Open Preview](%s)**\n\n", sanitizeMarkdownURL(sessionURL)))
 
 	if screenshotURL != nil {
-		b.WriteString(fmt.Sprintf("![Preview screenshot](%s)\n\n", *screenshotURL))
+		b.WriteString(fmt.Sprintf("![Preview screenshot](%s)\n\n", sanitizeMarkdownURL(*screenshotURL)))
 	}
 
 	b.WriteString(fmt.Sprintf("Started: %s\n\n", formatTimestamp(startedAt)))
@@ -419,11 +420,11 @@ func (p *PRPreviewIntegration) buildStoppedComment(sessionURL string, stoppedAt 
 	b.WriteString(commentHeader)
 	b.WriteString("\n")
 	b.WriteString("### \U0001F50D Preview available for this PR\n\n")
-	b.WriteString(fmt.Sprintf("**[Re-launch Preview](%s)** \u2014 starts a live preview of this change\n\n", sessionURL))
+	b.WriteString(fmt.Sprintf("**[Re-launch Preview](%s)** \u2014 starts a live preview of this change\n\n", sanitizeMarkdownURL(sessionURL)))
 	b.WriteString(fmt.Sprintf("Last preview: %s (stopped \u2014 idle timeout)\n\n", formatRelativeTime(stoppedAt)))
 
 	if screenshotURL != nil {
-		b.WriteString(fmt.Sprintf("![Last preview screenshot](%s)\n\n", *screenshotURL))
+		b.WriteString(fmt.Sprintf("![Last preview screenshot](%s)\n\n", sanitizeMarkdownURL(*screenshotURL)))
 	}
 
 	b.WriteString("---\n")
@@ -445,7 +446,7 @@ func (p *PRPreviewIntegration) buildClosedComment(merged bool, screenshotURL *st
 	b.WriteString("Preview session has ended.\n\n")
 
 	if screenshotURL != nil {
-		b.WriteString(fmt.Sprintf("**Final screenshot:**\n\n![Final preview screenshot](%s)\n\n", *screenshotURL))
+		b.WriteString(fmt.Sprintf("**Final screenshot:**\n\n![Final preview screenshot](%s)\n\n", sanitizeMarkdownURL(*screenshotURL)))
 	}
 
 	b.WriteString("---\n")
@@ -458,7 +459,7 @@ func (p *PRPreviewIntegration) buildAgentChangesComment(sessionURL string, fileC
 	b.WriteString(commentHeader)
 	b.WriteString("\n")
 	b.WriteString("### \u2705 Preview is live\n\n")
-	b.WriteString(fmt.Sprintf("**[\U0001F517 Open Preview](%s)**\n\n", sessionURL))
+	b.WriteString(fmt.Sprintf("**[\U0001F517 Open Preview](%s)**\n\n", sanitizeMarkdownURL(sessionURL)))
 
 	filesWord := "files"
 	if fileCount == 1 {
@@ -467,7 +468,7 @@ func (p *PRPreviewIntegration) buildAgentChangesComment(sessionURL string, fileC
 	b.WriteString(fmt.Sprintf("\U0001F916 Agent updated preview \u2014 %d %s changed (%s)\n\n", fileCount, filesWord, formatTimestamp(updatedAt)))
 
 	if screenshotURL != nil {
-		b.WriteString(fmt.Sprintf("![Preview screenshot](%s)\n\n", *screenshotURL))
+		b.WriteString(fmt.Sprintf("![Preview screenshot](%s)\n\n", sanitizeMarkdownURL(*screenshotURL)))
 	}
 
 	b.WriteString("---\n")
@@ -501,6 +502,15 @@ func (p *PRPreviewIntegration) updateComment(ctx context.Context, owner, repo st
 // buildSessionURL constructs the app URL for a preview session.
 func (p *PRPreviewIntegration) buildSessionURL(sessionID uuid.UUID) string {
 	return fmt.Sprintf("%s/sessions/%s?preview=1", p.appBaseURL, sessionID)
+}
+
+// sanitizeMarkdownURL escapes characters in a URL that could break Markdown
+// link/image syntax (e.g., unbalanced parentheses).
+func sanitizeMarkdownURL(rawURL string) string {
+	if _, err := url.Parse(rawURL); err != nil {
+		return ""
+	}
+	return strings.ReplaceAll(rawURL, ")", "%29")
 }
 
 // formatTimestamp formats a time as a human-readable string.

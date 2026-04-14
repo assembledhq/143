@@ -28,6 +28,8 @@ import (
 	"github.com/assembledhq/143/internal/services/agent/providers"
 	"github.com/assembledhq/143/internal/services"
 	"github.com/assembledhq/143/internal/services/codexauth"
+	"github.com/assembledhq/143/internal/services/preview"
+	previewproviders "github.com/assembledhq/143/internal/services/preview/providers"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/pm"
@@ -116,19 +118,28 @@ func main() {
 		logger.Info().Str("model", cfg.PlatformLLMModel).Msg("Platform LLM client initialized for internal features")
 	}
 
-	// Create file reader for sandbox file browsing (optional — gracefully degrades
-	// to a no-op reader if Docker is not available).
+	// Create Docker client for file browsing and preview provider (optional —
+	// gracefully degrades when Docker is not available).
 	var fileReader sandbox.FileReader
-	if apiDockerCli, dockerErr := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation()); dockerErr == nil {
+	var pvProvider preview.PreviewCapableProvider
+	var snapshotExec preview.SnapshotExecutor
+	apiDockerCli, dockerErr := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
+	if dockerErr == nil {
 		defer apiDockerCli.Close()
 		fileReader = sandbox.NewDockerFileReader(apiDockerCli)
+
+		// Build preview provider so the preview subsystem can start/stop
+		// sandbox previews.
+		sandboxExec := providers.NewDockerProvider(apiDockerCli, logger)
+		pvProvider = previewproviders.NewDockerPreviewProvider(apiDockerCli, sandboxExec, logger)
+		snapshotExec = sandboxExec
 	} else {
-		logger.Warn().Err(dockerErr).Msg("Docker not available for API file browsing — repo explorer will be disabled")
+		logger.Warn().Err(dockerErr).Msg("Docker not available — file browsing and preview provider disabled")
 		fileReader = sandbox.NoOpFileReader{}
 	}
 
 	cancelRegistry := agent.NewCancelRegistry(logger)
-	router, gwSrv, recycleWorker, err := api.NewRouter(cfg, pool, logger, codexAuthSvc, llmClient, fileReader, cancelRegistry)
+	router, gwSrv, recycleWorker, inspectorCloser, err := api.NewRouter(cfg, pool, logger, codexAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}
@@ -249,6 +260,11 @@ func main() {
 		cancel() // stop worker
 		if recycleWorker != nil {
 			recycleWorker.Stop()
+		}
+		if inspectorCloser != nil {
+			if err := inspectorCloser.Close(); err != nil {
+				logger.Error().Err(err).Msg("preview inspector shutdown failed")
+			}
 		}
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutdownCancel()

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, ChevronDown, ChevronUp, Info, AlertCircle } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -23,7 +23,7 @@ const LEVEL_CONFIG: Record<
     color: "text-destructive",
     label: "Error",
   },
-  warn: {
+  warning: {
     icon: AlertCircle,
     color: "text-amber-600 dark:text-amber-400",
     label: "Warning",
@@ -58,19 +58,28 @@ export function ConsoleBadge({ sessionId }: ConsoleBadgeProps) {
   const { data: messages = [] } = useQuery({
     queryKey: ["preview-console", sessionId],
     queryFn: () => api.sessions.preview.console(sessionId),
-    refetchInterval: 5000,
+    refetchInterval: 10000,
   });
 
-  const errorCount = messages.filter((m) => m.level === "error").length;
-  const warnCount = messages.filter((m) => m.level === "warn").length;
+  const { errorCount, warnCount } = useMemo(() => {
+    let errors = 0;
+    let warnings = 0;
+    for (const m of messages) {
+      if (m.level === "error") errors++;
+      else if (m.level === "warning") warnings++;
+    }
+    return { errorCount: errors, warnCount: warnings };
+  }, [messages]);
 
   if (messages.length === 0) return null;
 
   return (
     <div className="relative" ref={containerRef}>
-      <button
+      <Button
+        variant="ghost"
+        size="sm"
         onClick={() => setExpanded(!expanded)}
-        className="flex items-center gap-1"
+        className="flex items-center gap-1 h-auto p-0"
       >
         {errorCount > 0 ? (
           <Badge variant="destructive" className="text-xs gap-1">
@@ -96,7 +105,7 @@ export function ConsoleBadge({ sessionId }: ConsoleBadgeProps) {
         ) : (
           <ChevronDown className="size-3 text-muted-foreground" />
         )}
-      </button>
+      </Button>
 
       {expanded && (
         <div className="absolute top-full left-0 mt-1 z-50 w-[400px] rounded-lg border bg-background shadow-lg">
@@ -114,12 +123,12 @@ export function ConsoleBadge({ sessionId }: ConsoleBadgeProps) {
           </div>
           <ScrollArea className="max-h-[300px]">
             <div className="divide-y">
-              {messages.map((msg, i) => {
+              {messages.map((msg, idx) => {
                 const config = LEVEL_CONFIG[msg.level];
                 const Icon = config.icon;
                 return (
                   <div
-                    key={i}
+                    key={`${idx}-${msg.time}-${msg.level}`}
                     className={cn(
                       "flex gap-2 p-2 text-xs",
                       msg.level === "error" && "bg-destructive/5"
@@ -133,12 +142,12 @@ export function ConsoleBadge({ sessionId }: ConsoleBadgeProps) {
                       {msg.source && (
                         <p className="text-xs text-muted-foreground truncate">
                           {msg.source}
-                          {msg.line_number != null ? `:${msg.line_number}` : ""}
+                          {msg.line_no != null ? `:${msg.line_no}` : ""}
                         </p>
                       )}
                     </div>
                     <span className="text-xs text-muted-foreground whitespace-nowrap">
-                      {new Date(msg.timestamp).toLocaleTimeString()}
+                      {new Date(msg.time).toLocaleTimeString()}
                     </span>
                   </div>
                 );

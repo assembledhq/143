@@ -394,7 +394,7 @@ type DOMSnapshot struct {
 
 // PreviewStatusResponse is the API response for GET /sessions/{id}/preview.
 type PreviewStatusResponse struct {
-	PreviewInstance
+	Instance       *PreviewInstance        `json:"instance"`
 	Services       []PreviewService        `json:"services"`
 	Infrastructure []PreviewInfrastructure  `json:"infrastructure,omitempty"`
 }
@@ -428,6 +428,8 @@ type DesignModeFeedback struct {
 	Instruction string        `json:"instruction,omitempty"`
 	Annotations []Annotation  `json:"annotations,omitempty"`
 	ScreenshotRef string      `json:"screenshot_ref,omitempty"`
+	// Visual edit fields.
+	StyleEdits []StyleEdit   `json:"style_edits,omitempty"`
 	// Reorder-specific fields.
 	Direction string        `json:"direction,omitempty"` // "up", "down", "left", "right"
 	Parent    *ElementInfo  `json:"parent,omitempty"`

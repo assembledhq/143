@@ -182,6 +182,22 @@ func (s *PreviewStore) UpdatePreviewStatus(ctx context.Context, orgID, id uuid.U
 	return nil
 }
 
+// UpdatePreviewStatusIfActive atomically transitions a preview to the given
+// status only if its current status is not terminal (stopped, failed, expired).
+// Returns true if the update took effect, false if the preview was already
+// terminal (no error). This eliminates the TOCTOU window in RecyclePreview.
+func (s *PreviewStore) UpdatePreviewStatusIfActive(ctx context.Context, orgID, id uuid.UUID, status models.PreviewStatus, errMsg string) (bool, error) {
+	query := `UPDATE preview_instances SET status = @status, error = @error, updated_at = now()
+		WHERE id = @id AND org_id = @org_id AND status NOT IN ('stopped', 'failed', 'expired')`
+	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id": id, "org_id": orgID, "status": status, "error": errMsg,
+	})
+	if err != nil {
+		return false, fmt.Errorf("conditional update preview status: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 // UpdatePreviewAccess updates the last_accessed_at timestamp.
 func (s *PreviewStore) UpdatePreviewAccess(ctx context.Context, orgID, id uuid.UUID) error {
 	_, err := s.db.Exec(ctx,
@@ -701,6 +717,22 @@ func (s *PreviewStore) GetAccessSessionByTokenUnscoped(ctx context.Context, toke
 	return &row, nil
 }
 
+// GetAccessSessionByID retrieves an access session by ID, scoped to org.
+func (s *PreviewStore) GetAccessSessionByID(ctx context.Context, orgID, id uuid.UUID) (*models.PreviewAccessSession, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_access_sessions
+		WHERE id = @id AND org_id = @org_id`, previewAccessSessionColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"id": id, "org_id": orgID})
+	if err != nil {
+		return nil, fmt.Errorf("query access session: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewAccessSession])
+	if err != nil {
+		return nil, fmt.Errorf("get access session by id: %w", err)
+	}
+	return &row, nil
+}
+
 // RevokeAccessSession revokes a single access session, scoped to org.
 func (s *PreviewStore) RevokeAccessSession(ctx context.Context, orgID, id uuid.UUID) error {
 	_, err := s.db.Exec(ctx,
@@ -720,7 +752,10 @@ func (s *PreviewStore) RevokeAllForPreview(ctx context.Context, orgID, previewIn
 		 WHERE preview_instance_id = @pid AND org_id = @org_id AND revoked_at IS NULL`,
 		pgx.NamedArgs{"pid": previewInstanceID, "org_id": orgID},
 	)
-	return err
+	if err != nil {
+		return fmt.Errorf("revoke all access sessions for preview: %w", err)
+	}
+	return nil
 }
 
 // UpdateAccessSessionActivity updates the last_accessed_at for an access session, scoped to org.
@@ -731,6 +766,19 @@ func (s *PreviewStore) UpdateAccessSessionActivity(ctx context.Context, orgID, i
 	)
 	if err != nil {
 		return fmt.Errorf("update access session activity: %w", err)
+	}
+	return nil
+}
+
+// ExtendAccessSessionExpiry extends the expires_at for an active access session.
+func (s *PreviewStore) ExtendAccessSessionExpiry(ctx context.Context, orgID, id uuid.UUID, newExpiry time.Time) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE preview_access_sessions SET expires_at = @expires_at
+		 WHERE id = @id AND org_id = @org_id AND revoked_at IS NULL`,
+		pgx.NamedArgs{"id": id, "org_id": orgID, "expires_at": newExpiry},
+	)
+	if err != nil {
+		return fmt.Errorf("extend access session expiry: %w", err)
 	}
 	return nil
 }

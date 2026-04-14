@@ -344,7 +344,7 @@ func TestGateway_ServeHTTP_Proxy_InvalidCookie(t *testing.T) {
 	previewID := uuid.New()
 	req := httptest.NewRequest(http.MethodGet, "/some-page", nil)
 	req.Host = previewID.String() + ".preview.143.dev"
-	req.AddCookie(&http.Cookie{Name: "__Host-preview_session", Value: "invalid!!!"})
+	req.AddCookie(&http.Cookie{Name: "preview_session", Value: "invalid!!!"})
 	w := httptest.NewRecorder()
 
 	gw.ServeHTTP(w, req)
@@ -365,7 +365,7 @@ func TestGateway_ServeHTTP_Proxy_CookieMismatch(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/some-page", nil)
 	req.Host = previewID.String() + ".preview.143.dev"
-	req.AddCookie(&http.Cookie{Name: "__Host-preview_session", Value: cookieVal})
+	req.AddCookie(&http.Cookie{Name: "preview_session", Value: cookieVal})
 	w := httptest.NewRecorder()
 
 	gw.ServeHTTP(w, req)

@@ -400,7 +400,8 @@ func TestNewPreviewHandler(t *testing.T) {
 		WorkerNodeID: "w1",
 	})
 
-	h := NewPreviewHandler(mgr, store, zerolog.Nop())
+	sessionStore := db.NewSessionStore(mock)
+	h := NewPreviewHandler(mgr, store, sessionStore, zerolog.Nop())
 	require.NotNil(t, h)
 	require.NotNil(t, h.manager)
 	require.NotNil(t, h.store)

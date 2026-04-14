@@ -1677,7 +1677,6 @@ export function SessionDetailContent({ id }: { id: string }) {
             <TabsContent value="preview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
               <PreviewPanel
                 sessionId={id}
-                orgId={session.org_id}
                 previewOriginTemplate={PREVIEW_ORIGIN_TEMPLATE}
               />
             </TabsContent>

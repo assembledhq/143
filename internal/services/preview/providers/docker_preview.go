@@ -73,6 +73,9 @@ type previewState struct {
 	// cancelFn stops all service goroutines.
 	cancelFn context.CancelFunc
 
+	// wg tracks background goroutines so StopPreview can wait for them.
+	wg sync.WaitGroup
+
 	primaryPort int
 }
 
@@ -237,7 +240,9 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 		}
 
 		// Wait for support services in the background.
+		state.wg.Add(1)
 		go func() {
+			defer state.wg.Done()
 			for name, svcCfg := range cfg.Services {
 				if name == cfg.Primary {
 					continue
@@ -250,12 +255,16 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 				if err := d.waitForReadiness(bgCtx, sb, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
 					d.logger.Warn().Err(err).Str("service", name).Msg("support service readiness failed (progressive)")
 					d.mu.Lock()
-					state.services[name].status = models.PreviewServiceStatusFailed
-					state.services[name].err = err.Error()
+					if ss, ok := state.services[name]; ok {
+						ss.status = models.PreviewServiceStatusFailed
+						ss.err = err.Error()
+					}
 					d.mu.Unlock()
 				} else {
 					d.mu.Lock()
-					state.services[name].status = models.PreviewServiceStatusReady
+					if ss, ok := state.services[name]; ok {
+						ss.status = models.PreviewServiceStatusReady
+					}
 					d.mu.Unlock()
 					d.logger.Info().Str("service", name).Int("port", svcCfg.Port).Msg("support service ready (progressive)")
 				}
@@ -299,8 +308,9 @@ func (d *DockerPreviewProvider) StopPreview(ctx context.Context, handle string) 
 		return nil // already stopped — idempotent
 	}
 
-	// Cancel all service goroutines.
+	// Cancel all service goroutines and wait for background work to finish.
 	state.cancelFn()
+	state.wg.Wait()
 
 	// Tear down infrastructure containers.
 	for name, ih := range state.infra {
@@ -365,6 +375,7 @@ func (d *DockerPreviewProvider) PreviewStatus(ctx context.Context, handle string
 
 	snap := &preview.PreviewStatusSnapshot{}
 
+	// Copy service state under lock to avoid races with background goroutines.
 	for name, ss := range state.services {
 		snap.Services = append(snap.Services, preview.ServiceSnapshot{
 			Name:   name,
@@ -466,7 +477,9 @@ func (d *DockerPreviewProvider) provisionInfra(
 		// Cleanup the created container on start failure.
 		cleanCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_ = d.client.ContainerRemove(cleanCtx, resp.ID, container.RemoveOptions{Force: true})
+		if rmErr := d.client.ContainerRemove(cleanCtx, resp.ID, container.RemoveOptions{Force: true}); rmErr != nil {
+			d.logger.Warn().Err(rmErr).Str("container_id", resp.ID).Msg("failed to remove container after start failure")
+		}
 		return nil, fmt.Errorf("start container: %w", err)
 	}
 
@@ -531,6 +544,8 @@ func (d *DockerPreviewProvider) waitForInfraHealth(ctx context.Context, containe
 			if err != nil {
 				continue
 			}
+			// Drain buffered output before closing to prevent fd leaks.
+			_, _ = io.Copy(io.Discard, attachResp.Reader)
 			attachResp.Close()
 
 			// Check exit code.

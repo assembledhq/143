@@ -188,7 +188,7 @@ func (sc *SnapshotCache) CreateSnapshot(
 	//    Using shell tar is significantly faster than Go's archive/tar for
 	//    large node_modules trees (parallel I/O, kernel-level buffering).
 	tarCmd := fmt.Sprintf(
-		"tar czf %s -C %s %s .",
+		"tar czf %s -C %s %s -- .",
 		snapshotTmpFile,
 		shellQuote(sb.WorkDir),
 		tarExcludeFlags,
@@ -204,13 +204,20 @@ func (sc *SnapshotCache) CreateSnapshot(
 	}
 
 	// 2. Read the tar.gz out of the sandbox.
+	// TODO: Stream directly from sandbox to disk instead of buffering in memory.
+	// The current ReadFile approach loads the entire tar.gz into memory, which
+	// can be problematic for large workspaces. A streaming CopyFileToPath method
+	// on SnapshotExecutor would avoid this memory pressure.
 	tarData, err := sc.executor.ReadFile(ctx, sb, snapshotTmpFile)
 	if err != nil {
 		return fmt.Errorf("snapshot create: read tar from sandbox: %w", err)
 	}
 
 	// 3. Write to worker local disk.
-	blobPath := sc.blobPath(snapshotKey)
+	blobPath, err := sc.blobPath(snapshotKey)
+	if err != nil {
+		return fmt.Errorf("snapshot create: %w", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(blobPath), 0o750); err != nil {
 		return fmt.Errorf("snapshot create: mkdir: %w", err)
 	}
@@ -364,7 +371,20 @@ func (sc *SnapshotCache) RestoreSnapshot(
 		return fmt.Errorf("snapshot restore: write tar to sandbox: %w", err)
 	}
 
-	// 3. Extract inside the sandbox.
+	// 3. Remove existing workspace files (except .git which is excluded from
+	//    snapshots and reconstructed separately). Without this, files deleted
+	//    after the snapshot was taken would survive the restore.
+	cleanCmd := fmt.Sprintf(
+		"find %s -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +",
+		shellQuote(sb.WorkDir),
+	)
+	var cleanStderr bytes.Buffer
+	if cleanExit, cleanErr := sc.executor.Exec(ctx, sb, cleanCmd, io.Discard, &cleanStderr); cleanErr != nil || cleanExit != 0 {
+		log.Warn().Err(cleanErr).Int("exit_code", cleanExit).Str("stderr", cleanStderr.String()).
+			Msg("failed to clean workspace before restore — proceeding with overlay extraction")
+	}
+
+	// 4. Extract inside the sandbox.
 	extractCmd := fmt.Sprintf("tar xzf %s -C %s", snapshotTmpFile, shellQuote(sb.WorkDir))
 
 	var stderr bytes.Buffer
@@ -376,10 +396,10 @@ func (sc *SnapshotCache) RestoreSnapshot(
 		return fmt.Errorf("snapshot restore: tar exited %d: %s", exitCode, stderr.String())
 	}
 
-	// 4. Clean up the temporary file inside the sandbox.
+	// 5. Clean up the temporary file inside the sandbox.
 	_, _ = sc.executor.Exec(ctx, sb, fmt.Sprintf("rm -f %s", snapshotTmpFile), io.Discard, io.Discard)
 
-	// 5. Touch the cache entry to update LRU ordering.
+	// 6. Touch the cache entry to update LRU ordering.
 	if err := sc.store.TouchCache(ctx, hit.Entry.OrgID, hit.Entry.ID); err != nil {
 		log.Warn().Err(err).Msg("failed to touch cache entry after restore")
 	}
@@ -554,12 +574,16 @@ func (sc *SnapshotCache) TotalCacheSize(ctx context.Context) (int64, error) {
 // blobPath returns the local filesystem path for a snapshot blob.
 // Snapshots are organized by the first two hex chars of the key to avoid
 // putting too many files in a single directory.
-func (sc *SnapshotCache) blobPath(snapshotKey string) string {
+func (sc *SnapshotCache) blobPath(snapshotKey string) (string, error) {
+	// Validate key to prevent path traversal.
+	if strings.Contains(snapshotKey, "..") || strings.ContainsAny(snapshotKey, "/\\") {
+		return "", fmt.Errorf("invalid snapshot key %q: contains path traversal characters", snapshotKey)
+	}
 	prefix := "xx"
 	if len(snapshotKey) >= 2 {
 		prefix = snapshotKey[:2]
 	}
-	return filepath.Join(sc.cacheDir, prefix, snapshotKey+".tar.gz")
+	return filepath.Join(sc.cacheDir, prefix, snapshotKey+".tar.gz"), nil
 }
 
 // shellQuote wraps a string in single quotes, escaping any embedded single

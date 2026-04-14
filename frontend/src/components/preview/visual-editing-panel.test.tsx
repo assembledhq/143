@@ -22,9 +22,7 @@ vi.mock("@/lib/api", () => ({
 function makeElement(overrides: Partial<ElementInfo> = {}): ElementInfo {
   return {
     tag_name: "div",
-    class_list: ["container", "mx-auto"],
-    id: "main-content",
-    text_content: "Hello World",
+    inner_text: "Hello World",
     bounding_box: { x: 0, y: 0, width: 200, height: 100 },
     computed_styles: {
       color: "rgb(0, 0, 0)",
@@ -50,8 +48,8 @@ function makeElement(overrides: Partial<ElementInfo> = {}): ElementInfo {
       height: "100px",
       "border-radius": "4px",
     },
-    attributes: { class: "container mx-auto" },
-    children_count: 3,
+    attributes: { class: "container mx-auto", id: "main-content" },
+    dom_path: "html > body > div#main-content",
     ...overrides,
   };
 }
@@ -575,13 +573,11 @@ describe("VisualEditingPanel", () => {
     expect(designFeedbackMock).toHaveBeenCalledWith(
       "sess-1",
       expect.objectContaining({
+        type: "visual_edit",
         instruction: expect.stringContaining(".container"),
-        visual_edits: expect.arrayContaining([
+        elements: expect.arrayContaining([
           expect.objectContaining({
-            selector: ".container",
-            styles: expect.arrayContaining([
-              { property: "color", value: "#ff0000" },
-            ]),
+            tag_name: "div",
           }),
         ]),
       })

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -54,10 +55,14 @@ type Manager struct {
 
 	workerNodeID string // identity of this worker for routing
 
+	// hmrWatcher captures screenshots on HMR updates. May be nil.
+	hmrWatcher *HMRWatcher
+
 	// Inspector is the headless browser used for screenshot capture, DOM
 	// inspection, and interaction replay. It may be nil if the headless
 	// browser has not been configured on this worker node.
-	inspector PreviewInspector
+	inspectorMu sync.RWMutex
+	inspector   PreviewInspector
 
 	// snapshotCache handles filesystem snapshot caching for fast startup.
 	snapshotCache *SnapshotCache
@@ -74,6 +79,7 @@ type ManagerConfig struct {
 	Provider      PreviewCapableProvider
 	Inspector     PreviewInspector
 	SnapshotCache *SnapshotCache
+	HMRWatcher    *HMRWatcher // optional; enables HMR screenshot capture
 	Logger        zerolog.Logger
 	WorkerNodeID  string
 	MaxPerUser    int
@@ -93,6 +99,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 		provider:      cfg.Provider,
 		inspector:     cfg.Inspector,
 		snapshotCache: cfg.SnapshotCache,
+		hmrWatcher:    cfg.HMRWatcher,
 		logger:        cfg.Logger,
 		workerNodeID:  cfg.WorkerNodeID,
 		maxPerUser:    cfg.MaxPerUser,
@@ -298,6 +305,12 @@ func (m *Manager) StartPreview(ctx context.Context, input StartPreviewInput) (*m
 		Int("primary_port", handle.PrimaryPort).
 		Msg("preview ready")
 
+	// Start HMR watching now that the preview is up so the gateway can
+	// detect live-reload messages and capture screenshots.
+	if m.hmrWatcher != nil {
+		m.hmrWatcher.StartWatching(instance.ID, input.OrgID)
+	}
+
 	return instance, nil
 }
 
@@ -331,6 +344,11 @@ func (m *Manager) StopPreview(ctx context.Context, orgID, previewID uuid.UUID) e
 		return fmt.Errorf("stop preview: %w", err)
 	}
 
+	// Stop HMR watching for this preview.
+	if m.hmrWatcher != nil {
+		m.hmrWatcher.StopWatching(previewID)
+	}
+
 	m.logger.Info().Str("preview_id", previewID.String()).Msg("preview stopped")
 	return nil
 }
@@ -357,9 +375,9 @@ func (m *Manager) GetStatus(ctx context.Context, orgID, previewID uuid.UUID) (*m
 	}
 
 	return &models.PreviewStatusResponse{
-		PreviewInstance: *instance,
-		Services:        services,
-		Infrastructure:  infra,
+		Instance:       instance,
+		Services:       services,
+		Infrastructure: infra,
 	}, nil
 }
 
@@ -442,7 +460,9 @@ func (m *Manager) validateSession(ctx context.Context, sess *models.PreviewAcces
 		return nil, fmt.Errorf("bootstrap token has expired")
 	}
 	// Mark as used by updating activity.
-	_ = m.store.UpdateAccessSessionActivity(ctx, sess.OrgID, sess.ID)
+	if err := m.store.UpdateAccessSessionActivity(ctx, sess.OrgID, sess.ID); err != nil {
+		m.logger.Warn().Err(err).Str("session_id", sess.ID.String()).Msg("failed to update access session activity")
+	}
 	return sess, nil
 }
 
@@ -508,11 +528,15 @@ func (m *Manager) DialPreview(ctx context.Context, orgID, previewID uuid.UUID) (
 
 // Inspector returns the PreviewInspector, or nil if not configured.
 func (m *Manager) Inspector() PreviewInspector {
+	m.inspectorMu.RLock()
+	defer m.inspectorMu.RUnlock()
 	return m.inspector
 }
 
 // SetInspector sets the headless browser inspector (useful for late binding).
 func (m *Manager) SetInspector(inspector PreviewInspector) {
+	m.inspectorMu.Lock()
+	defer m.inspectorMu.Unlock()
 	m.inspector = inspector
 }
 
@@ -539,20 +563,15 @@ func (m *Manager) RecyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 
 	m.logger.Info().Str("preview_id", previewID.String()).Msg("recycling preview")
 
-	// Transition to starting.
-	if err := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusStarting, ""); err != nil {
+	// Atomically transition to starting only if the preview is still active.
+	// This eliminates the TOCTOU window where a concurrent stop could race
+	// between our check above and the status update.
+	updated, err := m.store.UpdatePreviewStatusIfActive(ctx, orgID, previewID, models.PreviewStatusStarting, "")
+	if err != nil {
 		return fmt.Errorf("set starting status: %w", err)
 	}
-
-	// Re-fetch to reduce TOCTOU window: the preview may have been stopped
-	// by cleanup between our initial check and now. The remaining window is
-	// small but acceptable for MVP.
-	instance, err = m.store.GetPreviewInstance(ctx, orgID, previewID)
-	if err != nil {
-		return fmt.Errorf("re-fetch preview instance: %w", err)
-	}
-	if instance.Status.IsTerminal() {
-		return fmt.Errorf("preview was stopped during recycle setup (status=%s)", instance.Status)
+	if !updated {
+		return fmt.Errorf("preview was stopped concurrently before recycle could begin")
 	}
 
 	// Stop current processes via provider.
@@ -610,6 +629,11 @@ func (m *Manager) RecyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 // Store returns the preview store (used by cleanup/recycle workers).
 func (m *Manager) Store() *db.PreviewStore {
 	return m.store
+}
+
+// WorkerNodeID returns this worker's identity string (used by recycle workers).
+func (m *Manager) WorkerNodeID() string {
+	return m.workerNodeID
 }
 
 // =============================================================================

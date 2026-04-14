@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import {
   X,
@@ -28,7 +28,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
-import type { ElementInfo, StyleEdit, VisualEdit } from "@/lib/preview-types";
+import type { ElementInfo, StyleEdit } from "@/lib/preview-types";
 
 interface VisualEditingPanelProps {
   sessionId: string;
@@ -72,7 +72,7 @@ function parsePixelValue(val: string | undefined): number {
 }
 
 function initStateFromElement(element: ElementInfo): EditState {
-  const s = element.computed_styles;
+  const s = element.computed_styles ?? {};
   return {
     color: s.color || "#000000",
     backgroundColor: s["background-color"] || "transparent",
@@ -151,23 +151,33 @@ export function VisualEditingPanel({
   const [dirtyFields, setDirtyFields] = useState<Set<string>>(new Set());
   const [applyError, setApplyError] = useState<string | null>(null);
 
+  // Reset state when a different element is selected
+  useEffect(() => {
+    setEditState(initStateFromElement(element));
+    setDirtyFields(new Set());
+    setApplyError(null);
+  }, [element]);
+
   // Validation
-  const validationErrors: string[] = [];
-  if (dirtyFields.has("color") && !isValidHexColor(editState.color)) {
-    validationErrors.push("Invalid text color hex value");
-  }
-  if (dirtyFields.has("backgroundColor") && !isValidHexColor(editState.backgroundColor)) {
-    validationErrors.push("Invalid background color hex value");
-  }
-  if (dirtyFields.has("borderColor") && !isValidHexColor(editState.borderColor)) {
-    validationErrors.push("Invalid border color hex value");
-  }
-  if (dirtyFields.has("width") && !isValidNumericSize(editState.width, editState.widthUnit)) {
-    validationErrors.push("Width must be a non-negative number");
-  }
-  if (dirtyFields.has("height") && !isValidNumericSize(editState.height, editState.heightUnit)) {
-    validationErrors.push("Height must be a non-negative number");
-  }
+  const validationErrors = useMemo(() => {
+    const errors: string[] = [];
+    if (dirtyFields.has("color") && !isValidHexColor(editState.color)) {
+      errors.push("Invalid text color hex value");
+    }
+    if (dirtyFields.has("backgroundColor") && !isValidHexColor(editState.backgroundColor)) {
+      errors.push("Invalid background color hex value");
+    }
+    if (dirtyFields.has("borderColor") && !isValidHexColor(editState.borderColor)) {
+      errors.push("Invalid border color hex value");
+    }
+    if (dirtyFields.has("width") && !isValidNumericSize(editState.width, editState.widthUnit)) {
+      errors.push("Width must be a non-negative number");
+    }
+    if (dirtyFields.has("height") && !isValidNumericSize(editState.height, editState.heightUnit)) {
+      errors.push("Height must be a non-negative number");
+    }
+    return errors;
+  }, [editState, dirtyFields]);
   const hasValidationErrors = validationErrors.length > 0;
 
   const update = useCallback(
@@ -178,133 +188,88 @@ export function VisualEditingPanel({
     []
   );
 
-  // Build style edits from dirty fields
+  // Memoize the computed styles reference to avoid unnecessary useCallback recreation
+  const s = useMemo(() => element.computed_styles ?? {}, [element.computed_styles]);
+
   const buildStyleEdits = useCallback((): StyleEdit[] => {
     const edits: StyleEdit[] = [];
+    const edit = (property: string, oldValue: string, newValue: string) => {
+      edits.push({ property, old_value: oldValue, new_value: newValue });
+    };
 
     if (dirtyFields.has("color"))
-      edits.push({ property: "color", value: editState.color });
+      edit("color", s.color || "", editState.color);
     if (dirtyFields.has("backgroundColor"))
-      edits.push({
-        property: "background-color",
-        value: editState.backgroundColor,
-      });
+      edit("background-color", s["background-color"] || "", editState.backgroundColor);
     if (dirtyFields.has("borderColor"))
-      edits.push({ property: "border-color", value: editState.borderColor });
+      edit("border-color", s["border-color"] || "", editState.borderColor);
 
     if (dirtyFields.has("marginTop"))
-      edits.push({ property: "margin-top", value: `${editState.marginTop}px` });
+      edit("margin-top", s["margin-top"] || "0px", `${editState.marginTop}px`);
     if (dirtyFields.has("marginRight"))
-      edits.push({
-        property: "margin-right",
-        value: `${editState.marginRight}px`,
-      });
+      edit("margin-right", s["margin-right"] || "0px", `${editState.marginRight}px`);
     if (dirtyFields.has("marginBottom"))
-      edits.push({
-        property: "margin-bottom",
-        value: `${editState.marginBottom}px`,
-      });
+      edit("margin-bottom", s["margin-bottom"] || "0px", `${editState.marginBottom}px`);
     if (dirtyFields.has("marginLeft"))
-      edits.push({
-        property: "margin-left",
-        value: `${editState.marginLeft}px`,
-      });
+      edit("margin-left", s["margin-left"] || "0px", `${editState.marginLeft}px`);
 
     if (dirtyFields.has("paddingTop"))
-      edits.push({
-        property: "padding-top",
-        value: `${editState.paddingTop}px`,
-      });
+      edit("padding-top", s["padding-top"] || "0px", `${editState.paddingTop}px`);
     if (dirtyFields.has("paddingRight"))
-      edits.push({
-        property: "padding-right",
-        value: `${editState.paddingRight}px`,
-      });
+      edit("padding-right", s["padding-right"] || "0px", `${editState.paddingRight}px`);
     if (dirtyFields.has("paddingBottom"))
-      edits.push({
-        property: "padding-bottom",
-        value: `${editState.paddingBottom}px`,
-      });
+      edit("padding-bottom", s["padding-bottom"] || "0px", `${editState.paddingBottom}px`);
     if (dirtyFields.has("paddingLeft"))
-      edits.push({
-        property: "padding-left",
-        value: `${editState.paddingLeft}px`,
-      });
+      edit("padding-left", s["padding-left"] || "0px", `${editState.paddingLeft}px`);
 
     if (dirtyFields.has("fontSize"))
-      edits.push({
-        property: "font-size",
-        value: `${editState.fontSize}${editState.fontSizeUnit}`,
-      });
+      edit("font-size", s["font-size"] || "", `${editState.fontSize}${editState.fontSizeUnit}`);
     if (dirtyFields.has("fontWeight"))
-      edits.push({ property: "font-weight", value: editState.fontWeight });
+      edit("font-weight", s["font-weight"] || "", editState.fontWeight);
     if (dirtyFields.has("lineHeight"))
-      edits.push({
-        property: "line-height",
-        value: `${editState.lineHeight}px`,
-      });
+      edit("line-height", s["line-height"] || "", `${editState.lineHeight}px`);
     if (dirtyFields.has("letterSpacing"))
-      edits.push({
-        property: "letter-spacing",
-        value: `${editState.letterSpacing}px`,
-      });
+      edit("letter-spacing", s["letter-spacing"] || "0px", `${editState.letterSpacing}px`);
 
     if (dirtyFields.has("flexDirection"))
-      edits.push({
-        property: "flex-direction",
-        value: editState.flexDirection,
-      });
+      edit("flex-direction", s["flex-direction"] || "", editState.flexDirection);
     if (dirtyFields.has("justifyContent"))
-      edits.push({
-        property: "justify-content",
-        value: editState.justifyContent,
-      });
+      edit("justify-content", s["justify-content"] || "", editState.justifyContent);
     if (dirtyFields.has("alignItems"))
-      edits.push({ property: "align-items", value: editState.alignItems });
+      edit("align-items", s["align-items"] || "", editState.alignItems);
     if (dirtyFields.has("gap"))
-      edits.push({ property: "gap", value: `${editState.gap}px` });
+      edit("gap", s.gap || "0px", `${editState.gap}px`);
 
     if (dirtyFields.has("width")) {
-      const val =
-        editState.widthUnit === "auto"
-          ? "auto"
-          : `${editState.width}${editState.widthUnit}`;
-      edits.push({ property: "width", value: val });
+      const val = editState.widthUnit === "auto" ? "auto" : `${editState.width}${editState.widthUnit}`;
+      edit("width", s.width || "", val);
     }
     if (dirtyFields.has("height")) {
-      const val =
-        editState.heightUnit === "auto"
-          ? "auto"
-          : `${editState.height}${editState.heightUnit}`;
-      edits.push({ property: "height", value: val });
+      const val = editState.heightUnit === "auto" ? "auto" : `${editState.height}${editState.heightUnit}`;
+      edit("height", s.height || "", val);
     }
 
     if (dirtyFields.has("borderRadius"))
-      edits.push({
-        property: "border-radius",
-        value: `${editState.borderRadius}px`,
-      });
+      edit("border-radius", s["border-radius"] || "0px", `${editState.borderRadius}px`);
 
     return edits;
-  }, [editState, dirtyFields]);
+  }, [editState, dirtyFields, s]);
+
+  const buildStyleEditsRef = useRef(buildStyleEdits);
+  useEffect(() => {
+    buildStyleEditsRef.current = buildStyleEdits;
+  }, [buildStyleEdits]);
 
   const applyMutation = useMutation({
     mutationFn: () => {
-      const styleEdits = buildStyleEdits();
+      const styleEdits = buildStyleEditsRef.current();
       if (styleEdits.length === 0) return Promise.resolve();
 
-      const visualEdit: VisualEdit = {
-        selector,
-        styles: styleEdits,
-      };
-
       return api.sessions.preview.designFeedback(sessionId, {
+        type: "visual_edit",
         instruction: `Apply visual edits to ${selector}`,
-        selected_elements: [
-          { selector, bounding_box: element.bounding_box },
-        ],
-        annotations: [],
-        visual_edits: [visualEdit],
+        elements: [element],
+        style_edits: styleEdits,
       });
     },
     onSuccess: () => {
@@ -657,8 +622,8 @@ export function VisualEditingPanel({
       {/* Validation errors */}
       {hasValidationErrors && (
         <div className="px-2 py-1.5 text-xs text-destructive space-y-0.5">
-          {validationErrors.map((err, i) => (
-            <div key={i} className="flex items-center gap-1">
+          {validationErrors.map((err) => (
+            <div key={err} className="flex items-center gap-1">
               <AlertTriangle className="size-3 shrink-0" />
               {err}
             </div>
@@ -671,12 +636,14 @@ export function VisualEditingPanel({
         <div className="mx-2 mb-1 flex items-center gap-1.5 rounded border border-destructive/20 bg-destructive/5 p-1.5 text-xs text-destructive">
           <AlertTriangle className="size-3 shrink-0" />
           <span className="flex-1">{applyError}</span>
-          <button
+          <Button
+            variant="ghost"
+            size="icon-xs"
             onClick={() => setApplyError(null)}
             className="rounded p-0.5 hover:bg-destructive/10"
           >
             <X className="size-3" />
-          </button>
+          </Button>
         </div>
       )}
 
@@ -717,6 +684,7 @@ function ColorField({
             value={value === "transparent" ? "#ffffff" : value}
             onChange={(e) => onChange(e.target.value)}
             className="absolute inset-0 w-7 h-7 cursor-pointer opacity-0"
+            aria-label={`${label} color picker`}
           />
           <div
             className="w-7 h-7 rounded border border-border"

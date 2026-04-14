@@ -60,7 +60,7 @@ describe("ConsoleBadge", () => {
 
   it("shows warning badge when only warnings are present", async () => {
     consoleGetMock.mockResolvedValue([
-      { level: "warn", text: "Deprecation warning", source: "lib.js", line: 10, timestamp: new Date().toISOString() },
+      { level: "warning", text: "Deprecation warning", source: "lib.js", line_no: 10, time: new Date().toISOString() },
     ]);
     renderWithProviders(<ConsoleBadge sessionId="sess-1" />);
 

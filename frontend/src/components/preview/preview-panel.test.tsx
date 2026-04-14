@@ -6,7 +6,7 @@ import {
   PreviewPanel,
 } from "./preview-panel";
 import { renderWithProviders, screen, waitFor, userEvent } from "@/test/test-utils";
-import type { PreviewStatus } from "@/lib/preview-types";
+import type { PreviewStatusResponse } from "@/lib/preview-types";
 
 /* ------------------------------------------------------------------ */
 /* Hoisted mocks                                                      */
@@ -30,14 +30,6 @@ vi.mock("@/lib/api", () => ({
       },
     },
   },
-}));
-
-vi.mock("./screenshot-timeline", () => ({
-  ScreenshotTimeline: ({ snapshots }: { snapshots: unknown[] }) => (
-    <div data-testid="screenshot-timeline">
-      {snapshots.length} snapshot(s)
-    </div>
-  ),
 }));
 
 vi.mock("./console-badge", () => ({
@@ -72,29 +64,40 @@ vi.mock("./ttl-warning", () => ({
 
 const DEFAULT_PROPS = {
   sessionId: "sess-1",
-  orgId: "org-1",
   previewOriginTemplate: "http://{id}.preview.test",
 };
 
 function makePreviewStatus(
-  overrides: Partial<PreviewStatus["instance"]> = {},
-  services: PreviewStatus["services"] = [],
-): PreviewStatus {
+  overrides: Partial<PreviewStatusResponse["instance"]> = {},
+  services: PreviewStatusResponse["services"] = [],
+): PreviewStatusResponse {
   return {
     instance: {
       id: "prev-1",
       session_id: "sess-1",
       org_id: "org-1",
-      phase: "ready",
-      preview_url: "http://prev-1.preview.test",
+      user_id: "user-1",
+      status: "ready",
+      profile_name: "",
+      name: "test-preview",
+      provider: "docker",
+      worker_node_id: "local",
+      preview_handle: "handle-1",
+      primary_service: "app",
+      port: 3000,
+      config_digest: "",
+      base_commit_sha: "",
+      last_accessed_at: "2026-01-01T00:00:00Z",
+      expires_at: "2026-01-02T00:00:00Z",
+      last_path: "/",
+      memory_limit_mb: 512,
+      cpu_limit_millis: 500,
       created_at: "2026-01-01T00:00:00Z",
       updated_at: "2026-01-01T00:00:00Z",
       ...overrides,
     },
     services,
-    infrastructure: {} as PreviewStatus["infrastructure"],
-    snapshots: [],
-    active_connections: 0,
+    infrastructure: [],
   };
 }
 
@@ -143,7 +146,7 @@ describe("PreviewPanel component", () => {
   it('shows idle state with "No preview running" when phase is absent', async () => {
     mockGet.mockResolvedValue(
       makePreviewStatus({
-        phase: undefined as unknown as PreviewStatus["instance"]["phase"],
+        status: undefined as unknown as PreviewStatusResponse["instance"]["status"],
       }),
     );
 
@@ -158,7 +161,7 @@ describe("PreviewPanel component", () => {
   });
 
   it('shows idle state when phase is "stopped"', async () => {
-    mockGet.mockResolvedValue(makePreviewStatus({ phase: "stopped" }));
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
@@ -170,16 +173,16 @@ describe("PreviewPanel component", () => {
     expect(screen.getByText("Stopped")).toBeInTheDocument();
   });
 
-  /* ---------- Building phase ---------- */
+  /* ---------- Starting status ---------- */
 
-  it("shows Stop and Restart buttons and Building badge during building phase", async () => {
-    mockGet.mockResolvedValue(makePreviewStatus({ phase: "building" }));
+  it("shows Stop and Restart buttons and Building badge during starting status", async () => {
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "starting" }));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
       // "Building" appears in both badge and progress label, use getAllByText
-      expect(screen.getAllByText("Building").length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText("Starting").length).toBeGreaterThanOrEqual(1);
     });
 
     expect(screen.getByText("Stop")).toBeInTheDocument();
@@ -188,31 +191,31 @@ describe("PreviewPanel component", () => {
     expect(screen.queryByText("Start Preview")).not.toBeInTheDocument();
   });
 
-  it("renders progress bar phase labels during building phase", async () => {
-    mockGet.mockResolvedValue(makePreviewStatus({ phase: "building" }));
+  it("renders progress bar status labels during starting status", async () => {
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "starting" }));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getAllByText("Building").length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText("Starting").length).toBeGreaterThanOrEqual(1);
     });
 
-    // Progress bar shows phase labels from PHASE_ORDER
-    expect(screen.getByText("Initializing")).toBeInTheDocument();
-    expect(screen.getByText("Starting")).toBeInTheDocument();
-    // "Ready" appears in the progress bar phase labels
+    // Progress bar shows status labels from STATUS_ORDER
+    expect(screen.getAllByText("Starting").length).toBeGreaterThanOrEqual(1);
+    // "Ready" appears in the progress bar status labels
     expect(screen.getByText("Ready")).toBeInTheDocument();
   });
 
-  /* ---------- Pending phase ---------- */
+  /* ---------- Starting status (active controls) ---------- */
 
-  it("shows active controls during pending phase", async () => {
-    mockGet.mockResolvedValue(makePreviewStatus({ phase: "pending" }));
+  it("shows active controls during starting status", async () => {
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "starting" }));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getByText("Pending")).toBeInTheDocument();
+      // "Pending" appears in both badge and progress bar
+      expect(screen.getAllByText("Starting").length).toBeGreaterThanOrEqual(1);
     });
 
     expect(screen.getByText("Stop")).toBeInTheDocument();
@@ -223,7 +226,7 @@ describe("PreviewPanel component", () => {
 
   it('shows Ready badge and iframe with title "Preview" when phase is ready', async () => {
     mockGet.mockResolvedValue(
-      makePreviewStatus({ phase: "ready", id: "prev-1" }),
+      makePreviewStatus({ status: "ready", id: "prev-1" }),
     );
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
@@ -242,7 +245,7 @@ describe("PreviewPanel component", () => {
   });
 
   it("renders width preset buttons in ready state", async () => {
-    mockGet.mockResolvedValue(makePreviewStatus({ phase: "ready" }));
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "ready" }));
 
     const { container } = renderWithProviders(
       <PreviewPanel {...DEFAULT_PROPS} />,
@@ -265,21 +268,20 @@ describe("PreviewPanel component", () => {
     expect(presetButtons).toHaveLength(4);
   });
 
-  it("renders ConsoleBadge and ScreenshotTimeline in ready state", async () => {
-    mockGet.mockResolvedValue(makePreviewStatus({ phase: "ready" }));
+  it("renders ConsoleBadge in ready state", async () => {
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "ready" }));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
       expect(screen.getByTestId("console-badge")).toBeInTheDocument();
     });
-    expect(screen.getByTestId("screenshot-timeline")).toBeInTheDocument();
   });
 
   it("renders TTLWarning when expires_at is set and preview is active", async () => {
     mockGet.mockResolvedValue(
       makePreviewStatus({
-        phase: "ready",
+        status: "ready",
         expires_at: "2026-12-31T00:00:00Z",
       }),
     );
@@ -295,7 +297,7 @@ describe("PreviewPanel component", () => {
 
   it("shows Partially Ready badge and iframe in partially_ready state", async () => {
     mockGet.mockResolvedValue(
-      makePreviewStatus({ phase: "partially_ready", id: "prev-1" }),
+      makePreviewStatus({ status: "partially_ready", id: "prev-1" }),
     );
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
@@ -309,13 +311,11 @@ describe("PreviewPanel component", () => {
 
   /* ---------- Failed phase ---------- */
 
-  it("shows failure diagnostics when phase is failed", async () => {
+  it("shows failure diagnostics when status is failed", async () => {
     mockGet.mockResolvedValue(
       makePreviewStatus({
-        phase: "failed",
+        status: "failed",
         error: "Container crashed unexpectedly",
-        failure_pattern: "build_failed",
-        build_log: "npm ERR! code ELIFECYCLE",
       }),
     );
 
@@ -330,23 +330,13 @@ describe("PreviewPanel component", () => {
       screen.getByText("Container crashed unexpectedly"),
     ).toBeInTheDocument();
 
-    // Failure suggestion from KNOWN_FAILURE_PATTERNS
-    expect(
-      screen.getByText(
-        /Build failed\. Check the build logs for errors\./,
-      ),
-    ).toBeInTheDocument();
-
-    // Build log toggle
-    expect(screen.getByText("Build log")).toBeInTheDocument();
-
     // Try Again button
     expect(screen.getByText("Try Again")).toBeInTheDocument();
   });
 
   it("shows Failed badge when phase is failed", async () => {
     mockGet.mockResolvedValue(
-      makePreviewStatus({ phase: "failed", error: "err" }),
+      makePreviewStatus({ status: "failed", error: "err" }),
     );
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
@@ -363,11 +353,16 @@ describe("PreviewPanel component", () => {
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
-    await waitFor(() => {
-      expect(
-        screen.getByText("Failed to load preview status"),
-      ).toBeInTheDocument();
-    });
+    // Query has retry: 2, so react-query retries before surfacing the error.
+    // Use a longer timeout to account for the retry delay.
+    await waitFor(
+      () => {
+        expect(
+          screen.getByText("Failed to load preview status"),
+        ).toBeInTheDocument();
+      },
+      { timeout: 5000 },
+    );
 
     expect(screen.getByText("Network error")).toBeInTheDocument();
     expect(screen.getByText("Retry")).toBeInTheDocument();
@@ -377,19 +372,29 @@ describe("PreviewPanel component", () => {
 
   it("renders service status indicators when multiple services exist", async () => {
     mockGet.mockResolvedValue(
-      makePreviewStatus({ phase: "ready" }, [
+      makePreviewStatus({ status: "ready" }, [
         {
-          name: "frontend",
-          type: "frontend",
+          id: "svc-1",
+          preview_instance_id: "prev-1",
+          service_name: "frontend",
+          role: "primary",
           status: "ready",
+          command: ["npm", "start"],
+          cwd: "",
           port: 3000,
+          created_at: "2026-01-01T00:00:00Z",
         },
         {
-          name: "api",
-          type: "backend",
+          id: "svc-2",
+          preview_instance_id: "prev-1",
+          service_name: "api",
+          role: "support",
           status: "starting",
+          command: ["go", "run", "."],
+          cwd: "",
           port: 8080,
           error: "port binding",
+          created_at: "2026-01-01T00:00:00Z",
         },
       ]),
     );
@@ -406,12 +411,17 @@ describe("PreviewPanel component", () => {
 
   it("does not render service indicators when only one service exists", async () => {
     mockGet.mockResolvedValue(
-      makePreviewStatus({ phase: "ready" }, [
+      makePreviewStatus({ status: "ready" }, [
         {
-          name: "frontend",
-          type: "frontend",
+          id: "svc-1",
+          preview_instance_id: "prev-1",
+          service_name: "frontend",
+          role: "primary",
           status: "ready",
+          command: ["npm", "start"],
+          cwd: "",
           port: 3000,
+          created_at: "2026-01-01T00:00:00Z",
         },
       ]),
     );
@@ -429,7 +439,7 @@ describe("PreviewPanel component", () => {
   /* ---------- Phase helpers via badge classes ---------- */
 
   it("applies emerald color class for ready phase badge", async () => {
-    mockGet.mockResolvedValue(makePreviewStatus({ phase: "ready" }));
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "ready" }));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
@@ -443,7 +453,7 @@ describe("PreviewPanel component", () => {
 
   it("applies destructive color class for failed phase badge", async () => {
     mockGet.mockResolvedValue(
-      makePreviewStatus({ phase: "failed", error: "err" }),
+      makePreviewStatus({ status: "failed", error: "err" }),
     );
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
@@ -456,17 +466,17 @@ describe("PreviewPanel component", () => {
     expect(badge.className).toContain("text-destructive");
   });
 
-  it("applies primary color class for building phase badge", async () => {
-    mockGet.mockResolvedValue(makePreviewStatus({ phase: "building" }));
+  it("applies primary color class for starting status badge", async () => {
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "starting" }));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getAllByText("Building").length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText("Starting").length).toBeGreaterThanOrEqual(1);
     });
 
     // The badge is inside a span with data-slot="badge"
-    const badges = screen.getAllByText("Building");
+    const badges = screen.getAllByText("Starting");
     const badgeEl = badges
       .map((el) => el.closest("[data-slot='badge']"))
       .find(Boolean);
@@ -476,7 +486,7 @@ describe("PreviewPanel component", () => {
 
   it("applies amber color class for partially_ready phase badge", async () => {
     mockGet.mockResolvedValue(
-      makePreviewStatus({ phase: "partially_ready" }),
+      makePreviewStatus({ status: "partially_ready" }),
     );
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
@@ -491,63 +501,29 @@ describe("PreviewPanel component", () => {
 
   /* ---------- Progress bar values via style width ---------- */
 
-  it("renders progress bar at 25% for building phase", async () => {
-    mockGet.mockResolvedValue(makePreviewStatus({ phase: "building" }));
+  it("renders progress bar at 50% for starting status", async () => {
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "starting" }));
 
     const { container } = renderWithProviders(
       <PreviewPanel {...DEFAULT_PROPS} />,
     );
 
     await waitFor(() => {
-      expect(screen.getAllByText("Building").length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText("Starting").length).toBeGreaterThanOrEqual(1);
     });
 
-    // The inner progress bar element has inline style with width
-    const progressBar = container.querySelector(
-      ".bg-primary.rounded-full.transition-all",
-    );
-    expect(progressBar).toHaveStyle({ width: "25%" });
-  });
-
-  it("renders progress bar at 50% for initializing phase", async () => {
-    mockGet.mockResolvedValue(makePreviewStatus({ phase: "initializing" }));
-
-    const { container } = renderWithProviders(
-      <PreviewPanel {...DEFAULT_PROPS} />,
-    );
-
-    await waitFor(() => {
-      expect(screen.getByText("Stop")).toBeInTheDocument();
-    });
-
+    // STATUS_ORDER = ["starting", "ready"], so starting = (1/2)*100 = 50%
     const progressBar = container.querySelector(
       ".bg-primary.rounded-full.transition-all",
     );
     expect(progressBar).toHaveStyle({ width: "50%" });
   });
 
-  it("renders progress bar at 75% for starting phase", async () => {
-    mockGet.mockResolvedValue(makePreviewStatus({ phase: "starting" }));
-
-    const { container } = renderWithProviders(
-      <PreviewPanel {...DEFAULT_PROPS} />,
-    );
-
-    await waitFor(() => {
-      expect(screen.getByText("Stop")).toBeInTheDocument();
-    });
-
-    const progressBar = container.querySelector(
-      ".bg-primary.rounded-full.transition-all",
-    );
-    expect(progressBar).toHaveStyle({ width: "75%" });
-  });
-
   /* ---------- Start mutation ---------- */
 
   it("calls start mutation when Start Preview button is clicked in idle state", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValue(makePreviewStatus({ phase: "stopped" }));
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
@@ -567,7 +543,7 @@ describe("PreviewPanel component", () => {
 
   it("calls stop mutation when Stop button is clicked", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValue(makePreviewStatus({ phase: "ready" }));
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "ready" }));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
@@ -586,7 +562,7 @@ describe("PreviewPanel component", () => {
 
   it("calls restart mutation when Restart button is clicked", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValue(makePreviewStatus({ phase: "ready" }));
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "ready" }));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
@@ -605,7 +581,7 @@ describe("PreviewPanel component", () => {
 
   it("shows mutation error banner when start fails", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValue(makePreviewStatus({ phase: "stopped" }));
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
     mockStart.mockRejectedValueOnce(new Error("connection refused"));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
@@ -624,7 +600,7 @@ describe("PreviewPanel component", () => {
 
   it("dismisses mutation error banner when X is clicked", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValue(makePreviewStatus({ phase: "stopped" }));
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
     mockStart.mockRejectedValueOnce(new Error("connection refused"));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
@@ -653,7 +629,7 @@ describe("PreviewPanel component", () => {
 
   it("shows mutation error banner when stop fails", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValue(makePreviewStatus({ phase: "ready" }));
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "ready" }));
     mockStop.mockRejectedValueOnce(new Error("timeout"));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
@@ -671,7 +647,7 @@ describe("PreviewPanel component", () => {
 
   it("shows mutation error banner when restart fails", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValue(makePreviewStatus({ phase: "ready" }));
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "ready" }));
     mockRestart.mockRejectedValueOnce(new Error("server error"));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
@@ -691,7 +667,7 @@ describe("PreviewPanel component", () => {
 
   it("changes iframe container max-width when a width preset is clicked", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValue(makePreviewStatus({ phase: "ready", id: "prev-1" }));
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "ready", id: "prev-1" }));
 
     const { container } = renderWithProviders(
       <PreviewPanel {...DEFAULT_PROPS} />,
@@ -721,7 +697,7 @@ describe("PreviewPanel component", () => {
 
   it("shows design mode overlay when design mode button is toggled on", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValue(makePreviewStatus({ phase: "ready", id: "prev-1" }));
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "ready", id: "prev-1" }));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
@@ -755,7 +731,7 @@ describe("PreviewPanel component", () => {
   /* ---------- Connecting to preview text ---------- */
 
   it("shows 'Connecting to preview...' overlay when iframe is ready but bootstrap is not complete", async () => {
-    mockGet.mockResolvedValue(makePreviewStatus({ phase: "ready", id: "prev-1" }));
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "ready", id: "prev-1" }));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
@@ -773,7 +749,7 @@ describe("PreviewPanel component", () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValue(
       makePreviewStatus({
-        phase: "failed",
+        status: "failed",
         error: "Container crashed",
       }),
     );

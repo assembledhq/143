@@ -36,6 +36,7 @@ type Gateway struct {
 	logger       zerolog.Logger
 	appOrigin    string
 	cookieSecret []byte
+	secureCookie bool   // true when preview origin uses https
 	cspHeader    string // pre-computed CSP header value
 }
 
@@ -51,7 +52,17 @@ type GatewayConfig struct {
 }
 
 // maxHTMLBodySize caps how much HTML we read into memory for script injection.
-const maxHTMLBodySize = 50 * 1024 * 1024 // 50 MB
+// Kept conservative to avoid excessive memory usage with concurrent previews.
+const maxHTMLBodySize = 5 * 1024 * 1024 // 5 MB
+
+// cookieName returns the session cookie name — __Host-prefixed over HTTPS,
+// plain name over HTTP (localhost dev).
+func (g *Gateway) cookieName() string {
+	if g.secureCookie {
+		return "__Host-preview_session"
+	}
+	return "preview_session"
+}
 
 // NewGateway creates a new preview gateway.
 func NewGateway(cfg GatewayConfig) *Gateway {
@@ -62,6 +73,7 @@ func NewGateway(cfg GatewayConfig) *Gateway {
 		logger:       cfg.Logger,
 		appOrigin:    cfg.AppOrigin,
 		cookieSecret: cfg.CookieSecret,
+		secureCookie: strings.HasPrefix(cfg.PreviewOriginTemplate, "https://"),
 		cspHeader: strings.Join([]string{
 			"default-src 'self' blob: data:",
 			"script-src 'self' 'unsafe-inline' 'unsafe-eval'",
@@ -198,7 +210,7 @@ func (g *Gateway) handleBootstrapExchange(w http.ResponseWriter, r *http.Request
 
 	// Set the preview session cookie (HMAC-signed).
 	cookieValue := encodeCookieValue(g.cookieSecret, sess.OrgID, previewID, sess.ID)
-	http.SetCookie(w, previewSessionCookie(cookieValue, sess.ExpiresAt))
+	http.SetCookie(w, previewSessionCookie(cookieValue, sess.ExpiresAt, g.secureCookie))
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -213,7 +225,7 @@ func (g *Gateway) handleBootstrapExchange(w http.ResponseWriter, r *http.Request
 
 func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID uuid.UUID) {
 	// Read and validate the session cookie.
-	cookie, err := r.Cookie("__Host-preview_session")
+	cookie, err := r.Cookie(g.cookieName())
 	if err != nil {
 		http.Error(w, "preview session required — complete bootstrap first", http.StatusUnauthorized)
 		return
@@ -231,25 +243,56 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 		return
 	}
 
-	// Refresh the session cookie expiry on each successful request so that
-	// active users are not logged out after the initial 5-minute window.
-	refreshedCookie := encodeCookieValue(g.cookieSecret, orgID, previewID, accessSessionID)
-	http.SetCookie(w, previewSessionCookie(refreshedCookie, time.Now().Add(5*time.Minute)))
+	// Re-check the access session in the database to enforce revocation and
+	// expiry. Without this, a cookie minted before RevokeAllForPreview would
+	// continue to grant access indefinitely.
+	sess, err := g.store.GetAccessSessionByID(r.Context(), orgID, accessSessionID)
+	if err != nil {
+		http.Error(w, "preview session not found", http.StatusUnauthorized)
+		return
+	}
+	if sess.RevokedAt != nil {
+		http.Error(w, "preview session has been revoked", http.StatusUnauthorized)
+		return
+	}
+	if time.Now().After(sess.ExpiresAt) {
+		http.Error(w, "preview session has expired", http.StatusUnauthorized)
+		return
+	}
+
+	// Extend the DB session expiry first, then refresh the cookie.
+	// This ordering ensures the cookie and DB expiry stay in sync: if the
+	// DB extension fails, the cookie is not refreshed either, preventing a
+	// state where the cookie claims validity but the DB rejects it.
+	newExpiry := time.Now().Add(5 * time.Minute)
+	if err := g.store.ExtendAccessSessionExpiry(r.Context(), orgID, accessSessionID, newExpiry); err != nil {
+		g.logger.Warn().Err(err).Str("access_session_id", accessSessionID.String()).Msg("failed to extend access session expiry")
+		// Continue without refreshing the cookie — the existing cookie
+		// and DB expiry are still in sync from the last successful refresh.
+	} else {
+		refreshedCookie := encodeCookieValue(g.cookieSecret, orgID, previewID, accessSessionID)
+		http.SetCookie(w, previewSessionCookie(refreshedCookie, newExpiry, g.secureCookie))
+	}
+
+	// Intercept heartbeat pings before recording activity so the heartbeat
+	// URL does not overwrite last_path (which is used for navigation restore).
+	if r.URL.Path == "/__143_heartbeat" {
+		// Still record access for idle timeout tracking.
+		if err := g.manager.RecordAccess(r.Context(), orgID, previewID); err != nil {
+			g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to record access")
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 
 	// Record activity for idle timeout tracking.
 	if err := g.manager.RecordAccess(r.Context(), orgID, previewID); err != nil {
 		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to record access")
 	}
-	if r.URL.Path != "" && r.URL.Path != "/" {
+	if r.URL.Path != "" && r.URL.Path != "/" && !strings.HasPrefix(r.URL.Path, "/__143_") {
 		if err := g.manager.RecordLastPath(r.Context(), orgID, previewID, r.URL.Path); err != nil {
 			g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to record last path")
 		}
-	}
-
-	// Intercept heartbeat pings — no need to proxy to the backend.
-	if r.URL.Path == "/__143_heartbeat" {
-		w.WriteHeader(http.StatusNoContent)
-		return
 	}
 
 	// Check for WebSocket upgrade.
@@ -370,6 +413,24 @@ type previewTransport struct {
 	previewID uuid.UUID
 }
 
+// connClosingBody wraps a response body so that closing it also closes the
+// underlying network connection. Without this, each proxied request would
+// leak a TCP connection because http.ReadResponse does not tie the body
+// lifetime to the connection.
+type connClosingBody struct {
+	io.ReadCloser
+	conn net.Conn
+}
+
+func (b *connClosingBody) Close() error {
+	bodyErr := b.ReadCloser.Close()
+	connErr := b.conn.Close()
+	if bodyErr != nil {
+		return bodyErr
+	}
+	return connErr
+}
+
 func (t *previewTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	conn, err := t.manager.DialPreview(req.Context(), t.orgID, t.previewID)
 	if err != nil {
@@ -391,7 +452,9 @@ func (t *previewTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 
-	// The response body will close the connection when fully read.
+	// Wrap the response body so closing it also closes the underlying
+	// connection, preventing TCP connection leaks.
+	resp.Body = &connClosingBody{ReadCloser: resp.Body, conn: conn}
 	return resp, nil
 }
 
@@ -459,7 +522,7 @@ func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID
 		if err != nil {
 			return fmt.Errorf("gzip reader: %w", err)
 		}
-		bodyBytes, err = io.ReadAll(io.LimitReader(gr, maxHTMLBodySize))
+		bodyBytes, err = io.ReadAll(io.LimitReader(gr, maxHTMLBodySize+1))
 		_ = gr.Close()
 		_ = resp.Body.Close()
 		if err != nil {
@@ -479,7 +542,7 @@ func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID
 	case "deflate":
 		reader := flate.NewReader(resp.Body)
 		var err error
-		bodyBytes, err = io.ReadAll(io.LimitReader(reader, maxHTMLBodySize))
+		bodyBytes, err = io.ReadAll(io.LimitReader(reader, maxHTMLBodySize+1))
 		_ = reader.Close()
 		_ = resp.Body.Close()
 		if err != nil {
@@ -505,11 +568,20 @@ func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID
 
 	if bodyBytes == nil {
 		var err error
-		bodyBytes, err = io.ReadAll(io.LimitReader(resp.Body, maxHTMLBodySize))
+		bodyBytes, err = io.ReadAll(io.LimitReader(resp.Body, maxHTMLBodySize+1))
 		_ = resp.Body.Close()
 		if err != nil {
 			return fmt.Errorf("read body: %w", err)
 		}
+	}
+
+	// If the body exceeds the max size, skip injection entirely to avoid
+	// serving a silently truncated page. Return the original body as-is.
+	if int64(len(bodyBytes)) > maxHTMLBodySize {
+		resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		resp.ContentLength = int64(len(bodyBytes))
+		resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
+		return nil
 	}
 
 	// Build the script block to inject.
@@ -568,16 +640,38 @@ func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID
 // copyWithHMRSnoop copies data from src to dst while also passing each
 // chunk to the HMR watcher for pattern detection. This is a best-effort
 // approach — we forward raw TCP bytes (which may span multiple WebSocket
-// frames) to the watcher. The watcher's pattern matching is substring-based
-// and tolerates partial frames.
+// frames) to the watcher. We accumulate data across reads so that HMR
+// patterns split across read boundaries are still detected.
+//
+// NOTE: This operates on raw TCP bytes, not decoded WebSocket frames.
+// Server→client WebSocket frames are unmasked so substring matching works,
+// but frame headers (2-14 bytes) may cause false positives in rare cases.
+// This is acceptable for the HMR use case (screenshot on hot reload).
 func (g *Gateway) copyWithHMRSnoop(dst io.Writer, src io.Reader, previewID uuid.UUID) {
 	buf := make([]byte, 32*1024)
+	// Keep a small overlap buffer so patterns split across read boundaries
+	// are still detected. 256 bytes covers any HMR pattern we match.
+	var overlap []byte
+	const overlapSize = 256
 	for {
 		n, readErr := src.Read(buf)
 		if n > 0 {
 			data := buf[:n]
-			// Forward to HMR watcher for pattern detection.
-			g.hmrWatcher.OnWebSocketMessage(previewID, data)
+			// Combine overlap from previous read with current data for
+			// pattern matching, so patterns straddling reads are detected.
+			combined := data
+			if len(overlap) > 0 {
+				combined = append(overlap, data...)
+			}
+			g.hmrWatcher.OnWebSocketMessage(previewID, combined)
+			// Keep tail for next iteration.
+			if len(data) >= overlapSize {
+				overlap = make([]byte, overlapSize)
+				copy(overlap, data[len(data)-overlapSize:])
+			} else {
+				overlap = make([]byte, len(data))
+				copy(overlap, data)
+			}
 			// Write to the client.
 			if _, writeErr := dst.Write(data); writeErr != nil {
 				g.logger.Debug().Err(writeErr).
@@ -620,27 +714,33 @@ func stripPreviewCookie(req *http.Request) {
 	cookies := req.Cookies()
 	req.Header.Del("Cookie")
 	for _, c := range cookies {
-		if c.Name != "__Host-preview_session" {
+		if c.Name != "__Host-preview_session" && c.Name != "preview_session" {
 			req.AddCookie(c)
 		}
 	}
 }
 
-func previewSessionCookie(value string, expiresAt time.Time) *http.Cookie {
+func previewSessionCookie(value string, expiresAt time.Time, secure bool) *http.Cookie {
+	// The __Host- prefix requires Secure=true. When running over plain HTTP
+	// (e.g., local dev on http://...preview.localhost), drop the prefix so
+	// the browser will actually set the cookie.
+	name := "__Host-preview_session"
+	if !secure {
+		name = "preview_session"
+	}
 	return &http.Cookie{
-		Name:     "__Host-preview_session",
+		Name:     name,
 		Value:    value,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteStrictMode,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
 		Expires:  expiresAt,
 	}
 }
 
 func cloneWebSocketRequestForBackend(req *http.Request) *http.Request {
 	cloned := req.Clone(req.Context())
-	cloned.Header = req.Header.Clone()
 	stripPreviewCookie(cloned)
 	return cloned
 }

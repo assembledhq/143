@@ -1,0 +1,4 @@
+DROP INDEX IF EXISTS idx_preview_instances_status_last_accessed;
+DROP INDEX IF EXISTS idx_preview_instances_status_expires;
+DROP INDEX IF EXISTS idx_preview_instances_org_user_status;
+DROP INDEX IF EXISTS idx_preview_instances_org_status;

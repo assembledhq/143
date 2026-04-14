@@ -12,6 +12,7 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/preview"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -21,18 +22,20 @@ import (
 
 // PreviewHandler handles all preview-related HTTP endpoints.
 type PreviewHandler struct {
-	manager *preview.Manager
-	store   *db.PreviewStore
-	logger  zerolog.Logger
-	audit   *db.AuditEmitter
+	manager      *preview.Manager
+	store        *db.PreviewStore
+	sessionStore *db.SessionStore
+	logger       zerolog.Logger
+	audit        *db.AuditEmitter
 }
 
 // NewPreviewHandler creates a new PreviewHandler.
-func NewPreviewHandler(manager *preview.Manager, store *db.PreviewStore, logger zerolog.Logger) *PreviewHandler {
+func NewPreviewHandler(manager *preview.Manager, store *db.PreviewStore, sessionStore *db.SessionStore, logger zerolog.Logger) *PreviewHandler {
 	return &PreviewHandler{
-		manager: manager,
-		store:   store,
-		logger:  logger,
+		manager:      manager,
+		store:        store,
+		sessionStore: sessionStore,
+		logger:       logger,
 	}
 }
 
@@ -115,19 +118,51 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body startPreviewRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
-		return
+	// Tolerate empty body (e.g., frontend sends no config when auto-detecting).
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
+			return
+		}
 	}
 	if body.Config == nil {
-		writeError(w, r, http.StatusBadRequest, "MISSING_CONFIG", "preview config is required")
+		// Auto-detect: build a minimal default config when the client sends no
+		// explicit preview config. This lets the frontend start a preview with
+		// a single click.
+		body.Config = &models.PreviewConfig{
+			Name:    "default",
+			Primary: "app",
+			Services: map[string]models.ServiceConfig{
+				"app": {
+					Command: []string{"npm", "start"},
+					Port:    3000,
+				},
+			},
+		}
+	}
+
+	// Look up the session to get its sandbox container.
+	session, err := h.sessionStore.GetByID(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "SESSION_NOT_FOUND", "session not found")
 		return
+	}
+	if session.ContainerID == nil || *session.ContainerID == "" {
+		writeError(w, r, http.StatusConflict, "NO_SANDBOX", "session has no active sandbox container")
+		return
+	}
+
+	sb := &agent.Sandbox{
+		ID:       *session.ContainerID,
+		Provider: "docker",
+		WorkDir:  "/workspace",
 	}
 
 	input := preview.StartPreviewInput{
 		SessionID:     sessionID,
 		OrgID:         orgID,
 		UserID:        user.ID,
+		Sandbox:       sb,
 		Config:        body.Config,
 		BaseCommitSHA: body.BaseCommitSHA,
 		ProfileName:   body.ProfileName,
@@ -162,7 +197,7 @@ func (h *PreviewHandler) GetPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, models.SingleResponse[*models.PreviewStatusResponse]{Data: status})
+	writeJSON(w, http.StatusOK, status)
 }
 
 // =============================================================================

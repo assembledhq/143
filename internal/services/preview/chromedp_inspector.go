@@ -12,6 +12,7 @@ import (
 	"image/gif"
 	"image/png"
 	"math"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -72,11 +73,12 @@ type previewContext struct {
 
 // screencastSession tracks an active screencast recording.
 type screencastSession struct {
-	previewID string
-	ctx       context.Context
-	cancel    context.CancelFunc
-	startedAt time.Time
-	fps       int
+	previewID      string
+	ctx            context.Context
+	cancel         context.CancelFunc
+	listenerCancel context.CancelFunc // cancels the CDP event listener context
+	startedAt      time.Time
+	fps            int
 
 	mu     sync.Mutex
 	frames [][]byte // raw PNG frames
@@ -124,14 +126,20 @@ func NewChromeDPInspector(cfg ChromeDPInspectorConfig, logger zerolog.Logger) *C
 // URL construction
 // =============================================================================
 
-func (c *ChromeDPInspector) previewURL(previewID, path string) string {
+func (c *ChromeDPInspector) previewURL(previewID, path string) (string, error) {
 	if path == "" {
 		path = "/"
+	}
+	if !strings.HasPrefix(path, "/") {
+		return "", fmt.Errorf("path must start with /, got %q", path)
+	}
+	if strings.Contains(path, "..") {
+		return "", fmt.Errorf("path must not contain .., got %q", path)
 	}
 	url := c.cfg.PreviewURLTemplate
 	url = strings.ReplaceAll(url, "{{.PreviewID}}", previewID)
 	url = strings.ReplaceAll(url, "{{.Path}}", path)
-	return url
+	return url, nil
 }
 
 // =============================================================================
@@ -308,7 +316,10 @@ func (c *ChromeDPInspector) CaptureScreenshot(ctx context.Context, previewID str
 	timeoutCtx, cancel := context.WithTimeout(pc.ctx, defaultOpTimeout)
 	defer cancel()
 
-	url := c.previewURL(previewID, opts.Path)
+	url, err := c.previewURL(previewID, opts.Path)
+	if err != nil {
+		return nil, fmt.Errorf("invalid path: %w", err)
+	}
 
 	// Build the action chain.
 	var pngData []byte
@@ -378,7 +389,10 @@ func (c *ChromeDPInspector) CaptureDOM(ctx context.Context, previewID string, op
 	timeoutCtx, cancel := context.WithTimeout(pc.ctx, defaultOpTimeout)
 	defer cancel()
 
-	url := c.previewURL(previewID, path)
+	url, err := c.previewURL(previewID, path)
+	if err != nil {
+		return nil, fmt.Errorf("invalid path: %w", err)
+	}
 
 	var outerHTML string
 
@@ -591,12 +605,25 @@ func (c *ChromeDPInspector) StartScreencast(ctx context.Context, previewID strin
 		done:      make(chan struct{}),
 	}
 
+	// Create a derived context from the preview context for the event listener.
+	// When the screencast ends, cancelling this context automatically removes
+	// the listener from the long-lived preview context, preventing listener
+	// accumulation across start/stop screencast cycles.
+	listenerCtx, listenerCancel := context.WithCancel(pc.ctx)
+	sess.listenerCancel = listenerCancel
+
 	c.mu.Lock()
 	c.screencasts[screencastID] = sess
 	c.mu.Unlock()
 
-	// Listen for screencast frames.
-	chromedp.ListenTarget(pc.ctx, func(ev interface{}) {
+	// Listen for screencast frames on the derived context so the listener
+	// is automatically cleaned up when the screencast ends.
+	chromedp.ListenTarget(listenerCtx, func(ev interface{}) {
+		select {
+		case <-scCtx.Done():
+			return
+		default:
+		}
 		switch e := ev.(type) {
 		case *page.EventScreencastFrame:
 			sess.mu.Lock()
@@ -662,6 +689,9 @@ func (c *ChromeDPInspector) StopScreencast(ctx context.Context, screencastID str
 	}
 
 	sess.cancel()
+	if sess.listenerCancel != nil {
+		sess.listenerCancel()
+	}
 	<-sess.done
 
 	sess.mu.Lock()
@@ -804,7 +834,24 @@ func (c *ChromeDPInspector) ExecuteInteraction(ctx context.Context, previewID st
 		case "navigate":
 			url := step.Value
 			if !strings.HasPrefix(url, "http") {
-				url = c.previewURL(previewID, step.Value)
+				var urlErr error
+				url, urlErr = c.previewURL(previewID, step.Value)
+				if urlErr != nil {
+					stepErr = fmt.Errorf("invalid navigate path: %w", urlErr)
+					break
+				}
+			} else {
+				// Validate that absolute URLs point to the expected preview origin
+				// to prevent SSRF through the server-side headless browser.
+				expectedURL, urlErr := c.previewURL(previewID, "/")
+				if urlErr != nil {
+					stepErr = fmt.Errorf("invalid navigate URL: %w", urlErr)
+					break
+				}
+				if !strings.HasPrefix(url, strings.TrimSuffix(expectedURL, "/")) {
+					stepErr = fmt.Errorf("navigate URL must match preview origin, got %q", url)
+					break
+				}
 			}
 			stepErr = chromedp.Run(timeoutCtx,
 				chromedp.Navigate(url),
@@ -843,11 +890,20 @@ func (c *ChromeDPInspector) ExecuteInteraction(ctx context.Context, previewID st
 				)
 			}
 		case "scroll":
-			js := fmt.Sprintf(`window.scrollBy(0, %s)`, step.Value)
+			var js string
 			if step.Value == "" {
 				js = `window.scrollTo(0, document.body.scrollHeight)`
+			} else {
+				pixels, parseErr := strconv.Atoi(step.Value)
+				if parseErr != nil {
+					stepErr = fmt.Errorf("scroll value must be an integer, got %q", step.Value)
+					break
+				}
+				js = fmt.Sprintf(`window.scrollBy(0, %d)`, pixels)
 			}
-			stepErr = chromedp.Run(timeoutCtx, chromedp.Evaluate(js, nil))
+			if stepErr == nil {
+				stepErr = chromedp.Run(timeoutCtx, chromedp.Evaluate(js, nil))
+			}
 		case "select":
 			stepErr = chromedp.Run(timeoutCtx,
 				chromedp.SetValue(step.Selector, step.Value, chromedp.ByQuery),
@@ -975,7 +1031,32 @@ func (c *ChromeDPInspector) CaptureMultiViewport(ctx context.Context, previewID 
 // ComputeVisualDiff
 // =============================================================================
 
+// isValidSnapshotID validates that a snapshot ID is safe to use in a URL path.
+// It must be a hex string (SHA-256 digest or UUID without dashes) to prevent
+// path traversal or SSRF via user-controlled agent tool params.
+func isValidSnapshotID(id string) bool {
+	if id == "" {
+		return true
+	}
+	if len(id) > 128 {
+		return false
+	}
+	for _, c := range id {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *ChromeDPInspector) ComputeVisualDiff(ctx context.Context, previewID string, beforeSnapshotID, afterSnapshotID string) (*models.VisualDiff, error) {
+	if !isValidSnapshotID(beforeSnapshotID) {
+		return nil, fmt.Errorf("invalid before snapshot ID: must be hex/UUID format")
+	}
+	if !isValidSnapshotID(afterSnapshotID) {
+		return nil, fmt.Errorf("invalid after snapshot ID: must be hex/UUID format")
+	}
+
 	pc, err := c.getOrCreatePreviewCtx(previewID)
 	if err != nil {
 		return nil, fmt.Errorf("get preview context: %w", err)
@@ -985,9 +1066,13 @@ func (c *ChromeDPInspector) ComputeVisualDiff(ctx context.Context, previewID str
 	defer cancel()
 
 	// Navigate to the before snapshot URL and capture.
-	beforeURL := c.previewURL(previewID, "/")
+	beforePath := "/"
 	if beforeSnapshotID != "" {
-		beforeURL = c.previewURL(previewID, "/__143_snapshot/"+beforeSnapshotID)
+		beforePath = "/__143_snapshot/" + beforeSnapshotID
+	}
+	beforeURL, err := c.previewURL(previewID, beforePath)
+	if err != nil {
+		return nil, fmt.Errorf("invalid before path: %w", err)
 	}
 
 	var beforePNG []byte
@@ -1002,9 +1087,13 @@ func (c *ChromeDPInspector) ComputeVisualDiff(ctx context.Context, previewID str
 	}
 
 	// Navigate to the after snapshot URL and capture.
-	afterURL := c.previewURL(previewID, "/")
+	afterPath := "/"
 	if afterSnapshotID != "" {
-		afterURL = c.previewURL(previewID, "/__143_snapshot/"+afterSnapshotID)
+		afterPath = "/__143_snapshot/" + afterSnapshotID
+	}
+	afterURL, err := c.previewURL(previewID, afterPath)
+	if err != nil {
+		return nil, fmt.Errorf("invalid after path: %w", err)
 	}
 
 	var afterPNG []byte
@@ -1237,15 +1326,21 @@ func (c *ChromeDPInspector) RunAssertions(ctx context.Context, previewID string,
 		return nil, fmt.Errorf("get preview context: %w", err)
 	}
 
-	// Remove _ = ... to silence the unused variable lint. Assertion helpers
-	// use pc.ctx directly; adding a per-assertion timeout is a follow-up.
-	_ = ctx // caller context unused; assertions run on the browser context
-
+	// Enforce the caller's deadline. If ctx expires mid-assertion, remaining
+	// assertions are skipped and marked as errors.
 	result := &AssertionResult{
 		Total: len(assertions),
 	}
 
 	for _, a := range assertions {
+		// Bail out if the caller context has been cancelled.
+		if err := ctx.Err(); err != nil {
+			check := AssertionCheck{Assertion: a, Message: fmt.Sprintf("cancelled: %v", err)}
+			result.Failed++
+			result.Results = append(result.Results, check)
+			continue
+		}
+
 		check := AssertionCheck{Assertion: a}
 
 		switch a.Type {
@@ -1475,6 +1570,9 @@ func (c *ChromeDPInspector) Close() error {
 	// Cancel all active screencasts.
 	for id, sess := range c.screencasts {
 		sess.cancel()
+		if sess.listenerCancel != nil {
+			sess.listenerCancel()
+		}
 		delete(c.screencasts, id)
 	}
 

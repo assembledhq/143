@@ -320,7 +320,7 @@ func TestGetStatus_Success(t *testing.T) {
 
 	resp, err := mgr.GetStatus(context.Background(), orgID, previewID)
 	require.NoError(t, err)
-	require.Equal(t, previewID, resp.PreviewInstance.ID)
+	require.Equal(t, previewID, resp.Instance.ID)
 	require.Len(t, resp.Services, 1)
 	require.Len(t, resp.Infrastructure, 0)
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -1010,16 +1010,10 @@ func TestRecyclePreview_PreservesPartiallyReadyStatus(t *testing.T) {
 			pgxmock.NewRows(previewInstanceTestCols).
 				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-old", now)...),
 		)
-	mock.ExpectExec("UPDATE preview_instances SET status = @status").
+	// Atomic conditional status transition (UpdatePreviewStatusIfActive).
+	mock.ExpectExec("UPDATE preview_instances SET status = @status.+NOT IN").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	// TOCTOU re-fetch after setting status to starting.
-	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(previewInstanceTestCols).
-				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusStarting, "handle-old", now)...),
-		)
 	// RevokeAllForPreview during recycle.
 	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -1066,16 +1060,10 @@ func TestRecyclePreview_ReconstructsInputFromStoredState(t *testing.T) {
 			pgxmock.NewRows(previewInstanceTestCols).
 				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-old", now)...),
 		)
-	mock.ExpectExec("UPDATE preview_instances SET status = @status").
+	// Atomic conditional status transition (UpdatePreviewStatusIfActive).
+	mock.ExpectExec("UPDATE preview_instances SET status = @status.+NOT IN").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	// TOCTOU re-fetch after setting status to starting.
-	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(previewInstanceTestCols).
-				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusStarting, "handle-old", now)...),
-		)
 	// RevokeAllForPreview during recycle.
 	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).

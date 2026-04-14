@@ -285,23 +285,26 @@ export const api = {
       return get<import('./types').SingleResponse<import('./types').FileContextResponse>>(`/api/v1/sessions/${sessionId}/files/context?${params.toString()}`);
     },
     preview: {
-      get: (sessionId: string) => get<import('./preview-types').PreviewStatus>(`/api/v1/sessions/${sessionId}/preview`),
-      start: (sessionId: string) => post<import('./preview-types').PreviewInstance>(`/api/v1/sessions/${sessionId}/preview`),
+      get: (sessionId: string) => get<import('./preview-types').PreviewStatusResponse>(`/api/v1/sessions/${sessionId}/preview`),
+      start: (sessionId: string, config?: Record<string, unknown>) =>
+        post<import('./types').SingleResponse<import('./preview-types').PreviewInstance>>(`/api/v1/sessions/${sessionId}/preview`, config ? { config } : undefined)
+          .then(r => r.data),
       stop: (sessionId: string) => del(`/api/v1/sessions/${sessionId}/preview`),
-      restart: (sessionId: string) => post<import('./preview-types').PreviewInstance>(`/api/v1/sessions/${sessionId}/preview/restart`),
-      bootstrap: (sessionId: string) => post<{ token: string }>(`/api/v1/sessions/${sessionId}/preview/bootstrap`),
+      restart: (sessionId: string) => post(`/api/v1/sessions/${sessionId}/preview/restart`),
+      bootstrap: (sessionId: string) =>
+        post<import('./types').SingleResponse<{ token: string; preview_id: string }>>(`/api/v1/sessions/${sessionId}/preview/bootstrap`)
+          .then(r => r.data),
       extend: (sessionId: string) => post(`/api/v1/sessions/${sessionId}/preview/extend`),
-      logs: (sessionId: string) => get<import('./preview-types').PreviewLog[]>(`/api/v1/sessions/${sessionId}/preview/logs`),
-      services: (sessionId: string) => get<import('./preview-types').PreviewService[]>(`/api/v1/sessions/${sessionId}/preview/services`),
-      console: (sessionId: string) => get<import('./preview-types').ConsoleMessage[]>(`/api/v1/sessions/${sessionId}/preview/console`),
-      snapshots: (sessionId: string) => get<import('./preview-types').PreviewSnapshot[]>(`/api/v1/sessions/${sessionId}/preview/snapshots`),
-      screenshot: (sessionId: string, opts: import('./preview-types').ScreenshotOpts) => post<import('./preview-types').ScreenshotResult>(`/api/v1/sessions/${sessionId}/preview/screenshot`, opts),
-      inspect: (sessionId: string, x: number, y: number) => post<import('./preview-types').ElementInfo>(`/api/v1/sessions/${sessionId}/preview/inspect`, { x, y }),
+      services: (sessionId: string) =>
+        get<import('./types').ListResponse<import('./preview-types').PreviewService>>(`/api/v1/sessions/${sessionId}/preview/services`)
+          .then(r => r.data),
+      console: (sessionId: string) =>
+        get<import('./types').ListResponse<import('./preview-types').ConsoleMessage>>(`/api/v1/sessions/${sessionId}/preview/console`)
+          .then(r => r.data),
+      inspect: (sessionId: string, x: number, y: number) =>
+        post<import('./types').SingleResponse<import('./preview-types').ElementInfo>>(`/api/v1/sessions/${sessionId}/preview/inspect`, { x, y })
+          .then(r => r.data),
       designFeedback: (sessionId: string, feedback: import('./preview-types').DesignModeFeedback) => post(`/api/v1/sessions/${sessionId}/preview/design-feedback`, feedback),
-      interact: (sessionId: string, steps: import('./preview-types').InteractionStep[]) => post<import('./preview-types').InteractionResult>(`/api/v1/sessions/${sessionId}/preview/interact`, { steps }),
-      multiViewport: (sessionId: string, opts: import('./preview-types').MultiViewportOpts) => post<import('./preview-types').MultiViewportResult>(`/api/v1/sessions/${sessionId}/preview/multi-viewport`, opts),
-      visualDiff: (sessionId: string, before: string, after: string) => post<import('./preview-types').VisualDiff>(`/api/v1/sessions/${sessionId}/preview/visual-diff`, { before_snapshot_id: before, after_snapshot_id: after }),
-      assert: (sessionId: string, assertions: import('./preview-types').PreviewAssertion[]) => post<import('./preview-types').AssertionResults>(`/api/v1/sessions/${sessionId}/preview/assert`, { assertions }),
     },
   },
   settings: {
