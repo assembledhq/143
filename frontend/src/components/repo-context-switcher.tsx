@@ -15,29 +15,6 @@ import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
 import { useEffect, useState } from "react";
 
-function StatusDot({ status }: { status: string | null }) {
-  if (!status) return null;
-
-  if (status === "running" || status === "pending") {
-    return (
-      <span className="relative flex h-2 w-2">
-        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-        <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
-      </span>
-    );
-  }
-
-  if (status === "needs_human_guidance" || status === "awaiting_input") {
-    return <span className="inline-flex rounded-full h-2 w-2 bg-amber-500" />;
-  }
-
-  if (status === "failed" || status === "cancelled") {
-    return <span className="inline-flex rounded-full h-2 w-2 bg-red-500" />;
-  }
-
-  return null;
-}
-
 export function RepoContextSwitcher() {
   const { data: summariesData } = useQuery({
     queryKey: ["repositories", "summary"],
@@ -80,7 +57,6 @@ export function RepoContextSwitcher() {
       >
         <GitBranch className="h-4 w-4 shrink-0" />
         <span className="truncate flex-1 text-left">{label}</span>
-        {selectedRepo && <StatusDot status={selectedRepo.latest_session_status} />}
         <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-40" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" side="top" className="w-64">
@@ -124,7 +100,6 @@ export function RepoContextSwitcher() {
                 {r.active_session_count}
               </span>
             )}
-            <StatusDot status={r.latest_session_status} />
           </DropdownMenuItem>
         ))}
       </DropdownMenuContent>
