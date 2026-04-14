@@ -92,6 +92,17 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   }
 
   docker compose -f "$COMPOSE_FILE" pull
+
+  # Run migrations BEFORE restarting the app so the DB schema is ready when
+  # the new code starts serving traffic. Uses `docker compose run` on the new
+  # image (already pulled) to execute the migration binary without replacing
+  # the running container. This prevents 500s from code referencing columns
+  # that the old schema doesn't have yet.
+  if [ "$ROLE" = "app" ]; then
+    echo "Running database migrations..."
+    docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate up
+  fi
+
   docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
 
   echo "Waiting for $HEALTH_SERVICE health check..."
@@ -121,11 +132,6 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     fi
     sleep 2
   done
-
-  # Run migrations after the app node itself is healthy.
-  if [ "$ROLE" = "app" ]; then
-    docker compose -f "$COMPOSE_FILE" exec -T api /bin/migrate up
-  fi
 
   echo "Deploy complete ($ROLE)."
 REMOTE
