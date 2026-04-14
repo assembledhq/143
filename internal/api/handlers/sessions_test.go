@@ -52,7 +52,7 @@ var sessionColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
-	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "deleted_at", "created_at",
+	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "deleted_at", "created_at",
 }
 
 func TestSessionHandler_List(t *testing.T) {
@@ -90,6 +90,7 @@ func TestSessionHandler_List(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, nil, // archived_at, archived_by_user_id
 							nil, // deleted_at
 							now,
 						),
@@ -173,6 +174,7 @@ func TestSessionHandler_List_WithRepositoryID(t *testing.T) {
 				nil, // diff_stats
 				nil, // diff_history
 				nil, // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
 				nil, // deleted_at
 				now,
 			),
@@ -267,6 +269,7 @@ func TestSessionHandler_List_CommaSeparatedStatuses(t *testing.T) {
 				nil, // diff_stats
 				nil, // diff_history
 				nil, // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
 				nil, // deleted_at
 				now,
 			),
@@ -350,7 +353,7 @@ func TestSessionHandler_List_WithCursor(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, nil, nil,
 				nil, 0, nil, "none", nil,
-				nil, nil, nil, nil, nil, nil, nil, now,
+				nil, nil, nil, nil, nil, nil, nil, nil, nil, now,
 			),
 		)
 
@@ -426,6 +429,7 @@ func TestSessionHandler_Get(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, nil, // archived_at, archived_by_user_id
 							nil, // deleted_at
 							now,
 						),
@@ -1140,6 +1144,7 @@ func TestSessionHandler_GetLogs_Success(t *testing.T) {
 				nil, // diff_stats
 				nil, // diff_history
 				nil, // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
 				nil, // deleted_at
 				now,
 			),
@@ -1228,6 +1233,7 @@ func TestSessionHandler_GetLogs_EmptyLogs(t *testing.T) {
 				nil, // diff_stats
 				nil, // diff_history
 				nil, // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
 				nil, // deleted_at
 				now,
 			),
@@ -1289,6 +1295,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil, // diff_stats
 				nil, // diff_history
 				nil, // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
 				nil, // deleted_at
 				now,
 			),
@@ -1314,6 +1321,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil, // diff_stats
 				nil, // diff_history
 				nil, // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
 				nil, // deleted_at
 				now,
 			),
@@ -1608,6 +1616,7 @@ func TestSessionHandler_EndSession_EnqueuesValidation(t *testing.T) {
 				nil, // diff_stats
 				nil, // diff_history
 				nil, // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
 				nil, // deleted_at
 				now,
 			),
@@ -1668,6 +1677,7 @@ func TestSessionHandler_EndSession_ManualSkipsValidation(t *testing.T) {
 				nil, // diff_stats
 				nil, // diff_history
 				nil, // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
 				nil, // deleted_at
 				now,
 			),
@@ -1849,6 +1859,7 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, nil, // archived_at, archived_by_user_id
 							nil, // deleted_at
 							now,
 						),
@@ -1889,6 +1900,7 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, nil, // archived_at, archived_by_user_id
 							nil, // deleted_at
 							now,
 						),
@@ -1971,6 +1983,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, nil, // archived_at, archived_by_user_id
 							nil, // deleted_at
 							now,
 						),
@@ -1995,6 +2008,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, nil, // archived_at, archived_by_user_id
 							nil, // deleted_at
 							now,
 						),
@@ -2036,6 +2050,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, nil, // archived_at, archived_by_user_id
 							nil, // deleted_at
 							now,
 						),
@@ -2081,6 +2096,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, nil, // archived_at, archived_by_user_id
 							nil, // deleted_at
 							now,
 						),
@@ -2117,6 +2133,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, 3, &now, "destroyed", nil,
 							nil, nil, nil, nil, nil,
 							nil, // input_manifest
+							nil, nil, // archived_at, archived_by_user_id
 							nil, // deleted_at
 							now,
 						),
@@ -2145,6 +2162,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, 2, &now, "destroyed", nil,
 							nil, nil, nil, nil, nil,
 							nil, // input_manifest
+							nil, nil, // archived_at, archived_by_user_id
 							nil, // deleted_at
 							now,
 						),
@@ -2178,6 +2196,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, nil, // archived_at, archived_by_user_id
 							nil, // deleted_at
 							now,
 						),
@@ -2206,6 +2225,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // diff_stats
 							nil, // diff_history
 							nil, // input_manifest
+							nil, nil, // archived_at, archived_by_user_id
 							nil, // deleted_at
 							now,
 						),
@@ -2534,6 +2554,7 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 				nil, // diff_stats
 				nil, // diff_history
 				nil, // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
 				nil, // deleted_at
 				now,
 			),
@@ -2596,6 +2617,7 @@ func TestSessionHandler_CreatePR_NoDiff(t *testing.T) {
 				nil, 0, nil, "none", nil,
 				nil, nil, nil, nil, nil,
 				nil, // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
 				nil, // deleted_at
 				now,
 			),
@@ -2648,6 +2670,7 @@ func TestSessionHandler_CreatePR_AlreadyExists(t *testing.T) {
 				nil, 0, nil, "none", nil,
 				nil, nil, nil, nil, nil,
 				nil, // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
 				nil, // deleted_at
 				now,
 			),
@@ -2743,6 +2766,7 @@ func TestSessionHandler_CreatePR_PRLookupDBError(t *testing.T) {
 				nil, 0, nil, "none", nil,
 				nil, nil, nil, nil, nil,
 				nil, // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
 				nil, // deleted_at
 				now,
 			),
@@ -2811,6 +2835,7 @@ func TestSessionHandler_CancelSession_Success(t *testing.T) {
 				nil, 1, &now, "running", nil,
 				nil, nil, nil, nil, nil,
 				nil, // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
 				nil, // deleted_at
 				now,
 			),
@@ -2863,6 +2888,7 @@ func TestSessionHandler_CancelSession_NotRunning(t *testing.T) {
 				nil, 1, &now, "snapshotted", stringPtr("snapshots/test.tar"),
 				nil, nil, nil, nil, nil,
 				nil, // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
 				nil, // deleted_at
 				now,
 			),
@@ -2939,6 +2965,7 @@ func TestSessionHandler_CancelSession_NoCanceller(t *testing.T) {
 				nil, 1, &now, "running", nil,
 				nil, nil, nil, nil, nil,
 				nil, // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
 				nil, // deleted_at
 				now,
 			),
@@ -2957,6 +2984,173 @@ func TestSessionHandler_CancelSession_NoCanceller(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, w.Code)
 	require.Contains(t, w.Body.String(), "CANCEL_UNAVAILABLE")
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionHandler_ArchiveSession(t *testing.T) {
+	t.Parallel()
+
+	t.Run("archives session successfully", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		handler := newSessionHandler(t, mock)
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+
+		mock.ExpectExec("UPDATE sessions SET archived_at").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/archive", nil)
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", sessionID.String())
+		ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+		ctx = middleware.WithOrgID(ctx, orgID)
+		ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+		req = req.WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		handler.ArchiveSession(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code, "archive should return 200")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns 401 when user is not authenticated", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		handler := newSessionHandler(t, mock)
+		sessionID := uuid.New()
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/archive", nil)
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", sessionID.String())
+		ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+		ctx = middleware.WithOrgID(ctx, uuid.New())
+		req = req.WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		handler.ArchiveSession(w, req)
+
+		require.Equal(t, http.StatusUnauthorized, w.Code)
+	})
+
+	t.Run("returns 404 when session not found", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		handler := newSessionHandler(t, mock)
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+
+		mock.ExpectExec("UPDATE sessions SET archived_at").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/archive", nil)
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", sessionID.String())
+		ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+		ctx = middleware.WithOrgID(ctx, orgID)
+		ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+		req = req.WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		handler.ArchiveSession(w, req)
+
+		require.Equal(t, http.StatusNotFound, w.Code)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
+func TestSessionHandler_UnarchiveSession(t *testing.T) {
+	t.Parallel()
+
+	t.Run("unarchives session successfully", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		handler := newSessionHandler(t, mock)
+		orgID := uuid.New()
+		sessionID := uuid.New()
+
+		mock.ExpectExec("UPDATE sessions SET archived_at = NULL").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/unarchive", nil)
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", sessionID.String())
+		ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+		ctx = middleware.WithOrgID(ctx, orgID)
+		req = req.WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		handler.UnarchiveSession(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code, "unarchive should return 200")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns 404 when session not found or not archived", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		handler := newSessionHandler(t, mock)
+		orgID := uuid.New()
+		sessionID := uuid.New()
+
+		mock.ExpectExec("UPDATE sessions SET archived_at = NULL").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/unarchive", nil)
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", sessionID.String())
+		ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+		ctx = middleware.WithOrgID(ctx, orgID)
+		req = req.WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		handler.UnarchiveSession(w, req)
+
+		require.Equal(t, http.StatusNotFound, w.Code)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns 400 for invalid session ID", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		handler := newSessionHandler(t, mock)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/not-a-uuid/unarchive", nil)
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", "not-a-uuid")
+		ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+		ctx = middleware.WithOrgID(ctx, uuid.New())
+		req = req.WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		handler.UnarchiveSession(w, req)
+
+		require.Equal(t, http.StatusBadRequest, w.Code)
+	})
 }
 
 func stringPtr(s string) *string {

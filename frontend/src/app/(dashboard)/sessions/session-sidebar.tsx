@@ -1,7 +1,7 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
-import { Plus, Search } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Archive, ArchiveRestore, Plus, Search } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
 import { useMemo, useState } from "react";
@@ -46,6 +46,7 @@ const filterTabs = [
   { value: "working", label: "Working" },
   { value: "failed", label: "Failed" },
   { value: "done", label: "Done" },
+  { value: "archived", label: "Archived" },
 ];
 
 
@@ -150,6 +151,7 @@ function OptimisticSessionRow({ session }: { session: OptimisticSession }) {
 export function SessionSidebar() {
   const params = useParams();
   const pathname = usePathname();
+  const queryClient = useQueryClient();
   const { currentUserFilter, triggeredByUserId, user, setUserFilter } = useSessionUserFilter();
   const selectedId = params?.id as string | undefined;
   const [search, setSearch] = useState("");
@@ -160,6 +162,7 @@ export function SessionSidebar() {
   const { optimisticSessions } = useOptimisticSessions();
 
   const currentFilter = activeFilter ?? "all";
+  const isArchivedView = currentFilter === "archived";
   const statusParam = filterToStatusParam(currentFilter);
 
   // Fetch all sessions (for tab badge counts and the "all" view).
@@ -179,18 +182,47 @@ export function SessionSidebar() {
     enabled: !!statusParam,
   });
 
+  // Fetch archived sessions when the archived tab is active.
+  const { data: archivedData, isLoading: isArchivedLoading } = useQuery({
+    queryKey: [...queryKeys.sessions.list(repo), "archived", triggeredByUserId],
+    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, triggered_by_user_id: triggeredByUserId, only_archived: true }),
+    refetchInterval: 10000,
+    enabled: isArchivedView,
+  });
+
+  const invalidateSessions = () => {
+    queryClient.invalidateQueries({ queryKey: queryKeys.sessions.all });
+  };
+
+  const archiveMutation = useMutation({
+    mutationFn: (sessionId: string) => api.sessions.archive(sessionId),
+    onSuccess: invalidateSessions,
+  });
+
+  const unarchiveMutation = useMutation({
+    mutationFn: (sessionId: string) => api.sessions.unarchive(sessionId),
+    onSuccess: invalidateSessions,
+  });
+
   const allSessions = useMemo(() => allData?.data ?? [], [allData?.data]);
 
   const needsAttentionSessions = allSessions.filter((s) => needsAttentionSet.has(s.status));
   const workingSessions = allSessions.filter((s) => workingSet.has(s.status));
   const failedSessions = allSessions.filter((s) => failedSet.has(s.status));
 
+  // Archived sessions: backend returns only archived sessions via only_archived filter.
+  const archivedSessions = useMemo(
+    () => archivedData?.data ?? [],
+    [archivedData?.data],
+  );
+
   const filteredSessions = useMemo(
     () => {
+      if (isArchivedView) return archivedSessions;
       if (statusParam && filteredData) return filteredData.data;
       return allSessions;
     },
-    [allSessions, filteredData, statusParam],
+    [allSessions, filteredData, statusParam, isArchivedView, archivedSessions],
   );
 
   const displayedSessions = useMemo(() => {
@@ -293,13 +325,13 @@ export function SessionSidebar() {
             <OptimisticSessionRow key={os.id} session={os} />
           ))}
 
-        {isLoading && (
+        {(isLoading || (isArchivedView && isArchivedLoading)) && (
           <div className="px-2 py-8 text-center text-xs text-muted-foreground">
             Loading...
           </div>
         )}
 
-        {!isLoading && displayedSessions.length === 0 && (
+        {!isLoading && !(isArchivedView && isArchivedLoading) && displayedSessions.length === 0 && (
           <div className="px-2 py-8 text-center text-xs text-muted-foreground">
             {allSessions.length === 0 ? "No sessions yet" : "No sessions match this filter."}
           </div>
@@ -311,29 +343,30 @@ export function SessionSidebar() {
           const isWorkingSession = workingSet.has(session.status);
           const hasUnread = isUnread(session);
           const ts = session.completed_at || session.started_at || session.created_at;
+          const isArchived = !!session.archived_at;
 
           return (
-            <Link
-              key={session.id}
-              href={`/sessions/${session.id}`}
-              className={cn(
-                "block rounded-lg px-3 py-2.5 mb-0.5 transition-all duration-150",
-                isSelected
-                  ? "bg-background shadow-sm border border-border/50"
-                  : "hover:bg-background/60"
-              )}
-            >
-              <div className="flex items-start gap-2.5 min-w-0">
-                {/* Unread / working indicator */}
-                <div className="mt-1.5 shrink-0">
-                  {isWorkingSession ? (
-                    <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />
-                  ) : hasUnread ? (
-                    <StatusDot color="bg-primary" />
-                  ) : (
-                    <span className="inline-flex rounded-full h-2 w-2" />
-                  )}
-                </div>
+            <div key={session.id} className="group relative">
+              <Link
+                href={`/sessions/${session.id}`}
+                className={cn(
+                  "block rounded-lg px-3 py-2.5 mb-0.5 transition-all duration-150",
+                  isSelected
+                    ? "bg-background shadow-sm border border-border/50"
+                    : "hover:bg-background/60"
+                )}
+              >
+                <div className="flex items-start gap-2.5 min-w-0">
+                  {/* Unread / working indicator */}
+                  <div className="mt-1.5 shrink-0">
+                    {isWorkingSession ? (
+                      <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />
+                    ) : hasUnread ? (
+                      <StatusDot color="bg-primary" />
+                    ) : (
+                      <span className="inline-flex rounded-full h-2 w-2" />
+                    )}
+                  </div>
 
                 {/* Content */}
                 <div className="min-w-0 flex-1">
@@ -371,7 +404,24 @@ export function SessionSidebar() {
                   )}
                 </div>
               </div>
-            </Link>
+              </Link>
+              {/* Archive / Unarchive button — visible on hover */}
+              <button
+                className="absolute top-2 right-2 hidden group-hover:flex group-focus-within:flex items-center justify-center h-6 w-6 rounded-md bg-background border border-border/60 text-muted-foreground hover:text-foreground hover:bg-accent transition-colors shadow-sm"
+                title={isArchived ? "Unarchive session" : "Archive session"}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  if (isArchived) {
+                    unarchiveMutation.mutate(session.id);
+                  } else {
+                    archiveMutation.mutate(session.id);
+                  }
+                }}
+              >
+                {isArchived ? <ArchiveRestore className="h-3 w-3" /> : <Archive className="h-3 w-3" />}
+              </button>
+            </div>
           );
         })}
       </div>

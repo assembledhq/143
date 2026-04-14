@@ -445,6 +445,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Post("/api/v1/sessions/{id}/end", sessionHandler.EndSession)
 			r.Post("/api/v1/sessions/{id}/retry", sessionHandler.RetrySession)
 			r.Post("/api/v1/sessions/{id}/cancel", sessionHandler.CancelSession)
+			r.Post("/api/v1/sessions/{id}/archive", sessionHandler.ArchiveSession)
+			r.Post("/api/v1/sessions/{id}/unarchive", sessionHandler.UnarchiveSession)
 			r.Post("/api/v1/sessions/{id}/pr", sessionHandler.CreatePR)
 			r.Post("/api/v1/sessions/{id}/threads", sessionThreadHandler.CreateThread)
 			r.Post("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.SendThreadMessage)
