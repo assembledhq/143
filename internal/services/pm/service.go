@@ -403,7 +403,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 
 	plan, err := parsePlan(result.Summary)
 	if err != nil {
-		failSession("parse plan", err)
+		sessionErr := failSession("parse plan", err)
 		logOutput := result.Summary
 		if len(logOutput) > 2000 {
 			logOutput = logOutput[:2000] + "...(truncated)"
@@ -420,7 +420,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		if sessionID != "" {
 			return nil, fmt.Errorf("parse plan [session_id=%s]: %w", sessionID, err)
 		}
-		return nil, fmt.Errorf("parse plan: %w", err)
+		return nil, sessionErr
 	}
 
 	plan.OrgID = orgID
