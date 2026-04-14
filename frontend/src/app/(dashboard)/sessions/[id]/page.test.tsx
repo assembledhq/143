@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { renderWithProviders, screen, userEvent, waitFor } from '@/test/test-utils';
 import { server } from '@/test/mocks/server';
-import { mockSessions, mockMembers } from '@/test/mocks/handlers';
+import { mockSessions, mockMembers, mockIssues } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
 import type { Session, SessionLog, SessionMessage, User, SingleResponse, ListResponse } from '@/lib/types';
 
@@ -202,6 +202,17 @@ describe('SessionDetailPage', () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+      // Return issue without description so no synthetic message is added to timeline
+      http.get('/api/v1/issues/:id', ({ params }) => {
+        const issue = mockIssues.find((i) => i.id === params.id);
+        if (!issue) {
+          return HttpResponse.json(
+            { error: { code: 'NOT_FOUND', message: 'Issue not found' } },
+            { status: 404 },
+          );
+        }
+        return HttpResponse.json({ data: { ...issue, description: '' } } satisfies SingleResponse<typeof issue>);
       }),
     );
 
