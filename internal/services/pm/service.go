@@ -27,7 +27,7 @@ type issueStore interface {
 type sessionStore interface {
 	CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error)
 	Create(ctx context.Context, run *models.Session) error
-	UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string) error
+	UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.SessionResult) error
 	UpdatePMPlanID(ctx context.Context, orgID, runID, planID uuid.UUID) error
 	ListByOrg(ctx context.Context, orgID uuid.UUID, filters db.SessionFilters) ([]models.Session, error)
 	ListRecentByOrg(ctx context.Context, orgID uuid.UUID, statuses []string, limit int) ([]models.Session, error)
@@ -267,19 +267,38 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		pmSession = nil
 	}
 
-	// Helper to mark PM session as failed on early return.
-	failSession := func() {
+	// failSession marks the PM session as failed, capturing the error message on
+	// the session record and writing a session log entry (matching the manual-session
+	// pattern so failures are visible in the UI). It returns a wrapped error for the
+	// caller to return directly, avoiding duplicate format strings at each call site.
+	failSession := func(stage string, cause error) error {
+		errMsg := fmt.Sprintf("%s: %v", stage, cause)
 		if pmSession != nil {
-			if err := s.sessions.UpdateStatus(ctx, orgID, pmSession.ID, "failed"); err != nil {
+			result := &models.SessionResult{
+				Error: strPtr(errMsg),
+			}
+			if err := s.sessions.UpdateResult(ctx, orgID, pmSession.ID, "failed", result); err != nil {
 				s.logger.Error().Err(err).Msg("failed to mark PM session as failed")
 			}
+			// Write an error-level session log so the failure appears in the activity stream.
+			if s.sessionLogs != nil {
+				log := &models.SessionLog{
+					SessionID: pmSession.ID,
+					OrgID:     orgID,
+					Level:     "error",
+					Message:   errMsg,
+				}
+				if err := s.sessionLogs.Create(ctx, log); err != nil {
+					s.logger.Error().Err(err).Msg("failed to write PM failure session log")
+				}
+			}
 		}
+		return fmt.Errorf("%s: %w", stage, cause)
 	}
 
 	ctxBundle, err := s.gatherContext(ctx, orgID, &repo)
 	if err != nil {
-		failSession()
-		return nil, fmt.Errorf("gather context: %w", err)
+		return nil, failSession("gather context", err)
 	}
 
 	sbCfg := pmSandboxConfig()
@@ -302,8 +321,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 
 	sb, err := s.sandbox.Create(ctx, sbCfg)
 	if err != nil {
-		failSession()
-		return nil, fmt.Errorf("create sandbox: %w", err)
+		return nil, failSession("create sandbox", err)
 	}
 	defer func() {
 		if destroyErr := s.sandbox.Destroy(ctx, sb); destroyErr != nil {
@@ -315,14 +333,12 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	if s.github != nil {
 		ghToken, err := s.github.GetInstallationToken(ctx, repo.InstallationID)
 		if err != nil {
-			failSession()
-			return nil, fmt.Errorf("get installation token: %w", err)
+			return nil, failSession("get installation token", err)
 		}
 		token = ghToken
 	}
 	if err := s.sandbox.CloneRepo(ctx, sb, repo.CloneURL, repo.DefaultBranch, token); err != nil {
-		failSession()
-		return nil, fmt.Errorf("clone repo: %w", err)
+		return nil, failSession("clone repo", err)
 	}
 
 	if ctxBundle.productContext != nil {
@@ -339,12 +355,10 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 
 	contextJSON, err := json.Marshal(ctxBundle.pmContext)
 	if err != nil {
-		failSession()
-		return nil, fmt.Errorf("marshal pm context: %w", err)
+		return nil, failSession("marshal pm context", err)
 	}
 	if err := s.sandbox.WriteFile(ctx, sb, "/workspace/.pm-context.json", contextJSON); err != nil {
-		failSession()
-		return nil, fmt.Errorf("write context: %w", err)
+		return nil, failSession("write context to sandbox", err)
 	}
 
 	// Write full Slack thread files to the sandbox for PM drill-down.
@@ -384,13 +398,12 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	close(logCh)
 	logWg.Wait()
 	if err != nil {
-		failSession()
-		return nil, fmt.Errorf("pm agent execution: %w", err)
+		return nil, failSession("pm agent execution", err)
 	}
 
 	plan, err := parsePlan(result.Summary)
 	if err != nil {
-		failSession()
+		sessionErr := failSession("parse plan", err)
 		logOutput := result.Summary
 		if len(logOutput) > 2000 {
 			logOutput = logOutput[:2000] + "...(truncated)"
@@ -407,7 +420,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		if sessionID != "" {
 			return nil, fmt.Errorf("parse plan [session_id=%s]: %w", sessionID, err)
 		}
-		return nil, fmt.Errorf("parse plan: %w", err)
+		return nil, sessionErr
 	}
 
 	plan.OrgID = orgID
@@ -425,12 +438,10 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 
 	planModel, err := planToModel(plan, ctxBundle.productContext)
 	if err != nil {
-		failSession()
-		return nil, fmt.Errorf("serialize plan: %w", err)
+		return nil, failSession("serialize plan", err)
 	}
 	if err := s.plans.Create(ctx, planModel); err != nil {
-		failSession()
-		return nil, fmt.Errorf("persist plan: %w", err)
+		return nil, failSession("persist plan", err)
 	}
 	plan.ID = planModel.ID
 	plan.CreatedAt = planModel.CreatedAt
@@ -453,8 +464,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	}
 
 	if err := s.executePlan(ctx, orgID, plan, ctxBundle.settings, ctxBundle.productContext); err != nil {
-		failSession()
-		return nil, fmt.Errorf("execute plan: %w", err)
+		return nil, failSession("execute plan", err)
 	}
 
 	// Execute project plans if projects feature is enabled.
@@ -479,9 +489,12 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		s.logger.Error().Err(err).Msg("failed to persist completed plan status")
 	}
 
-	// Mark PM session as completed.
+	// Mark PM session as completed, persisting token usage on the session record.
 	if pmSession != nil {
-		if err := s.sessions.UpdateStatus(ctx, orgID, pmSession.ID, "completed"); err != nil {
+		sessionResult := &models.SessionResult{
+			TokenUsage: plan.TokenUsage,
+		}
+		if err := s.sessions.UpdateResult(ctx, orgID, pmSession.ID, "completed", sessionResult); err != nil {
 			s.logger.Error().Err(err).Msg("failed to mark PM session as completed")
 		}
 	}
