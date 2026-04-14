@@ -278,7 +278,7 @@ export function SessionSidebar() {
       </div>
 
       {/* Session list */}
-      <div className="flex-1 overflow-y-auto px-2 pb-2">
+      <div className="flex-1 overflow-y-auto px-2 pt-1 pb-2">
         {/* Ghost "New session" entry when creating */}
         {isNewSession && (
           <Link
