@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -308,6 +310,7 @@ func (m *mockOrphanCloser) CloseOrphans(_ context.Context, startedBefore time.Ti
 }
 
 type mockUsageRoller struct {
+	mu              sync.Mutex
 	rolledHours     []time.Time
 	rollupErrByHour map[time.Time]error
 	deletedCutoffs  []time.Time
@@ -316,13 +319,25 @@ type mockUsageRoller struct {
 
 func (m *mockUsageRoller) RollupAllOrgs(_ context.Context, hour time.Time) error {
 	hour = hour.UTC()
+	m.mu.Lock()
 	m.rolledHours = append(m.rolledHours, hour)
+	m.mu.Unlock()
 	if m.rollupErrByHour != nil {
 		if err := m.rollupErrByHour[hour]; err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// sortedRolledHours returns a sorted copy of rolledHours for deterministic assertions.
+func (m *mockUsageRoller) sortedRolledHours() []time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sorted := make([]time.Time, len(m.rolledHours))
+	copy(sorted, m.rolledHours)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Before(sorted[j]) })
+	return sorted
 }
 
 func (m *mockUsageRoller) DeleteOlderThan(_ context.Context, cutoff time.Time) (int64, error) {
@@ -382,10 +397,11 @@ func TestReapPhase4_CatchesUpMissedHoursFromWatermark(t *testing.T) {
 	// now is 10:35 → lastCompletedHour is 09:00 (truncate to 10:00 then subtract 1h)
 	reaper.reapUsageRollups(context.Background(), time.Date(2026, 4, 10, 10, 35, 0, 0, time.UTC))
 
+	sorted := usageRoller.sortedRolledHours()
 	require.Equal(t, []time.Time{
 		time.Date(2026, 4, 10, 8, 0, 0, 0, time.UTC),
 		time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC),
-	}, usageRoller.rolledHours, "reaper should catch up every missed hour through the last completed hour")
+	}, sorted, "reaper should catch up every missed hour through the last completed hour")
 	require.Equal(t, time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC), reaper.lastRollupHour, "reaper should advance the watermark to lastCompletedHour")
 }
 
@@ -403,7 +419,8 @@ func TestReapPhase4_BackfillsStartupWindowWhenWatermarkMissing(t *testing.T) {
 	// now is 10:35 → lastCompletedHour is 09:00
 	reaper.reapUsageRollups(context.Background(), time.Date(2026, 4, 10, 10, 35, 0, 0, time.UTC))
 
-	require.Len(t, usageRoller.rolledHours, 25, "fresh reaper should backfill a bounded startup window (24h lookback inclusive of both endpoints)")
-	require.Equal(t, time.Date(2026, 4, 9, 9, 0, 0, 0, time.UTC), usageRoller.rolledHours[0], "startup catch-up should begin 24 hours before the last completed hour")
-	require.Equal(t, time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC), usageRoller.rolledHours[len(usageRoller.rolledHours)-1], "startup catch-up should end at the last completed hour")
+	sorted := usageRoller.sortedRolledHours()
+	require.Len(t, sorted, 25, "fresh reaper should backfill a bounded startup window (24h lookback inclusive of both endpoints)")
+	require.Equal(t, time.Date(2026, 4, 9, 9, 0, 0, 0, time.UTC), sorted[0], "startup catch-up should begin 24 hours before the last completed hour")
+	require.Equal(t, time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC), sorted[len(sorted)-1], "startup catch-up should end at the last completed hour")
 }
