@@ -205,7 +205,11 @@ describe('groupByLocalDay', () => {
     // Depending on timezone they may or may not collapse into one day,
     // but verify the aggregation logic works.
     const totalSessions = result.reduce((s, d) => s + d.total_sessions, 0);
-    expect(totalSessions).toBe(8);
+    // Sessions use max-of-hourly (not sum) to avoid double-counting sessions
+    // that span multiple hours. If both hours land on the same day, max(3,5)=5.
+    // If they split across days (timezone-dependent), 3+5=8.
+    expect(totalSessions).toBeGreaterThanOrEqual(5);
+    expect(totalSessions).toBeLessThanOrEqual(8);
   });
 
   it('uses max for peak_concurrent across hours in a day', () => {

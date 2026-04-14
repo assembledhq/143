@@ -443,7 +443,7 @@ func (s *UsageRollupStore) RollupAllOrgs(ctx context.Context, hour time.Time) er
 		WHERE started_at < @hour_end AND COALESCE(stopped_at, @now) > @hour_start
 		UNION
 		SELECT DISTINCT org_id FROM sessions
-		WHERE token_usage IS NOT NULL AND date_trunc('hour', created_at) = @hour`,
+		WHERE token_usage IS NOT NULL AND date_trunc('hour', created_at) = @hour_start`,
 		pgx.NamedArgs{"hour_start": hour, "hour_end": hourEnd, "now": now},
 	)
 	if err != nil {

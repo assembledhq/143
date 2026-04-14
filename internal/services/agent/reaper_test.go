@@ -379,14 +379,14 @@ func TestReapPhase4_CatchesUpMissedHoursFromWatermark(t *testing.T) {
 	)
 	reaper.lastRollupHour = time.Date(2026, 4, 10, 7, 0, 0, 0, time.UTC)
 
+	// now is 10:35 → lastCompletedHour is 09:00 (truncate to 10:00 then subtract 1h)
 	reaper.reapUsageRollups(context.Background(), time.Date(2026, 4, 10, 10, 35, 0, 0, time.UTC))
 
 	require.Equal(t, []time.Time{
 		time.Date(2026, 4, 10, 8, 0, 0, 0, time.UTC),
 		time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC),
-		time.Date(2026, 4, 10, 10, 0, 0, 0, time.UTC),
-	}, usageRoller.rolledHours, "reaper should catch up every missed hour through the current hour")
-	require.Equal(t, time.Date(2026, 4, 10, 10, 0, 0, 0, time.UTC), reaper.lastRollupHour, "reaper should advance the watermark after successful catch-up")
+	}, usageRoller.rolledHours, "reaper should catch up every missed hour through the last completed hour")
+	require.Equal(t, time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC), reaper.lastRollupHour, "reaper should advance the watermark to lastCompletedHour")
 }
 
 func TestReapPhase4_BackfillsStartupWindowWhenWatermarkMissing(t *testing.T) {
@@ -400,9 +400,10 @@ func TestReapPhase4_BackfillsStartupWindowWhenWatermarkMissing(t *testing.T) {
 		WithUsageRoller(usageRoller),
 	)
 
+	// now is 10:35 → lastCompletedHour is 09:00
 	reaper.reapUsageRollups(context.Background(), time.Date(2026, 4, 10, 10, 35, 0, 0, time.UTC))
 
-	require.Len(t, usageRoller.rolledHours, 25, "fresh reaper should backfill a bounded startup window instead of only two hours")
-	require.Equal(t, time.Date(2026, 4, 9, 10, 0, 0, 0, time.UTC), usageRoller.rolledHours[0], "startup catch-up should begin 24 hours before the current hour")
-	require.Equal(t, time.Date(2026, 4, 10, 10, 0, 0, 0, time.UTC), usageRoller.rolledHours[len(usageRoller.rolledHours)-1], "startup catch-up should include the current hour")
+	require.Len(t, usageRoller.rolledHours, 24, "fresh reaper should backfill a bounded startup window")
+	require.Equal(t, time.Date(2026, 4, 9, 9, 0, 0, 0, time.UTC), usageRoller.rolledHours[0], "startup catch-up should begin 24 hours before the last completed hour")
+	require.Equal(t, time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC), usageRoller.rolledHours[len(usageRoller.rolledHours)-1], "startup catch-up should end at the last completed hour")
 }

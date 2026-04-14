@@ -393,7 +393,7 @@ func TestRollupAllOrgs_NoActiveOrgs(t *testing.T) {
 	hour := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
 
 	mock.ExpectQuery("SELECT DISTINCT org_id").
-		WithArgs(pgx.NamedArgs{"hour_start": hour, "hour_end": hour.Add(time.Hour)}).
+		WithArgs(pgx.NamedArgs{"hour_start": hour, "hour_end": hour.Add(time.Hour), "now": pgxmock.AnyArg()}).
 		WillReturnRows(pgxmock.NewRows([]string{"org_id"}))
 
 	err = store.RollupAllOrgs(context.Background(), hour)
@@ -411,7 +411,7 @@ func TestRollupAllOrgs_QueryError(t *testing.T) {
 	hour := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
 
 	mock.ExpectQuery("SELECT DISTINCT org_id").
-		WithArgs(pgx.NamedArgs{"hour_start": hour, "hour_end": hour.Add(time.Hour)}).
+		WithArgs(pgx.NamedArgs{"hour_start": hour, "hour_end": hour.Add(time.Hour), "now": pgxmock.AnyArg()}).
 		WillReturnError(pgx.ErrTxClosed)
 
 	err = store.RollupAllOrgs(context.Background(), hour)
@@ -431,7 +431,7 @@ func TestRollupHour_QueryError(t *testing.T) {
 	hour := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
 
 	mock.ExpectQuery("SELECT").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour_start": hour, "hour_end": hour.Add(time.Hour)}).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour_start": hour, "hour_end": hour.Add(time.Hour), "now": pgxmock.AnyArg()}).
 		WillReturnError(pgx.ErrTxClosed)
 
 	err = store.RollupHour(context.Background(), orgID, hour)
@@ -453,7 +453,7 @@ func TestRollupHour_NoEvents(t *testing.T) {
 	// First query: container events — returns empty
 	eventCols := []string{"id", "session_id", "user_id", "cpu_limit", "memory_limit_mb", "started_at", "stopped_at", "container_minutes", "duration_ms"}
 	mock.ExpectQuery("SELECT").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour_start": hour, "hour_end": hour.Add(time.Hour)}).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour_start": hour, "hour_end": hour.Add(time.Hour), "now": pgxmock.AnyArg()}).
 		WillReturnRows(pgxmock.NewRows(eventCols))
 
 	// Second query: token usage — returns empty
@@ -490,7 +490,7 @@ func TestRollupHour_TokenQueryError(t *testing.T) {
 	// First query: container events — returns empty
 	eventCols := []string{"id", "session_id", "user_id", "cpu_limit", "memory_limit_mb", "started_at", "stopped_at", "container_minutes", "duration_ms"}
 	mock.ExpectQuery("SELECT").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour_start": hour, "hour_end": hour.Add(time.Hour)}).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour_start": hour, "hour_end": hour.Add(time.Hour), "now": pgxmock.AnyArg()}).
 		WillReturnRows(pgxmock.NewRows(eventCols))
 
 	// Second query: token usage — error
@@ -520,7 +520,7 @@ func TestRollupHour_WithEvents(t *testing.T) {
 	// First query: container events — one event
 	eventCols := []string{"id", "session_id", "user_id", "cpu_limit", "memory_limit_mb", "started_at", "stopped_at", "container_minutes", "duration_ms"}
 	mock.ExpectQuery("SELECT").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour_start": hour, "hour_end": hour.Add(time.Hour)}).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour_start": hour, "hour_end": hour.Add(time.Hour), "now": pgxmock.AnyArg()}).
 		WillReturnRows(pgxmock.NewRows(eventCols).AddRow(
 			eventID, sessionID, userID, 2.0, 4096,
 			hour, hour.Add(30*time.Minute), 30.0, 1800000.0,
@@ -666,13 +666,20 @@ func TestGetBreakdown_UserDimension(t *testing.T) {
 	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
 
+	args := pgx.NamedArgs{"org_id": orgID, "start": start, "end": end, "limit": 50, "now": pgxmock.AnyArg()}
+
+	// Grand total query
+	mock.ExpectQuery("SELECT COALESCE\\(SUM").
+		WithArgs(args).
+		WillReturnRows(pgxmock.NewRows([]string{"total"}).AddRow(100.0))
+
 	cols := []string{
 		"key", "label",
 		"total_container_minutes", "total_sessions", "total_container_starts",
 		"peak_concurrent", "total_input_tokens", "total_output_tokens", "total_llm_cost_usd",
 	}
-	mock.ExpectQuery("SELECT").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "start": start, "end": end, "limit": 50}).
+	mock.ExpectQuery("WITH session_counts").
+		WithArgs(args).
 		WillReturnRows(pgxmock.NewRows(cols).
 			AddRow("u1", "alice@test.com", 60.0, 3, 3, 1, int64(1000), int64(500), 0.50).
 			AddRow("u2", "bob@test.com", 40.0, 2, 2, 1, int64(800), int64(400), 0.30))
@@ -697,13 +704,20 @@ func TestGetBreakdown_CapacityDimension(t *testing.T) {
 	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
 
+	args := pgx.NamedArgs{"org_id": orgID, "start": start, "end": end, "limit": 10, "now": pgxmock.AnyArg()}
+
+	// Grand total query
+	mock.ExpectQuery("SELECT COALESCE\\(SUM").
+		WithArgs(args).
+		WillReturnRows(pgxmock.NewRows([]string{"total"}).AddRow(100.0))
+
 	cols := []string{
 		"key", "label",
 		"total_container_minutes", "total_sessions", "total_container_starts",
 		"peak_concurrent", "total_input_tokens", "total_output_tokens", "total_llm_cost_usd",
 	}
-	mock.ExpectQuery("SELECT").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "start": start, "end": end, "limit": 10}).
+	mock.ExpectQuery("WITH session_counts").
+		WithArgs(args).
 		WillReturnRows(pgxmock.NewRows(cols).
 			AddRow("2cpu_4096mb", "2cpu_4096mb", 100.0, 5, 5, 2, int64(2000), int64(1000), 1.0))
 
@@ -725,8 +739,16 @@ func TestGetBreakdown_QueryError(t *testing.T) {
 	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
 
-	mock.ExpectQuery("SELECT").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "start": start, "end": end, "limit": 50}).
+	args := pgx.NamedArgs{"org_id": orgID, "start": start, "end": end, "limit": 50, "now": pgxmock.AnyArg()}
+
+	// Grand total query succeeds
+	mock.ExpectQuery("SELECT COALESCE\\(SUM").
+		WithArgs(args).
+		WillReturnRows(pgxmock.NewRows([]string{"total"}).AddRow(100.0))
+
+	// Main breakdown query fails
+	mock.ExpectQuery("WITH session_counts").
+		WithArgs(args).
 		WillReturnError(pgx.ErrTxClosed)
 
 	_, err = store.GetBreakdown(context.Background(), orgID, start, end, "user", "minutes_desc", 50)
@@ -843,13 +865,20 @@ func TestGetBreakdown_EmptyResult(t *testing.T) {
 	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
 
+	args := pgx.NamedArgs{"org_id": orgID, "start": start, "end": end, "limit": 50, "now": pgxmock.AnyArg()}
+
+	// Grand total query
+	mock.ExpectQuery("SELECT COALESCE\\(SUM").
+		WithArgs(args).
+		WillReturnRows(pgxmock.NewRows([]string{"total"}).AddRow(0.0))
+
 	cols := []string{
 		"key", "label",
 		"total_container_minutes", "total_sessions", "total_container_starts",
 		"peak_concurrent", "total_input_tokens", "total_output_tokens", "total_llm_cost_usd",
 	}
-	mock.ExpectQuery("SELECT").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "start": start, "end": end, "limit": 50}).
+	mock.ExpectQuery("WITH session_counts").
+		WithArgs(args).
 		WillReturnRows(pgxmock.NewRows(cols))
 
 	rows, err := store.GetBreakdown(context.Background(), orgID, start, end, "user", "tokens_desc", 50)
