@@ -77,6 +77,9 @@ else
   echo "Skipping secret refresh (no SOPS key or .env.production.enc not found)."
 fi
 
+# Sync compose file so the remote always runs the latest version
+scp "${SCP_OPTS[@]}" "$PROJECT_DIR/$COMPOSE_FILE" deploy@"$HOST":/opt/143/
+
 ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "COMPOSE_FILE=$COMPOSE_FILE" "HEALTH_SERVICE=$HEALTH_SERVICE" "ROLE=$ROLE" "IMAGE_TAG=$TAG" \
   bash << 'REMOTE'
