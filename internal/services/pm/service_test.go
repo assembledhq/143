@@ -30,8 +30,10 @@ func (m *mockIssueStore) UpdateStatus(ctx context.Context, orgID, issueID uuid.U
 }
 
 type mockSessionStore struct {
-	created []*models.Session
-	running int
+	created          []*models.Session
+	running          int
+	lastResult       *models.SessionResult
+	lastResultStatus string
 }
 
 func (m *mockSessionStore) CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error) {
@@ -51,7 +53,9 @@ func (m *mockSessionStore) ListRecentByOrg(ctx context.Context, orgID uuid.UUID,
 	return nil, nil
 }
 
-func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string) error {
+func (m *mockSessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.SessionResult) error {
+	m.lastResult = result
+	m.lastResultStatus = status
 	return nil
 }
 
@@ -196,4 +200,49 @@ func TestExecutePlan_ManualAutonomySkipsDelegation(t *testing.T) {
 
 	runStore := svc.sessions.(*mockSessionStore)
 	require.Len(t, runStore.created, 0, "should not create agent runs in manual mode")
+}
+
+type mockSessionLogStore struct {
+	logs []*models.SessionLog
+}
+
+func (m *mockSessionLogStore) Create(ctx context.Context, log *models.SessionLog) error {
+	m.logs = append(m.logs, log)
+	return nil
+}
+
+func TestAnalyze_FailSessionRecordsError(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	sessions := &mockSessionStore{}
+	logStore := &mockSessionLogStore{}
+
+	svc := &Service{
+		sessions:    sessions,
+		sessionLogs: logStore,
+		orgs:        &failingOrgStore{}, // gatherContext will fail on GetByID
+		repos:       &mockRepoStore{repos: []models.Repository{{ID: repoID, Status: "active"}}},
+		sandbox:     &mockSandbox{},
+		adapter:     &mockAdapter{},
+		logger:      zerolog.Nop(),
+	}
+
+	_, err := svc.Analyze(context.Background(), orgID, models.PMTriggerCron, nil)
+	require.Error(t, err, "Analyze should fail")
+	require.Contains(t, err.Error(), "gather context")
+
+	// Verify session was created, then marked failed with error via UpdateResult.
+	require.Len(t, sessions.created, 1, "PM session should be created")
+	require.Equal(t, "failed", sessions.lastResultStatus, "session should be marked failed")
+	require.NotNil(t, sessions.lastResult, "UpdateResult should have been called")
+	require.NotNil(t, sessions.lastResult.Error, "error message should be set on session")
+	require.Contains(t, *sessions.lastResult.Error, "gather context", "error should describe the failure stage")
+	require.Contains(t, *sessions.lastResult.Error, "org not found", "error should include the underlying cause")
+
+	// Verify an error-level session log was written.
+	require.Len(t, logStore.logs, 1, "should write one session log entry")
+	require.Equal(t, "error", logStore.logs[0].Level, "log should be error level")
+	require.Contains(t, logStore.logs[0].Message, "gather context", "log message should describe failure")
 }
