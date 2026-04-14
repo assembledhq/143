@@ -26,10 +26,16 @@ type mockSchedulerLock struct{}
 func (m *mockSchedulerLock) TryAcquire(ctx context.Context) (bool, error) { return true, nil }
 func (m *mockSchedulerLock) Release(ctx context.Context) error            { return nil }
 
-type mockJobs struct{}
+type mockJobs struct {
+	failedJob *models.LatestJobError
+}
 
 func (m *mockJobs) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
 	return uuid.New(), nil
+}
+
+func (m *mockJobs) GetLatestFailedByType(ctx context.Context, orgID uuid.UUID, jobType string) (*models.LatestJobError, error) {
+	return m.failedJob, nil
 }
 
 type mockOrgs struct {
@@ -80,6 +86,10 @@ type trackingJobs struct {
 func (m *trackingJobs) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
 	m.enqueued = append(m.enqueued, jobType)
 	return uuid.New(), nil
+}
+
+func (m *trackingJobs) GetLatestFailedByType(ctx context.Context, orgID uuid.UUID, jobType string) (*models.LatestJobError, error) {
+	return nil, nil
 }
 
 type mockPMDocs struct {
@@ -385,4 +395,52 @@ func TestScheduler_ShouldRunPM_Overdue(t *testing.T) {
 	run, err := s.shouldRunPM(context.Background(), uuid.New(), now, 4*time.Hour)
 	require.NoError(t, err, "shouldRunPM should not error")
 	require.True(t, run, "should run when schedule interval elapsed")
+}
+
+func TestScheduler_ShouldRunPM_RecentFailure(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	failedAt := now.Add(-30 * time.Minute) // failed 30 min ago
+	s := &Scheduler{
+		lock: &mockSchedulerLock{},
+		jobs: &mockJobs{failedJob: &models.LatestJobError{
+			JobID:     uuid.New(),
+			LastError: "sandbox error",
+			UpdatedAt: failedAt,
+		}},
+		orgs:         &mockOrgs{},
+		integrations: &mockIntegrations{},
+		plans:        &mockPlanStore{err: pgx.ErrNoRows}, // no successful plan
+		repos:        &mockRepos{},
+		logger:       zerolog.Nop(),
+	}
+
+	run, err := s.shouldRunPM(context.Background(), uuid.New(), now, 4*time.Hour)
+	require.NoError(t, err, "shouldRunPM should not error")
+	require.False(t, run, "should not run when a recent failure exists within the interval")
+}
+
+func TestScheduler_ShouldRunPM_OldFailure(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	failedAt := now.Add(-5 * time.Hour) // failed 5 hours ago
+	s := &Scheduler{
+		lock: &mockSchedulerLock{},
+		jobs: &mockJobs{failedJob: &models.LatestJobError{
+			JobID:     uuid.New(),
+			LastError: "sandbox error",
+			UpdatedAt: failedAt,
+		}},
+		orgs:         &mockOrgs{},
+		integrations: &mockIntegrations{},
+		plans:        &mockPlanStore{err: pgx.ErrNoRows}, // no successful plan
+		repos:        &mockRepos{},
+		logger:       zerolog.Nop(),
+	}
+
+	run, err := s.shouldRunPM(context.Background(), uuid.New(), now, 4*time.Hour)
+	require.NoError(t, err, "shouldRunPM should not error")
+	require.True(t, run, "should run when the failure is older than the interval")
 }

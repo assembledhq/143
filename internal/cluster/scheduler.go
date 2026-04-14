@@ -15,6 +15,7 @@ import (
 
 type schedulerJobStore interface {
 	Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
+	GetLatestFailedByType(ctx context.Context, orgID uuid.UUID, jobType string) (*models.LatestJobError, error)
 }
 
 type schedulerOrgStore interface {
@@ -323,13 +324,39 @@ func (s *Scheduler) scheduleContextRefreshes(ctx context.Context, orgIDs []uuid.
 	}
 }
 
+// shouldRunPM checks whether PM analysis should be enqueued for the given org.
+// It respects the configured interval for both successful plans and recent failures,
+// preventing a retry storm when PM Analysis is persistently failing.
+//
+// NOTE: this is an org-level check. When repos have custom PM settings, a failure
+// from any single repo's job will delay retries for the entire org. If per-repo
+// backoff is needed in the future, failure checks should move into the per-repo loop.
 func (s *Scheduler) shouldRunPM(ctx context.Context, orgID uuid.UUID, now time.Time, interval time.Duration) (bool, error) {
 	plan, err := s.plans.GetLatestByOrg(ctx, orgID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return true, nil
-		}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return false, err
 	}
-	return plan.CreatedAt.Add(interval).Before(now), nil
+
+	// If the latest successful plan is recent enough, skip.
+	if err == nil && plan.CreatedAt.Add(interval).After(now) {
+		return false, nil
+	}
+
+	// Also check the latest failed job — if it failed recently, don't retry
+	// until the interval has elapsed. This prevents a storm of retries when
+	// PM Analysis is persistently failing (e.g. sandbox issues).
+	failedJob, err := s.jobs.GetLatestFailedByType(ctx, orgID, models.JobTypePMAnalyze)
+	if err != nil {
+		return false, err
+	}
+	if failedJob != nil && failedJob.UpdatedAt.Add(interval).After(now) {
+		s.logger.Debug().
+			Str("org_id", orgID.String()).
+			Time("failed_at", failedJob.UpdatedAt).
+			Str("error", failedJob.LastError).
+			Msg("skipping PM analysis: recent failure within interval")
+		return false, nil
+	}
+
+	return true, nil
 }
