@@ -99,14 +99,14 @@ export function ProjectSidebar() {
             placeholder="Search projects..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-full h-8 pl-8 pr-3 rounded-md border border-border bg-background text-[13px] placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
+            className="w-full h-8 pl-8 pr-3 rounded-md border border-border bg-background text-xs placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
           />
         </div>
 
         {/* New project button */}
         <Link
           href="/projects/new"
-          className="flex items-center justify-center gap-2 w-full h-9 rounded-md border border-border bg-background text-[13px] font-medium text-foreground hover:bg-accent transition-colors shadow-sm"
+          className="flex items-center justify-center gap-2 w-full h-9 rounded-md border border-border bg-background text-xs font-medium text-foreground hover:bg-accent transition-colors shadow-sm"
         >
           <Plus className="h-4 w-4" />
           New project
@@ -164,7 +164,7 @@ export function ProjectSidebar() {
           >
             <div className="flex items-center gap-2.5 min-w-0">
               <span className="inline-flex rounded-full h-2 w-2 border border-muted-foreground/30 shrink-0" />
-              <p className="text-[13px] text-muted-foreground/50 italic">
+              <p className="text-xs text-muted-foreground/50 italic">
                 New project
               </p>
             </div>
@@ -222,7 +222,7 @@ export function ProjectSidebar() {
 
                 {/* Content */}
                 <div className="min-w-0 flex-1">
-                  <p className="text-[13px] font-medium text-foreground truncate leading-snug">
+                  <p className="text-xs font-medium text-foreground truncate leading-snug">
                     {project.title}
                   </p>
 

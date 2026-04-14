@@ -96,7 +96,7 @@ export default function AuditLogPage() {
             title="Audit log"
             description="View all activity across your organization."
           />
-          <div className="rounded-md bg-muted px-3 py-2 text-[13px] text-muted-foreground">
+          <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
             Only admins can view audit logs.
           </div>
         </div>
@@ -185,7 +185,7 @@ export default function AuditLogPage() {
         {/* Entries */}
         <div className="rounded-lg border border-border bg-card shadow-sm">
           {error ? (
-            <div className="rounded-md bg-destructive/10 px-3 py-2 text-[13px] text-destructive m-3">
+            <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive m-3">
               Failed to load audit logs.
             </div>
           ) : isLoading && cursors.length === 0 ? (

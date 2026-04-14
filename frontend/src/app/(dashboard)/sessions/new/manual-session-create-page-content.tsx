@@ -308,7 +308,7 @@ export function ManualSessionCreatePageContent() {
       <div className="flex-1 flex flex-col items-center justify-center px-6 pb-4">
         <div className="text-center mb-8">
           <p className="text-3xl font-semibold tracking-tight bg-[image:var(--gradient-primary)] bg-clip-text text-transparent">Let&apos;s build</p>
-          <p className="mt-2 text-sm text-muted-foreground">Start a manual session with text, files, photos, or dictation.</p>
+          <p className="mt-2 text-xs text-muted-foreground">Start a manual session with text, files, photos, or dictation.</p>
         </div>
       </div>
 
@@ -351,7 +351,7 @@ export function ManualSessionCreatePageContent() {
               }}
               placeholder="Tell the agent what to do..."
               rows={1}
-              className="min-h-[44px] resize-none border-none bg-transparent px-0 py-2 text-sm shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0"
+              className="min-h-[44px] resize-none border-none bg-transparent px-0 py-2 text-xs shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0"
               aria-label="Manual session prompt"
             />
 
@@ -439,7 +439,7 @@ export function ManualSessionCreatePageContent() {
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="h-8 gap-1.5 rounded-full px-3 text-[13px] text-muted-foreground hover:text-foreground"
+                      className="h-8 gap-1.5 rounded-full px-3 text-xs text-muted-foreground hover:text-foreground"
                     >
                       <GitBranch className="h-3.5 w-3.5" />
                       <span>{selectedRepo ? selectedRepo.full_name.split("/").pop() : "Select repo"}</span>
@@ -475,7 +475,7 @@ export function ManualSessionCreatePageContent() {
                       value={selectedBranch}
                       onChange={(e) => setSelectedBranch(e.target.value)}
                       placeholder={selectedRepo.default_branch || "main"}
-                      className="h-7 w-36 text-[13px] px-2"
+                      className="h-7 w-36 text-xs px-2"
                       aria-label="Target branch"
                     />
                   </div>
@@ -485,7 +485,7 @@ export function ManualSessionCreatePageContent() {
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="h-8 gap-1.5 rounded-full px-3 text-[13px] text-muted-foreground hover:text-foreground"
+                        className="h-8 gap-1.5 rounded-full px-3 text-xs text-muted-foreground hover:text-foreground"
                         aria-label="Target branch"
                       >
                         <GitBranch className="h-3.5 w-3.5" />
@@ -516,7 +516,7 @@ export function ManualSessionCreatePageContent() {
               )}
 
               <Select value={selectedModel} onValueChange={(v) => setSelectedModel(v === "__default__" ? "" : v)}>
-                <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-[13px] text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
+                <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
                   <SelectValue placeholder="Default model" />
                 </SelectTrigger>
                 <SelectContent>

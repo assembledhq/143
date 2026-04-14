@@ -338,7 +338,7 @@ export default function CreateEvalTaskPage() {
           <Card>
             <CardContent className="space-y-4">
               <h3 className="text-sm font-semibold">Review your eval task</h3>
-              <div className="grid gap-3 md:grid-cols-2 text-[13px]">
+              <div className="grid gap-3 md:grid-cols-2 text-xs">
                 <div><span className="text-muted-foreground">Name:</span> {name}</div>
                 <div><span className="text-muted-foreground">Complexity:</span> {complexity}</div>
                 <div><span className="text-muted-foreground">Base commit:</span> <span className="font-mono">{baseCommitSha.slice(0, 8)}</span></div>
@@ -347,10 +347,10 @@ export default function CreateEvalTaskPage() {
               </div>
               <div>
                 <span className="text-xs text-muted-foreground">Issue description</span>
-                <p className="mt-1 text-[13px] whitespace-pre-wrap line-clamp-4">{issueDescription}</p>
+                <p className="mt-1 text-xs whitespace-pre-wrap line-clamp-4">{issueDescription}</p>
               </div>
               {createMutation.isError && (
-                <div className="rounded-md bg-destructive/10 px-3 py-2 text-[13px] text-destructive">
+                <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
                   {createMutation.error instanceof Error
                     ? createMutation.error.message
                     : "Failed to create eval task. Please try again."}
