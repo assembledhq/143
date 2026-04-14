@@ -65,9 +65,8 @@ describe('SessionSidebar', () => {
     await screen.findByText('Fixed TypeError by adding null check');
 
     expect(screen.getByRole('tab', { name: 'All' })).toBeInTheDocument();
-    expect(screen.getAllByText('Needs attention').length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText('Working').length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText('Done').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('Active').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('Archived').length).toBeGreaterThanOrEqual(1);
   });
 
   it('uses a left-aligned horizontal-only tab scroller', async () => {
