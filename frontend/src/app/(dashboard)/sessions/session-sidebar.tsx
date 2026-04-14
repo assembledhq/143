@@ -17,9 +17,8 @@ import { useOptimisticSessions, type OptimisticSession } from "@/contexts/optimi
 import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
 import type { SessionListItem } from "@/lib/types";
 import {
-  needsAttentionSet,
+  activeSet,
   workingSet,
-  failedSet,
   filterToStatusParam,
 } from "@/lib/session-status-groups";
 
@@ -42,10 +41,7 @@ const statusConfig: Record<string, { dot: string; label: string }> = {
 
 const filterTabs = [
   { value: "all", label: "All" },
-  { value: "needs_attention", label: "Needs attention" },
-  { value: "working", label: "Working" },
-  { value: "failed", label: "Failed" },
-  { value: "done", label: "Done" },
+  { value: "active", label: "Active" },
   { value: "archived", label: "Archived" },
 ];
 
@@ -206,9 +202,7 @@ export function SessionSidebar() {
 
   const allSessions = useMemo(() => allData?.data ?? [], [allData?.data]);
 
-  const needsAttentionSessions = allSessions.filter((s) => needsAttentionSet.has(s.status));
-  const workingSessions = allSessions.filter((s) => workingSet.has(s.status));
-  const failedSessions = allSessions.filter((s) => failedSet.has(s.status));
+  const activeSessions = allSessions.filter((s) => activeSet.has(s.status));
 
   // Archived sessions: backend returns only archived sessions via only_archived filter.
   const archivedSessions = useMemo(
@@ -281,20 +275,13 @@ export function SessionSidebar() {
           <TabsList size="sm" className="overflow-x-auto overflow-y-hidden">
             {filterTabs.map((tab) => {
               const count =
-                tab.value === "needs_attention" ? needsAttentionSessions.length
-                : tab.value === "working" ? workingSessions.length
-                : tab.value === "failed" ? failedSessions.length
+                tab.value === "active" ? activeSessions.length
                 : 0;
               return (
                 <TabsTrigger key={tab.value} value={tab.value}>
                   {tab.label}
                   {count > 0 && (
-                    <span className={cn(
-                      "rounded-full text-white text-xs leading-none px-1.5 py-0.5",
-                      tab.value === "needs_attention" ? "bg-orange-500"
-                      : tab.value === "failed" ? "bg-destructive"
-                      : "bg-primary"
-                    )}>{count}</span>
+                    <span className="rounded-full text-white text-xs leading-none px-1.5 py-0.5 bg-primary">{count}</span>
                   )}
                 </TabsTrigger>
               );
@@ -320,7 +307,7 @@ export function SessionSidebar() {
           </Link>
         )}
 
-        {(currentFilter === "all" || currentFilter === "working") &&
+        {(currentFilter === "all" || currentFilter === "active") &&
           optimisticSessions.map((os) => (
             <OptimisticSessionRow key={os.id} session={os} />
           ))}
