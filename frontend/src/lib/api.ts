@@ -205,7 +205,7 @@ export const api = {
       del(`/api/v1/pm/documents/${docId}`),
   },
   sessions: {
-    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; triggered_by_user_id?: string; search?: string }) => {
+    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; triggered_by_user_id?: string; search?: string; include_archived?: boolean; only_archived?: boolean }) => {
       const searchParams = new URLSearchParams();
       if (params?.status) searchParams.set('status', params.status);
       if (params?.cursor) searchParams.set('cursor', params.cursor);
@@ -213,6 +213,8 @@ export const api = {
       if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
       if (params?.triggered_by_user_id) searchParams.set('triggered_by_user_id', params.triggered_by_user_id);
       if (params?.search) searchParams.set('search', params.search);
+      if (params?.only_archived) searchParams.set('only_archived', 'true');
+      else if (params?.include_archived) searchParams.set('include_archived', 'true');
       const qs = searchParams.toString();
       return get<import('./types').ListResponse<import('./types').SessionListItem>>(`/api/v1/sessions${qs ? `?${qs}` : ''}`);
     },
@@ -238,6 +240,10 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${sessionId}/retry`),
     cancelSession: (sessionId: string) =>
       post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${sessionId}/cancel`),
+    archive: (sessionId: string) =>
+      post<{ status: string }>(`/api/v1/sessions/${sessionId}/archive`, {}),
+    unarchive: (sessionId: string) =>
+      post<{ status: string }>(`/api/v1/sessions/${sessionId}/unarchive`, {}),
     // Thread endpoints
     listThreads: (sessionId: string) =>
       get<import('./types').ListResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads`),

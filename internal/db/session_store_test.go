@@ -21,7 +21,7 @@ var sessionTestColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
-	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "deleted_at", "created_at",
+	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "deleted_at", "created_at",
 }
 
 func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []interface{} {
@@ -40,6 +40,7 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 		nil, // diff_stats
 		nil, // diff_history
 		nil, // input_manifest
+		nil, nil, // archived_at, archived_by_user_id
 		nil, // deleted_at
 		now,
 	}
@@ -547,4 +548,83 @@ func TestSessionStore_ListExpiredSnapshots(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, sessions, 0)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionStore_Archive(t *testing.T) {
+	t.Parallel()
+
+	t.Run("archives session successfully", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		store := NewSessionStore(mock)
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+
+		mock.ExpectExec("UPDATE sessions SET archived_at").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		err = store.Archive(context.Background(), orgID, sessionID, userID)
+		require.NoError(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns error when session not found or already archived", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		store := NewSessionStore(mock)
+
+		mock.ExpectExec("UPDATE sessions SET archived_at").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+		err = store.Archive(context.Background(), uuid.New(), uuid.New(), uuid.New())
+		require.ErrorIs(t, err, ErrSessionAlreadyArchived)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
+func TestSessionStore_Unarchive(t *testing.T) {
+	t.Parallel()
+
+	t.Run("unarchives session successfully", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		store := NewSessionStore(mock)
+
+		mock.ExpectExec("UPDATE sessions SET archived_at = NULL, archived_by_user_id = NULL").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		err = store.Unarchive(context.Background(), uuid.New(), uuid.New())
+		require.NoError(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns error when session not found or not archived", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		store := NewSessionStore(mock)
+
+		mock.ExpectExec("UPDATE sessions SET archived_at = NULL").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+		err = store.Unarchive(context.Background(), uuid.New(), uuid.New())
+		require.ErrorIs(t, err, ErrSessionNotArchived)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
 }
