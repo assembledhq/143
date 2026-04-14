@@ -361,6 +361,13 @@ type WebhookDelivery struct {
 	CreatedAt      time.Time       `db:"created_at" json:"created_at"`
 }
 
+// LatestJobError holds the error and timestamp from the most recent failed job.
+type LatestJobError struct {
+	JobID     uuid.UUID
+	LastError string
+	UpdatedAt time.Time
+}
+
 // Job type constants for async work queue items.
 const (
 	JobTypePMAnalyze        = "pm_analyze"

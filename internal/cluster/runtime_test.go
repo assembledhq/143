@@ -48,6 +48,10 @@ func (m *schedulerRuntimeJobsMock) Enqueue(ctx context.Context, orgID uuid.UUID,
 	return uuid.New(), nil
 }
 
+func (m *schedulerRuntimeJobsMock) GetLatestFailedByType(ctx context.Context, orgID uuid.UUID, jobType string) (*models.LatestJobError, error) {
+	return nil, nil
+}
+
 type schedulerRuntimeOrgStoreMock struct {
 	orgByID map[uuid.UUID]models.Organization
 	errByID map[uuid.UUID]error
