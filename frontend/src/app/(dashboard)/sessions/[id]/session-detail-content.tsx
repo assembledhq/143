@@ -82,6 +82,11 @@ const agentTypeLabels: Record<string, string> = {
   custom: "Custom",
 };
 
+function hasMeaningfulDuration(startedAt?: string, completedAt?: string): boolean {
+  if (!startedAt || !completedAt) return false;
+  return new Date(completedAt).getTime() - new Date(startedAt).getTime() >= 1000;
+}
+
 function formatDuration(startedAt?: string, completedAt?: string): string {
   if (!startedAt) return "-";
   const start = new Date(startedAt);
@@ -266,16 +271,32 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
 
       {/* Timestamps — secondary reference data */}
       <div className="flex items-center gap-x-4 gap-y-1 flex-wrap text-xs text-muted-foreground px-1">
-        <span className="inline-flex items-center gap-1.5">
-          <Timer className="h-3 w-3" />
-          {formatDuration(session.started_at, session.completed_at)}
-        </span>
+        {/* Hide duration for failed/cancelled sessions with no meaningful runtime */}
+        {!((session.status === "failed" || session.status === "cancelled") &&
+          !hasMeaningfulDuration(session.started_at, session.completed_at)) && (
+          <span className="inline-flex items-center gap-1.5">
+            <Timer className="h-3 w-3" />
+            {formatDuration(session.started_at, session.completed_at)}
+          </span>
+        )}
         <span className="inline-flex items-center gap-1.5">
           {session.completed_at ? (
-            <>
-              <CheckCircle2 className="h-3 w-3" />
-              Completed {formatTimeAgo(session.completed_at)}
-            </>
+            session.status === "failed" ? (
+              <>
+                <XCircle className="h-3 w-3" />
+                Failed {formatTimeAgo(session.completed_at)}
+              </>
+            ) : session.status === "cancelled" ? (
+              <>
+                <MinusCircle className="h-3 w-3" />
+                Cancelled {formatTimeAgo(session.completed_at)}
+              </>
+            ) : (
+              <>
+                <CheckCircle2 className="h-3 w-3" />
+                Completed {formatTimeAgo(session.completed_at)}
+              </>
+            )
           ) : session.started_at ? (
             <>
               <Clock className="h-3 w-3" />
