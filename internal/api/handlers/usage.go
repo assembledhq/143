@@ -458,7 +458,7 @@ func (h *UsageHandler) ExportCSV(w http.ResponseWriter, r *http.Request) {
 				countMap[countKey{date: c.LocalDate, email: c.UserEmail, capacity: c.CapacityTier}] = c.Sessions
 			}
 			for _, key := range dailyOrder {
-				if count, ok := countMap[countKey{date: key.date, email: key.email, capacity: key.capacity}]; ok {
+				if count, ok := countMap[countKey(key)]; ok {
 					dailyAgg[key].sessions = count
 				}
 			}
