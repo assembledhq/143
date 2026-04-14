@@ -172,7 +172,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
                 <XCircle className="h-3.5 w-3.5" />
                 Failure details
                 {session.failure_category && (
-                  <Badge variant="secondary" className="bg-destructive/10 text-destructive border-destructive/20 text-xs">
+                  <Badge variant="secondary" className="bg-destructive/10 text-destructive border-destructive/20 text-sm">
                     {session.failure_category}
                   </Badge>
                 )}
@@ -195,7 +195,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
             {/* Show next steps only for non-codex-auth failures (codex auth has the reauth button instead) */}
             {!isCodexAuthFailure && session.failure_next_steps && session.failure_next_steps.length > 0 && (
               <div>
-                <p className="text-xs font-medium text-muted-foreground mb-1">Next steps</p>
+                <p className="text-sm font-medium text-muted-foreground mb-1">Next steps</p>
                 <ul className="list-disc list-inside text-sm space-y-1">
                   {session.failure_next_steps.map((step, i) => (
                     <li key={i}>{step}</li>
@@ -236,7 +236,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
       <Card>
         <CardContent className="p-4">
           <div className="flex items-center gap-3 flex-wrap">
-            <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${status.color}`}>
+            <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-sm font-medium ${status.color}`}>
               {isActive && (
                 <span className="relative mr-1.5 flex h-2 w-2">
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
@@ -264,7 +264,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
       </Card>
 
       {/* Timestamps — secondary reference data */}
-      <div className="flex items-center gap-x-4 gap-y-1 flex-wrap text-xs text-muted-foreground px-1">
+      <div className="flex items-center gap-x-4 gap-y-1 flex-wrap text-sm text-muted-foreground px-1">
         <span className="inline-flex items-center gap-1.5">
           <Timer className="h-3 w-3" />
           {formatDuration(session.started_at, session.completed_at)}
@@ -293,13 +293,13 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
           <CardContent className="space-y-3 text-sm">
             {session.pm_reasoning && (
               <div>
-                <p className="text-xs font-medium text-muted-foreground">Why this was prioritized</p>
+                <p className="text-sm font-medium text-muted-foreground">Why this was prioritized</p>
                 <p>{session.pm_reasoning}</p>
               </div>
             )}
             {session.pm_approach && (
               <div>
-                <p className="text-xs font-medium text-muted-foreground">Suggested approach</p>
+                <p className="text-sm font-medium text-muted-foreground">Suggested approach</p>
                 <p>{session.pm_approach}</p>
               </div>
             )}
@@ -1528,7 +1528,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </TabsList>
               {hasPR && prData?.data?.github_pr_url ? (
                 <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
-                  <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5">
+                  <Button variant="outline" size="sm" className="h-7 text-sm gap-1.5">
                     <ExternalLink className="h-3 w-3" />
                     View PR
                   </Button>
@@ -1537,7 +1537,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 <Button
                   variant="outline"
                   size="sm"
-                  className="h-7 text-xs gap-1.5"
+                  className="h-7 text-sm gap-1.5"
                   disabled={
                     createPRMutation.isPending ||
                     (ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected)
