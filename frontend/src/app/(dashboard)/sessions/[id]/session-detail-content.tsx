@@ -78,6 +78,7 @@ const agentTypeLabels: Record<string, string> = {
   claude_code: "Claude Code",
   codex: "Codex",
   gemini_cli: "Gemini CLI",
+  pm_agent: "PM Agent",
   custom: "Custom",
 };
 
@@ -172,7 +173,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
                 <XCircle className="h-3.5 w-3.5" />
                 Failure details
                 {session.failure_category && (
-                  <Badge variant="secondary" className="bg-destructive/10 text-destructive border-destructive/20 text-sm">
+                  <Badge variant="secondary" className="bg-destructive/10 text-destructive border-destructive/20 text-xs">
                     {session.failure_category}
                   </Badge>
                 )}
@@ -234,9 +235,9 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
 
       {/* Session vitals — primary info row */}
       <Card>
-        <CardContent className="p-4">
-          <div className="flex items-center gap-3 flex-wrap">
-            <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-sm font-medium ${status.color}`}>
+        <CardContent className="px-3 py-2.5">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${status.color}`}>
               {isActive && (
                 <span className="relative mr-1.5 flex h-2 w-2">
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
@@ -245,17 +246,17 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
               )}
               {status.label}
             </span>
-            <span className="h-4 w-px bg-border" />
-            <span className="inline-flex items-center gap-1.5 text-sm">
-              <Cpu className="h-3.5 w-3.5 text-muted-foreground" />
+            <span className="h-3.5 w-px bg-border" />
+            <span className="inline-flex items-center gap-1.5 text-xs">
+              <Cpu className="h-3 w-3 text-muted-foreground" />
               <span className="font-medium">{agentTypeLabels[session.agent_type] || session.agent_type}</span>
             </span>
-            <span className="h-4 w-px bg-border" />
-            <span className="inline-flex items-center gap-1.5 text-sm">
+            <span className="h-3.5 w-px bg-border" />
+            <span className="inline-flex items-center gap-1.5 text-xs">
               {session.pm_plan_id && !session.triggered_by_user_id ? (
-                <Bot className="h-3.5 w-3.5 text-primary" />
+                <Bot className="h-3 w-3 text-primary" />
               ) : (
-                <UserIcon className="h-3.5 w-3.5 text-muted-foreground" />
+                <UserIcon className="h-3 w-3 text-muted-foreground" />
               )}
               <span className="font-medium">{triggeredByLabel}</span>
             </span>
@@ -264,7 +265,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
       </Card>
 
       {/* Timestamps — secondary reference data */}
-      <div className="flex items-center gap-x-4 gap-y-1 flex-wrap text-sm text-muted-foreground px-1">
+      <div className="flex items-center gap-x-4 gap-y-1 flex-wrap text-xs text-muted-foreground px-1">
         <span className="inline-flex items-center gap-1.5">
           <Timer className="h-3 w-3" />
           {formatDuration(session.started_at, session.completed_at)}
