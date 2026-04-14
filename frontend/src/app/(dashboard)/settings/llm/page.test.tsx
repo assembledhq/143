@@ -144,15 +144,22 @@ describe("LLMPage", () => {
   it("renders provider card names and descriptions for all providers", async () => {
     renderWithProviders(<LLMPage />);
 
-    // Use findByText for all assertions — the component triggers multiple
-    // async queries whose resolution can re-render the tree, so elements
-    // may not be present on the first render pass.
-    expect(await screen.findByText("Anthropic")).toBeInTheDocument();
-    expect(await screen.findByText("OpenAI")).toBeInTheDocument();
-    expect(await screen.findByText("OpenRouter")).toBeInTheDocument();
-    expect(await screen.findByText("Claude models (Opus, Sonnet, Haiku)")).toBeInTheDocument();
-    expect(await screen.findByText("GPT-4o and O3 models")).toBeInTheDocument();
-    expect(await screen.findByText("Access all models with a single key")).toBeInTheDocument();
+    // The component fires multiple async queries that trigger re-renders,
+    // which can cause intermediate states where card content is incomplete.
+    // Wait for ALL expected texts to be present in a single check to avoid
+    // catching a transient mid-render state.
+    await waitFor(() => {
+      for (const text of [
+        "Anthropic",
+        "OpenAI",
+        "OpenRouter",
+        "Claude models (Opus, Sonnet, Haiku)",
+        "GPT-4o and O3 models",
+        "Access all models with a single key",
+      ]) {
+        expect(screen.getByText(text)).toBeInTheDocument();
+      }
+    }, { timeout: 3000 });
   });
 
   it("renders input fields with correct placeholders for each provider", async () => {
