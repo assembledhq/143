@@ -118,7 +118,7 @@ export function ProjectSidebar() {
           onValueChange={(v) => setActiveFilter(v === "all" ? null : v)}
           className="gap-0"
         >
-          <TabsList size="sm" className="overflow-y-hidden">
+          <TabsList size="sm" className="overflow-x-auto overflow-y-hidden">
             {filterTabs.map((tab) => {
               const count =
                 tab.value === "active" ? activeCount
