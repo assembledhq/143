@@ -55,23 +55,27 @@ const filterTabs = [
   { value: "all", label: "All" },
   { value: "needs_attention", label: "Action needed" },
   { value: "working", label: "Working" },
+  { value: "failed", label: "Failed" },
   { value: "done", label: "Done" },
   { value: "decisions", label: "Decisions" },
 ];
 
-// Status groups — keep in sync with models.NeedsAttentionStatuses / WorkingStatuses / DoneStatuses.
-const needsAttentionStatuses = ["awaiting_input", "needs_human_guidance", "failed"];
+// Status groups — keep in sync with models.NeedsAttentionStatuses / WorkingStatuses / FailedStatuses / DoneStatuses.
+const needsAttentionStatuses = ["awaiting_input", "needs_human_guidance"];
 const workingStatuses = ["pending", "running"];
+const failedStatuses = ["failed"];
 const doneStatuses = ["completed", "pr_created", "cancelled", "skipped", "idle"];
 
 const needsAttentionSet = new Set(needsAttentionStatuses);
 const workingSet = new Set(workingStatuses);
+const failedSet = new Set(failedStatuses);
 
 /** Map a filter tab value to the comma-separated status string for the API. */
 function filterToStatusParam(filter: string | null): string | undefined {
   if (!filter || filter === "all" || filter === "decisions") return undefined;
   if (filter === "needs_attention") return needsAttentionStatuses.join(",");
   if (filter === "working") return workingStatuses.join(",");
+  if (filter === "failed") return failedStatuses.join(",");
   if (filter === "done") return doneStatuses.join(",");
   return filter;
 }
@@ -261,6 +265,7 @@ export function SessionsPageContent() {
 
   const needsAttentionSessions = allSessions.filter((s) => needsAttentionSet.has(s.status));
   const workingSessions = allSessions.filter((s) => workingSet.has(s.status));
+  const failedSessions = allSessions.filter((s) => failedSet.has(s.status));
 
   const filteredSessions = useMemo(
     () => {
@@ -299,6 +304,7 @@ export function SessionsPageContent() {
             const count =
               tab.value === "needs_attention" ? needsAttentionSessions.length
               : tab.value === "working" ? workingSessions.length
+              : tab.value === "failed" ? failedSessions.length
               : 0;
             return (
               <button
@@ -315,6 +321,7 @@ export function SessionsPageContent() {
                   {count > 0 && (
                     <span className={`rounded-full text-white text-xs leading-none px-1.5 py-0.5 font-normal ${
                       tab.value === "needs_attention" ? "bg-orange-500"
+                      : tab.value === "failed" ? "bg-destructive"
                       : "bg-primary"
                     }`}>{count}</span>
                   )}
