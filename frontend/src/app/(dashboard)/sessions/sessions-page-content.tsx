@@ -34,9 +34,8 @@ import { useSessionUserFilter } from "@/hooks/use-session-user-filter";
 import { SessionOwnerToggle } from "./session-owner-toggle";
 import type { Session, User } from "@/lib/types";
 import {
-  needsAttentionSet,
+  activeSet,
   workingSet,
-  failedSet,
   filterToStatusParam as baseFilterToStatusParam,
 } from "@/lib/session-status-groups";
 
@@ -59,10 +58,7 @@ const statusConfig: Record<string, { dot: string; text: string; bg: string; labe
 
 const filterTabs = [
   { value: "all", label: "All" },
-  { value: "needs_attention", label: "Action needed" },
-  { value: "working", label: "Working" },
-  { value: "failed", label: "Failed" },
-  { value: "done", label: "Done" },
+  { value: "active", label: "Active" },
   { value: "decisions", label: "Decisions" },
 ];
 
@@ -254,9 +250,8 @@ export function SessionsPageContent() {
   const allSessions = useMemo(() => allData?.data ?? [], [allData?.data]);
   const members = useMemo(() => membersData?.data ?? [], [membersData?.data]);
 
-  const needsAttentionSessions = allSessions.filter((s) => needsAttentionSet.has(s.status));
+  const activeSessions = allSessions.filter((s) => activeSet.has(s.status));
   const workingSessions = allSessions.filter((s) => workingSet.has(s.status));
-  const failedSessions = allSessions.filter((s) => failedSet.has(s.status));
 
   const filteredSessions = useMemo(
     () => {
@@ -293,9 +288,7 @@ export function SessionsPageContent() {
           {filterTabs.map((tab) => {
             const isSelected = currentFilter === tab.value;
             const count =
-              tab.value === "needs_attention" ? needsAttentionSessions.length
-              : tab.value === "working" ? workingSessions.length
-              : tab.value === "failed" ? failedSessions.length
+              tab.value === "active" ? activeSessions.length
               : 0;
             return (
               <button
@@ -310,11 +303,7 @@ export function SessionsPageContent() {
                 <span className="flex items-center gap-1.5">
                   {tab.label}
                   {count > 0 && (
-                    <span className={`rounded-full text-white text-xs leading-none px-1.5 py-0.5 font-normal ${
-                      tab.value === "needs_attention" ? "bg-orange-500"
-                      : tab.value === "failed" ? "bg-destructive"
-                      : "bg-primary"
-                    }`}>{count}</span>
+                    <span className="rounded-full text-white text-xs leading-none px-1.5 py-0.5 font-normal bg-primary">{count}</span>
                   )}
                 </span>
                 {isSelected && (
