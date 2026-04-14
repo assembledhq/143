@@ -431,7 +431,7 @@ function BootstrapDetailSheet({
     });
   }, []);
 
-  const MAX_SSE_RECONNECT_ATTEMPTS = 5;
+  const MAX_SSE_RECONNECT_ATTEMPTS = 3;
 
   useEffect(() => {
     const sessionId = bootstrap.session_id;

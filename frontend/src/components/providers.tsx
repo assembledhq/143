@@ -7,7 +7,19 @@ import { ErrorBoundary } from "@/components/error-boundary";
 import { ThemeProvider } from "@/components/theme-provider";
 
 export function Providers({ children }: { children: React.ReactNode }) {
-  const [queryClient] = useState(() => new QueryClient());
+  const [queryClient] = useState(
+    () =>
+      new QueryClient({
+        defaultOptions: {
+          queries: {
+            retry: 2,
+          },
+          mutations: {
+            retry: 0,
+          },
+        },
+      })
+  );
 
   useEffect(() => {
     // ── P-80 Shooting Star easter egg ──────────────────────────────────────────
