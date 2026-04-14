@@ -136,9 +136,27 @@ func TestPreviewHandler_StartPreview_InvalidBody(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-func TestPreviewHandler_StartPreview_MissingConfig(t *testing.T) {
+func TestPreviewHandler_StartPreview_DefaultConfig(t *testing.T) {
 	t.Parallel()
-	h := newPreviewTestHandlerWithManager()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	// The handler now applies a default config and proceeds to session lookup.
+	// Expect the query to return no rows → 404 SESSION_NOT_FOUND.
+	mock.ExpectQuery("SELECT").WillReturnError(pgxmock.ErrCancelled)
+
+	m := preview.NewManager(preview.ManagerConfig{
+		Logger:       zerolog.Nop(),
+		WorkerNodeID: "test",
+	})
+	sessionStore := db.NewSessionStore(mock)
+	h := &PreviewHandler{
+		manager:      m,
+		sessionStore: sessionStore,
+		logger:       zerolog.Nop(),
+	}
 
 	sessionID := uuid.New()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/preview",
@@ -153,12 +171,7 @@ func TestPreviewHandler_StartPreview_MissingConfig(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.StartPreview(w, req)
 
-	require.Equal(t, http.StatusBadRequest, w.Code)
-
-	var resp models.ErrorResponse
-	err := json.NewDecoder(w.Body).Decode(&resp)
-	require.NoError(t, err)
-	require.Equal(t, "MISSING_CONFIG", resp.Error.Code)
+	require.Equal(t, http.StatusNotFound, w.Code)
 }
 
 func TestPreviewHandler_ManagerNotConfigured(t *testing.T) {

@@ -151,12 +151,8 @@ export function VisualEditingPanel({
   const [dirtyFields, setDirtyFields] = useState<Set<string>>(new Set());
   const [applyError, setApplyError] = useState<string | null>(null);
 
-  // Reset state when a different element is selected
-  useEffect(() => {
-    setEditState(initStateFromElement(element));
-    setDirtyFields(new Set());
-    setApplyError(null);
-  }, [element]);
+  // State is reset when a different element is selected because the
+  // parent renders this component with key={selector}, causing a remount.
 
   // Validation
   const validationErrors = useMemo(() => {

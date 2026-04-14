@@ -336,6 +336,7 @@ export function DesignModeOverlay({
       {showEditPanel && primarySelected && (
         <div className="absolute bottom-2 left-[304px] pointer-events-auto">
           <VisualEditingPanel
+            key={primarySelected.selector}
             sessionId={sessionId}
             element={primarySelected.info}
             selector={primarySelected.selector}

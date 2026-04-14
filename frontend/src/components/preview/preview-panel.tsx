@@ -224,13 +224,12 @@ export function PreviewPanel({
 
   // Reset bootstrapComplete when preview transitions away from ready
   // (e.g., backend restart) so the loading overlay shows for the new iframe.
+  // Uses a ref to detect the transition without calling setState inside an effect.
   const prevIsReady = useRef(isReady);
-  useEffect(() => {
-    if (prevIsReady.current && !isReady) {
-      setBootstrapComplete(false);
-    }
-    prevIsReady.current = isReady;
-  }, [isReady]);
+  if (prevIsReady.current && !isReady) {
+    setBootstrapComplete(false);
+  }
+  prevIsReady.current = isReady;
 
   // Track pending load listener for cleanup
   const pendingLoadCleanupRef = useRef<(() => void) | null>(null);
