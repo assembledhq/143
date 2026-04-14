@@ -353,7 +353,7 @@ func TestSessionHandler_List_WithCursor(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, nil, nil,
 				nil, 0, nil, "none", nil,
-				nil, nil, nil, nil, nil, nil, nil, now,
+				nil, nil, nil, nil, nil, nil, nil, nil, nil, now,
 			),
 		)
 
