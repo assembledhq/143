@@ -132,6 +132,12 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 		filters.CursorID = &id
 	}
 
+	if r.URL.Query().Get("only_archived") == "true" {
+		filters.OnlyArchived = true
+	} else if r.URL.Query().Get("include_archived") == "true" {
+		filters.IncludeArchived = true
+	}
+
 	if statusParam := r.URL.Query().Get("status"); statusParam != "" {
 		for _, s := range strings.Split(statusParam, ",") {
 			s = strings.TrimSpace(s)
@@ -1288,6 +1294,59 @@ func manualSessionTitle(message string) string {
 	}
 
 	return strings.TrimSpace(trimmed[:120]) + "..."
+}
+
+// ArchiveSession marks a session as archived, hiding it from default list views.
+func (h *SessionHandler) ArchiveSession(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user not authenticated")
+		return
+	}
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+
+	if err := h.runStore.Archive(r.Context(), orgID, sessionID, user.ID); err != nil {
+		if errors.Is(err, db.ErrSessionAlreadyArchived) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found or already archived")
+		} else {
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to archive session")
+		}
+		return
+	}
+
+	sessionIDStr := sessionID.String()
+	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionArchived, models.AuditResourceSession, &sessionIDStr, &sessionID, nil, nil)
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// UnarchiveSession removes the archived flag from a session.
+func (h *SessionHandler) UnarchiveSession(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+
+	if err := h.runStore.Unarchive(r.Context(), orgID, sessionID); err != nil {
+		if errors.Is(err, db.ErrSessionNotArchived) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found or not archived")
+		} else {
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to unarchive session")
+		}
+		return
+	}
+
+	sessionIDStr := sessionID.String()
+	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionUnarchived, models.AuditResourceSession, &sessionIDStr, &sessionID, nil, nil)
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // gitRefPattern validates git ref names. Allows alphanumeric, dots, hyphens,
