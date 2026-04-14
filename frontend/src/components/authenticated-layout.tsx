@@ -147,7 +147,6 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                 {orgName}
               </span>
             </Link>
-            <RepoContextSwitcher />
           </div>
           <TooltipProvider>
             <div className="flex items-center gap-0.5">
@@ -210,6 +209,11 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
           })}
           <SidebarSettingsSection pathname={pathname} userRole={user?.role} />
         </nav>
+
+        {/* Repo context switcher */}
+        <div className="relative px-2 pb-1 border-t border-border/50 pt-2">
+          <RepoContextSwitcher />
+        </div>
 
         {/* User menu */}
         <div className="relative px-2 pb-3 border-t border-border/50 pt-2">
