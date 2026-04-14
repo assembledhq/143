@@ -130,7 +130,7 @@ function OptimisticSessionRow({ session }: { session: OptimisticSession }) {
           </span>
         </div>
         <div className="min-w-0 flex-1">
-          <p className="text-[13px] font-medium text-foreground truncate leading-snug">
+          <p className="text-xs font-medium text-foreground truncate leading-snug">
             {session.title}
           </p>
           <div className="flex items-center gap-3 mt-0.5">
@@ -221,7 +221,7 @@ export function SessionSidebar() {
                   e.currentTarget.blur();
                 }
               }}
-              className="w-full h-8 pl-8 pr-3 rounded-md border border-border bg-background text-[13px] placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
+              className="w-full h-8 pl-8 pr-3 rounded-md border border-border bg-background text-xs placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
             />
           </div>
           <SessionOwnerToggle
@@ -234,7 +234,7 @@ export function SessionSidebar() {
         {/* New session button */}
         <Link
           href="/sessions/new"
-          className="flex items-center justify-center gap-2 w-full h-9 rounded-md border border-border bg-background text-[13px] font-medium text-foreground hover:bg-accent transition-colors shadow-sm"
+          className="flex items-center justify-center gap-2 w-full h-9 rounded-md border border-border bg-background text-xs font-medium text-foreground hover:bg-accent transition-colors shadow-sm"
         >
           <Plus className="h-4 w-4" />
           New session
@@ -281,7 +281,7 @@ export function SessionSidebar() {
           >
             <div className="flex items-center gap-2.5 min-w-0">
               <span className="inline-flex rounded-full h-2 w-2 border border-muted-foreground/30 shrink-0" />
-              <p className="text-[13px] text-muted-foreground/50 italic">
+              <p className="text-xs text-muted-foreground/50 italic">
                 New session
               </p>
             </div>
@@ -339,7 +339,7 @@ export function SessionSidebar() {
                 <div className="min-w-0 flex-1">
                   <div className="flex items-start justify-between gap-2">
                     <p className={cn(
-                      "text-[13px] font-medium truncate leading-snug",
+                      "text-xs font-medium truncate leading-snug",
                       hasUnread || isWorkingSession ? "text-foreground" : "text-muted-foreground"
                     )}>
                       {sessionTitle(session)}

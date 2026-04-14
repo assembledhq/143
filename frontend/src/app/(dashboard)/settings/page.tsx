@@ -35,12 +35,12 @@ function PRAuthorshipSettings() {
 
   return (
     <section className="space-y-3">
-      <h2 className="text-[13px] font-medium text-foreground">Pull request defaults</h2>
+      <h2 className="text-xs font-medium text-foreground">Pull request defaults</h2>
       <Card>
         <CardContent className="space-y-4">
           <div className="space-y-2">
             <Label>PR authorship</Label>
-            <p className="text-[13px] text-muted-foreground">
+            <p className="text-xs text-muted-foreground">
               Controls who appears as the author when 143 creates a pull request.
             </p>
             <div className="space-y-1.5">
@@ -60,7 +60,7 @@ function PRAuthorshipSettings() {
                     className="mt-0.5"
                   />
                   <div>
-                    <span className="text-[13px] font-medium">{option.label}</span>
+                    <span className="text-xs font-medium">{option.label}</span>
                     <p className="text-xs text-muted-foreground">{option.description}</p>
                   </div>
                 </label>
@@ -106,7 +106,7 @@ export default function SettingsPage() {
         />
 
         <section className="space-y-3">
-          <h2 className="text-[13px] font-medium text-foreground">Organization</h2>
+          <h2 className="text-xs font-medium text-foreground">Organization</h2>
           <Card>
             <CardContent>
               <div className="max-w-[560px] space-y-2">

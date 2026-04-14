@@ -41,7 +41,7 @@ export function AutonomySlider({ value, onChange }: AutonomySliderProps) {
             )}
           >
             <div className={cn(
-              "text-[13px] font-medium",
+              "text-xs font-medium",
               value === level.value ? "text-primary" : "text-foreground"
             )}>
               {level.label}

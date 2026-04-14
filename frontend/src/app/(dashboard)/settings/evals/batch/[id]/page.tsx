@@ -104,7 +104,7 @@ export default function BatchDetailPage() {
             <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Comparison matrix</h2>
             <Card>
               <CardContent className="p-0 overflow-x-auto">
-                <table className="w-full text-[13px]">
+                <table className="w-full text-xs">
                   <thead>
                     <tr className="border-b border-border bg-muted/30">
                       <th className="text-left px-4 py-2 text-xs font-medium text-muted-foreground uppercase tracking-wider">Task</th>
@@ -158,7 +158,7 @@ export default function BatchDetailPage() {
                           .filter((r): r is EvalRun => r != null && r.passed != null);
                         const passed = runs.filter((r) => r.passed).length;
                         return (
-                          <td key={label} className="text-center px-4 py-3 text-[13px]">
+                          <td key={label} className="text-center px-4 py-3 text-xs">
                             {runs.length > 0 ? `${passed}/${runs.length}` : "-"}
                           </td>
                         );

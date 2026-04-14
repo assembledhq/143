@@ -126,7 +126,7 @@ export default function EvalTaskDetailPage() {
                       </AlertDialogDescription>
                     </AlertDialogHeader>
                     {archiveMutation.isError && (
-                      <div className="rounded-md bg-destructive/10 px-3 py-2 text-[13px] text-destructive">
+                      <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
                         Failed to archive eval task. Please try again.
                       </div>
                     )}
@@ -151,7 +151,7 @@ export default function EvalTaskDetailPage() {
           <div className="flex items-center gap-3 rounded-lg border border-orange-200 bg-orange-50 px-4 py-3 dark:border-orange-800 dark:bg-orange-950/30">
             <AlertTriangle className="h-4 w-4 text-orange-600 dark:text-orange-400 shrink-0" />
             <div>
-              <p className="text-[13px] font-medium text-orange-800 dark:text-orange-300">Snapshot broken</p>
+              <p className="text-xs font-medium text-orange-800 dark:text-orange-300">Snapshot broken</p>
               <p className="text-xs text-orange-700 dark:text-orange-400">
                 The base commit ({task.base_commit_sha.slice(0, 8)}) is no longer reachable. This usually happens after a force-push. Runs for this task will fail.
               </p>
@@ -175,18 +175,18 @@ export default function EvalTaskDetailPage() {
                 </div>
                 <div>
                   <span className="text-xs text-muted-foreground">Source</span>
-                  <p className="text-[13px]">
+                  <p className="text-xs">
                     {evalSourceConfig[task.source].label}
                     {task.source_pr_number ? ` (PR #${task.source_pr_number})` : ""}
                   </p>
                 </div>
                 <div>
                   <span className="text-xs text-muted-foreground">Base commit</span>
-                  <p className="text-[13px] font-mono">{task.base_commit_sha.slice(0, 8)}</p>
+                  <p className="text-xs font-mono">{task.base_commit_sha.slice(0, 8)}</p>
                 </div>
                 <div>
                   <span className="text-xs text-muted-foreground">Pass threshold</span>
-                  <p className="text-[13px]">{(task.pass_threshold * 100).toFixed(0)}%</p>
+                  <p className="text-xs">{(task.pass_threshold * 100).toFixed(0)}%</p>
                 </div>
               </div>
               {task.tags && task.tags.length > 0 && (
@@ -208,7 +208,7 @@ export default function EvalTaskDetailPage() {
           <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Issue description</h2>
           <Card>
             <CardContent>
-              <p className="text-[13px] whitespace-pre-wrap">{task.issue_description}</p>
+              <p className="text-xs whitespace-pre-wrap">{task.issue_description}</p>
             </CardContent>
           </Card>
         </section>
@@ -227,7 +227,7 @@ export default function EvalTaskDetailPage() {
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
-                      <span className="text-[13px] font-medium">{criterion.name}</span>
+                      <span className="text-xs font-medium">{criterion.name}</span>
                       <Badge variant="secondary" className="text-xs">
                         {criterion.grader_type === "code_check" ? "Code check" : "LLM judge"}
                       </Badge>
@@ -289,11 +289,11 @@ function EvalRunRow({ run }: { run: EvalRun }) {
           {statusStyle.label}
         </span>
       </span>
-      <span className="flex-1 text-[13px] font-mono">{run.model}</span>
-      <span className="w-20 text-right text-[13px]">
+      <span className="flex-1 text-xs font-mono">{run.model}</span>
+      <span className="w-20 text-right text-xs">
         {run.final_score != null ? `${(run.final_score * 100).toFixed(0)}%` : "-"}
       </span>
-      <span className="w-16 text-right text-[13px]">
+      <span className="w-16 text-right text-xs">
         {run.passed != null ? (
           run.passed ? (
             <span className="text-emerald-600 dark:text-emerald-400">Pass</span>
@@ -374,7 +374,7 @@ function RunEvalDialog({ taskId }: { taskId: string }) {
           </div>
         </div>
         {runMutation.isError && (
-          <div className="rounded-md bg-destructive/10 px-3 py-2 text-[13px] text-destructive">
+          <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
             Failed to start eval run. Please try again.
           </div>
         )}

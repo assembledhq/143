@@ -59,7 +59,7 @@ export function AgentStatusBar({ label, pmStatus, agentStatus, children }: Agent
         <StatusDot color={dotColor} />
       )}
 
-      <span className="text-[13px] font-medium text-foreground">{label}</span>
+      <span className="text-xs font-medium text-foreground">{label}</span>
 
       <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${
         isRunning ? "bg-primary/10 text-primary shadow-[var(--glow-primary-sm)]"

@@ -191,7 +191,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                 key={item.href}
                 href={item.href}
                 className={cn(
-                  "relative flex items-center gap-2.5 rounded-md px-2.5 py-[7px] text-[13px] font-medium transition-colors duration-150",
+                  "relative flex items-center gap-2.5 rounded-md px-2.5 py-[7px] text-xs font-medium transition-colors duration-150",
                   isActive
                     ? "bg-sidebar-accent text-sidebar-accent-foreground"
                     : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground"
@@ -223,7 +223,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                 <Button
                   variant="ghost"
                   size="sm"
-                  className="h-8 w-full justify-start gap-2 rounded-md px-2.5 text-[13px] font-medium transition-colors duration-150 text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                  className="h-8 w-full justify-start gap-2 rounded-md px-2.5 text-xs font-medium transition-colors duration-150 text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
                 >
                   {user.avatar_url ? (
                     /* eslint-disable-next-line @next/next/no-img-element */

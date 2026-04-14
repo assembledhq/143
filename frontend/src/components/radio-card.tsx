@@ -28,7 +28,7 @@ export function RadioCard({
       <div className="flex items-center gap-2">
         <RadioGroupItem value={value} {...(ariaLabel ? { "aria-label": ariaLabel } : {})} />
         {icon}
-        <span className="text-[13px] font-medium">{label}</span>
+        <span className="text-xs font-medium">{label}</span>
       </div>
       {description && (
         <span className={`mt-1 ${indent} text-xs text-muted-foreground`}>

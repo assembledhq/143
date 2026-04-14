@@ -36,7 +36,7 @@ export function FileDiffHeader({ filePath, added, removed, className, onBrowseFi
       )}
     >
       <div className="flex items-center gap-2 min-w-0">
-        <span className="text-[13px] font-medium font-mono text-foreground truncate">
+        <span className="text-xs font-medium font-mono text-foreground truncate">
           {filePath}
         </span>
         <DiffStatsBadge added={added} removed={removed} />
