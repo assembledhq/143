@@ -176,7 +176,7 @@ func TestInjectSecurityHeaders(t *testing.T) {
 	h := make(http.Header)
 	gw.injectSecurityHeaders(h)
 
-	require.Contains(t, h.Get("X-Frame-Options"), "ALLOW-FROM https://app.143.dev")
+	// X-Frame-Options ALLOW-FROM is deprecated; only CSP frame-ancestors is set.
 	require.Contains(t, h.Get("Content-Security-Policy"), "frame-ancestors https://app.143.dev")
 	require.Equal(t, "no-referrer", h.Get("Referrer-Policy"))
 	require.Equal(t, "nosniff", h.Get("X-Content-Type-Options"))

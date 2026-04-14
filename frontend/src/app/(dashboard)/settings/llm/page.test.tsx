@@ -146,12 +146,12 @@ describe("LLMPage", () => {
 
     await waitFor(() => {
       expect(screen.getByText("Anthropic")).toBeInTheDocument();
+      expect(screen.getByText("OpenAI")).toBeInTheDocument();
+      expect(screen.getByText("OpenRouter")).toBeInTheDocument();
+      expect(screen.getByText("Claude models (Opus, Sonnet, Haiku)")).toBeInTheDocument();
+      expect(screen.getByText("GPT-4o and O3 models")).toBeInTheDocument();
+      expect(screen.getByText("Access all models with a single key")).toBeInTheDocument();
     });
-    expect(screen.getByText("OpenAI")).toBeInTheDocument();
-    expect(screen.getByText("OpenRouter")).toBeInTheDocument();
-    expect(screen.getByText("Claude models (Opus, Sonnet, Haiku)")).toBeInTheDocument();
-    expect(screen.getByText("GPT-4o and O3 models")).toBeInTheDocument();
-    expect(screen.getByText("Access all models with a single key")).toBeInTheDocument();
   });
 
   it("renders input fields with correct placeholders for each provider", async () => {
