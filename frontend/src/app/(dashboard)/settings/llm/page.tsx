@@ -237,7 +237,7 @@ export default function LLMPage() {
                     </Badge>
                   )}
                 </div>
-                <ul className="text-xs text-muted-foreground space-y-1 ml-1">
+                <ul className="text-xs text-muted-foreground space-y-1">
                   <li>Session titles</li>
                   <li>PR descriptions</li>
                   <li>Project generation</li>
@@ -287,7 +287,6 @@ export default function LLMPage() {
                               </Badge>
                             )}
                           </div>
-                          <p className="text-xs text-muted-foreground mt-0.5">{info.description}</p>
                         </div>
                         {ps?.orgConfigured && (
                           <Button
@@ -317,7 +316,7 @@ export default function LLMPage() {
                             onChange={(e) =>
                               setApiKeys((prev) => ({ ...prev, [provider]: e.target.value }))
                             }
-                            className="pr-9 font-mono text-xs"
+                            className="h-8 pr-9 font-mono text-xs"
                           />
                           <button
                             type="button"
@@ -334,13 +333,13 @@ export default function LLMPage() {
                           </button>
                         </div>
                         <Button
-                          size="sm"
                           onClick={() => handleSaveKey(provider)}
                           disabled={!apiKeys[provider]?.trim() || status === "saving"}
                         >
                           {status === "saving" ? "Saving..." : "Save key"}
                         </Button>
                       </div>
+                      <p className="text-xs text-muted-foreground">{info.description}</p>
                       {status === "success" && (
                         <p className="text-xs text-emerald-600 dark:text-emerald-400">Key saved successfully.</p>
                       )}

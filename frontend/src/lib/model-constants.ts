@@ -91,6 +91,6 @@ export const OPENAI_API_TYPE_CHAT = "chat";
 
 export const LLM_PROVIDER_INFO: Record<string, { name: string; description: string; keyPlaceholder: string }> = {
   anthropic: { name: "Anthropic", description: "Claude models (Opus, Sonnet, Haiku)", keyPlaceholder: "sk-ant-..." },
-  openai: { name: "OpenAI", description: "GPT-4o and O3 models", keyPlaceholder: "sk-..." },
+  openai: { name: "OpenAI", description: "OpenAI models (GPT series)", keyPlaceholder: "sk-..." },
   openrouter: { name: "OpenRouter", description: "Access all models with a single key", keyPlaceholder: "sk-or-..." },
 };
