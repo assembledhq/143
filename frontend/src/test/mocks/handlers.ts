@@ -215,6 +215,33 @@ export const mockMembers: User[] = [
 ];
 
 export const handlers = [
+  http.get('/api/v1/auth/me', () => {
+    return HttpResponse.json({
+      data: mockMembers[0],
+    } satisfies SingleResponse<User>);
+  }),
+
+  http.post('/api/v1/sessions/:id/view', () => {
+    return new HttpResponse(null, { status: 204 });
+  }),
+
+  http.get('/api/v1/users/me/github-status', () => {
+    return HttpResponse.json({
+      data: { connected: true, username: 'alice' },
+    });
+  }),
+
+  http.get('/api/v1/issues/:id', ({ params }) => {
+    const issue = mockIssues.find((i) => i.id === params.id);
+    if (!issue) {
+      return HttpResponse.json(
+        { error: { code: 'NOT_FOUND', message: 'Issue not found' } },
+        { status: 404 },
+      );
+    }
+    return HttpResponse.json({ data: issue } satisfies SingleResponse<Issue>);
+  }),
+
   http.get('/api/v1/issues', () => {
     return HttpResponse.json({
       data: mockIssues,
