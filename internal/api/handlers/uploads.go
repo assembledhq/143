@@ -107,15 +107,9 @@ func (h *UploadHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ServeUpload handles GET /api/v1/uploads/files/* — serves locally-stored uploads.
-// Only functional when using FileUploadStore.
+// ServeUpload handles GET /api/v1/uploads/files/* — serves uploaded files.
+// Works with both local filesystem and S3 storage backends.
 func (h *UploadHandler) ServeUpload(w http.ResponseWriter, r *http.Request) {
-	fileStore, ok := h.store.(*storage.FileUploadStore)
-	if !ok {
-		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "file serving not available in S3 mode")
-		return
-	}
-
 	// Extract the file key from the URL path after /api/v1/uploads/files/
 	key := strings.TrimPrefix(r.URL.Path, "/api/v1/uploads/files/")
 	if key == "" || strings.Contains(key, "..") {
@@ -130,7 +124,7 @@ func (h *UploadHandler) ServeUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fileStore.ServeFile(w, r, key)
+	h.store.Serve(w, r, key)
 }
 
 func extensionFromMIME(mime string) string {

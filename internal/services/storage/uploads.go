@@ -6,8 +6,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -23,24 +25,27 @@ type UploadStore interface {
 
 	// URL returns the public URL for a previously-uploaded file.
 	URL(key string) string
+
+	// Serve writes the file contents to the response. Implementations may
+	// serve directly (local filesystem) or proxy from object storage (S3).
+	Serve(w http.ResponseWriter, r *http.Request, key string)
 }
 
 // S3UploadStore stores uploads in an S3-compatible bucket.
 type S3UploadStore struct {
-	client   S3Client
-	bucket   string
-	prefix   string
-	endpoint string // base URL for constructing public URLs
+	client  S3Client
+	bucket  string
+	prefix  string
+	baseURL string // backend URL prefix for proxied file serving
 }
 
 // NewS3UploadStore creates an S3UploadStore.
-// endpoint is the base URL for the bucket (e.g. "https://mybucket.s3.amazonaws.com").
-func NewS3UploadStore(client S3Client, bucket, prefix, endpoint string) *S3UploadStore {
+func NewS3UploadStore(client S3Client, bucket, prefix string) *S3UploadStore {
 	return &S3UploadStore{
-		client:   client,
-		bucket:   bucket,
-		prefix:   strings.TrimSuffix(prefix, "/"),
-		endpoint: strings.TrimSuffix(endpoint, "/"),
+		client:  client,
+		bucket:  bucket,
+		prefix:  strings.TrimSuffix(prefix, "/"),
+		baseURL: "/api/v1/uploads/files",
 	}
 }
 
@@ -69,7 +74,42 @@ func (s *S3UploadStore) Save(ctx context.Context, key string, reader io.Reader, 
 }
 
 func (s *S3UploadStore) URL(key string) string {
-	return s.endpoint + "/" + s.fullKey(key)
+	return s.baseURL + "/" + key
+}
+
+// Serve fetches the file from S3 and streams it to the HTTP response.
+func (s *S3UploadStore) Serve(w http.ResponseWriter, r *http.Request, key string) {
+	if s.client == nil {
+		http.Error(w, "storage not configured", http.StatusNotFound)
+		return
+	}
+	out, err := s.client.GetObject(r.Context(), &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(s.fullKey(key)),
+	})
+	if err != nil {
+		http.Error(w, "file not found", http.StatusNotFound)
+		return
+	}
+	defer out.Body.Close()
+
+	if out.ContentType != nil {
+		w.Header().Set("Content-Type", *out.ContentType)
+	}
+	if out.ContentLength != nil {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", *out.ContentLength))
+	}
+	// Images display inline; other file types download as attachments.
+	fileName := path.Base(key)
+	if out.ContentType != nil && strings.HasPrefix(*out.ContentType, "image/") {
+		w.Header().Set("Content-Disposition", "inline")
+	} else {
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fileName))
+	}
+	w.Header().Set("Cache-Control", "private, max-age=86400")
+	if _, err := io.Copy(w, out.Body); err != nil {
+		log.Printf("upload serve: streaming %s: %v", key, err)
+	}
 }
 
 // FileUploadStore stores uploads on the local filesystem and serves them
@@ -109,8 +149,9 @@ func (f *FileUploadStore) URL(key string) string {
 	return f.baseURL + "/" + key
 }
 
-// ServeFile serves a locally-stored upload file. Only used with FileUploadStore.
-func (f *FileUploadStore) ServeFile(w http.ResponseWriter, r *http.Request, key string) {
+// Serve serves a locally-stored upload file.
+func (f *FileUploadStore) Serve(w http.ResponseWriter, r *http.Request, key string) {
 	path := filepath.Join(f.baseDir, filepath.Clean(key))
 	http.ServeFile(w, r, path)
 }
+

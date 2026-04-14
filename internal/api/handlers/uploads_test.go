@@ -162,14 +162,19 @@ func TestUploadHandler_ServeUpload_CrossOrgDenied(t *testing.T) {
 func TestUploadHandler_ServeUpload_S3Mode(t *testing.T) {
 	t.Parallel()
 
-	s3Store := storage.NewS3UploadStore(nil, "bucket", "prefix", "https://example.com")
+	s3Store := storage.NewS3UploadStore(nil, "bucket", "prefix")
 	h := NewUploadHandler(s3Store)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/uploads/files/some-key.png", nil)
+	// The key must be prefixed by the requesting org's ID.
+	orgID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/uploads/files/"+orgID.String()+"/file.png", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 
 	h.ServeUpload(w, req)
 
+	// S3 client is nil, so GetObject will fail — handler returns 404.
 	require.Equal(t, http.StatusNotFound, w.Code)
 }
 
