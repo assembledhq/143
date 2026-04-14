@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
-import { renderWithProviders, screen } from "@/test/test-utils";
+import { renderWithProviders, screen, waitFor } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import AutopilotPage from "./page";
 import type {
@@ -152,7 +152,7 @@ describe("AutopilotPage", () => {
     renderWithProviders(<AutopilotPage />);
 
     // Should redirect to onboarding, not render setup UI inline
-    await vi.waitFor(() => {
+    await waitFor(() => {
       expect(mockReplace).toHaveBeenCalledWith("/onboarding");
     });
   });

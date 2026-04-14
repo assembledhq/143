@@ -417,6 +417,19 @@ describe("CreateSessionDialog", () => {
   });
 
   it("submits with selected repo and model", async () => {
+    // Radix UI DropdownMenu internally schedules state updates (Presence,
+    // FocusScope, DismissableLayer) outside of React's act() scope.
+    // This is a known limitation with React 19 + Radix.  Suppress the
+    // expected act() warnings so they don't pollute test output.
+    const origConsoleError = console.error;
+    console.error = (...args: unknown[]) => {
+      if (typeof args[0] === "string" && (
+        args[0].includes("not wrapped in act") ||
+        args[0].includes("was not awaited")
+      )) return;
+      origConsoleError(...args);
+    };
+
     const user = userEvent.setup();
     setupRepoHandlers();
     setupManualSessionHandler();
@@ -441,11 +454,18 @@ describe("CreateSessionDialog", () => {
     );
 
     // Wait for repo selector and select a repo
+    const repoButton = await screen.findByRole("button", { name: /Repo/ });
+    await user.click(repoButton);
+
+    // Wait for dropdown to fully open and select repo
+    const repoOption = await screen.findByText("acme/api-server");
+    await user.click(repoOption);
+
+    // Wait for dropdown to close, selection to settle, and branch data to load
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: /Repo/ })).toBeInTheDocument();
+      expect(screen.getByText("api-server")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Target branch/ })).toBeInTheDocument();
     });
-    await user.click(screen.getByRole("button", { name: /Repo/ }));
-    await user.click(screen.getByText("acme/api-server"));
 
     // Submit
     await user.click(screen.getByRole("button", { name: /Create/ }));
@@ -453,5 +473,7 @@ describe("CreateSessionDialog", () => {
     await waitFor(() => {
       expect(onOpenChange).toHaveBeenCalledWith(false);
     });
+
+    console.error = origConsoleError;
   });
 });
