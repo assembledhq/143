@@ -87,7 +87,7 @@ export type MetricKey =
 
 export const metricOptions: { value: MetricKey; label: string }[] = [
   { value: "total_container_minutes", label: "Container Minutes" },
-  { value: "total_sessions", label: "Sessions" },
+  { value: "total_sessions", label: "Peak Hourly Sessions" },
   { value: "total_container_starts", label: "Container Starts" },
   { value: "peak_concurrent", label: "Peak Concurrent" },
   { value: "total_input_tokens", label: "Input Tokens" },

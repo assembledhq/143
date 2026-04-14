@@ -29,6 +29,10 @@ type stubUsageRollupStore struct {
 	dailyCountsErr     error
 }
 
+func (s *stubUsageRollupStore) GetRollupSummary(context.Context, uuid.UUID, time.Time, time.Time) (db.RollupSummary, error) {
+	return db.RollupSummary{}, nil
+}
+
 func (s *stubUsageRollupStore) GetTokenTotals(context.Context, uuid.UUID, time.Time, time.Time) (db.TokenTotals, error) {
 	return db.TokenTotals{}, nil
 }

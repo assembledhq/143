@@ -96,18 +96,22 @@ export function UsageBreakdownTable({
                   </TableHead>
                   <TableHead className="text-xs text-right">Minutes</TableHead>
                   <TableHead className="text-xs text-right">Sessions</TableHead>
-                  <TableHead className="text-xs text-right">Tokens</TableHead>
-                  <TableHead className="text-xs text-right">
-                    <Tooltip>
-                      <TooltipTrigger className="inline-flex items-center gap-1">
-                        Est. Cost
-                        <Info className="h-3 w-3 text-muted-foreground" />
-                      </TooltipTrigger>
-                      <TooltipContent className="max-w-[200px]">
-                        Estimated cost at standard provider rates. Your actual billing may differ based on your plan.
-                      </TooltipContent>
-                    </Tooltip>
-                  </TableHead>
+                  {dimension === "user" && (
+                    <>
+                      <TableHead className="text-xs text-right">Tokens</TableHead>
+                      <TableHead className="text-xs text-right">
+                        <Tooltip>
+                          <TooltipTrigger className="inline-flex items-center gap-1">
+                            Est. Cost
+                            <Info className="h-3 w-3 text-muted-foreground" />
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-[200px]">
+                            Estimated cost at standard provider rates. Your actual billing may differ based on your plan.
+                          </TooltipContent>
+                        </Tooltip>
+                      </TableHead>
+                    </>
+                  )}
                   <TableHead className="text-xs text-right pr-4">%</TableHead>
                 </TableRow>
               </TableHeader>
@@ -130,12 +134,16 @@ export function UsageBreakdownTable({
                     <TableCell className="text-[13px] text-right tabular-nums">
                       {formatNumber(row.total_sessions)}
                     </TableCell>
-                    <TableCell className="text-[13px] text-right tabular-nums">
-                      {formatTokenCount(row.total_input_tokens + row.total_output_tokens)}
-                    </TableCell>
-                    <TableCell className="text-[13px] text-right tabular-nums">
-                      {formatCost(row.total_llm_cost_usd)}
-                    </TableCell>
+                    {dimension === "user" && (
+                      <>
+                        <TableCell className="text-[13px] text-right tabular-nums">
+                          {formatTokenCount(row.total_input_tokens + row.total_output_tokens)}
+                        </TableCell>
+                        <TableCell className="text-[13px] text-right tabular-nums">
+                          {formatCost(row.total_llm_cost_usd)}
+                        </TableCell>
+                      </>
+                    )}
                     <TableCell className="text-[13px] text-right tabular-nums pr-4">
                       <div className="flex items-center justify-end gap-2">
                         <div className="w-16 h-1.5 bg-muted rounded-full overflow-hidden">

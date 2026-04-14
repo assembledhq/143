@@ -151,10 +151,11 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 		return fmt.Errorf("iterate container events: %w", err)
 	}
 
-	// Query token usage from sessions that were active during this hour.
-	// Known limitation: tokens are attributed to the hour the session was created,
-	// not when tokens were actually consumed. Sessions spanning multiple hours will
-	// have all their tokens in the creation hour. This is acceptable for v1 dashboards.
+	// Query token usage from sessions that completed during this hour.
+	// Tokens are attributed to the completion hour (not creation hour) because
+	// token_usage is only populated when a session finishes. Using created_at
+	// would permanently miss tokens for sessions that start in one hour but
+	// complete after that hour has already been rolled up.
 	tokenRows, err := s.db.Query(ctx, `
 		SELECT
 			s.created_by AS user_id,
@@ -164,7 +165,8 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 		FROM sessions s
 		WHERE s.org_id = @org_id
 		  AND s.token_usage IS NOT NULL
-		  AND date_trunc('hour', s.created_at) = @hour`,
+		  AND s.completed_at IS NOT NULL
+		  AND date_trunc('hour', s.completed_at) = @hour`,
 		pgx.NamedArgs{
 			"org_id": orgID,
 			"hour":   hour,
@@ -440,7 +442,7 @@ func (s *UsageRollupStore) GetActiveOrgIDs(ctx context.Context, start, end time.
 		WHERE started_at < @end AND COALESCE(stopped_at, now()) > @start
 		UNION
 		SELECT DISTINCT org_id FROM sessions
-		WHERE token_usage IS NOT NULL AND created_at >= @start AND created_at < @end`,
+		WHERE token_usage IS NOT NULL AND completed_at >= @start AND completed_at < @end`,
 		pgx.NamedArgs{"start": start, "end": end},
 	)
 	if err != nil {
@@ -865,6 +867,38 @@ func (s *UsageRollupStore) GetDailySessionCounts(ctx context.Context, orgID uuid
 	return counts, nil
 }
 
+// RollupSummary holds aggregated summary metrics from the rollup table.
+type RollupSummary struct {
+	TotalContainerMinutes float64
+	TotalSessions         int
+	PeakConcurrent        int
+	InputTokens           int64
+	OutputTokens          int64
+	CostUSD               float64
+}
+
+// GetRollupSummary returns summary metrics from org-level rollup rows over the
+// given time range. This provides a single consistent data source for summary
+// cards instead of mixing legacy raw queries with rollup-backed token totals.
+func (s *UsageRollupStore) GetRollupSummary(ctx context.Context, orgID uuid.UUID, start, end time.Time) (RollupSummary, error) {
+	var rs RollupSummary
+	err := s.db.QueryRow(ctx, `
+		SELECT
+			COALESCE(SUM(total_container_minutes), 0),
+			COALESCE(SUM(total_sessions), 0),
+			COALESCE(MAX(peak_concurrent), 0),
+			COALESCE(SUM(total_input_tokens), 0),
+			COALESCE(SUM(total_output_tokens), 0),
+			COALESCE(SUM(total_llm_cost_usd), 0)
+		FROM usage_hourly
+		WHERE org_id = @org_id AND hour_utc >= @start AND hour_utc < @end
+		  AND user_id IS NULL AND capacity_tier IS NULL`,
+		pgx.NamedArgs{"org_id": orgID, "start": start, "end": end},
+	).Scan(&rs.TotalContainerMinutes, &rs.TotalSessions, &rs.PeakConcurrent,
+		&rs.InputTokens, &rs.OutputTokens, &rs.CostUSD)
+	return rs, err
+}
+
 // TokenTotals holds aggregated token counts from the rollup table.
 type TokenTotals struct {
 	InputTokens  int64
@@ -887,6 +921,22 @@ func (s *UsageRollupStore) GetTokenTotals(ctx context.Context, orgID uuid.UUID, 
 		pgx.NamedArgs{"org_id": orgID, "start": start, "end": end},
 	).Scan(&t.InputTokens, &t.OutputTokens, &t.CostUSD)
 	return t, err
+}
+
+// GetLatestRollupHour returns the most recent hour_utc in usage_hourly.
+// Returns the zero time if the table is empty. This is used to seed the
+// reaper's rollup watermark on startup so it doesn't redundantly re-roll
+// hours that were already materialized before the process restarted.
+func (s *UsageRollupStore) GetLatestRollupHour(ctx context.Context) (time.Time, error) {
+	var latest *time.Time
+	err := s.db.QueryRow(ctx, `SELECT MAX(hour_utc) FROM usage_hourly`).Scan(&latest)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("query latest rollup hour: %w", err)
+	}
+	if latest == nil {
+		return time.Time{}, nil
+	}
+	return *latest, nil
 }
 
 // DeleteOlderThan removes rollup rows older than the given cutoff.

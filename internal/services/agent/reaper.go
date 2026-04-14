@@ -21,6 +21,7 @@ type OrphanCloser interface {
 type UsageRoller interface {
 	RollupAllOrgs(ctx context.Context, hour time.Time) error
 	DeleteOlderThan(ctx context.Context, cutoff time.Time) (int64, error)
+	GetLatestRollupHour(ctx context.Context) (time.Time, error)
 }
 
 // SessionReaper periodically cleans up stale sessions and expired snapshots
@@ -202,25 +203,45 @@ func (r *SessionReaper) reapUsageRollups(ctx context.Context, now time.Time) {
 	const startupLookback = 24 * time.Hour
 	const maxConcurrentRollups = 4
 
-	// Only roll up fully completed hours. The current hour is still in
-	// progress — rolling it up now would permanently undercount because the
-	// watermark advances past it, preventing a re-roll once more events land.
-	lastCompletedHour := now.UTC().Truncate(time.Hour).Add(-time.Hour)
+	// Roll up fully completed hours first, then do a best-effort roll of the
+	// current in-progress hour so the dashboard stays near-real-time. The
+	// watermark only advances past completed hours; the current hour is
+	// re-rolled every tick until it completes.
+	currentHour := now.UTC().Truncate(time.Hour)
+	lastCompletedHour := currentHour.Add(-time.Hour)
 	startHour := lastCompletedHour
 
 	if r.lastRollupHour.IsZero() {
-		startHour = lastCompletedHour.Add(-startupLookback)
+		// Seed watermark from the database so we don't redundantly re-roll
+		// hours that were already materialized before this process started.
+		if latest, err := r.usageRoller.GetLatestRollupHour(ctx); err != nil {
+			r.logger.Warn().Err(err).Msg("reaper: failed to seed rollup watermark from DB, falling back to lookback")
+		} else if !latest.IsZero() {
+			r.lastRollupHour = latest
+			r.logger.Info().Time("watermark", latest).Msg("reaper: seeded rollup watermark from DB")
+		}
+		// After seeding, re-evaluate: if we have a watermark, advance from it;
+		// otherwise fall back to the startup lookback window.
+		if r.lastRollupHour.IsZero() {
+			startHour = lastCompletedHour.Add(-startupLookback)
+		} else {
+			startHour = r.lastRollupHour.Add(time.Hour)
+		}
 	} else if r.lastRollupHour.Before(lastCompletedHour) {
 		startHour = r.lastRollupHour.Add(time.Hour)
 	}
 
-	// Collect hours to process.
+	// Collect completed hours to process.
 	var hours []time.Time
 	for h := startHour; !h.After(lastCompletedHour); h = h.Add(time.Hour) {
 		hours = append(hours, h)
 	}
 
 	if len(hours) == 0 {
+		// No completed hours to catch up on — just roll the current hour.
+		if err := r.usageRoller.RollupAllOrgs(ctx, currentHour); err != nil {
+			r.logger.Warn().Err(err).Time("hour", currentHour).Msg("reaper: failed to roll up current hour (best-effort)")
+		}
 		return
 	}
 
@@ -231,55 +252,62 @@ func (r *SessionReaper) reapUsageRollups(ctx context.Context, now time.Time) {
 			return
 		}
 		r.lastRollupHour = hours[0]
-		return
-	}
+	} else {
+		// Multiple hours: run concurrently with bounded parallelism.
+		sem := make(chan struct{}, maxConcurrentRollups)
+		var mu sync.Mutex
+		var firstErr error
+		var errHour time.Time
 
-	// Multiple hours: run concurrently with bounded parallelism.
-	sem := make(chan struct{}, maxConcurrentRollups)
-	var mu sync.Mutex
-	var firstErr error
-	var errHour time.Time
+		var wg sync.WaitGroup
+		for _, h := range hours {
+			wg.Add(1)
+			go func(hour time.Time) {
+				defer wg.Done()
 
-	var wg sync.WaitGroup
-	for _, h := range hours {
-		wg.Add(1)
-		go func(hour time.Time) {
-			defer wg.Done()
-
-			// Check for prior error or context cancellation.
-			mu.Lock()
-			failed := firstErr != nil
-			mu.Unlock()
-			if failed {
-				return
-			}
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-
-			sem <- struct{}{}
-			err := r.usageRoller.RollupAllOrgs(ctx, hour)
-			<-sem
-
-			if err != nil {
+				// Check for prior error or context cancellation.
 				mu.Lock()
-				if firstErr == nil {
-					firstErr = err
-					errHour = hour
-				}
+				failed := firstErr != nil
 				mu.Unlock()
-			}
-		}(h)
-	}
-	wg.Wait()
+				if failed {
+					return
+				}
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
 
-	if firstErr != nil {
-		r.logger.Error().Err(firstErr).Time("hour", errHour).Msg("reaper: failed to roll up hourly usage")
-		// Don't advance watermark past what we can guarantee — but hours are
-		// independent (idempotent upserts), so re-rolling on next tick is safe.
-		return
+				sem <- struct{}{}
+				err := r.usageRoller.RollupAllOrgs(ctx, hour)
+				<-sem
+
+				if err != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = err
+						errHour = hour
+					}
+					mu.Unlock()
+				}
+			}(h)
+		}
+		wg.Wait()
+
+		if firstErr != nil {
+			r.logger.Error().Err(firstErr).Time("hour", errHour).Msg("reaper: failed to roll up hourly usage")
+			// Don't advance watermark past what we can guarantee — but hours are
+			// independent (idempotent upserts), so re-rolling on next tick is safe.
+			return
+		}
+		r.lastRollupHour = lastCompletedHour
 	}
-	r.lastRollupHour = lastCompletedHour
+
+	// Best-effort roll of the current in-progress hour. This keeps the
+	// dashboard near-real-time. The watermark is NOT advanced past this
+	// hour, so it will be re-rolled on the next tick and again as a
+	// completed hour once the hour boundary passes.
+	if err := r.usageRoller.RollupAllOrgs(ctx, currentHour); err != nil {
+		r.logger.Warn().Err(err).Time("hour", currentHour).Msg("reaper: failed to roll up current hour (best-effort)")
+	}
 }

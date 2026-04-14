@@ -25,6 +25,7 @@ type UsageHandler struct {
 }
 
 type usageRollupReader interface {
+	GetRollupSummary(ctx context.Context, orgID uuid.UUID, start, end time.Time) (db.RollupSummary, error)
 	GetTokenTotals(ctx context.Context, orgID uuid.UUID, start, end time.Time) (db.TokenTotals, error)
 	GetTimeseries(ctx context.Context, orgID uuid.UUID, start, end time.Time, groupBy string, userID *uuid.UUID, capacity *string) ([]models.UsageTimeseriesBucket, error)
 	GetBreakdown(ctx context.Context, orgID uuid.UUID, start, end time.Time, dimension, sortBy string, limit int) ([]models.UsageBreakdownRow, error)
@@ -128,20 +129,33 @@ func (h *UsageHandler) GetSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Prefer rollup-backed summary for consistency with the rest of the dashboard.
+	// Fall back to legacy raw queries if the rollup store is unavailable.
+	if h.rollupStore != nil {
+		rs, err := h.rollupStore.GetRollupSummary(r.Context(), orgID, start, end)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL", "failed to fetch usage summary", err)
+			return
+		}
+		summary := &models.UsageSummary{
+			OrgID:                 orgID,
+			PeriodStart:           start,
+			PeriodEnd:             end,
+			TotalContainerMinutes: rs.TotalContainerMinutes,
+			TotalSessions:         rs.TotalSessions,
+			PeakConcurrent:        rs.PeakConcurrent,
+			TotalInputTokens:      rs.InputTokens,
+			TotalOutputTokens:     rs.OutputTokens,
+			TotalLLMCostUSD:       rs.CostUSD,
+		}
+		writeJSON(w, http.StatusOK, models.SingleResponse[*models.UsageSummary]{Data: summary})
+		return
+	}
+
 	summary, err := h.usageStore.GetUsageSummary(r.Context(), orgID, start, end)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "INTERNAL", "failed to fetch usage summary", err)
 		return
-	}
-
-	// Enrich summary with token totals from the rollup table if available.
-	if h.rollupStore != nil {
-		totals, err := h.rollupStore.GetTokenTotals(r.Context(), orgID, start, end)
-		if err == nil {
-			summary.TotalInputTokens = totals.InputTokens
-			summary.TotalOutputTokens = totals.OutputTokens
-			summary.TotalLLMCostUSD = totals.CostUSD
-		}
 	}
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[*models.UsageSummary]{Data: summary})

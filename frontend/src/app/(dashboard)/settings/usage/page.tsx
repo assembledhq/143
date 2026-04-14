@@ -123,7 +123,7 @@ export default function UsagePage() {
         </div>
 
         <p className="text-xs text-muted-foreground text-center pb-4">
-          Data updates every ~5 minutes. Usage shown is from the rollup table; real-time active containers may differ slightly.
+          Data updates each reaper tick (typically every few minutes). The current hour is rolled up with partial data and finalized at the hour boundary.
         </p>
       </div>
     </PageContainer>

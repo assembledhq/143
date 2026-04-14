@@ -315,6 +315,8 @@ type mockUsageRoller struct {
 	rollupErrByHour map[time.Time]error
 	deletedCutoffs  []time.Time
 	deleteErr       error
+	latestHour      time.Time
+	latestHourErr   error
 }
 
 func (m *mockUsageRoller) RollupAllOrgs(_ context.Context, hour time.Time) error {
@@ -338,6 +340,10 @@ func (m *mockUsageRoller) sortedRolledHours() []time.Time {
 	copy(sorted, m.rolledHours)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Before(sorted[j]) })
 	return sorted
+}
+
+func (m *mockUsageRoller) GetLatestRollupHour(_ context.Context) (time.Time, error) {
+	return m.latestHour, m.latestHourErr
 }
 
 func (m *mockUsageRoller) DeleteOlderThan(_ context.Context, cutoff time.Time) (int64, error) {
@@ -401,8 +407,9 @@ func TestReapPhase4_CatchesUpMissedHoursFromWatermark(t *testing.T) {
 	require.Equal(t, []time.Time{
 		time.Date(2026, 4, 10, 8, 0, 0, 0, time.UTC),
 		time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC),
-	}, sorted, "reaper should catch up every missed hour through the last completed hour")
-	require.Equal(t, time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC), reaper.lastRollupHour, "reaper should advance the watermark to lastCompletedHour")
+		time.Date(2026, 4, 10, 10, 0, 0, 0, time.UTC), // current hour (best-effort)
+	}, sorted, "reaper should catch up every missed hour plus roll the current hour")
+	require.Equal(t, time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC), reaper.lastRollupHour, "watermark should advance to lastCompletedHour, not the current hour")
 }
 
 func TestReapPhase4_BackfillsStartupWindowWhenWatermarkMissing(t *testing.T) {
@@ -420,7 +427,9 @@ func TestReapPhase4_BackfillsStartupWindowWhenWatermarkMissing(t *testing.T) {
 	reaper.reapUsageRollups(context.Background(), time.Date(2026, 4, 10, 10, 35, 0, 0, time.UTC))
 
 	sorted := usageRoller.sortedRolledHours()
-	require.Len(t, sorted, 25, "fresh reaper should backfill a bounded startup window (24h lookback inclusive of both endpoints)")
+	// 25 completed hours + 1 current hour (best-effort)
+	require.Len(t, sorted, 26, "fresh reaper should backfill a bounded startup window plus the current hour")
 	require.Equal(t, time.Date(2026, 4, 9, 9, 0, 0, 0, time.UTC), sorted[0], "startup catch-up should begin 24 hours before the last completed hour")
-	require.Equal(t, time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC), sorted[len(sorted)-1], "startup catch-up should end at the last completed hour")
+	require.Equal(t, time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC), sorted[len(sorted)-2], "startup catch-up should end at the last completed hour")
+	require.Equal(t, time.Date(2026, 4, 10, 10, 0, 0, 0, time.UTC), sorted[len(sorted)-1], "current hour should be rolled as best-effort")
 }
