@@ -172,7 +172,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
       {/* Failure card — shown prominently at top for failed sessions */}
       {session.status === "failed" && (session.failure_explanation || session.error) && (
         <Card className="border-l-2 border-l-destructive border-destructive/20 dark:border-destructive/30">
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-0">
             <div className="flex items-center justify-between">
               <CardTitle className="text-xs text-destructive flex items-center gap-2">
                 <XCircle className="h-3.5 w-3.5" />
@@ -196,7 +196,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
               )}
             </div>
           </CardHeader>
-          <CardContent className="space-y-3">
+          <CardContent className="pt-2 space-y-3">
             <p className="text-xs">{session.failure_explanation || session.error}</p>
             {/* Show next steps only for non-codex-auth failures (codex auth has the reauth button instead) */}
             {!isCodexAuthFailure && session.failure_next_steps && session.failure_next_steps.length > 0 && (
