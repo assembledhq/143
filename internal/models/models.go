@@ -151,7 +151,9 @@ type Session struct {
 	// field being non-nil unless the session was fetched individually.
 	DiffHistory   json.RawMessage `db:"diff_history" json:"diff_history,omitempty"`
 	InputManifest json.RawMessage `db:"input_manifest" json:"input_manifest,omitempty"`
-	DeletedAt     *time.Time      `db:"deleted_at" json:"-"`
+	ArchivedAt       *time.Time  `db:"archived_at" json:"archived_at,omitempty"`
+	ArchivedByUserID *uuid.UUID  `db:"archived_by_user_id" json:"archived_by_user_id,omitempty"`
+	DeletedAt        *time.Time  `db:"deleted_at" json:"-"`
 	CreatedAt     time.Time       `db:"created_at" json:"created_at"`
 }
 

@@ -36,6 +36,8 @@ type SessionFilters struct {
 	RepositoryID       uuid.UUID  // When non-zero, filter sessions by repository via issues table.
 	TriggeredByUserID  uuid.UUID  // When non-zero, filter sessions to those triggered by this user.
 	Search             string     // When non-empty, filter sessions by title (case-insensitive prefix/substring match).
+	IncludeArchived    bool       // When true, include archived sessions in the results.
+	OnlyArchived       bool       // When true, return only archived sessions.
 }
 
 // sessionSelectColumns is used for single-session queries where we want all fields.
@@ -47,7 +49,7 @@ const sessionSelectColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-00
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
-	sandbox_state, snapshot_key, target_branch, working_branch, repository_id, diff_stats, diff_history, input_manifest, deleted_at, created_at`
+	sandbox_state, snapshot_key, target_branch, working_branch, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, deleted_at, created_at`
 
 // sessionListColumns excludes large JSONB blobs (diff_history) from list queries
 // to avoid returning multi-megabyte payloads when listing many sessions.
@@ -59,7 +61,7 @@ const sessionListColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-0000
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
-	sandbox_state, snapshot_key, target_branch, working_branch, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, deleted_at, created_at`
+	sandbox_state, snapshot_key, target_branch, working_branch, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, deleted_at, created_at`
 
 // maxDiffHistoryEntries caps the number of entries kept in diff_history.
 // Older entries beyond this limit are pruned when a new entry is appended.
@@ -107,6 +109,12 @@ func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters S
 		SELECT ` + sessionListColumns + `
 		FROM sessions
 		WHERE org_id = @org_id AND deleted_at IS NULL`
+
+	if filters.OnlyArchived {
+		query += ` AND archived_at IS NOT NULL`
+	} else if !filters.IncludeArchived {
+		query += ` AND archived_at IS NULL`
+	}
 
 	if filters.RepositoryID != uuid.Nil {
 		query += ` AND repository_id = @repository_id`
@@ -347,6 +355,10 @@ var (
 	ErrSessionNotFound = fmt.Errorf("session not found")
 	// ErrSessionNotFailed is returned when trying to retry a session that is not in failed status.
 	ErrSessionNotFailed = fmt.Errorf("session is not in failed status")
+	// ErrSessionAlreadyArchived is returned when trying to archive an already-archived session.
+	ErrSessionAlreadyArchived = fmt.Errorf("session not found or already archived")
+	// ErrSessionNotArchived is returned when trying to unarchive a session that is not archived.
+	ErrSessionNotArchived = fmt.Errorf("session not found or not archived")
 )
 
 // ResetForRetry resets a failed session back to pending so it can be re-run.
@@ -606,6 +618,39 @@ func (s *SessionStore) ListExpiredSnapshots(ctx context.Context, olderThan time.
 		return nil, fmt.Errorf("query expired snapshots: %w", err)
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+}
+
+// Archive marks a session as archived, hiding it from default list views.
+func (s *SessionStore) Archive(ctx context.Context, orgID, sessionID, userID uuid.UUID) error {
+	query := `UPDATE sessions SET archived_at = now(), archived_by_user_id = @user_id, updated_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL AND archived_at IS NULL`
+	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":      sessionID,
+		"org_id":  orgID,
+		"user_id": userID,
+	})
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrSessionAlreadyArchived
+	}
+	return nil
+}
+
+// Unarchive removes the archived flag from a session, restoring it to default views.
+func (s *SessionStore) Unarchive(ctx context.Context, orgID, sessionID uuid.UUID) error {
+	query := `UPDATE sessions SET archived_at = NULL, archived_by_user_id = NULL, updated_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL AND archived_at IS NOT NULL`
+	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	})
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrSessionNotArchived
+	}
+	return nil
 }
 
 // SoftDelete marks a session as deleted without removing the row.
