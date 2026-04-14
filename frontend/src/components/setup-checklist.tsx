@@ -156,7 +156,7 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
                   </SelectContent>
                 </Select>
               </div>
-              <p className="text-[13px] text-muted-foreground">{selectedAgent.description}</p>
+              <p className="text-xs text-muted-foreground">{selectedAgent.description}</p>
             </div>
           </div>
           <div className="flex shrink-0 gap-2">

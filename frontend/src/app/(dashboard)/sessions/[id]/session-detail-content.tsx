@@ -153,13 +153,13 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
       {session.result_summary && (
         <Card className="border-l-2 border-l-emerald-500 bg-emerald-50/30 dark:bg-emerald-950/10">
           <CardHeader className="pb-2">
-            <CardTitle className="text-[13px] flex items-center gap-2">
+            <CardTitle className="text-xs flex items-center gap-2">
               <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
               Result
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <MarkdownContent content={session.result_summary} className="text-[13px]" />
+            <MarkdownContent content={session.result_summary} className="text-xs" />
           </CardContent>
         </Card>
       )}
@@ -169,7 +169,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
         <Card className="border-l-2 border-l-destructive border-destructive/20 dark:border-destructive/30">
           <CardHeader className="pb-2">
             <div className="flex items-center justify-between">
-              <CardTitle className="text-[13px] text-destructive flex items-center gap-2">
+              <CardTitle className="text-xs text-destructive flex items-center gap-2">
                 <XCircle className="h-3.5 w-3.5" />
                 Failure details
                 {session.failure_category && (
@@ -192,12 +192,12 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
             </div>
           </CardHeader>
           <CardContent className="space-y-3">
-            <p className="text-[13px]">{session.failure_explanation || session.error}</p>
+            <p className="text-xs">{session.failure_explanation || session.error}</p>
             {/* Show next steps only for non-codex-auth failures (codex auth has the reauth button instead) */}
             {!isCodexAuthFailure && session.failure_next_steps && session.failure_next_steps.length > 0 && (
               <div>
-                <p className="text-[13px] font-medium text-muted-foreground mb-1">Next steps</p>
-                <ul className="list-disc list-inside text-[13px] space-y-1">
+                <p className="text-xs font-medium text-muted-foreground mb-1">Next steps</p>
+                <ul className="list-disc list-inside text-xs space-y-1">
                   {session.failure_next_steps.map((step, i) => (
                     <li key={i}>{step}</li>
                   ))}
@@ -215,7 +215,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
               </Button>
             )}
             {isCodexAuthFailure && isCodexAuthenticated && (
-              <p className="text-[13px] text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
+              <p className="text-xs text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
                 <CheckCircle2 className="h-3.5 w-3.5" />
                 ChatGPT connected — click Retry to re-run this session.
               </p>
@@ -289,18 +289,18 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
       {session.pm_plan_id && (session.pm_reasoning || session.pm_approach) && (
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-[13px]">PM context</CardTitle>
+            <CardTitle className="text-xs">PM context</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-3 text-[13px]">
+          <CardContent className="space-y-3 text-xs">
             {session.pm_reasoning && (
               <div>
-                <p className="text-[13px] font-medium text-muted-foreground">Why this was prioritized</p>
+                <p className="text-xs font-medium text-muted-foreground">Why this was prioritized</p>
                 <p>{session.pm_reasoning}</p>
               </div>
             )}
             {session.pm_approach && (
               <div>
-                <p className="text-[13px] font-medium text-muted-foreground">Suggested approach</p>
+                <p className="text-xs font-medium text-muted-foreground">Suggested approach</p>
                 <p>{session.pm_approach}</p>
               </div>
             )}
@@ -328,7 +328,7 @@ function ValidationTab({ sessionId }: { sessionId: string }) {
       <div className="flex items-center justify-center py-12">
         <div className="text-center space-y-2">
           <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/40 mx-auto" />
-          <p className="text-[13px] text-muted-foreground">Loading validation...</p>
+          <p className="text-xs text-muted-foreground">Loading validation...</p>
         </div>
       </div>
     );
@@ -340,7 +340,7 @@ function ValidationTab({ sessionId }: { sessionId: string }) {
       <div className="flex items-center justify-center py-12">
         <div className="text-center space-y-2 max-w-[280px]">
           <CheckCircle2 className="h-8 w-8 text-muted-foreground/40 mx-auto" />
-          <p className="text-[13px] font-medium text-muted-foreground">No validation data</p>
+          <p className="text-xs font-medium text-muted-foreground">No validation data</p>
           <p className="text-xs text-muted-foreground/60">Validation checks will appear here once the session produces results.</p>
         </div>
       </div>
@@ -352,7 +352,7 @@ function ValidationTab({ sessionId }: { sessionId: string }) {
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-2">
-        <span className="text-[13px] font-medium">Overall:</span>
+        <span className="text-xs font-medium">Overall:</span>
         {overallStatus === "passed" && (
           <Badge variant="secondary" className="bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400 border-emerald-200/50 dark:border-emerald-800/30">
             <CheckCircle2 className="mr-1 h-3 w-3" /> Passed
@@ -413,7 +413,7 @@ function PRCard({ sessionId }: { sessionId: string }) {
   });
 
   const pr = prData?.data;
-  if (prLoading) return <div className="flex items-center justify-center gap-2 py-2 text-[13px] text-muted-foreground"><Loader2 className="h-3.5 w-3.5 animate-spin" />Loading PR...</div>;
+  if (prLoading) return <div className="flex items-center justify-center gap-2 py-2 text-xs text-muted-foreground"><Loader2 className="h-3.5 w-3.5 animate-spin" />Loading PR...</div>;
   if (!pr) return null;
 
   return (
@@ -421,7 +421,7 @@ function PRCard({ sessionId }: { sessionId: string }) {
       <CardContent className="py-3 space-y-3">
         <div className="flex items-start justify-between">
           <div className="min-w-0">
-            <h3 className="text-[13px] font-medium truncate">{pr.title}</h3>
+            <h3 className="text-xs font-medium truncate">{pr.title}</h3>
             <p className="text-xs text-muted-foreground mt-0.5">{pr.github_repo} #{pr.github_pr_number}</p>
           </div>
           <a href={pr.github_pr_url} target="_blank" rel="noopener noreferrer">
@@ -431,7 +431,7 @@ function PRCard({ sessionId }: { sessionId: string }) {
             </Button>
           </a>
         </div>
-        <div className="flex items-center gap-3 text-[13px]">
+        <div className="flex items-center gap-3 text-xs">
           <div>
             <span className="text-muted-foreground">Status: </span>
             <Badge variant="secondary" className={`text-xs ${prStatusColor[pr.status] || "bg-muted text-muted-foreground"}`}>
@@ -543,7 +543,7 @@ function ChangesTab({
         <div className="flex-1 flex items-center justify-center py-12">
           <div className="text-center space-y-2 max-w-[280px]">
             <FileCode2 className="h-8 w-8 text-muted-foreground/40 mx-auto" />
-            <p className="text-[13px] font-medium text-muted-foreground">
+            <p className="text-xs font-medium text-muted-foreground">
               No changes yet
             </p>
             <p className="text-xs text-muted-foreground/60">
@@ -1017,7 +1017,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
           <div className="flex items-center justify-center py-12">
             <div className="text-center space-y-2 max-w-[280px]">
               <MessageSquare className="h-8 w-8 text-muted-foreground/40 mx-auto" />
-              <p className="text-[13px] font-medium text-muted-foreground">No activity yet</p>
+              <p className="text-xs font-medium text-muted-foreground">No activity yet</p>
               <p className="text-xs text-muted-foreground/60">The session is processing its initial turn.</p>
             </div>
           </div>
@@ -1168,7 +1168,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
 
             {availableModels.length > 0 && (
               <Select value={selectedModel} onValueChange={setSelectedModel}>
-                <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-[13px] text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
+                <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
                   <SelectValue placeholder="Default model" />
                 </SelectTrigger>
                 <SelectContent>
@@ -1183,7 +1183,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
             {isClaudeCode && canSendMessage && !planMode && (
               <button
                 onClick={() => setPlanMode(true)}
-                className="flex items-center gap-1 h-8 px-2 text-[13px] text-muted-foreground hover:text-foreground transition-colors rounded-md"
+                className="flex items-center gap-1 h-8 px-2 text-xs text-muted-foreground hover:text-foreground transition-colors rounded-md"
                 title="Switch to plan mode (Shift+Tab)"
               >
                 <ClipboardList className="h-3.5 w-3.5" />
@@ -1388,7 +1388,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       <div className="flex items-center justify-center h-full">
         <div className="text-center space-y-2">
           <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/40 mx-auto" />
-          <p className="text-[13px] text-muted-foreground">Loading session...</p>
+          <p className="text-xs text-muted-foreground">Loading session...</p>
         </div>
       </div>
     );
@@ -1399,7 +1399,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       <div className="flex items-center justify-center h-full">
         <div className="text-center space-y-2 max-w-[280px]">
           <AlertTriangle className="h-5 w-5 text-muted-foreground/40 mx-auto" />
-          <p className="text-[13px] font-medium text-muted-foreground">Failed to load session</p>
+          <p className="text-xs font-medium text-muted-foreground">Failed to load session</p>
           <p className="text-xs text-muted-foreground/60">The session could not be found or an error occurred.</p>
         </div>
       </div>
@@ -1418,7 +1418,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         {/* Session header bar */}
         <div className="border-b border-border px-4 py-3 bg-background flex items-center justify-between shrink-0">
           <div className="min-w-0 flex-1 flex items-center gap-2">
-            <h1 className="text-[13px] font-medium text-foreground truncate">
+            <h1 className="text-xs font-medium text-foreground truncate">
               {sessionTitle(session)}
             </h1>
             <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium shrink-0 ${status.color}`}>
@@ -1529,7 +1529,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </TabsList>
               {hasPR && prData?.data?.github_pr_url ? (
                 <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
-                  <Button variant="outline" size="sm" className="h-7 text-[13px] gap-1.5">
+                  <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5">
                     <ExternalLink className="h-3 w-3" />
                     View PR
                   </Button>
@@ -1538,7 +1538,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 <Button
                   variant="outline"
                   size="sm"
-                  className="h-7 text-[13px] gap-1.5"
+                  className="h-7 text-xs gap-1.5"
                   disabled={
                     createPRMutation.isPending ||
                     (ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected)

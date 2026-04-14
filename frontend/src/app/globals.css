@@ -141,7 +141,7 @@
     @apply border-border outline-ring/50;
   }
   body {
-    @apply bg-background text-foreground text-[13px] antialiased;
+    @apply bg-background text-foreground text-xs antialiased;
   }
   button, a, [role="button"] {
     @apply transition-all duration-150;

@@ -291,7 +291,7 @@ export default function NewProjectPage() {
         {/* ── Main Form ────────────────────────────────────────── */}
         <div className="space-y-4 rounded-lg border border-border bg-card p-5">
           {hasGenerated && (
-            <div className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2.5 text-[13px] text-primary flex items-center gap-2">
+            <div className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2.5 text-xs text-primary flex items-center gap-2">
               <Sparkles className="h-3.5 w-3.5 shrink-0" />
               Generated from your description. Review and edit as needed.
             </div>
@@ -455,7 +455,7 @@ export default function NewProjectPage() {
 
           {/* ── Advanced Settings ─────────────────────────────── */}
           <Collapsible open={showAdvanced} onOpenChange={setShowAdvanced}>
-            <CollapsibleTrigger className="flex items-center gap-1.5 text-[13px] text-muted-foreground hover:text-foreground transition-colors py-1">
+            <CollapsibleTrigger className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors py-1">
               <ChevronDown
                 className={cn(
                   "h-3.5 w-3.5 transition-transform",

@@ -90,7 +90,7 @@ export function KeyboardHelpOverlay({ open, onClose }: KeyboardHelpOverlayProps)
           </button>
         </div>
         <div className="p-4">
-          <table className="w-full text-[13px]">
+          <table className="w-full text-xs">
             <tbody>
               {shortcuts.map((s) => (
                 <tr key={s.key} className="border-b border-border/30 last:border-0">

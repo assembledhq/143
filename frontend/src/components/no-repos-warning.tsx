@@ -61,7 +61,7 @@ export function NoReposWarning() {
     return (
       <div className="flex items-center gap-3 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-4 py-3">
         <Check className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
-        <p className="text-[13px] text-emerald-700 dark:text-emerald-300">
+        <p className="text-xs text-emerald-700 dark:text-emerald-300">
           {syncResult.repos_synced} repositor{syncResult.repos_synced === 1 ? "y" : "ies"} synced.
         </p>
       </div>
@@ -75,7 +75,7 @@ export function NoReposWarning() {
     <div className="flex items-center gap-3 rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-3">
       <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
       <div className="flex-1 min-w-0">
-        <p className="text-[13px] text-amber-700 dark:text-amber-300">
+        <p className="text-xs text-amber-700 dark:text-amber-300">
           GitHub is connected but no repositories are synced. Sessions won&apos;t have access to your code.
         </p>
         {syncError && needsReinstall && (

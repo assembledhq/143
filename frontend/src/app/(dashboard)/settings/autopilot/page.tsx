@@ -84,7 +84,7 @@ export default function AutopilotSettingsPage() {
       <div className="space-y-6">
         <PageHeader title="Autopilot settings" description="Configure PM model, cadence, and organization-wide automation defaults." />
       <section className="space-y-3">
-        <h2 className="text-[13px] font-medium text-foreground">PM configuration</h2>
+        <h2 className="text-xs font-medium text-foreground">PM configuration</h2>
         <Card>
           <CardContent className="space-y-4">
             <div className="space-y-2">
@@ -130,33 +130,33 @@ export default function AutopilotSettingsPage() {
       </section>
 
       <section className="space-y-3">
-        <h2 className="text-[13px] font-medium text-foreground">Execution</h2>
+        <h2 className="text-xs font-medium text-foreground">Execution</h2>
         <Card>
           <CardContent className="space-y-4">
             <div className="space-y-2">
               <Label>Autonomy level</Label>
-              <p className="text-[13px] text-muted-foreground">
+              <p className="text-xs text-muted-foreground">
                 Controls how much autonomy the autopilot has when executing tasks.
               </p>
               <RadioGroup value={autonomyLevel} onValueChange={setAutonomyOverride}>
                 <label className="flex items-center gap-3 rounded-lg border p-3">
                   <RadioGroupItem value="manual" aria-label="Suggest" />
                   <div>
-                    <span className="text-[13px] font-medium">Suggest</span>
+                    <span className="text-xs font-medium">Suggest</span>
                     <p className="text-xs text-muted-foreground">Autopilot recommends, you decide.</p>
                   </div>
                 </label>
                 <label className="flex items-center gap-3 rounded-lg border p-3">
                   <RadioGroupItem value="auto_simple" aria-label="Act on low-risk" />
                   <div>
-                    <span className="text-[13px] font-medium">Act on low-risk</span>
+                    <span className="text-xs font-medium">Act on low-risk</span>
                     <p className="text-xs text-muted-foreground">Auto-create sessions for bounded work.</p>
                   </div>
                 </label>
                 <label className="flex items-center gap-3 rounded-lg border p-3">
                   <RadioGroupItem value="auto_all" aria-label="Operate broadly" />
                   <div>
-                    <span className="text-[13px] font-medium">Operate broadly</span>
+                    <span className="text-xs font-medium">Operate broadly</span>
                     <p className="text-xs text-muted-foreground">Autopilot runs automatically on eligible work.</p>
                   </div>
                 </label>
@@ -164,7 +164,7 @@ export default function AutopilotSettingsPage() {
             </div>
             <div className="space-y-2">
               <Label htmlFor="max-concurrent-runs">Max concurrent runs</Label>
-              <p className="text-[13px] text-muted-foreground">
+              <p className="text-xs text-muted-foreground">
                 Maximum number of sessions the autopilot can run at the same time.
               </p>
               <Input
@@ -197,12 +197,12 @@ export default function AutopilotSettingsPage() {
       </div>
 
       <section className="space-y-3">
-        <h2 className="text-[13px] font-medium text-foreground">Repository overrides</h2>
-        <p className="text-[13px] text-muted-foreground">
+        <h2 className="text-xs font-medium text-foreground">Repository overrides</h2>
+        <p className="text-xs text-muted-foreground">
           Individual repositories can override Autopilot settings from their repository settings page.
         </p>
         {reposWithCustomPM.length === 0 ? (
-          <p className="text-[13px] text-muted-foreground italic">No repository overrides yet.</p>
+          <p className="text-xs text-muted-foreground italic">No repository overrides yet.</p>
         ) : (
           <div className="flex flex-wrap gap-2">
             {reposWithCustomPM.map((repository) => (
