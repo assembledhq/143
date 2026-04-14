@@ -1183,6 +1183,10 @@ func TestPMAnalyzeHandler_ServiceError(t *testing.T) {
 	err := handler(context.Background(), "pm_analyze", payload)
 	require.Error(t, err, "pm_analyze handler should return error when service fails")
 	require.Contains(t, err.Error(), "pm analysis failed", "error should contain service error message")
+
+	// PM analyze errors should be wrapped as FatalError to prevent retries.
+	var fatal *FatalError
+	require.ErrorAs(t, err, &fatal, "pm_analyze errors should be wrapped as FatalError")
 }
 
 // ---------------------------------------------------------------------------

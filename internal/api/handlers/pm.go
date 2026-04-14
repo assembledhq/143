@@ -274,6 +274,8 @@ func (h *PMHandler) Status(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Compute next automatic run time from org settings (pm_schedule_hours).
+	// If the last run failed, the scheduler backs off for the full interval from
+	// the failure time, so use the later of (last plan + interval, last failure + interval).
 	if status.LastRunAt != nil && !status.IsRunning {
 		scheduleHours := models.DefaultPMScheduleHours
 		if h.orgStore != nil {
@@ -287,7 +289,11 @@ func (h *PMHandler) Status(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		nextRunAt := status.LastRunAt.Add(time.Duration(scheduleHours) * time.Hour)
+		interval := time.Duration(scheduleHours) * time.Hour
+		nextRunAt := status.LastRunAt.Add(interval)
+		if status.LastFailedAt != nil && status.LastFailedAt.Add(interval).After(nextRunAt) {
+			nextRunAt = status.LastFailedAt.Add(interval)
+		}
 		status.NextRunAt = &nextRunAt
 
 		remaining := time.Until(nextRunAt)

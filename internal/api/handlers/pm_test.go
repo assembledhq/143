@@ -310,6 +310,75 @@ func TestPMHandler_StatusWithJobError(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestPMHandler_StatusNextRunAtAccountsForFailure(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	planStore := db.NewPMPlanStore(mock)
+	decisionLogStore := db.NewPMDecisionLogStore(mock)
+	jobStore := db.NewJobStore(mock)
+	handler := NewPMHandler(planStore, decisionLogStore, jobStore, nil)
+
+	orgID := uuid.New()
+	now := time.Now()
+	planCreatedAt := now.Add(-5 * time.Hour)  // plan was 5h ago
+	failedAt := now.Add(-30 * time.Minute)    // failure was 30min ago (more recent)
+
+	// Mock GetLatestByOrg — old successful plan.
+	mock.ExpectQuery("SELECT .+ FROM pm_plans WHERE org_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(pmPlanColumnsWithContext).
+				AddRow(uuid.New(), orgID, nil, "completed", "analysis",
+					json.RawMessage(`[]`), json.RawMessage(`[]`), json.RawMessage(`[]`),
+					5, 0, 0, 0, 0, 0,
+					json.RawMessage(`{}`), json.RawMessage(`{}`), "cron",
+					planCreatedAt, &planCreatedAt,
+				),
+		)
+
+	// Mock GetLatestFailedByType — recent failure.
+	mock.ExpectQuery("SELECT id, last_error, updated_at FROM jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "last_error", "updated_at"}).
+				AddRow(uuid.New(), "create sandbox: Docker daemon unreachable", failedAt),
+		)
+
+	// Mock GetDecisionSummary query.
+	mock.ExpectQuery("SELECT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"total_delegated", "succeeded", "failed", "still_open"}).
+				AddRow(0, 0, 0, 0),
+		)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/pm/status", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.Status(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "should return OK")
+
+	var resp models.SingleResponse[models.PMStatus]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "response should be valid JSON")
+	require.NotNil(t, resp.Data.NextRunAt, "should compute next run time")
+
+	// With default 4h schedule: plan-based next run = planCreatedAt + 4h = now - 1h (in the past).
+	// Failure-based next run = failedAt + 4h = now + 3h30m (in the future).
+	// NextRunAt should use the failure-based time since it's later.
+	defaultInterval := time.Duration(models.DefaultPMScheduleHours) * time.Hour
+	expectedNextRun := failedAt.Add(defaultInterval)
+	require.WithinDuration(t, expectedNextRun, *resp.Data.NextRunAt, time.Second,
+		"NextRunAt should be based on failure time, not the older plan time")
+
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 // pmDocColumns matches the column order in db/pm_documents.go scanPMDoc.
 var pmDocTestColumns = []string{
 	"id", "org_id", "title", "content", "doc_type", "sort_order",
