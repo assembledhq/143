@@ -28,6 +28,7 @@ packages:
   - docker-compose-plugin
   - git
   - jq
+  - curl
 
 runcmd:
   # Set up GHCR access (token written to file to avoid leaking in cloud-init logs)
