@@ -9,6 +9,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Label } from "@/components/ui/label";
 import { Download } from "lucide-react";
 import { api } from "@/lib/api";
 
@@ -25,7 +26,12 @@ export function UsageExportButton({ start, end }: UsageExportButtonProps) {
   const handleExport = () => {
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
     const url = api.usage.getExportUrl({ start, end, granularity, dimension, tz });
-    window.open(url, "_blank");
+    // Try window.open first; fall back to location.href for popup-blocked
+    // browsers. Since this is a file download, location.href won't navigate away.
+    const w = window.open(url, "_blank");
+    if (!w) {
+      window.location.href = url;
+    }
   };
 
   return (
@@ -48,7 +54,7 @@ export function UsageExportButton({ start, end }: UsageExportButtonProps) {
           />
           <div className="absolute right-0 top-full mt-1 z-50 w-56 rounded-lg border bg-background p-3 shadow-md space-y-3">
             <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">Granularity</label>
+              <Label className="text-xs font-medium text-muted-foreground">Granularity</Label>
               <Select value={granularity} onValueChange={(v) => setGranularity(v as "daily" | "hourly")}>
                 <SelectTrigger className="h-8 text-xs">
                   <SelectValue />
@@ -60,7 +66,7 @@ export function UsageExportButton({ start, end }: UsageExportButtonProps) {
               </Select>
             </div>
             <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">Breakdown</label>
+              <Label className="text-xs font-medium text-muted-foreground">Breakdown</Label>
               <Select value={dimension} onValueChange={(v) => setDimension(v as "none" | "user" | "capacity")}>
                 <SelectTrigger className="h-8 text-xs">
                   <SelectValue />

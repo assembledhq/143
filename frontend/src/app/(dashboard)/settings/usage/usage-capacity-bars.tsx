@@ -29,7 +29,7 @@ function formatTierLabel(tier: string): string {
 
 export function UsageCapacityBars({ start, end }: UsageCapacityBarsProps) {
   const { data, isLoading } = useQuery({
-    queryKey: queryKeys.usage.breakdown({ start, end, dimension: "capacity" }),
+    queryKey: queryKeys.usage.breakdown({ start, end, dimension: "capacity", sort: "minutes_desc" }),
     queryFn: () =>
       api.usage.getBreakdown({ start, end, dimension: "capacity", sort: "minutes_desc" }),
   });

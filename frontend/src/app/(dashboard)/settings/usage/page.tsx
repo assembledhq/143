@@ -2,6 +2,7 @@
 
 import { useState, useCallback } from "react";
 import { useQueryState, parseAsString } from "nuqs";
+import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { UsageSummaryCards } from "./usage-summary-cards";
@@ -10,7 +11,7 @@ import { UsageTimeseriesChart } from "./usage-timeseries-chart";
 import { UsageBreakdownTable } from "./usage-breakdown-table";
 import { UsageCapacityBars } from "./usage-capacity-bars";
 import { UsageExportButton } from "./usage-export-button";
-import { getDateRangePreset, formatDateForApi, type MetricKey } from "./usage-helpers";
+import { getDateRangePreset, formatDateForApi, nextDayIso, type MetricKey } from "./usage-helpers";
 
 export default function UsagePage() {
   const [preset, setPreset] = useState<DatePreset>("30d");
@@ -28,7 +29,7 @@ export default function UsagePage() {
     ? new Date(selectedDay + "T00:00:00").toISOString()
     : start;
   const breakdownEnd = selectedDay
-    ? new Date(new Date(selectedDay + "T00:00:00").getTime() + 86400000).toISOString()
+    ? nextDayIso(selectedDay)
     : end;
 
   const handleRowClick = useCallback(
@@ -73,20 +74,24 @@ export default function UsagePage() {
           />
           <div className="flex items-center gap-2">
             {selectedDay && (
-              <button
-                className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8 text-xs text-muted-foreground"
                 onClick={() => setSelectedDay(null)}
               >
                 Clear day filter
-              </button>
+              </Button>
             )}
             {selectedUserId && (
-              <button
-                className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8 text-xs text-muted-foreground"
                 onClick={() => setSelectedUserId(null)}
               >
                 Clear user filter
-              </button>
+              </Button>
             )}
             <UsageExportButton start={start} end={end} />
           </div>

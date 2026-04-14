@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,7 +39,7 @@ type SessionReaper struct {
 	interval         time.Duration
 	logger           zerolog.Logger
 	lastRetentionRun time.Time // throttles retention cleanup to once per hour
-	lastRollupHour   time.Time // watermark: last hour successfully rolled up
+	lastRollupHour   time.Time // watermark: last hour successfully rolled up; written only after wg.Wait() in the single reaper goroutine
 }
 
 // StaleSessionLister is the subset of the session store used by the reaper.
@@ -188,26 +189,97 @@ func (r *SessionReaper) reap(ctx context.Context) {
 	}
 }
 
-// reapUsageRollups rolls up all hours from the watermark through the current
-// hour. On a fresh process with no watermark, it backfills a bounded startup
-// window so ordinary downtime does not leave permanent holes in the rollup.
+// reapUsageRollups rolls up all hours from the watermark through the last
+// completed hour. On a fresh process with no watermark, it backfills a bounded
+// startup window (24h) so ordinary downtime does not leave permanent holes in
+// the rollup. For longer outages, use the backfill-usage CLI:
+//
+//	DATABASE_URL=... go run cmd/backfill-usage/main.go --days <N>
+//
+// When catching up multiple hours (e.g. startup), rollups run concurrently
+// with bounded parallelism to avoid blocking the reaper tick for minutes.
 func (r *SessionReaper) reapUsageRollups(ctx context.Context, now time.Time) {
 	const startupLookback = 24 * time.Hour
+	const maxConcurrentRollups = 4
 
-	currentHour := now.UTC().Truncate(time.Hour)
-	startHour := currentHour
+	// Only roll up fully completed hours. The current hour is still in
+	// progress — rolling it up now would permanently undercount because the
+	// watermark advances past it, preventing a re-roll once more events land.
+	lastCompletedHour := now.UTC().Truncate(time.Hour).Add(-time.Hour)
+	startHour := lastCompletedHour
 
 	if r.lastRollupHour.IsZero() {
-		startHour = currentHour.Add(-startupLookback)
-	} else if r.lastRollupHour.Before(currentHour) {
+		startHour = lastCompletedHour.Add(-startupLookback)
+	} else if r.lastRollupHour.Before(lastCompletedHour) {
 		startHour = r.lastRollupHour.Add(time.Hour)
 	}
 
-	for h := startHour; !h.After(currentHour); h = h.Add(time.Hour) {
-		if err := r.usageRoller.RollupAllOrgs(ctx, h); err != nil {
-			r.logger.Error().Err(err).Time("hour", h).Msg("reaper: failed to roll up hourly usage")
+	// Collect hours to process.
+	var hours []time.Time
+	for h := startHour; !h.After(lastCompletedHour); h = h.Add(time.Hour) {
+		hours = append(hours, h)
+	}
+
+	if len(hours) == 0 {
+		return
+	}
+
+	// For a single hour (the common steady-state case), skip goroutine overhead.
+	if len(hours) == 1 {
+		if err := r.usageRoller.RollupAllOrgs(ctx, hours[0]); err != nil {
+			r.logger.Error().Err(err).Time("hour", hours[0]).Msg("reaper: failed to roll up hourly usage")
 			return
 		}
-		r.lastRollupHour = h
+		r.lastRollupHour = hours[0]
+		return
 	}
+
+	// Multiple hours: run concurrently with bounded parallelism.
+	sem := make(chan struct{}, maxConcurrentRollups)
+	var mu sync.Mutex
+	var firstErr error
+	var errHour time.Time
+
+	var wg sync.WaitGroup
+	for _, h := range hours {
+		wg.Add(1)
+		go func(hour time.Time) {
+			defer wg.Done()
+
+			// Check for prior error or context cancellation.
+			mu.Lock()
+			failed := firstErr != nil
+			mu.Unlock()
+			if failed {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			sem <- struct{}{}
+			err := r.usageRoller.RollupAllOrgs(ctx, hour)
+			<-sem
+
+			if err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+					errHour = hour
+				}
+				mu.Unlock()
+			}
+		}(h)
+	}
+	wg.Wait()
+
+	if firstErr != nil {
+		r.logger.Error().Err(firstErr).Time("hour", errHour).Msg("reaper: failed to roll up hourly usage")
+		// Don't advance watermark past what we can guarantee — but hours are
+		// independent (idempotent upserts), so re-rolling on next tick is safe.
+		return
+	}
+	r.lastRollupHour = lastCompletedHour
 }

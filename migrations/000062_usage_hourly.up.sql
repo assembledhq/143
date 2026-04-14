@@ -44,3 +44,8 @@ CREATE INDEX idx_usage_hourly_org_hour
 CREATE INDEX idx_usage_hourly_org_user_hour_nonnull
     ON usage_hourly (org_id, user_id, hour_utc DESC)
     WHERE user_id IS NOT NULL;
+
+-- Per-tier queries (user_id IS NULL, capacity_tier IS NOT NULL)
+CREATE INDEX idx_usage_hourly_org_tier_hour
+    ON usage_hourly (org_id, capacity_tier, hour_utc DESC)
+    WHERE user_id IS NULL AND capacity_tier IS NOT NULL;

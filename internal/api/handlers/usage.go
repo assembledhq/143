@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
@@ -32,17 +33,24 @@ type usageRollupReader interface {
 }
 
 // NewUsageHandler creates a UsageHandler.
-func NewUsageHandler(usageStore *db.ContainerUsageStore) *UsageHandler {
-	return &UsageHandler{usageStore: usageStore}
+func NewUsageHandler(usageStore *db.ContainerUsageStore, opts ...UsageHandlerOption) *UsageHandler {
+	h := &UsageHandler{usageStore: usageStore}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
-// SetRollupStore wires the rollup store for timeseries/breakdown/export endpoints.
-func (h *UsageHandler) SetRollupStore(rs usageRollupReader) {
-	h.rollupStore = rs
+// UsageHandlerOption configures optional dependencies on UsageHandler.
+type UsageHandlerOption func(*UsageHandler)
+
+// WithRollupStore sets the rollup store for timeseries/breakdown/export endpoints.
+func WithRollupStore(rs usageRollupReader) UsageHandlerOption {
+	return func(h *UsageHandler) { h.rollupStore = rs }
 }
 
 // parseTimeRange extracts start/end from query params with defaults and validation.
-func parseTimeRange(r *http.Request, w http.ResponseWriter) (start, end time.Time, ok bool) {
+func parseTimeRange(w http.ResponseWriter, r *http.Request) (start, end time.Time, ok bool) {
 	now := time.Now().UTC()
 	start = now.AddDate(0, 0, -30)
 	end = now
@@ -171,7 +179,7 @@ func (h *UsageHandler) GetTimeseries(w http.ResponseWriter, r *http.Request) {
 	}
 
 	orgID := middleware.OrgIDFromContext(r.Context())
-	start, end, ok := parseTimeRange(r, w)
+	start, end, ok := parseTimeRange(w, r)
 	if !ok {
 		return
 	}
@@ -194,6 +202,13 @@ func (h *UsageHandler) GetTimeseries(w http.ResponseWriter, r *http.Request) {
 	var capacity *string
 	if c := r.URL.Query().Get("capacity"); c != "" {
 		capacity = &c
+	}
+
+	// user_id and capacity filters override group_by — reject conflicting combos
+	// so callers don't get silently surprising results.
+	if userID != nil && capacity != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "user_id and capacity filters are mutually exclusive")
+		return
 	}
 
 	buckets, err := h.rollupStore.GetTimeseries(r.Context(), orgID, start, end, groupBy, userID, capacity)
@@ -224,7 +239,7 @@ func (h *UsageHandler) GetBreakdown(w http.ResponseWriter, r *http.Request) {
 	}
 
 	orgID := middleware.OrgIDFromContext(r.Context())
-	start, end, ok := parseTimeRange(r, w)
+	start, end, ok := parseTimeRange(w, r)
 	if !ok {
 		return
 	}
@@ -262,6 +277,11 @@ func (h *UsageHandler) GetBreakdown(w http.ResponseWriter, r *http.Request) {
 // This is a read-only GET endpoint so CSRF is not required; the browser will
 // include auth cookies automatically via same-origin window.open().
 //
+// NOTE: Because the response is streamed, the 200 status and CSV headers are
+// written before all rows are scanned. If an error occurs mid-stream, the HTTP
+// status cannot be changed. An "ERROR" sentinel row is appended so clients can
+// detect truncation, but they won't see an HTTP error status code.
+//
 //	GET /api/v1/usage/export?start=...&end=...&granularity=daily&dimension=none&tz=America/Los_Angeles
 func (h *UsageHandler) ExportCSV(w http.ResponseWriter, r *http.Request) {
 	if h.rollupStore == nil {
@@ -270,7 +290,7 @@ func (h *UsageHandler) ExportCSV(w http.ResponseWriter, r *http.Request) {
 	}
 
 	orgID := middleware.OrgIDFromContext(r.Context())
-	start, end, ok := parseTimeRange(r, w)
+	start, end, ok := parseTimeRange(w, r)
 	if !ok {
 		return
 	}
@@ -306,6 +326,7 @@ func (h *UsageHandler) ExportCSV(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/csv")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
 
+	logger := zerolog.Ctx(r.Context())
 	cw := csv.NewWriter(w)
 
 	// Write header.
@@ -320,7 +341,10 @@ func (h *UsageHandler) ExportCSV(w http.ResponseWriter, r *http.Request) {
 		header = append(header, "capacity_tier")
 	}
 	header = append(header, "container_minutes", "sessions", "container_starts", "peak_concurrent", "input_tokens", "output_tokens", "llm_cost_usd")
-	_ = cw.Write(header)
+	if err := cw.Write(header); err != nil {
+		logger.Error().Err(err).Msg("csv: failed to write header")
+		return
+	}
 
 	// Track daily aggregation for daily granularity.
 	type dailyKey struct {
@@ -339,6 +363,7 @@ func (h *UsageHandler) ExportCSV(w http.ResponseWriter, r *http.Request) {
 	}
 	dailyAgg := make(map[dailyKey]*dailyRow)
 	var dailyOrder []dailyKey
+	var scanErr error
 
 	for rows.Next() {
 		var (
@@ -354,6 +379,8 @@ func (h *UsageHandler) ExportCSV(w http.ResponseWriter, r *http.Request) {
 			cost         float64
 		)
 		if err := rows.Scan(&hourUTC, &userEmail, &capacityTier, &minutes, &sessions, &starts, &peak, &inTok, &outTok, &cost); err != nil {
+			logger.Error().Err(err).Msg("csv: failed to scan export row")
+			scanErr = err
 			break
 		}
 
@@ -377,7 +404,10 @@ func (h *UsageHandler) ExportCSV(w http.ResponseWriter, r *http.Request) {
 				strconv.FormatInt(outTok, 10),
 				fmt.Sprintf("%.2f", cost),
 			)
-			_ = cw.Write(record)
+			if err := cw.Write(record); err != nil {
+				logger.Error().Err(err).Msg("csv: failed to write hourly record")
+				return
+			}
 		} else {
 			key := dailyKey{date: dateStr, email: userEmail, capacity: capacityTier}
 			agg, ok := dailyAgg[key]
@@ -387,9 +417,9 @@ func (h *UsageHandler) ExportCSV(w http.ResponseWriter, r *http.Request) {
 				dailyOrder = append(dailyOrder, key)
 			}
 			agg.minutes += minutes
-			if sessions > agg.sessions {
-				agg.sessions = sessions
-			}
+			// Sessions are summed as a rough fallback; the accurate count
+			// comes from GetDailySessionCounts below which uses COUNT(DISTINCT).
+			agg.sessions += sessions
 			agg.starts += starts
 			if peak > agg.peak {
 				agg.peak = peak
@@ -400,7 +430,40 @@ func (h *UsageHandler) ExportCSV(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// If a scan error occurred, write an error indicator row so the client
+	// sees that the export was truncated rather than silently missing data.
+	if scanErr != nil {
+		_ = cw.Write([]string{"ERROR", "Export truncated due to internal error"})
+		cw.Flush()
+		return
+	}
+
 	if granularity == "daily" {
+		// Fetch accurate daily session counts from raw events instead of
+		// summing hourly rollups, which would double-count sessions that
+		// span multiple hours.
+		dailyCounts, err := h.rollupStore.GetDailySessionCounts(r.Context(), orgID, start, end, dimension, tzName)
+		if err != nil {
+			logger.Error().Err(err).Msg("csv: failed to fetch daily session counts")
+			// Fall through — use the rollup-based summed counts as a fallback.
+			// These will overcount sessions that span multiple hours.
+		} else {
+			type countKey struct {
+				date     string
+				email    string
+				capacity string
+			}
+			countMap := make(map[countKey]int, len(dailyCounts))
+			for _, c := range dailyCounts {
+				countMap[countKey{date: c.LocalDate, email: c.UserEmail, capacity: c.CapacityTier}] = c.Sessions
+			}
+			for _, key := range dailyOrder {
+				if count, ok := countMap[countKey{date: key.date, email: key.email, capacity: key.capacity}]; ok {
+					dailyAgg[key].sessions = count
+				}
+			}
+		}
+
 		for _, key := range dailyOrder {
 			agg := dailyAgg[key]
 			record := []string{key.date}
@@ -419,9 +482,15 @@ func (h *UsageHandler) ExportCSV(w http.ResponseWriter, r *http.Request) {
 				strconv.FormatInt(agg.outTok, 10),
 				fmt.Sprintf("%.2f", agg.cost),
 			)
-			_ = cw.Write(record)
+			if err := cw.Write(record); err != nil {
+				logger.Error().Err(err).Msg("csv: failed to write daily record")
+				return
+			}
 		}
 	}
 
 	cw.Flush()
+	if err := cw.Error(); err != nil {
+		logger.Error().Err(err).Msg("csv: flush error")
+	}
 }

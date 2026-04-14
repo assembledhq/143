@@ -40,7 +40,8 @@ func main() {
 
 	rollupStore := internaldb.NewUsageRollupStore(pool)
 
-	end := time.Now().UTC().Truncate(time.Hour).Add(time.Hour)
+	// Exclude the current in-progress hour — only backfill completed hours.
+	end := time.Now().UTC().Truncate(time.Hour)
 	start := end.AddDate(0, 0, -*days)
 
 	logger.Info().
@@ -49,15 +50,21 @@ func main() {
 		Int("days", *days).
 		Msg("starting usage backfill")
 
-	// Get all orgs that have any container usage events in the range.
+	// Get all orgs that have container usage events overlapping the range
+	// (including events that started before the window but were still active
+	// inside it) OR token usage in the range.
 	rows, err := pool.Query(ctx, `
 		SELECT DISTINCT org_id FROM container_usage_events
-		WHERE started_at >= @start AND started_at < @end`,
+		WHERE started_at < @end AND COALESCE(stopped_at, now()) > @start
+		UNION
+		SELECT DISTINCT org_id FROM sessions
+		WHERE token_usage IS NOT NULL AND created_at >= @start AND created_at < @end`,
 		pgx.NamedArgs{"start": start, "end": end},
 	)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to query orgs")
 	}
+	defer rows.Close()
 
 	var orgIDs []uuid.UUID
 	for rows.Next() {
@@ -67,7 +74,9 @@ func main() {
 		}
 		orgIDs = append(orgIDs, id)
 	}
-	rows.Close()
+	if err := rows.Err(); err != nil {
+		logger.Fatal().Err(err).Msg("failed to iterate org rows")
+	}
 
 	logger.Info().Int("orgs", len(orgIDs)).Msg("found orgs with usage data")
 

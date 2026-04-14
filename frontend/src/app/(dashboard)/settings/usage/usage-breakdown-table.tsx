@@ -86,6 +86,7 @@ export function UsageBreakdownTable({
             No breakdown data available
           </div>
         ) : (
+          <TooltipProvider>
           <div className="overflow-x-auto -mx-4">
             <Table>
               <TableHeader>
@@ -97,17 +98,15 @@ export function UsageBreakdownTable({
                   <TableHead className="text-xs text-right">Sessions</TableHead>
                   <TableHead className="text-xs text-right">Tokens</TableHead>
                   <TableHead className="text-xs text-right">
-                    <TooltipProvider>
-                      <Tooltip>
-                        <TooltipTrigger className="inline-flex items-center gap-1">
-                          Est. Cost
-                          <Info className="h-3 w-3 text-muted-foreground" />
-                        </TooltipTrigger>
-                        <TooltipContent className="max-w-[200px]">
-                          Estimated cost at standard provider rates. Your actual billing may differ based on your plan.
-                        </TooltipContent>
-                      </Tooltip>
-                    </TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger className="inline-flex items-center gap-1">
+                        Est. Cost
+                        <Info className="h-3 w-3 text-muted-foreground" />
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-[200px]">
+                        Estimated cost at standard provider rates. Your actual billing may differ based on your plan.
+                      </TooltipContent>
+                    </Tooltip>
                   </TableHead>
                   <TableHead className="text-xs text-right pr-4">%</TableHead>
                 </TableRow>
@@ -153,6 +152,7 @@ export function UsageBreakdownTable({
               </TableBody>
             </Table>
           </div>
+          </TooltipProvider>
         )}
       </CardContent>
     </Card>

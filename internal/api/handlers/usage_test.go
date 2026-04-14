@@ -204,7 +204,7 @@ func TestParseTimeRange_Defaults(t *testing.T) {
 	t.Parallel()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/timeseries", nil)
 	rr := httptest.NewRecorder()
-	start, end, ok := parseTimeRange(req, rr)
+	start, end, ok := parseTimeRange(rr, req)
 	require.True(t, ok)
 	require.True(t, start.Before(end))
 	require.InDelta(t, 30*24, end.Sub(start).Hours(), 1)
@@ -214,7 +214,7 @@ func TestParseTimeRange_InvalidStart(t *testing.T) {
 	t.Parallel()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/timeseries?start=bad", nil)
 	rr := httptest.NewRecorder()
-	_, _, ok := parseTimeRange(req, rr)
+	_, _, ok := parseTimeRange(rr, req)
 	require.False(t, ok)
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 }
@@ -223,7 +223,7 @@ func TestParseTimeRange_InvalidEnd(t *testing.T) {
 	t.Parallel()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/timeseries?start=2026-04-01T00:00:00Z&end=bad", nil)
 	rr := httptest.NewRecorder()
-	_, _, ok := parseTimeRange(req, rr)
+	_, _, ok := parseTimeRange(rr, req)
 	require.False(t, ok)
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 }
@@ -232,7 +232,7 @@ func TestParseTimeRange_StartAfterEnd(t *testing.T) {
 	t.Parallel()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/timeseries?start=2026-05-01T00:00:00Z&end=2026-04-01T00:00:00Z", nil)
 	rr := httptest.NewRecorder()
-	_, _, ok := parseTimeRange(req, rr)
+	_, _, ok := parseTimeRange(rr, req)
 	require.False(t, ok)
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 }
@@ -241,7 +241,7 @@ func TestParseTimeRange_ExceedsMaxRange(t *testing.T) {
 	t.Parallel()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/timeseries?start=2026-01-01T00:00:00Z&end=2026-12-01T00:00:00Z", nil)
 	rr := httptest.NewRecorder()
-	_, _, ok := parseTimeRange(req, rr)
+	_, _, ok := parseTimeRange(rr, req)
 	require.False(t, ok)
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 }
@@ -268,8 +268,7 @@ func TestUsageHandler_GetTimeseries_WithStore(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewUsageHandler(db.NewContainerUsageStore(mock))
-	handler.SetRollupStore(&stubUsageRollupStore{})
+	handler := NewUsageHandler(db.NewContainerUsageStore(mock), WithRollupStore(&stubUsageRollupStore{}))
 	orgID := uuid.New()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/timeseries?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z", nil)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
@@ -299,8 +298,7 @@ func TestUsageHandler_GetBreakdown_WithStore(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewUsageHandler(db.NewContainerUsageStore(mock))
-	handler.SetRollupStore(&stubUsageRollupStore{})
+	handler := NewUsageHandler(db.NewContainerUsageStore(mock), WithRollupStore(&stubUsageRollupStore{}))
 	orgID := uuid.New()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/breakdown?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z&dimension=capacity&sort=sessions_desc&limit=10", nil)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
@@ -330,14 +328,13 @@ func TestUsageHandler_ExportCSV_HourlyGranularity(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewUsageHandler(db.NewContainerUsageStore(mock))
-	handler.SetRollupStore(&stubUsageRollupStore{
+	handler := NewUsageHandler(db.NewContainerUsageStore(mock), WithRollupStore(&stubUsageRollupStore{
 		exportRows: &stubRows{
 			rows: [][]any{
 				{time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC), "", "", 30.0, 1, 1, 1, int64(100), int64(50), 0.25},
 			},
 		},
-	})
+	}))
 	orgID := uuid.New()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/export?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z&granularity=hourly&dimension=none&tz=UTC", nil)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
@@ -358,8 +355,7 @@ func TestUsageHandler_ExportCSV_UserDimension(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewUsageHandler(db.NewContainerUsageStore(mock))
-	handler.SetRollupStore(&stubUsageRollupStore{
+	handler := NewUsageHandler(db.NewContainerUsageStore(mock), WithRollupStore(&stubUsageRollupStore{
 		exportRows: &stubRows{
 			rows: [][]any{
 				{time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC), "user@test.com", "", 30.0, 1, 1, 1, int64(100), int64(50), 0.25},
@@ -368,7 +364,7 @@ func TestUsageHandler_ExportCSV_UserDimension(t *testing.T) {
 		dailySessionCounts: []db.ExportDailySessionCountRow{
 			{LocalDate: "2026-04-01", UserEmail: "user@test.com", Sessions: 1},
 		},
-	})
+	}))
 	orgID := uuid.New()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/export?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z&granularity=daily&dimension=user&tz=UTC", nil)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
@@ -389,8 +385,7 @@ func TestUsageHandler_ExportCSV_CapacityDimension(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewUsageHandler(db.NewContainerUsageStore(mock))
-	handler.SetRollupStore(&stubUsageRollupStore{
+	handler := NewUsageHandler(db.NewContainerUsageStore(mock), WithRollupStore(&stubUsageRollupStore{
 		exportRows: &stubRows{
 			rows: [][]any{
 				{time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC), "", "2cpu_4096mb", 30.0, 1, 1, 1, int64(100), int64(50), 0.25},
@@ -399,7 +394,7 @@ func TestUsageHandler_ExportCSV_CapacityDimension(t *testing.T) {
 		dailySessionCounts: []db.ExportDailySessionCountRow{
 			{LocalDate: "2026-04-01", CapacityTier: "2cpu_4096mb", Sessions: 1},
 		},
-	})
+	}))
 	orgID := uuid.New()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/export?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z&granularity=daily&dimension=capacity&tz=UTC", nil)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
@@ -420,8 +415,7 @@ func TestUsageHandler_ExportCSV_InvalidTimezone(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewUsageHandler(db.NewContainerUsageStore(mock))
-	handler.SetRollupStore(&stubUsageRollupStore{})
+	handler := NewUsageHandler(db.NewContainerUsageStore(mock), WithRollupStore(&stubUsageRollupStore{}))
 	orgID := uuid.New()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/export?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z&tz=Invalid/Zone", nil)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
@@ -496,8 +490,7 @@ func TestUsageHandler_GetTimeseries_WithUserID(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewUsageHandler(db.NewContainerUsageStore(mock))
-	handler.SetRollupStore(&stubUsageRollupStore{})
+	handler := NewUsageHandler(db.NewContainerUsageStore(mock), WithRollupStore(&stubUsageRollupStore{}))
 	orgID := uuid.New()
 	userID := uuid.New()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/timeseries?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z&user_id="+userID.String(), nil)
@@ -513,8 +506,7 @@ func TestUsageHandler_GetTimeseries_InvalidUserID(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewUsageHandler(db.NewContainerUsageStore(mock))
-	handler.SetRollupStore(&stubUsageRollupStore{})
+	handler := NewUsageHandler(db.NewContainerUsageStore(mock), WithRollupStore(&stubUsageRollupStore{}))
 	orgID := uuid.New()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/timeseries?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z&user_id=not-a-uuid", nil)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
@@ -529,8 +521,7 @@ func TestUsageHandler_GetTimeseries_WithCapacity(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewUsageHandler(db.NewContainerUsageStore(mock))
-	handler.SetRollupStore(&stubUsageRollupStore{})
+	handler := NewUsageHandler(db.NewContainerUsageStore(mock), WithRollupStore(&stubUsageRollupStore{}))
 	orgID := uuid.New()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/timeseries?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z&capacity=2cpu_4096mb", nil)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
@@ -539,14 +530,29 @@ func TestUsageHandler_GetTimeseries_WithCapacity(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code)
 }
 
+func TestUsageHandler_GetTimeseries_UserIDAndCapacityMutuallyExclusive(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewUsageHandler(db.NewContainerUsageStore(mock), WithRollupStore(&stubUsageRollupStore{}))
+	orgID := uuid.New()
+	userID := uuid.New()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/timeseries?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z&user_id="+userID.String()+"&capacity=2cpu_4096mb", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+	handler.GetTimeseries(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
 func TestUsageHandler_GetBreakdown_DefaultParams(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewUsageHandler(db.NewContainerUsageStore(mock))
-	handler.SetRollupStore(&stubUsageRollupStore{})
+	handler := NewUsageHandler(db.NewContainerUsageStore(mock), WithRollupStore(&stubUsageRollupStore{}))
 	orgID := uuid.New()
 	// No dimension, sort, or limit params — tests defaults
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/breakdown?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z", nil)
@@ -581,14 +587,13 @@ func TestUsageHandler_ExportCSV_DefaultGranularity(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	handler := NewUsageHandler(db.NewContainerUsageStore(mock))
-	handler.SetRollupStore(&stubUsageRollupStore{
+	handler := NewUsageHandler(db.NewContainerUsageStore(mock), WithRollupStore(&stubUsageRollupStore{
 		exportRows: &stubRows{
 			rows: [][]any{
 				{time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC), "", "", 30.0, 1, 1, 1, int64(100), int64(50), 0.25},
 			},
 		},
-	})
+	}))
 	orgID := uuid.New()
 	// No granularity param — defaults to "daily"
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/export?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z", nil)
@@ -614,8 +619,7 @@ func TestUsageHandler_ExportCSV_DailyDoesNotDoubleCountSessionsAcrossHours(t *te
 	defer mock.Close()
 
 	usageStore := db.NewContainerUsageStore(mock)
-	handler := NewUsageHandler(usageStore)
-	handler.SetRollupStore(&stubUsageRollupStore{
+	handler := NewUsageHandler(usageStore, WithRollupStore(&stubUsageRollupStore{
 		exportRows: &stubRows{
 			rows: [][]any{
 				{time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC), "", "", 30.0, 1, 1, 1, int64(100), int64(50), 0.25},
@@ -625,7 +629,7 @@ func TestUsageHandler_ExportCSV_DailyDoesNotDoubleCountSessionsAcrossHours(t *te
 		dailySessionCounts: []db.ExportDailySessionCountRow{
 			{LocalDate: "2026-04-01", Sessions: 1},
 		},
-	})
+	}))
 
 	orgID := uuid.New()
 	start := "2026-04-01T00:00:00Z"

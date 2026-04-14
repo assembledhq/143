@@ -25,7 +25,12 @@ export function groupByLocalDay(buckets: UsageTimeseriesBucket[]): DailyBucket[]
   return [...byDay.entries()].map(([day, hours]) => ({
     day,
     total_container_minutes: sum(hours, "total_container_minutes"),
-    total_sessions: sum(hours, "total_sessions"),
+    // Sessions use max-of-hourly (not sum) because hourly distinct counts
+    // can't be naively summed — a session spanning multiple hours would be
+    // double-counted. Max gives the peak hour's count, which underestimates
+    // the true daily total. This is acceptable for the chart; the breakdown
+    // table shows accurate counts via server-side COUNT(DISTINCT).
+    total_sessions: max(hours, "total_sessions"),
     total_container_starts: sum(hours, "total_container_starts"),
     peak_concurrent: max(hours, "peak_concurrent"),
     total_input_tokens: sum(hours, "total_input_tokens"),
@@ -52,8 +57,10 @@ export function formatTokenCount(count: number): string {
   return String(count);
 }
 
+/** Format a USD cost. Handles negative values (e.g. refunds/credits). */
 export function formatCost(usd: number): string {
-  if (usd < 0.01) return "$0.00";
+  if (Math.abs(usd) < 0.01) return "$0.00";
+  if (usd < 0) return `-$${Math.abs(usd).toFixed(2)}`;
   return `$${usd.toFixed(2)}`;
 }
 
@@ -117,6 +124,21 @@ export function getDateRangePreset(preset: string): { start: Date; end: Date } {
 
 export function formatDateForApi(date: Date): string {
   return date.toISOString();
+}
+
+/**
+ * Return the ISO string for midnight of the day after a "YYYY-MM-DD" string.
+ * DST-safe because setDate adjusts for local-time day boundaries.
+ *
+ * Note: parsing with "T00:00:00" (no Z) creates a local-time Date, so the
+ * resulting ISO string represents local midnight in UTC. This means the
+ * breakdown window covers one local-time day, which matches the chart's
+ * local-day grouping.
+ */
+export function nextDayIso(day: string): string {
+  const d = new Date(day + "T00:00:00");
+  d.setDate(d.getDate() + 1);
+  return d.toISOString();
 }
 
 export function formatDayLabel(day: string): string {

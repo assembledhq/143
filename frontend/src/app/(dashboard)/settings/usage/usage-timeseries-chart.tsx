@@ -157,9 +157,11 @@ export function UsageTimeseriesChart({
               data={dailyData}
               margin={{ top: 4, right: 4, bottom: 0, left: 4 }}
               onClick={(e: Record<string, unknown>) => {
-                const payload = (e?.activePayload as Array<{ payload: DailyBucket & { label: string } }>)?.[0];
-                if (payload?.payload?.day) {
-                  onDayClick?.(payload.payload.day);
+                if (!e?.activePayload || !Array.isArray(e.activePayload)) return;
+                const first = e.activePayload[0] as { payload?: Record<string, unknown> } | undefined;
+                const day = first?.payload?.day;
+                if (typeof day === "string") {
+                  onDayClick?.(day);
                 }
               }}
             >

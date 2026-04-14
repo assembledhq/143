@@ -131,8 +131,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, userStore, repoStore, integrationStore, prService)
 	containerUsageStore := db.NewContainerUsageStore(pool)
 	usageRollupStore := db.NewUsageRollupStore(pool)
-	usageHandler := handlers.NewUsageHandler(containerUsageStore)
-	usageHandler.SetRollupStore(usageRollupStore)
+	usageHandler := handlers.NewUsageHandler(containerUsageStore, handlers.WithRollupStore(usageRollupStore))
 	platformModel := cfg.PlatformLLMModel
 	if platformModel == "" {
 		platformModel = "gpt-5-nano"
