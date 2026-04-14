@@ -28,8 +28,9 @@ creation_rules:
     age: >-
       age1xyvl6ral4fq757tpnz30cuzefrpngnuv6zutjsg7wtnmza4uyqlshc2ucl
   - path_regex: \.env\.production(\.enc)?$
+    # Personal key, server key, CI deploy key
     age: >-
-      age1xyvl6ral4fq757tpnz30cuzefrpngnuv6zutjsg7wtnmza4uyqlshc2ucl,age1javfprksts8jt07rga3ltdnhllstv7rkt09s9lvgz8twy9sgps7q3xtgs5
+      age1xyvl6ral4fq757tpnz30cuzefrpngnuv6zutjsg7wtnmza4uyqlshc2ucl,age1javfprksts8jt07rga3ltdnhllstv7rkt09s9lvgz8twy9sgps7q3xtgs5,age1uty3jxw8a5nv27rn4kf7sjn5ugtemyyuadn6wh7lky8acqlxvdnsp6tvhj
   # Default: catches .env, .env.enc, and any other .env* files
   - path_regex: \.env(\..*)?$
     age: >-

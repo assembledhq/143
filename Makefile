@@ -227,7 +227,7 @@ secrets-rotate:
 	@for f in .env*.enc; do \
 		[ -f "$$f" ] || continue; \
 		echo "Rotating keys for $$f ..."; \
-		sops updatekeys --yes "$$f"; \
+		sops updatekeys --yes --input-type dotenv "$$f"; \
 	done
 	@echo "Done. Commit the updated .enc files."
 
