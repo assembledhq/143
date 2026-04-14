@@ -33,7 +33,7 @@ else
     if [ -f "$ENC_FILE" ]; then
       echo "Decrypting fleet hosts from .env.production.enc..."
       FLEET_HOSTS="$(sops --decrypt --input-type dotenv --output-type dotenv "$ENC_FILE" \
-        | grep '^FLEET_HOSTS=' | cut -d= -f2-)"
+        | grep '^FLEET_HOSTS=' | cut -d= -f2- || true)"
     fi
   fi
 
