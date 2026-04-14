@@ -393,7 +393,7 @@ func TestRollupAllOrgs_NoActiveOrgs(t *testing.T) {
 	hour := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
 
 	mock.ExpectQuery("SELECT DISTINCT org_id").
-		WithArgs(pgx.NamedArgs{"hour_start": hour, "hour_end": hour.Add(time.Hour), "now": pgxmock.AnyArg()}).
+		WithArgs(pgx.NamedArgs{"start": hour, "end": hour.Add(time.Hour)}).
 		WillReturnRows(pgxmock.NewRows([]string{"org_id"}))
 
 	err = store.RollupAllOrgs(context.Background(), hour)
@@ -411,7 +411,7 @@ func TestRollupAllOrgs_QueryError(t *testing.T) {
 	hour := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
 
 	mock.ExpectQuery("SELECT DISTINCT org_id").
-		WithArgs(pgx.NamedArgs{"hour_start": hour, "hour_end": hour.Add(time.Hour), "now": pgxmock.AnyArg()}).
+		WithArgs(pgx.NamedArgs{"start": hour, "end": hour.Add(time.Hour)}).
 		WillReturnError(pgx.ErrTxClosed)
 
 	err = store.RollupAllOrgs(context.Background(), hour)

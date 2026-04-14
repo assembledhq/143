@@ -432,22 +432,19 @@ func (s *UsageRollupStore) RollupRange(ctx context.Context, orgID uuid.UUID, sta
 	return nil
 }
 
-// RollupAllOrgs rolls up the given hour for all orgs that have activity.
-func (s *UsageRollupStore) RollupAllOrgs(ctx context.Context, hour time.Time) error {
-	hour = hour.Truncate(time.Hour).UTC()
-	hourEnd := hour.Add(time.Hour)
-
-	now := time.Now().UTC()
+// GetActiveOrgIDs returns the distinct org IDs that have container usage events
+// or token usage in the given [start, end) window.
+func (s *UsageRollupStore) GetActiveOrgIDs(ctx context.Context, start, end time.Time) ([]uuid.UUID, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT DISTINCT org_id FROM container_usage_events
-		WHERE started_at < @hour_end AND COALESCE(stopped_at, @now) > @hour_start
+		WHERE started_at < @end AND COALESCE(stopped_at, now()) > @start
 		UNION
 		SELECT DISTINCT org_id FROM sessions
-		WHERE token_usage IS NOT NULL AND date_trunc('hour', created_at) = @hour_start`,
-		pgx.NamedArgs{"hour_start": hour, "hour_end": hourEnd, "now": now},
+		WHERE token_usage IS NOT NULL AND created_at >= @start AND created_at < @end`,
+		pgx.NamedArgs{"start": start, "end": end},
 	)
 	if err != nil {
-		return fmt.Errorf("list active orgs: %w", err)
+		return nil, fmt.Errorf("query active org IDs: %w", err)
 	}
 	defer rows.Close()
 
@@ -455,12 +452,24 @@ func (s *UsageRollupStore) RollupAllOrgs(ctx context.Context, hour time.Time) er
 	for rows.Next() {
 		var orgID uuid.UUID
 		if err := rows.Scan(&orgID); err != nil {
-			return fmt.Errorf("scan org_id: %w", err)
+			return nil, fmt.Errorf("scan org_id: %w", err)
 		}
 		orgIDs = append(orgIDs, orgID)
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate orgs: %w", err)
+		return nil, fmt.Errorf("iterate org IDs: %w", err)
+	}
+	return orgIDs, nil
+}
+
+// RollupAllOrgs rolls up the given hour for all orgs that have activity.
+func (s *UsageRollupStore) RollupAllOrgs(ctx context.Context, hour time.Time) error {
+	hour = hour.Truncate(time.Hour).UTC()
+	hourEnd := hour.Add(time.Hour)
+
+	orgIDs, err := s.GetActiveOrgIDs(ctx, hour, hourEnd)
+	if err != nil {
+		return fmt.Errorf("list active orgs: %w", err)
 	}
 
 	for _, orgID := range orgIDs {

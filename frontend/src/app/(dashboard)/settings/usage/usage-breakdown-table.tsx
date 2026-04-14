@@ -49,7 +49,7 @@ export function UsageBreakdownTable({
   selectedKey,
 }: UsageBreakdownTableProps) {
   const { data, isLoading } = useQuery({
-    queryKey: queryKeys.usage.breakdown({ start, end, dimension }),
+    queryKey: queryKeys.usage.breakdown({ start, end, dimension, sort: "minutes_desc" }),
     queryFn: () =>
       api.usage.getBreakdown({ start, end, dimension, sort: "minutes_desc" }),
   });
