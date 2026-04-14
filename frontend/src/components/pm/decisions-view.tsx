@@ -100,7 +100,7 @@ function DecisionRow({ decision }: { decision: PMDecisionView }) {
     <div>
       <button
         onClick={() => setExpanded(!expanded)}
-        className="flex items-center gap-3 w-full py-2.5 px-4 border-b border-border last:border-b-0 text-sm text-left hover:bg-muted/30 transition-colors"
+        className="flex items-center gap-3 w-full py-2.5 px-4 border-b border-border last:border-b-0 text-[13px] text-left hover:bg-muted/30 transition-colors"
       >
         <span className="w-16 text-xs text-muted-foreground shrink-0">
           {formatDate(decision.created_at)}
@@ -145,7 +145,7 @@ export function DecisionsView() {
   if (isLoading) {
     return (
       <Card>
-        <CardContent className="py-12 text-center text-sm text-muted-foreground">
+        <CardContent className="py-12 text-center text-[13px] text-muted-foreground">
           Loading decisions...
         </CardContent>
       </Card>
@@ -155,7 +155,7 @@ export function DecisionsView() {
   if (error) {
     return (
       <Card>
-        <CardContent className="py-12 text-center text-sm text-muted-foreground">
+        <CardContent className="py-12 text-center text-[13px] text-muted-foreground">
           Failed to load decision history.
         </CardContent>
       </Card>
@@ -168,7 +168,7 @@ export function DecisionsView() {
   if (allDecisions.length === 0) {
     return (
       <Card>
-        <CardContent className="py-12 text-center text-sm text-muted-foreground">
+        <CardContent className="py-12 text-center text-[13px] text-muted-foreground">
           No decisions yet. Run an analysis to start building decision history.
         </CardContent>
       </Card>
@@ -245,7 +245,7 @@ export function DecisionsView() {
             <span className="w-24 shrink-0">Outcome</span>
           </div>
           {decisions.length === 0 ? (
-            <div className="px-4 py-8 text-center text-sm text-muted-foreground">
+            <div className="px-4 py-8 text-center text-[13px] text-muted-foreground">
               No decisions match the current filters.
             </div>
           ) : (

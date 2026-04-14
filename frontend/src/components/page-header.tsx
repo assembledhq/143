@@ -13,10 +13,10 @@ export function PageHeader({ title, description, subtitle, action }: PageHeaderP
       <div>
         <h1 className="text-2xl font-semibold tracking-tight text-foreground">{title}</h1>
         {description && (
-          <p className="mt-1.5 text-sm text-muted-foreground/80">{description}</p>
+          <p className="mt-1.5 text-[13px] text-muted-foreground/80">{description}</p>
         )}
         {subtitle && (
-          <p className="mt-1 text-sm text-muted-foreground">{subtitle}</p>
+          <p className="mt-1 text-[13px] text-muted-foreground">{subtitle}</p>
         )}
       </div>
       {action && <div className="shrink-0">{action}</div>}
