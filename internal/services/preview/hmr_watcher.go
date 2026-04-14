@@ -1,12 +1,12 @@
 package preview
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -48,36 +48,43 @@ const (
 // common dev servers. Each entry requires ALL patterns in the set to match,
 // reducing false positives from non-HMR messages that happen to contain a
 // single matching substring.
-var hmrPatternSets = [][]string{
+var hmrPatternSets = [][]byte{
 	// Vite: messages always include both "type" and "updates" array
-	{`"type":"update"`, `"updates":`},
+	[]byte(`"type":"update"`), []byte(`"updates":`),
+	// sentinel: end of Vite update pattern set
+	nil,
 	// Vite full-reload: includes "type" and "path"
-	{`"type":"full-reload"`, `"path":`},
-
+	[]byte(`"type":"full-reload"`), []byte(`"path":`),
+	nil,
 	// webpack (webpack-dev-server): "action":"built" co-occurs with "hash"
-	{`"action":"built"`, `"hash":"`},
+	[]byte(`"action":"built"`), []byte(`"hash":"`),
+	nil,
 	// webpack hash message: "type":"hash" co-occurs with "data"
-	{`"type":"hash"`, `"data":"`},
-
+	[]byte(`"type":"hash"`), []byte(`"data":"`),
+	nil,
 	// Next.js: these action values are specific enough on their own
-	{`"action":"serverComponentChanges"`},
-	{`"action":"devPagesManifestUpdate"`},
+	[]byte(`"action":"serverComponentChanges"`),
+	nil,
+	[]byte(`"action":"devPagesManifestUpdate"`),
+	nil,
 }
 
 // isHMRMessage returns true if data contains a known HMR update pattern set.
 // All patterns within a set must match for the message to be considered HMR.
+// Uses bytes.Contains directly to avoid allocating a string copy of the data.
 func isHMRMessage(data []byte) bool {
-	s := string(data)
-	for _, patterns := range hmrPatternSets {
-		allMatch := true
-		for _, p := range patterns {
-			if !strings.Contains(s, p) {
-				allMatch = false
-				break
+	allMatch := true
+	for _, p := range hmrPatternSets {
+		if p == nil {
+			// End of a pattern set. If all patterns matched, it's HMR.
+			if allMatch {
+				return true
 			}
+			allMatch = true
+			continue
 		}
-		if allMatch {
-			return true
+		if allMatch && !bytes.Contains(data, p) {
+			allMatch = false
 		}
 	}
 	return false
@@ -235,6 +242,14 @@ func (hw *HMRWatcher) OnWebSocketMessage(previewID uuid.UUID, data []byte) {
 	// Debounce: reset the timer so rapid bursts of HMR messages result in
 	// only a single screenshot after the activity settles.
 	pw.resetTimer(func() {
+		// Re-check that the watcher is still active. StopWatching may have
+		// deleted it between the timer being set and firing.
+		hw.mu.RLock()
+		_, stillActive := hw.watchers[previewID]
+		hw.mu.RUnlock()
+		if !stillActive {
+			return
+		}
 		hw.captureAgentChange(pw)
 	})
 }

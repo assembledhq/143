@@ -118,9 +118,9 @@ func (w *RecycleWorker) recycle() {
 			Dur("uptime", now.Sub(p.CreatedAt)).
 			Msg("recycle: preview exceeded max uptime, recycling")
 
-		// Use a per-preview context with a shorter timeout so that one
-		// slow recycle does not consume the entire batch timeout.
-		previewCtx, previewCancel := context.WithTimeout(ctx, 30*time.Second)
+		// Use a per-preview context with a generous timeout since recycle
+		// involves SIGTERM, grace period, teardown, re-provision, and restart.
+		previewCtx, previewCancel := context.WithTimeout(ctx, 90*time.Second)
 		err := w.manager.RecyclePreview(previewCtx, p.OrgID, p.ID)
 		previewCancel()
 		if err != nil {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -69,6 +70,10 @@ type PRPreviewIntegration struct {
 	gh         GitHubClient
 	logger     zerolog.Logger
 	appBaseURL string
+
+	// commentMu serializes GitHub comment create/update operations to prevent
+	// duplicate comments when concurrent events race on the same PR.
+	commentMu sync.Mutex
 }
 
 // NewPRPreviewIntegration creates a new PRPreviewIntegration. If appBaseURL is
@@ -483,6 +488,11 @@ func (p *PRPreviewIntegration) buildAgentChangesComment(sessionURL string, fileC
 // updateComment updates an existing PR comment, or logs a warning if the
 // comment ID is not yet set.
 func (p *PRPreviewIntegration) updateComment(ctx context.Context, owner, repo string, prState *models.PRPreviewState, body string) error {
+	// Serialize comment creation to prevent duplicate comments when concurrent
+	// events both see GitHubCommentID as nil.
+	p.commentMu.Lock()
+	defer p.commentMu.Unlock()
+
 	if prState.GitHubCommentID == nil {
 		// No comment exists yet; create one.
 		commentID, err := p.gh.CreateIssueComment(ctx, owner, repo, prState.PRNumber, body)

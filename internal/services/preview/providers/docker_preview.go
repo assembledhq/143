@@ -2,11 +2,13 @@
 package providers
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -234,7 +236,9 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 				d.cleanupState(handle)
 				return nil, fmt.Errorf("readiness probe for primary %q failed: %w", cfg.Primary, err)
 			}
+			d.mu.Lock()
 			state.services[cfg.Primary].status = models.PreviewServiceStatusReady
+			d.mu.Unlock()
 			d.logger.Info().Str("service", cfg.Primary).Int("port", primaryCfg.Port).Msg("primary service ready (progressive)")
 			partiallyReady = true
 		}
@@ -282,7 +286,9 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 				d.cleanupState(handle)
 				return nil, fmt.Errorf("readiness probe for %q failed: %w", name, err)
 			}
+			d.mu.Lock()
 			state.services[name].status = models.PreviewServiceStatusReady
+			d.mu.Unlock()
 			d.logger.Info().Str("service", name).Int("port", svcCfg.Port).Msg("service ready")
 		}
 	}
@@ -685,10 +691,26 @@ func (d *DockerPreviewProvider) startService(
 	d.mu.Unlock()
 
 	// Start the process in the background with a hard timeout.
+	state.wg.Add(1)
 	go func() {
+		defer state.wg.Done()
 		// Apply a hard timeout to prevent runaway service processes.
 		svcCtx, cancel := context.WithTimeout(ctx, 2*time.Hour)
 		defer cancel()
+
+		// Detect the service PID after a short delay to allow the process to start.
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			pidCmd := fmt.Sprintf("lsof -ti :%d | head -1", svcCfg.Port)
+			var pidOut bytes.Buffer
+			if exitCode, err := d.executor.Exec(svcCtx, state.sandbox, pidCmd, &pidOut, io.Discard); err == nil && exitCode == 0 {
+				if pid, err := strconv.Atoi(strings.TrimSpace(pidOut.String())); err == nil && pid > 0 {
+					d.mu.Lock()
+					ss.pid = pid
+					d.mu.Unlock()
+				}
+			}
+		}()
 
 		exitCode, err := d.executor.ExecStream(svcCtx, state.sandbox, cmd, func(line []byte) {
 			// Log output for diagnostics. In a full implementation this

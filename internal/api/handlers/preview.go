@@ -170,7 +170,8 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 
 	instance, err := h.manager.StartPreview(r.Context(), input)
 	if err != nil {
-		writeError(w, r, http.StatusUnprocessableEntity, "PREVIEW_START_FAILED", err.Error())
+		h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("preview start failed")
+		writeError(w, r, http.StatusUnprocessableEntity, "PREVIEW_START_FAILED", "failed to start preview")
 		return
 	}
 
@@ -302,7 +303,8 @@ func (h *PreviewHandler) MintBootstrapToken(w http.ResponseWriter, r *http.Reque
 
 	token, err := h.manager.MintBootstrapToken(r.Context(), orgID, user.ID, instance.ID)
 	if err != nil {
-		writeError(w, r, http.StatusUnprocessableEntity, "BOOTSTRAP_TOKEN_FAILED", err.Error())
+		h.logger.Warn().Err(err).Str("preview_id", instance.ID.String()).Msg("bootstrap token mint failed")
+		writeError(w, r, http.StatusUnprocessableEntity, "BOOTSTRAP_TOKEN_FAILED", "failed to create bootstrap token")
 		return
 	}
 
@@ -383,7 +385,7 @@ func (h *PreviewHandler) DetectReadiness(w http.ResponseWriter, r *http.Request)
 
 	cfg, err := preview.ParseConfig(configJSON)
 	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_CONFIG", err.Error())
+		writeError(w, r, http.StatusBadRequest, "INVALID_CONFIG", "invalid preview configuration")
 		return
 	}
 

@@ -35,6 +35,7 @@ import type {
 } from "@/lib/preview-types";
 import { ConsoleBadge } from "./console-badge";
 import { DesignModeOverlay } from "./design-mode-overlay";
+import { ErrorBoundary } from "@/components/error-boundary";
 import { TTLWarning } from "./ttl-warning";
 
 export const PREVIEW_BOOTSTRAP_READY_EVENT = "preview_bootstrap_ready";
@@ -628,11 +629,13 @@ export function PreviewPanel({
               )}
               {/* Design mode overlay */}
               {designMode && bootstrapComplete && (
-                <DesignModeOverlay
-                  sessionId={sessionId}
-                  iframeRef={iframeRef}
-                  previewOrigin={previewOrigin}
-                />
+                <ErrorBoundary fallback={null}>
+                  <DesignModeOverlay
+                    sessionId={sessionId}
+                    iframeRef={iframeRef}
+                    previewOrigin={previewOrigin}
+                  />
+                </ErrorBoundary>
               )}
             </div>
           </div>

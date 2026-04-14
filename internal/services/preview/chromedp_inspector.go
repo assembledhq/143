@@ -183,6 +183,7 @@ func (c *ChromeDPInspector) ensureBrowser() error {
 
 	// Force browser creation by running a no-op.
 	if err := chromedp.Run(c.browserCtx); err != nil {
+		c.browserCancel()
 		c.allocCancel()
 		return fmt.Errorf("start browser: %w", err)
 	}
@@ -421,10 +422,13 @@ func (c *ChromeDPInspector) CaptureDOM(ctx context.Context, previewID string, op
 		if selector == "" {
 			selector = "body"
 		}
-		selectorJSON, _ := json.Marshal(selector)
+		selectorJSON, err := json.Marshal(selector)
+		if err != nil {
+			return nil, fmt.Errorf("marshal selector: %w", err)
+		}
 		var stylesJSON string
-		js := `(function() {
-			var el = document.querySelector(` + string(selectorJSON) + `);
+		js := fmt.Sprintf(`(function() {
+			var el = document.querySelector(%s);`, string(selectorJSON)) + `
 			if (!el) el = document.body;
 			var cs = window.getComputedStyle(el);
 			var result = {};
@@ -1376,7 +1380,11 @@ func (c *ChromeDPInspector) RunAssertions(ctx context.Context, previewID string,
 func (c *ChromeDPInspector) assertElementExists(pc *previewContext, a Assertion) AssertionCheck {
 	check := AssertionCheck{Assertion: a}
 
-	selectorJSON, _ := json.Marshal(a.Selector)
+	selectorJSON, err := json.Marshal(a.Selector)
+	if err != nil {
+		check.Message = fmt.Sprintf("invalid selector: %v", err)
+		return check
+	}
 	js := fmt.Sprintf(`(function() {
 		var el = document.querySelector(%s);
 		if (!el) return 'not_found';
@@ -1438,8 +1446,16 @@ func (c *ChromeDPInspector) assertElementText(pc *previewContext, a Assertion) A
 func (c *ChromeDPInspector) assertElementStyle(pc *previewContext, a Assertion) AssertionCheck {
 	check := AssertionCheck{Assertion: a}
 
-	selectorJSON, _ := json.Marshal(a.Selector)
-	propertyJSON, _ := json.Marshal(a.Property)
+	selectorJSON, err := json.Marshal(a.Selector)
+	if err != nil {
+		check.Message = fmt.Sprintf("invalid selector: %v", err)
+		return check
+	}
+	propertyJSON, err := json.Marshal(a.Property)
+	if err != nil {
+		check.Message = fmt.Sprintf("invalid property: %v", err)
+		return check
+	}
 	js := fmt.Sprintf(`(function() {
 		var el = document.querySelector(%s);
 		if (!el) return '';
@@ -1471,7 +1487,11 @@ func (c *ChromeDPInspector) assertElementStyle(pc *previewContext, a Assertion) 
 func (c *ChromeDPInspector) assertElementCount(pc *previewContext, a Assertion) AssertionCheck {
 	check := AssertionCheck{Assertion: a}
 
-	selectorJSON, _ := json.Marshal(a.Selector)
+	selectorJSON, err := json.Marshal(a.Selector)
+	if err != nil {
+		check.Message = fmt.Sprintf("invalid selector: %v", err)
+		return check
+	}
 	js := fmt.Sprintf(`document.querySelectorAll(%s).length`, string(selectorJSON))
 	var count int
 	if err := chromedp.Run(pc.ctx, chromedp.Evaluate(js, &count)); err != nil {

@@ -507,6 +507,13 @@ const activityHeartbeatScript = `
 // resolver and activity heartbeat scripts, and replaces the body with the
 // modified content. The Content-Length header is updated accordingly.
 func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID) error {
+	// Skip injection for responses that declare a Content-Length larger than
+	// our buffer limit. This avoids reading a partial body that we'd have to
+	// serve truncated (the rest would be lost since we close the body).
+	if resp.ContentLength > maxHTMLBodySize {
+		return nil
+	}
+
 	// Read the original body and decode it when the upstream still responded
 	// with a supported content encoding.
 	var bodyBytes []byte
@@ -576,11 +583,19 @@ func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID
 	}
 
 	// If the body exceeds the max size, skip injection entirely to avoid
-	// serving a silently truncated page. Return the original body as-is.
+	// serving a silently truncated page. The original body has already been
+	// closed and fully read (limited to maxHTMLBodySize+1), so return what
+	// we have. For compressed bodies this is the decompressed content; the
+	// caller's recompress function will re-encode it correctly.
 	if int64(len(bodyBytes)) > maxHTMLBodySize {
-		resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-		resp.ContentLength = int64(len(bodyBytes))
-		resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
+		outBytes, recompErr := recompress(bodyBytes)
+		if recompErr != nil {
+			outBytes = bodyBytes
+			resp.Header.Del("Content-Encoding")
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(outBytes))
+		resp.ContentLength = int64(len(outBytes))
+		resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(outBytes)))
 		return nil
 	}
 
@@ -696,7 +711,8 @@ func (g *Gateway) copyWithHMRSnoop(dst io.Writer, src io.Reader, previewID uuid.
 // =============================================================================
 
 func (g *Gateway) injectSecurityHeaders(h http.Header) {
-	h.Set("X-Frame-Options", "ALLOW-FROM "+g.appOrigin)
+	// X-Frame-Options ALLOW-FROM is deprecated and ignored by modern browsers.
+	// The frame-ancestors CSP directive (set below) is the modern replacement.
 	h.Set("Content-Security-Policy", g.cspHeader)
 	h.Set("Referrer-Policy", "no-referrer")
 	h.Set("X-Content-Type-Options", "nosniff")
@@ -778,15 +794,15 @@ func decodeCookieValue(secret []byte, value string) (orgID, previewID, accessSes
 
 	orgID, err = uuid.Parse(parts[0])
 	if err != nil {
-		return uuid.UUID{}, uuid.UUID{}, uuid.UUID{}, fmt.Errorf("invalid org_id in cookie: %w", err)
+		return uuid.UUID{}, uuid.UUID{}, uuid.UUID{}, fmt.Errorf("invalid cookie value")
 	}
 	previewID, err = uuid.Parse(parts[1])
 	if err != nil {
-		return uuid.UUID{}, uuid.UUID{}, uuid.UUID{}, fmt.Errorf("invalid preview_id in cookie: %w", err)
+		return uuid.UUID{}, uuid.UUID{}, uuid.UUID{}, fmt.Errorf("invalid cookie value")
 	}
 	accessSessionID, err = uuid.Parse(parts[2])
 	if err != nil {
-		return uuid.UUID{}, uuid.UUID{}, uuid.UUID{}, fmt.Errorf("invalid access_session_id in cookie: %w", err)
+		return uuid.UUID{}, uuid.UUID{}, uuid.UUID{}, fmt.Errorf("invalid cookie value")
 	}
 	return orgID, previewID, accessSessionID, nil
 }

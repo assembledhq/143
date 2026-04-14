@@ -342,9 +342,17 @@ func (sc *SnapshotCache) RestoreSnapshot(
 	log.Info().Msg("restoring filesystem snapshot")
 	start := time.Now()
 
-	// 1. Read the blob from worker local disk.
+	// 1. Read the blob from worker local disk. The blob may have been evicted
+	//    between FindSnapshot and this call (TOCTOU). Return a descriptive error
+	//    so the caller can fall back to a full build.
 	tarData, err := os.ReadFile(hit.BlobPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			log.Warn().Str("blob_path", hit.BlobPath).Msg("snapshot blob missing, likely evicted between find and restore")
+			_ = os.Remove(hit.BlobPath + ".sha256")
+			_ = sc.store.DeleteCache(ctx, hit.Entry.OrgID, hit.Entry.ID)
+			return fmt.Errorf("snapshot restore: blob evicted (key=%s), fall back to full build", hit.Entry.SnapshotKey)
+		}
 		return fmt.Errorf("snapshot restore: read blob: %w", err)
 	}
 
