@@ -2986,6 +2986,173 @@ func TestSessionHandler_CancelSession_NoCanceller(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestSessionHandler_ArchiveSession(t *testing.T) {
+	t.Parallel()
+
+	t.Run("archives session successfully", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		handler := newSessionHandler(t, mock)
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+
+		mock.ExpectExec("UPDATE sessions SET archived_at").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/archive", nil)
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", sessionID.String())
+		ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+		ctx = middleware.WithOrgID(ctx, orgID)
+		ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+		req = req.WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		handler.ArchiveSession(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code, "archive should return 200")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns 401 when user is not authenticated", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		handler := newSessionHandler(t, mock)
+		sessionID := uuid.New()
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/archive", nil)
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", sessionID.String())
+		ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+		ctx = middleware.WithOrgID(ctx, uuid.New())
+		req = req.WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		handler.ArchiveSession(w, req)
+
+		require.Equal(t, http.StatusUnauthorized, w.Code)
+	})
+
+	t.Run("returns 404 when session not found", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		handler := newSessionHandler(t, mock)
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+
+		mock.ExpectExec("UPDATE sessions SET archived_at").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/archive", nil)
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", sessionID.String())
+		ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+		ctx = middleware.WithOrgID(ctx, orgID)
+		ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+		req = req.WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		handler.ArchiveSession(w, req)
+
+		require.Equal(t, http.StatusNotFound, w.Code)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
+func TestSessionHandler_UnarchiveSession(t *testing.T) {
+	t.Parallel()
+
+	t.Run("unarchives session successfully", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		handler := newSessionHandler(t, mock)
+		orgID := uuid.New()
+		sessionID := uuid.New()
+
+		mock.ExpectExec("UPDATE sessions SET archived_at = NULL").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/unarchive", nil)
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", sessionID.String())
+		ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+		ctx = middleware.WithOrgID(ctx, orgID)
+		req = req.WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		handler.UnarchiveSession(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code, "unarchive should return 200")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns 404 when session not found or not archived", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		handler := newSessionHandler(t, mock)
+		orgID := uuid.New()
+		sessionID := uuid.New()
+
+		mock.ExpectExec("UPDATE sessions SET archived_at = NULL").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/unarchive", nil)
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", sessionID.String())
+		ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+		ctx = middleware.WithOrgID(ctx, orgID)
+		req = req.WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		handler.UnarchiveSession(w, req)
+
+		require.Equal(t, http.StatusNotFound, w.Code)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns 400 for invalid session ID", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		handler := newSessionHandler(t, mock)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/not-a-uuid/unarchive", nil)
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", "not-a-uuid")
+		ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+		ctx = middleware.WithOrgID(ctx, uuid.New())
+		req = req.WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		handler.UnarchiveSession(w, req)
+
+		require.Equal(t, http.StatusBadRequest, w.Code)
+	})
+}
+
 func stringPtr(s string) *string {
 	return &s
 }
