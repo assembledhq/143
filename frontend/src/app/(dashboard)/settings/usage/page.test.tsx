@@ -285,7 +285,7 @@ describe('UsagePage', () => {
   it('renders the footer disclaimer text', () => {
     renderWithProviders(<UsagePage />);
     expect(
-      screen.getByText(/Data updates every ~5 minutes/)
+      screen.getByText(/Data updates each reaper tick/)
     ).toBeInTheDocument();
   });
 
