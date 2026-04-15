@@ -1314,7 +1314,7 @@ func (h *SessionHandler) ArchiveSession(w http.ResponseWriter, r *http.Request) 
 		if errors.Is(err, db.ErrSessionAlreadyArchived) {
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found or already archived")
 		} else {
-			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to archive session")
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to archive session", err)
 		}
 		return
 	}
@@ -1338,7 +1338,7 @@ func (h *SessionHandler) UnarchiveSession(w http.ResponseWriter, r *http.Request
 		if errors.Is(err, db.ErrSessionNotArchived) {
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found or not archived")
 		} else {
-			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to unarchive session")
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to unarchive session", err)
 		}
 		return
 	}
