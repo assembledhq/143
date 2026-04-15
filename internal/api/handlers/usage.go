@@ -202,6 +202,12 @@ func (h *UsageHandler) GetTimeseries(w http.ResponseWriter, r *http.Request) {
 	if groupBy == "" {
 		groupBy = "hour"
 	}
+	switch groupBy {
+	case "hour", "user", "capacity":
+	default:
+		writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "group_by must be one of: hour, user, capacity")
+		return
+	}
 
 	var userID *uuid.UUID
 	if uid := r.URL.Query().Get("user_id"); uid != "" {
@@ -262,6 +268,12 @@ func (h *UsageHandler) GetBreakdown(w http.ResponseWriter, r *http.Request) {
 	if dimension == "" {
 		dimension = "user"
 	}
+	switch dimension {
+	case "user", "capacity":
+	default:
+		writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "dimension must be one of: user, capacity")
+		return
+	}
 
 	sortBy := r.URL.Query().Get("sort")
 	if sortBy == "" {
@@ -313,10 +325,22 @@ func (h *UsageHandler) ExportCSV(w http.ResponseWriter, r *http.Request) {
 	if dimension == "" {
 		dimension = "none"
 	}
+	switch dimension {
+	case "none", "user", "capacity":
+	default:
+		writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "dimension must be one of: none, user, capacity")
+		return
+	}
 
 	granularity := r.URL.Query().Get("granularity")
 	if granularity == "" {
 		granularity = "daily"
+	}
+	switch granularity {
+	case "daily", "hourly":
+	default:
+		writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "granularity must be one of: daily, hourly")
+		return
 	}
 
 	tzName := r.URL.Query().Get("tz")
@@ -459,8 +483,8 @@ func (h *UsageHandler) ExportCSV(w http.ResponseWriter, r *http.Request) {
 		dailyCounts, err := h.rollupStore.GetDailySessionCounts(r.Context(), orgID, start, end, dimension, tzName)
 		if err != nil {
 			logger.Error().Err(err).Msg("csv: failed to fetch daily session counts")
-			// Fall through — use the rollup-based summed counts as a fallback.
-			// These will overcount sessions that span multiple hours.
+			// Write a warning row so the consumer knows session counts are approximate.
+			_ = cw.Write([]string{"# WARNING: session counts are approximate (summed from hourly rollups)"})
 		} else {
 			type countKey struct {
 				date     string

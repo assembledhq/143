@@ -102,7 +102,7 @@ export function UsageTimeseriesChart({
   userId,
   onDayClick,
 }: UsageTimeseriesChartProps) {
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError } = useQuery({
     queryKey: queryKeys.usage.timeseries({
       start,
       end,
@@ -147,6 +147,10 @@ export function UsageTimeseriesChart({
 
         {isLoading ? (
           <div className="h-64 bg-muted/30 animate-pulse rounded" />
+        ) : isError ? (
+          <div className="h-64 flex items-center justify-center text-sm text-destructive">
+            Failed to load usage data. Please try again later.
+          </div>
         ) : dailyData.length === 0 ? (
           <div className="h-64 flex items-center justify-center text-sm text-muted-foreground">
             No usage data for this period

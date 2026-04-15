@@ -48,7 +48,7 @@ export function UsageBreakdownTable({
   onRowClick,
   selectedKey,
 }: UsageBreakdownTableProps) {
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError } = useQuery({
     queryKey: queryKeys.usage.breakdown({ start, end, dimension, sort: "minutes_desc" }),
     queryFn: () =>
       api.usage.getBreakdown({ start, end, dimension, sort: "minutes_desc" }),
@@ -80,6 +80,10 @@ export function UsageBreakdownTable({
             {Array.from({ length: 4 }).map((_, i) => (
               <div key={i} className="h-10 bg-muted animate-pulse rounded" />
             ))}
+          </div>
+        ) : isError ? (
+          <div className="py-8 text-center text-sm text-destructive">
+            Failed to load breakdown data. Please try again later.
           </div>
         ) : rows.length === 0 ? (
           <div className="py-8 text-center text-sm text-muted-foreground">

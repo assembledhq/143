@@ -144,7 +144,13 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 			agg.totalStarts++
 		}
 		agg.sessionIDs[sessionID] = struct{}{}
-		agg.durations = append(agg.durations, durationMs/1000.0) // convert to seconds
+		// Use clipped duration (within this hour) for avg/p95 stats, not the
+		// full event duration which would inflate stats in every overlapping hour.
+		clippedDurationSec := clippedStop.Sub(clippedStart).Seconds()
+		if clippedDurationSec < 0 {
+			clippedDurationSec = 0
+		}
+		agg.durations = append(agg.durations, clippedDurationSec)
 		agg.intervals = append(agg.intervals, timeInterval{start: clippedStart, stop: clippedStop})
 	}
 	if err := rows.Err(); err != nil {
@@ -410,6 +416,28 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 		})
 	}
 
+	// Wrap the batch in a transaction so a partial failure doesn't leave
+	// inconsistent dimensional rows (e.g. per-user rows without an org-total).
+	txStarter, canTx := s.db.(TxStarter)
+	if canTx {
+		tx, err := txStarter.Begin(ctx)
+		if err != nil {
+			return fmt.Errorf("begin upsert tx: %w", err)
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck
+
+		br := tx.SendBatch(ctx, batch)
+		for i := 0; i < len(upserts); i++ {
+			if _, err := br.Exec(); err != nil {
+				br.Close()
+				return fmt.Errorf("upsert usage_hourly (batch item %d): %w", i, err)
+			}
+		}
+		br.Close()
+		return tx.Commit(ctx)
+	}
+
+	// Fallback for DBTX implementations that don't support transactions (tests).
 	br := s.db.SendBatch(ctx, batch)
 	defer br.Close()
 	for i := 0; i < len(upserts); i++ {
@@ -880,20 +908,35 @@ type RollupSummary struct {
 // GetRollupSummary returns summary metrics from org-level rollup rows over the
 // given time range. This provides a single consistent data source for summary
 // cards instead of mixing legacy raw queries with rollup-backed token totals.
+//
+// Session count uses COUNT(DISTINCT session_id) from raw events rather than
+// SUM(total_sessions) from rollup rows, which would double-count sessions
+// spanning multiple hours.
 func (s *UsageRollupStore) GetRollupSummary(ctx context.Context, orgID uuid.UUID, start, end time.Time) (RollupSummary, error) {
 	var rs RollupSummary
+	now := time.Now().UTC()
 	err := s.db.QueryRow(ctx, `
-		SELECT
-			COALESCE(SUM(total_container_minutes), 0),
-			COALESCE(SUM(total_sessions), 0),
-			COALESCE(MAX(peak_concurrent), 0),
-			COALESCE(SUM(total_input_tokens), 0),
-			COALESCE(SUM(total_output_tokens), 0),
-			COALESCE(SUM(total_llm_cost_usd), 0)
-		FROM usage_hourly
-		WHERE org_id = @org_id AND hour_utc >= @start AND hour_utc < @end
-		  AND user_id IS NULL AND capacity_tier IS NULL`,
-		pgx.NamedArgs{"org_id": orgID, "start": start, "end": end},
+		WITH rollup AS (
+			SELECT
+				COALESCE(SUM(total_container_minutes), 0) AS minutes,
+				COALESCE(MAX(peak_concurrent), 0) AS peak,
+				COALESCE(SUM(total_input_tokens), 0) AS in_tok,
+				COALESCE(SUM(total_output_tokens), 0) AS out_tok,
+				COALESCE(SUM(total_llm_cost_usd), 0) AS cost
+			FROM usage_hourly
+			WHERE org_id = @org_id AND hour_utc >= @start AND hour_utc < @end
+			  AND user_id IS NULL AND capacity_tier IS NULL
+		),
+		sessions AS (
+			SELECT COUNT(DISTINCT e.session_id) AS cnt
+			FROM container_usage_events e
+			WHERE e.org_id = @org_id
+			  AND e.started_at < @end
+			  AND COALESCE(e.stopped_at, @now) > @start
+		)
+		SELECT r.minutes, s.cnt, r.peak, r.in_tok, r.out_tok, r.cost
+		FROM rollup r, sessions s`,
+		pgx.NamedArgs{"org_id": orgID, "start": start, "end": end, "now": now},
 	).Scan(&rs.TotalContainerMinutes, &rs.TotalSessions, &rs.PeakConcurrent,
 		&rs.InputTokens, &rs.OutputTokens, &rs.CostUSD)
 	return rs, err
@@ -929,7 +972,10 @@ func (s *UsageRollupStore) GetTokenTotals(ctx context.Context, orgID uuid.UUID, 
 // hours that were already materialized before the process restarted.
 func (s *UsageRollupStore) GetLatestRollupHour(ctx context.Context) (time.Time, error) {
 	var latest *time.Time
-	err := s.db.QueryRow(ctx, `SELECT MAX(hour_utc) FROM usage_hourly`).Scan(&latest)
+	// Use ORDER BY + LIMIT 1 instead of MAX() so the idx_usage_hourly_org_hour
+	// index (org_id, hour_utc DESC) can satisfy this with a reverse index scan
+	// rather than a full table scan.
+	err := s.db.QueryRow(ctx, `SELECT hour_utc FROM usage_hourly ORDER BY hour_utc DESC LIMIT 1`).Scan(&latest)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("query latest rollup hour: %w", err)
 	}

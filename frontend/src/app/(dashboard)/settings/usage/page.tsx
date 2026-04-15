@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/page-header";
@@ -20,9 +20,15 @@ export default function UsagePage() {
   const [selectedUserId, setSelectedUserId] = useQueryState("user", parseAsString);
   const [selectedDay, setSelectedDay] = useQueryState("day", parseAsString);
 
-  const { start: startDate, end: endDate } = getDateRangePreset(preset);
-  const start = formatDateForApi(startDate);
-  const end = formatDateForApi(endDate);
+  // Memoize date range so query keys stay stable across renders. Truncate
+  // to the minute so the ISO string doesn't change every millisecond.
+  const { start, end } = useMemo(() => {
+    const { start: s, end: e } = getDateRangePreset(preset);
+    s.setSeconds(0, 0);
+    e.setSeconds(0, 0);
+    return { start: formatDateForApi(s), end: formatDateForApi(e) };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only recompute when preset changes
+  }, [preset]);
 
   // If a specific day is clicked, narrow the breakdown to that day.
   const breakdownStart = selectedDay
@@ -114,7 +120,7 @@ export default function UsagePage() {
               dimension={dimension}
               onDimensionChange={setDimension}
               onRowClick={handleRowClick}
-              selectedKey={selectedUserId}
+              selectedKey={dimension === "user" ? selectedUserId : undefined}
             />
           </div>
           <div>

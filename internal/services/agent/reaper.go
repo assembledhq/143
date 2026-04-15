@@ -254,8 +254,11 @@ func (r *SessionReaper) reapUsageRollups(ctx context.Context, now time.Time) {
 		r.lastRollupHour = hours[0]
 	} else {
 		// Multiple hours: run concurrently with bounded parallelism.
+		// Track per-hour success so we can advance the watermark to the
+		// latest contiguous successful hour even if one hour fails.
 		sem := make(chan struct{}, maxConcurrentRollups)
 		var mu sync.Mutex
+		succeeded := make(map[time.Time]bool, len(hours))
 		var firstErr error
 		var errHour time.Time
 
@@ -265,13 +268,6 @@ func (r *SessionReaper) reapUsageRollups(ctx context.Context, now time.Time) {
 			go func(hour time.Time) {
 				defer wg.Done()
 
-				// Check for prior error or context cancellation.
-				mu.Lock()
-				failed := firstErr != nil
-				mu.Unlock()
-				if failed {
-					return
-				}
 				select {
 				case <-ctx.Done():
 					return
@@ -282,25 +278,32 @@ func (r *SessionReaper) reapUsageRollups(ctx context.Context, now time.Time) {
 				err := r.usageRoller.RollupAllOrgs(ctx, hour)
 				<-sem
 
+				mu.Lock()
 				if err != nil {
-					mu.Lock()
 					if firstErr == nil {
 						firstErr = err
 						errHour = hour
 					}
-					mu.Unlock()
+				} else {
+					succeeded[hour] = true
 				}
+				mu.Unlock()
 			}(h)
 		}
 		wg.Wait()
 
 		if firstErr != nil {
 			r.logger.Error().Err(firstErr).Time("hour", errHour).Msg("reaper: failed to roll up hourly usage")
-			// Don't advance watermark past what we can guarantee — but hours are
-			// independent (idempotent upserts), so re-rolling on next tick is safe.
-			return
 		}
-		r.lastRollupHour = lastCompletedHour
+
+		// Advance watermark to the latest contiguous successful hour so a
+		// single persistently failing hour doesn't block all progress.
+		for _, h := range hours {
+			if !succeeded[h] {
+				break
+			}
+			r.lastRollupHour = h
+		}
 	}
 
 	// Best-effort roll of the current in-progress hour. This keeps the

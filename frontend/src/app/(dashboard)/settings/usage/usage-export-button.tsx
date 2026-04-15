@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -22,6 +22,8 @@ export function UsageExportButton({ start, end }: UsageExportButtonProps) {
   const [granularity, setGranularity] = useState<"daily" | "hourly">("daily");
   const [dimension, setDimension] = useState<"none" | "user" | "capacity">("none");
   const [showOptions, setShowOptions] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   const handleExport = () => {
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -34,13 +36,41 @@ export function UsageExportButton({ start, end }: UsageExportButtonProps) {
     }
   };
 
+  const close = useCallback(() => {
+    setShowOptions(false);
+    triggerRef.current?.focus();
+  }, []);
+
+  // Close on Escape
+  useEffect(() => {
+    if (!showOptions) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        close();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [showOptions, close]);
+
+  // Focus the panel when opened
+  useEffect(() => {
+    if (showOptions) {
+      panelRef.current?.focus();
+    }
+  }, [showOptions]);
+
   return (
     <div className="relative">
       <Button
+        ref={triggerRef}
         variant="outline"
         size="sm"
         className="h-8 text-xs gap-1.5"
         onClick={() => setShowOptions(!showOptions)}
+        aria-expanded={showOptions}
+        aria-haspopup="dialog"
       >
         <Download className="h-3.5 w-3.5" />
         Export CSV
@@ -50,9 +80,16 @@ export function UsageExportButton({ start, end }: UsageExportButtonProps) {
         <>
           <div
             className="fixed inset-0 z-40"
-            onClick={() => setShowOptions(false)}
+            onClick={close}
+            aria-hidden="true"
           />
-          <div className="absolute right-0 top-full mt-1 z-50 w-56 rounded-lg border bg-background p-3 shadow-md space-y-3">
+          <div
+            ref={panelRef}
+            role="dialog"
+            aria-label="Export options"
+            tabIndex={-1}
+            className="absolute right-0 top-full mt-1 z-50 w-56 rounded-lg border bg-background p-3 shadow-md space-y-3"
+          >
             <div className="space-y-1.5">
               <Label className="text-xs font-medium text-muted-foreground">Granularity</Label>
               <Select value={granularity} onValueChange={(v) => setGranularity(v as "daily" | "hourly")}>
@@ -83,7 +120,7 @@ export function UsageExportButton({ start, end }: UsageExportButtonProps) {
               className="w-full h-8 text-xs"
               onClick={() => {
                 handleExport();
-                setShowOptions(false);
+                close();
               }}
             >
               Download

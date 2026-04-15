@@ -28,7 +28,7 @@ function formatTierLabel(tier: string): string {
 }
 
 export function UsageCapacityBars({ start, end }: UsageCapacityBarsProps) {
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError } = useQuery({
     queryKey: queryKeys.usage.breakdown({ start, end, dimension: "capacity", sort: "minutes_desc" }),
     queryFn: () =>
       api.usage.getBreakdown({ start, end, dimension: "capacity", sort: "minutes_desc" }),
@@ -46,6 +46,17 @@ export function UsageCapacityBars({ start, end }: UsageCapacityBarsProps) {
               <div key={i} className="h-6 bg-muted animate-pulse rounded" />
             ))}
           </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  if (isError) {
+    return (
+      <Card>
+        <CardContent className="p-4">
+          <h3 className="text-sm font-medium mb-3">Capacity Breakdown</h3>
+          <p className="text-sm text-destructive">Failed to load capacity data.</p>
         </CardContent>
       </Card>
     );

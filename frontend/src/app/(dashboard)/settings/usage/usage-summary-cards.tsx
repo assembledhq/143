@@ -48,7 +48,7 @@ function KPICard({ icon: Icon, label, value, subtitle, loading }: KPICardProps) 
 }
 
 export function UsageSummaryCards({ start, end }: UsageSummaryCardsProps) {
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError } = useQuery({
     queryKey: queryKeys.usage.summary({ start, end }),
     queryFn: () => api.usage.getSummary({ start, end }),
   });
@@ -60,6 +60,18 @@ export function UsageSummaryCards({ start, end }: UsageSummaryCardsProps) {
     output: summary?.total_output_tokens ?? 0,
     cost: summary?.total_llm_cost_usd ?? 0,
   };
+
+  if (isError) {
+    return (
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <Card className="col-span-full">
+          <CardContent className="p-4 text-sm text-destructive">
+            Failed to load usage summary. Please try again later.
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">

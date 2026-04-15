@@ -462,7 +462,8 @@ func TestRollupHour_NoEvents(t *testing.T) {
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour": hour}).
 		WillReturnRows(pgxmock.NewRows(tokenCols))
 
-	// Batch upsert: one org-total row (all zeros)
+	// Transaction: batch upsert wrapped in begin/commit
+	mock.ExpectBegin()
 	anyArgs13 := []any{
 		pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 		pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -471,6 +472,7 @@ func TestRollupHour_NoEvents(t *testing.T) {
 	}
 	eb := mock.ExpectBatch()
 	eb.ExpectExec("INSERT INTO usage_hourly").WithArgs(anyArgs13...).WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectCommit()
 
 	err = store.RollupHour(context.Background(), orgID, hour)
 	require.NoError(t, err)
@@ -534,7 +536,9 @@ func TestRollupHour_WithEvents(t *testing.T) {
 			userID, int64(1000), int64(500), 0.25,
 		))
 
-	// Batch upsert: 4 rows (per-user-tier, per-user, per-tier, org-total)
+	// Transaction: batch upsert wrapped in begin/commit
+	// 4 rows: per-user-tier, per-user, per-tier, org-total
+	mock.ExpectBegin()
 	anyArgs := []any{
 		pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 		pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -546,6 +550,7 @@ func TestRollupHour_WithEvents(t *testing.T) {
 	eb2.ExpectExec("INSERT INTO usage_hourly").WithArgs(anyArgs...).WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	eb2.ExpectExec("INSERT INTO usage_hourly").WithArgs(anyArgs...).WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	eb2.ExpectExec("INSERT INTO usage_hourly").WithArgs(anyArgs...).WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectCommit()
 
 	err = store.RollupHour(context.Background(), orgID, hour)
 	require.NoError(t, err)
