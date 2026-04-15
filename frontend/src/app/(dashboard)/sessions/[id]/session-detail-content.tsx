@@ -99,6 +99,11 @@ function formatDuration(startedAt?: string, completedAt?: string): string {
   return `${mins}m ${secs}s`;
 }
 
+/** Returns true if the session has been pending for more than 2 minutes. */
+function isPendingTooLong(createdAt: string): boolean {
+  return Date.now() - new Date(createdAt).getTime() > 2 * 60 * 1000;
+}
+
 
 const validationChecks: { key: string; label: string }[] = [
   { key: "direction_check", label: "Direction check" },
@@ -125,6 +130,14 @@ type DetailTab = "overview" | "changes" | "validation";
 function OverviewTab({ session, members }: { session: Session; members: User[] }) {
   const queryClient = useQueryClient();
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
+
+  // Force re-render every 5s while pending so the elapsed time stays current.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (session.status !== "pending") return;
+    const id = setInterval(() => setTick((t) => t + 1), 5000);
+    return () => clearInterval(id);
+  }, [session.status]);
 
   const isCodexAuthFailure = session.failure_category === FAILURE_CATEGORY_CODEX_AUTH;
 
@@ -276,7 +289,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
           !hasMeaningfulDuration(session.started_at, session.completed_at)) && (
           <span className="inline-flex items-center gap-1.5">
             <Timer className="h-3 w-3" />
-            {formatDuration(session.started_at, session.completed_at)}
+            {session.status === "pending" ? formatDuration(session.created_at) : formatDuration(session.started_at, session.completed_at)}
           </span>
         )}
         <span className="inline-flex items-center gap-1.5">
@@ -302,7 +315,12 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
               <Clock className="h-3 w-3" />
               Started {formatTimeAgo(session.started_at)}
             </>
-          ) : null}
+          ) : (
+            <>
+              <Clock className="h-3 w-3" />
+              Queued {formatTimeAgo(session.created_at)}
+            </>
+          )}
         </span>
       </div>
 
@@ -1036,10 +1054,33 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
       <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto space-y-2 p-4">
         {timelineEntries.length === 0 && !isRunning && session.status !== "pending" && (
           <div className="flex items-center justify-center py-12">
-            <div className="text-center space-y-2 max-w-[280px]">
-              <MessageSquare className="h-8 w-8 text-muted-foreground/40 mx-auto" />
-              <p className="text-xs font-medium text-muted-foreground">No activity yet</p>
-              <p className="text-xs text-muted-foreground/60">The session is processing its initial turn.</p>
+            <div className="text-center space-y-2 max-w-[320px]">
+              {session.status === "pending" ? (
+                <>
+                  <Loader2 className="h-8 w-8 text-muted-foreground/40 mx-auto animate-spin" />
+                  <p className="text-xs font-medium text-muted-foreground">Waiting to start</p>
+                  <p className="text-xs text-muted-foreground/60">
+                    This session is queued and waiting for an available slot. Queued {formatTimeAgo(session.created_at)}.
+                  </p>
+                  {isPendingTooLong(session.created_at) && (
+                    <div className="mt-3 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 px-3 py-2 text-left">
+                      <p className="text-xs font-medium text-amber-700 dark:text-amber-400 flex items-center gap-1.5">
+                        <AlertTriangle className="h-3 w-3 shrink-0" />
+                        Taking longer than expected
+                      </p>
+                      <p className="text-xs text-amber-600 dark:text-amber-500 mt-1">
+                        This session has been waiting for over 2 minutes. It may be blocked by other running sessions or an internal issue. Try cancelling and retrying if it doesn&apos;t start soon.
+                      </p>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <>
+                  <MessageSquare className="h-8 w-8 text-muted-foreground/40 mx-auto" />
+                  <p className="text-xs font-medium text-muted-foreground">No activity yet</p>
+                  <p className="text-xs text-muted-foreground/60">The session is processing its initial turn.</p>
+                </>
+              )}
             </div>
           </div>
         )}
