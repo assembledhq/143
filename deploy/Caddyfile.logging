@@ -1,9 +1,0 @@
-# Reverse proxy for Grafana on the logging node.
-# Caddy handles TLS automatically via Let's Encrypt.
-#
-# GRAFANA_DOMAIN defaults to logs.143.dev — override via .env:
-#   GRAFANA_DOMAIN=logs.example.com
-
-{$GRAFANA_DOMAIN:logs.143.dev} {
-	reverse_proxy grafana:3000
-}
