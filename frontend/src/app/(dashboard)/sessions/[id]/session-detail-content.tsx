@@ -1034,7 +1034,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
     <div className="flex flex-col h-full">
       {/* Unified timeline */}
       <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto space-y-2 p-4">
-        {timelineEntries.length === 0 && !isRunning && (
+        {timelineEntries.length === 0 && !isRunning && session.status !== "pending" && (
           <div className="flex items-center justify-center py-12">
             <div className="text-center space-y-2 max-w-[280px]">
               <MessageSquare className="h-8 w-8 text-muted-foreground/40 mx-auto" />
@@ -1051,6 +1051,15 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
           onApprovePlan={canSendMessage ? handleApprovePlan : undefined}
           onAdjustPlan={canSendMessage ? handleAdjustPlan : undefined}
         />
+        {session.status === "pending" && (
+          <div className="flex items-center justify-center py-12">
+            <div className="text-center space-y-2 max-w-[280px]">
+              <Loader2 className="h-8 w-8 text-muted-foreground/40 mx-auto animate-spin" />
+              <p className="text-xs font-medium text-muted-foreground">Setting up environment</p>
+              <p className="text-xs text-muted-foreground/60">Preparing the container and getting the agent ready to run.</p>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* PR queued indicator */}
