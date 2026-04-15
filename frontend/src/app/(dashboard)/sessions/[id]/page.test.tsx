@@ -259,6 +259,8 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id={pendingSession.id} />);
     expect(await screen.findByPlaceholderText('Session is not active')).toBeDisabled();
+    expect(screen.getByText('Setting up environment')).toBeInTheDocument();
+    expect(screen.getByText('Preparing the container and getting the agent ready to run.')).toBeInTheDocument();
   });
 
   it('keeps polling logs and reconnects after an SSE error while the session is active', async () => {
