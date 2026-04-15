@@ -26,12 +26,12 @@ services:
     environment:
       GF_INSTALL_PLUGINS: victoriametrics-logs-datasource
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
-      GF_SERVER_ROOT_URL: http://localhost:3000
+      GF_SERVER_ROOT_URL: http://localhost:9999
     volumes:
       - grafana-data:/var/lib/grafana
       - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:9999:3000"
     depends_on:
       - victorialogs
     restart: unless-stopped
