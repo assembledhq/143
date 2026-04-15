@@ -163,10 +163,11 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
 
   # Rolling deploy for the primary service:
   #   1. Scale up a new container alongside the old one
-  #   2. Disconnect the new container from the network (no traffic yet)
-  #   3. Wait for its health check to pass
-  #   4. Reconnect new container, stop old one
-  # This guarantees traffic only reaches the new container after it's healthy.
+  #   2. Wait for the new container's health check to pass
+  #   3. Stop the old container
+  # Both containers share the network during the health-check window so that
+  # the new container can reach dependencies (DB, etc.) that its health
+  # endpoint may probe.
   if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
     OLD_CONTAINER="$(docker compose -f "$COMPOSE_FILE" ps -q "$HEALTH_SERVICE" | head -1 || true)"
 
@@ -184,24 +185,26 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       exit 1
     fi
 
-    # Disconnect new container from network so it doesn't receive traffic.
-    # The health check (wget to localhost) still works inside the container.
-    NETWORK="$(docker inspect "$NEW_CONTAINER" --format '{{range $net, $_ := .NetworkSettings.Networks}}{{$net}} {{end}}' | awk '{print $1}')"
-    echo "Disconnecting new container from $NETWORK until healthy..."
-    docker network disconnect "$NETWORK" "$NEW_CONTAINER"
-
     if ! wait_container_healthy "$NEW_CONTAINER" 120; then
       echo "Rolling back — removing failed container..."
       docker stop "$NEW_CONTAINER" >/dev/null 2>&1 || true
       docker rm "$NEW_CONTAINER" >/dev/null 2>&1 || true
-      docker compose -f "$COMPOSE_FILE" up -d --no-deps --scale "$HEALTH_SERVICE=1" --no-recreate "$HEALTH_SERVICE"
+      # Ensure the old container is still serving after rollback.
+      if [ -n "$OLD_CONTAINER" ]; then
+        OLD_STATUS="$(docker inspect --format '{{.State.Status}}' "$OLD_CONTAINER" 2>/dev/null || echo "missing")"
+        if [ "$OLD_STATUS" != "running" ]; then
+          echo "WARNING: old container is $OLD_STATUS — restarting service..."
+          docker compose -f "$COMPOSE_FILE" up -d --no-deps "$HEALTH_SERVICE"
+        fi
+      else
+        docker compose -f "$COMPOSE_FILE" up -d --no-deps "$HEALTH_SERVICE"
+      fi
       exit 1
     fi
 
-    # New container is healthy — connect it and remove the old one.
-    echo "Connecting new container to network and removing old..."
-    docker network connect "$NETWORK" "$NEW_CONTAINER"
+    # New container is healthy — remove the old one.
     if [ -n "$OLD_CONTAINER" ]; then
+      echo "Removing old container..."
       docker stop "$OLD_CONTAINER" >/dev/null 2>&1 || true
       docker rm "$OLD_CONTAINER" >/dev/null 2>&1 || true
     fi
@@ -211,7 +214,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     # the health service we just rolled — --force-recreate would destroy it.
     OTHER_SERVICES="$(docker compose -f "$COMPOSE_FILE" ps --services | grep -v "^${HEALTH_SERVICE}$" || true)"
     if [ -n "$OTHER_SERVICES" ]; then
-      echo $OTHER_SERVICES | xargs docker compose -f "$COMPOSE_FILE" up -d --force-recreate --no-deps --remove-orphans
+      echo "$OTHER_SERVICES" | xargs docker compose -f "$COMPOSE_FILE" up -d --force-recreate --no-deps --remove-orphans
     fi
   else
     # Non-rolling roles (db, logging) — just recreate everything.
