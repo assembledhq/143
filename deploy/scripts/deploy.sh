@@ -111,12 +111,42 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   cd /opt/143
 
   dump_diagnostics() {
+    local cid="${1:-}"
     echo "--- Last 50 lines of $HEALTH_SERVICE logs ---"
     docker compose -f "$COMPOSE_FILE" logs --tail=50 "$HEALTH_SERVICE" 2>&1 || true
-    echo "--- Docker health check log ---"
-    docker inspect --format '{{range .State.Health.Log}}--- {{.Start}} ---
+    if [ -n "$cid" ]; then
+      echo "--- Docker health check log ---"
+      docker inspect --format '{{range .State.Health.Log}}--- {{.Start}} ---
 {{.Output}}
-{{end}}' "$CONTAINER_ID" 2>&1 || true
+{{end}}' "$cid" 2>&1 || true
+    fi
+  }
+
+  # wait_container_healthy CONTAINER_ID TIMEOUT — poll until a specific container
+  # passes its health check, or fail after TIMEOUT seconds.
+  wait_container_healthy() {
+    local cid="$1" timeout="${2:-120}"
+    echo "Waiting for container $cid health check (timeout ${timeout}s)..."
+    for i in $(seq 1 $((timeout / 2))); do
+      HEALTH_STATUS="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cid")"
+      if [ "$HEALTH_STATUS" = "healthy" ]; then
+        echo "Health check passed."
+        return 0
+      fi
+
+      if [ "$HEALTH_STATUS" = "unhealthy" ] || [ "$HEALTH_STATUS" = "exited" ] || [ "$HEALTH_STATUS" = "dead" ]; then
+        echo "ERROR: container entered terminal state: $HEALTH_STATUS"
+        dump_diagnostics "$cid"
+        return 1
+      fi
+
+      if [ "$i" -eq $((timeout / 2)) ]; then
+        echo "ERROR: Health check timed out after ${timeout}s (last status: $HEALTH_STATUS)"
+        dump_diagnostics "$cid"
+        return 1
+      fi
+      sleep 2
+    done
   }
 
   docker compose -f "$COMPOSE_FILE" pull
@@ -131,35 +161,67 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate up
   fi
 
-  docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
+  # Rolling deploy for the primary service:
+  #   1. Scale up a new container alongside the old one
+  #   2. Disconnect the new container from the network (no traffic yet)
+  #   3. Wait for its health check to pass
+  #   4. Reconnect new container, stop old one
+  # This guarantees traffic only reaches the new container after it's healthy.
+  if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
+    OLD_CONTAINER="$(docker compose -f "$COMPOSE_FILE" ps -q "$HEALTH_SERVICE" | head -1 || true)"
 
-  echo "Waiting for $HEALTH_SERVICE health check..."
-  for i in $(seq 1 60); do
-    CONTAINER_ID="$(docker compose -f "$COMPOSE_FILE" ps -q "$HEALTH_SERVICE")"
-    if [ -z "$CONTAINER_ID" ]; then
-      echo "ERROR: could not find container for service $HEALTH_SERVICE"
+    echo "Starting new $HEALTH_SERVICE container..."
+    docker compose -f "$COMPOSE_FILE" up -d --no-deps --scale "$HEALTH_SERVICE=2" --no-recreate "$HEALTH_SERVICE"
+
+    # Identify the new container
+    if [ -n "$OLD_CONTAINER" ]; then
+      NEW_CONTAINER="$(docker compose -f "$COMPOSE_FILE" ps -q "$HEALTH_SERVICE" | grep -v "$OLD_CONTAINER" | head -1)"
+    else
+      NEW_CONTAINER="$(docker compose -f "$COMPOSE_FILE" ps -q "$HEALTH_SERVICE" | head -1)"
+    fi
+    if [ -z "$NEW_CONTAINER" ]; then
+      echo "ERROR: could not identify new container"
       exit 1
     fi
 
-    HEALTH_STATUS="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$CONTAINER_ID")"
-    if [ "$HEALTH_STATUS" = "healthy" ] || [ "$HEALTH_STATUS" = "running" ]; then
-      echo "Health check passed for $HEALTH_SERVICE."
-      break
-    fi
+    # Disconnect new container from network so it doesn't receive traffic.
+    # The health check (wget to localhost) still works inside the container.
+    NETWORK="$(docker inspect "$NEW_CONTAINER" --format '{{range $net, $_ := .NetworkSettings.Networks}}{{$net}} {{end}}' | awk '{print $1}')"
+    echo "Disconnecting new container from $NETWORK until healthy..."
+    docker network disconnect "$NETWORK" "$NEW_CONTAINER"
 
-    if [ "$HEALTH_STATUS" = "unhealthy" ] || [ "$HEALTH_STATUS" = "exited" ] || [ "$HEALTH_STATUS" = "dead" ]; then
-      echo "ERROR: $HEALTH_SERVICE entered terminal state: $HEALTH_STATUS"
-      dump_diagnostics
+    if ! wait_container_healthy "$NEW_CONTAINER" 120; then
+      echo "Rolling back — removing failed container..."
+      docker stop "$NEW_CONTAINER" >/dev/null 2>&1 || true
+      docker rm "$NEW_CONTAINER" >/dev/null 2>&1 || true
+      docker compose -f "$COMPOSE_FILE" up -d --no-deps --scale "$HEALTH_SERVICE=1" --no-recreate "$HEALTH_SERVICE"
       exit 1
     fi
 
-    if [ "$i" -eq 60 ]; then
-      echo "ERROR: Health check timed out after 120s for $HEALTH_SERVICE (last status: $HEALTH_STATUS)"
-      dump_diagnostics
-      exit 1
+    # New container is healthy — connect it and remove the old one.
+    echo "Connecting new container to network and removing old..."
+    docker network connect "$NETWORK" "$NEW_CONTAINER"
+    if [ -n "$OLD_CONTAINER" ]; then
+      docker stop "$OLD_CONTAINER" >/dev/null 2>&1 || true
+      docker rm "$OLD_CONTAINER" >/dev/null 2>&1 || true
     fi
-    sleep 2
-  done
+    echo "$HEALTH_SERVICE rolled over successfully."
+
+    # Recreate remaining services (caddy, frontend, vector, etc.) but skip
+    # the health service we just rolled — --force-recreate would destroy it.
+    OTHER_SERVICES="$(docker compose -f "$COMPOSE_FILE" ps --services | grep -v "^${HEALTH_SERVICE}$" || true)"
+    if [ -n "$OTHER_SERVICES" ]; then
+      echo $OTHER_SERVICES | xargs docker compose -f "$COMPOSE_FILE" up -d --force-recreate --no-deps --remove-orphans
+    fi
+  else
+    # Non-rolling roles (db, logging) — just recreate everything.
+    docker compose -f "$COMPOSE_FILE" up -d --force-recreate --remove-orphans
+
+    CONTAINER_ID="$(docker compose -f "$COMPOSE_FILE" ps -q "$HEALTH_SERVICE" | head -1)"
+    if [ -n "$CONTAINER_ID" ]; then
+      wait_container_healthy "$CONTAINER_ID" 120
+    fi
+  fi
 
   # Verify Vector is running on app/worker nodes
   if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
