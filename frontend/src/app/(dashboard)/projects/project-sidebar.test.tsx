@@ -61,7 +61,6 @@ describe('ProjectSidebar', () => {
     expect(screen.getByRole('tab', { name: /Active/ })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /Draft/ })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /Done/ })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: /Paused/ })).toBeInTheDocument();
   });
 
   it('uses a left-aligned horizontal-only tab scroller', async () => {

@@ -35,9 +35,12 @@ func (s *Service) executeProjectPlan(ctx context.Context, orgID uuid.UUID, pp *P
 			s.recordProjectCycle(ctx, orgID, pp, planID, 0, 0)
 			return nil
 		case "needs_human_review":
-			if err := s.projects.UpdateStatus(ctx, orgID, pp.ProjectID, string(models.ProjectStatusPaused)); err != nil {
-				s.logger.Warn().Err(err).Msg("failed to update project status to paused for human review")
-			}
+			// Human review requested — leave the project active. The PM will
+			// re-evaluate on the next scheduled cycle and can recommend
+			// "needs_human_review" again if the issue is still unresolved.
+			// We intentionally do NOT revert to draft because that would lose
+			// the context that this project was actively running.
+			s.logger.Info().Str("project_id", pp.ProjectID.String()).Msg("project cycle requested human review; project remains active")
 			s.recordProjectCycle(ctx, orgID, pp, planID, 0, 0)
 			return nil
 		}

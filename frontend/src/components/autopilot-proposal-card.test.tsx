@@ -46,7 +46,7 @@ describe("AutopilotProposalCard", () => {
             {
               id: "p-1",
               title: "Refactor auth module",
-              status: "proposed",
+              status: "draft",
             },
           ],
         }),
@@ -74,7 +74,7 @@ describe("AutopilotProposalCard", () => {
       ),
       http.get("/api/v1/projects", () =>
         HttpResponse.json({
-          data: [{ id: "p-1", title: "Fix billing", status: "proposed" }],
+          data: [{ id: "p-1", title: "Fix billing", status: "draft" }],
         }),
       ),
     );
