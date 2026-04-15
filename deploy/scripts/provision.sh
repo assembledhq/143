@@ -160,6 +160,14 @@ fi
 scp "${SCP_OPTS[@]}" -r "$PROJECT_DIR/deploy" root@"$HOST":/opt/143/
 ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143"
 
+# Step 2b: Sync authorized keys from deploy/authorized_keys/*.pub
+# Replaces authorized_keys on the host with exactly the keys in the repo.
+# Safe here because provisioning just set up the deploy user with the SSH key.
+if ls "$PROJECT_DIR/deploy/authorized_keys"/*.pub &>/dev/null; then
+  echo "--- Syncing authorized keys ---"
+  "$SCRIPT_DIR/sync-keys.sh" --apply "$SSH_KEY" "$HOST"
+fi
+
 # Step 3: Write .env with secrets
 # Uses printf + pipe to avoid nested heredoc quoting issues with special chars.
 echo "--- Step 3/5: Writing secrets ---"

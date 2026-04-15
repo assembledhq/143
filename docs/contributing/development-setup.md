@@ -89,6 +89,19 @@ The frontend proxies `/api/*` to the Go server automatically.
 | `make secrets-edit` | Edit encrypted `.env.enc` in-place |
 | `make secrets-rotate` | Re-encrypt after adding a team member's key |
 
+### Deployment
+
+| Command | Description |
+|---------|-------------|
+| `make deploy` | Deploy all fleet nodes (alias for `deploy-fleet`) |
+| `make deploy-app` | Deploy app node(s) |
+| `make deploy-worker` | Deploy worker node(s) |
+| `make deploy-db` | Deploy database node(s) |
+| `make deploy-logging` | Deploy logging node(s) |
+| `make sync-keys` | Dry-run: show what keys would change on all servers |
+| `make sync-keys APPLY=true` | Push SSH public keys from `deploy/authorized_keys/` to all servers |
+| `make logs` | Open Grafana via SSH tunnel on localhost:9999 |
+
 After running `make secrets-setup`, add this to your shell profile (`~/.bash_profile` or `~/.zshrc`):
 
 ```bash
@@ -107,6 +120,71 @@ To enable GitHub OAuth login and repo onboarding, set these in `.env`:
 - `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` / `GITHUB_WEBHOOK_SECRET` — create a GitHub App
 
 See the [local development guide](../local-development.md) for step-by-step setup including webhook tunneling, and `.env.example` for the full list of variables.
+
+## Deployment
+
+To deploy to production servers, you need an SSH key that the servers trust.
+
+### SSH Key Setup
+
+1. Generate a dedicated deploy key (if you don't have one):
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/143-deploy -C "your-email@example.com"
+```
+
+2. Add your public key to the repo:
+
+```bash
+cp ~/.ssh/143-deploy.pub deploy/authorized_keys/yourname.pub
+```
+
+3. Open a PR with your key and get it reviewed:
+
+```bash
+git add deploy/authorized_keys/yourname.pub
+git commit -m "Add yourname deploy key"
+# push and open a PR as usual
+```
+
+4. Once the PR is merged, someone with existing server access runs:
+
+```bash
+make sync-keys            # dry run — review the diff
+make sync-keys APPLY=true    # push changes to all servers
+```
+
+This replaces `authorized_keys` on every fleet server with exactly the keys in the repo. You'll have deploy access after the apply step completes.
+
+### Deploying
+
+The Makefile auto-detects your SSH key from `~/.ssh/143-deploy`. If your key is at a different path, pass `SSH_KEY=<path>` explicitly.
+
+```bash
+# Deploy everything (auto-detects SSH key)
+make deploy
+
+# Deploy a single role
+make deploy-app
+make deploy-worker
+
+# Override SSH key if yours is named differently
+make deploy SSH_KEY=~/.ssh/my-other-key
+```
+
+### Provisioning New Servers
+
+```bash
+make provision-app    HOST=<ip>
+make provision-worker HOST=<ip>
+make provision-db     HOST=<ip>
+```
+
+### Viewing Logs
+
+```bash
+make logs    # opens Grafana via SSH tunnel on localhost:9999
+```
 
 ## Project Structure
 

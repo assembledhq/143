@@ -3,7 +3,7 @@
 # Connects to a remote Postgres instance via DB_HOST.
 #
 # Provision from your local machine:
-#   make provision-worker HOST=87.99.158.39 SSH_KEY=~/.ssh/143-deploy
+#   make provision-worker HOST=87.99.158.39
 #
 # Or manually substitute and pass as user-data:
 #   export SSH_PUBLIC_KEY="$(cat ~/.ssh/143-deploy.pub)"

@@ -1,0 +1,3 @@
+# Require review from maintainers for deploy key changes.
+# Adding a key here grants SSH access to production servers after sync.
+/deploy/authorized_keys/ @wangjohn
