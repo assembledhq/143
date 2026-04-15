@@ -59,7 +59,7 @@ Self-hosted VictoriaLogs + Grafana stack on a dedicated Hetzner logging server, 
 
 - **Hetzner CX22**: 2 vCPU, 4 GB RAM, 40 GB disk, ~€4/month
 - VictoriaLogs (~512 MB) + Grafana (~300 MB) = ~1 GB RAM, leaving headroom
-- Disk: 40 GB is sufficient for 30 days retention. With ~3 containers on app and ~2 on worker, estimated volume is ~0.5–1 GB/day (~15–30 GB over 30 days). If average daily volume exceeds ~1 GB/day (visible via the disk usage alert), upgrade to CX32 (80 GB disk, ~€8/month).
+- Disk: 40 GB is sufficient for 30 days retention. With ~3 containers on app and ~2 on worker, estimated volume is ~0.5–1 GB/day (~15–30 GB over 30 days). At the upper bound (1 GB/day), 30 GB of logs + OS + Docker images + Grafana data approaches the limit — the disk usage alert at 80% (32 GB) provides the safety margin. If average daily volume exceeds ~1 GB/day (visible via the disk usage alert), upgrade to CX32 (80 GB disk, ~€8/month).
 
 ### Docker Compose (`docker-compose.logging.yml`)
 
@@ -141,12 +141,21 @@ transforms:
       .service = .label."com.docker.compose.service" ?? "unknown"
 
       # Parse structured JSON logs from our Go services (zerolog output).
-      # Intentionally merge parsed fields into the root — this overwrites Vector's
-      # built-in .timestamp and .message with the zerolog values, which is what the
-      # VictoriaLogs sink expects (_time_field: "timestamp", _msg_field: "message").
+      # Selectively extract known zerolog fields rather than merging the entire parsed
+      # object into root, which would clobber Vector metadata (source_type, container_name, etc.).
       parsed, err = parse_json(.message)
       if err == null {
-        . = merge(., parsed)
+        .message = string(parsed.message) ?? .message
+        .timestamp = string(parsed.time) ?? .timestamp
+        .level = string(parsed.level) ?? .level
+        .error = parsed.error
+        .caller = parsed.caller
+        .org_id = parsed.org_id
+        .agent_run_id = parsed.agent_run_id
+        .trace_id = parsed.trace_id
+        .request_id = parsed.request_id
+        .path = parsed.path
+        .response_time_ms = parsed.response_time_ms
       }
 
       # Add server identity
@@ -218,7 +227,46 @@ volumes:
 
 ### Add Vector to Worker Server (`docker-compose.worker.yml`)
 
-Same as app, with `SERVER_ROLE: worker`. To avoid drift between the two nearly-identical Vector blocks, consider extracting to a shared `docker-compose.vector.yml` and using `include` in each server's compose file. For now, copy the block above and change `SERVER_ROLE`.
+Same as app, with `SERVER_ROLE: worker`. To avoid drift between the two nearly-identical Vector blocks, extract to a shared `docker-compose.vector.yml` and use `include` in each server's compose file:
+
+```yaml
+# docker-compose.vector.yml — shared Vector collector config
+services:
+  vector:
+    image: timberio/vector:0.54.0-alpine
+    environment:
+      SERVER_ROLE: ${SERVER_ROLE}  # set in each server's .env (app or worker)
+      VICTORIALOGS_HOST: ${VICTORIALOGS_HOST}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./deploy/vector.yaml:/etc/vector/vector.yaml:ro
+      - vector-buffer:/var/lib/vector
+    command: ["vector", "--config", "/etc/vector/vector.yaml", "--api.enabled=true"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8686/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.5"
+
+volumes:
+  vector-buffer:
+```
+
+Then in each server's compose file:
+
+```yaml
+# docker-compose.app.yml (add at the top level)
+include:
+  - docker-compose.vector.yml
+```
+
+Each server's `.env` sets `SERVER_ROLE=app` or `SERVER_ROLE=worker` accordingly.
 
 ## Network Security
 
@@ -233,6 +281,8 @@ VictoriaLogs must not be exposed to the public internet. All inter-server commun
 5. No firewall rules needed — traffic stays on the private network
 
 > **Note:** Hetzner private networks are not encrypted at the network layer. Plain HTTP between Vector and VictoriaLogs is acceptable because our logs do not contain secrets or PII (auth tokens are never logged, and user-facing content stays in the database). If this changes, add mTLS between Vector and VictoriaLogs.
+
+> **Note:** VictoriaLogs has no built-in authentication on its ingest endpoint. Any server on the Hetzner private network can write arbitrary logs. This is acceptable for our small fleet, but if more servers join the network, consider adding an auth proxy (e.g., Caddy with basic auth) in front of VictoriaLogs or using Vector's `auth` sink option with a shared bearer token.
 
 ### Grafana Access
 
@@ -285,8 +335,8 @@ Provisioning workflow:
 
 ### Step 2: Deploy Vector Collectors
 
-1. Add Vector service to `docker-compose.app.yml` on the app server
-2. Add Vector service to `docker-compose.worker.yml` on the worker server
+1. Add `VICTORIALOGS_HOST` (logging server's private IP) and `SERVER_ROLE` to the `.env` on both app and worker servers. Update provisioning/deploy scripts to include these vars (see A.2 and A.3 changes below).
+2. Add `docker-compose.vector.yml` to the repo and `include` it from `docker-compose.app.yml` and `docker-compose.worker.yml`
 3. Deploy both — Vector starts collecting Docker logs immediately
 4. Verify logs appear in Grafana
 
@@ -334,6 +384,7 @@ For now, Grafana alerting on log queries is sufficient:
 - **Sandbox OOM**: Alert on `"out of memory"` in worker logs
 - **Logging server disk usage**: Alert if disk usage on the logging server exceeds 80%. Add a lightweight disk-monitor container to `docker-compose.logging.yml` that emits JSON to stdout every 5 minutes — Vector's `docker_logs` source picks it up like any other container log:
   ```yaml
+  # Note: $$ is Docker Compose syntax for a literal $. In a plain shell script, use single $.
   disk-monitor:
     image: alpine:3.21
     entrypoint: ["/bin/sh", "-c"]
@@ -425,6 +476,10 @@ if [ "$ROLE" != "db" ] && [ "$ROLE" != "logging" ]; then
 fi
 if [ "$ROLE" = "logging" ]; then
   : "${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required for logging role (set it or add to .env.production.enc)}"
+  : "${PRIVATE_IP:?PRIVATE_IP is required for logging role (set it or add to .env.production.enc)}"
+fi
+if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
+  : "${VICTORIALOGS_HOST:?VICTORIALOGS_HOST is required for $ROLE role (logging server private IP)}"
 fi
 ```
 
@@ -450,8 +505,9 @@ Add secrets block (before the `db` block):
 
 ```bash
 if [ "$ROLE" = "logging" ]; then
-  # Logging nodes only need the Grafana admin password — no DB or age key
-  printf 'GRAFANA_ADMIN_PASSWORD=%s\n' "$GRAFANA_ADMIN_PASSWORD" \
+  # Logging nodes need the Grafana admin password and the private IP for binding VictoriaLogs
+  : "${PRIVATE_IP:?PRIVATE_IP is required for logging role (set it or add to .env.production.enc)}"
+  printf 'GRAFANA_ADMIN_PASSWORD=%s\nPRIVATE_IP=%s\n' "$GRAFANA_ADMIN_PASSWORD" "$PRIVATE_IP" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 elif [ "$ROLE" = "db" ]; then
 ```
@@ -479,9 +535,19 @@ Add secrets block (before the `db` block):
 
 ```bash
   if [ "$ROLE" = "logging" ]; then
-    printf 'GRAFANA_ADMIN_PASSWORD=%s\n' "${GRAFANA_ADMIN_PASSWORD:-}" \
+    printf 'GRAFANA_ADMIN_PASSWORD=%s\nPRIVATE_IP=%s\n' "${GRAFANA_ADMIN_PASSWORD:-}" "${PRIVATE_IP:-}" \
       | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat > /opt/143/.env && chmod 600 /opt/143/.env'
   elif [ "$ROLE" = "db" ]; then
+```
+
+Add `VICTORIALOGS_HOST` to app/worker `.env` — update the existing secrets block for app and worker roles to include the logging server's private IP:
+
+```bash
+  if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
+    # Append VICTORIALOGS_HOST and SERVER_ROLE for Vector log collection
+    printf 'VICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\n' "${VICTORIALOGS_HOST:-}" "$ROLE" \
+      | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat >> /opt/143/.env'
+  fi
 ```
 
 ### A.4: Cloud-Init Template (`deploy/cloud-init/logging.yml`)
@@ -498,7 +564,6 @@ Add secrets block (before the `db` block):
 #   export SSH_PUBLIC_KEY="$(cat ~/.ssh/143-deploy.pub)"
 #   export GRAFANA_ADMIN_PASSWORD="your-grafana-password"
 #   export PRIVATE_IP="10.0.0.5"
-#   export REPO_URL="https://github.com/assembledhq/143.git"
 #   envsubst < deploy/cloud-init/logging.yml > /tmp/user-data.yml
 
 users:
@@ -518,7 +583,8 @@ packages:
 runcmd:
   # Clone repo to get compose files and configs.
   # No GHCR login needed — VictoriaLogs and Grafana are public images.
-  - su - deploy -c 'git clone --depth 1 ${REPO_URL} /tmp/143-repo'
+  # Note: using a literal URL here avoids envsubst issues with special characters in REPO_URL.
+  - su - deploy -c 'git clone --depth 1 https://github.com/assembledhq/143.git /tmp/143-repo'
   - su - deploy -c 'cp /tmp/143-repo/docker-compose.logging.yml /opt/143/'
   - su - deploy -c 'cp -r /tmp/143-repo/deploy /opt/143/deploy'
   - rm -rf /tmp/143-repo
@@ -550,13 +616,19 @@ write_files:
       PRIVATE_IP=${PRIVATE_IP}
 ```
 
-### A.5: Fleet Hosts Update (`.env.production.enc`)
+### A.5: Fleet Hosts and Env Update (`.env.production.enc`)
 
-Add the logging server to `FLEET_HOSTS` in `.env.production.enc`:
+Add the logging server to `FLEET_HOSTS` and add `VICTORIALOGS_HOST` for the app/worker Vector collectors:
 
 ```bash
 # Existing format (comma-separated role:IP pairs):
 FLEET_HOSTS=db:10.0.0.3,app:10.0.0.2,worker:10.0.0.4,logging:10.0.0.5
+
+# Logging server private IP — used by Vector on app/worker and for PRIVATE_IP binding on logging
+VICTORIALOGS_HOST=10.0.0.5
+
+# Private IP of the logging server — used by provision/deploy to bind VictoriaLogs
+PRIVATE_IP=10.0.0.5
 ```
 
 Update via `sops .env.production.enc` and `deploy-fleet.sh` will pick it up automatically.
