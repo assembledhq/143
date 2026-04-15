@@ -237,13 +237,13 @@ func TestProjectHandler_Update_InvalidTransition(t *testing.T) {
 	repoID := uuid.New()
 	now := time.Now()
 
-	// GetByID returns a draft project
+	// GetByID returns a completed project
 	mock.ExpectQuery("SELECT .+ FROM projects WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, repoID, models.ProjectStatusDraft, now)...))
+		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, repoID, models.ProjectStatusCompleted, now)...))
 
-	// Try to transition from draft -> completed (invalid)
-	body, _ := json.Marshal(map[string]string{"status": "completed"})
+	// Try to transition from completed -> draft (invalid)
+	body, _ := json.Marshal(map[string]string{"status": "draft"})
 
 	req := httptest.NewRequest(http.MethodPatch, "/api/v1/projects/"+projectID.String(), bytes.NewBuffer(body))
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
