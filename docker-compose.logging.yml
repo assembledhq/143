@@ -27,11 +27,6 @@ services:
       - -httpListenAddr=:9428
     ports:
       - "${VICTORIALOGS_HOST}:9428:9428"
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:9428/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
     restart: unless-stopped
     deploy:
       resources:
