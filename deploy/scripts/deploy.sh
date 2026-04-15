@@ -4,7 +4,7 @@ set -euo pipefail
 # Deploy to a node via SSH.
 # Usage: ./deploy.sh <role> <host> <ssh-key-path> [image-tag]
 #
-# Roles: app, worker, db
+# Roles: app, worker, db, logging
 # Provider-agnostic — just needs SSH access to the target.
 
 ROLE="$1"
@@ -27,7 +27,11 @@ case "$ROLE" in
     COMPOSE_FILE="docker-compose.db.yml"
     HEALTH_SERVICE="postgres"
     ;;
-  *)      echo "Unknown role: $ROLE (expected: app, worker, db)"; exit 1 ;;
+  logging)
+    COMPOSE_FILE="docker-compose.logging.yml"
+    HEALTH_SERVICE="grafana"
+    ;;
+  *)      echo "Unknown role: $ROLE (expected: app, worker, db, logging)"; exit 1 ;;
 esac
 
 echo "Deploying role=$ROLE tag=$TAG to $HOST..."
@@ -60,13 +64,28 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
     fi
   done <<< "$DECRYPTED"
 
-  if [ "$ROLE" = "db" ]; then
+  if [ "$ROLE" = "logging" ]; then
+    : "${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required for logging role (set it or add to .env.production.enc)}"
+    : "${VICTORIALOGS_HOST:?VICTORIALOGS_HOST is required for logging role (set it or add to .env.production.enc)}"
+    printf 'GRAFANA_ADMIN_PASSWORD=%s\nVICTORIALOGS_HOST=%s\n' "$GRAFANA_ADMIN_PASSWORD" "$VICTORIALOGS_HOST" \
+      | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat > /opt/143/.env && chmod 600 /opt/143/.env'
+  elif [ "$ROLE" = "db" ]; then
+    : "${DB_PASSWORD:?DB_PASSWORD is required for db role (set it or add to .env.production.enc)}"
     printf 'DB_PASSWORD=%s\n' "$DB_PASSWORD" \
+      | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat > /opt/143/.env && chmod 600 /opt/143/.env'
+  elif [ "$ROLE" = "worker" ]; then
+    : "${DB_PASSWORD:?DB_PASSWORD is required for worker role (set it or add to .env.production.enc)}"
+    : "${DB_HOST:?DB_HOST is required for worker role (set it or add to .env.production.enc)}"
+    : "${VICTORIALOGS_HOST:?VICTORIALOGS_HOST is required for worker role (set it or add to .env.production.enc)}"
+    printf 'DB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\n' "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" \
       | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat > /opt/143/.env && chmod 600 /opt/143/.env'
   else
     # Both app and worker nodes need SOPS_AGE_KEY + the encrypted secrets file
     # so the entrypoint can decrypt GitHub App creds, API keys, etc. at boot.
-    printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\n' "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" \
+    : "${DB_PASSWORD:?DB_PASSWORD is required for app role (set it or add to .env.production.enc)}"
+    : "${DB_HOST:?DB_HOST is required for app role (set it or add to .env.production.enc)}"
+    : "${VICTORIALOGS_HOST:?VICTORIALOGS_HOST is required for app role (set it or add to .env.production.enc)}"
+    printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\n' "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" \
       | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat > /opt/143/.env && chmod 600 /opt/143/.env'
     scp "${SCP_OPTS[@]}" "$ENC_FILE" deploy@"$HOST":/opt/143/
     ssh "${SSH_OPTS[@]}" deploy@"$HOST" "chmod 600 /opt/143/.env.production.enc"
@@ -78,6 +97,10 @@ fi
 
 # Sync compose file so the remote always runs the latest version
 scp "${SCP_OPTS[@]}" "$PROJECT_DIR/$COMPOSE_FILE" deploy@"$HOST":/opt/143/
+if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
+  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.vector.yml" deploy@"$HOST":/opt/143/
+  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/vector.yaml" deploy@"$HOST":/opt/143/deploy/
+fi
 
 ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "COMPOSE_FILE=$COMPOSE_FILE" "HEALTH_SERVICE=$HEALTH_SERVICE" "ROLE=$ROLE" "IMAGE_TAG=$TAG" \

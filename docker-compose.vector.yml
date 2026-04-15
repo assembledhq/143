@@ -1,0 +1,28 @@
+# Shared Vector log collector — included by app and worker compose files.
+# See docs/design/47-logging-victorialogs.md
+
+services:
+  vector:
+    image: timberio/vector:0.54.0-alpine
+    environment:
+      SERVER_ROLE: ${SERVER_ROLE}
+      VICTORIALOGS_HOST: ${VICTORIALOGS_HOST}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./deploy/vector.yaml:/etc/vector/vector.yaml:ro
+      - vector-buffer:/var/lib/vector
+    command: ["vector", "--config", "/etc/vector/vector.yaml", "--api.enabled=true"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8686/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.5"
+
+volumes:
+  vector-buffer:

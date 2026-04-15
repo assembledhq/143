@@ -4,7 +4,7 @@ set -euo pipefail
 # Provision a node by running bootstrap.sh + copying config files via SSH.
 # Usage: ./provision.sh <role> <host> <ssh-key-path> [--reprovision]
 #
-# Roles: app, worker, db
+# Roles: app, worker, db, logging
 # This is the SSH-based alternative to cloud-init for already-running servers.
 #
 # Pass --reprovision to tear down existing containers and volumes before reprovisioning.
@@ -31,12 +31,15 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # Validate role
 case "$ROLE" in
-  app)    COMPOSE_FILE="docker-compose.app.yml" ;;
-  worker) COMPOSE_FILE="docker-compose.worker.yml" ;;
-  db)     COMPOSE_FILE="docker-compose.db.yml" ;;
-  *)      echo "Unknown role: $ROLE (expected: app, worker, db)"; exit 1 ;;
+  app)     COMPOSE_FILE="docker-compose.app.yml" ;;
+  worker)  COMPOSE_FILE="docker-compose.worker.yml" ;;
+  db)      COMPOSE_FILE="docker-compose.db.yml" ;;
+  logging) COMPOSE_FILE="docker-compose.logging.yml" ;;
+  *)       echo "Unknown role: $ROLE (expected: app, worker, db, logging)"; exit 1 ;;
 esac
 
+# Logging nodes use only public runtime images, but they still rely on values
+# that commonly live in the encrypted production env.
 # Read SOPS_AGE_KEY from the default age keyfile if not already set
 if [ -z "${SOPS_AGE_KEY:-}" ]; then
   AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-$HOME/.config/sops/age/keys.txt}"
@@ -75,10 +78,18 @@ else
 fi
 
 # Validate required secrets are available (from env or .env.production.enc)
-: "${DB_PASSWORD:?DB_PASSWORD is required (set it or add to .env.production.enc)}"
-: "${GHCR_TOKEN:?GHCR_TOKEN is required (set it or add to .env.production.enc)}"
-if [ "$ROLE" != "db" ]; then
+if [ "$ROLE" != "logging" ]; then
+  : "${DB_PASSWORD:?DB_PASSWORD is required (set it or add to .env.production.enc)}"
+  : "${GHCR_TOKEN:?GHCR_TOKEN is required (set it or add to .env.production.enc)}"
+fi
+if [ "$ROLE" != "db" ] && [ "$ROLE" != "logging" ]; then
   : "${DB_HOST:?DB_HOST is required for $ROLE role (set it or add to .env.production.enc)}"
+fi
+if [ "$ROLE" = "logging" ]; then
+  : "${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required for logging role (set it or add to .env.production.enc)}"
+fi
+if [ "$ROLE" != "db" ]; then
+  : "${VICTORIALOGS_HOST:?VICTORIALOGS_HOST is required for $ROLE role (logging server private IP)}"
 fi
 
 SSH_OPTS=(-o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
@@ -122,6 +133,19 @@ SYSCTL
     sysctl -p /etc/sysctl.d/99-postgres.conf
     echo "Bootstrap complete (db)."
 BOOTSTRAP_DB
+elif [ "$ROLE" = "logging" ]; then
+  # Logging nodes just need Docker — no gVisor, no special kernel tuning
+  ssh "${SSH_OPTS[@]}" root@"$HOST" << 'BOOTSTRAP_LOGGING'
+    set -euo pipefail
+    id deploy &>/dev/null || adduser --disabled-password --gecos "" deploy
+    mkdir -p /home/deploy/.ssh /opt/143
+    [ -f /root/.ssh/authorized_keys ] && cp /root/.ssh/authorized_keys /home/deploy/.ssh/
+    chown -R deploy:deploy /home/deploy/.ssh /opt/143
+    chmod 700 /home/deploy/.ssh
+    command -v docker &>/dev/null || (curl -fsSL https://get.docker.com | sh)
+    usermod -aG docker deploy
+    echo "Bootstrap complete (logging)."
+BOOTSTRAP_LOGGING
 else
   ssh "${SSH_OPTS[@]}" root@"$HOST" 'bash -s -- '"$ROLE" < "$SCRIPT_DIR/bootstrap.sh"
 fi
@@ -129,23 +153,31 @@ fi
 # Step 2: Copy compose file and deploy configs
 echo "--- Step 2/5: Copying config files ---"
 scp "${SCP_OPTS[@]}" "$PROJECT_DIR/$COMPOSE_FILE" root@"$HOST":/opt/143/
+if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
+  # Vector collector is included from the main compose file
+  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.vector.yml" root@"$HOST":/opt/143/
+fi
 scp "${SCP_OPTS[@]}" -r "$PROJECT_DIR/deploy" root@"$HOST":/opt/143/
 ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143"
 
 # Step 3: Write .env with secrets
 # Uses printf + pipe to avoid nested heredoc quoting issues with special chars.
 echo "--- Step 3/5: Writing secrets ---"
-if [ "$ROLE" = "db" ]; then
+if [ "$ROLE" = "logging" ]; then
+  # Logging nodes need the Grafana admin password and the private IP for binding VictoriaLogs
+  printf 'GRAFANA_ADMIN_PASSWORD=%s\nVICTORIALOGS_HOST=%s\n' "$GRAFANA_ADMIN_PASSWORD" "$VICTORIALOGS_HOST" \
+    | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
+elif [ "$ROLE" = "db" ]; then
   printf 'DB_PASSWORD=%s\n' "$DB_PASSWORD" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 elif [ "$ROLE" = "worker" ]; then
   # Workers only get the secrets they need — no age key or encrypted bundle.
   # A worker compromise cannot decrypt the full production secret set.
-  printf 'DB_PASSWORD=%s\nDB_HOST=%s\n' "$DB_PASSWORD" "$DB_HOST" \
+  printf 'DB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\n' "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 else
   # App nodes get the full secret set for SOPS decryption
-  printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\n' "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" \
+  printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\n' "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
   # Copy encrypted production env (baked into the Docker image too, but
   # having it on disk lets you re-decrypt without rebuilding)
@@ -157,9 +189,16 @@ fi
 
 # Step 4: GHCR login + pull images
 echo "--- Step 4/5: Pulling images ---"
-ssh "${SSH_OPTS[@]}" root@"$HOST" << PULL
-  su - deploy -c 'echo "${GHCR_TOKEN}" | docker login ghcr.io -u deploy --password-stdin'
+case "$ROLE" in
+  db|logging)
+    # Public images (postgres, victorialogs, grafana) are pulled automatically by compose
+    ;;
+  *)
+    ssh "${SSH_OPTS[@]}" root@"$HOST" << PULL
+      su - deploy -c 'echo "${GHCR_TOKEN}" | docker login ghcr.io -u deploy --password-stdin'
 PULL
+    ;;
+esac
 
 case "$ROLE" in
   app)
@@ -174,8 +213,8 @@ PULL_APP
       su - deploy -c 'docker pull ghcr.io/assembledhq/143-sandbox:latest'
 PULL_WORKER
     ;;
-  db)
-    # Postgres image is pulled automatically by compose
+  db|logging)
+    # Public images are pulled automatically by compose
     ;;
 esac
 
