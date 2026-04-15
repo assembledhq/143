@@ -14,6 +14,7 @@ import {
   groupByLocalDay,
   formatDayLabel,
   formatDateForApi,
+  nextDayIso,
   metricOptions,
 } from './usage-helpers';
 import type { UsageTimeseriesBucket } from '@/lib/types';
@@ -131,6 +132,11 @@ describe('formatCost', () => {
     expect(formatCost(1.5)).toBe('$1.50');
     expect(formatCost(99.999)).toBe('$100.00');
   });
+
+  it('formats negative costs', () => {
+    expect(formatCost(-1.5)).toBe('-$1.50');
+    expect(formatCost(-0.005)).toBe('$0.00');
+  });
 });
 
 describe('formatNumber', () => {
@@ -177,6 +183,21 @@ describe('formatDateForApi', () => {
   it('returns an ISO string', () => {
     const d = new Date('2026-04-12T15:30:00Z');
     expect(formatDateForApi(d)).toBe(d.toISOString());
+  });
+});
+
+describe('nextDayIso', () => {
+  it('returns an ISO string for the next day', () => {
+    const result = nextDayIso('2026-04-10');
+    const d = new Date(result);
+    expect(d.getDate()).toBe(11);
+  });
+
+  it('handles month boundaries', () => {
+    const result = nextDayIso('2026-01-31');
+    const d = new Date(result);
+    expect(d.getMonth()).toBe(1); // February
+    expect(d.getDate()).toBe(1);
   });
 });
 
