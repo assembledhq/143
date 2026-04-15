@@ -27,8 +27,8 @@ export function AuditLogDetailDrawer({ entry, onClose, members }: AuditLogDetail
     <Sheet open={!!entry} onOpenChange={(open) => !open && onClose()}>
       <SheetContent>
         <SheetHeader>
-          <SheetTitle className="text-sm">Event details</SheetTitle>
-          <SheetDescription>
+          <SheetTitle className="text-xs">Event details</SheetTitle>
+          <SheetDescription className="text-xs">
             {actorName} {actionLabel}
           </SheetDescription>
         </SheetHeader>
@@ -69,9 +69,9 @@ export function AuditLogDetailDrawer({ entry, onClose, members }: AuditLogDetail
             <div className="space-y-2">
               <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Request info</h3>
               <div className="rounded-md bg-muted/30 border border-border/50 p-3 space-y-2">
-                {entry.ip_address && <DetailRow label="IP Address" value={entry.ip_address} mono small />}
-                {entry.user_agent && <DetailRow label="User Agent" value={entry.user_agent} small />}
-                {entry.request_id && <DetailRow label="Request ID" value={entry.request_id} mono small />}
+                {entry.ip_address && <DetailRow label="IP Address" value={entry.ip_address} mono />}
+                {entry.user_agent && <DetailRow label="User Agent" value={entry.user_agent} />}
+                {entry.request_id && <DetailRow label="Request ID" value={entry.request_id} mono />}
               </div>
             </div>
           )}
@@ -81,8 +81,8 @@ export function AuditLogDetailDrawer({ entry, onClose, members }: AuditLogDetail
             <div className="space-y-2">
               <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Related</h3>
               <div className="rounded-md bg-muted/30 border border-border/50 p-3 space-y-2">
-                {entry.session_id && <DetailRow label="Session ID" value={entry.session_id} mono small />}
-                {entry.project_id && <DetailRow label="Project ID" value={entry.project_id} mono small />}
+                {entry.session_id && <DetailRow label="Session ID" value={entry.session_id} mono />}
+                {entry.project_id && <DetailRow label="Project ID" value={entry.project_id} mono />}
               </div>
             </div>
           )}
@@ -96,20 +96,18 @@ function DetailRow({
   label,
   value,
   mono,
-  small,
   children,
 }: {
   label: string;
   value?: string;
   mono?: boolean;
-  small?: boolean;
   children?: React.ReactNode;
 }) {
   return (
-    <div className={`flex items-start gap-3 ${small ? "text-xs" : "text-sm"}`}>
-      <span className="text-muted-foreground min-w-[100px] shrink-0 text-xs font-medium">{label}</span>
+    <div className="flex items-start gap-3 text-xs">
+      <span className="text-muted-foreground min-w-[100px] shrink-0 font-medium">{label}</span>
       {children ?? (
-        <span className={`text-foreground break-all ${mono ? "font-mono text-xs" : ""}`}>
+        <span className={`text-foreground break-all ${mono ? "font-mono" : ""}`}>
           {value}
         </span>
       )}
