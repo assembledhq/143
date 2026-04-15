@@ -191,7 +191,7 @@ else
   # having it on disk lets you re-decrypt without rebuilding)
   if [ -f "$ENC_FILE" ]; then
     scp "${SCP_OPTS[@]}" "$ENC_FILE" root@"$HOST":/opt/143/
-    ssh "${SSH_OPTS[@]}" root@"$HOST" "chown deploy:deploy /opt/143/.env.production.enc && chmod 600 /opt/143/.env.production.enc"
+    ssh "${SSH_OPTS[@]}" root@"$HOST" "chown deploy:deploy /opt/143/.env.production.enc && chmod 644 /opt/143/.env.production.enc"
   fi
 fi
 
