@@ -63,10 +63,9 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
   if [ "$ROLE" = "db" ]; then
     printf 'DB_PASSWORD=%s\n' "$DB_PASSWORD" \
       | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat > /opt/143/.env && chmod 600 /opt/143/.env'
-  elif [ "$ROLE" = "worker" ]; then
-    printf 'DB_PASSWORD=%s\nDB_HOST=%s\n' "$DB_PASSWORD" "$DB_HOST" \
-      | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat > /opt/143/.env && chmod 600 /opt/143/.env'
   else
+    # Both app and worker nodes need SOPS_AGE_KEY + the encrypted secrets file
+    # so the entrypoint can decrypt GitHub App creds, API keys, etc. at boot.
     printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\n' "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" \
       | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat > /opt/143/.env && chmod 600 /opt/143/.env'
     scp "${SCP_OPTS[@]}" "$ENC_FILE" deploy@"$HOST":/opt/143/
