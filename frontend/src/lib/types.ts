@@ -963,3 +963,60 @@ export const evalSourceConfig: Record<EvalTaskSource, { label: string }> = {
   pr_bootstrap: { label: "PR bootstrap" },
   failure_derived: { label: "Failure derived" },
 };
+
+// ── Usage & Billing Dashboard ──────────────────────────────────────────
+
+export interface UsageSummary {
+  org_id: string;
+  period_start: string;
+  period_end: string;
+  total_container_minutes: number;
+  total_sessions: number;
+  peak_concurrent: number;
+  by_capacity: CapacityBucket[];
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_llm_cost_usd: number;
+}
+
+export interface CapacityBucket {
+  cpu_limit: number;
+  memory_limit_mb: number;
+  container_minutes: number;
+  session_count: number;
+}
+
+export interface UsageTimeseriesBucket {
+  hour_utc: string;
+  user_id?: string;
+  user_name?: string;
+  capacity_tier?: string;
+  total_container_minutes: number;
+  total_sessions: number;
+  total_container_starts: number;
+  peak_concurrent: number;
+  avg_duration_sec: number;
+  p95_duration_sec: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_llm_cost_usd: number;
+}
+
+export interface UsageTimeseriesResponse {
+  buckets: UsageTimeseriesBucket[];
+  period_start: string;
+  period_end: string;
+}
+
+export interface UsageBreakdownRow {
+  key: string;
+  label: string;
+  total_container_minutes: number;
+  total_sessions: number;
+  total_container_starts: number;
+  peak_concurrent: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_llm_cost_usd: number;
+  percentage: number;
+}

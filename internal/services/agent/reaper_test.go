@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -297,14 +299,59 @@ func TestReapPhase2_SnapshotDeleteError_SkipsSession(t *testing.T) {
 
 // mockOrphanCloser implements OrphanCloser for testing.
 type mockOrphanCloser struct {
-	closed    int64
-	closeErr  error
-	calledAt  time.Time
+	closed   int64
+	closeErr error
+	calledAt time.Time
 }
 
 func (m *mockOrphanCloser) CloseOrphans(_ context.Context, startedBefore time.Time) (int64, error) {
 	m.calledAt = startedBefore
 	return m.closed, m.closeErr
+}
+
+type mockUsageRoller struct {
+	mu              sync.Mutex
+	rolledHours     []time.Time
+	rollupErrByHour map[time.Time]error
+	deletedCutoffs  []time.Time
+	deleteErr       error
+	latestHour      time.Time
+	latestHourErr   error
+}
+
+func (m *mockUsageRoller) RollupAllOrgs(_ context.Context, hour time.Time) error {
+	hour = hour.UTC()
+	m.mu.Lock()
+	m.rolledHours = append(m.rolledHours, hour)
+	m.mu.Unlock()
+	if m.rollupErrByHour != nil {
+		if err := m.rollupErrByHour[hour]; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// sortedRolledHours returns a sorted copy of rolledHours for deterministic assertions.
+func (m *mockUsageRoller) sortedRolledHours() []time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sorted := make([]time.Time, len(m.rolledHours))
+	copy(sorted, m.rolledHours)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Before(sorted[j]) })
+	return sorted
+}
+
+func (m *mockUsageRoller) GetLatestRollupHour(_ context.Context) (time.Time, error) {
+	return m.latestHour, m.latestHourErr
+}
+
+func (m *mockUsageRoller) DeleteOlderThan(_ context.Context, cutoff time.Time) (int64, error) {
+	m.deletedCutoffs = append(m.deletedCutoffs, cutoff.UTC())
+	if m.deleteErr != nil {
+		return 0, m.deleteErr
+	}
+	return 0, nil
 }
 
 func TestReapPhase3_ClosesOrphanedUsageEvents(t *testing.T) {
@@ -339,4 +386,50 @@ func TestReapPhase3_SkippedWhenOrphanCloserNil(t *testing.T) {
 	// No orphan closer — should not panic.
 	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop())
 	reaper.reap(context.Background())
+}
+
+func TestReapPhase4_CatchesUpMissedHoursFromWatermark(t *testing.T) {
+	t.Parallel()
+
+	mock := &reaperMockSessionLister{}
+	snapStore := &reaperMockSnapshotStore{}
+	usageRoller := &mockUsageRoller{}
+
+	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop(),
+		WithUsageRoller(usageRoller),
+	)
+	reaper.lastRollupHour = time.Date(2026, 4, 10, 7, 0, 0, 0, time.UTC)
+
+	// now is 10:35 → lastCompletedHour is 09:00 (truncate to 10:00 then subtract 1h)
+	reaper.reapUsageRollups(context.Background(), time.Date(2026, 4, 10, 10, 35, 0, 0, time.UTC))
+
+	sorted := usageRoller.sortedRolledHours()
+	require.Equal(t, []time.Time{
+		time.Date(2026, 4, 10, 8, 0, 0, 0, time.UTC),
+		time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC),
+		time.Date(2026, 4, 10, 10, 0, 0, 0, time.UTC), // current hour (best-effort)
+	}, sorted, "reaper should catch up every missed hour plus roll the current hour")
+	require.Equal(t, time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC), reaper.lastRollupHour, "watermark should advance to lastCompletedHour, not the current hour")
+}
+
+func TestReapPhase4_BackfillsStartupWindowWhenWatermarkMissing(t *testing.T) {
+	t.Parallel()
+
+	mock := &reaperMockSessionLister{}
+	snapStore := &reaperMockSnapshotStore{}
+	usageRoller := &mockUsageRoller{}
+
+	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop(),
+		WithUsageRoller(usageRoller),
+	)
+
+	// now is 10:35 → lastCompletedHour is 09:00
+	reaper.reapUsageRollups(context.Background(), time.Date(2026, 4, 10, 10, 35, 0, 0, time.UTC))
+
+	sorted := usageRoller.sortedRolledHours()
+	// 25 completed hours + 1 current hour (best-effort)
+	require.Len(t, sorted, 26, "fresh reaper should backfill a bounded startup window plus the current hour")
+	require.Equal(t, time.Date(2026, 4, 9, 9, 0, 0, 0, time.UTC), sorted[0], "startup catch-up should begin 24 hours before the last completed hour")
+	require.Equal(t, time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC), sorted[len(sorted)-2], "startup catch-up should end at the last completed hour")
+	require.Equal(t, time.Date(2026, 4, 10, 10, 0, 0, 0, time.UTC), sorted[len(sorted)-1], "current hour should be rolled as best-effort")
 }

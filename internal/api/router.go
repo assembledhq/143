@@ -19,11 +19,11 @@ import (
 	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/services/codexauth"
 	"github.com/assembledhq/143/internal/services/email"
-	"github.com/assembledhq/143/internal/services/storage"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/sandbox"
+	"github.com/assembledhq/143/internal/services/storage"
 	threadservice "github.com/assembledhq/143/internal/services/thread"
 )
 
@@ -129,7 +129,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	)
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, userStore, repoStore, integrationStore, prService)
 	containerUsageStore := db.NewContainerUsageStore(pool)
-	usageHandler := handlers.NewUsageHandler(containerUsageStore)
+	usageRollupStore := db.NewUsageRollupStore(pool)
+	usageHandler := handlers.NewUsageHandler(containerUsageStore, handlers.WithRollupStore(usageRollupStore))
 	platformModel := cfg.PlatformLLMModel
 	if platformModel == "" {
 		platformModel = "gpt-5-nano"
@@ -536,6 +537,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Post("/api/v1/settings/codex-auth/initiate", codexAuthHandler.Initiate)
 			r.Get("/api/v1/settings/codex-auth/status", codexAuthHandler.Status)
 			r.Post("/api/v1/settings/codex-auth/disconnect", codexAuthHandler.Disconnect)
+
+			// Usage timeseries, breakdown, and export (admin-only)
+			r.Get("/api/v1/usage/timeseries", usageHandler.GetTimeseries)
+			r.Get("/api/v1/usage/breakdown", usageHandler.GetBreakdown)
+			r.Get("/api/v1/usage/export", usageHandler.ExportCSV)
 
 			// Audit logs
 			r.Get("/api/v1/audit-logs", auditLogHandler.List)
