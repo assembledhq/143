@@ -11,7 +11,6 @@ services:
       DATABASE_URL: postgres://onefortythree:${DB_PASSWORD}@${DB_HOST}:5432/onefortythree?sslmode=disable
       ENV: production
       MODE: worker
-      NODE_ID: ${HOSTNAME}
       MAX_CONCURRENT_RUNS: ${MAX_CONCURRENT_RUNS:-5}
       SANDBOX_IMAGE: ghcr.io/assembledhq/143-sandbox:${IMAGE_TAG:-latest}
       SANDBOX_RUNTIME: runsc
