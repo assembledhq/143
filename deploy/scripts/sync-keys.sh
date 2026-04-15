@@ -65,9 +65,15 @@ for HOST in "${HOSTS[@]}"; do
     continue
   fi
 
-  # Show diff
-  diff <(printf '%s\n' "$REMOTE_KEYS") <(printf '%s\n' "$AUTHORIZED_KEYS") \
-    | sed 's/^/  /' || true
+  # Show diff: removed lines in red with -, added lines in green with +
+  while IFS= read -r line; do
+    case "$line" in
+      "< "*)  printf '  \033[31m- %s\033[0m\n' "${line#< }" ;;
+      "> "*)  printf '  \033[32m+ %s\033[0m\n' "${line#> }" ;;
+      ---*)   ;;
+      *)      ;;
+    esac
+  done < <(diff <(printf '%s\n' "$REMOTE_KEYS") <(printf '%s\n' "$AUTHORIZED_KEYS") || true)
 
   if [ "$APPLY" = true ]; then
     printf '%s\n' "$AUTHORIZED_KEYS" | ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
