@@ -9,6 +9,7 @@ import { useMemo, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { cn, formatTimeAgo, sessionTitle } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
+import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
 import { useSessionUserFilter } from "@/hooks/use-session-user-filter";
@@ -400,8 +401,10 @@ export function SessionSidebar() {
               </div>
               </Link>
               {/* Archive / Unarchive button — visible on hover */}
-              <button
-                className="absolute top-2 right-2 hidden group-hover:flex group-focus-within:flex items-center justify-center h-6 w-6 rounded-md bg-background border border-border/60 text-muted-foreground hover:text-foreground hover:bg-accent transition-colors shadow-sm"
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                className="absolute top-2 right-2 hidden group-hover:flex group-focus-within:flex bg-background border border-border/60 text-muted-foreground hover:text-foreground shadow-sm"
                 title={isArchived ? "Unarchive session" : "Archive session"}
                 onClick={(e) => {
                   e.preventDefault();
@@ -414,7 +417,7 @@ export function SessionSidebar() {
                 }}
               >
                 {isArchived ? <ArchiveRestore className="h-3 w-3" /> : <Archive className="h-3 w-3" />}
-              </button>
+              </Button>
             </div>
           );
         })}
