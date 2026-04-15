@@ -1,13 +1,74 @@
 package providers
 
 import (
+	"context"
+	"io"
 	"testing"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/preview"
+	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/network"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+type mockDockerPreviewClient struct {
+	createHostConfig       *container.HostConfig
+	createNetworkingConfig *network.NetworkingConfig
+	inspectResp            container.InspectResponse
+}
+
+func (m *mockDockerPreviewClient) ContainerCreate(_ context.Context, _ *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, _ *ocispec.Platform, _ string) (container.CreateResponse, error) {
+	m.createHostConfig = hostConfig
+	m.createNetworkingConfig = networkingConfig
+	return container.CreateResponse{ID: "infra-1"}, nil
+}
+
+func (m *mockDockerPreviewClient) ContainerStart(_ context.Context, _ string, _ container.StartOptions) error {
+	return nil
+}
+
+func (m *mockDockerPreviewClient) ContainerStop(_ context.Context, _ string, _ container.StopOptions) error {
+	return nil
+}
+
+func (m *mockDockerPreviewClient) ContainerRemove(_ context.Context, _ string, _ container.RemoveOptions) error {
+	return nil
+}
+
+func (m *mockDockerPreviewClient) ContainerInspect(_ context.Context, _ string) (container.InspectResponse, error) {
+	return m.inspectResp, nil
+}
+
+func (m *mockDockerPreviewClient) ContainerExecCreate(_ context.Context, _ string, _ container.ExecOptions) (container.ExecCreateResponse, error) {
+	return container.ExecCreateResponse{}, nil
+}
+
+func (m *mockDockerPreviewClient) ContainerExecAttach(_ context.Context, _ string, _ container.ExecAttachOptions) (types.HijackedResponse, error) {
+	return types.HijackedResponse{}, nil
+}
+
+func (m *mockDockerPreviewClient) ContainerExecInspect(_ context.Context, _ string) (container.ExecInspect, error) {
+	return container.ExecInspect{}, nil
+}
+
+type noopSandboxExecutor struct{}
+
+func (n *noopSandboxExecutor) ExecStream(_ context.Context, _ *agent.Sandbox, _ string, _ func(line []byte), _ io.Writer) (int, error) {
+	return 0, nil
+}
+
+func (n *noopSandboxExecutor) Exec(_ context.Context, _ *agent.Sandbox, _ string, _, _ io.Writer) (int, error) {
+	return 0, nil
+}
+
+func (n *noopSandboxExecutor) ReadFile(_ context.Context, _ *agent.Sandbox, _ string) ([]byte, error) {
+	return nil, nil
+}
 
 func TestBuildInfraEnv_Postgres(t *testing.T) {
 	t.Parallel()
@@ -28,7 +89,7 @@ func TestNewDockerPreviewProvider_DefaultNetworkMatchesCompose(t *testing.T) {
 
 	provider := NewDockerPreviewProvider(nil, nil, zerolog.Nop())
 
-	require.Equal(t, "preview-net", provider.network, "default preview network should match the compose bridge name")
+	require.Equal(t, "143-sandbox", provider.network, "default preview network should match the sandbox bridge name")
 }
 
 func TestNewDockerPreviewProvider_WithPreviewNetworkOverride(t *testing.T) {
@@ -37,6 +98,40 @@ func TestNewDockerPreviewProvider_WithPreviewNetworkOverride(t *testing.T) {
 	provider := NewDockerPreviewProvider(nil, nil, zerolog.Nop(), WithPreviewNetwork("custom-preview-net"))
 
 	require.Equal(t, "custom-preview-net", provider.network, "explicit preview network option should override the default")
+}
+
+func TestProvisionInfra_UsesSandboxNetwork(t *testing.T) {
+	t.Parallel()
+
+	client := &mockDockerPreviewClient{
+		inspectResp: container.InspectResponse{
+			ContainerJSONBase: &container.ContainerJSONBase{
+				HostConfig: &container.HostConfig{
+					NetworkMode: container.NetworkMode("143-sandbox-custom"),
+				},
+			},
+			NetworkSettings: &types.NetworkSettings{
+				Networks: map[string]*network.EndpointSettings{
+					"143-sandbox-custom": {IPAddress: "172.18.0.5"},
+				},
+			},
+		},
+	}
+	provider := NewDockerPreviewProvider(client, &noopSandboxExecutor{}, zerolog.Nop())
+
+	handle, err := provider.provisionInfra(
+		context.Background(),
+		&agent.Sandbox{ID: "sandbox-1"},
+		"preview-handle",
+		"db",
+		models.InfrastructureConfig{Template: "postgres-17"},
+		preview.InfraTemplate{Image: "postgres:17", DefaultMemMB: 128, DefaultCPU: 0.25, DefaultPort: 5432},
+	)
+
+	require.NoError(t, err, "provisionInfra should use the sandbox network when creating infra containers")
+	require.NotNil(t, handle, "provisionInfra should return a handle")
+	require.Equal(t, container.NetworkMode("143-sandbox-custom"), client.createHostConfig.NetworkMode, "infra containers should join the sandbox container network")
+	require.Contains(t, client.createNetworkingConfig.EndpointsConfig, "143-sandbox-custom", "network aliases should be attached to the sandbox network")
 }
 
 func TestBuildInfraEnv_Redis(t *testing.T) {

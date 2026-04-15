@@ -592,6 +592,7 @@ func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID
 	// Read the original body and decode it when the upstream still responded
 	// with a supported content encoding.
 	var bodyBytes []byte
+	var passthroughBody []byte
 	contentEncoding := strings.TrimSpace(strings.ToLower(resp.Header.Get("Content-Encoding")))
 	recompress := func(body []byte) ([]byte, error) {
 		return body, nil
@@ -600,13 +601,19 @@ func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID
 	switch contentEncoding {
 	case "", "identity":
 	case "gzip":
-		gr, err := gzip.NewReader(resp.Body)
+		compressedBody, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			return fmt.Errorf("read gzipped response body: %w", err)
+		}
+		passthroughBody = compressedBody
+
+		gr, err := gzip.NewReader(bytes.NewReader(compressedBody))
 		if err != nil {
 			return fmt.Errorf("gzip reader: %w", err)
 		}
 		bodyBytes, err = io.ReadAll(io.LimitReader(gr, maxHTMLBodySize+1))
 		_ = gr.Close()
-		_ = resp.Body.Close()
 		if err != nil {
 			return fmt.Errorf("read gzipped body: %w", err)
 		}
@@ -622,11 +629,16 @@ func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID
 			return buf.Bytes(), nil
 		}
 	case "deflate":
-		reader := flate.NewReader(resp.Body)
-		var err error
+		compressedBody, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			return fmt.Errorf("read deflate response body: %w", err)
+		}
+		passthroughBody = compressedBody
+
+		reader := flate.NewReader(bytes.NewReader(compressedBody))
 		bodyBytes, err = io.ReadAll(io.LimitReader(reader, maxHTMLBodySize+1))
 		_ = reader.Close()
-		_ = resp.Body.Close()
 		if err != nil {
 			return fmt.Errorf("read deflate body: %w", err)
 		}
@@ -660,10 +672,16 @@ func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID
 	// If the body exceeds the max size, skip injection but serve the
 	// complete body so the browser gets a valid (uninstrumented) page.
 	if int64(len(bodyBytes)) > maxHTMLBodySize {
-		outBytes, recompErr := recompress(bodyBytes)
-		if recompErr != nil {
-			outBytes = bodyBytes
-			resp.Header.Del("Content-Encoding")
+		outBytes := bodyBytes
+		if len(passthroughBody) > 0 {
+			outBytes = passthroughBody
+		} else {
+			recompressedBody, recompErr := recompress(bodyBytes)
+			if recompErr != nil {
+				resp.Header.Del("Content-Encoding")
+			} else {
+				outBytes = recompressedBody
+			}
 		}
 		resp.Body = io.NopCloser(bytes.NewReader(outBytes))
 		resp.ContentLength = int64(len(outBytes))

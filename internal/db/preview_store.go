@@ -49,7 +49,7 @@ const activeStatusFilter = `('starting', 'ready', 'partially_ready', 'unhealthy'
 const previewInstanceColumns = `id, session_id, org_id, user_id, profile_name, name, status,
 	provider, worker_node_id, preview_handle, primary_service, port,
 	config_digest, base_commit_sha, last_accessed_at, expires_at, stopped_at,
-	last_path, memory_limit_mb, cpu_limit_millis, recycle_config, recycle_sandbox, error, created_at, updated_at`
+	last_path, memory_limit_mb, cpu_limit_millis, recycle_config, recycle_sandbox, error, created_at, updated_at, recycled_at`
 
 const previewServiceColumns = `id, preview_instance_id, service_name, role, status,
 	command, cwd, port, pid, error, created_at`
@@ -251,10 +251,12 @@ func (s *PreviewStore) StopPreview(ctx context.Context, orgID, id uuid.UUID) err
 	return nil
 }
 
-// UpdatePreviewHandle updates the provider handle and primary port after a recycle.
+// UpdatePreviewHandle updates the provider handle and primary port. A new
+// handle implies the preview process restarted successfully, so recycled_at is
+// refreshed to anchor the next recycle window.
 func (s *PreviewStore) UpdatePreviewHandle(ctx context.Context, orgID, id uuid.UUID, handle string, port int) error {
 	tag, err := s.db.Exec(ctx,
-		`UPDATE preview_instances SET preview_handle = @handle, port = @port, updated_at = now()
+		`UPDATE preview_instances SET preview_handle = @handle, port = @port, updated_at = now(), recycled_at = now()
 		 WHERE id = @id AND org_id = @org_id`,
 		pgx.NamedArgs{"id": id, "org_id": orgID, "handle": handle, "port": port},
 	)
@@ -283,19 +285,19 @@ func (s *PreviewStore) ListActivePreviews(ctx context.Context, workerNodeID stri
 	return result, nil
 }
 
-// ListActivePreviewsCreatedBefore returns active previews on the given worker
-// that were created before the cutoff time. Used by the recycler to avoid
-// loading all active previews into memory.
-func (s *PreviewStore) ListActivePreviewsCreatedBefore(ctx context.Context, workerNodeID string, createdBefore time.Time) ([]models.PreviewInstance, error) {
+// ListActivePreviewsRecycledBefore returns active previews on the given worker
+// whose last successful start/recycle was before the cutoff time. Used by the
+// recycler to avoid repeatedly restarting a long-lived row after its first recycle.
+func (s *PreviewStore) ListActivePreviewsRecycledBefore(ctx context.Context, workerNodeID string, recycledBefore time.Time) ([]models.PreviewInstance, error) {
 	query := fmt.Sprintf(`SELECT %s FROM preview_instances
-		WHERE worker_node_id = @worker_node_id AND status IN %s AND created_at < @created_before
-		ORDER BY created_at ASC`, previewInstanceColumns, activeStatusFilter)
+		WHERE worker_node_id = @worker_node_id AND status IN %s AND recycled_at < @recycled_before
+		ORDER BY recycled_at ASC`, previewInstanceColumns, activeStatusFilter)
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"worker_node_id": workerNodeID,
-		"created_before": createdBefore,
+		"recycled_before": recycledBefore,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("list active previews created before: %w", err)
+		return nil, fmt.Errorf("list active previews recycled before: %w", err)
 	}
 	result, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewInstance])
 	if err != nil {

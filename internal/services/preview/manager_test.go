@@ -122,7 +122,7 @@ var previewInstanceTestCols = []string{
 	"id", "session_id", "org_id", "user_id", "profile_name", "name", "status",
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
-	"last_path", "memory_limit_mb", "cpu_limit_millis", "recycle_config", "recycle_sandbox", "error", "created_at", "updated_at",
+	"last_path", "memory_limit_mb", "cpu_limit_millis", "recycle_config", "recycle_sandbox", "error", "created_at", "updated_at", "recycled_at",
 }
 
 var previewServiceTestCols = []string{
@@ -140,12 +140,24 @@ var previewAccessSessionTestCols = []string{
 	"session_token_hash", "issued_at", "expires_at", "revoked_at", "last_accessed_at", "created_at",
 }
 
+var sessionTestCols = []string{
+	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
+	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
+	"container_id", "started_at", "completed_at", "token_usage",
+	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
+	"parent_session_id", "revision_context", "error", "result_summary", "diff",
+	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
+	"project_task_id", "model_override", "triggered_by_user_id",
+	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
+	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "deleted_at", "created_at",
+}
+
 func newPreviewInstanceRow(id, sessionID, orgID, userID uuid.UUID, status models.PreviewStatus, handle string, now time.Time) []any {
 	return []any{
 		id, sessionID, orgID, userID, "bootstrap", "my-preview", string(status),
 		"docker", "worker-1", handle, "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
-		"/", 512, 500, []byte(`{"version":"3","name":"my-preview","primary":"web","services":{"web":{"command":["npm","run","dev"],"port":3000,"ready":{"http_path":"/"}}},"credentials":{"mode":"none"},"network":{"mode":"restricted"}}`), []byte(`{"id":"sandbox-1","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"abc"}}`), "", now, now,
+		"/", 512, 500, []byte(`{"version":"3","name":"my-preview","primary":"web","services":{"web":{"command":["npm","run","dev"],"port":3000,"ready":{"http_path":"/"}}},"credentials":{"mode":"none"},"network":{"mode":"restricted"}}`), []byte(`{"id":"sandbox-1","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"abc"}}`), "", now, now, now,
 	}
 }
 
@@ -153,6 +165,21 @@ func newAccessSessionRow(id, orgID, userID, previewID uuid.UUID, tokenHash strin
 	return []any{
 		id, orgID, userID, previewID,
 		tokenHash, now, expiresAt, revokedAt, now, now,
+	}
+}
+
+func newSessionRow(sessionID, orgID uuid.UUID, containerID *string, now time.Time) []any {
+	issueID := uuid.New()
+	return []any{
+		sessionID, issueID, orgID, "claude-code", "running", "supervised", "low",
+		nil, nil, nil, nil,
+		containerID, &now, nil, nil,
+		nil, nil, nil, false,
+		nil, nil, nil, nil, nil,
+		nil, nil, nil, nil,
+		nil, nil, nil,
+		nil, 0, nil, "running", nil,
+		nil, nil, nil, nil, nil, nil, nil, now,
 	}
 }
 
@@ -1088,6 +1115,81 @@ func TestRecyclePreview_ReconstructsInputFromStoredState(t *testing.T) {
 
 	err = mgr.RecyclePreview(context.Background(), orgID, previewID)
 	require.NoError(t, err, "RecyclePreview should rebuild restart inputs from stored preview state")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestRecyclePreview_FallsBackForLegacyPreviewsWithoutStoredRecycleState(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+	sandboxID := "sandbox-legacy"
+	pid := 1234
+
+	legacyRow := newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-old", now)
+	legacyRow[20] = nil
+	legacyRow[21] = nil
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(legacyRow...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionTestCols).
+				AddRow(newSessionRow(sessionID, orgID, &sandboxID, now)...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM preview_services ps .+preview_instance_id = @pid").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewServiceTestCols).
+				AddRow(uuid.New(), previewID, "web", string(models.PreviewServiceRolePrimary), string(models.PreviewServiceStatusReady), []string{"npm", "run", "dev"}, "/workspace", 3000, &pid, "", now),
+		)
+	mock.ExpectQuery("SELECT .+ FROM preview_infrastructure pi2 .+preview_instance_id = @pid").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInfraTestCols))
+	mock.ExpectExec("UPDATE preview_instances SET status = @status.+NOT IN").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_instances SET preview_handle = @handle, port = @port").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_instances SET status = @status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_instances SET expires_at = @expires_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	provider := &mockProvider{
+		startHandle: &PreviewHandle{
+			Handle:      "handle-new",
+			PrimaryPort: 3001,
+		},
+	}
+	mgr := NewManager(ManagerConfig{
+		Store:        db.NewPreviewStore(mock),
+		SessionStore: db.NewSessionStore(mock),
+		Provider:     provider,
+		Logger:       zerolog.Nop(),
+		WorkerNodeID: "worker-1",
+	})
+
+	err = mgr.RecyclePreview(context.Background(), orgID, previewID)
+	require.NoError(t, err, "RecyclePreview should rebuild legacy restart inputs when recycle state is missing")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

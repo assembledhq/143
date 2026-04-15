@@ -38,6 +38,7 @@ type PreviewInstance struct {
 	Error           string          `db:"error" json:"error,omitempty"`
 	CreatedAt       time.Time       `db:"created_at" json:"created_at"`
 	UpdatedAt       time.Time       `db:"updated_at" json:"updated_at"`
+	RecycledAt      time.Time       `db:"recycled_at" json:"recycled_at"`
 }
 
 // PreviewService tracks the state of a single service within a multi-service preview.

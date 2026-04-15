@@ -29,7 +29,7 @@ var previewInstanceTestCols = []string{
 	"id", "session_id", "org_id", "user_id", "profile_name", "name", "status",
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
-	"last_path", "memory_limit_mb", "cpu_limit_millis", "recycle_config", "recycle_sandbox", "error", "created_at", "updated_at",
+	"last_path", "memory_limit_mb", "cpu_limit_millis", "recycle_config", "recycle_sandbox", "error", "created_at", "updated_at", "recycled_at",
 }
 
 var previewServiceTestCols = []string{
@@ -74,7 +74,7 @@ func newPreviewInstanceRow(id, sessionID, orgID, userID uuid.UUID, now time.Time
 		id, sessionID, orgID, userID, "bootstrap", "my-preview", "starting",
 		"docker", "worker-1", "handle-abc", "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
-		"/", 512, 500, []byte(`{"version":"3","name":"my-preview","primary":"web","services":{"web":{"command":["npm","start"],"port":3000,"ready":{"http_path":"/"}}},"credentials":{"mode":"none"},"network":{"mode":"restricted"}}`), []byte(`{"id":"sandbox-1","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"abc"}}`), "", now, now,
+		"/", 512, 500, []byte(`{"version":"3","name":"my-preview","primary":"web","services":{"web":{"command":["npm","start"],"port":3000,"ready":{"http_path":"/"}}},"credentials":{"mode":"none"},"network":{"mode":"restricted"}}`), []byte(`{"id":"sandbox-1","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"abc"}}`), "", now, now, now,
 	}
 }
 
@@ -1278,6 +1278,34 @@ func TestPreviewStore_ListIdlePreviews(t *testing.T) {
 	require.Len(t, previews, 1)
 	require.Equal(t, previewID, previews[0].ID)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewStore_ListActivePreviewsRecycledBefore(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	now := time.Now()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances.+worker_node_id = @worker_node_id.+recycled_at < @recycled_before.+ORDER BY recycled_at").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, now)...),
+		)
+
+	previews, err := store.ListActivePreviewsRecycledBefore(context.Background(), "worker-1", now.Add(-time.Hour))
+	require.NoError(t, err, "ListActivePreviewsRecycledBefore should return matching previews")
+	require.Len(t, previews, 1, "ListActivePreviewsRecycledBefore should return one matching preview")
+	require.Equal(t, previewID, previews[0].ID, "ListActivePreviewsRecycledBefore should return the expected preview")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestPreviewStore_UpdateServicePID(t *testing.T) {

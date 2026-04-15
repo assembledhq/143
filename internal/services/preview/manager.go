@@ -49,9 +49,10 @@ const (
 // It is separate from HTTP handlers so the lifecycle logic does not leak
 // into routers.
 type Manager struct {
-	store    *db.PreviewStore
-	provider PreviewCapableProvider
-	logger   zerolog.Logger
+	store        *db.PreviewStore
+	sessionStore *db.SessionStore
+	provider     PreviewCapableProvider
+	logger       zerolog.Logger
 
 	workerNodeID string // identity of this worker for routing
 
@@ -82,6 +83,7 @@ type Manager struct {
 // ManagerConfig holds initialization options for the preview Manager.
 type ManagerConfig struct {
 	Store         *db.PreviewStore
+	SessionStore  *db.SessionStore
 	Provider      PreviewCapableProvider
 	Inspector     PreviewInspector
 	SnapshotCache *SnapshotCache
@@ -102,6 +104,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 	}
 	m := &Manager{
 		store:         cfg.Store,
+		sessionStore:  cfg.SessionStore,
 		provider:      cfg.Provider,
 		inspector:     cfg.Inspector,
 		snapshotCache: cfg.SnapshotCache,
@@ -709,7 +712,7 @@ func (m *Manager) RecyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 		return fmt.Errorf("preview provider is not configured")
 	}
 
-	input, err := loadRecycleInput(instance)
+	input, err := m.loadRecycleInput(ctx, instance)
 	if err != nil {
 		return fmt.Errorf("load recycle input: %w", err)
 	}
@@ -914,12 +917,14 @@ func storeRecycleInput(instance *models.PreviewInstance, input StartPreviewInput
 	return nil
 }
 
+var errMissingRecycleInput = errors.New("preview recycle input is missing")
+
 func loadRecycleInput(instance *models.PreviewInstance) (StartPreviewInput, error) {
 	if len(instance.RecycleConfig) <= 2 {
-		return StartPreviewInput{}, fmt.Errorf("preview %s is missing stored recycle config", instance.ID)
+		return StartPreviewInput{}, fmt.Errorf("%w: preview %s is missing stored recycle config", errMissingRecycleInput, instance.ID)
 	}
 	if len(instance.RecycleSandbox) <= 2 {
-		return StartPreviewInput{}, fmt.Errorf("preview %s is missing stored recycle sandbox", instance.ID)
+		return StartPreviewInput{}, fmt.Errorf("%w: preview %s is missing stored recycle sandbox", errMissingRecycleInput, instance.ID)
 	}
 
 	var cfg models.PreviewConfig
@@ -937,6 +942,88 @@ func loadRecycleInput(instance *models.PreviewInstance) (StartPreviewInput, erro
 		UserID:        instance.UserID,
 		Sandbox:       &sandbox,
 		Config:        &cfg,
+		BaseCommitSHA: instance.BaseCommitSHA,
+		ProfileName:   instance.ProfileName,
+	}, nil
+}
+
+func (m *Manager) loadRecycleInput(ctx context.Context, instance *models.PreviewInstance) (StartPreviewInput, error) {
+	input, err := loadRecycleInput(instance)
+	if err == nil {
+		return input, nil
+	}
+	if !errors.Is(err, errMissingRecycleInput) {
+		return StartPreviewInput{}, err
+	}
+
+	rebuilt, rebuildErr := m.rebuildLegacyRecycleInput(ctx, instance)
+	if rebuildErr != nil {
+		return StartPreviewInput{}, fmt.Errorf("%w; rebuild legacy restart input: %v", err, rebuildErr)
+	}
+	m.logger.Warn().
+		Str("preview_id", instance.ID.String()).
+		Msg("recycle input missing; rebuilding preview restart input from persisted session and service state")
+	return rebuilt, nil
+}
+
+func (m *Manager) rebuildLegacyRecycleInput(ctx context.Context, instance *models.PreviewInstance) (StartPreviewInput, error) {
+	if m.sessionStore == nil {
+		return StartPreviewInput{}, fmt.Errorf("session store is not configured")
+	}
+
+	session, err := m.sessionStore.GetByID(ctx, instance.OrgID, instance.SessionID)
+	if err != nil {
+		return StartPreviewInput{}, fmt.Errorf("get session: %w", err)
+	}
+	if session.ContainerID == nil || *session.ContainerID == "" {
+		return StartPreviewInput{}, fmt.Errorf("session has no active sandbox container")
+	}
+
+	services, err := m.store.ListServicesByPreview(ctx, instance.OrgID, instance.ID)
+	if err != nil {
+		return StartPreviewInput{}, fmt.Errorf("list preview services: %w", err)
+	}
+	if len(services) == 0 {
+		return StartPreviewInput{}, fmt.Errorf("preview has no persisted services to rebuild from")
+	}
+
+	infra, err := m.store.ListInfraByPreview(ctx, instance.OrgID, instance.ID)
+	if err != nil {
+		return StartPreviewInput{}, fmt.Errorf("list preview infrastructure: %w", err)
+	}
+
+	cfg := &models.PreviewConfig{
+		Version:        "3",
+		Name:           instance.Name,
+		Primary:        instance.PrimaryService,
+		Services:       make(map[string]models.ServiceConfig, len(services)),
+		Infrastructure: make(map[string]models.InfrastructureConfig, len(infra)),
+		Credentials:    models.CredentialConfig{Mode: "none"},
+		Network:        models.NetworkConfig{Mode: "restricted"},
+	}
+	for _, svc := range services {
+		cfg.Services[svc.ServiceName] = models.ServiceConfig{
+			Command: svc.Command,
+			Cwd:     svc.Cwd,
+			Port:    svc.Port,
+			Ready:   models.ReadinessProbe{HTTPPath: "/"},
+		}
+	}
+	if _, ok := cfg.Services[cfg.Primary]; !ok {
+		return StartPreviewInput{}, fmt.Errorf("primary service %q is missing from persisted preview services", cfg.Primary)
+	}
+	for _, item := range infra {
+		cfg.Infrastructure[item.InfraName] = models.InfrastructureConfig{
+			Template: item.Template,
+		}
+	}
+
+	return StartPreviewInput{
+		SessionID:     instance.SessionID,
+		OrgID:         instance.OrgID,
+		UserID:        instance.UserID,
+		Sandbox:       &agent.Sandbox{ID: *session.ContainerID, Provider: instance.Provider, WorkDir: "/workspace"},
+		Config:        cfg,
 		BaseCommitSHA: instance.BaseCommitSHA,
 		ProfileName:   instance.ProfileName,
 	}, nil

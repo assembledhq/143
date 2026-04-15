@@ -110,7 +110,7 @@ func NewDockerPreviewProvider(
 	p := &DockerPreviewProvider{
 		client:   client,
 		executor: executor,
-		network:  "preview-net",
+		network:  "143-sandbox",
 		logger:   logger,
 		previews: make(map[string]*previewState),
 	}
@@ -159,7 +159,7 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 			return nil, fmt.Errorf("unknown infrastructure template %q", infraCfg.Template)
 		}
 
-		ih, err := d.provisionInfra(ctx, handle, name, infraCfg, tmpl)
+		ih, err := d.provisionInfra(ctx, sb, handle, name, infraCfg, tmpl)
 		if err != nil {
 			d.cleanupState(handle)
 			return nil, fmt.Errorf("provision infrastructure %q: %w", name, err)
@@ -436,10 +436,16 @@ func (d *DockerPreviewProvider) PreviewStatus(ctx context.Context, handle string
 
 func (d *DockerPreviewProvider) provisionInfra(
 	ctx context.Context,
+	sb *agent.Sandbox,
 	previewHandle, infraName string,
 	infraCfg models.InfrastructureConfig,
 	tmpl preview.InfraTemplate,
 ) (*preview.InfraHandle, error) {
+	networkName, err := d.resolveSandboxNetwork(ctx, sb.ID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve sandbox network: %w", err)
+	}
+
 	cred, err := generateInfraCredential(infraName)
 	if err != nil {
 		return nil, fmt.Errorf("generate credential for %q: %w", infraName, err)
@@ -465,11 +471,11 @@ func (d *DockerPreviewProvider) provisionInfra(
 				Memory:   memLimit,
 				NanoCPUs: cpuNanos,
 			},
-			NetworkMode: container.NetworkMode(d.network),
+			NetworkMode: container.NetworkMode(networkName),
 		},
 		&network.NetworkingConfig{
 			EndpointsConfig: map[string]*network.EndpointSettings{
-				d.network: {Aliases: []string{containerName}},
+				networkName: {Aliases: []string{containerName}},
 			},
 		},
 		nil,
@@ -770,6 +776,9 @@ func (d *DockerPreviewProvider) getSandboxIP(ctx context.Context, containerID st
 	if err != nil {
 		return "", err
 	}
+	if inspect.NetworkSettings == nil {
+		return "", fmt.Errorf("container %s has no network settings", containerID)
+	}
 
 	// Look for the IP on the preview network first, fall back to any network.
 	if ep, ok := inspect.NetworkSettings.Networks[d.network]; ok && ep.IPAddress != "" {
@@ -782,6 +791,31 @@ func (d *DockerPreviewProvider) getSandboxIP(ctx context.Context, containerID st
 	}
 
 	return "", fmt.Errorf("no IP address found for container %s", containerID)
+}
+
+func (d *DockerPreviewProvider) resolveSandboxNetwork(ctx context.Context, containerID string) (string, error) {
+	inspect, err := d.client.ContainerInspect(ctx, containerID)
+	if err != nil {
+		return "", err
+	}
+
+	if inspect.ContainerJSONBase != nil && inspect.HostConfig != nil {
+		if networkName := inspect.HostConfig.NetworkMode.NetworkName(); networkName != "" {
+			return networkName, nil
+		}
+	}
+	if inspect.NetworkSettings == nil {
+		return "", fmt.Errorf("container %s has no network settings", containerID)
+	}
+
+	if _, ok := inspect.NetworkSettings.Networks[d.network]; ok {
+		return d.network, nil
+	}
+	for networkName := range inspect.NetworkSettings.Networks {
+		return networkName, nil
+	}
+
+	return "", fmt.Errorf("no network found for container %s", containerID)
 }
 
 // =============================================================================

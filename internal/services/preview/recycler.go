@@ -94,9 +94,9 @@ func (w *RecycleWorker) recycle() {
 	now := time.Now()
 	uptimeCutoff := now.Add(-w.maxUptime)
 
-	// List active previews that have exceeded the max uptime. The DB query
-	// filters by created_at so we don't load all active previews into memory.
-	candidates, err := w.manager.Store().ListActivePreviewsCreatedBefore(ctx, w.manager.WorkerNodeID(), uptimeCutoff)
+	// List active previews that have exceeded the max uptime since their last
+	// successful start/recycle, so long-lived previews are not recycled on every sweep.
+	candidates, err := w.manager.Store().ListActivePreviewsRecycledBefore(ctx, w.manager.WorkerNodeID(), uptimeCutoff)
 	if err != nil {
 		w.logger.Warn().Err(err).Msg("recycle: failed to list previews")
 		return
@@ -107,8 +107,8 @@ func (w *RecycleWorker) recycle() {
 		w.logger.Info().
 			Str("preview_id", p.ID.String()).
 			Str("org_id", p.OrgID.String()).
-			Time("created_at", p.CreatedAt).
-			Dur("uptime", now.Sub(p.CreatedAt)).
+			Time("recycled_at", p.RecycledAt).
+			Dur("uptime", now.Sub(p.RecycledAt)).
 			Msg("recycle: preview exceeded max uptime, recycling")
 
 		// Use an independent per-preview context so each recycle gets the full

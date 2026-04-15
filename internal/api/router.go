@@ -295,6 +295,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 
 	previewManager := preview.NewManager(preview.ManagerConfig{
 		Store:         previewStore,
+		SessionStore:  sessionStore,
 		Provider:      previewProvider,
 		Inspector:     previewInspector,
 		SnapshotCache: previewSnapshotCache,

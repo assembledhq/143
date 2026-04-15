@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -251,6 +252,95 @@ func TestInjectScriptsIntoHTML_GzipResponse(t *testing.T) {
 	require.NoError(t, reader.Close(), "gzip reader should close cleanly")
 	require.Contains(t, string(body), activityHeartbeatScript, "modified HTML should include the injected activity heartbeat script")
 	require.Contains(t, string(body), preview.ComponentResolverScript, "modified HTML should include the component resolver script")
+}
+
+func TestInjectScriptsIntoHTML_OversizedCompressedBodyPassesThroughUnchanged(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		contentEncoding string
+		compress        func(t *testing.T, body []byte) []byte
+		decompress      func(t *testing.T, body []byte) []byte
+	}{
+		{
+			name:            "gzip",
+			contentEncoding: "gzip",
+			compress: func(t *testing.T, body []byte) []byte {
+				t.Helper()
+
+				var compressed bytes.Buffer
+				writer := gzip.NewWriter(&compressed)
+				_, err := writer.Write(body)
+				require.NoError(t, err, "gzip writer should accept the oversized HTML body")
+				require.NoError(t, writer.Close(), "gzip writer should close cleanly")
+				return compressed.Bytes()
+			},
+			decompress: func(t *testing.T, body []byte) []byte {
+				t.Helper()
+
+				reader, err := gzip.NewReader(bytes.NewReader(body))
+				require.NoError(t, err, "gzip reader should open the passthrough response body")
+				decompressed, err := io.ReadAll(reader)
+				require.NoError(t, err, "gzip reader should return the full passthrough body")
+				require.NoError(t, reader.Close(), "gzip reader should close cleanly")
+				return decompressed
+			},
+		},
+		{
+			name:            "deflate",
+			contentEncoding: "deflate",
+			compress: func(t *testing.T, body []byte) []byte {
+				t.Helper()
+
+				var compressed bytes.Buffer
+				writer, err := flate.NewWriter(&compressed, flate.DefaultCompression)
+				require.NoError(t, err, "deflate writer should be created")
+				_, err = writer.Write(body)
+				require.NoError(t, err, "deflate writer should accept the oversized HTML body")
+				require.NoError(t, writer.Close(), "deflate writer should close cleanly")
+				return compressed.Bytes()
+			},
+			decompress: func(t *testing.T, body []byte) []byte {
+				t.Helper()
+
+				reader := flate.NewReader(bytes.NewReader(body))
+				decompressed, err := io.ReadAll(reader)
+				require.NoError(t, err, "deflate reader should return the full passthrough body")
+				require.NoError(t, reader.Close(), "deflate reader should close cleanly")
+				return decompressed
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			gw := NewGateway(GatewayConfig{AppOrigin: "https://app.143.dev"})
+			oversizedHTML := []byte("<html><head></head><body>" + strings.Repeat("a", int(maxHTMLBodySize)+1024) + "</body></html>")
+			originalCompressed := tt.compress(t, oversizedHTML)
+
+			resp := &http.Response{
+				Header: make(http.Header),
+				Body:   io.NopCloser(bytes.NewReader(originalCompressed)),
+			}
+			resp.Header.Set("Content-Type", "text/html; charset=utf-8")
+			resp.Header.Set("Content-Encoding", tt.contentEncoding)
+
+			err := gw.injectScriptsIntoHTML(resp, uuid.New())
+			require.NoError(t, err, "injectScriptsIntoHTML should preserve oversized compressed HTML")
+			require.Equal(t, tt.contentEncoding, resp.Header.Get("Content-Encoding"), "compressed passthrough should preserve the original content encoding")
+
+			passthroughCompressed, err := io.ReadAll(resp.Body)
+			require.NoError(t, err, "response body should remain readable after passthrough")
+			require.Equal(t, originalCompressed, passthroughCompressed, "oversized compressed HTML should be served byte-for-byte unchanged")
+
+			passthroughHTML := tt.decompress(t, passthroughCompressed)
+			require.Equal(t, oversizedHTML, passthroughHTML, "oversized compressed HTML should remain complete after passthrough")
+			require.NotContains(t, string(passthroughHTML), activityHeartbeatScript, "oversized passthrough responses should skip script injection")
+		})
+	}
 }
 
 func TestInjectScriptsIntoHTML_UnsupportedEncodingSkipsInjectionWithoutMutatingResponse(t *testing.T) {

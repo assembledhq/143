@@ -117,4 +117,5 @@ volumes:
 
 networks:
   preview-net:
+    name: 143-sandbox
     driver: bridge
