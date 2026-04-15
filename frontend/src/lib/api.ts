@@ -397,13 +397,14 @@ export const api = {
     revokeInvitation: (id: string) => del<void>(`/api/v1/team/invitations/${id}`),
   },
   projects: {
-    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; search?: string }) => {
+    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; search?: string; proposed_by_pm?: boolean }) => {
       const searchParams = new URLSearchParams();
       if (params?.status) searchParams.set('status', params.status);
       if (params?.cursor) searchParams.set('cursor', params.cursor);
       if (params?.limit) searchParams.set('limit', String(params.limit));
       if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
       if (params?.search) searchParams.set('search', params.search);
+      if (params?.proposed_by_pm !== undefined) searchParams.set('proposed_by_pm', String(params.proposed_by_pm));
       const qs = searchParams.toString();
       return get<import('./types').ListResponse<import('./types').Project>>(`/api/v1/projects${qs ? `?${qs}` : ''}`);
     },
@@ -414,10 +415,6 @@ export const api = {
       patch<import('./types').SingleResponse<import('./types').Project>>(`/api/v1/projects/${id}`, body),
     del: (id: string) => del(`/api/v1/projects/${id}`),
     start: (id: string) => post(`/api/v1/projects/${id}/start`),
-    pause: (id: string) => post(`/api/v1/projects/${id}/pause`),
-    resume: (id: string) => post(`/api/v1/projects/${id}/resume`),
-    approve: (id: string) => post(`/api/v1/projects/${id}/approve`),
-    dismiss: (id: string, reason?: string) => post(`/api/v1/projects/${id}/dismiss`, reason ? { reason } : undefined),
     proposalSummary: () =>
       get<import('./types').SingleResponse<import('./types').ProposalSummary>>('/api/v1/projects/proposals/summary'),
     runNow: (id: string) => post<import('./types').SingleResponse<{ job_id: string }>>(`/api/v1/projects/${id}/run`),

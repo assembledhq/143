@@ -580,7 +580,7 @@ export interface ComplexityEstimate {
 }
 
 // Project types
-export type ProjectStatus = 'proposed' | 'draft' | 'planning' | 'active' | 'paused' | 'completed' | 'cancelled';
+export type ProjectStatus = 'draft' | 'active' | 'completed';
 export type ProjectExecMode = 'sequential' | 'parallel' | 'dependency_graph';
 export type ProjectTaskStatus = 'pending' | 'blocked' | 'delegated' | 'running' | 'completed' | 'failed' | 'skipped' | 'cancelled';
 
@@ -777,23 +777,15 @@ export interface ProjectDetail {
 }
 
 export const projectStatusConfig: Record<string, { color: string; label: string }> = {
-  proposed: { color: "bg-purple-500/10 text-purple-700 dark:text-purple-400", label: "Proposed" },
   draft: { color: "bg-muted text-muted-foreground", label: "Draft" },
-  planning: { color: "bg-yellow-500/10 text-yellow-700 dark:text-yellow-400", label: "Planning" },
   active: { color: "bg-blue-500/10 text-blue-700 dark:text-blue-400", label: "Active" },
-  paused: { color: "bg-orange-500/10 text-orange-700 dark:text-orange-400", label: "Paused" },
-  completed: { color: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400", label: "Completed" },
-  cancelled: { color: "bg-red-500/10 text-red-700 dark:text-red-400", label: "Cancelled" },
+  completed: { color: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400", label: "Done" },
 };
 
 export const projectStatusDotColor: Record<string, string> = {
-  proposed: "bg-purple-500",
   draft: "bg-muted-foreground/50",
-  planning: "bg-yellow-500",
   active: "bg-blue-500",
-  paused: "bg-orange-500",
   completed: "bg-emerald-500",
-  cancelled: "bg-red-500",
 };
 
 // --- Session file browsing types ---
