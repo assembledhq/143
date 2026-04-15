@@ -1,6 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { Archive, ArchiveRestore, Plus, Search } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
@@ -193,11 +194,17 @@ export function SessionSidebar() {
   const archiveMutation = useMutation({
     mutationFn: (sessionId: string) => api.sessions.archive(sessionId),
     onSuccess: invalidateSessions,
+    onError: () => {
+      toast.error("Failed to archive session");
+    },
   });
 
   const unarchiveMutation = useMutation({
     mutationFn: (sessionId: string) => api.sessions.unarchive(sessionId),
     onSuccess: invalidateSessions,
+    onError: () => {
+      toast.error("Failed to unarchive session");
+    },
   });
 
   const allSessions = useMemo(() => allData?.data ?? [], [allData?.data]);
