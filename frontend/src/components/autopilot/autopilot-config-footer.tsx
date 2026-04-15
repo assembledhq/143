@@ -145,16 +145,8 @@ export function AutopilotConfigFooter({
         </div>
 
         {/* Expanded detail view */}
-        <CollapsibleContent
-          forceMount
-          className={cn(
-            "overflow-hidden transition-all duration-200",
-            isOpen
-              ? "grid grid-rows-[1fr] opacity-100"
-              : "grid grid-rows-[0fr] opacity-0"
-          )}
-        >
-          <div className="min-h-0">
+        <CollapsibleContent className="overflow-hidden">
+          <div>
             <div className="divide-y divide-border/60">
               <ConfigRow
                 label="Direction"
