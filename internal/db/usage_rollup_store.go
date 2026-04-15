@@ -429,11 +429,11 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 		br := tx.SendBatch(ctx, batch)
 		for i := 0; i < len(upserts); i++ {
 			if _, err := br.Exec(); err != nil {
-				br.Close()
+				_ = br.Close()
 				return fmt.Errorf("upsert usage_hourly (batch item %d): %w", i, err)
 			}
 		}
-		br.Close()
+		_ = br.Close()
 		return tx.Commit(ctx)
 	}
 
